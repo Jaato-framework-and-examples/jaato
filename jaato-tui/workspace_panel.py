@@ -74,6 +74,10 @@ class WorkspacePanel:
         Delete     – clear file list (only future changes will appear).
         Ctrl+W     – close the panel.
         Escape     – close the panel.
+
+    Pasting an ``@`` reference (works regardless of input state, as long as
+    the panel is visible) is handled in ``pt_display.py`` via the
+    ``workspace_paste_ref`` keybinding (default Alt+P).
     """
 
     def __init__(
@@ -81,6 +85,7 @@ class WorkspacePanel:
         toggle_key: Optional[KeyBinding] = None,
         open_file_key: Optional[KeyBinding] = None,
         clear_key: Optional[KeyBinding] = None,
+        paste_ref_key: Optional[KeyBinding] = None,
     ):
         """Initialize the workspace panel.
 
@@ -91,6 +96,9 @@ class WorkspacePanel:
                           external editor.  Shown in the footer hint.
             clear_key: Keybinding used to clear the file list.  Shown in the
                        footer hint.
+            paste_ref_key: Keybinding used to paste the selected file or
+                           directory as an ``@`` reference into the input
+                           line.  Shown in the footer hint.
         """
         # File state: {relative_path: status_string}
         self._files: Dict[str, str] = {}
@@ -113,6 +121,7 @@ class WorkspacePanel:
         self._toggle_key = toggle_key or "c-w"
         self._open_file_key = open_file_key or "enter"
         self._clear_key = clear_key or "delete"
+        self._paste_ref_key = paste_ref_key or ["escape", "p"]
         self._theme: Optional["ThemeConfig"] = None
         self._tree_dirty: bool = True  # Rebuild tree before next render
 
@@ -346,6 +355,29 @@ class WorkspacePanel:
         parent = entry.get("parent_dir", "")
         return f"{parent}{entry['name']}"
 
+    def get_selected_path(self) -> Optional[str]:
+        """Return the path of the file *or directory* at the cursor.
+
+        Like :meth:`get_selected_file_path` but also returns directory paths
+        (with a trailing ``/``) so callers that don't care whether the entry
+        is a file can use a single API.
+
+        Returns:
+            File path (relative for workspace, absolute for sandbox) or
+            directory path with trailing ``/``, or ``None`` if the list is
+            empty.
+        """
+        flat = self._get_flat_entries()
+        if not flat or self._cursor_index >= len(flat):
+            return None
+
+        entry = flat[self._cursor_index]
+        if entry["is_dir"]:
+            return entry.get("dir_path")
+
+        parent = entry.get("parent_dir", "")
+        return f"{parent}{entry['name']}"
+
     def set_max_visible_lines(self, n: int) -> None:
         """Set maximum visible lines in the popup.
 
@@ -573,8 +605,9 @@ class WorkspacePanel:
         # Right-align close hint
         close_hint = f"[{format_key_for_display(self._toggle_key)} close]"
         open_hint = f"{format_key_for_display(self._open_file_key)} open · "
+        paste_hint = f"{format_key_for_display(self._paste_ref_key)} @ref · "
         clear_hint = f"{format_key_for_display(self._clear_key)} clear · "
-        nav_hint = f"↑↓ · ◂▸ · {open_hint}{clear_hint}"
+        nav_hint = f"↑↓ · ◂▸ · {open_hint}{paste_hint}{clear_hint}"
         right_content = nav_hint + close_hint
         padding = max(1, width - 4 - len(f" {count} files") - len(right_content))
         footer.append(" " * padding)

@@ -166,6 +166,7 @@ DEFAULT_KEYBINDINGS = {
     "toggle_workspace": "c-w",  # Toggle workspace file panel
     "workspace_open_file": "enter",  # Open selected file in external editor
     "workspace_clear": "delete",  # Clear workspace file list
+    "workspace_paste_ref": ["escape", "p"],  # Paste selected file/dir as @reference into input
 
     # Permission prompt navigation
     "permission_next": "tab",     # Next permission option
@@ -368,6 +369,7 @@ class KeybindingConfig:
     toggle_workspace: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_workspace"])
     workspace_open_file: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_open_file"])
     workspace_clear: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_clear"])
+    workspace_paste_ref: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_paste_ref"].copy() if isinstance(DEFAULT_KEYBINDINGS["workspace_paste_ref"], list) else DEFAULT_KEYBINDINGS["workspace_paste_ref"])
 
     # Permission prompt navigation
     permission_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_next"])
@@ -573,6 +575,7 @@ class KeybindingConfig:
             "toggle_workspace": self.toggle_workspace,
             "workspace_open_file": self.workspace_open_file,
             "workspace_clear": self.workspace_clear,
+            "workspace_paste_ref": self.workspace_paste_ref,
             "split_pane": self.split_pane,
             "join_pane": self.join_pane,
             "move_agent": self.move_agent,
@@ -761,5 +764,6 @@ def generate_example_config() -> str:
         "toggle_workspace": "c-w",
         "workspace_open_file": "enter",
         "workspace_clear": "delete",
+        "workspace_paste_ref": ["escape", "p"],
     }
     return json.dumps(example, indent=2)

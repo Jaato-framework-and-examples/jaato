@@ -504,6 +504,7 @@ class PTDisplay:
             toggle_key=self._keybinding_config.toggle_workspace,
             open_file_key=self._keybinding_config.workspace_open_file,
             clear_key=self._keybinding_config.workspace_clear,
+            paste_ref_key=self._keybinding_config.workspace_paste_ref,
         )
         self._workspace_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
@@ -2334,6 +2335,32 @@ class PTDisplay:
         def handle_workspace_clear(event):
             """Clear the workspace file list so only future changes appear."""
             self._workspace_panel.clear()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("workspace_paste_ref"),
+                filter=Condition(
+                    lambda: self._workspace_panel.is_visible
+                    and self._workspace_panel.has_files
+                    and not self._waiting_for_channel_input
+                ) & not_in_search_mode)
+        def handle_workspace_paste_ref(event):
+            """Insert the selected workspace entry into the input as ``@<path>``.
+
+            Unlike the other workspace bindings this one does **not** require
+            the input buffer to be empty — that lets the user stack multiple
+            references (e.g. ``@a.py @b.py describe these``).  A separator
+            space is inserted automatically when the cursor sits next to
+            non-whitespace.
+            """
+            path = self._workspace_panel.get_selected_path()
+            if not path:
+                return
+
+            buf = self._input_buffer
+            before = buf.document.text_before_cursor
+            needs_lead_space = bool(before) and not before[-1].isspace()
+            snippet = f"{' ' if needs_lead_space else ''}@{path} "
+            buf.insert_text(snippet)
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
