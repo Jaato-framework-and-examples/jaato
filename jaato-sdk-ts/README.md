@@ -6,15 +6,21 @@ Mirrors the Python [`jaato-sdk`](../jaato-sdk/) method-for-method, with
 identical noun naming (camelCase per JS convention) so cross-language
 parity is enforced by construction.
 
-**Status: pre-release (Phase 3 code shipped, not yet on npm).**
-The `JaatoClient` class is implemented and tested (27 unit tests
-pass against a mock WebSocket); the codegen-generated event /
-request types stay in lockstep with the Python SDK via the CI
-staleness gate. What's still pending: the npm publish workflow
-and the first `npm publish @jaato/sdk@0.1.0`. Consume locally
-per the [Consuming this SDK](#consuming-this-sdk-before-its-published-to-npm)
-section below until the first publish lands. Plan history:
-[`project_backlog_sdk_feature_parity.md`](../docs/).
+**Status: pre-release (Phase 3 code + full Python parity shipped,
+not yet on npm).** The `JaatoClient` class is implemented and
+tested (35 unit tests pass against a mock WebSocket).  Method
+surface is feature-equivalent to the Python `IPCClient` —
+every wire verb the TUI / dashboard / external SDK consumers
+need is exposed as a typed method (see [API reference](#api-reference)
+below).  The codegen-generated event / request types stay in
+lockstep with the Python SDK via the CI staleness gate.
+
+What's still pending: the npm publish workflow and the first
+`npm publish @jaato/sdk@0.1.0`.  Consume locally per the
+[Consuming this SDK](#consuming-this-sdk-before-its-published-to-npm)
+section below until the first publish lands.
+
+Plan history: [`project_backlog_sdk_feature_parity.md`](../docs/).
 
 ## Background: why this exists
 
@@ -60,6 +66,11 @@ The result was **the SDK feature parity workstream** —
   method-for-method with the Python SDK. ✅ code + tests
   shipped; first npm publish still pending (see
   [Publishing](#publishing) below).
+* **Phase 3.1** — closed the remaining 6 gaps premium flagged
+  before starting the jaato-task migration: `attachSession`,
+  `createSession`, `getDefaultSession`, `listSessions`,
+  `listProfiles`, `respondToToolExecution`.  The last is also
+  new on the Python side (jaato-sdk 0.3.3).  ✅ shipped.
 
 What pi-agent calls `agent.prompt()` is `JaatoClient.send_message()`
 here. `agent.steer(msg)` is `inject_prompt(text, source_type="user")`.
@@ -138,6 +149,8 @@ which exits non-zero (with a unified diff) if the committed
 
 ## Importing
 
+Wire-protocol types only:
+
 ```typescript
 import {
   EventType,
@@ -159,6 +172,103 @@ function handle(event: JaatoEvent): void {
   }
 }
 ```
+
+Full client (connect, send, subscribe):
+
+```typescript
+import { JaatoClient, ConnectionState, EventType } from "@jaato/sdk";
+
+const client = new JaatoClient({
+  url: "ws://localhost:8080",
+  token: "<bearer-token>",  // omit when behind a proxy that injects it
+});
+
+// Subscribe to all events.
+const unsub = client.subscribe((event) => {
+  if (event.type === EventType.AGENT_OUTPUT) {
+    document.getElementById("chat")!.append(event.text);
+  }
+});
+
+// Status notifications (CONNECTED / RECONNECTING / CLOSED).
+client.onStatus((status) => {
+  if (status.state === ConnectionState.CONNECTED && client.sessionId) {
+    // Re-attach after a reconnect so the server replays buffered events.
+    void client.attachSession(client.sessionId);
+  }
+});
+
+await client.connect();
+await client.createSession({ profile: "researcher" });
+await client.sendMessage("Summarise the latest commits.");
+```
+
+## API reference
+
+Method-for-method mirror of the Python `IPCClient` /
+`IPCRecoveryClient`.  All methods are `async` and return
+`Promise<void>` unless otherwise noted; results arrive on the
+event stream and are correlated by `request_id` where applicable.
+
+**Lifecycle**
+
+| Method | WS verb | Purpose |
+|---|---|---|
+| `connect()` | (handshake) | Open WS, await `ConnectedEvent`, enforce `MIN_SERVER_VERSION` |
+| `close()` | — | Close WS and cancel any pending reconnect |
+| `subscribe(handler)` | — | Receive every incoming `JaatoEvent` |
+| `events()` | — | Async iterator alternative to `subscribe` |
+| `onStatus(handler)` | — | Connection-state transitions |
+
+**Conversation**
+
+| Method | WS verb |
+|---|---|
+| `sendMessage(text, attachments?, parallelTools?)` | `message.send` |
+| `injectPrompt(text, sourceType?, sourceId?)` | `inject_prompt.request` (steer / follow-up) |
+| `replayMessages(requestId, messages?, timeoutSeconds?)` | `replay_messages.request` (continue from current) |
+| `resolveForkPoint(requestId, opts)` | `resolve_fork_point.request` |
+| `stop(agentId?)` | `stop` |
+| `requestHistory(agentId?)` | `history.request` |
+
+**Session management**
+
+| Method | WS verb |
+|---|---|
+| `createSession({ name?, profile?, agent?, agentParams? })` | `command.execute` `session.new` |
+| `attachSession(sessionId)` | `command.execute` `session.attach` |
+| `getDefaultSession()` | `command.execute` `session.default` |
+| `listSessions()` | `command.execute` `session.list` |
+| `listProfiles()` | `command.execute` `session.profiles` |
+
+**Tools (model-callable + client-registered)**
+
+| Method | WS verb |
+|---|---|
+| `registerClientTools(tools, categories?)` | `tools.register_client` |
+| `respondToToolExecution(callId, result?, error?)` | `tool.execute_result` (return result for client-registered tool) |
+| `disableTool(toolName)` | `tool.disable.request` |
+| `requestCommandList()` | `command_list.request` |
+| `executeCommand(command, args?)` | `command.execute` (escape hatch for any verb without a typed method) |
+
+**Permissions**
+
+| Method | WS verb |
+|---|---|
+| `addWhitelistTools(tools?, patterns?)` | `permission.add_whitelist` |
+| `addBlacklistTools(tools?, patterns?)` | `permission.add_blacklist` |
+| `removePermissionRules(target, tools?, patterns?)` | `permission.remove` |
+| `clearPermissionRules(target?)` | `permission.clear` |
+| `setDefaultPolicy(policy)` | `permission.set_default` |
+| `requestPolicySnapshot(requestId?)` | `permission.policy_snapshot.request` |
+| `respondToPermission(requestId, response, editedArgs?)` | `permission.response` |
+
+**Prompts (mid-flow)**
+
+| Method | WS verb |
+|---|---|
+| `respondToClarification(requestId, response, questionIndex?)` | `clarification.response` |
+| `respondToReferenceSelection(requestId, response)` | `reference_selection.response` |
 
 ## Consuming this SDK before it's published to npm
 
@@ -291,6 +401,15 @@ additive surface (new methods, new event types), patch bumps for
 fixes, major bumps for protocol-breaking changes. The `MIN_SERVER_VERSION`
 constant in `src/client.ts` documents the minimum compatible
 jaato-server version (currently `0.5.27`).
+
+**Server pinning recommendation.** Although `MIN_SERVER_VERSION`
+is `0.5.27` (the Phase-1 cut where the SDK's typed verbs landed),
+consumers should pin **`jaato-server >= 0.5.28`** in production —
+0.5.28 fixed a Phase-0 regression where `AgentCompletedEvent.token_usage`
+would crash any agent calling `signal_completion` with a typed
+completion payload.  The SDK floor stays at 0.5.27 because the
+client itself works against either; the recommendation is
+operational.
 
 ## License
 
