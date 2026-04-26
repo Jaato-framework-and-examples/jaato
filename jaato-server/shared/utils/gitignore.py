@@ -30,6 +30,10 @@ class GitignoreParser:
     """
 
     # Patterns that are always ignored regardless of .gitignore content.
+    # Note: ``.jaato/`` is intentionally NOT in this list — the directory
+    # holds project-level config (profiles, GC config, instructions) that
+    # users often want visible in the workspace panel.  Add it to a
+    # workspace ``.gitignore`` if you want to hide it for a given project.
     DEFAULT_IGNORE_PATTERNS: List[str] = [
         ".git/",
         "__pycache__/",
@@ -38,7 +42,6 @@ class GitignoreParser:
         "node_modules/",
         ".mypy_cache/",
         ".pytest_cache/",
-        ".jaato/",
         "*.pyc",
         "*.pyo",
         ".DS_Store",

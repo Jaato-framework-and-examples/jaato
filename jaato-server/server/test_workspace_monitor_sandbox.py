@@ -294,7 +294,7 @@ class TestSandboxEventTracking:
         try:
             monitor.add_sandbox_path(sandbox_dir)
 
-            for rel in ("__pycache__/foo.pyc", ".pytest_cache/v/cache/lastfailed", ".jaato/log.txt"):
+            for rel in ("__pycache__/foo.pyc", ".pytest_cache/v/cache/lastfailed", ".mypy_cache/note"):
                 target = os.path.join(sandbox_dir, rel)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 open(target, "w").close()
