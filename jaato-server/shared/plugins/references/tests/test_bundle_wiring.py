@@ -349,8 +349,8 @@ class TestBundleReconcileSubcommand:
 
 
 class TestReferencesUnknownSubcommand:
-    """The references command errors mention reference-level ops only;
-    bundle-level ops are redirected to the bundle command."""
+    """The references command errors mention both the reference-level
+    surface and the nested 'bundle' namespace."""
 
     def test_unknown_subcommand_points_at_references_surface(self, workspace):
         plugin = ReferencesPlugin()
@@ -363,11 +363,13 @@ class TestReferencesUnknownSubcommand:
 
         assert "error" in result
         assert "list" in result["error"]
-        assert "bundle help" in result["error"]
+        # Hints at the nested bundle help, not a separate command.
+        assert "bundle" in result["error"]
 
-    def test_old_bundle_subcommands_redirect(self, workspace):
-        """``references bundles|reconcile|merge|pack|unpack`` are gone —
-        the dispatcher hints at the new home so users discover ``bundle``."""
+    def test_old_flat_bundle_subcommands_redirect_to_nested(self, workspace):
+        """Pre-Phase-4 muscle memory ('references reconcile' etc.) is
+        intercepted with a hint pointing to the nested form
+        'references bundle <verb>'."""
         plugin = ReferencesPlugin()
         plugin.set_workspace_path(str(workspace))
         plugin.initialize({"lookup_strategy": "tags_only"})
@@ -377,7 +379,8 @@ class TestReferencesUnknownSubcommand:
                 {"subcommand": old, "target": ""}
             )
             assert "error" in result, f"expected error for 'references {old}'"
-            assert "bundle" in result["error"].lower()
+            # Error message points at the nested namespace.
+            assert "references bundle" in result["error"]
 
 
 class TestBundleUnknownSubcommand:

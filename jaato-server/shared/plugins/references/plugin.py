@@ -1647,8 +1647,7 @@ class ReferencesPlugin:
             "listReferences": self._execute_list,        # model tool
             "validateReference": self._execute_validate_reference,  # model tool
             "compute_embedding": self._execute_compute_embedding,  # model tool (gen-references agent)
-            "references": self._execute_references_cmd,  # user command (reference ops)
-            "bundle": self._execute_bundle_cmd,           # user command (bundle ops)
+            "references": self._execute_references_cmd,  # user command (refs + nested bundle ops)
         }
 
     def _execute_select(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -2056,19 +2055,21 @@ class ReferencesPlugin:
     def _execute_references_cmd(self, args: Dict[str, Any]) -> Any:
         """Execute the 'references' user command.
 
-        Subcommands cover *reference*-level operations only — listing,
-        selecting, unselecting individual references, and reloading the
-        catalog from disk. *Bundle*-level operations (create, delete,
-        add, eject, remove, reconcile, merge, pack, unpack) live under
-        the separate ``bundle`` user command; see
-        :meth:`_execute_bundle_cmd`.
+        The command covers two kinds of operations under one verb:
+
+        * **Reference-level** (``list``, ``select``, ``unselect``,
+          ``reload``, ``help``) — handled directly here.
+        * **Bundle-level** — under the nested ``references bundle
+          <verb>`` namespace, dispatched into :meth:`_execute_bundle_cmd`
+          after splitting ``target`` into ``<bundle-verb> <bundle-args>``.
 
         Subcommands:
-            list [all|selected|unselected]  - List reference sources
-            select <ref-id>                 - Select a reference source
-            unselect <ref-id>               - Unselect a reference source
-            reload                          - Reload catalog from disk
-            help                            - Show usage help
+            list [all|selected|unselected]   - List reference sources
+            select <ref-id>                  - Select a reference source
+            unselect <ref-id>                - Unselect a reference source
+            reload                           - Reload catalog from disk
+            bundle <verb> [args]             - Bundle-level operations
+            help                             - Show usage help
         """
         subcommand = args.get("subcommand", "list")
         target = args.get("target", "")
@@ -2087,25 +2088,40 @@ class ReferencesPlugin:
             return self._cmd_references_unselect(target)
         elif subcommand == "reload":
             return self._cmd_references_reload()
+        elif subcommand == "bundle":
+            # Nested namespace: the second token is the bundle verb;
+            # everything after it is forwarded as the bundle handler's
+            # raw argument tail. ``split(None, 1)`` keeps quoting in
+            # the rest intact (we don't shlex-roundtrip it).
+            parts = (target or "").split(None, 1)
+            if not parts:
+                return self._cmd_bundle_help()
+            bundle_subcommand = parts[0]
+            bundle_target = parts[1] if len(parts) > 1 else ""
+            return self._execute_bundle_cmd({
+                "subcommand": bundle_subcommand,
+                "target": bundle_target,
+            })
         elif subcommand == "help":
             return self._cmd_references_help()
         elif subcommand in (
             "bundles", "reconcile", "merge", "pack", "unpack",
         ):
+            # Pre-Phase-4 muscle memory: hint at the new home.
+            new_verb = "list" if subcommand == "bundles" else subcommand
             return {
                 "error": (
-                    f"'references {subcommand}' has moved to the 'bundle' "
-                    f"command — try 'bundle "
-                    f"{('list' if subcommand == 'bundles' else subcommand)} ...' "
-                    f"or 'bundle help'."
+                    f"'references {subcommand}' has moved into the 'bundle' "
+                    f"namespace — try 'references bundle {new_verb} ...' "
+                    f"or 'references bundle help'."
                 )
             }
         else:
             return {
                 "error": (
                     f"Unknown subcommand: {subcommand}. Use: list, select, "
-                    f"unselect, reload, help. For bundle operations see "
-                    f"'bundle help'."
+                    f"unselect, reload, bundle, help. For bundle ops see "
+                    f"'references bundle help'."
                 )
             }
 
@@ -2266,14 +2282,14 @@ class ReferencesPlugin:
                 continue
             if name is not None:
                 return {
-                    "error": "Usage: bundle create <name> [--scope workspace|user]"
+                    "error": "Usage: references bundle create <name> [--scope workspace|user]"
                 }
             name = tok
             i += 1
 
         if name is None:
             return {
-                "error": "Usage: bundle create <name> [--scope workspace|user]"
+                "error": "Usage: references bundle create <name> [--scope workspace|user]"
             }
 
         # Normalize the root-bundle alias; everything else stays as-is.
@@ -2413,11 +2429,11 @@ class ReferencesPlugin:
                 force = True
                 continue
             if bundle_token is not None:
-                return {"error": "Usage: bundle delete <bundle-ref> [--force]"}
+                return {"error": "Usage: references bundle delete <bundle-ref> [--force]"}
             bundle_token = tok
 
         if bundle_token is None:
-            return {"error": "Usage: bundle delete <bundle-ref> [--force]"}
+            return {"error": "Usage: references bundle delete <bundle-ref> [--force]"}
 
         try:
             ref = parse_bundle_ref(bundle_token)
@@ -2536,12 +2552,12 @@ class ReferencesPlugin:
                 i += 1
                 continue
             if ref_id_token is not None:
-                return {"error": "Usage: bundle add <ref-id> --to <bundle-ref>"}
+                return {"error": "Usage: references bundle add <ref-id> --to <bundle-ref>"}
             ref_id_token = tok
             i += 1
 
         if ref_id_token is None or target_token is None:
-            return {"error": "Usage: bundle add <ref-id> --to <bundle-ref>"}
+            return {"error": "Usage: references bundle add <ref-id> --to <bundle-ref>"}
 
         # Resolve the source reference by id from the live catalog.
         source = next(
@@ -2648,7 +2664,7 @@ class ReferencesPlugin:
             return {"error": f"Failed to parse arguments: {e}"}
 
         if len(tokens) != 1:
-            return {"error": "Usage: bundle eject <ref-id>"}
+            return {"error": "Usage: references bundle eject <ref-id>"}
         ref_id = tokens[0]
 
         source = next((s for s in self._sources if s.id == ref_id), None)
@@ -2742,7 +2758,7 @@ class ReferencesPlugin:
             return {"error": f"Failed to parse arguments: {e}"}
 
         if len(tokens) != 1:
-            return {"error": "Usage: bundle remove <ref-id>"}
+            return {"error": "Usage: references bundle remove <ref-id>"}
         ref_id = tokens[0]
 
         source = next((s for s in self._sources if s.id == ref_id), None)
@@ -2921,14 +2937,15 @@ class ReferencesPlugin:
         return None
 
     def _cmd_bundle_help(self) -> HelpLines:
-        """Return detailed help for the 'bundle' command."""
+        """Return detailed help for the 'references bundle' namespace."""
         return HelpLines(lines=[
-            ("Bundle Command", "bold"),
+            ("References / Bundle Subcommands", "bold"),
             ("", ""),
             ("Manage knowledge bundles for the current session.", ""),
+            ("Nested under 'references' — invoke as 'references bundle <verb>'.", ""),
             ("", ""),
             ("USAGE", "bold"),
-            ("    bundle [subcommand] [args]", ""),
+            ("    references bundle [subcommand] [args]", ""),
             ("", ""),
             ("SUBCOMMANDS", "bold"),
             ("    list", "dim"),
@@ -2984,19 +3001,19 @@ class ReferencesPlugin:
             ("    Bare names are resolved against the workspace tier first.", "dim"),
             ("", ""),
             ("EXAMPLES", "bold"),
-            ("    bundle list                                Show loaded bundles", "dim"),
-            ("    bundle create teammate                     New workspace bundle", "dim"),
-            ("    bundle create personal --scope user        New user bundle", "dim"),
-            ("    bundle add api-spec --to teammate          Move ref into a bundle", "dim"),
-            ("    bundle eject api-spec                      Pull ref out (still loaded)", "dim"),
-            ("    bundle remove api-spec                     Delete ref from disk", "dim"),
-            ("    bundle delete teammate                     Remove an empty bundle", "dim"),
-            ("    bundle delete teammate --force             Remove non-empty bundle", "dim"),
-            ("    bundle reconcile                           Reconcile workspace bundles", "dim"),
-            ("    bundle reconcile --scope all               Reconcile every loaded bundle", "dim"),
-            ("    bundle merge user:notes --into workspace:project", "dim"),
-            ("    bundle pack teammate                       Pack workspace:teammate", "dim"),
-            ("    bundle unpack ./teammate-workspace.tar.gz", "dim"),
+            ("    references bundle list                                Show loaded bundles", "dim"),
+            ("    references bundle create teammate                     New workspace bundle", "dim"),
+            ("    references bundle create personal --scope user        New user bundle", "dim"),
+            ("    references bundle add api-spec --to teammate          Move ref into a bundle", "dim"),
+            ("    references bundle eject api-spec                      Pull ref out (still loaded)", "dim"),
+            ("    references bundle remove api-spec                     Delete ref from disk", "dim"),
+            ("    references bundle delete teammate                     Remove an empty bundle", "dim"),
+            ("    references bundle delete teammate --force             Remove non-empty bundle", "dim"),
+            ("    references bundle reconcile                           Reconcile workspace bundles", "dim"),
+            ("    references bundle reconcile --scope all               Reconcile every loaded bundle", "dim"),
+            ("    references bundle merge user:notes --into workspace:project", "dim"),
+            ("    references bundle pack teammate                       Pack workspace:teammate", "dim"),
+            ("    references bundle unpack ./teammate-workspace.tar.gz", "dim"),
         ])
 
 
@@ -3059,7 +3076,7 @@ class ReferencesPlugin:
             if bundle_token is not None:
                 return {
                     "error": (
-                        "Usage: bundle reconcile [<bundle-ref>] [--scope workspace|user|all]"
+                        "Usage: references bundle reconcile [<bundle-ref>] [--scope workspace|user|all]"
                     )
                 }
             bundle_token = tok
@@ -3199,7 +3216,7 @@ class ReferencesPlugin:
         if not source_arg:
             return {
                 "error": (
-                    "Usage: bundle merge <source-ref> [--into <target-ref>] "
+                    "Usage: references bundle merge <source-ref> [--into <target-ref>] "
                     "[--on-conflict reject|prefix|newer] [--re-embed] [--dry-run]"
                 )
             }
@@ -3450,14 +3467,14 @@ class ReferencesPlugin:
                 continue
             if bundle_token is not None:
                 return {
-                    "error": "Usage: bundle pack <bundle-ref> [--to <archive>]"
+                    "error": "Usage: references bundle pack <bundle-ref> [--to <archive>]"
                 }
             bundle_token = tok
             i += 1
 
         if bundle_token is None:
             return {
-                "error": "Usage: bundle pack <bundle-ref> [--to <archive>]"
+                "error": "Usage: references bundle pack <bundle-ref> [--to <archive>]"
             }
 
         try:
@@ -3591,7 +3608,7 @@ class ReferencesPlugin:
             if archive_token is not None:
                 return {
                     "error": (
-                        "Usage: bundle unpack <archive> [--into <bundle-ref>] "
+                        "Usage: references bundle unpack <archive> [--into <bundle-ref>] "
                         "[--overwrite|--merge] [--no-reconcile]"
                     )
                 }
@@ -3601,7 +3618,7 @@ class ReferencesPlugin:
         if archive_token is None:
             return {
                 "error": (
-                    "Usage: bundle unpack <archive> [--into <bundle-ref>] "
+                    "Usage: references bundle unpack <archive> [--into <bundle-ref>] "
                     "[--overwrite|--merge] [--no-reconcile]"
                 )
             }
@@ -4008,20 +4025,23 @@ class ReferencesPlugin:
             ("        Previously selected sources are preserved when they still", "dim"),
             ("        exist in the reloaded catalog.", "dim"),
             ("", ""),
+            ("    bundle <verb> [args]", "dim"),
+            ("        Bundle-level operations: list, create, delete, add,", "dim"),
+            ("        eject, remove, reconcile, merge, pack, unpack.", "dim"),
+            ("        See 'references bundle help' for the full surface.", "dim"),
+            ("", ""),
             ("    help", "dim"),
             ("        Show this help message.", "dim"),
             ("", ""),
-            ("RELATED", "bold"),
-            ("    Bundle-level operations (create, delete, add, eject, remove,", "dim"),
-            ("    reconcile, merge, pack, unpack) live under the 'bundle'", "dim"),
-            ("    command — see 'bundle help'.", "dim"),
-            ("", ""),
             ("EXAMPLES", "bold"),
-            ("    references                          List all references", "dim"),
-            ("    references list selected            Show only selected references", "dim"),
-            ("    references select my-ref-001        Select a reference by ID", "dim"),
-            ("    references unselect my-ref-001      Unselect a reference by ID", "dim"),
-            ("    references reload                   Reload catalog from disk", "dim"),
+            ("    references                                List all references", "dim"),
+            ("    references list selected                  Show only selected refs", "dim"),
+            ("    references select my-ref-001              Select a reference by ID", "dim"),
+            ("    references unselect my-ref-001            Unselect a reference by ID", "dim"),
+            ("    references reload                         Reload catalog from disk", "dim"),
+            ("    references bundle list                    Show loaded bundles", "dim"),
+            ("    references bundle create teammate         Create an empty bundle", "dim"),
+            ("    references bundle pack teammate           Pack a bundle for distribution", "dim"),
         ])
 
     def _get_access_summary(self, source: ReferenceSource) -> str:
@@ -4147,54 +4167,42 @@ class ReferencesPlugin:
             "validateReference",
             "compute_embedding",
             "references",
-            "bundle",
         ]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
 
-        Two top-level commands:
+        A single top-level ``references`` command groups two
+        responsibilities under one verb:
 
-        * ``references`` — reference-level operations (list, select,
-          unselect, reload). ``share_with_model=True`` so the model
-          sees selection changes inside its own context.
-        * ``bundle`` — bundle-level operations (list, create, delete,
-          add, eject, remove, reconcile, merge, pack, unpack). Not
-          shared with the model — the human curates the bundle layout;
-          the model just consumes the resulting catalog.
+        * **Reference-level ops** (``list``, ``select``, ``unselect``,
+          ``reload``) — what the model can see and what the operator
+          has selected.
+        * **Bundle-level ops** under the nested ``references bundle
+          <verb>`` namespace (``list``, ``create``, ``delete``, ``add``,
+          ``eject``, ``remove``, ``reconcile``, ``merge``, ``pack``,
+          ``unpack``) — how references are physically organized into
+          knowledge bundles on disk.
+
+        ``share_with_model=True`` so the model sees selection changes
+        inside its own context. Bundle ops are also visible to the
+        model under this flag, which is fine — they're metadata-only
+        from the model's perspective.
         """
         return [
             UserCommand(
                 name="references",
-                description="Manage reference sources (list|select|unselect|reload)",
+                description=(
+                    "Manage reference sources and bundles "
+                    "(list|select|unselect|reload|bundle)"
+                ),
                 share_with_model=True,
                 parameters=[
                     CommandParameter(
                         name="subcommand",
-                        description="Action: list, select, unselect, reload, or help",
-                        required=False,
-                    ),
-                    CommandParameter(
-                        name="target",
-                        description="Filter or reference ID",
-                        required=False,
-                        capture_rest=True,
-                    ),
-                ],
-            ),
-            UserCommand(
-                name="bundle",
-                description=(
-                    "Manage knowledge bundles "
-                    "(list|create|delete|add|eject|remove|reconcile|merge|pack|unpack)"
-                ),
-                share_with_model=False,
-                parameters=[
-                    CommandParameter(
-                        name="subcommand",
                         description=(
-                            "Action: list, create, delete, add, eject, remove, "
-                            "reconcile, merge, pack, unpack, or help"
+                            "Action: list, select, unselect, reload, bundle, "
+                            "or help"
                         ),
                         required=False,
                     ),
@@ -4211,27 +4219,40 @@ class ReferencesPlugin:
     def get_command_completions(
         self, command: str, args: List[str]
     ) -> List[CommandCompletion]:
-        """Return completion options for ``references`` and ``bundle`` commands.
+        """Return completion options for the ``references`` command.
 
-        The two commands share most of the autocompletion machinery
-        (bundle-ref completions, scope flags, etc.) but expose
-        different subcommand surfaces. Dispatched via ``command``.
+        ``bundle`` is a nested subcommand of ``references`` rather than
+        a separate top-level command. When the user's first token is
+        ``bundle``, completion delegates to :meth:`_bundle_completions`
+        with the remaining args (so the same per-verb completion logic
+        is shared regardless of nesting depth).
         """
-        if command == "references":
-            return self._references_completions(args)
-        if command == "bundle":
-            return self._bundle_completions(args)
-        return []
+        if command != "references":
+            return []
+
+        # Nested bundle namespace: ``references bundle <verb> [args...]``
+        # shifts the completion frame by one — the bundle completion
+        # logic sees args starting at the bundle verb.
+        if args and args[0].lower() == "bundle":
+            return self._bundle_completions(args[1:])
+
+        return self._references_completions(args)
 
     def _references_completions(
         self, args: List[str]
     ) -> List[CommandCompletion]:
-        """Completions for the 'references' command (reference-level ops)."""
+        """Completions for the 'references' command (reference-level ops).
+
+        Includes ``bundle`` as a top-level subcommand entry so users
+        discover the nested namespace, but does not list the bundle
+        verbs at this level — those appear after ``bundle`` is typed.
+        """
         subcommands = [
             CommandCompletion("list", "List reference sources"),
             CommandCompletion("select", "Select a reference source"),
             CommandCompletion("unselect", "Unselect a reference source"),
             CommandCompletion("reload", "Reload catalog from disk"),
+            CommandCompletion("bundle", "Manage knowledge bundles"),
             CommandCompletion("help", "Show detailed help"),
         ]
 

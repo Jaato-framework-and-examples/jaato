@@ -359,45 +359,105 @@ class TestBundleHelp:
 
 
 class TestBundleCompletions:
-    def test_top_level_completions_lists_all_verbs(self, workspace):
-        plugin = _make_plugin(workspace)
+    """Bundle is a nested namespace under references, so completions
+    are requested via ``references bundle <...>`` rather than a
+    standalone ``bundle`` command."""
 
-        comps = plugin.get_command_completions("bundle", [""])
-
-        values = {c.value for c in comps}
-        assert {"list", "create", "delete", "add", "eject", "remove"} <= values
-        assert {"reconcile", "merge", "pack", "unpack", "help"} <= values
-
-    def test_add_completes_with_ref_ids(self, workspace):
-        plugin = _make_plugin(workspace)
-
-        comps = plugin.get_command_completions("bundle", ["add", ""])
-
-        values = {c.value for c in comps}
-        assert "free-ref" in values
-        assert "team-doc" in values
-
-    def test_create_scope_value_completions(self, workspace):
-        plugin = _make_plugin(workspace)
-
-        comps = plugin.get_command_completions(
-            "bundle", ["create", "newbundle", "--scope", ""],
-        )
-
-        values = {c.value for c in comps}
-        assert {"workspace", "user"} <= values
-
-    def test_references_completions_no_longer_offer_bundle_verbs(self, workspace):
+    def test_references_top_level_includes_bundle(self, workspace):
         plugin = _make_plugin(workspace)
 
         comps = plugin.get_command_completions("references", [""])
 
         values = {c.value for c in comps}
-        # Reference-level ops are still offered.
-        assert {"list", "select", "unselect", "reload"} <= values
-        # Bundle-level ops have moved out.
-        assert "bundles" not in values
-        assert "reconcile" not in values
-        assert "merge" not in values
+        # Reference-level ops + the bundle namespace entry.
+        assert {"list", "select", "unselect", "reload", "bundle"} <= values
+        # Bundle verbs themselves are *not* surfaced here — they appear
+        # only after ``bundle`` has been typed.
+        assert "create" not in values
         assert "pack" not in values
-        assert "unpack" not in values
+
+    def test_nested_bundle_completion_lists_all_verbs(self, workspace):
+        plugin = _make_plugin(workspace)
+
+        comps = plugin.get_command_completions("references", ["bundle", ""])
+
+        values = {c.value for c in comps}
+        assert {"list", "create", "delete", "add", "eject", "remove"} <= values
+        assert {"reconcile", "merge", "pack", "unpack", "help"} <= values
+
+    def test_nested_add_completes_with_ref_ids(self, workspace):
+        plugin = _make_plugin(workspace)
+
+        comps = plugin.get_command_completions(
+            "references", ["bundle", "add", ""],
+        )
+
+        values = {c.value for c in comps}
+        assert "free-ref" in values
+        assert "team-doc" in values
+
+    def test_nested_create_scope_value_completions(self, workspace):
+        plugin = _make_plugin(workspace)
+
+        comps = plugin.get_command_completions(
+            "references", ["bundle", "create", "newbundle", "--scope", ""],
+        )
+
+        values = {c.value for c in comps}
+        assert {"workspace", "user"} <= values
+
+    def test_standalone_bundle_command_no_longer_resolves(self, workspace):
+        """Completions for a non-existent top-level 'bundle' command
+        return [] — the namespace is only reachable via 'references'."""
+        plugin = _make_plugin(workspace)
+
+        comps = plugin.get_command_completions("bundle", [""])
+
+        assert comps == []
+
+
+class TestBundleNestedDispatch:
+    """The 'references bundle <verb>' surface dispatches into the
+    same handlers that ``_execute_bundle_cmd`` exposes internally."""
+
+    def test_references_bundle_list_invokes_bundle_list(self, workspace):
+        plugin = _make_plugin(workspace)
+
+        result = plugin._execute_references_cmd({
+            "subcommand": "bundle", "target": "list",
+        })
+
+        # _cmd_bundle_list returns HelpLines.
+        text = "\n".join(line for line, _tag in result.lines)
+        assert "(root)" in text or "teammate" in text
+
+    def test_references_bundle_create_runs(self, workspace):
+        plugin = _make_plugin(workspace)
+
+        result = plugin._execute_references_cmd({
+            "subcommand": "bundle", "target": "create newbundle",
+        })
+
+        assert result["status"] == "ok"
+        assert (workspace / ".jaato" / "references" / "newbundle").is_dir()
+
+    def test_references_bundle_with_no_verb_shows_help(self, workspace):
+        plugin = _make_plugin(workspace)
+
+        result = plugin._execute_references_cmd({
+            "subcommand": "bundle", "target": "",
+        })
+
+        # Empty target → help.
+        text = "\n".join(line for line, _tag in result.lines)
+        assert "References / Bundle" in text or "USAGE" in text
+
+    def test_references_bundle_unknown_verb_errors(self, workspace):
+        plugin = _make_plugin(workspace)
+
+        result = plugin._execute_references_cmd({
+            "subcommand": "bundle", "target": "nonsense",
+        })
+
+        assert "error" in result
+        assert "Unknown subcommand" in result["error"]
