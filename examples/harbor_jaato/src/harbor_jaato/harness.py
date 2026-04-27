@@ -92,8 +92,18 @@ async def _drive(args: argparse.Namespace) -> int:
             elif isinstance(ev, PermissionRequestedEvent):
                 # First prompt: "a" promotes the tool to the session
                 # whitelist so we don't pay a round-trip per call.
-                response = "a" if not permission_promoted else "y"
-                permission_promoted = True
+                # Subsequent prompts mean a tool ignored the whitelist
+                # — log them so we can spot misbehaving plugins.
+                if permission_promoted:
+                    logger.warning(
+                        "post-promotion permission request: tool=%s args=%s",
+                        ev.tool_name,
+                        ev.tool_args,
+                    )
+                    response = "y"
+                else:
+                    response = "a"
+                    permission_promoted = True
                 await client.respond_to_permission(ev.request_id, response)
             elif isinstance(ev, TurnCompletedEvent):
                 result.n_input_tokens += ev.prompt_tokens
