@@ -3,6 +3,12 @@
 Covers cross-kind dispatch via the :class:`BundleEntryRegistry`. The
 plugin is instantiated with an isolated registry so we can wire up a
 stub handler without touching the global one.
+
+The pack/unpack tests use a real :class:`ReferencesEntryHandler` over
+a temp workspace because the v2 archive format requires concrete
+manifests, sidecars, and an embedding-config validator path that the
+stub handler doesn't simulate. See ``test_plugin.py`` in
+``bundle_common/tests`` for stub-only pack/unpack coverage.
 """
 
 import json
@@ -23,6 +29,8 @@ from shared.plugins.bundle_common.handler import (
     BundleEntryHandler,
     BundleEntryRegistry,
 )
+from shared.plugins.references.entry_handler import ReferencesEntryHandler
+from shared.plugins.references.plugin import ReferencesPlugin
 
 
 class _FakeHandler(BundleEntryHandler):
@@ -412,3 +420,269 @@ class TestCompletions:
     def test_other_command_returns_empty(self, plugin_with_stub):
         plugin, _ = plugin_with_stub
         assert plugin.get_command_completions("references", [""]) == []
+
+    def test_pack_completes_with_bundle_names(self, plugin_with_stub):
+        plugin, _ = plugin_with_stub
+
+        comps = plugin.get_command_completions("bundle", ["pack", ""])
+
+        values = {c.value for c in comps}
+        assert "teammate" in values
+        assert "personal" in values
+
+    def test_pack_scope_value_completions(self, plugin_with_stub):
+        plugin, _ = plugin_with_stub
+
+        comps = plugin.get_command_completions(
+            "bundle", ["pack", "teammate", "--scope", ""],
+        )
+
+        values = {c.value for c in comps}
+        assert {"workspace", "user"} <= values
+
+    def test_unpack_flag_completions(self, plugin_with_stub):
+        plugin, _ = plugin_with_stub
+
+        comps = plugin.get_command_completions(
+            "bundle", ["unpack", "archive.tar.gz", "--"],
+        )
+
+        values = {c.value for c in comps}
+        assert {"--scope", "--into", "--overwrite", "--merge", "--no-reconcile"} <= values
+
+
+# ===========================================================================
+# Pack / unpack — exercised against a real ReferencesEntryHandler so the
+# v2 archive format is validated end-to-end (the stub handler doesn't
+# simulate manifests/sidecars deeply enough for the packer's plumbing).
+# ===========================================================================
+
+
+def _write_ref_json(directory: Path, sid: str) -> None:
+    """Drop a LOCAL ref JSON whose payload is a relative file in the bundle dir."""
+    directory.mkdir(parents=True, exist_ok=True)
+    payload_dir = directory / "payloads"
+    payload_dir.mkdir(exist_ok=True)
+    payload_file = payload_dir / f"{sid}.md"
+    payload_file.write_text(f"# {sid}\nbody")
+    (directory / f"{sid}.json").write_text(json.dumps({
+        "id": sid,
+        "name": sid.replace("-", " ").title(),
+        "description": f"Desc for {sid}",
+        "type": "local",
+        "path": str(payload_file.resolve()),
+        "mode": "selectable",
+    }))
+
+
+def _write_manifest(directory: Path, *, rows, model="mock-model", dim=4) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
+        "embedding_model": model,
+        "embedding_dimensions": dim,
+        "embedding_sidecar": "vectors.npy",
+        "rows": list(rows),
+    }))
+    # Empty sidecar stand-in — pack copies bytes, doesn't parse.
+    (directory / "vectors.npy").write_bytes(b"\x93NUMPY-FAKE")
+
+
+@pytest.fixture
+def workspace_with_ref(tmp_path, monkeypatch):
+    """Workspace with one references sub-bundle ('teammate') holding one ref."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    ws = tmp_path / "ws"
+    refs = ws / ".jaato" / "references"
+    teammate = refs / "teammate"
+    _write_ref_json(teammate, "team-doc")
+    _write_manifest(teammate, rows=[])  # rows empty — reconcile would populate
+    return ws
+
+
+@pytest.fixture
+def plugin_with_real_refs(workspace_with_ref):
+    """Bundle plugin wired to a real ReferencesPlugin in an isolated registry."""
+    registry = BundleEntryRegistry()
+    refs_plugin = ReferencesPlugin()
+    refs_plugin.set_workspace_path(str(workspace_with_ref))
+    refs_plugin.initialize({"lookup_strategy": "tags_only"})
+
+    # initialize() registers the references handler with the *global*
+    # registry; replicate the same in our isolated one so the bundle
+    # plugin sees it. Unregister from global so we don't leak.
+    from shared.plugins.bundle_common.handler import (
+        registry as global_registry,
+    )
+    global_registry.unregister("references")
+    handler = ReferencesEntryHandler(refs_plugin)
+    registry.register(handler)
+
+    bundle_plugin = BundlePlugin(registry=registry)
+    bundle_plugin.set_workspace_path(str(workspace_with_ref))
+
+    yield bundle_plugin, refs_plugin, workspace_with_ref
+
+    refs_plugin.shutdown()
+
+
+class TestPack:
+    def test_pack_writes_archive_at_default_path(self, plugin_with_real_refs):
+        plugin, _refs, ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "pack",
+            "target": "teammate",
+        })
+
+        assert result["status"] == "ok"
+        # Default archive lives under the workspace root.
+        archive = ws / "teammate-workspace.tar.gz"
+        assert archive.is_file()
+        assert result["archive_path"] == str(archive.resolve())
+
+    def test_pack_with_explicit_to(self, plugin_with_real_refs, tmp_path):
+        plugin, _refs, _ws = plugin_with_real_refs
+        out = tmp_path / "out.tar.gz"
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "pack",
+            "target": f"teammate --to {out}",
+        })
+
+        assert result["status"] == "ok"
+        assert out.is_file()
+
+    def test_pack_unknown_bundle_errors(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "pack",
+            "target": "ghost",
+        })
+
+        assert "error" in result
+        assert "no bundle" in result["error"].lower()
+
+    def test_pack_records_per_kind_breakdown(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "pack",
+            "target": "teammate",
+        })
+
+        kinds = result["kinds"]
+        assert len(kinds) == 1
+        assert kinds[0]["kind"] == "references"
+        assert kinds[0]["entry_count"] == 1
+
+
+class TestUnpack:
+    def test_pack_then_unpack_roundtrip(self, plugin_with_real_refs, tmp_path):
+        plugin, refs_plugin, ws = plugin_with_real_refs
+
+        # Pack into a temp archive…
+        archive = tmp_path / "out.tar.gz"
+        pack_result = plugin._execute_bundle_cmd({
+            "subcommand": "pack",
+            "target": f"teammate --to {archive}",
+        })
+        assert pack_result["status"] == "ok"
+
+        # …and unpack into a fresh recipient workspace.
+        recipient = tmp_path / "recipient"
+        recipient.mkdir()
+        recipient_refs = recipient / ".jaato" / "references"
+        recipient_refs.mkdir(parents=True)
+
+        # Re-target the plugin at the recipient workspace.
+        new_registry = BundleEntryRegistry()
+        new_refs = ReferencesPlugin()
+        new_refs.set_workspace_path(str(recipient))
+        new_refs.initialize({"lookup_strategy": "tags_only"})
+        from shared.plugins.bundle_common.handler import (
+            registry as global_registry,
+        )
+        global_registry.unregister("references")
+        new_registry.register(ReferencesEntryHandler(new_refs))
+        new_plugin = BundlePlugin(registry=new_registry)
+        new_plugin.set_workspace_path(str(recipient))
+
+        unpack_result = new_plugin._execute_bundle_cmd({
+            "subcommand": "unpack",
+            "target": f"{archive}",
+        })
+        try:
+            assert unpack_result["status"] == "ok"
+            installed = recipient_refs / "teammate"
+            assert (installed / EMBEDDING_CONFIG_FILENAME).is_file()
+            assert (installed / "team-doc.json").is_file()
+            assert unpack_result["target"] == "workspace:teammate"
+        finally:
+            new_refs.shutdown()
+
+    def test_unpack_missing_archive_errors(self, plugin_with_real_refs, tmp_path):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "unpack",
+            "target": str(tmp_path / "nope.tar.gz"),
+        })
+
+        assert "error" in result
+        # FileNotFoundError surfaces verbatim from bundle_common.
+        assert "not found" in result["error"].lower() or "no such" in result["error"].lower()
+
+    def test_unpack_collision_without_flag(self, plugin_with_real_refs, tmp_path):
+        plugin, _refs, _ws = plugin_with_real_refs
+        archive = tmp_path / "out.tar.gz"
+        plugin._execute_bundle_cmd({
+            "subcommand": "pack",
+            "target": f"teammate --to {archive}",
+        })
+
+        # First unpack fine (target_name defaults to "teammate" — but
+        # the source workspace already has a teammate bundle).
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "unpack",
+            "target": f"{archive}",
+        })
+
+        assert "error" in result
+        # "already" appears in the bundle_common error message
+        # ("target X already contains a bundle").
+        assert "already" in result["error"].lower()
+
+    def test_unpack_no_reconcile_flag(self, plugin_with_real_refs, tmp_path):
+        plugin, _refs, _ws = plugin_with_real_refs
+        archive = tmp_path / "out.tar.gz"
+        plugin._execute_bundle_cmd({
+            "subcommand": "pack",
+            "target": f"teammate --to {archive}",
+        })
+
+        recipient = tmp_path / "recipient"
+        recipient_refs = recipient / ".jaato" / "references"
+        recipient_refs.mkdir(parents=True)
+        new_refs = ReferencesPlugin()
+        new_refs.set_workspace_path(str(recipient))
+        new_refs.initialize({"lookup_strategy": "tags_only"})
+        from shared.plugins.bundle_common.handler import (
+            registry as global_registry,
+        )
+        global_registry.unregister("references")
+        new_registry = BundleEntryRegistry()
+        new_registry.register(ReferencesEntryHandler(new_refs))
+        new_plugin = BundlePlugin(registry=new_registry)
+        new_plugin.set_workspace_path(str(recipient))
+
+        try:
+            result = new_plugin._execute_bundle_cmd({
+                "subcommand": "unpack",
+                "target": f"{archive} --no-reconcile",
+            })
+
+            assert result["status"] == "ok"
+            assert result["reconciled"] == []
+        finally:
+            new_refs.shutdown()

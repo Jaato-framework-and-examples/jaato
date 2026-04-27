@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import logging
 import shlex
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from jaato_sdk.plugins.base import (
     CommandCompletion,
@@ -42,6 +43,7 @@ from jaato_sdk.plugins.model_provider.types import ToolSchema
 from ..bundle_common.bundle import (
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
+    VALID_BUNDLE_TIERS,
     AmbiguousBundleRefError,
     Bundle,
     BundleRef,
@@ -54,6 +56,14 @@ from ..bundle_common.handler import (
     BundleEntryRegistry,
 )
 from ..bundle_common.handler import registry as default_registry
+from ..bundle_common.pack import PackResult, pack_bundle_set
+from ..bundle_common.unpack import (
+    UnpackError,
+    UnpackMode,
+    UnpackResult,
+    read_envelope,
+    unpack_archive,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -177,13 +187,17 @@ class BundlePlugin:
             return self._cmd_eject(target)
         if subcommand == "remove":
             return self._cmd_remove(target)
+        if subcommand == "pack":
+            return self._cmd_pack(target)
+        if subcommand == "unpack":
+            return self._cmd_unpack(target)
         if subcommand == "help":
             return self._cmd_help()
         return {
             "error": (
                 f"Unknown subcommand: {subcommand}. Use: list, add, eject, "
-                f"remove, help. (Bundle creation, deletion, reconcile, "
-                f"merge, pack and unpack remain under 'references bundle "
+                f"remove, pack, unpack, help. (Bundle creation, deletion, "
+                f"reconcile and merge remain under 'references bundle "
                 f"<verb>' until they are generalized.)"
             )
         }
@@ -423,6 +437,386 @@ class BundlePlugin:
             target_bundle=None,
         )
 
+    def _cmd_pack(self, raw_args: str) -> Dict[str, Any]:
+        """``bundle pack <name> [--scope workspace|user] [--to <archive>]``.
+
+        Builds a composite v2 archive containing every registered
+        kind's bundle named ``<name>`` in the chosen tier. Handlers
+        with no matching bundle for that ``(name, tier)`` are silently
+        skipped — packing ``teammate`` produces an archive with
+        whatever combination of kinds happens to have a teammate
+        bundle. The archive layout is documented in
+        :mod:`bundle_common.pack`.
+
+        Args:
+            raw_args: ``<name> [--scope ws|user] [--to <archive>]``.
+                Bare ``<name>`` defaults to ``--scope workspace`` and
+                writes ``./<name>-<tier>.tar.gz`` under the workspace
+                root (or current directory if no workspace is bound).
+        """
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        name_token: Optional[str] = None
+        scope: str = BUNDLE_TIER_WORKSPACE
+        output_arg: Optional[str] = None
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--scope":
+                if i + 1 >= len(tokens):
+                    return {"error": "--scope requires workspace or user"}
+                value = tokens[i + 1]
+                if value not in VALID_BUNDLE_TIERS:
+                    return {"error": f"Unknown scope {value!r}; use workspace or user"}
+                scope = value
+                i += 2
+                continue
+            if tok.startswith("--scope="):
+                value = tok.split("=", 1)[1]
+                if value not in VALID_BUNDLE_TIERS:
+                    return {"error": f"Unknown scope {value!r}; use workspace or user"}
+                scope = value
+                i += 1
+                continue
+            if tok == "--to":
+                if i + 1 >= len(tokens):
+                    return {"error": "--to requires a path"}
+                output_arg = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--to="):
+                output_arg = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if name_token is not None:
+                return {
+                    "error": (
+                        "Usage: bundle pack <name> [--scope workspace|user] "
+                        "[--to <archive>]"
+                    )
+                }
+            name_token = tok
+            i += 1
+
+        if name_token is None:
+            return {
+                "error": (
+                    "Usage: bundle pack <name> [--scope workspace|user] "
+                    "[--to <archive>]"
+                )
+            }
+
+        # ``root`` aliases to the empty-string sentinel for symmetry
+        # with parse_bundle_ref's accepted forms; users packing the
+        # root bundle write 'bundle pack root'.
+        bundle_name = "" if name_token in ("root", "(root)") else name_token
+
+        # Determine the archive output path. Defaults match the legacy
+        # references-side behaviour: ``<name>-<tier>.tar.gz`` under the
+        # workspace root, or under cwd when no workspace is bound.
+        if output_arg:
+            archive_path = Path(output_arg).expanduser()
+            if not archive_path.is_absolute():
+                base = self._workspace_path
+                if base:
+                    archive_path = Path(base) / archive_path
+        else:
+            stem = bundle_name or "root"
+            base = self._workspace_path or "."
+            archive_path = Path(base) / f"{stem}-{scope}.tar.gz"
+
+        # The packer needs concrete tier roots for resolve_bundle_roots.
+        ws_path = Path(self._workspace_path) if self._workspace_path else None
+
+        try:
+            result = pack_bundle_set(
+                bundle_name,
+                scope,
+                archive_path,
+                registry=self._registry,
+                workspace_path=ws_path,
+                jaato_version=self._jaato_version_string(),
+            )
+        except FileNotFoundError as e:
+            return {"error": f"pack: {e}"}
+        except OSError as e:
+            return {"error": f"pack: I/O error: {e}"}
+        except ValueError as e:
+            return {"error": f"pack: {e}"}
+
+        size_kb = result.bytes_written / 1024
+        kind_lines: List[str] = []
+        total_entries = 0
+        total_payloads = 0
+        for kr in result.kinds:
+            total_entries += kr.entry_count
+            total_payloads += kr.payload_count
+            kind_lines.append(
+                f"    {kr.kind}: {kr.entry_count} entries, "
+                f"{kr.payload_count} payloads"
+            )
+
+        if not result.kinds:
+            return {
+                "error": (
+                    f"no bundle named {name_token!r} in scope {scope!r} "
+                    f"across any registered kind"
+                )
+            }
+
+        lines: List[Tuple[str, str]] = [
+            ("PACK", "bold"),
+            ("", ""),
+            (f"  bundle: {scope}:{bundle_name or '(root)'}", ""),
+            (f"  archive: {result.archive_path}", ""),
+            (
+                f"  total: {len(result.kinds)} kind(s), {total_entries} "
+                f"entries, {total_payloads} payloads, {size_kb:.1f} KiB",
+                "",
+            ),
+        ]
+        for line in kind_lines:
+            lines.append((line, ""))
+
+        return {
+            "status": "ok",
+            "archive_path": str(result.archive_path),
+            "source_name": result.source_name,
+            "source_tier": result.source_tier,
+            "kinds": [
+                {
+                    "kind": kr.kind,
+                    "bundle_name": kr.bundle_name,
+                    "entry_count": kr.entry_count,
+                    "payload_count": kr.payload_count,
+                }
+                for kr in result.kinds
+            ],
+            "bytes_written": result.bytes_written,
+            "help_lines": HelpLines(lines=lines),
+        }
+
+    def _cmd_unpack(self, raw_args: str) -> Dict[str, Any]:
+        """``bundle unpack <archive> [--scope workspace|user]
+        [--into <name>] [--overwrite|--merge] [--no-reconcile]``.
+
+        Reads the archive's envelope, validates that every declared
+        kind has a registered handler, then dispatches each kind's
+        contents to its handler's domain root. Auto-reconciles each
+        affected handler so freshly-installed bundles are immediately
+        usable; pass ``--no-reconcile`` to skip when the recipient
+        plans to run reconcile by hand later.
+
+        ``--into <name>`` overrides the bundle name on the recipient
+        side; without it the archive's recorded ``source_name`` is
+        used. ``--scope`` overrides the recipient tier; default is
+        ``workspace``.
+
+        Tar-traversal attempts are rejected before any disk writes —
+        the safety check lives in :mod:`bundle_common.unpack` and
+        applies to every member, including symlink targets.
+        """
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        archive_token: Optional[str] = None
+        target_name: Optional[str] = None
+        scope: str = BUNDLE_TIER_WORKSPACE
+        mode: UnpackMode = UnpackMode.ERROR
+        do_reconcile: bool = True
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--into":
+                if i + 1 >= len(tokens):
+                    return {"error": "--into requires a name"}
+                target_name = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--into="):
+                target_name = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if tok == "--scope":
+                if i + 1 >= len(tokens):
+                    return {"error": "--scope requires workspace or user"}
+                value = tokens[i + 1]
+                if value not in VALID_BUNDLE_TIERS:
+                    return {"error": f"Unknown scope {value!r}; use workspace or user"}
+                scope = value
+                i += 2
+                continue
+            if tok.startswith("--scope="):
+                value = tok.split("=", 1)[1]
+                if value not in VALID_BUNDLE_TIERS:
+                    return {"error": f"Unknown scope {value!r}; use workspace or user"}
+                scope = value
+                i += 1
+                continue
+            if tok == "--overwrite":
+                mode = UnpackMode.OVERWRITE
+                i += 1
+                continue
+            if tok == "--merge":
+                mode = UnpackMode.MERGE
+                i += 1
+                continue
+            if tok == "--no-reconcile":
+                do_reconcile = False
+                i += 1
+                continue
+            if archive_token is not None:
+                return {
+                    "error": (
+                        "Usage: bundle unpack <archive> [--scope workspace|user] "
+                        "[--into <name>] [--overwrite|--merge] [--no-reconcile]"
+                    )
+                }
+            archive_token = tok
+            i += 1
+
+        if archive_token is None:
+            return {
+                "error": (
+                    "Usage: bundle unpack <archive> [--scope workspace|user] "
+                    "[--into <name>] [--overwrite|--merge] [--no-reconcile]"
+                )
+            }
+
+        archive_path = Path(archive_token).expanduser()
+        if not archive_path.is_absolute() and self._workspace_path:
+            archive_path = Path(self._workspace_path) / archive_path
+
+        ws_path = Path(self._workspace_path) if self._workspace_path else None
+        if scope == BUNDLE_TIER_WORKSPACE and ws_path is None:
+            return {
+                "error": (
+                    "unpack: cannot install into the workspace tier — no "
+                    "workspace_path is bound. Pass --scope user, or load a "
+                    "workspace first."
+                )
+            }
+
+        try:
+            result = unpack_archive(
+                archive_path,
+                registry=self._registry,
+                target_tier=scope,
+                target_name=target_name,
+                mode=mode,
+                workspace_path=ws_path,
+            )
+        except UnpackError as e:
+            return {"error": f"unpack: {e}"}
+        except FileNotFoundError as e:
+            return {"error": f"unpack: {e}"}
+
+        # Reload + reconcile each handler that received contents. The
+        # reload lets the handler pick up the freshly-written manifests
+        # and entry files; the reconcile self-heals any sidecar drift
+        # (e.g. embedding model differs between packer and recipient).
+        reconciled: List[str] = []
+        for kr in result.kinds:
+            handler = self._registry.get(kr.kind)
+            if handler is None:  # pragma: no cover - validated above
+                continue
+            try:
+                handler.reload_catalog()
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug(
+                    "reload_catalog failed for %s: %s", kr.kind, e,
+                )
+            if not do_reconcile:
+                continue
+            # Find the freshly-installed bundle on the handler side.
+            target_bundle = next(
+                (
+                    b for b in handler.list_bundles()
+                    if b.name == kr.target_name and b.tier == kr.target_tier
+                ),
+                None,
+            )
+            if target_bundle is None:
+                continue
+            try:
+                rec = handler.reconcile_bundle(target_bundle)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug(
+                    "reconcile_bundle failed for %s: %s", kr.kind, e,
+                )
+                continue
+            if rec is not None and hasattr(rec, "summary"):
+                reconciled.append(f"{kr.kind}: {rec.summary()}")
+            else:
+                reconciled.append(kr.kind)
+
+        target_label = (
+            f"{result.target_tier}:"
+            f"{result.target_name or '(root)'}"
+        )
+        lines: List[Tuple[str, str]] = [
+            ("UNPACK", "bold"),
+            ("", ""),
+            (f"  archive: {result.archive_path}", ""),
+            (f"  installed: {target_label}", ""),
+            (f"  format: v{result.format_version}", ""),
+            (f"  mode: {result.mode.value}", ""),
+        ]
+        for kr in result.kinds:
+            lines.append((
+                f"    {kr.kind}: {kr.entry_count} entries -> {kr.target_dir}",
+                "",
+            ))
+        if reconciled:
+            lines.append(("", ""))
+            for r in reconciled:
+                lines.append((f"  reconciled: {r}", ""))
+        elif do_reconcile:
+            lines.append(("  reconciled: (no kinds were installed)", "dim"))
+        else:
+            lines.append(("  reconciled: skipped (--no-reconcile)", "dim"))
+
+        return {
+            "status": "ok",
+            "archive_path": str(result.archive_path),
+            "target": target_label,
+            "target_tier": result.target_tier,
+            "target_name": result.target_name,
+            "format_version": result.format_version,
+            "mode": result.mode.value,
+            "kinds": [
+                {
+                    "kind": kr.kind,
+                    "target_dir": str(kr.target_dir),
+                    "entry_count": kr.entry_count,
+                }
+                for kr in result.kinds
+            ],
+            "reconciled": reconciled,
+            "help_lines": HelpLines(lines=lines),
+        }
+
+    @staticmethod
+    def _jaato_version_string() -> str:
+        """Best-effort jaato package version for the archive envelope.
+
+        Returns ``"unknown"`` when metadata isn't available (e.g.,
+        editable install without installed metadata) — matches the
+        references-side behaviour the legacy pack used.
+        """
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+            return version("jaato-server")
+        except PackageNotFoundError:
+            return "unknown"
+        except ImportError:
+            return "unknown"
+
     def _cmd_help(self) -> HelpLines:
         return HelpLines(lines=[
             ("Bundle Command", "bold"),
@@ -450,6 +844,19 @@ class BundlePlugin:
             ("    remove <kind>:<id>", "dim"),
             ("        Permanently delete an entry's backing file from disk.", "dim"),
             ("", ""),
+            ("    pack <name> [--scope workspace|user] [--to <archive>]", "dim"),
+            ("        Build a composite .tar.gz holding every kind's bundle", "dim"),
+            ("        with the given <name> in the chosen tier. Kinds with", "dim"),
+            ("        no matching bundle are silently skipped.", "dim"),
+            ("        Default output: ./<name>-<tier>.tar.gz under the workspace.", "dim"),
+            ("", ""),
+            ("    unpack <archive> [--scope workspace|user] [--into <name>]", "dim"),
+            ("                     [--overwrite|--merge] [--no-reconcile]", "dim"),
+            ("        Install an archive's contents into the chosen tier.", "dim"),
+            ("        Each kind in the archive is routed to its registered", "dim"),
+            ("        handler. Auto-reconciles each affected handler so the", "dim"),
+            ("        bundles are immediately usable.", "dim"),
+            ("", ""),
             ("    help", "dim"),
             ("        Show this help message.", "dim"),
             ("", ""),
@@ -464,9 +871,9 @@ class BundlePlugin:
             ("    to the workspace tier.", "dim"),
             ("", ""),
             ("RELATED", "bold"),
-            ("    Bundle creation, deletion, reconcile, merge, pack, and", "dim"),
-            ("    unpack remain under 'references bundle <verb>' until the", "dim"),
-            ("    cross-kind generalization lands.", "dim"),
+            ("    Bundle creation, deletion, reconcile, and merge remain", "dim"),
+            ("    under 'references bundle <verb>' until the cross-kind", "dim"),
+            ("    generalization lands.", "dim"),
             ("", ""),
             ("EXAMPLES", "bold"),
             ("    bundle                                       (same as 'bundle list')", "dim"),
@@ -474,6 +881,10 @@ class BundlePlugin:
             ("    bundle add references:api-spec --to teammate", "dim"),
             ("    bundle eject references:api-spec", "dim"),
             ("    bundle remove references:api-spec", "dim"),
+            ("    bundle pack teammate                         ./teammate-workspace.tar.gz", "dim"),
+            ("    bundle pack teammate --scope user --to ~/share.tar.gz", "dim"),
+            ("    bundle unpack ./teammate-workspace.tar.gz", "dim"),
+            ("    bundle unpack share.tar.gz --into shared --overwrite", "dim"),
         ])
 
     # ------------------------------------------------------------------
@@ -491,6 +902,8 @@ class BundlePlugin:
             CommandCompletion("add", "Move an entry into a bundle"),
             CommandCompletion("eject", "Move an entry out of its bundle"),
             CommandCompletion("remove", "Permanently delete an entry"),
+            CommandCompletion("pack", "Build a composite distributable archive"),
+            CommandCompletion("unpack", "Install an archive into a tier"),
             CommandCompletion("help", "Show detailed help"),
         ]
 
@@ -532,6 +945,51 @@ class BundlePlugin:
                 if partial.startswith("-") or not partial:
                     flags = [CommandCompletion("--to", "Target bundle (scope:name)")]
                     return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "pack":
+            if len(args) == 2:
+                # Offer bare bundle names — pack is composite, so the
+                # name (not the kind-qualified form) is what matters.
+                names: Set[str] = set()
+                for handler in self._registry.all_handlers():
+                    for b in handler.list_bundles():
+                        names.add("root" if b.name == "" else b.name)
+                options = [
+                    CommandCompletion(n, f"Pack '{n}' across all kinds")
+                    for n in sorted(names)
+                ]
+                return [o for o in options if o.value.startswith(partial)]
+            if len(args) >= 3 and args[-2] == "--scope":
+                scopes = [
+                    CommandCompletion("workspace", "Workspace tier (default)"),
+                    CommandCompletion("user", "User tier (~/.jaato/<kind>)"),
+                ]
+                return [s for s in scopes if s.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [
+                    CommandCompletion("--scope", "Source tier (workspace|user)"),
+                    CommandCompletion("--to", "Output archive path"),
+                ]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "unpack":
+            # First positional is a path — leave to the client's
+            # filename completion.
+            if len(args) >= 3 and args[-2] == "--scope":
+                scopes = [
+                    CommandCompletion("workspace", "Install into workspace tier"),
+                    CommandCompletion("user", "Install into user tier"),
+                ]
+                return [s for s in scopes if s.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [
+                    CommandCompletion("--scope", "Destination tier (workspace|user)"),
+                    CommandCompletion("--into", "Override the bundle name"),
+                    CommandCompletion("--overwrite", "Replace existing bundles"),
+                    CommandCompletion("--merge", "Merge into existing bundles"),
+                    CommandCompletion("--no-reconcile", "Skip post-unpack reconcile"),
+                ]
+                return [f for f in flags if f.value.startswith(partial or "-")]
 
         return []
 
