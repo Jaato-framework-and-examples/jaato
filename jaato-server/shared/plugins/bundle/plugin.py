@@ -187,6 +187,12 @@ class BundlePlugin:
             return self._cmd_eject(target)
         if subcommand == "remove":
             return self._cmd_remove(target)
+        if subcommand == "create":
+            return self._cmd_create(target)
+        if subcommand == "delete":
+            return self._cmd_delete(target)
+        if subcommand == "reconcile":
+            return self._cmd_reconcile(target)
         if subcommand == "pack":
             return self._cmd_pack(target)
         if subcommand == "unpack":
@@ -196,9 +202,9 @@ class BundlePlugin:
         return {
             "error": (
                 f"Unknown subcommand: {subcommand}. Use: list, add, eject, "
-                f"remove, pack, unpack, help. (Bundle creation, deletion, "
-                f"reconcile and merge remain under 'references bundle "
-                f"<verb>' until they are generalized.)"
+                f"remove, create, delete, reconcile, pack, unpack, help. "
+                f"(Bundle merge remains under 'references bundle merge' — "
+                f"it's references-specific by nature.)"
             )
         }
 
@@ -436,6 +442,410 @@ class BundlePlugin:
             source_bundle=source_bundle,
             target_bundle=None,
         )
+
+    def _cmd_create(self, raw_args: str) -> Dict[str, Any]:
+        """``bundle create <name> --kind <kind> [--scope workspace|user]``.
+
+        Delegates to the chosen handler's
+        :meth:`BundleEntryHandler.create_empty_bundle`. ``--kind`` is
+        required because each kind writes its own manifest format
+        (references manifests carry embedding metadata; agents/tasks
+        manifests don't), so picking a default would force users
+        through an error round-trip. Defaults: ``--scope workspace``.
+
+        After the manifest is written the handler is asked to reload
+        its catalog so subsequent commands see the new bundle.
+        """
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        name_token: Optional[str] = None
+        kind: Optional[str] = None
+        scope: str = BUNDLE_TIER_WORKSPACE
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--kind":
+                if i + 1 >= len(tokens):
+                    return {"error": "--kind requires a value"}
+                kind = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--kind="):
+                kind = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if tok == "--scope":
+                if i + 1 >= len(tokens):
+                    return {"error": "--scope requires workspace or user"}
+                value = tokens[i + 1]
+                if value not in VALID_BUNDLE_TIERS:
+                    return {"error": f"Unknown scope {value!r}; use workspace or user"}
+                scope = value
+                i += 2
+                continue
+            if tok.startswith("--scope="):
+                value = tok.split("=", 1)[1]
+                if value not in VALID_BUNDLE_TIERS:
+                    return {"error": f"Unknown scope {value!r}; use workspace or user"}
+                scope = value
+                i += 1
+                continue
+            if name_token is not None:
+                return {
+                    "error": (
+                        "Usage: bundle create <name> --kind <kind> "
+                        "[--scope workspace|user]"
+                    )
+                }
+            name_token = tok
+            i += 1
+
+        if name_token is None or kind is None:
+            return {
+                "error": (
+                    "Usage: bundle create <name> --kind <kind> "
+                    "[--scope workspace|user]"
+                )
+            }
+        handler = self._registry.get(kind)
+        if handler is None:
+            return {
+                "error": (
+                    f"unknown kind {kind!r}; registered kinds: "
+                    f"{', '.join(self._registry.kinds()) or '(none)'}"
+                )
+            }
+
+        bundle_name = "" if name_token in ("root", "(root)") else name_token
+
+        # Reject if a bundle with this name already exists in the
+        # chosen tier under this kind.
+        existing = next(
+            (
+                b for b in handler.list_bundles()
+                if b.name == bundle_name and b.tier == scope
+            ),
+            None,
+        )
+        if existing is not None:
+            return {
+                "error": (
+                    f"bundle '{existing.qualified_ref}' already exists "
+                    f"under kind={kind!r} at {existing.directory}; use "
+                    f"'bundle delete' first or pick a different name"
+                )
+            }
+
+        ws_path = Path(self._workspace_path) if self._workspace_path else None
+        if scope == BUNDLE_TIER_WORKSPACE and ws_path is None:
+            return {
+                "error": (
+                    "create: cannot create a workspace bundle — no "
+                    "workspace_path is bound. Pass --scope user, or load a "
+                    "workspace first."
+                )
+            }
+        try:
+            new_bundle = handler.create_empty_bundle(
+                bundle_name, scope, workspace_path=ws_path,
+            )
+        except NotImplementedError as e:
+            return {"error": str(e)}
+        except FileExistsError as e:
+            return {"error": f"create: {e}"}
+        except (RuntimeError, ValueError) as e:
+            return {"error": f"create: {e}"}
+
+        try:
+            handler.reload_catalog()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("reload_catalog failed for %s: %s", kind, e)
+
+        lines: List[Tuple[str, str]] = [
+            ("CREATE", "bold"),
+            ("", ""),
+            (f"  kind: {kind}", ""),
+            (f"  bundle: {new_bundle.qualified_ref}", ""),
+            (f"  directory: {new_bundle.directory}", ""),
+        ]
+
+        return {
+            "status": "ok",
+            "kind": kind,
+            "bundle": new_bundle.qualified_ref,
+            "directory": str(new_bundle.directory),
+            "help_lines": HelpLines(lines=lines),
+        }
+
+    def _cmd_delete(self, raw_args: str) -> Dict[str, Any]:
+        """``bundle delete <bundle-ref> --kind <kind> [--force]``.
+
+        Deletes a single kind's bundle. ``--kind`` is required even
+        when only one kind is registered — the explicit qualifier
+        protects against accidentally clobbering a composite bundle
+        when more handlers come online. ``--force`` is required for
+        non-empty bundles; without it the dispatcher errors out and
+        leaves disk untouched.
+        """
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        bundle_token: Optional[str] = None
+        kind: Optional[str] = None
+        force: bool = False
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--kind":
+                if i + 1 >= len(tokens):
+                    return {"error": "--kind requires a value"}
+                kind = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--kind="):
+                kind = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if tok == "--force":
+                force = True
+                i += 1
+                continue
+            if bundle_token is not None:
+                return {
+                    "error": (
+                        "Usage: bundle delete <bundle-ref> --kind <kind> "
+                        "[--force]"
+                    )
+                }
+            bundle_token = tok
+            i += 1
+
+        if bundle_token is None or kind is None:
+            return {
+                "error": (
+                    "Usage: bundle delete <bundle-ref> --kind <kind> "
+                    "[--force]"
+                )
+            }
+        handler = self._registry.get(kind)
+        if handler is None:
+            return {"error": f"unknown kind {kind!r}"}
+
+        try:
+            ref = parse_bundle_ref(bundle_token)
+        except ValueError as e:
+            return {"error": str(e)}
+        try:
+            bundle = find_bundle(
+                handler.list_bundles(), ref,
+                default_scope=BUNDLE_TIER_WORKSPACE,
+            )
+        except AmbiguousBundleRefError as e:
+            return {"error": str(e)}
+        if bundle is None:
+            return {
+                "error": (
+                    f"Unknown {kind} bundle '{ref.display}'. Loaded: "
+                    f"{[b.qualified_ref for b in handler.list_bundles()] or '(none)'}"
+                )
+            }
+
+        try:
+            handler.delete_bundle(bundle, force=force)
+        except NotImplementedError as e:
+            return {"error": str(e)}
+        except ValueError as e:
+            return {"error": str(e)}
+        except Exception as e:  # pragma: no cover - defensive
+            return {"error": f"delete failed: {e}"}
+
+        try:
+            handler.reload_catalog()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("reload_catalog failed for %s: %s", kind, e)
+
+        lines: List[Tuple[str, str]] = [
+            ("DELETE", "bold"),
+            ("", ""),
+            (f"  kind: {kind}", ""),
+            (f"  removed: {bundle.qualified_ref}", ""),
+            (f"  directory: {bundle.directory}", ""),
+            (f"  forced: {force}", ""),
+        ]
+
+        return {
+            "status": "ok",
+            "kind": kind,
+            "bundle": bundle.qualified_ref,
+            "directory": str(bundle.directory),
+            "forced": force,
+            "help_lines": HelpLines(lines=lines),
+        }
+
+    def _cmd_reconcile(self, raw_args: str) -> Dict[str, Any]:
+        """``bundle reconcile [<bundle-ref>] [--scope ws|user|all] [--kind <k>]``.
+
+        With no bundle reference, reconciles every bundle that matches
+        the scope filter (default: ``--scope workspace``). With a
+        bundle reference, reconciles just that bundle — ``--kind`` is
+        required in that case so the dispatcher knows which handler
+        owns the manifest.
+
+        Without ``--kind``, reconcile fans out across every registered
+        handler that has a bundle matching the (name, tier) tuple, so
+        a composite bundle can be brought up-to-date in one command.
+        """
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        bundle_token: Optional[str] = None
+        kind: Optional[str] = None
+        scope_filter: Optional[str] = None  # None == default workspace
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--kind":
+                if i + 1 >= len(tokens):
+                    return {"error": "--kind requires a value"}
+                kind = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--kind="):
+                kind = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if tok == "--scope":
+                if i + 1 >= len(tokens):
+                    return {"error": "--scope requires workspace, user, or all"}
+                value = tokens[i + 1]
+                if value not in (*VALID_BUNDLE_TIERS, "all"):
+                    return {
+                        "error": (
+                            f"Unknown scope {value!r}. Use workspace, user, or all."
+                        )
+                    }
+                scope_filter = value
+                i += 2
+                continue
+            if tok.startswith("--scope="):
+                value = tok.split("=", 1)[1]
+                if value not in (*VALID_BUNDLE_TIERS, "all"):
+                    return {
+                        "error": (
+                            f"Unknown scope {value!r}. Use workspace, user, or all."
+                        )
+                    }
+                scope_filter = value
+                i += 1
+                continue
+            if bundle_token is not None:
+                return {
+                    "error": (
+                        "Usage: bundle reconcile [<bundle-ref>] "
+                        "[--scope workspace|user|all] [--kind <kind>]"
+                    )
+                }
+            bundle_token = tok
+            i += 1
+
+        if bundle_token is not None and scope_filter is not None:
+            return {
+                "error": (
+                    "Cannot combine a bundle reference with --scope; pick "
+                    "one bundle (e.g. 'workspace:teammate') or pick a scope "
+                    "(e.g. '--scope all')."
+                )
+            }
+
+        # Determine which handlers to ask. With --kind, only that one;
+        # otherwise every registered handler.
+        if kind is not None:
+            handler = self._registry.get(kind)
+            if handler is None:
+                return {"error": f"unknown kind {kind!r}"}
+            handlers = [handler]
+        else:
+            handlers = self._registry.all_handlers()
+        if not handlers:
+            return {"error": "no kinds registered to reconcile"}
+
+        # Collect target bundles per handler.
+        targets: List[Tuple[BundleEntryHandler, Bundle]] = []
+        if bundle_token is not None:
+            try:
+                ref = parse_bundle_ref(bundle_token)
+            except ValueError as e:
+                return {"error": str(e)}
+            for h in handlers:
+                try:
+                    hit = find_bundle(
+                        h.list_bundles(), ref,
+                        default_scope=BUNDLE_TIER_WORKSPACE,
+                    )
+                except AmbiguousBundleRefError as e:
+                    return {"error": str(e)}
+                if hit is not None:
+                    targets.append((h, hit))
+            if not targets:
+                return {
+                    "error": (
+                        f"no bundle '{ref.display}' found across "
+                        f"{[h.kind for h in handlers]}"
+                    )
+                }
+        else:
+            effective_scope = scope_filter or BUNDLE_TIER_WORKSPACE
+            for h in handlers:
+                for b in h.list_bundles():
+                    if effective_scope == "all" or b.tier == effective_scope:
+                        targets.append((h, b))
+            if not targets:
+                return {
+                    "status": "ok",
+                    "results": [],
+                    "help_lines": HelpLines(lines=[
+                        ("RECONCILE", "bold"),
+                        ("", ""),
+                        ("  (no bundles to reconcile in the chosen scope)", "dim"),
+                    ]),
+                }
+
+        results: List[Dict[str, Any]] = []
+        lines: List[Tuple[str, str]] = [("RECONCILE", "bold"), ("", "")]
+        for h, b in targets:
+            try:
+                rec = h.reconcile_bundle(b)
+            except Exception as e:  # pragma: no cover - defensive
+                lines.append((f"  [{h.kind}] {b.qualified_ref}: error — {e}", ""))
+                results.append({
+                    "kind": h.kind,
+                    "bundle": b.qualified_ref,
+                    "error": str(e),
+                })
+                continue
+            summary = (
+                rec.summary() if rec is not None and hasattr(rec, "summary")
+                else "ok"
+            )
+            lines.append((f"  [{h.kind}] {b.qualified_ref}: {summary}", ""))
+            results.append({
+                "kind": h.kind,
+                "bundle": b.qualified_ref,
+                "summary": summary,
+            })
+
+        return {
+            "status": "ok",
+            "results": results,
+            "help_lines": HelpLines(lines=lines),
+        }
 
     def _cmd_pack(self, raw_args: str) -> Dict[str, Any]:
         """``bundle pack <name> [--scope workspace|user] [--to <archive>]``.
@@ -844,6 +1254,20 @@ class BundlePlugin:
             ("    remove <kind>:<id>", "dim"),
             ("        Permanently delete an entry's backing file from disk.", "dim"),
             ("", ""),
+            ("    create <name> --kind <kind> [--scope workspace|user]", "dim"),
+            ("        Create an empty bundle of the given kind. --kind is", "dim"),
+            ("        required because each kind has its own manifest format.", "dim"),
+            ("", ""),
+            ("    delete <bundle-ref> --kind <kind> [--force]", "dim"),
+            ("        Remove a single kind's bundle from disk. --force is", "dim"),
+            ("        required for non-empty bundles.", "dim"),
+            ("", ""),
+            ("    reconcile [<bundle-ref>] [--scope workspace|user|all] [--kind <k>]", "dim"),
+            ("        Sync bundle manifests with the live catalog. With", "dim"),
+            ("        no bundle ref, reconciles every bundle in scope (default", "dim"),
+            ("        workspace). With a bundle ref, reconciles that bundle", "dim"),
+            ("        across every kind that has it (or just --kind <k>).", "dim"),
+            ("", ""),
             ("    pack <name> [--scope workspace|user] [--to <archive>]", "dim"),
             ("        Build a composite .tar.gz holding every kind's bundle", "dim"),
             ("        with the given <name> in the chosen tier. Kinds with", "dim"),
@@ -902,6 +1326,9 @@ class BundlePlugin:
             CommandCompletion("add", "Move an entry into a bundle"),
             CommandCompletion("eject", "Move an entry out of its bundle"),
             CommandCompletion("remove", "Permanently delete an entry"),
+            CommandCompletion("create", "Create an empty bundle"),
+            CommandCompletion("delete", "Remove a kind's bundle from disk"),
+            CommandCompletion("reconcile", "Sync bundle manifests"),
             CommandCompletion("pack", "Build a composite distributable archive"),
             CommandCompletion("unpack", "Install an archive into a tier"),
             CommandCompletion("help", "Show detailed help"),
@@ -988,6 +1415,83 @@ class BundlePlugin:
                     CommandCompletion("--overwrite", "Replace existing bundles"),
                     CommandCompletion("--merge", "Merge into existing bundles"),
                     CommandCompletion("--no-reconcile", "Skip post-unpack reconcile"),
+                ]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "create":
+            if len(args) >= 3 and args[-2] == "--kind":
+                kinds = [
+                    CommandCompletion(k, f"Create a {k} bundle")
+                    for k in self._registry.kinds()
+                ]
+                return [c for c in kinds if c.value.startswith(partial)]
+            if len(args) >= 3 and args[-2] == "--scope":
+                scopes = [
+                    CommandCompletion("workspace", "Workspace tier (default)"),
+                    CommandCompletion("user", "User tier"),
+                ]
+                return [s for s in scopes if s.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [
+                    CommandCompletion("--kind", "Bundle kind (required)"),
+                    CommandCompletion("--scope", "Tier (workspace|user)"),
+                ]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "delete":
+            # First positional: bundle name across registered kinds.
+            if len(args) == 2:
+                names: Set[str] = set()
+                for handler in self._registry.all_handlers():
+                    for b in handler.list_bundles():
+                        names.add("root" if b.name == "" else b.name)
+                options = [
+                    CommandCompletion(n, "Delete bundle (qualify with --kind)")
+                    for n in sorted(names)
+                ]
+                return [o for o in options if o.value.startswith(partial)]
+            if len(args) >= 3 and args[-2] == "--kind":
+                kinds = [
+                    CommandCompletion(k, f"Delete a {k} bundle")
+                    for k in self._registry.kinds()
+                ]
+                return [c for c in kinds if c.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [
+                    CommandCompletion("--kind", "Bundle kind (required)"),
+                    CommandCompletion("--force", "Delete non-empty bundles"),
+                ]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "reconcile":
+            # First positional: bundle ref, but optional.
+            if len(args) == 2 and not partial.startswith("-"):
+                names = set()
+                for handler in self._registry.all_handlers():
+                    for b in handler.list_bundles():
+                        names.add("root" if b.name == "" else b.name)
+                options = [
+                    CommandCompletion(n, "Reconcile this bundle")
+                    for n in sorted(names)
+                ]
+                return [o for o in options if o.value.startswith(partial)]
+            if len(args) >= 3 and args[-2] == "--scope":
+                scopes = [
+                    CommandCompletion("workspace", "Workspace tier (default)"),
+                    CommandCompletion("user", "User tier"),
+                    CommandCompletion("all", "Both tiers"),
+                ]
+                return [s for s in scopes if s.value.startswith(partial)]
+            if len(args) >= 3 and args[-2] == "--kind":
+                kinds = [
+                    CommandCompletion(k, f"Limit to {k}")
+                    for k in self._registry.kinds()
+                ]
+                return [c for c in kinds if c.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [
+                    CommandCompletion("--scope", "Tier filter (workspace|user|all)"),
+                    CommandCompletion("--kind", "Limit to one kind"),
                 ]
                 return [f for f in flags if f.value.startswith(partial or "-")]
 

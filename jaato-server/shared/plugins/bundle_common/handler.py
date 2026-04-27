@@ -241,6 +241,34 @@ class BundleEntryHandler(Protocol):
             f"kind {self.kind!r} does not support 'bundle create'"
         )
 
+    def delete_bundle(self, bundle: Bundle, *, force: bool = False) -> None:
+        """Remove ``bundle`` from disk.
+
+        Refuses to delete a non-empty bundle unless ``force=True``.
+        "Non-empty" means the bundle's directory still contains any
+        entry files or the manifest's ``rows`` list is non-empty. The
+        check exists so a stray ``bundle delete`` doesn't silently
+        wipe contributions an operator forgot they had.
+
+        For root bundles the implementation should remove the
+        manifest, sidecar, and entry files but leave the tier-root
+        directory itself in place — sub-bundles may still live
+        alongside the root manifest. For named bundles the entire
+        bundle directory is removed.
+
+        Default raises :class:`NotImplementedError` so kinds that
+        don't support operator-level bundle deletion opt in
+        explicitly. Implementations that *do* opt in should also
+        update any in-memory catalog state to drop the deleted
+        bundle's entries (the dispatcher calls
+        :meth:`reload_catalog` afterwards as a belt-and-braces
+        sync, but the immediate state should be consistent on
+        return).
+        """
+        raise NotImplementedError(
+            f"kind {self.kind!r} does not support 'bundle delete'"
+        )
+
     # ------------------------------------------------------------------
     # Optional pack/unpack hooks. Default implementations cover the
     # common case where an entry is fully self-contained (URL/MCP/INLINE

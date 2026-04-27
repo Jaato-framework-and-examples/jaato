@@ -686,3 +686,218 @@ class TestUnpack:
             assert result["reconciled"] == []
         finally:
             new_refs.shutdown()
+
+
+# ===========================================================================
+# create / delete / reconcile — exercised against a real
+# ReferencesEntryHandler so the per-kind plumbing is validated end-to-end.
+# Reuses the workspace_with_ref fixture from above.
+# ===========================================================================
+
+
+class TestCreate:
+    def test_create_writes_manifest(self, plugin_with_real_refs):
+        plugin, refs_plugin, ws = plugin_with_real_refs
+
+        # references plugin requires an embedding provider for create;
+        # inject a fake one matching the bundles in the fixture.
+        from shared.plugins.references.tests.test_entry_handler import _write_ref  # noqa: E501
+        from shared.plugins.references.entry_handler import (
+            ReferencesEntryHandler as _RefHandler,
+        )
+
+        class _FakeProvider:
+            model_name = "mock-model"
+            dimensions = 4
+            available = True
+
+            def load_model(self):
+                return True
+
+            def embed_text(self, text):
+                from shared.plugins.references.embedding_types import EmbeddingResult
+                return EmbeddingResult(embedding=[0.0] * 4, model="mock-model", dimensions=4)
+
+            def embed_batch(self, texts):
+                return [self.embed_text(t) for t in texts]
+
+            def embed_text_as_array(self, text):
+                return [0.0] * 4
+
+        refs_plugin._embedding_provider = _FakeProvider()
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "create",
+            "target": "newone --kind references",
+        })
+
+        assert result["status"] == "ok"
+        new_dir = ws / ".jaato" / "references" / "newone"
+        assert (new_dir / EMBEDDING_CONFIG_FILENAME).is_file()
+
+    def test_create_requires_kind(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "create",
+            "target": "newone",
+        })
+
+        assert "error" in result
+        assert "Usage" in result["error"]
+
+    def test_create_unknown_kind(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "create",
+            "target": "newone --kind agents",
+        })
+
+        assert "error" in result
+        assert "unknown kind" in result["error"]
+
+    def test_create_existing_bundle_errors(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "create",
+            "target": "teammate --kind references",
+        })
+
+        assert "error" in result
+        assert "already exists" in result["error"]
+
+
+class TestDelete:
+    def test_delete_requires_kind(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "delete",
+            "target": "teammate",
+        })
+
+        assert "error" in result
+        assert "Usage" in result["error"]
+
+    def test_delete_non_empty_without_force_errors(self, plugin_with_real_refs):
+        plugin, _refs, ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "delete",
+            "target": "teammate --kind references",
+        })
+
+        assert "error" in result
+        assert "not empty" in result["error"]
+        # Bundle still on disk.
+        assert (ws / ".jaato" / "references" / "teammate").is_dir()
+
+    def test_delete_with_force_removes_bundle(self, plugin_with_real_refs):
+        plugin, _refs, ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "delete",
+            "target": "teammate --kind references --force",
+        })
+
+        assert result["status"] == "ok"
+        assert not (ws / ".jaato" / "references" / "teammate").exists()
+
+    def test_delete_unknown_bundle_errors(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "delete",
+            "target": "ghost --kind references",
+        })
+
+        assert "error" in result
+        assert "Unknown references bundle" in result["error"]
+
+
+class TestReconcile:
+    def test_reconcile_with_no_args_targets_workspace(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "reconcile",
+            "target": "",
+        })
+
+        assert result["status"] == "ok"
+        # The fixture has one workspace bundle ('teammate').
+        bundles_touched = {r["bundle"] for r in result["results"]}
+        assert "workspace:teammate" in bundles_touched
+
+    def test_reconcile_specific_bundle(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "reconcile",
+            "target": "teammate",
+        })
+
+        assert result["status"] == "ok"
+        assert len(result["results"]) == 1
+        assert result["results"][0]["bundle"] == "workspace:teammate"
+        assert result["results"][0]["kind"] == "references"
+
+    def test_reconcile_with_scope_all(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "reconcile",
+            "target": "--scope all",
+        })
+
+        assert result["status"] == "ok"
+
+    def test_reconcile_unknown_bundle_errors(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "reconcile",
+            "target": "ghost",
+        })
+
+        assert "error" in result
+        assert "no bundle" in result["error"].lower()
+
+    def test_reconcile_bundle_ref_and_scope_mutually_exclusive(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "reconcile",
+            "target": "teammate --scope all",
+        })
+
+        assert "error" in result
+        assert "Cannot combine" in result["error"]
+
+
+class TestCreateDeleteReconcileCompletions:
+    def test_create_kind_completions(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+        comps = plugin.get_command_completions(
+            "bundle", ["create", "newone", "--kind", ""],
+        )
+        values = {c.value for c in comps}
+        assert "references" in values
+
+    def test_delete_kind_completions(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+        comps = plugin.get_command_completions(
+            "bundle", ["delete", "teammate", "--kind", ""],
+        )
+        values = {c.value for c in comps}
+        assert "references" in values
+
+    def test_reconcile_scope_completions(self, plugin_with_real_refs):
+        plugin, _refs, _ws = plugin_with_real_refs
+        comps = plugin.get_command_completions(
+            "bundle", ["reconcile", "--scope", ""],
+        )
+        values = {c.value for c in comps}
+        assert {"workspace", "user", "all"} <= values
