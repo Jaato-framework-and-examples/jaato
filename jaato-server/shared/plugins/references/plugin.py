@@ -35,7 +35,28 @@ from .config_loader import (
     resolve_source_paths,
     validate_reference_file,
 )
-from .bundle import Bundle, ROOT_BUNDLE_NAME, detect_drift, discover_bundles
+from .bundle import (
+    AmbiguousBundleRefError,
+    BUNDLE_TIER_USER,
+    BUNDLE_TIER_WORKSPACE,
+    Bundle,
+    BundleRef,
+    ROOT_BUNDLE_NAME,
+    VALID_BUNDLE_TIERS,
+    detect_drift,
+    discover_bundles,
+    find_bundle,
+    parse_bundle_ref,
+    resolve_bundle_roots,
+)
+from .pack import PackResult, pack_bundle
+from .unpack import (
+    UnpackError,
+    UnpackMode,
+    UnpackResult,
+    read_envelope,
+    unpack_bundle,
+)
 from .merge import (
     MergeOptions,
     MergeResult,
@@ -1133,62 +1154,92 @@ class ReferencesPlugin:
             self._semantic_matcher = matcher
 
     def _discover_and_load_bundles(self) -> None:
-        """Populate ``self._bundles`` and merge sub-bundle refs into the catalog.
+        """Populate ``self._bundles`` and merge bundle refs into the catalog.
 
-        The root bundle (if any) is discovered from
-        ``<workspace>/.jaato/references/embedding_config.json``. Sub-bundles
-        are immediate subdirectories of that path containing their own
-        manifests. Each sub-bundle's reference JSONs are loaded via
+        Walks both tier roots (workspace then user) via
+        :func:`resolve_bundle_roots`. Within each root the root bundle is
+        discovered from ``<root>/embedding_config.json`` and sub-bundles
+        from each immediate subdirectory containing its own manifest.
+        Each bundle's reference JSONs are loaded via
         :func:`discover_references` and tagged with ``bundle_name`` so the
         flat catalog can still reason about membership.
 
-        Sources already loaded by :func:`load_config` (the root bundle)
-        have their ``bundle_name`` left as the default empty string. This
-        matches the new :data:`ROOT_BUNDLE_NAME` sentinel.
+        **Tier shadowing:** :func:`discover_bundles` walks workspace first
+        and a workspace bundle hides any user bundle of the same name —
+        the shadowed user bundle never appears in ``self._bundles`` and
+        its references are not loaded into the catalog.
+
+        Sources already loaded by :func:`load_config` (the workspace-tier
+        root bundle) have their ``bundle_name`` left as the default empty
+        string. Sources from the user-tier root bundle are loaded here
+        and likewise carry ``bundle_name = ""`` (the empty name is the
+        root-bundle sentinel; tier disambiguation lives on the
+        :class:`Bundle` itself, not on individual references).
         """
         self._bundles = []
 
         if not self._config:
             return
 
-        refs_dir = Path(self._config.references_dir)
-        if not refs_dir.is_absolute():
-            if self._workspace_path:
-                refs_dir = Path(self._workspace_path) / refs_dir
-            elif self._project_root:
-                refs_dir = Path(self._project_root) / refs_dir
-            else:
-                self._trace(
-                    "_discover_and_load_bundles: cannot resolve references_dir "
-                    "without workspace_path; bundle discovery skipped"
-                )
-                return
+        # Resolve the workspace tier root from the config (which may have
+        # an absolute or relative ``references_dir``). The user tier always
+        # lives under ``~/.jaato/references`` — :func:`resolve_bundle_roots`
+        # handles that — but we splice in the user pair manually so that a
+        # custom workspace ``references_dir`` (set in references.json) is
+        # still honored.
+        workspace_refs_dir: Optional[Path] = None
+        cfg_refs = Path(self._config.references_dir)
+        if cfg_refs.is_absolute():
+            workspace_refs_dir = cfg_refs
+        elif self._workspace_path:
+            workspace_refs_dir = Path(self._workspace_path) / cfg_refs
+        elif self._project_root:
+            workspace_refs_dir = Path(self._project_root) / cfg_refs
 
-        self._bundles = discover_bundles(refs_dir)
+        roots: List[Tuple[Path, str]] = []
+        if workspace_refs_dir is not None:
+            roots.append((workspace_refs_dir.resolve(), BUNDLE_TIER_WORKSPACE))
+        else:
+            self._trace(
+                "_discover_and_load_bundles: workspace references_dir "
+                "unresolved (no workspace_path); workspace tier skipped"
+            )
+        # User tier — always available.
+        for path, tier in resolve_bundle_roots(workspace_path=None):
+            if tier == BUNDLE_TIER_USER:
+                roots.append((path, tier))
+                break
+
+        self._bundles = discover_bundles(roots)
 
         if not self._bundles:
             self._trace("_discover_and_load_bundles: no bundles found")
             return
 
-        # Load sub-bundle references. The root bundle's refs are already
-        # in self._sources from the initial load_config() call; we only
-        # need to pick up the sub-bundles here.
+        # Load bundle references into the flat catalog. The workspace-tier
+        # root bundle's refs are already in self._sources from the initial
+        # load_config() call; everything else (workspace sub-bundles, plus
+        # all user-tier bundles that survived shadowing) is loaded here.
         existing_ids = {s.id for s in self._sources}
         project_root = self._project_root
         for bundle in self._bundles:
-            if bundle.name == ROOT_BUNDLE_NAME:
+            # Skip the workspace-tier root — already loaded by load_config().
+            if (
+                bundle.name == ROOT_BUNDLE_NAME
+                and bundle.tier == BUNDLE_TIER_WORKSPACE
+            ):
                 continue
-            sub_sources = discover_references(
+            bundle_sources = discover_references(
                 str(bundle.directory),
                 base_path=str(bundle.directory.parent),
                 project_root=project_root,
             )
-            for source in sub_sources:
+            for source in bundle_sources:
                 source.bundle_name = bundle.name
                 if source.id in existing_ids:
                     self._trace(
                         f"_discover_and_load_bundles: skipping duplicate id "
-                        f"'{source.id}' from bundle '{bundle.display_name}'"
+                        f"'{source.id}' from bundle '{bundle.qualified_ref}'"
                     )
                     continue
                 self._sources.append(source)
@@ -1196,7 +1247,7 @@ class ReferencesPlugin:
 
         self._trace(
             f"_discover_and_load_bundles: bundles="
-            f"{[b.display_name for b in self._bundles]}, "
+            f"{[b.qualified_ref for b in self._bundles]}, "
             f"total_sources={len(self._sources)}"
         )
 
@@ -2034,21 +2085,29 @@ class ReferencesPlugin:
             return self._cmd_references_reconcile(target)
         elif subcommand == "merge":
             return self._cmd_references_merge(target)
+        elif subcommand == "pack":
+            return self._cmd_references_pack(target)
+        elif subcommand == "unpack":
+            return self._cmd_references_unpack(target)
         elif subcommand == "help":
             return self._cmd_references_help()
         else:
             return {
                 "error": (
                     f"Unknown subcommand: {subcommand}. Use: list, select, "
-                    f"unselect, reload, bundles, reconcile, merge, help"
+                    f"unselect, reload, bundles, reconcile, merge, pack, "
+                    f"unpack, help"
                 )
             }
 
     def _cmd_references_bundles(self) -> HelpLines:
         """Execute 'references bundles' — show loaded knowledge bundles.
 
-        One row per bundle: name, source count, model, dimensions, and
-        current drift status. Bundles without an attached matcher are
+        One row per bundle: tier, name, source count, model, dimensions,
+        and current drift status. The tier column distinguishes
+        workspace-tier bundles (``<workspace>/.jaato/references/``) from
+        user-tier bundles (``~/.jaato/references/``); see :func:`discover_bundles`
+        for shadowing semantics. Bundles without an attached matcher are
         flagged so the operator can see at a glance why semantic matching
         skips them.
         """
@@ -2057,7 +2116,17 @@ class ReferencesPlugin:
             lines.append(("    (no bundles — no embedding_config.json discovered)", ""))
             return HelpLines(lines=lines)
 
-        for bundle in self._bundles:
+        # Stable ordering: workspace tier first (matching discovery order),
+        # then user tier. Within each tier preserve the discovery order so
+        # the root bundle still leads.
+        ordered = sorted(
+            self._bundles,
+            key=lambda b: (
+                0 if b.tier == BUNDLE_TIER_WORKSPACE else 1,
+                self._bundles.index(b),
+            ),
+        )
+        for bundle in ordered:
             own_count = sum(
                 1 for s in self._sources if s.bundle_name == bundle.name
             )
@@ -2069,7 +2138,8 @@ class ReferencesPlugin:
             else:
                 status = "up-to-date"
             lines.append((
-                f"  {bundle.display_name:<18} "
+                f"  [{bundle.tier:<9}] "
+                f"{bundle.display_name:<18} "
                 f"{own_count:>3} refs  "
                 f"model={bundle.embedding_model}  "
                 f"dim={bundle.embedding_dimensions}  "
@@ -2079,28 +2149,110 @@ class ReferencesPlugin:
         return HelpLines(lines=lines)
 
     def _cmd_references_reconcile(self, target: str) -> Dict[str, Any]:
-        """Execute 'references reconcile [<bundle>]'.
+        """Execute 'references reconcile [<bundle-ref>] [--scope <tier>]'.
 
-        Without an argument, reconciles every bundle. With a bundle name
-        (``root`` or a subdirectory name), reconciles only that bundle.
+        Argument forms:
+
+        * ``reconcile`` — reconcile every workspace-tier bundle (the
+          default scope for write commands; user-tier reconciles must
+          be explicit).
+        * ``reconcile --scope user`` — reconcile every user-tier bundle.
+        * ``reconcile --scope all`` — reconcile every loaded bundle.
+        * ``reconcile <bundle-ref>`` — reconcile a single bundle. The
+          ref is parsed by :func:`parse_bundle_ref`, so ``teammate``,
+          ``workspace:teammate``, ``user:teammate``, ``root``, and
+          ``user:(root)`` are all valid. Bare names that exist in both
+          tiers raise :class:`AmbiguousBundleRefError` and the user
+          must qualify.
+
         After a successful pass, re-attaches matchers so the next
         semantic query sees the new sidecar.
         """
-        target = (target or "").strip()
+        import shlex
 
-        # Resolve target → list of bundles to reconcile.
-        if target:
-            name = ROOT_BUNDLE_NAME if target in ("root", "(root)") else target
-            candidates = [b for b in self._bundles if b.name == name]
-            if not candidates:
+        try:
+            tokens = shlex.split(target or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        scope_filter: Optional[str] = None  # None = no filter, "all" handled below
+        bundle_token: Optional[str] = None
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--scope":
+                if i + 1 >= len(tokens):
+                    return {"error": "--scope requires a value: workspace, user, or all"}
+                value = tokens[i + 1]
+                if value not in (*VALID_BUNDLE_TIERS, "all"):
+                    return {
+                        "error": (
+                            f"Unknown scope {value!r}. Use 'workspace', 'user', or 'all'."
+                        )
+                    }
+                scope_filter = value
+                i += 2
+                continue
+            if tok.startswith("--scope="):
+                value = tok.split("=", 1)[1]
+                if value not in (*VALID_BUNDLE_TIERS, "all"):
+                    return {
+                        "error": (
+                            f"Unknown scope {value!r}. Use 'workspace', 'user', or 'all'."
+                        )
+                    }
+                scope_filter = value
+                i += 1
+                continue
+            if bundle_token is not None:
                 return {
                     "error": (
-                        f"Unknown bundle '{target}'. Known bundles: "
-                        f"{[b.display_name for b in self._bundles] or '(none)'}"
+                        "Usage: references reconcile [<bundle-ref>] [--scope workspace|user|all]"
                     )
                 }
+            bundle_token = tok
+            i += 1
+
+        # A single bundle and a --scope filter are mutually exclusive — the
+        # bundle ref already pins down a specific tier (or trips ambiguity).
+        if bundle_token is not None and scope_filter is not None:
+            return {
+                "error": (
+                    "Cannot combine a bundle reference with --scope; either "
+                    "pick one bundle (e.g. 'workspace:teammate') or pick a "
+                    "scope (e.g. '--scope user')."
+                )
+            }
+
+        # Resolve target → list of bundles to reconcile.
+        if bundle_token is not None:
+            try:
+                ref = parse_bundle_ref(bundle_token)
+            except ValueError as e:
+                return {"error": str(e)}
+            try:
+                hit = find_bundle(
+                    self._bundles, ref, default_scope=BUNDLE_TIER_WORKSPACE,
+                )
+            except AmbiguousBundleRefError as e:
+                return {"error": str(e)}
+            if hit is None:
+                return {
+                    "error": (
+                        f"Unknown bundle '{ref.display}'. Known bundles: "
+                        f"{[b.qualified_ref for b in self._bundles] or '(none)'}"
+                    )
+                }
+            candidates = [hit]
         else:
-            candidates = list(self._bundles)
+            # No bundle ref → scope filter applies. Default scope for the
+            # write command is "workspace" (matches the contract documented
+            # in the bundle module: write commands default to workspace).
+            effective_scope = scope_filter or BUNDLE_TIER_WORKSPACE
+            if effective_scope == "all":
+                candidates = list(self._bundles)
+            else:
+                candidates = [b for b in self._bundles if b.tier == effective_scope]
 
         if not candidates:
             return {
@@ -2133,8 +2285,12 @@ class ReferencesPlugin:
             self._semantic_matcher = root.matcher if root else None
 
         lines: List[Tuple[str, str]] = [("RECONCILE", "bold"), ("", "")]
-        for result in results:
-            lines.append((f"  {result.summary()}", ""))
+        for bundle, result in zip(candidates, results):
+            # Prefix with tier so logs distinguish workspace and user
+            # entries when the same bundle name exists in both — even if
+            # discovery shadows them today, an --scope all run still
+            # benefits from the disambiguation.
+            lines.append((f"  [{bundle.tier}] {result.summary()}", ""))
             for sid, reason in result.skipped:
                 lines.append((f"    skipped {sid}: {reason}", ""))
 
@@ -2143,6 +2299,7 @@ class ReferencesPlugin:
             "results": [
                 {
                     "bundle": r.bundle_name or "(root)",
+                    "tier": b.tier,
                     "status": r.status.value,
                     "added": r.added,
                     "refreshed": r.refreshed,
@@ -2150,18 +2307,28 @@ class ReferencesPlugin:
                     "skipped": r.skipped,
                     "final_row_count": r.final_row_count,
                 }
-                for r in results
+                for b, r in zip(candidates, results)
             ],
             "help_lines": HelpLines(lines=lines),
         }
 
     def _cmd_references_merge(self, raw_args: str) -> Dict[str, Any]:
-        """Execute 'references merge <source> [flags]'.
+        """Execute 'references merge <source-ref> [--into <target-ref>] [flags]'.
 
-        Parses the flag tail, resolves the source (loaded bundle name or
-        filesystem path), runs :func:`merge_bundle`, and — on success —
-        appends the merged sources into the in-memory catalog so the
-        model sees them without a reload.
+        Source and target both accept the ``[<scope>:]<name>`` syntax
+        parsed by :func:`parse_bundle_ref` (e.g., ``teammate``,
+        ``workspace:teammate``, ``user:teammate``). Bare names default
+        to the workspace tier when both tiers contain a bundle of that
+        name. Source can also be a directory path (used for unloaded
+        bundles, e.g. a tarball that's been unpacked outside any tier
+        root). Target defaults to ``workspace:(root)``.
+
+        Cross-tier merges are supported — e.g. ``merge user:personal
+        --into workspace:project`` lifts a user-tier bundle into the
+        current workspace.
+
+        On success the in-memory catalog is updated so the model sees
+        the merged sources without waiting for a reload.
 
         Args:
             raw_args: The ``target`` parameter from :class:`UserCommand`,
@@ -2180,50 +2347,83 @@ class ReferencesPlugin:
         if not source_arg:
             return {
                 "error": (
-                    "Usage: references merge <source> [--into <bundle>] "
+                    "Usage: references merge <source-ref> [--into <target-ref>] "
                     "[--on-conflict reject|prefix|newer] [--re-embed] [--dry-run]"
                 )
             }
 
-        # Resolve target bundle (default: root).
-        target_name = ROOT_BUNDLE_NAME
+        # Resolve target bundle. Defaults to the workspace-tier root,
+        # matching the documented "write commands default to workspace"
+        # rule. When the user wrote ``--into user:notes`` (or any
+        # ``scope:name`` form), the parsed BundleRef pins the tier.
         if target_arg:
-            target_name = (
-                ROOT_BUNDLE_NAME if target_arg in ("root", "(root)") else target_arg
+            try:
+                target_ref = parse_bundle_ref(target_arg)
+            except ValueError as e:
+                return {"error": f"--into: {e}"}
+        else:
+            target_ref = BundleRef(name=ROOT_BUNDLE_NAME, scope=BUNDLE_TIER_WORKSPACE)
+
+        try:
+            target_bundle = find_bundle(
+                self._bundles, target_ref, default_scope=BUNDLE_TIER_WORKSPACE,
             )
-        target_bundle = next(
-            (b for b in self._bundles if b.name == target_name), None,
-        )
+        except AmbiguousBundleRefError as e:
+            return {"error": f"--into: {e}"}
         if target_bundle is None:
             return {
                 "error": (
-                    f"Unknown target bundle '{target_arg or 'root'}'. "
+                    f"Unknown target bundle '{target_ref.display}'. "
                     f"Loaded bundles: "
-                    f"{[b.display_name for b in self._bundles] or '(none)'}"
+                    f"{[b.qualified_ref for b in self._bundles] or '(none)'}"
                 )
             }
 
-        # Resolve source — first try a loaded bundle by name, then a path.
+        # Resolve source: first try as a parsed BundleRef against the
+        # loaded catalog, then fall back to a directory path. Path
+        # fallback also covers the cross-tier-same-name case where a
+        # user bundle was shadowed by a workspace bundle of the same
+        # name and isn't visible to find_bundle.
         source_bundle: Optional[Bundle]
         source_sources: List[ReferenceSource]
         resolved_source_name: str
 
-        source_lookup = next(
-            (b for b in self._bundles if b.name == source_arg), None,
-        )
+        # First, try bundle-ref resolution. parse_bundle_ref rejects
+        # paths-with-colons that aren't valid scopes, so things like
+        # ``./teammate:1.0`` won't be misinterpreted.
+        source_lookup: Optional[Bundle] = None
+        try:
+            source_ref = parse_bundle_ref(source_arg)
+        except ValueError:
+            source_ref = None
+
+        if source_ref is not None:
+            try:
+                source_lookup = find_bundle(
+                    self._bundles, source_ref, default_scope=BUNDLE_TIER_WORKSPACE,
+                )
+            except AmbiguousBundleRefError as e:
+                return {"error": str(e)}
+
         if source_lookup is not None:
-            if source_lookup.name == target_bundle.name:
+            # Compare identity by (tier, name) — a workspace and a user
+            # bundle that happen to share a name are still different
+            # bundles for the purposes of merge.
+            if (
+                source_lookup.name == target_bundle.name
+                and source_lookup.tier == target_bundle.tier
+            ):
                 return {
                     "error": (
                         f"Source and target are the same bundle "
-                        f"('{target_bundle.display_name}'); nothing to merge."
+                        f"('{target_bundle.qualified_ref}'); nothing to merge."
                     )
                 }
             source_bundle = source_lookup
             source_sources = [
                 s for s in self._sources if s.bundle_name == source_lookup.name
             ]
-            resolved_source_name = source_lookup.display_name
+            resolved_source_name = source_lookup.qualified_ref
         else:
             source_path = Path(source_arg)
             if not source_path.is_absolute():
@@ -2236,7 +2436,7 @@ class ReferencesPlugin:
                     "error": (
                         f"Source '{source_arg}' is neither a loaded bundle nor a "
                         f"directory on disk. Loaded bundles: "
-                        f"{[b.display_name for b in self._bundles] or '(none)'}"
+                        f"{[b.qualified_ref for b in self._bundles] or '(none)'}"
                     )
                 }
             source_bundle = _read_bundle_manifest(source_path)
@@ -2317,7 +2517,14 @@ class ReferencesPlugin:
                 target_bundle.matcher = self._attach_matcher(
                     target_bundle, self._embedding_provider.model_name,
                 )
-                if target_bundle.name == ROOT_BUNDLE_NAME:
+                # Keep the legacy ``self._semantic_matcher`` shim in sync
+                # only when the target is the *workspace*-tier root —
+                # that's the bundle the legacy field has always tracked.
+                # A user-tier root merge never updates the shim.
+                if (
+                    target_bundle.name == ROOT_BUNDLE_NAME
+                    and target_bundle.tier == BUNDLE_TIER_WORKSPACE
+                ):
                     self._semantic_matcher = target_bundle.matcher
 
         # Build the HelpLines block for display.
@@ -2339,7 +2546,8 @@ class ReferencesPlugin:
         payload: Dict[str, Any] = {
             "status": result.status.value,
             "source": resolved_source_name,
-            "target": target_bundle.display_name,
+            "target": target_bundle.qualified_ref,
+            "target_tier": target_bundle.tier,
             "added": result.added,
             "renamed": result.renamed,
             "skipped": result.skipped,
@@ -2350,6 +2558,352 @@ class ReferencesPlugin:
         if result.error:
             payload["error"] = result.error
         return payload
+
+    def _cmd_references_pack(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'references pack <bundle-ref> [--to <archive>]'.
+
+        Writes a self-contained ``.tar.gz`` archive of the named bundle
+        — manifest + sidecar + reference JSONs + every LOCAL reference's
+        payload — see :mod:`pack` for the layout. URL/MCP/INLINE
+        references are included as-is; LOCAL references' ``path``
+        fields are rewritten to bundle-relative ``payload/...`` so the
+        archive lands cleanly under any recipient workspace.
+
+        Args:
+            raw_args: ``<bundle-ref> [--to <archive>]``. Bundle ref
+                accepts ``[<scope>:]<name>``; default scope is workspace.
+                ``--to`` defaults to ``./<name>-<tier>.tar.gz``.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        bundle_token: Optional[str] = None
+        output_arg: Optional[str] = None
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--to":
+                if i + 1 >= len(tokens):
+                    return {"error": "--to requires a path"}
+                output_arg = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--to="):
+                output_arg = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if bundle_token is not None:
+                return {
+                    "error": "Usage: references pack <bundle-ref> [--to <archive>]"
+                }
+            bundle_token = tok
+            i += 1
+
+        if bundle_token is None:
+            return {
+                "error": "Usage: references pack <bundle-ref> [--to <archive>]"
+            }
+
+        try:
+            ref = parse_bundle_ref(bundle_token)
+        except ValueError as e:
+            return {"error": str(e)}
+        try:
+            bundle = find_bundle(
+                self._bundles, ref, default_scope=BUNDLE_TIER_WORKSPACE,
+            )
+        except AmbiguousBundleRefError as e:
+            return {"error": str(e)}
+        if bundle is None:
+            return {
+                "error": (
+                    f"Unknown bundle '{ref.display}'. Loaded bundles: "
+                    f"{[b.qualified_ref for b in self._bundles] or '(none)'}"
+                )
+            }
+
+        # Default output: <name>-<tier>.tar.gz in the workspace root
+        # (when known) or cwd. Using the workspace makes the file easy
+        # to find and survives across IPC clients that may not share cwd.
+        if output_arg:
+            output_path = Path(output_arg).expanduser()
+            if not output_path.is_absolute():
+                base = self._workspace_path or self._project_root
+                if base:
+                    output_path = Path(base) / output_path
+        else:
+            stem = bundle.name or "root"
+            base = self._workspace_path or self._project_root or "."
+            output_path = Path(base) / f"{stem}-{bundle.tier}.tar.gz"
+
+        # Use this bundle's own references — bundle_name == bundle.name
+        # because the loader stamps it during discovery.
+        bundle_sources = [
+            s for s in self._sources if s.bundle_name == bundle.name
+        ]
+
+        try:
+            result = pack_bundle(
+                bundle, bundle_sources, output_path,
+                jaato_version=self._jaato_version_string(),
+            )
+        except FileNotFoundError as e:
+            return {"error": f"pack: {e}"}
+        except OSError as e:
+            return {"error": f"pack: I/O error: {e}"}
+
+        self._trace(
+            f"references pack: bundle={bundle.qualified_ref} "
+            f"refs={result.ref_count} payloads={result.local_payloads} "
+            f"size={result.bytes_written} -> {result.archive_path}"
+        )
+
+        size_kb = result.bytes_written / 1024
+        lines: List[Tuple[str, str]] = [
+            ("PACK", "bold"),
+            ("", ""),
+            (f"  bundle: {bundle.qualified_ref}", ""),
+            (f"  archive: {result.archive_path}", ""),
+            (
+                f"  contents: {result.ref_count} ref(s), "
+                f"{result.local_payloads} LOCAL payload(s), "
+                f"{size_kb:.1f} KiB",
+                "",
+            ),
+        ]
+
+        return {
+            "status": "ok",
+            "bundle": bundle.qualified_ref,
+            "archive_path": str(result.archive_path),
+            "ref_count": result.ref_count,
+            "local_payloads": result.local_payloads,
+            "bytes_written": result.bytes_written,
+            "help_lines": HelpLines(lines=lines),
+        }
+
+    def _cmd_references_unpack(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'references unpack <archive> [flags]'.
+
+        Extracts a packed archive into a tier on this side, then runs
+        reconcile (unless ``--no-reconcile``) so the recipient's sidecar
+        matches their embedding model rather than inheriting the
+        packer's vectors verbatim.
+
+        Args:
+            raw_args: ``<archive> [--into <bundle-ref>] [--overwrite|--merge]
+                [--no-reconcile]``. Default target is
+                ``workspace:<source_name>``; ``--into`` overrides both
+                tier and name in one go.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        archive_token: Optional[str] = None
+        into_token: Optional[str] = None
+        mode = UnpackMode.ERROR
+        do_reconcile = True
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--into":
+                if i + 1 >= len(tokens):
+                    return {"error": "--into requires a bundle reference"}
+                into_token = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--into="):
+                into_token = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if tok == "--overwrite":
+                mode = UnpackMode.OVERWRITE
+                i += 1
+                continue
+            if tok == "--merge":
+                mode = UnpackMode.MERGE
+                i += 1
+                continue
+            if tok == "--no-reconcile":
+                do_reconcile = False
+                i += 1
+                continue
+            if archive_token is not None:
+                return {
+                    "error": (
+                        "Usage: references unpack <archive> [--into <bundle-ref>] "
+                        "[--overwrite|--merge] [--no-reconcile]"
+                    )
+                }
+            archive_token = tok
+            i += 1
+
+        if archive_token is None:
+            return {
+                "error": (
+                    "Usage: references unpack <archive> [--into <bundle-ref>] "
+                    "[--overwrite|--merge] [--no-reconcile]"
+                )
+            }
+
+        archive_path = Path(archive_token).expanduser()
+        if not archive_path.is_absolute():
+            base = self._workspace_path or self._project_root
+            if base:
+                archive_path = Path(base) / archive_path
+
+        # Determine the destination tier and name. When --into is
+        # given, parse it as a BundleRef. Otherwise read source_name
+        # from the archive envelope and default to workspace.
+        target_tier = BUNDLE_TIER_WORKSPACE
+        target_name: Optional[str] = None
+        if into_token:
+            try:
+                into_ref = parse_bundle_ref(into_token)
+            except ValueError as e:
+                return {"error": f"--into: {e}"}
+            if into_ref.scope is not None:
+                target_tier = into_ref.scope
+            target_name = into_ref.name
+
+        # Resolve the tier root.
+        try:
+            envelope = read_envelope(archive_path)
+        except UnpackError as e:
+            return {"error": f"unpack: {e}"}
+        except FileNotFoundError as e:
+            return {"error": f"unpack: {e}"}
+
+        if target_name is None:
+            target_name = envelope.get("source_name", "")
+
+        target_root = self._tier_root(target_tier)
+        if target_root is None:
+            return {
+                "error": (
+                    f"unpack: cannot resolve tier root for {target_tier!r} — "
+                    f"workspace_path is unknown; pass --into "
+                    f"user:<name> or load a workspace first"
+                )
+            }
+
+        try:
+            result = unpack_bundle(
+                archive_path,
+                target_root=target_root,
+                target_tier=target_tier,
+                target_name=target_name,
+                mode=mode,
+            )
+        except UnpackError as e:
+            return {"error": f"unpack: {e}"}
+        except FileNotFoundError as e:
+            return {"error": f"unpack: {e}"}
+
+        # Re-discover bundles so the new arrival shows up in the live
+        # catalog. Then optionally reconcile the new bundle to self-heal
+        # any sidecar drift caused by an embedding-model mismatch
+        # between packer and recipient.
+        self._discover_and_load_bundles()
+        reconciled = False
+        if do_reconcile and self._lookup_strategy in ("hybrid", "semantic_only"):
+            new_bundle = next(
+                (
+                    b for b in self._bundles
+                    if b.tier == result.target_tier
+                    and b.name == result.target_name
+                ),
+                None,
+            )
+            if new_bundle is not None:
+                rec_result = reconcile_bundle(
+                    new_bundle, self._sources, self._embedding_provider,
+                )
+                reconciled = True
+                self._trace(
+                    f"references unpack: reconcile[{new_bundle.qualified_ref}]: "
+                    f"{rec_result.summary()}"
+                )
+                # Re-attach matcher so the next semantic query picks up
+                # the freshly written sidecar.
+                if self._embedding_provider is not None:
+                    new_bundle.matcher = self._attach_matcher(
+                        new_bundle, self._embedding_provider.model_name,
+                    )
+                    if (
+                        new_bundle.name == ROOT_BUNDLE_NAME
+                        and new_bundle.tier == BUNDLE_TIER_WORKSPACE
+                    ):
+                        self._semantic_matcher = new_bundle.matcher
+
+        target_qualified = (
+            f"{result.target_tier}:"
+            f"{result.target_name or '(root)'}"
+        )
+        lines: List[Tuple[str, str]] = [
+            ("UNPACK", "bold"),
+            ("", ""),
+            (f"  archive: {result.archive_path}", ""),
+            (f"  installed: {target_qualified}", ""),
+            (f"  mode: {result.mode.value}", ""),
+            (f"  references: {result.ref_count}", ""),
+            (
+                f"  reconciled: {'yes' if reconciled else 'skipped'}",
+                "",
+            ),
+        ]
+
+        return {
+            "status": "ok",
+            "archive_path": str(result.archive_path),
+            "target": target_qualified,
+            "target_tier": result.target_tier,
+            "target_name": result.target_name,
+            "mode": result.mode.value,
+            "ref_count": result.ref_count,
+            "reconciled": reconciled,
+            "help_lines": HelpLines(lines=lines),
+        }
+
+    def _tier_root(self, tier: str) -> Optional[Path]:
+        """Resolve the references root directory for ``tier``.
+
+        For the workspace tier the root is ``<workspace>/.jaato/
+        references`` (None when no workspace is loaded). For the user
+        tier it is ``~/.jaato/references``, always available.
+        """
+        if tier == BUNDLE_TIER_USER:
+            return Path.home() / ".jaato" / "references"
+        if tier == BUNDLE_TIER_WORKSPACE:
+            base = self._workspace_path or self._project_root
+            if base is None:
+                return None
+            return Path(base) / ".jaato" / "references"
+        return None
+
+    @staticmethod
+    def _jaato_version_string() -> str:
+        """Best-effort jaato package version for the archive envelope.
+
+        Returns ``"unknown"`` rather than raising when the package
+        metadata isn't available (e.g., editable install without
+        installed metadata).
+        """
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+            return version("jaato-server")
+        except PackageNotFoundError:
+            return "unknown"
+        except ImportError:
+            return "unknown"
 
     def _cmd_references_list(self, filter_arg: str) -> HelpLines:
         """Execute 'references list [all|selected|unselected]'."""
@@ -2605,40 +3159,74 @@ class ReferencesPlugin:
             ("    bundles", "dim"),
             ("        Show loaded knowledge bundles. Each bundle is a directory", "dim"),
             ("        (root or subdirectory) with its own embedding_config.json", "dim"),
-            ("        and sidecar matrix. Reports drift and matcher status.", "dim"),
+            ("        and sidecar matrix. The tier column distinguishes workspace", "dim"),
+            ("        bundles (./jaato/references) from user bundles (~/.jaato/references).", "dim"),
             ("", ""),
-            ("    reconcile [<bundle>]", "dim"),
+            ("    reconcile [<bundle-ref>] [--scope workspace|user|all]", "dim"),
             ("        Bring a bundle's sidecar in sync with the catalog: embed", "dim"),
             ("        newly dropped refs, refresh stale ones, drop orphans.", "dim"),
-            ("        Without an argument, reconciles every bundle. Requires an", "dim"),
-            ("        embedding provider (jaato.embedding entry point).", "dim"),
+            ("        With no argument, reconciles every workspace-tier bundle.", "dim"),
+            ("        Use --scope user or --scope all to widen. <bundle-ref>", "dim"),
+            ("        accepts 'name', 'workspace:name', or 'user:name'.", "dim"),
             ("", ""),
-            ("    merge <source> [--into <bundle>] [flags]", "dim"),
-            ("        Merge a knowledge bundle into another. <source> is either a", "dim"),
-            ("        loaded bundle name or a directory path containing an", "dim"),
-            ("        embedding_config.json. Default target is the root bundle.", "dim"),
+            ("    merge <source-ref> [--into <target-ref>] [flags]", "dim"),
+            ("        Merge a knowledge bundle into another. <source-ref> is", "dim"),
+            ("        either '[<scope>:]<name>' for a loaded bundle or a", "dim"),
+            ("        directory path containing an embedding_config.json.", "dim"),
+            ("        Default target is workspace:(root). Cross-tier merges", "dim"),
+            ("        are supported: 'merge user:notes --into workspace:project'.", "dim"),
             ("        Flags:", "dim"),
             ("          --on-conflict reject|prefix|newer  (default: reject)", "dim"),
             ("          --re-embed                        (needed on model/dim mismatch)", "dim"),
             ("          --dry-run                         (preview without writing)", "dim"),
             ("", ""),
+            ("    pack <bundle-ref> [--to <archive>]", "dim"),
+            ("        Pack a bundle into a self-contained .tar.gz archive for", "dim"),
+            ("        distribution. LOCAL reference payloads are copied into", "dim"),
+            ("        the archive (deduped by source path, symlinks followed)", "dim"),
+            ("        so the recipient gets a complete, portable bundle.", "dim"),
+            ("        URL/MCP/INLINE refs pass through unchanged. Default", "dim"),
+            ("        output: ./<name>-<tier>.tar.gz in the workspace.", "dim"),
+            ("", ""),
+            ("    unpack <archive> [--into <bundle-ref>] [flags]", "dim"),
+            ("        Unpack a .tar.gz produced by 'pack' into a tier on this", "dim"),
+            ("        side. --into accepts '[<scope>:]<name>' (default:", "dim"),
+            ("        workspace:<archive's source name>). Auto-reconciles the", "dim"),
+            ("        new bundle so the sidecar matches this side's embedding", "dim"),
+            ("        model. Tar-traversal attempts are rejected.", "dim"),
+            ("        Flags:", "dim"),
+            ("          --overwrite      Replace an existing bundle of that name", "dim"),
+            ("          --merge          Merge into the existing bundle", "dim"),
+            ("          --no-reconcile   Skip the post-unpack reconcile pass", "dim"),
+            ("", ""),
             ("    help", "dim"),
             ("        Show this help message.", "dim"),
             ("", ""),
+            ("BUNDLE REFERENCES", "bold"),
+            ("    Most subcommands accept a bundle reference of the form:", "dim"),
+            ("        [<scope>:]<name>", "dim"),
+            ("    where <scope> is 'workspace' or 'user' and <name> is a bundle", "dim"),
+            ("    directory name (or 'root' / '(root)' for the root bundle).", "dim"),
+            ("    Bare names are resolved against the workspace tier first.", "dim"),
+            ("", ""),
             ("EXAMPLES", "bold"),
-            ("    references                          List all references", "dim"),
-            ("    references list                     Same as above", "dim"),
-            ("    references list selected            Show only selected references", "dim"),
-            ("    references list unselected          Show only unselected references", "dim"),
-            ("    references select my-ref-001        Select a reference by ID", "dim"),
-            ("    references unselect my-ref-001      Unselect a reference by ID", "dim"),
-            ("    references reload                   Reload catalog from disk", "dim"),
-            ("    references bundles                  Show loaded bundles", "dim"),
-            ("    references reconcile                Reconcile every bundle", "dim"),
-            ("    references reconcile teammate-kb    Reconcile one bundle", "dim"),
-            ("    references merge teammate-kb        Merge sub-bundle into root", "dim"),
+            ("    references                              List all references", "dim"),
+            ("    references list selected                Show only selected references", "dim"),
+            ("    references select my-ref-001            Select a reference by ID", "dim"),
+            ("    references reload                       Reload catalog from disk", "dim"),
+            ("    references bundles                      Show loaded bundles", "dim"),
+            ("    references reconcile                    Reconcile workspace bundles", "dim"),
+            ("    references reconcile --scope all        Reconcile every loaded bundle", "dim"),
+            ("    references reconcile user:teammate      Reconcile a single user bundle", "dim"),
+            ("    references merge teammate               Merge a workspace bundle into root", "dim"),
+            ("    references merge user:notes             Lift a user bundle into the workspace", "dim"),
+            ("    references merge user:notes --into workspace:project", "dim"),
             ("    references merge ./incoming --on-conflict prefix", "dim"),
-            ("    references merge legacy --re-embed  Cross-model merge", "dim"),
+            ("    references pack teammate                Pack workspace:teammate to ./teammate-workspace.tar.gz", "dim"),
+            ("    references pack user:notes --to ~/share/notes.tar.gz", "dim"),
+            ("    references unpack ./teammate-workspace.tar.gz", "dim"),
+            ("    references unpack share.tar.gz --into user:shared --overwrite", "dim"),
+            ("    references unpack share.tar.gz --merge   Merge instead of clobber", "dim"),
         ])
 
     def _get_access_summary(self, source: ReferenceSource) -> str:
@@ -2809,6 +3397,8 @@ class ReferencesPlugin:
             CommandCompletion("bundles", "Show loaded knowledge bundles"),
             CommandCompletion("reconcile", "Reconcile bundle sidecars"),
             CommandCompletion("merge", "Merge a bundle into another"),
+            CommandCompletion("pack", "Pack a bundle into a distributable archive"),
+            CommandCompletion("unpack", "Unpack an archive into a tier"),
             CommandCompletion("help", "Show detailed help"),
         ]
 
@@ -2849,34 +3439,59 @@ class ReferencesPlugin:
                 return [o for o in options if o.value.startswith(partial)]
 
             if subcommand == "reconcile":
-                options = [
-                    CommandCompletion(
-                        b.name if b.name else "root",
-                        f"Reconcile {b.display_name}",
-                    )
-                    for b in self._bundles
-                ]
+                options = self._bundle_ref_completions(
+                    description_prefix="Reconcile",
+                    include_root=True,
+                )
                 return [o for o in options if o.value.startswith(partial)]
 
             if subcommand == "merge":
-                # Suggest loaded bundle names other than the root as
-                # first-argument completions for `merge <source>`. The
-                # root is not offered because you can't merge the root
-                # into itself; path-based sources aren't enumerable so
-                # the user types them manually.
-                options = [
-                    CommandCompletion(b.name, f"Merge {b.display_name}")
-                    for b in self._bundles
-                    if b.name != ROOT_BUNDLE_NAME
-                ]
+                # Suggest loaded bundles (other than the workspace root)
+                # as first-argument completions for ``merge <source>``.
+                # The workspace root is omitted because the default
+                # target is also the workspace root and merging a
+                # bundle into itself isn't meaningful; path-based
+                # sources aren't enumerable so the user types them
+                # manually.
+                options = self._bundle_ref_completions(
+                    description_prefix="Merge",
+                    include_root=True,
+                    exclude_workspace_root=True,
+                )
                 return [o for o in options if o.value.startswith(partial)]
+
+            if subcommand == "pack":
+                # First positional is the bundle to pack — any loaded
+                # bundle is a valid candidate.
+                options = self._bundle_ref_completions(
+                    description_prefix="Pack",
+                    include_root=True,
+                )
+                return [o for o in options if o.value.startswith(partial)]
+
+            # ``unpack`` takes an archive path; we can't enumerate paths
+            # so we leave completion to the client's filename completion.
+
+        # Reconcile flag-value completions: ``reconcile --scope <tier>``.
+        if len(args) >= 2 and args[0].lower() == "reconcile":
+            partial = args[-1].lower()
+            if len(args) >= 3 and args[-2] == "--scope":
+                scopes = [
+                    CommandCompletion("workspace", "Workspace tier (default)"),
+                    CommandCompletion("user", "User tier (~/.jaato/references)"),
+                    CommandCompletion("all", "Both tiers"),
+                ]
+                return [s for s in scopes if s.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [CommandCompletion("--scope", "Filter by tier")]
+                return [f for f in flags if f.value.startswith(partial or "-")]
 
         # Trailing-flag completions for 'references merge'.
         if len(args) >= 2 and args[0].lower() == "merge":
             partial = args[-1].lower()
             # Flag names come first.
             flags = [
-                CommandCompletion("--into", "Target bundle (default: root)"),
+                CommandCompletion("--into", "Target bundle (default: workspace:(root))"),
                 CommandCompletion("--on-conflict", "reject | prefix | newer"),
                 CommandCompletion("--re-embed", "Re-embed source against target model"),
                 CommandCompletion("--dry-run", "Preview without writing"),
@@ -2892,16 +3507,90 @@ class ReferencesPlugin:
                 ]
                 return [v for v in vals if v.value.startswith(partial)]
             if len(args) >= 3 and args[-2] == "--into":
-                options = [
-                    CommandCompletion(
-                        b.name if b.name else "root",
-                        f"Into {b.display_name}",
-                    )
-                    for b in self._bundles
-                ]
+                options = self._bundle_ref_completions(
+                    description_prefix="Into",
+                    include_root=True,
+                )
                 return [o for o in options if o.value.startswith(partial)]
 
+        # Trailing-flag completions for 'references pack'.
+        if len(args) >= 2 and args[0].lower() == "pack":
+            partial = args[-1].lower()
+            if partial.startswith("-") or not partial:
+                flags = [
+                    CommandCompletion("--to", "Output archive path"),
+                ]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        # Trailing-flag completions for 'references unpack'.
+        if len(args) >= 2 and args[0].lower() == "unpack":
+            partial = args[-1].lower()
+            if len(args) >= 3 and args[-2] == "--into":
+                options = self._bundle_ref_completions(
+                    description_prefix="Install as",
+                    include_root=True,
+                )
+                return [o for o in options if o.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [
+                    CommandCompletion("--into", "Destination bundle (scope:name)"),
+                    CommandCompletion("--overwrite", "Replace existing bundle"),
+                    CommandCompletion("--merge", "Merge into existing bundle"),
+                    CommandCompletion("--no-reconcile", "Skip post-unpack reconcile"),
+                ]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
         return []
+
+    def _bundle_ref_completions(
+        self,
+        *,
+        description_prefix: str,
+        include_root: bool,
+        exclude_workspace_root: bool = False,
+    ) -> List[CommandCompletion]:
+        """Build CommandCompletions for the loaded bundles.
+
+        Each bundle is offered as a bare name (when unambiguous across
+        tiers) and as a ``scope:name`` form (always). The ``root`` alias
+        is offered for root bundles instead of the empty-string sentinel.
+
+        Args:
+            description_prefix: Verb used in the completion description
+                (e.g., ``"Reconcile"`` → ``"Reconcile workspace:teammate"``).
+            include_root: Whether to offer the root bundle alias.
+            exclude_workspace_root: When True, omit the workspace-tier
+                root bundle (used by ``merge`` because merging the root
+                into itself isn't meaningful).
+        """
+        # Collect names to detect cross-tier ambiguity.
+        from collections import Counter
+        name_counts: Counter = Counter(b.name for b in self._bundles)
+
+        completions: List[CommandCompletion] = []
+        for b in self._bundles:
+            if (
+                exclude_workspace_root
+                and b.name == ROOT_BUNDLE_NAME
+                and b.tier == BUNDLE_TIER_WORKSPACE
+            ):
+                continue
+            display_name = "root" if b.name == ROOT_BUNDLE_NAME else b.name
+            if not include_root and b.name == ROOT_BUNDLE_NAME:
+                continue
+            qualified = f"{b.tier}:{display_name}"
+            # Always offer the qualified form so users discover the syntax.
+            completions.append(
+                CommandCompletion(qualified, f"{description_prefix} {b.qualified_ref}")
+            )
+            # Offer the bare name only when it's unambiguous; with
+            # multiple bundles sharing a name across tiers, the bare
+            # form would be rejected at parse time anyway.
+            if name_counts[b.name] == 1:
+                completions.append(
+                    CommandCompletion(display_name, f"{description_prefix} {b.qualified_ref}")
+                )
+        return completions
 
     # ==================== Prompt Enrichment ====================
 

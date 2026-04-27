@@ -2,15 +2,27 @@
 
 A **bundle** is a self-contained unit of reference knowledge: its own
 ``embedding_config.json`` manifest, its own ``.npy`` sidecar matrix, and
-its own set of reference JSON files. The root bundle lives directly under
-``.jaato/references/``; additional bundles are immediate subdirectories
-that contain their own ``embedding_config.json``.
+its own set of reference JSON files. Bundles live in two tiers:
+
+* **workspace** tier — under ``<workspace>/.jaato/references/`` (per-project
+  knowledge that travels with the repository).
+* **user** tier — under ``~/.jaato/references/`` (cross-project personal
+  knowledge that follows the user across workspaces).
+
+In each tier the root bundle is the manifest at the top level; additional
+bundles are immediate subdirectories that contain their own
+``embedding_config.json``. Discovery walks the workspace tier first, then
+the user tier; when the same bundle name exists in both tiers the workspace
+copy **shadows** the user copy entirely (it is hidden from discovery), the
+same way ``.jaato/theme.json`` shadows ``~/.jaato/theme.json``.
 
 This module owns:
     * ``Bundle`` — dataclass holding manifest + runtime state for one bundle
+    * ``BUNDLE_TIER_*`` — tier identifiers exposed on ``Bundle.tier``
+    * ``resolve_bundle_roots`` — ordered (root, tier) list for discovery
     * ``metadata_hash`` — the canonical fingerprint used by ``source_hash``
     * ``DriftReport`` + ``detect_drift`` — compare catalog vs. bundle manifest
-    * ``discover_bundles`` — scan the references directory for bundles
+    * ``discover_bundles`` — scan one or more references directories for bundles
 
 Reconcile (writing updated sidecars) lives in :mod:`reconcile`; this module
 is deliberately numpy-free so bundle discovery and drift detection work in
@@ -24,7 +36,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from .models import ReferenceSource
 
@@ -41,6 +53,17 @@ ROOT_BUNDLE_NAME = ""
 # Valid reconcile modes declared in a bundle manifest.
 _VALID_RECONCILE_MODES: Set[str] = {"eager", "lazy", "off"}
 
+# Tier identifiers. ``BUNDLE_TIER_WORKSPACE`` is per-project; the bundle
+# lives under ``<workspace>/.jaato/references/`` and travels with the repo.
+# ``BUNDLE_TIER_USER`` is per-user; the bundle lives under
+# ``~/.jaato/references/`` and follows the user across workspaces.
+BUNDLE_TIER_WORKSPACE = "workspace"
+BUNDLE_TIER_USER = "user"
+VALID_BUNDLE_TIERS: Tuple[str, ...] = (BUNDLE_TIER_WORKSPACE, BUNDLE_TIER_USER)
+
+# Subpath under each tier root where bundles live.
+_REFERENCES_SUBPATH = Path(".jaato") / "references"
+
 
 @dataclass
 class Bundle:
@@ -52,10 +75,12 @@ class Bundle:
     namespacing (``<bundle>/<id>``).
 
     Lifecycle:
-        1. ``discover_bundles`` walks ``.jaato/references/`` and creates
-           one ``Bundle`` per directory that has an ``embedding_config.json``.
-           At this point ``matcher`` is None and ``owned_source_ids`` is
-           populated from the ``rows`` list.
+        1. ``discover_bundles`` walks the configured tier roots (workspace
+           first, then user) and creates one ``Bundle`` per directory that
+           has an ``embedding_config.json``. Each bundle is tagged with the
+           tier it was found in (see :attr:`tier`). At this point
+           ``matcher`` is None and ``owned_source_ids`` is populated from
+           the ``rows`` list.
         2. The plugin resolves actual ``ReferenceSource`` instances for
            each bundle (via ``discover_references`` on the bundle's
            directory) and stores the sources in its flat catalog. Each
@@ -68,9 +93,17 @@ class Bundle:
 
     Attributes:
         name: Bundle identifier. The root bundle uses ``ROOT_BUNDLE_NAME``
-            (empty string); sub-bundles use their directory name.
+            (empty string); sub-bundles use their directory name. The same
+            ``name`` may exist in multiple tiers, but discovery shadows
+            the user-tier copy when a workspace-tier copy is present.
         directory: Absolute path to the directory that owns this bundle's
             manifest + sidecar + reference JSON files.
+        tier: Which tier root this bundle was discovered under — either
+            ``BUNDLE_TIER_WORKSPACE`` (lives in ``<workspace>/.jaato/
+            references/``) or ``BUNDLE_TIER_USER`` (lives in
+            ``~/.jaato/references/``). Drives presentation (``references
+            bundles`` shows a tier column) and the destination of write
+            commands like ``reconcile``, ``merge --into``, and ``unpack``.
         embedding_model: sentence-transformers model used to produce the
             sidecar vectors. A change invalidates every row.
         embedding_dimensions: Vector dimensionality. Must equal
@@ -101,11 +134,22 @@ class Bundle:
     reconcile_mode: str = "eager"
     owned_source_ids: Set[str] = field(default_factory=set)
     matcher: Optional[Any] = None
+    tier: str = BUNDLE_TIER_WORKSPACE
 
     @property
     def display_name(self) -> str:
         """Human-facing label for the bundle."""
         return "(root)" if self.name == ROOT_BUNDLE_NAME else self.name
+
+    @property
+    def qualified_ref(self) -> str:
+        """``scope:name`` string identifying this bundle across tiers.
+
+        Use this when the bundle name alone is ambiguous (e.g., logging,
+        error messages, ``references bundles`` rendering). The root
+        bundle still renders as ``(root)`` for the name component.
+        """
+        return f"{self.tier}:{self.display_name}"
 
     @property
     def manifest_path(self) -> Path:
@@ -237,6 +281,7 @@ def _load_bundle_from_manifest(
     manifest_path: Path,
     *,
     name: str,
+    tier: str = BUNDLE_TIER_WORKSPACE,
 ) -> Optional[Bundle]:
     """Build a :class:`Bundle` from an ``embedding_config.json`` on disk.
 
@@ -247,6 +292,9 @@ def _load_bundle_from_manifest(
     Args:
         manifest_path: Absolute path to an ``embedding_config.json``.
         name: Bundle name (``""`` for root, subdir name for sub-bundles).
+        tier: Which tier root this bundle was discovered under. Stored on
+            the resulting ``Bundle.tier`` so downstream commands know
+            where the bundle physically lives.
 
     Returns:
         The loaded :class:`Bundle`, or ``None`` on failure.
@@ -298,6 +346,13 @@ def _load_bundle_from_manifest(
         )
         reconcile_mode = "eager"
 
+    if tier not in VALID_BUNDLE_TIERS:
+        logger.warning(
+            "Bundle '%s': unknown tier %r, falling back to %r",
+            name or "(root)", tier, BUNDLE_TIER_WORKSPACE,
+        )
+        tier = BUNDLE_TIER_WORKSPACE
+
     return Bundle(
         name=name,
         directory=manifest_path.parent.resolve(),
@@ -307,51 +362,281 @@ def _load_bundle_from_manifest(
         embedding_rows=list(rows),
         reconcile_mode=reconcile_mode,
         owned_source_ids=set(rows),
+        tier=tier,
     )
+
+
+def resolve_bundle_roots(
+    workspace_path: Optional[Union[str, Path]],
+    *,
+    user_home: Optional[Path] = None,
+) -> List[Tuple[Path, str]]:
+    """Return the ordered list of ``(root_dir, tier)`` pairs to scan.
+
+    Discovery walks workspace first, then user; the order matters because
+    workspace bundles **shadow** user bundles of the same name in
+    :func:`discover_bundles`.
+
+    Args:
+        workspace_path: Workspace root, or ``None`` if unknown. When None,
+            the workspace tier is omitted (the user tier still applies).
+        user_home: Override for ``Path.home()``. Test seam — production
+            code passes ``None`` to use the real home directory.
+
+    Returns:
+        Ordered list of ``(absolute_root_dir, tier_name)``. Roots that do
+        not exist on disk are still returned; ``discover_bundles`` treats
+        a missing root as "no bundles in this tier" without raising.
+    """
+    roots: List[Tuple[Path, str]] = []
+    if workspace_path is not None:
+        roots.append((
+            Path(workspace_path).resolve() / _REFERENCES_SUBPATH,
+            BUNDLE_TIER_WORKSPACE,
+        ))
+    home = user_home if user_home is not None else Path.home()
+    roots.append((home / _REFERENCES_SUBPATH, BUNDLE_TIER_USER))
+    return roots
 
 
 def discover_bundles(
-    references_dir: Path,
+    roots: Union[Path, Sequence[Tuple[Path, str]]],
 ) -> List[Bundle]:
-    """Scan a references directory for knowledge bundles.
+    """Scan one or more references directories for knowledge bundles.
 
-    Discovers the root bundle (manifest at the top level) followed by each
-    immediate subdirectory that contains its own ``embedding_config.json``.
-    Subdirectories without a manifest are ignored entirely — they are not
-    merged into the root bundle — so dropping an unrelated directory into
-    ``.jaato/references/`` never accidentally pollutes the catalog.
+    Two calling conventions are supported:
+
+    * **Single-root (legacy):** ``discover_bundles(path)`` — scans the
+      given directory as the workspace tier. Kept so existing callers and
+      tests don't need to know about tiering.
+    * **Multi-root (preferred):** ``discover_bundles([(path, tier), ...])``
+      — scans each ``(root, tier)`` pair in order. The first tier wins on
+      name collisions: if both the workspace and user tiers contain a
+      ``teammate`` bundle, the workspace copy is returned and the user
+      copy is silently shadowed (a debug log records the shadow).
+
+    Within each root, the root bundle (manifest at the top level) is
+    discovered first, followed by each immediate subdirectory that contains
+    its own ``embedding_config.json``. Subdirectories without a manifest are
+    ignored entirely — they are not merged into the root bundle — so
+    dropping an unrelated directory into ``.jaato/references/`` never
+    accidentally pollutes the catalog.
+
+    Shadowing keys on bundle ``name`` (the root bundle name is the empty
+    string ``ROOT_BUNDLE_NAME``); a workspace root manifest shadows a user
+    root manifest, and ``workspace/teammate`` shadows ``user/teammate``.
 
     Args:
-        references_dir: Absolute path to the workspace references directory
-            (typically ``<workspace>/.jaato/references``).
+        roots: Either a single ``Path`` (legacy form, treated as the
+            workspace tier) or a sequence of ``(root_dir, tier_name)``
+            tuples in the order discovery should walk them.
 
     Returns:
-        List of :class:`Bundle` in deterministic order: root first, then
-        sub-bundles sorted by directory name.
+        List of :class:`Bundle` in deterministic order: per root, the root
+        bundle first then sub-bundles sorted by directory name; tiers are
+        concatenated in input order.
     """
+    if isinstance(roots, Path):
+        normalized: Sequence[Tuple[Path, str]] = (
+            (roots, BUNDLE_TIER_WORKSPACE),
+        )
+    else:
+        normalized = roots
+
     bundles: List[Bundle] = []
+    seen_names: Set[str] = set()
 
-    if not references_dir.is_dir():
-        return bundles
-
-    root = _load_bundle_from_manifest(
-        references_dir / EMBEDDING_CONFIG_FILENAME,
-        name=ROOT_BUNDLE_NAME,
-    )
-    if root is not None:
-        bundles.append(root)
-
-    for child in sorted(references_dir.iterdir()):
-        if not child.is_dir():
+    for references_dir, tier in normalized:
+        if not references_dir.is_dir():
             continue
-        manifest = child / EMBEDDING_CONFIG_FILENAME
-        if not manifest.is_file():
-            continue
-        sub = _load_bundle_from_manifest(manifest, name=child.name)
-        if sub is not None:
+
+        root = _load_bundle_from_manifest(
+            references_dir / EMBEDDING_CONFIG_FILENAME,
+            name=ROOT_BUNDLE_NAME,
+            tier=tier,
+        )
+        if root is not None:
+            if root.name in seen_names:
+                logger.debug(
+                    "discover_bundles: shadowing %s root bundle at %s "
+                    "(already provided by an earlier tier)",
+                    tier, root.directory,
+                )
+            else:
+                bundles.append(root)
+                seen_names.add(root.name)
+
+        for child in sorted(references_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            manifest = child / EMBEDDING_CONFIG_FILENAME
+            if not manifest.is_file():
+                continue
+            sub = _load_bundle_from_manifest(manifest, name=child.name, tier=tier)
+            if sub is None:
+                continue
+            if sub.name in seen_names:
+                logger.debug(
+                    "discover_bundles: shadowing %s bundle '%s' at %s "
+                    "(already provided by an earlier tier)",
+                    tier, sub.name, sub.directory,
+                )
+                continue
             bundles.append(sub)
+            seen_names.add(sub.name)
 
     return bundles
+
+
+@dataclass(frozen=True)
+class BundleRef:
+    """Parsed user-supplied bundle reference (``[<scope>:]<name>``).
+
+    Two states are distinguished:
+
+    * ``scope`` set — caller wrote ``workspace:teammate`` or
+      ``user:teammate``; the tier is unambiguous and resolution will
+      reject any bundle in another tier.
+    * ``scope`` is ``None`` — caller wrote a bare ``teammate``; resolution
+      tries the supplied default tier first and falls through to the
+      other tier when no match exists, surfacing an "ambiguous" error
+      only when both tiers contain a bundle of that name.
+
+    The ``(root)`` and ``root`` aliases both normalize to
+    :data:`ROOT_BUNDLE_NAME` so users don't have to remember the empty-
+    string sentinel.
+    """
+
+    name: str
+    scope: Optional[str] = None  # None means "tier not specified"
+
+    @property
+    def display(self) -> str:
+        """Human-readable form of this ref, suitable for error messages."""
+        name = "(root)" if self.name == ROOT_BUNDLE_NAME else self.name
+        return f"{self.scope}:{name}" if self.scope else name
+
+
+def parse_bundle_ref(raw: str) -> BundleRef:
+    """Parse ``[<scope>:]<name>`` user input into a :class:`BundleRef`.
+
+    Accepts the following forms (whitespace is stripped):
+
+    * ``"teammate"`` → ``BundleRef(name="teammate", scope=None)``
+    * ``"workspace:teammate"`` → ``BundleRef(name="teammate", scope="workspace")``
+    * ``"user:teammate"`` → ``BundleRef(name="teammate", scope="user")``
+    * ``"root"`` or ``"(root)"`` → ``BundleRef(name=ROOT_BUNDLE_NAME, scope=None)``
+    * ``"workspace:root"`` / ``"workspace:(root)"`` → root with scope set
+
+    Raises:
+        ValueError: ``raw`` is empty, contains an unknown scope, or has
+            an empty name component (e.g. ``"workspace:"``).
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("bundle reference is empty")
+
+    scope: Optional[str] = None
+    name = raw
+    if ":" in raw:
+        scope_part, _, name_part = raw.partition(":")
+        scope_part = scope_part.strip()
+        name_part = name_part.strip()
+        if scope_part not in VALID_BUNDLE_TIERS:
+            raise ValueError(
+                f"unknown scope {scope_part!r} in {raw!r}; expected one of "
+                f"{', '.join(VALID_BUNDLE_TIERS)}"
+            )
+        if not name_part:
+            raise ValueError(
+                f"missing bundle name after scope in {raw!r} "
+                f"(write '{scope_part}:root' for the root bundle)"
+            )
+        scope = scope_part
+        name = name_part
+
+    if name in ("root", "(root)"):
+        name = ROOT_BUNDLE_NAME
+
+    return BundleRef(name=name, scope=scope)
+
+
+class AmbiguousBundleRefError(ValueError):
+    """A bare bundle name matched bundles in more than one tier.
+
+    Raised by :func:`find_bundle` when the caller did not specify a
+    scope and the name appears in both the workspace and user tiers.
+    The :attr:`candidates` list lets the caller render a helpful
+    "did you mean ``workspace:teammate`` or ``user:teammate``?" error.
+    """
+
+    def __init__(self, ref: BundleRef, candidates: List[Bundle]) -> None:
+        names = ", ".join(sorted(b.qualified_ref for b in candidates))
+        super().__init__(
+            f"bundle '{ref.display}' is ambiguous — present in multiple "
+            f"tiers ({names}); qualify it as 'workspace:{ref.display}' "
+            f"or 'user:{ref.display}'"
+        )
+        self.ref = ref
+        self.candidates = list(candidates)
+
+
+def find_bundle(
+    bundles: Iterable[Bundle],
+    ref: BundleRef,
+    *,
+    default_scope: Optional[str] = None,
+) -> Optional[Bundle]:
+    """Resolve a :class:`BundleRef` against a list of loaded bundles.
+
+    Resolution rules:
+
+    1. If ``ref.scope`` is set, only bundles with the matching tier are
+       considered. Returns the unique match, or ``None`` if none exists.
+    2. Otherwise:
+        * If ``default_scope`` is supplied and a bundle with the given
+          name exists in that tier, return it (used by write commands
+          to resolve bare names against the workspace tier first).
+        * Else if exactly one bundle has the name (in any tier), return
+          it (the unambiguous case).
+        * Else if multiple bundles match across tiers, raise
+          :class:`AmbiguousBundleRefError`.
+        * Else return ``None``.
+
+    Args:
+        bundles: All loaded bundles (typically ``self._bundles``).
+        ref: Parsed user input.
+        default_scope: Tier to prefer when the user wrote a bare name.
+            Set to :data:`BUNDLE_TIER_WORKSPACE` for write commands and
+            ``None`` for read commands that treat tiers symmetrically.
+
+    Returns:
+        The matching :class:`Bundle`, or ``None`` if no bundle matches.
+
+    Raises:
+        AmbiguousBundleRefError: bare-name lookup matched bundles in
+            multiple tiers and ``default_scope`` did not break the tie.
+    """
+    bundle_list = list(bundles)
+
+    if ref.scope is not None:
+        for b in bundle_list:
+            if b.tier == ref.scope and b.name == ref.name:
+                return b
+        return None
+
+    matches = [b for b in bundle_list if b.name == ref.name]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+
+    if default_scope is not None:
+        for b in matches:
+            if b.tier == default_scope:
+                return b
+
+    raise AmbiguousBundleRefError(ref, matches)
 
 
 def write_manifest(bundle: Bundle, *, rows: List[str]) -> None:
