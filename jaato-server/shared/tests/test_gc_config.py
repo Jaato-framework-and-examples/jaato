@@ -303,3 +303,101 @@ class TestLoadGCFromFile:
                     assert result is not None
             finally:
                 os.chdir(original_cwd)
+
+    def test_workspace_root_resolves_independent_of_cwd(self):
+        """workspace_root must override cwd-based resolution.
+
+        Regression: in daemon mode, _in_workspace() does not chdir, so the
+        default ".jaato/gc.json" used to resolve against the daemon's startup
+        directory instead of the client's workspace.
+        """
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as workspace, \
+                tempfile.TemporaryDirectory() as cwd_dir:
+            try:
+                # Daemon-style cwd: NOT the workspace, contains nothing.
+                os.chdir(cwd_dir)
+
+                # Workspace has a gc.json that should be picked up.
+                jaato_dir = Path(workspace) / ".jaato"
+                jaato_dir.mkdir()
+                with open(jaato_dir / "gc.json", "w") as f:
+                    json.dump({"type": "truncate", "threshold_percent": 42.0}, f)
+
+                with patch('shared.plugins.gc.load_gc_plugin') as mock_load:
+                    mock_load.return_value = MagicMock()
+
+                    # Without workspace_root: cwd has no gc.json, should miss.
+                    # (Unless ~/.jaato/gc.json exists on the test machine; that
+                    # is the documented user-level fallback. Skip strict check.)
+
+                    # With workspace_root: must find the workspace file.
+                    result = load_gc_from_file(workspace_root=workspace)
+                    assert result is not None
+                    _, gc_config = result
+                    assert gc_config.threshold_percent == 42.0
+            finally:
+                os.chdir(original_cwd)
+
+    def test_user_home_fallback_when_workspace_missing(self):
+        """When workspace has no gc.json, fall back to ~/.jaato/gc.json."""
+        with tempfile.TemporaryDirectory() as workspace, \
+                tempfile.TemporaryDirectory() as fake_home:
+            # Workspace deliberately has no .jaato/gc.json.
+            user_jaato = Path(fake_home) / ".jaato"
+            user_jaato.mkdir()
+            with open(user_jaato / "gc.json", "w") as f:
+                json.dump({"type": "summarize", "threshold_percent": 33.0}, f)
+
+            with patch('shared.plugins.gc.load_gc_plugin') as mock_load, \
+                    patch('pathlib.Path.home', return_value=Path(fake_home)):
+                mock_load.return_value = MagicMock()
+
+                result = load_gc_from_file(workspace_root=workspace)
+                assert result is not None
+                _, gc_config = result
+                assert gc_config.threshold_percent == 33.0
+
+    def test_workspace_takes_precedence_over_user_home(self):
+        """Workspace gc.json wins over ~/.jaato/gc.json when both exist."""
+        with tempfile.TemporaryDirectory() as workspace, \
+                tempfile.TemporaryDirectory() as fake_home:
+            # Workspace gc.json
+            ws_jaato = Path(workspace) / ".jaato"
+            ws_jaato.mkdir()
+            with open(ws_jaato / "gc.json", "w") as f:
+                json.dump({"type": "truncate", "threshold_percent": 11.0}, f)
+
+            # User-level gc.json (should be ignored)
+            user_jaato = Path(fake_home) / ".jaato"
+            user_jaato.mkdir()
+            with open(user_jaato / "gc.json", "w") as f:
+                json.dump({"type": "summarize", "threshold_percent": 99.0}, f)
+
+            with patch('shared.plugins.gc.load_gc_plugin') as mock_load, \
+                    patch('pathlib.Path.home', return_value=Path(fake_home)):
+                mock_load.return_value = MagicMock()
+
+                result = load_gc_from_file(workspace_root=workspace)
+                assert result is not None
+                _, gc_config = result
+                assert gc_config.threshold_percent == 11.0
+
+    def test_explicit_relative_path_uses_workspace_root(self):
+        """A relative explicit path resolves against workspace_root."""
+        with tempfile.TemporaryDirectory() as workspace:
+            jaato_dir = Path(workspace) / "custom"
+            jaato_dir.mkdir()
+            with open(jaato_dir / "gc.json", "w") as f:
+                json.dump({"type": "truncate", "threshold_percent": 55.0}, f)
+
+            with patch('shared.plugins.gc.load_gc_plugin') as mock_load:
+                mock_load.return_value = MagicMock()
+
+                result = load_gc_from_file(
+                    file_path="custom/gc.json",
+                    workspace_root=workspace,
+                )
+                assert result is not None
+                _, gc_config = result
+                assert gc_config.threshold_percent == 55.0
