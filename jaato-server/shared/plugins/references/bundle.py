@@ -488,6 +488,157 @@ def discover_bundles(
     return bundles
 
 
+@dataclass(frozen=True)
+class BundleRef:
+    """Parsed user-supplied bundle reference (``[<scope>:]<name>``).
+
+    Two states are distinguished:
+
+    * ``scope`` set — caller wrote ``workspace:teammate`` or
+      ``user:teammate``; the tier is unambiguous and resolution will
+      reject any bundle in another tier.
+    * ``scope`` is ``None`` — caller wrote a bare ``teammate``; resolution
+      tries the supplied default tier first and falls through to the
+      other tier when no match exists, surfacing an "ambiguous" error
+      only when both tiers contain a bundle of that name.
+
+    The ``(root)`` and ``root`` aliases both normalize to
+    :data:`ROOT_BUNDLE_NAME` so users don't have to remember the empty-
+    string sentinel.
+    """
+
+    name: str
+    scope: Optional[str] = None  # None means "tier not specified"
+
+    @property
+    def display(self) -> str:
+        """Human-readable form of this ref, suitable for error messages."""
+        name = "(root)" if self.name == ROOT_BUNDLE_NAME else self.name
+        return f"{self.scope}:{name}" if self.scope else name
+
+
+def parse_bundle_ref(raw: str) -> BundleRef:
+    """Parse ``[<scope>:]<name>`` user input into a :class:`BundleRef`.
+
+    Accepts the following forms (whitespace is stripped):
+
+    * ``"teammate"`` → ``BundleRef(name="teammate", scope=None)``
+    * ``"workspace:teammate"`` → ``BundleRef(name="teammate", scope="workspace")``
+    * ``"user:teammate"`` → ``BundleRef(name="teammate", scope="user")``
+    * ``"root"`` or ``"(root)"`` → ``BundleRef(name=ROOT_BUNDLE_NAME, scope=None)``
+    * ``"workspace:root"`` / ``"workspace:(root)"`` → root with scope set
+
+    Raises:
+        ValueError: ``raw`` is empty, contains an unknown scope, or has
+            an empty name component (e.g. ``"workspace:"``).
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("bundle reference is empty")
+
+    scope: Optional[str] = None
+    name = raw
+    if ":" in raw:
+        scope_part, _, name_part = raw.partition(":")
+        scope_part = scope_part.strip()
+        name_part = name_part.strip()
+        if scope_part not in VALID_BUNDLE_TIERS:
+            raise ValueError(
+                f"unknown scope {scope_part!r} in {raw!r}; expected one of "
+                f"{', '.join(VALID_BUNDLE_TIERS)}"
+            )
+        if not name_part:
+            raise ValueError(
+                f"missing bundle name after scope in {raw!r} "
+                f"(write '{scope_part}:root' for the root bundle)"
+            )
+        scope = scope_part
+        name = name_part
+
+    if name in ("root", "(root)"):
+        name = ROOT_BUNDLE_NAME
+
+    return BundleRef(name=name, scope=scope)
+
+
+class AmbiguousBundleRefError(ValueError):
+    """A bare bundle name matched bundles in more than one tier.
+
+    Raised by :func:`find_bundle` when the caller did not specify a
+    scope and the name appears in both the workspace and user tiers.
+    The :attr:`candidates` list lets the caller render a helpful
+    "did you mean ``workspace:teammate`` or ``user:teammate``?" error.
+    """
+
+    def __init__(self, ref: BundleRef, candidates: List[Bundle]) -> None:
+        names = ", ".join(sorted(b.qualified_ref for b in candidates))
+        super().__init__(
+            f"bundle '{ref.display}' is ambiguous — present in multiple "
+            f"tiers ({names}); qualify it as 'workspace:{ref.display}' "
+            f"or 'user:{ref.display}'"
+        )
+        self.ref = ref
+        self.candidates = list(candidates)
+
+
+def find_bundle(
+    bundles: Iterable[Bundle],
+    ref: BundleRef,
+    *,
+    default_scope: Optional[str] = None,
+) -> Optional[Bundle]:
+    """Resolve a :class:`BundleRef` against a list of loaded bundles.
+
+    Resolution rules:
+
+    1. If ``ref.scope`` is set, only bundles with the matching tier are
+       considered. Returns the unique match, or ``None`` if none exists.
+    2. Otherwise:
+        * If ``default_scope`` is supplied and a bundle with the given
+          name exists in that tier, return it (used by write commands
+          to resolve bare names against the workspace tier first).
+        * Else if exactly one bundle has the name (in any tier), return
+          it (the unambiguous case).
+        * Else if multiple bundles match across tiers, raise
+          :class:`AmbiguousBundleRefError`.
+        * Else return ``None``.
+
+    Args:
+        bundles: All loaded bundles (typically ``self._bundles``).
+        ref: Parsed user input.
+        default_scope: Tier to prefer when the user wrote a bare name.
+            Set to :data:`BUNDLE_TIER_WORKSPACE` for write commands and
+            ``None`` for read commands that treat tiers symmetrically.
+
+    Returns:
+        The matching :class:`Bundle`, or ``None`` if no bundle matches.
+
+    Raises:
+        AmbiguousBundleRefError: bare-name lookup matched bundles in
+            multiple tiers and ``default_scope`` did not break the tie.
+    """
+    bundle_list = list(bundles)
+
+    if ref.scope is not None:
+        for b in bundle_list:
+            if b.tier == ref.scope and b.name == ref.name:
+                return b
+        return None
+
+    matches = [b for b in bundle_list if b.name == ref.name]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+
+    if default_scope is not None:
+        for b in matches:
+            if b.tier == default_scope:
+                return b
+
+    raise AmbiguousBundleRefError(ref, matches)
+
+
 def write_manifest(bundle: Bundle, *, rows: List[str]) -> None:
     """Write the bundle's manifest to disk with an updated ``rows`` list.
 

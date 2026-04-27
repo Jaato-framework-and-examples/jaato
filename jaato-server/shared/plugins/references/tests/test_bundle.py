@@ -6,14 +6,18 @@ from pathlib import Path
 import pytest
 
 from shared.plugins.references.bundle import (
+    AmbiguousBundleRefError,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
     EMBEDDING_CONFIG_FILENAME,
     ROOT_BUNDLE_NAME,
     Bundle,
+    BundleRef,
     detect_drift,
     discover_bundles,
+    find_bundle,
     metadata_hash,
+    parse_bundle_ref,
     resolve_bundle_roots,
     write_manifest,
 )
@@ -426,6 +430,115 @@ class TestDiscoverBundlesMultiTier:
 
         assert by_name[ROOT_BUNDLE_NAME].qualified_ref == "workspace:(root)"
         assert by_name["teammate"].qualified_ref == "workspace:teammate"
+
+
+class TestParseBundleRef:
+    """parse_bundle_ref handles bare names, scope-qualified names, and aliases."""
+
+    def test_bare_name_yields_no_scope(self):
+        ref = parse_bundle_ref("teammate")
+        assert ref == BundleRef(name="teammate", scope=None)
+
+    def test_workspace_scope_qualified(self):
+        ref = parse_bundle_ref("workspace:teammate")
+        assert ref == BundleRef(name="teammate", scope=BUNDLE_TIER_WORKSPACE)
+
+    def test_user_scope_qualified(self):
+        ref = parse_bundle_ref("user:notes")
+        assert ref == BundleRef(name="notes", scope=BUNDLE_TIER_USER)
+
+    def test_root_alias_normalized(self):
+        assert parse_bundle_ref("root").name == ROOT_BUNDLE_NAME
+        assert parse_bundle_ref("(root)").name == ROOT_BUNDLE_NAME
+
+    def test_scope_qualified_root(self):
+        ref = parse_bundle_ref("user:root")
+        assert ref == BundleRef(name=ROOT_BUNDLE_NAME, scope=BUNDLE_TIER_USER)
+
+    def test_whitespace_stripped(self):
+        ref = parse_bundle_ref("  workspace:teammate  ")
+        assert ref == BundleRef(name="teammate", scope=BUNDLE_TIER_WORKSPACE)
+
+    def test_unknown_scope_rejected(self):
+        with pytest.raises(ValueError, match="unknown scope"):
+            parse_bundle_ref("system:teammate")
+
+    def test_empty_input_rejected(self):
+        with pytest.raises(ValueError, match="empty"):
+            parse_bundle_ref("")
+        with pytest.raises(ValueError, match="empty"):
+            parse_bundle_ref("   ")
+
+    def test_missing_name_after_scope_rejected(self):
+        with pytest.raises(ValueError, match="missing bundle name"):
+            parse_bundle_ref("workspace:")
+
+    def test_display_form_round_trips(self):
+        """``display`` is a useful surface for error messages."""
+        assert BundleRef(name="teammate", scope=None).display == "teammate"
+        assert BundleRef(name="teammate", scope=BUNDLE_TIER_USER).display == "user:teammate"
+        assert BundleRef(name=ROOT_BUNDLE_NAME, scope=BUNDLE_TIER_WORKSPACE).display == "workspace:(root)"
+        assert BundleRef(name=ROOT_BUNDLE_NAME, scope=None).display == "(root)"
+
+
+class TestFindBundle:
+    """find_bundle resolves a BundleRef against a list of loaded bundles."""
+
+    def _bundle(self, name, tier):
+        return Bundle(
+            name=name,
+            directory=Path(f"/tmp/{tier}/{name or 'root'}"),
+            embedding_model="m",
+            embedding_dimensions=4,
+            embedding_sidecar="x.npy",
+            tier=tier,
+        )
+
+    def test_scope_qualified_picks_exact_tier(self):
+        ws = self._bundle("teammate", BUNDLE_TIER_WORKSPACE)
+        usr = self._bundle("teammate", BUNDLE_TIER_USER)
+        ref = BundleRef(name="teammate", scope=BUNDLE_TIER_USER)
+        assert find_bundle([ws, usr], ref) is usr
+
+    def test_scope_qualified_returns_none_when_tier_missing(self):
+        ws = self._bundle("teammate", BUNDLE_TIER_WORKSPACE)
+        ref = BundleRef(name="teammate", scope=BUNDLE_TIER_USER)
+        assert find_bundle([ws], ref) is None
+
+    def test_bare_name_unique_match(self):
+        ws = self._bundle("teammate", BUNDLE_TIER_WORKSPACE)
+        ref = BundleRef(name="teammate", scope=None)
+        assert find_bundle([ws], ref) is ws
+
+    def test_bare_name_default_scope_breaks_tie(self):
+        """When the same name lives in both tiers, default_scope picks the winner."""
+        ws = self._bundle("teammate", BUNDLE_TIER_WORKSPACE)
+        usr = self._bundle("teammate", BUNDLE_TIER_USER)
+        ref = BundleRef(name="teammate", scope=None)
+        assert find_bundle([ws, usr], ref, default_scope=BUNDLE_TIER_WORKSPACE) is ws
+        assert find_bundle([ws, usr], ref, default_scope=BUNDLE_TIER_USER) is usr
+
+    def test_bare_name_ambiguous_raises_when_no_default_scope(self):
+        ws = self._bundle("teammate", BUNDLE_TIER_WORKSPACE)
+        usr = self._bundle("teammate", BUNDLE_TIER_USER)
+        ref = BundleRef(name="teammate", scope=None)
+        with pytest.raises(AmbiguousBundleRefError) as ei:
+            find_bundle([ws, usr], ref)
+        assert "ambiguous" in str(ei.value)
+        assert sorted(b.tier for b in ei.value.candidates) == sorted([
+            BUNDLE_TIER_USER, BUNDLE_TIER_WORKSPACE,
+        ])
+
+    def test_no_match_returns_none(self):
+        ws = self._bundle("teammate", BUNDLE_TIER_WORKSPACE)
+        ref = BundleRef(name="ghost", scope=None)
+        assert find_bundle([ws], ref) is None
+
+    def test_root_bundle_resolution(self):
+        """Root sentinel name is matched explicitly, not by string."""
+        ws_root = self._bundle(ROOT_BUNDLE_NAME, BUNDLE_TIER_WORKSPACE)
+        ref = parse_bundle_ref("workspace:root")
+        assert find_bundle([ws_root], ref) is ws_root
 
 
 class TestWriteManifest:
