@@ -47,7 +47,7 @@ from typing import (
     runtime_checkable,
 )
 
-from .bundle import Bundle
+from .bundle import Bundle, BUNDLE_TIER_USER, BUNDLE_TIER_WORKSPACE
 
 
 @dataclass(frozen=True)
@@ -136,6 +136,18 @@ class BundleEntryHandler(Protocol):
         """
         ...
 
+    def list_bundles(self) -> List[Bundle]:
+        """Enumerate the bundles (containers) this handler owns.
+
+        Returned in discovery order — workspace-tier bundles first,
+        then user-tier — so cross-kind aggregation produces stable,
+        readable output. Each bundle's :attr:`Bundle.tier` carries the
+        tier it was loaded from; :attr:`Bundle.name` is the directory
+        name (or :data:`bundle_common.bundle.ROOT_BUNDLE_NAME` for the
+        root bundle of a tier).
+        """
+        ...
+
     def find_entry(self, entry_id: str) -> Optional[BundleEntry]:
         """Look up a single entry by its id, or ``None`` if missing.
 
@@ -201,6 +213,33 @@ class BundleEntryHandler(Protocol):
         ``None`` when nothing to report.
         """
         ...
+
+    def create_empty_bundle(
+        self,
+        name: str,
+        tier: str,
+        *,
+        workspace_path: Optional[Path] = None,
+        user_home: Optional[Path] = None,
+    ) -> Bundle:
+        """Create an empty bundle of this kind on disk and return it.
+
+        Called by the top-level ``bundle create`` command. Implementers
+        write a fresh manifest in the appropriate tier-root directory
+        and return a populated :class:`Bundle` describing it. Kinds
+        that don't support operator-level bundle creation (e.g. tasks
+        that are entirely filesystem-driven) may raise
+        :class:`NotImplementedError`; the dispatcher surfaces a
+        kind-specific error message in that case.
+
+        ``workspace_path`` is required for ``tier == "workspace"``;
+        ``user_home`` overrides ``Path.home()`` for tests. The default
+        implementation raises :class:`NotImplementedError` so handlers
+        opt in explicitly.
+        """
+        raise NotImplementedError(
+            f"kind {self.kind!r} does not support 'bundle create'"
+        )
 
     # ------------------------------------------------------------------
     # Optional pack/unpack hooks. Default implementations cover the

@@ -98,6 +98,15 @@ class ReferencesEntryHandler(BundleEntryHandler):
             entries.append(self._build_entry(source.id, source.bundle_name, file_path))
         return entries
 
+    def list_bundles(self) -> List[Bundle]:
+        """Return every references bundle (workspace + user tiers).
+
+        Mirrors ``self._plugin._bundles``, which is already maintained
+        in workspace-then-user discovery order by
+        :meth:`ReferencesPlugin._discover_and_load_bundles`.
+        """
+        return list(self._plugin._bundles)
+
     def find_entry(self, entry_id: str) -> Optional[BundleEntry]:
         """Resolve ``entry_id`` to a :class:`BundleEntry` or ``None``.
 
@@ -195,6 +204,12 @@ class ReferencesEntryHandler(BundleEntryHandler):
     def reconcile_bundle(self, bundle: Bundle):
         """Run the references-specific reconcile pass for ``bundle``.
 
+        Also re-attaches the bundle's semantic matcher when an
+        embedding provider is available so the next semantic query
+        sees the freshly written sidecar. Skipping the re-attach
+        would leave the matcher pointing at the pre-reconcile sidecar
+        and silently degrade match quality.
+
         Imported lazily because :mod:`shared.plugins.references.reconcile`
         depends on numpy via the embedding provider — keeping the
         import lazy means handler construction stays cheap and tests
@@ -202,8 +217,104 @@ class ReferencesEntryHandler(BundleEntryHandler):
         """
         from .reconcile import reconcile_bundle as _reconcile_bundle  # local
 
-        return _reconcile_bundle(
+        result = _reconcile_bundle(
             bundle, self._plugin._sources, self._plugin._embedding_provider,
+        )
+        if self._plugin._embedding_provider is not None and hasattr(
+            self._plugin, "_attach_matcher",
+        ):
+            bundle.matcher = self._plugin._attach_matcher(
+                bundle, self._plugin._embedding_provider.model_name,
+            )
+            # Keep the legacy ``self._semantic_matcher`` shim in sync
+            # only when the workspace-tier root reconciles.
+            if (
+                bundle.name == ""
+                and bundle.tier == BUNDLE_TIER_WORKSPACE
+            ):
+                self._plugin._semantic_matcher = bundle.matcher
+        return result
+
+    def create_empty_bundle(
+        self,
+        name: str,
+        tier: str,
+        *,
+        workspace_path: Optional[Path] = None,
+        user_home: Optional[Path] = None,
+    ) -> Bundle:
+        """Write a fresh references manifest at the chosen tier root.
+
+        The bundle's embedding model and dimensions are inherited from
+        the active embedding provider; without a provider the call
+        fails because a sidecar can't be written meaningfully. The
+        wrapped plugin is *not* required to be the workspace-loaded
+        instance — ``workspace_path`` resolves the tier root directly,
+        making this method usable from any context that has the
+        coordinates.
+        """
+        from ..bundle_common.bundle import (
+            BUNDLE_TIER_USER as _USER,
+            BUNDLE_TIER_WORKSPACE as _WS,
+            EMBEDDING_CONFIG_FILENAME as _MANIFEST,
+            ROOT_BUNDLE_NAME as _ROOT,
+            VALID_BUNDLE_TIERS as _TIERS,
+        )
+
+        if tier not in _TIERS:
+            raise ValueError(
+                f"unknown tier {tier!r}; expected one of {', '.join(_TIERS)}"
+            )
+        provider = self._plugin._embedding_provider
+        if provider is None:
+            raise RuntimeError(
+                "references kind requires an embedding provider to create "
+                "an empty bundle (the manifest declares model + dimensions)"
+            )
+        if not provider.available:
+            provider.load_model()
+        dimensions = getattr(provider, "dimensions", None)
+        if not isinstance(dimensions, int) or dimensions <= 0:
+            raise RuntimeError(
+                "embedding provider did not report a valid dimension; "
+                "cannot write a bundle manifest without it"
+            )
+
+        # Resolve the destination directory.
+        if tier == _WS:
+            if workspace_path is None:
+                raise ValueError(
+                    "tier='workspace' requires workspace_path to be set"
+                )
+            tier_root = Path(workspace_path) / self.domain_subpath
+        else:
+            home = user_home if user_home is not None else Path.home()
+            tier_root = home / self.domain_subpath
+        bundle_dir = tier_root if name == _ROOT else tier_root / name
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = bundle_dir / _MANIFEST
+        if manifest_path.is_file():
+            raise FileExistsError(
+                f"manifest already exists at {manifest_path}"
+            )
+        sidecar_name = "references.embeddings.npy"
+        manifest_path.write_text(
+            json.dumps({
+                "embedding_model": provider.model_name,
+                "embedding_dimensions": int(dimensions),
+                "embedding_sidecar": sidecar_name,
+                "rows": [],
+            }, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return Bundle(
+            name=name,
+            directory=bundle_dir.resolve(),
+            embedding_model=provider.model_name,
+            embedding_dimensions=int(dimensions),
+            embedding_sidecar=sidecar_name,
+            embedding_rows=[],
+            tier=tier,
         )
 
     # ------------------------------------------------------------------
