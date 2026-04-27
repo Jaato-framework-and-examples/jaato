@@ -1105,6 +1105,16 @@ class ReferencesPlugin:
         # yields an empty bundle list and becomes a no-op.
         self._discover_and_load_bundles()
 
+        # Register the handler that exposes this plugin's bundle-relevant
+        # operations to the shared bundle subsystem. Idempotent within
+        # a process: re-initializing replaces the prior handler with one
+        # bound to the new state. The handler itself doesn't drive any
+        # behaviour today — Phase 8 rewires bundle CRUD/pack/unpack to
+        # call through the registry.
+        from ..bundle_common.handler import registry as _bundle_registry
+        from .entry_handler import ReferencesEntryHandler
+        _bundle_registry.register(ReferencesEntryHandler(self))
+
         # Reconcile drift (new/edited/removed references) against each
         # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
         # deferred to the first semantic query; "off" disables the pass.
@@ -1456,6 +1466,11 @@ class ReferencesPlugin:
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
         self._trace("shutdown: cleaning up resources")
+        # Unregister the bundle handler so a stale plugin reference
+        # isn't left in the registry. Idempotent — the registry
+        # tolerates removing a kind that isn't currently registered.
+        from ..bundle_common.handler import registry as _bundle_registry
+        _bundle_registry.unregister("references")
         if self._channel:
             self._channel.shutdown()
         self._channel = None
