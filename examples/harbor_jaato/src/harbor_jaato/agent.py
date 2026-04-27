@@ -124,6 +124,22 @@ class JaatoAgent(BaseAgent):
             # useful in AgentContext.
             await self._populate_from_result(environment, context)
 
+    async def cleanup(self, environment: BaseEnvironment) -> None:
+        """Stop the daemon and remove its socket.
+
+        Container teardown handles this anyway, but graceful shutdown
+        avoids stragglers on long-lived eval hosts and surfaces daemon
+        crashes deterministically (a crash leaves the socket behind;
+        explicit removal turns the next ``connect()`` into a clean
+        auto-start instead of an EADDRINUSE).
+        """
+        try:
+            await environment.exec(
+                "pkill -f 'jaato.*--daemon' || true; rm -f /tmp/jaato.sock"
+            )
+        except Exception as e:
+            logger.warning("cleanup exec failed: %s", e)
+
     async def _install_jaato(self, environment: BaseEnvironment) -> None:
         cmd = (
             f"python3 -m venv {CONTAINER_VENV} && "
