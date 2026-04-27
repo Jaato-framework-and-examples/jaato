@@ -114,6 +114,7 @@ class JaatoAgent(BaseAgent):
             f"{shlex.quote(CONTAINER_PYTHON)} -m harbor_jaato.harness "
             f"--instruction-file {shlex.quote(CONTAINER_INSTRUCTION)} "
             f"--profile harbor "
+            f"--workspace /workspace "
             f"--result {shlex.quote(CONTAINER_RESULT)}"
         )
         try:

@@ -55,7 +55,10 @@ async def _drive(args: argparse.Namespace) -> int:
     result = HarnessResult()
     result.write_atomic(out_path)
 
-    client = IPCRecoveryClient(socket_path=args.socket)
+    client = IPCRecoveryClient(
+        socket_path=args.socket,
+        workspace_path=Path(args.workspace),
+    )
     await client.connect()
     await client.create_session(profile=args.profile, agent=args.agent)
     await client.send_message(instruction)
@@ -132,6 +135,13 @@ def main() -> None:
     p.add_argument("--agent", default="harbor-shell")
     p.add_argument("--result", required=True)
     p.add_argument("--socket", default="/tmp/jaato.sock")
+    p.add_argument(
+        "--workspace",
+        default="/workspace",
+        help="Workspace path; pinned so the daemon doesn't fall back "
+        "to CWD or $HOME, which can drift from where Harbor mounts "
+        "the task files.",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
