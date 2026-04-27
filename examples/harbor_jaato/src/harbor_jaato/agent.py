@@ -82,6 +82,13 @@ class JaatoAgent(BaseAgent):
     SUPPORTS_ATIF = False
     SUPPORTS_WINDOWS = False
 
+    # Hard cap on the in-container harness exec. Longer than any
+    # individual benchmark task we expect, shorter than infinity so a
+    # wedged daemon doesn't quietly produce a stale result.json against
+    # Harbor's own (typically larger) per-trial budget. Override per
+    # trial by setting ``AgentContext.timeout_seconds`` upstream.
+    RUN_TIMEOUT_SECONDS: int = 3600
+
     @staticmethod
     def name() -> str:
         return "jaato"
@@ -117,8 +124,13 @@ class JaatoAgent(BaseAgent):
             f"--workspace /workspace "
             f"--result {shlex.quote(CONTAINER_RESULT)}"
         )
+        timeout = (
+            getattr(context, "timeout_seconds", None) or self.RUN_TIMEOUT_SECONDS
+        )
         try:
-            await environment.exec(cmd, cwd="/workspace", env=env_overrides)
+            await environment.exec(
+                cmd, cwd="/workspace", env=env_overrides, timeout=timeout
+            )
         finally:
             # Always try to pull whatever the harness wrote, even on
             # nonzero exit / timeout — partial token counts are still
