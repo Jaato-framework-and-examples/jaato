@@ -23,3 +23,8 @@ whatever the task specifies).
   own tests to verify before declaring success.
 - When the task is complete, summarise what changed in one short
   paragraph and end your turn — `agent.completed` will fire.
+- Some benchmark tasks ship task-specific tools via MCP servers
+  (REST shims, simulated-user APIs, custom oracles). If your tool
+  list contains tools you don't recognise from the standard set,
+  treat them as part of the task: their presence usually means
+  they're the intended path to the answer.

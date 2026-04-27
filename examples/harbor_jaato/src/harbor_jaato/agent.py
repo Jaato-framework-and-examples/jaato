@@ -50,6 +50,7 @@ CONTAINER_INSTRUCTION = f"{CONTAINER_JAATO_DIR}/instruction.txt"
 CONTAINER_RESULT = f"{CONTAINER_JAATO_DIR}/result.json"
 CONTAINER_PROFILE = f"{CONTAINER_JAATO_DIR}/profiles/harbor.json"
 CONTAINER_AGENT = f"{CONTAINER_JAATO_DIR}/agents/harbor-shell.md"
+CONTAINER_MCP_CONFIG = f"{CONTAINER_JAATO_DIR}/.mcp.json"
 
 AGENT_NAME = "harbor-shell"
 AGENT_RESOURCE = "data/harbor-shell.md"
@@ -194,25 +195,32 @@ class JaatoAgent(BaseAgent):
         rendered agent body becomes the session's system prompt.
         """
         provider, model = self._split_model_name()
+        plugins = list(DEFAULT_PLUGINS)
+        plugin_configs: dict[str, Any] = {
+            # The container is the security boundary; the permission
+            # plugin's "ask" default would otherwise hang the harness
+            # waiting for a non-existent human. Setting the policy
+            # here means PermissionRequestedEvent never fires.
+            "permission": {
+                "policy": {
+                    "defaultPolicy": "allow",
+                    "whitelist": {"tools": [], "patterns": []},
+                    "blacklist": {"tools": [], "patterns": []},
+                }
+            },
+        }
+        mcp_servers = self._translate_mcp_servers()
+        if mcp_servers:
+            plugins.append("mcp")
+            plugin_configs["mcp"] = {"config_path": CONTAINER_MCP_CONFIG}
+
         profile = {
             "name": "harbor",
             "description": "Harbor eval profile",
             "model": model,
             "provider": provider,
-            "plugins": list(DEFAULT_PLUGINS),
-            # The container is the security boundary; the permission
-            # plugin's "ask" default would otherwise hang the harness
-            # waiting for a non-existent human. Setting the policy
-            # here means PermissionRequestedEvent never fires.
-            "plugin_configs": {
-                "permission": {
-                    "policy": {
-                        "defaultPolicy": "allow",
-                        "whitelist": {"tools": [], "patterns": []},
-                        "blacklist": {"tools": [], "patterns": []},
-                    }
-                }
-            },
+            "plugins": plugins,
+            "plugin_configs": plugin_configs,
         }
         await environment.exec(
             f"mkdir -p {CONTAINER_JAATO_DIR}/profiles "
@@ -221,10 +229,55 @@ class JaatoAgent(BaseAgent):
         await self._upload_text(
             environment, json.dumps(profile, indent=2), CONTAINER_PROFILE
         )
+        if mcp_servers:
+            await self._upload_text(
+                environment,
+                json.dumps({"mcpServers": mcp_servers}, indent=2),
+                CONTAINER_MCP_CONFIG,
+            )
         agent_md = resources.files("harbor_jaato").joinpath(
             AGENT_RESOURCE
         ).read_text()
         await self._upload_text(environment, agent_md, CONTAINER_AGENT)
+
+    def _translate_mcp_servers(self) -> dict[str, dict[str, Any]]:
+        """Translate ``self.mcp_servers`` (Harbor) → jaato ``.mcp.json`` form.
+
+        Harbor's ``MCPServerConfig`` supports three transports:
+        ``stdio``, ``sse``, ``streamable-http``. Jaato's MCP plugin
+        only speaks stdio (see ``shared/mcp_context_manager.py`` —
+        ``ServerConfig`` has only ``command`` / ``args`` / ``env``).
+        We translate stdio entries cleanly and skip HTTP transports
+        with a logger warning so a benchmark that requires an HTTP
+        MCP server fails loudly rather than silently missing tools.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        servers = getattr(self, "mcp_servers", None) or []
+        for server in servers:
+            transport = getattr(server, "transport", "stdio")
+            name = getattr(server, "name", None) or "unnamed"
+            if transport != "stdio":
+                logger.warning(
+                    "skipping MCP server %r: transport %r unsupported "
+                    "by jaato (stdio only)",
+                    name,
+                    transport,
+                )
+                continue
+            command = getattr(server, "command", None)
+            if not command:
+                logger.warning(
+                    "skipping MCP server %r: stdio transport requires "
+                    "command",
+                    name,
+                )
+                continue
+            out[name] = {
+                "type": "stdio",
+                "command": command,
+                "args": list(getattr(server, "args", []) or []),
+            }
+        return out
 
     async def _upload_text(
         self, environment: BaseEnvironment, text: str, dest: str
