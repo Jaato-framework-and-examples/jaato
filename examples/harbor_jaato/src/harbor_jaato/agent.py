@@ -154,12 +154,21 @@ class JaatoAgent(BaseAgent):
             logger.warning("cleanup exec failed: %s", e)
 
     async def _install_jaato(self, environment: BaseEnvironment) -> None:
+        # Default install pulls from public PyPI. Set
+        # JAATO_INSTALL_FROM_TEST_PYPI=1 in the host environment to use
+        # test-PyPI builds instead — useful for SDK pre-release work.
+        import os
+
+        extra = (
+            "--extra-index-url https://test.pypi.org/simple/ "
+            if os.environ.get("JAATO_INSTALL_FROM_TEST_PYPI") == "1"
+            else ""
+        )
         cmd = (
             f"python3 -m venv {CONTAINER_VENV} && "
             f"{CONTAINER_PIP} install --quiet --upgrade pip && "
-            f"{CONTAINER_PIP} install --quiet "
-            "  --extra-index-url https://test.pypi.org/simple/ "
-            "  jaato-server jaato-sdk"
+            f"{CONTAINER_PIP} install --quiet {extra}"
+            "jaato-server jaato-sdk"
         )
         await environment.exec(cmd)
 
