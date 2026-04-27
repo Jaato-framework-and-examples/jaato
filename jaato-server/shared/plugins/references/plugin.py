@@ -51,13 +51,14 @@ from .bundle import (
     parse_bundle_ref,
     resolve_bundle_roots,
 )
-from .pack import PackResult, pack_bundle
-from .unpack import (
+from ..bundle_common.handler import registry as _bundle_registry
+from ..bundle_common.pack import PackResult, pack_bundle
+from ..bundle_common.unpack import (
     UnpackError,
     UnpackMode,
     UnpackResult,
     read_envelope,
-    unpack_bundle,
+    unpack_archive,
 )
 from .merge import (
     MergeOptions,
@@ -1105,6 +1106,16 @@ class ReferencesPlugin:
         # yields an empty bundle list and becomes a no-op.
         self._discover_and_load_bundles()
 
+        # Register the handler that exposes this plugin's bundle-relevant
+        # operations to the shared bundle subsystem. Idempotent within
+        # a process: re-initializing replaces the prior handler with one
+        # bound to the new state. The handler itself doesn't drive any
+        # behaviour today — Phase 8 rewires bundle CRUD/pack/unpack to
+        # call through the registry.
+        from ..bundle_common.handler import registry as _bundle_registry
+        from .entry_handler import ReferencesEntryHandler
+        _bundle_registry.register(ReferencesEntryHandler(self))
+
         # Reconcile drift (new/edited/removed references) against each
         # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
         # deferred to the first semantic query; "off" disables the pass.
@@ -1456,6 +1467,11 @@ class ReferencesPlugin:
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
         self._trace("shutdown: cleaning up resources")
+        # Unregister the bundle handler so a stale plugin reference
+        # isn't left in the registry. Idempotent — the registry
+        # tolerates removing a kind that isn't currently registered.
+        from ..bundle_common.handler import registry as _bundle_registry
+        _bundle_registry.unregister("references")
         if self._channel:
             self._channel.shutdown()
         self._channel = None
@@ -3509,15 +3525,22 @@ class ReferencesPlugin:
             base = self._workspace_path or self._project_root or "."
             output_path = Path(base) / f"{stem}-{bundle.tier}.tar.gz"
 
-        # Use this bundle's own references — bundle_name == bundle.name
-        # because the loader stamps it during discovery.
-        bundle_sources = [
-            s for s in self._sources if s.bundle_name == bundle.name
-        ]
-
+        # Pack this single references bundle through the shared
+        # bundle_common.pack — it dispatches via the registered
+        # ReferencesEntryHandler for payload collection and JSON
+        # rewriting. The single-bundle entry point produces a v2
+        # archive with one ``kinds/references/`` subtree.
+        handler = _bundle_registry.get("references")
+        if handler is None:
+            return {
+                "error": (
+                    "references handler is not registered with the bundle "
+                    "registry — initialize() may not have completed"
+                )
+            }
         try:
             result = pack_bundle(
-                bundle, bundle_sources, output_path,
+                handler, bundle, output_path,
                 jaato_version=self._jaato_version_string(),
             )
         except FileNotFoundError as e:
@@ -3525,9 +3548,17 @@ class ReferencesPlugin:
         except OSError as e:
             return {"error": f"pack: I/O error: {e}"}
 
+        # The references-kind entry is always present in single-kind
+        # packs; pull its summary out for human-readable output.
+        ref_kind = next(
+            (k for k in result.kinds if k.kind == "references"), None,
+        )
+        ref_count = ref_kind.entry_count if ref_kind else 0
+        local_payloads = ref_kind.payload_count if ref_kind else 0
+
         self._trace(
             f"bundle pack: bundle={bundle.qualified_ref} "
-            f"refs={result.ref_count} payloads={result.local_payloads} "
+            f"refs={ref_count} payloads={local_payloads} "
             f"size={result.bytes_written} -> {result.archive_path}"
         )
 
@@ -3538,8 +3569,8 @@ class ReferencesPlugin:
             (f"  bundle: {bundle.qualified_ref}", ""),
             (f"  archive: {result.archive_path}", ""),
             (
-                f"  contents: {result.ref_count} ref(s), "
-                f"{result.local_payloads} LOCAL payload(s), "
+                f"  contents: {ref_count} ref(s), "
+                f"{local_payloads} LOCAL payload(s), "
                 f"{size_kb:.1f} KiB",
                 "",
             ),
@@ -3549,8 +3580,8 @@ class ReferencesPlugin:
             "status": "ok",
             "bundle": bundle.qualified_ref,
             "archive_path": str(result.archive_path),
-            "ref_count": result.ref_count,
-            "local_payloads": result.local_payloads,
+            "ref_count": ref_count,
+            "local_payloads": local_payloads,
             "bytes_written": result.bytes_written,
             "help_lines": HelpLines(lines=lines),
         }
@@ -3654,23 +3685,30 @@ class ReferencesPlugin:
         if target_name is None:
             target_name = envelope.get("source_name", "")
 
-        target_root = self._tier_root(target_tier)
-        if target_root is None:
-            return {
-                "error": (
-                    f"unpack: cannot resolve tier root for {target_tier!r} — "
-                    f"workspace_path is unknown; pass --into "
-                    f"user:<name> or load a workspace first"
-                )
-            }
+        # Workspace path is required for workspace-tier installs but
+        # not for user-tier installs (resolves to ~/.jaato/...). The
+        # bundle_common unpacker enforces this.
+        workspace_path_for_unpack: Optional[Path] = None
+        if target_tier == BUNDLE_TIER_WORKSPACE:
+            base = self._workspace_path or self._project_root
+            if base is None:
+                return {
+                    "error": (
+                        f"unpack: cannot resolve workspace tier root — "
+                        f"workspace_path is unknown; pass --into "
+                        f"user:<name> or load a workspace first"
+                    )
+                }
+            workspace_path_for_unpack = Path(base)
 
         try:
-            result = unpack_bundle(
+            result = unpack_archive(
                 archive_path,
-                target_root=target_root,
+                registry=_bundle_registry,
                 target_tier=target_tier,
                 target_name=target_name,
                 mode=mode,
+                workspace_path=workspace_path_for_unpack,
             )
         except UnpackError as e:
             return {"error": f"unpack: {e}"}
@@ -3717,18 +3755,29 @@ class ReferencesPlugin:
             f"{result.target_tier}:"
             f"{result.target_name or '(root)'}"
         )
+        # The references-kind line is what the user usually cares
+        # about for this command; composite installs surface
+        # additional kinds in subsequent log lines.
+        ref_kind = next(
+            (k for k in result.kinds if k.kind == "references"), None,
+        )
+        ref_count = ref_kind.entry_count if ref_kind else 0
+        other_kinds = [k for k in result.kinds if k.kind != "references"]
+
         lines: List[Tuple[str, str]] = [
             ("UNPACK", "bold"),
             ("", ""),
             (f"  archive: {result.archive_path}", ""),
+            (f"  format: v{result.format_version}", ""),
             (f"  installed: {target_qualified}", ""),
             (f"  mode: {result.mode.value}", ""),
-            (f"  references: {result.ref_count}", ""),
-            (
-                f"  reconciled: {'yes' if reconciled else 'skipped'}",
-                "",
-            ),
+            (f"  references: {ref_count}", ""),
         ]
+        for k in other_kinds:
+            lines.append((f"  {k.kind}: {k.entry_count}", ""))
+        lines.append((
+            f"  reconciled: {'yes' if reconciled else 'skipped'}", "",
+        ))
 
         return {
             "status": "ok",
@@ -3737,7 +3786,16 @@ class ReferencesPlugin:
             "target_tier": result.target_tier,
             "target_name": result.target_name,
             "mode": result.mode.value,
-            "ref_count": result.ref_count,
+            "format_version": result.format_version,
+            "ref_count": ref_count,
+            "kinds": [
+                {
+                    "kind": k.kind,
+                    "entry_count": k.entry_count,
+                    "target_dir": str(k.target_dir),
+                }
+                for k in result.kinds
+            ],
             "reconciled": reconciled,
             "help_lines": HelpLines(lines=lines),
         }

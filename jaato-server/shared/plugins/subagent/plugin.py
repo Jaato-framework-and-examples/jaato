@@ -205,6 +205,18 @@ class SubagentPlugin:
         self._client_class = JaatoClient
 
         self._initialized = True
+
+        # Register the bundle entry handler so the top-level 'bundle'
+        # command can list / find / remove profiles alongside other
+        # registered kinds. Idempotent within a process — re-init
+        # replaces the prior handler with one bound to the new state.
+        try:
+            from ..bundle_common.handler import registry as _bundle_registry
+            from .entry_handler import ProfilesEntryHandler
+            _bundle_registry.register(ProfilesEntryHandler(self))
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Failed to register profiles bundle handler: %s", e)
+
         logger.info(
             "Subagent plugin initialized with %d profiles (connection: %s)",
             len(self._config.profiles) if self._config else 0,
@@ -222,6 +234,13 @@ class SubagentPlugin:
         """
         # Preserve _active_sessions and _sessions_lock — running
         # subagents continue independently.
+        # Unregister the bundle entry handler so the global registry
+        # doesn't hold a stale plugin reference. Idempotent.
+        try:
+            from ..bundle_common.handler import registry as _bundle_registry
+            _bundle_registry.unregister("profiles")
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Failed to unregister profiles bundle handler: %s", e)
         self._owner_counters.clear()
         self._subagent_counter = 0
         self._parent_session = None

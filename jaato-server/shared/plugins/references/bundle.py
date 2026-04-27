@@ -1,189 +1,109 @@
-"""Knowledge bundle abstraction for the references plugin.
+"""References-specific bundle helpers.
 
-A **bundle** is a self-contained unit of reference knowledge: its own
-``embedding_config.json`` manifest, its own ``.npy`` sidecar matrix, and
-its own set of reference JSON files. Bundles live in two tiers:
+The domain-agnostic parts of bundle management — ``Bundle``, the tier
+constants, ``BundleRef`` / ``parse_bundle_ref`` / ``find_bundle``,
+``discover_bundles``, ``write_manifest`` — live in
+:mod:`shared.plugins.bundle_common.bundle` so future plugins (agents,
+tasks, profiles, services) can reuse the same machinery. This module
+re-exports those symbols for the references plugin's existing import
+sites and adds the references-specific pieces that depend on
+:class:`ReferenceSource`:
 
-* **workspace** tier — under ``<workspace>/.jaato/references/`` (per-project
-  knowledge that travels with the repository).
-* **user** tier — under ``~/.jaato/references/`` (cross-project personal
-  knowledge that follows the user across workspaces).
+* :func:`metadata_hash` — fingerprint stored in
+  ``ReferenceSource.embedding.source_hash``.
+* :class:`DriftReport` + :func:`detect_drift` — compare a bundle
+  manifest against the live reference catalog.
 
-In each tier the root bundle is the manifest at the top level; additional
-bundles are immediate subdirectories that contain their own
-``embedding_config.json``. Discovery walks the workspace tier first, then
-the user tier; when the same bundle name exists in both tiers the workspace
-copy **shadows** the user copy entirely (it is hidden from discovery), the
-same way ``.jaato/theme.json`` shadows ``~/.jaato/theme.json``.
-
-This module owns:
-    * ``Bundle`` — dataclass holding manifest + runtime state for one bundle
-    * ``BUNDLE_TIER_*`` — tier identifiers exposed on ``Bundle.tier``
-    * ``resolve_bundle_roots`` — ordered (root, tier) list for discovery
-    * ``metadata_hash`` — the canonical fingerprint used by ``source_hash``
-    * ``DriftReport`` + ``detect_drift`` — compare catalog vs. bundle manifest
-    * ``discover_bundles`` — scan one or more references directories for bundles
-
-Reconcile (writing updated sidecars) lives in :mod:`reconcile`; this module
-is deliberately numpy-free so bundle discovery and drift detection work in
-environments without the embedding provider installed.
+The shim also wraps :func:`bundle_common.bundle.resolve_bundle_roots`
+to bake in the references-domain subpath (``.jaato/references``) so
+existing call sites (and tests) don't have to know about the new
+``domain_subpath`` argument.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import List, Optional, Tuple, Union
+
+# Re-export the domain-agnostic surface so existing imports
+# (``from shared.plugins.references.bundle import …``) keep working.
+from ..bundle_common.bundle import (  # noqa: F401
+    BUNDLE_TIER_USER,
+    BUNDLE_TIER_WORKSPACE,
+    EMBEDDING_CONFIG_FILENAME,
+    ROOT_BUNDLE_NAME,
+    VALID_BUNDLE_TIERS,
+    AmbiguousBundleRefError,
+    Bundle,
+    BundleRef,
+    _load_bundle_from_manifest,
+    discover_bundles,
+    find_bundle,
+    parse_bundle_ref,
+    write_manifest,
+)
+from ..bundle_common.bundle import (
+    resolve_bundle_roots as _resolve_bundle_roots_generic,
+)
 
 from .models import ReferenceSource
 
 logger = logging.getLogger(__name__)
 
 
-# Well-known filename for the per-bundle manifest. Duplicated from
-# ``config_loader`` to keep ``bundle`` importable without the full loader.
-EMBEDDING_CONFIG_FILENAME = "embedding_config.json"
-
-# Sentinel name for the root bundle. Displayed as ``(root)`` to users.
-ROOT_BUNDLE_NAME = ""
-
-# Valid reconcile modes declared in a bundle manifest.
-_VALID_RECONCILE_MODES: Set[str] = {"eager", "lazy", "off"}
-
-# Tier identifiers. ``BUNDLE_TIER_WORKSPACE`` is per-project; the bundle
-# lives under ``<workspace>/.jaato/references/`` and travels with the repo.
-# ``BUNDLE_TIER_USER`` is per-user; the bundle lives under
-# ``~/.jaato/references/`` and follows the user across workspaces.
-BUNDLE_TIER_WORKSPACE = "workspace"
-BUNDLE_TIER_USER = "user"
-VALID_BUNDLE_TIERS: Tuple[str, ...] = (BUNDLE_TIER_WORKSPACE, BUNDLE_TIER_USER)
-
-# Subpath under each tier root where bundles live.
+# References-domain subpath under each tier root. The references
+# plugin's bundles live at ``<workspace>/.jaato/references/`` and
+# ``~/.jaato/references/``. Other domains pass their own subpath.
 _REFERENCES_SUBPATH = Path(".jaato") / "references"
 
 
-@dataclass
-class Bundle:
-    """One knowledge bundle — a cohesive unit of reference metadata + vectors.
+def resolve_bundle_roots(
+    workspace_path: Optional[Union[str, Path]],
+    *,
+    user_home: Optional[Path] = None,
+) -> List[Tuple[Path, str]]:
+    """References-domain wrapper over the generic resolver.
 
-    Each bundle owns exactly one sidecar matrix and one manifest. The
-    bundle's sources come from JSON files in its own directory and nowhere
-    else; cross-bundle overlap is handled at the plugin level by
-    namespacing (``<bundle>/<id>``).
+    Bakes in :data:`_REFERENCES_SUBPATH` so callers and tests don't
+    have to repeat ``.jaato/references`` at every call site. Equivalent
+    to::
 
-    Lifecycle:
-        1. ``discover_bundles`` walks the configured tier roots (workspace
-           first, then user) and creates one ``Bundle`` per directory that
-           has an ``embedding_config.json``. Each bundle is tagged with the
-           tier it was found in (see :attr:`tier`). At this point
-           ``matcher`` is None and ``owned_source_ids`` is populated from
-           the ``rows`` list.
-        2. The plugin resolves actual ``ReferenceSource`` instances for
-           each bundle (via ``discover_references`` on the bundle's
-           directory) and stores the sources in its flat catalog. Each
-           source carries ``bundle_name`` so membership is recoverable.
-        3. On ``_init_bundle_matchers`` the plugin attaches a fresh
-           ``SemanticMatcherProtocol`` instance per bundle whose embedding
-           model matches the active provider.
-        4. Reconcile (``reconcile.reconcile_bundle``) rewrites the manifest
-           + sidecar on disk and the plugin re-attaches the matcher.
+        bundle_common.bundle.resolve_bundle_roots(
+            workspace_path,
+            domain_subpath=Path(".jaato/references"),
+            user_home=user_home,
+        )
 
-    Attributes:
-        name: Bundle identifier. The root bundle uses ``ROOT_BUNDLE_NAME``
-            (empty string); sub-bundles use their directory name. The same
-            ``name`` may exist in multiple tiers, but discovery shadows
-            the user-tier copy when a workspace-tier copy is present.
-        directory: Absolute path to the directory that owns this bundle's
-            manifest + sidecar + reference JSON files.
-        tier: Which tier root this bundle was discovered under — either
-            ``BUNDLE_TIER_WORKSPACE`` (lives in ``<workspace>/.jaato/
-            references/``) or ``BUNDLE_TIER_USER`` (lives in
-            ``~/.jaato/references/``). Drives presentation (``references
-            bundles`` shows a tier column) and the destination of write
-            commands like ``reconcile``, ``merge --into``, and ``unpack``.
-        embedding_model: sentence-transformers model used to produce the
-            sidecar vectors. A change invalidates every row.
-        embedding_dimensions: Vector dimensionality. Must equal
-            ``matrix.shape[1]`` when loaded.
-        embedding_sidecar: Filename of the ``.npy`` file, relative to
-            ``directory``.
-        embedding_rows: Ordered list of reference ids — ``rows[i]`` is the
-            id whose vector is at matrix row ``i``. Authoritative mapping
-            from row to id; per-reference ``embedding.index`` does not exist.
-        reconcile_mode: ``"eager"`` (reconcile during ``initialize``),
-            ``"lazy"`` (reconcile before the first semantic query), or
-            ``"off"`` (only reconcile when the operator runs
-            ``references reconcile`` manually).
-        owned_source_ids: Cached set of ids the bundle claims in its
-            ``rows`` list. Populated on load; the live catalog is the
-            source of truth for which ids actually exist.
-        matcher: Attached ``SemanticMatcherProtocol`` instance; ``None``
-            when the bundle has no compatible matcher (model mismatch,
-            missing provider, empty rows, load failure). Not serialized.
+    Args:
+        workspace_path: Workspace root, or ``None`` if unknown.
+        user_home: Override for ``Path.home()`` (test seam).
+
+    Returns:
+        Ordered list of ``(absolute_root_dir, tier_name)`` pairs.
     """
-
-    name: str
-    directory: Path
-    embedding_model: str
-    embedding_dimensions: int
-    embedding_sidecar: str
-    embedding_rows: List[str] = field(default_factory=list)
-    reconcile_mode: str = "eager"
-    owned_source_ids: Set[str] = field(default_factory=set)
-    matcher: Optional[Any] = None
-    tier: str = BUNDLE_TIER_WORKSPACE
-
-    @property
-    def display_name(self) -> str:
-        """Human-facing label for the bundle."""
-        return "(root)" if self.name == ROOT_BUNDLE_NAME else self.name
-
-    @property
-    def qualified_ref(self) -> str:
-        """``scope:name`` string identifying this bundle across tiers.
-
-        Use this when the bundle name alone is ambiguous (e.g., logging,
-        error messages, ``references bundles`` rendering). The root
-        bundle still renders as ``(root)`` for the name component.
-        """
-        return f"{self.tier}:{self.display_name}"
-
-    @property
-    def manifest_path(self) -> Path:
-        """Absolute path to this bundle's ``embedding_config.json``."""
-        return self.directory / EMBEDDING_CONFIG_FILENAME
-
-    @property
-    def sidecar_path(self) -> Path:
-        """Absolute path to this bundle's ``.npy`` sidecar matrix."""
-        return self.directory / self.embedding_sidecar
-
-    @property
-    def lock_path(self) -> Path:
-        """Advisory-lock filename used by the reconcile writer.
-
-        A sibling of the sidecar so concurrent daemons targeting the same
-        workspace serialize their rewrites.
-        """
-        return self.directory / (self.embedding_sidecar + ".lock")
+    return _resolve_bundle_roots_generic(
+        workspace_path,
+        domain_subpath=_REFERENCES_SUBPATH,
+        user_home=user_home,
+    )
 
 
 def metadata_hash(source: ReferenceSource) -> str:
     """Compute the canonical fingerprint stored in ``embedding.source_hash``.
 
     We hash *metadata*, not content: the embedding is produced from
-    ``name + description + tags + fetchHint`` (the text the ``gen-references``
-    agent feeds to ``compute_embedding``), so the right staleness signal is
-    "did any of that metadata drift?" Content-hashing would be wrong: a
-    LOCAL reference's content can change independently without the vector
-    needing to be regenerated, and URL/MCP references have no local content
-    to hash at all.
+    ``name + description + tags + fetchHint`` (the text the
+    ``gen-references`` agent feeds to ``compute_embedding``), so the
+    right staleness signal is "did any of that metadata drift?"
+    Content-hashing would be wrong: a LOCAL reference's content can
+    change independently without the vector needing to be regenerated,
+    and URL/MCP references have no local content to hash at all.
 
-    The format is ``sha256:<hex>``. Tags are sorted for stability across
-    ordering-insensitive edits.
+    The format is ``sha256:<hex>``. Tags are sorted for stability
+    across ordering-insensitive edits.
 
     Args:
         source: The reference source to fingerprint.
@@ -206,14 +126,14 @@ class DriftReport:
     """Per-bundle summary of what reconcile would do if run now.
 
     Attributes:
-        missing: Source ids present in the catalog but not in ``rows``, or
-            present without a stored ``source_hash``. Reconcile would embed
-            these and append rows.
-        stale: Source ids whose current metadata hash differs from the
-            stored ``embedding.source_hash``. Reconcile would re-embed and
-            replace the row.
-        orphan: Row ids present in the bundle's ``rows`` list but missing
-            from the catalog. Reconcile would drop the row.
+        missing: Source ids present in the catalog but not in
+            ``rows``, or present without a stored ``source_hash``.
+            Reconcile would embed these and append rows.
+        stale: Source ids whose current metadata hash differs from
+            the stored ``embedding.source_hash``. Reconcile would
+            re-embed and replace the row.
+        orphan: Row ids present in the bundle's ``rows`` list but
+            missing from the catalog. Reconcile would drop the row.
     """
 
     missing: List[str] = field(default_factory=list)
@@ -244,9 +164,9 @@ def detect_drift(
 ) -> DriftReport:
     """Compare the bundle's manifest against the live catalog.
 
-    Only sources whose ``bundle_name`` matches this bundle are considered;
-    this lets the plugin hold one flat catalog and still get per-bundle
-    drift reports.
+    Only sources whose ``bundle_name`` matches this bundle are
+    considered; this lets the plugin hold one flat catalog and still
+    get per-bundle drift reports.
 
     Args:
         bundle: The bundle to inspect.
@@ -275,395 +195,3 @@ def detect_drift(
     orphan = [sid for sid in bundle.embedding_rows if sid not in own_sources]
 
     return DriftReport(missing=missing, stale=stale, orphan=orphan)
-
-
-def _load_bundle_from_manifest(
-    manifest_path: Path,
-    *,
-    name: str,
-    tier: str = BUNDLE_TIER_WORKSPACE,
-) -> Optional[Bundle]:
-    """Build a :class:`Bundle` from an ``embedding_config.json`` on disk.
-
-    Returns ``None`` when the file is missing, unreadable, or malformed.
-    Malformed bundles are logged but do not raise — a corrupt manifest in
-    one subdirectory must not prevent the rest of the catalog from loading.
-
-    Args:
-        manifest_path: Absolute path to an ``embedding_config.json``.
-        name: Bundle name (``""`` for root, subdir name for sub-bundles).
-        tier: Which tier root this bundle was discovered under. Stored on
-            the resulting ``Bundle.tier`` so downstream commands know
-            where the bundle physically lives.
-
-    Returns:
-        The loaded :class:`Bundle`, or ``None`` on failure.
-    """
-    if not manifest_path.is_file():
-        return None
-
-    try:
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning(
-            "Bundle '%s': failed to read manifest %s: %s",
-            name or "(root)", manifest_path, e,
-        )
-        return None
-
-    if not isinstance(raw, dict):
-        logger.warning(
-            "Bundle '%s': manifest must be a JSON object: %s",
-            name or "(root)", manifest_path,
-        )
-        return None
-
-    model = raw.get("embedding_model")
-    dims = raw.get("embedding_dimensions")
-    sidecar = raw.get("embedding_sidecar")
-    rows = raw.get("rows")
-    reconcile_mode = raw.get("reconcile", "eager")
-
-    if not model or not dims or not sidecar:
-        logger.warning(
-            "Bundle '%s': manifest missing required fields "
-            "(embedding_model, embedding_dimensions, embedding_sidecar): %s",
-            name or "(root)", manifest_path,
-        )
-        return None
-
-    if not isinstance(rows, list) or not all(isinstance(r, str) for r in rows):
-        logger.warning(
-            "Bundle '%s': manifest 'rows' must be a list of reference ids: %s",
-            name or "(root)", manifest_path,
-        )
-        return None
-
-    if reconcile_mode not in _VALID_RECONCILE_MODES:
-        logger.warning(
-            "Bundle '%s': unknown reconcile mode %r, falling back to 'eager'",
-            name or "(root)", reconcile_mode,
-        )
-        reconcile_mode = "eager"
-
-    if tier not in VALID_BUNDLE_TIERS:
-        logger.warning(
-            "Bundle '%s': unknown tier %r, falling back to %r",
-            name or "(root)", tier, BUNDLE_TIER_WORKSPACE,
-        )
-        tier = BUNDLE_TIER_WORKSPACE
-
-    return Bundle(
-        name=name,
-        directory=manifest_path.parent.resolve(),
-        embedding_model=str(model),
-        embedding_dimensions=int(dims),
-        embedding_sidecar=str(sidecar),
-        embedding_rows=list(rows),
-        reconcile_mode=reconcile_mode,
-        owned_source_ids=set(rows),
-        tier=tier,
-    )
-
-
-def resolve_bundle_roots(
-    workspace_path: Optional[Union[str, Path]],
-    *,
-    user_home: Optional[Path] = None,
-) -> List[Tuple[Path, str]]:
-    """Return the ordered list of ``(root_dir, tier)`` pairs to scan.
-
-    Discovery walks workspace first, then user; the order matters because
-    workspace bundles **shadow** user bundles of the same name in
-    :func:`discover_bundles`.
-
-    Args:
-        workspace_path: Workspace root, or ``None`` if unknown. When None,
-            the workspace tier is omitted (the user tier still applies).
-        user_home: Override for ``Path.home()``. Test seam — production
-            code passes ``None`` to use the real home directory.
-
-    Returns:
-        Ordered list of ``(absolute_root_dir, tier_name)``. Roots that do
-        not exist on disk are still returned; ``discover_bundles`` treats
-        a missing root as "no bundles in this tier" without raising.
-    """
-    roots: List[Tuple[Path, str]] = []
-    if workspace_path is not None:
-        roots.append((
-            Path(workspace_path).resolve() / _REFERENCES_SUBPATH,
-            BUNDLE_TIER_WORKSPACE,
-        ))
-    home = user_home if user_home is not None else Path.home()
-    roots.append((home / _REFERENCES_SUBPATH, BUNDLE_TIER_USER))
-    return roots
-
-
-def discover_bundles(
-    roots: Union[Path, Sequence[Tuple[Path, str]]],
-) -> List[Bundle]:
-    """Scan one or more references directories for knowledge bundles.
-
-    Two calling conventions are supported:
-
-    * **Single-root (legacy):** ``discover_bundles(path)`` — scans the
-      given directory as the workspace tier. Kept so existing callers and
-      tests don't need to know about tiering.
-    * **Multi-root (preferred):** ``discover_bundles([(path, tier), ...])``
-      — scans each ``(root, tier)`` pair in order. The first tier wins on
-      name collisions: if both the workspace and user tiers contain a
-      ``teammate`` bundle, the workspace copy is returned and the user
-      copy is silently shadowed (a debug log records the shadow).
-
-    Within each root, the root bundle (manifest at the top level) is
-    discovered first, followed by each immediate subdirectory that contains
-    its own ``embedding_config.json``. Subdirectories without a manifest are
-    ignored entirely — they are not merged into the root bundle — so
-    dropping an unrelated directory into ``.jaato/references/`` never
-    accidentally pollutes the catalog.
-
-    Shadowing keys on bundle ``name`` (the root bundle name is the empty
-    string ``ROOT_BUNDLE_NAME``); a workspace root manifest shadows a user
-    root manifest, and ``workspace/teammate`` shadows ``user/teammate``.
-
-    Args:
-        roots: Either a single ``Path`` (legacy form, treated as the
-            workspace tier) or a sequence of ``(root_dir, tier_name)``
-            tuples in the order discovery should walk them.
-
-    Returns:
-        List of :class:`Bundle` in deterministic order: per root, the root
-        bundle first then sub-bundles sorted by directory name; tiers are
-        concatenated in input order.
-    """
-    if isinstance(roots, Path):
-        normalized: Sequence[Tuple[Path, str]] = (
-            (roots, BUNDLE_TIER_WORKSPACE),
-        )
-    else:
-        normalized = roots
-
-    bundles: List[Bundle] = []
-    seen_names: Set[str] = set()
-
-    for references_dir, tier in normalized:
-        if not references_dir.is_dir():
-            continue
-
-        root = _load_bundle_from_manifest(
-            references_dir / EMBEDDING_CONFIG_FILENAME,
-            name=ROOT_BUNDLE_NAME,
-            tier=tier,
-        )
-        if root is not None:
-            if root.name in seen_names:
-                logger.debug(
-                    "discover_bundles: shadowing %s root bundle at %s "
-                    "(already provided by an earlier tier)",
-                    tier, root.directory,
-                )
-            else:
-                bundles.append(root)
-                seen_names.add(root.name)
-
-        for child in sorted(references_dir.iterdir()):
-            if not child.is_dir():
-                continue
-            manifest = child / EMBEDDING_CONFIG_FILENAME
-            if not manifest.is_file():
-                continue
-            sub = _load_bundle_from_manifest(manifest, name=child.name, tier=tier)
-            if sub is None:
-                continue
-            if sub.name in seen_names:
-                logger.debug(
-                    "discover_bundles: shadowing %s bundle '%s' at %s "
-                    "(already provided by an earlier tier)",
-                    tier, sub.name, sub.directory,
-                )
-                continue
-            bundles.append(sub)
-            seen_names.add(sub.name)
-
-    return bundles
-
-
-@dataclass(frozen=True)
-class BundleRef:
-    """Parsed user-supplied bundle reference (``[<scope>:]<name>``).
-
-    Two states are distinguished:
-
-    * ``scope`` set — caller wrote ``workspace:teammate`` or
-      ``user:teammate``; the tier is unambiguous and resolution will
-      reject any bundle in another tier.
-    * ``scope`` is ``None`` — caller wrote a bare ``teammate``; resolution
-      tries the supplied default tier first and falls through to the
-      other tier when no match exists, surfacing an "ambiguous" error
-      only when both tiers contain a bundle of that name.
-
-    The ``(root)`` and ``root`` aliases both normalize to
-    :data:`ROOT_BUNDLE_NAME` so users don't have to remember the empty-
-    string sentinel.
-    """
-
-    name: str
-    scope: Optional[str] = None  # None means "tier not specified"
-
-    @property
-    def display(self) -> str:
-        """Human-readable form of this ref, suitable for error messages."""
-        name = "(root)" if self.name == ROOT_BUNDLE_NAME else self.name
-        return f"{self.scope}:{name}" if self.scope else name
-
-
-def parse_bundle_ref(raw: str) -> BundleRef:
-    """Parse ``[<scope>:]<name>`` user input into a :class:`BundleRef`.
-
-    Accepts the following forms (whitespace is stripped):
-
-    * ``"teammate"`` → ``BundleRef(name="teammate", scope=None)``
-    * ``"workspace:teammate"`` → ``BundleRef(name="teammate", scope="workspace")``
-    * ``"user:teammate"`` → ``BundleRef(name="teammate", scope="user")``
-    * ``"root"`` or ``"(root)"`` → ``BundleRef(name=ROOT_BUNDLE_NAME, scope=None)``
-    * ``"workspace:root"`` / ``"workspace:(root)"`` → root with scope set
-
-    Raises:
-        ValueError: ``raw`` is empty, contains an unknown scope, or has
-            an empty name component (e.g. ``"workspace:"``).
-    """
-    raw = (raw or "").strip()
-    if not raw:
-        raise ValueError("bundle reference is empty")
-
-    scope: Optional[str] = None
-    name = raw
-    if ":" in raw:
-        scope_part, _, name_part = raw.partition(":")
-        scope_part = scope_part.strip()
-        name_part = name_part.strip()
-        if scope_part not in VALID_BUNDLE_TIERS:
-            raise ValueError(
-                f"unknown scope {scope_part!r} in {raw!r}; expected one of "
-                f"{', '.join(VALID_BUNDLE_TIERS)}"
-            )
-        if not name_part:
-            raise ValueError(
-                f"missing bundle name after scope in {raw!r} "
-                f"(write '{scope_part}:root' for the root bundle)"
-            )
-        scope = scope_part
-        name = name_part
-
-    if name in ("root", "(root)"):
-        name = ROOT_BUNDLE_NAME
-
-    return BundleRef(name=name, scope=scope)
-
-
-class AmbiguousBundleRefError(ValueError):
-    """A bare bundle name matched bundles in more than one tier.
-
-    Raised by :func:`find_bundle` when the caller did not specify a
-    scope and the name appears in both the workspace and user tiers.
-    The :attr:`candidates` list lets the caller render a helpful
-    "did you mean ``workspace:teammate`` or ``user:teammate``?" error.
-    """
-
-    def __init__(self, ref: BundleRef, candidates: List[Bundle]) -> None:
-        names = ", ".join(sorted(b.qualified_ref for b in candidates))
-        super().__init__(
-            f"bundle '{ref.display}' is ambiguous — present in multiple "
-            f"tiers ({names}); qualify it as 'workspace:{ref.display}' "
-            f"or 'user:{ref.display}'"
-        )
-        self.ref = ref
-        self.candidates = list(candidates)
-
-
-def find_bundle(
-    bundles: Iterable[Bundle],
-    ref: BundleRef,
-    *,
-    default_scope: Optional[str] = None,
-) -> Optional[Bundle]:
-    """Resolve a :class:`BundleRef` against a list of loaded bundles.
-
-    Resolution rules:
-
-    1. If ``ref.scope`` is set, only bundles with the matching tier are
-       considered. Returns the unique match, or ``None`` if none exists.
-    2. Otherwise:
-        * If ``default_scope`` is supplied and a bundle with the given
-          name exists in that tier, return it (used by write commands
-          to resolve bare names against the workspace tier first).
-        * Else if exactly one bundle has the name (in any tier), return
-          it (the unambiguous case).
-        * Else if multiple bundles match across tiers, raise
-          :class:`AmbiguousBundleRefError`.
-        * Else return ``None``.
-
-    Args:
-        bundles: All loaded bundles (typically ``self._bundles``).
-        ref: Parsed user input.
-        default_scope: Tier to prefer when the user wrote a bare name.
-            Set to :data:`BUNDLE_TIER_WORKSPACE` for write commands and
-            ``None`` for read commands that treat tiers symmetrically.
-
-    Returns:
-        The matching :class:`Bundle`, or ``None`` if no bundle matches.
-
-    Raises:
-        AmbiguousBundleRefError: bare-name lookup matched bundles in
-            multiple tiers and ``default_scope`` did not break the tie.
-    """
-    bundle_list = list(bundles)
-
-    if ref.scope is not None:
-        for b in bundle_list:
-            if b.tier == ref.scope and b.name == ref.name:
-                return b
-        return None
-
-    matches = [b for b in bundle_list if b.name == ref.name]
-    if not matches:
-        return None
-    if len(matches) == 1:
-        return matches[0]
-
-    if default_scope is not None:
-        for b in matches:
-            if b.tier == default_scope:
-                return b
-
-    raise AmbiguousBundleRefError(ref, matches)
-
-
-def write_manifest(bundle: Bundle, *, rows: List[str]) -> None:
-    """Write the bundle's manifest to disk with an updated ``rows`` list.
-
-    Uses an atomic write (``.tmp`` + rename) so a crash mid-write cannot
-    corrupt the manifest.
-
-    Args:
-        bundle: Target bundle.
-        rows: New ordered list of reference ids. ``len(rows)`` must equal
-            the new sidecar matrix's row count.
-    """
-    payload: Dict[str, Any] = {
-        "embedding_model": bundle.embedding_model,
-        "embedding_dimensions": bundle.embedding_dimensions,
-        "embedding_sidecar": bundle.embedding_sidecar,
-        "rows": rows,
-    }
-    if bundle.reconcile_mode != "eager":
-        payload["reconcile"] = bundle.reconcile_mode
-
-    tmp = bundle.manifest_path.with_suffix(bundle.manifest_path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    tmp.replace(bundle.manifest_path)
-    bundle.embedding_rows = list(rows)
-    bundle.owned_source_ids = set(rows)
