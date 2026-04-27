@@ -200,7 +200,19 @@ class JaatoAgent(BaseAgent):
             "model": model,
             "provider": provider,
             "plugins": list(DEFAULT_PLUGINS),
-            "plugin_configs": {},
+            # The container is the security boundary; the permission
+            # plugin's "ask" default would otherwise hang the harness
+            # waiting for a non-existent human. Setting the policy
+            # here means PermissionRequestedEvent never fires.
+            "plugin_configs": {
+                "permission": {
+                    "policy": {
+                        "defaultPolicy": "allow",
+                        "whitelist": {"tools": [], "patterns": []},
+                        "blacklist": {"tools": [], "patterns": []},
+                    }
+                }
+            },
         }
         await environment.exec(
             f"mkdir -p {CONTAINER_JAATO_DIR}/profiles "

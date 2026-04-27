@@ -7,12 +7,11 @@ Lifecycle:
    already running.
 2. Create a session pinned to the requested profile (the BaseAgent
    writes ``.jaato/profiles/harbor.json`` during ``setup()`` so model,
-   provider, and plugins are baked into the profile).
+   provider, plugins, **and** the permission plugin's
+   ``defaultPolicy: "allow"`` are baked in — no permission events
+   fire, so the harness never has to handle them).
 3. Send the instruction; drain events until a terminal status.
-4. Auto-respond ``"a"`` (always-allow) to the first
-   ``PermissionRequestedEvent`` — that promotes every subsequent tool
-   call to whitelisted, so we don't bottleneck on per-call approvals.
-5. Flush ``result.json`` atomically after every ``TurnCompletedEvent``
+4. Flush ``result.json`` atomically after every ``TurnCompletedEvent``
    so a kill mid-run still leaves usable token counts in
    ``AgentContext``.
 
@@ -38,7 +37,6 @@ from jaato_sdk.events import (
     AgentOutputEvent,
     AgentStatusChangedEvent,
     ErrorEvent,
-    PermissionRequestedEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
     TurnCompletedEvent,
@@ -63,7 +61,6 @@ async def _drive(args: argparse.Namespace) -> int:
     await client.create_session(profile=args.profile, agent=args.agent)
     await client.send_message(instruction)
 
-    permission_promoted = False
     try:
         async for ev in client.events():
             if isinstance(ev, AgentOutputEvent):
@@ -89,22 +86,6 @@ async def _drive(args: argparse.Namespace) -> int:
                         "error": ev.error_message,
                     }
                 )
-            elif isinstance(ev, PermissionRequestedEvent):
-                # First prompt: "a" promotes the tool to the session
-                # whitelist so we don't pay a round-trip per call.
-                # Subsequent prompts mean a tool ignored the whitelist
-                # — log them so we can spot misbehaving plugins.
-                if permission_promoted:
-                    logger.warning(
-                        "post-promotion permission request: tool=%s args=%s",
-                        ev.tool_name,
-                        ev.tool_args,
-                    )
-                    response = "y"
-                else:
-                    response = "a"
-                    permission_promoted = True
-                await client.respond_to_permission(ev.request_id, response)
             elif isinstance(ev, TurnCompletedEvent):
                 result.n_input_tokens += ev.prompt_tokens
                 result.n_output_tokens += ev.output_tokens
