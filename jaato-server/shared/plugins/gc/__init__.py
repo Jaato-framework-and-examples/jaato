@@ -112,13 +112,24 @@ def load_gc_plugin(name: str, config: Optional[Dict] = None) -> GCPlugin:
 
 
 def load_gc_from_file(
-    file_path: str = ".jaato/gc.json",
-    agent_name: Optional[str] = None
+    file_path: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    workspace_root: Optional[str] = None,
 ) -> Optional[tuple["GCPlugin", "GCConfig"]]:
     """Load GC configuration from a JSON file.
 
-    Loads GC configuration from a JSON file (default: .jaato/gc.json)
-    and returns an initialized GC plugin with its config.
+    Loads GC configuration from a JSON file and returns an initialized
+    GC plugin with its config.
+
+    Resolution order (when ``file_path`` is not provided):
+        1. ``<workspace_root>/.jaato/gc.json`` if ``workspace_root`` is set,
+           otherwise ``./.jaato/gc.json`` (relative to cwd, legacy behavior).
+        2. ``~/.jaato/gc.json`` (user-level fallback).
+
+    When ``file_path`` is given:
+        - Absolute paths are used as-is.
+        - Relative paths are resolved against ``workspace_root`` when set,
+          otherwise against the current working directory.
 
     The JSON file should have this structure:
         {
@@ -132,15 +143,19 @@ def load_gc_from_file(
         }
 
     Args:
-        file_path: Path to the JSON config file (default: .jaato/gc.json).
+        file_path: Optional explicit path to the JSON config file. When None,
+            the workspace + user fallback search order described above is used.
         agent_name: Optional agent name for trace logging identification.
+        workspace_root: Absolute path to the session's workspace. Required for
+            correct resolution in daemon mode where ``os.getcwd()`` reflects
+            the daemon's startup directory, not the client's workspace.
 
     Returns:
-        Tuple of (GCPlugin, GCConfig) if file exists and is valid,
-        None if file doesn't exist or is invalid.
+        Tuple of (GCPlugin, GCConfig) if a config file exists and is valid,
+        None if no candidate file exists or the file is invalid.
 
     Example:
-        result = load_gc_from_file(agent_name="main")
+        result = load_gc_from_file(agent_name="main", workspace_root="/path/to/ws")
         if result:
             gc_plugin, gc_config = result
             client.set_gc_plugin(gc_plugin, gc_config)
@@ -151,8 +166,21 @@ def load_gc_from_file(
 
     logger = logging.getLogger(__name__)
 
-    config_path = Path(file_path)
-    if not config_path.exists():
+    candidates: list[Path] = []
+    if file_path is not None:
+        explicit = Path(file_path)
+        if not explicit.is_absolute() and workspace_root:
+            explicit = Path(workspace_root) / explicit
+        candidates.append(explicit)
+    else:
+        if workspace_root:
+            candidates.append(Path(workspace_root) / ".jaato" / "gc.json")
+        else:
+            candidates.append(Path(".jaato") / "gc.json")
+        candidates.append(Path.home() / ".jaato" / "gc.json")
+
+    config_path = next((p for p in candidates if p.exists()), None)
+    if config_path is None:
         return None
 
     try:
@@ -196,17 +224,17 @@ def load_gc_from_file(
             plugin_config=data.get('plugin_config') or {},
         )
 
-        logger.info("Loaded GC config from %s: type=%s", file_path, gc_type)
+        logger.info("Loaded GC config from %s: type=%s", config_path, gc_type)
         return gc_plugin, gc_config
 
     except json.JSONDecodeError as e:
-        logger.warning("Invalid JSON in GC config file %s: %s", file_path, e)
+        logger.warning("Invalid JSON in GC config file %s: %s", config_path, e)
         return None
     except ValueError as e:
-        logger.warning("Failed to load GC plugin from %s: %s", file_path, e)
+        logger.warning("Failed to load GC plugin from %s: %s", config_path, e)
         return None
     except Exception as e:
-        logger.warning("Error reading GC config file %s: %s", file_path, e)
+        logger.warning("Error reading GC config file %s: %s", config_path, e)
         return None
 
 

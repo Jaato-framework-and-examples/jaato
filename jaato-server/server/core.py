@@ -1442,7 +1442,7 @@ class JaatoServer:
                         from shared.plugins.subagent.config import gc_profile_to_plugin_config
                         gc_result = gc_profile_to_plugin_config(self._profile.gc)
                     if not gc_result:
-                        gc_result = load_gc_from_file()
+                        gc_result = load_gc_from_file(workspace_root=self._workspace_path)
 
             gc_threshold = None
             gc_strategy = None
@@ -3432,7 +3432,7 @@ class JaatoServer:
                 with self._with_session_env(), self._in_workspace():
                     self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
-                    gc_result = load_gc_from_file()
+                    gc_result = load_gc_from_file(workspace_root=self._workspace_path)
                 gc_threshold = None
                 gc_strategy = None
                 gc_target_percent = None
