@@ -6,12 +6,15 @@ from pathlib import Path
 import pytest
 
 from shared.plugins.references.bundle import (
+    BUNDLE_TIER_USER,
+    BUNDLE_TIER_WORKSPACE,
     EMBEDDING_CONFIG_FILENAME,
     ROOT_BUNDLE_NAME,
     Bundle,
     detect_drift,
     discover_bundles,
     metadata_hash,
+    resolve_bundle_roots,
     write_manifest,
 )
 from shared.plugins.references.models import (
@@ -268,6 +271,161 @@ class TestDiscoverBundles:
         bundles = discover_bundles(refs)
 
         assert bundles[0].reconcile_mode == "eager"
+
+
+class TestResolveBundleRoots:
+    """resolve_bundle_roots returns workspace-then-user in deterministic order."""
+
+    def test_workspace_first_then_user(self, tmp_path):
+        ws = tmp_path / "ws"
+        home = tmp_path / "home"
+        roots = resolve_bundle_roots(str(ws), user_home=home)
+
+        assert roots == [
+            (ws.resolve() / ".jaato" / "references", BUNDLE_TIER_WORKSPACE),
+            (home / ".jaato" / "references", BUNDLE_TIER_USER),
+        ]
+
+    def test_workspace_omitted_when_unknown(self, tmp_path):
+        """A None workspace yields user-tier-only roots — no synthetic ws root."""
+        home = tmp_path / "home"
+        roots = resolve_bundle_roots(None, user_home=home)
+
+        assert roots == [(home / ".jaato" / "references", BUNDLE_TIER_USER)]
+
+    def test_workspace_path_resolved(self, tmp_path):
+        """Relative ``..`` segments in the workspace path are normalized."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "sub").mkdir()
+        # Pass a path with a trailing ``sub/..`` to force resolve() to collapse it.
+        roots = resolve_bundle_roots(str(ws / "sub" / ".."), user_home=tmp_path / "home")
+        assert roots[0][0] == ws.resolve() / ".jaato" / "references"
+
+
+class TestDiscoverBundlesMultiTier:
+    """discover_bundles walks multiple roots with workspace-shadows-user precedence."""
+
+    def test_legacy_single_path_arg_still_works(self, tmp_path):
+        """A bare ``Path`` argument keeps the pre-tiering API working."""
+        refs = tmp_path / ".jaato" / "references"
+        refs.mkdir(parents=True)
+        _manifest(refs / EMBEDDING_CONFIG_FILENAME, rows=["a"])
+
+        bundles = discover_bundles(refs)
+
+        assert len(bundles) == 1
+        assert bundles[0].tier == BUNDLE_TIER_WORKSPACE
+
+    def test_each_bundle_tagged_with_its_tier(self, tmp_path):
+        ws_refs = tmp_path / "ws" / ".jaato" / "references"
+        ws_refs.mkdir(parents=True)
+        _manifest(ws_refs / EMBEDDING_CONFIG_FILENAME, rows=["w1"])
+        (ws_refs / "ws-only").mkdir()
+        _manifest(ws_refs / "ws-only" / EMBEDDING_CONFIG_FILENAME, rows=["w2"])
+
+        user_refs = tmp_path / "home" / ".jaato" / "references"
+        user_refs.mkdir(parents=True)
+        (user_refs / "personal").mkdir()
+        _manifest(user_refs / "personal" / EMBEDDING_CONFIG_FILENAME, rows=["u1"])
+
+        bundles = discover_bundles([
+            (ws_refs, BUNDLE_TIER_WORKSPACE),
+            (user_refs, BUNDLE_TIER_USER),
+        ])
+
+        by_name = {b.name: b for b in bundles}
+        assert by_name[ROOT_BUNDLE_NAME].tier == BUNDLE_TIER_WORKSPACE
+        assert by_name["ws-only"].tier == BUNDLE_TIER_WORKSPACE
+        assert by_name["personal"].tier == BUNDLE_TIER_USER
+
+    def test_workspace_root_shadows_user_root(self, tmp_path):
+        """Same name (root) in both tiers — workspace wins, user invisible."""
+        ws_refs = tmp_path / "ws" / ".jaato" / "references"
+        ws_refs.mkdir(parents=True)
+        _manifest(ws_refs / EMBEDDING_CONFIG_FILENAME, rows=["ws-row"])
+
+        user_refs = tmp_path / "home" / ".jaato" / "references"
+        user_refs.mkdir(parents=True)
+        _manifest(user_refs / EMBEDDING_CONFIG_FILENAME, rows=["user-row"])
+
+        bundles = discover_bundles([
+            (ws_refs, BUNDLE_TIER_WORKSPACE),
+            (user_refs, BUNDLE_TIER_USER),
+        ])
+
+        assert len(bundles) == 1
+        assert bundles[0].embedding_rows == ["ws-row"]
+        assert bundles[0].tier == BUNDLE_TIER_WORKSPACE
+
+    def test_workspace_named_bundle_shadows_user_named_bundle(self, tmp_path):
+        """A workspace ``teammate`` hides a user ``teammate`` entirely."""
+        ws_refs = tmp_path / "ws" / ".jaato" / "references"
+        (ws_refs / "teammate").mkdir(parents=True)
+        _manifest(ws_refs / "teammate" / EMBEDDING_CONFIG_FILENAME, rows=["w"])
+
+        user_refs = tmp_path / "home" / ".jaato" / "references"
+        (user_refs / "teammate").mkdir(parents=True)
+        _manifest(user_refs / "teammate" / EMBEDDING_CONFIG_FILENAME, rows=["u"])
+
+        bundles = discover_bundles([
+            (ws_refs, BUNDLE_TIER_WORKSPACE),
+            (user_refs, BUNDLE_TIER_USER),
+        ])
+
+        assert len(bundles) == 1
+        assert bundles[0].embedding_rows == ["w"]
+        assert bundles[0].tier == BUNDLE_TIER_WORKSPACE
+
+    def test_user_bundle_visible_when_no_workspace_collision(self, tmp_path):
+        """Distinct bundle names from each tier coexist; only collisions shadow."""
+        ws_refs = tmp_path / "ws" / ".jaato" / "references"
+        (ws_refs / "project").mkdir(parents=True)
+        _manifest(ws_refs / "project" / EMBEDDING_CONFIG_FILENAME, rows=["p"])
+
+        user_refs = tmp_path / "home" / ".jaato" / "references"
+        (user_refs / "personal").mkdir(parents=True)
+        _manifest(user_refs / "personal" / EMBEDDING_CONFIG_FILENAME, rows=["x"])
+
+        bundles = discover_bundles([
+            (ws_refs, BUNDLE_TIER_WORKSPACE),
+            (user_refs, BUNDLE_TIER_USER),
+        ])
+
+        names = sorted((b.name, b.tier) for b in bundles)
+        assert names == [
+            ("personal", BUNDLE_TIER_USER),
+            ("project", BUNDLE_TIER_WORKSPACE),
+        ]
+
+    def test_missing_root_is_skipped_silently(self, tmp_path):
+        """Either tier root may not exist on disk — discovery returns the rest."""
+        user_refs = tmp_path / "home" / ".jaato" / "references"
+        (user_refs / "personal").mkdir(parents=True)
+        _manifest(user_refs / "personal" / EMBEDDING_CONFIG_FILENAME, rows=["x"])
+
+        bundles = discover_bundles([
+            (tmp_path / "ws-does-not-exist" / ".jaato" / "references", BUNDLE_TIER_WORKSPACE),
+            (user_refs, BUNDLE_TIER_USER),
+        ])
+
+        assert len(bundles) == 1
+        assert bundles[0].name == "personal"
+        assert bundles[0].tier == BUNDLE_TIER_USER
+
+    def test_qualified_ref_format(self, tmp_path):
+        """qualified_ref follows ``<tier>:<display_name>``; root renders as (root)."""
+        refs = tmp_path / ".jaato" / "references"
+        refs.mkdir(parents=True)
+        _manifest(refs / EMBEDDING_CONFIG_FILENAME, rows=[])
+        (refs / "teammate").mkdir()
+        _manifest(refs / "teammate" / EMBEDDING_CONFIG_FILENAME, rows=[])
+
+        bundles = discover_bundles([(refs, BUNDLE_TIER_WORKSPACE)])
+        by_name = {b.name: b for b in bundles}
+
+        assert by_name[ROOT_BUNDLE_NAME].qualified_ref == "workspace:(root)"
+        assert by_name["teammate"].qualified_ref == "workspace:teammate"
 
 
 class TestWriteManifest:

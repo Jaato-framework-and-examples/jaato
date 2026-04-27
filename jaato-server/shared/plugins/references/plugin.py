@@ -35,7 +35,15 @@ from .config_loader import (
     resolve_source_paths,
     validate_reference_file,
 )
-from .bundle import Bundle, ROOT_BUNDLE_NAME, detect_drift, discover_bundles
+from .bundle import (
+    BUNDLE_TIER_USER,
+    BUNDLE_TIER_WORKSPACE,
+    Bundle,
+    ROOT_BUNDLE_NAME,
+    detect_drift,
+    discover_bundles,
+    resolve_bundle_roots,
+)
 from .merge import (
     MergeOptions,
     MergeResult,
@@ -1133,62 +1141,92 @@ class ReferencesPlugin:
             self._semantic_matcher = matcher
 
     def _discover_and_load_bundles(self) -> None:
-        """Populate ``self._bundles`` and merge sub-bundle refs into the catalog.
+        """Populate ``self._bundles`` and merge bundle refs into the catalog.
 
-        The root bundle (if any) is discovered from
-        ``<workspace>/.jaato/references/embedding_config.json``. Sub-bundles
-        are immediate subdirectories of that path containing their own
-        manifests. Each sub-bundle's reference JSONs are loaded via
+        Walks both tier roots (workspace then user) via
+        :func:`resolve_bundle_roots`. Within each root the root bundle is
+        discovered from ``<root>/embedding_config.json`` and sub-bundles
+        from each immediate subdirectory containing its own manifest.
+        Each bundle's reference JSONs are loaded via
         :func:`discover_references` and tagged with ``bundle_name`` so the
         flat catalog can still reason about membership.
 
-        Sources already loaded by :func:`load_config` (the root bundle)
-        have their ``bundle_name`` left as the default empty string. This
-        matches the new :data:`ROOT_BUNDLE_NAME` sentinel.
+        **Tier shadowing:** :func:`discover_bundles` walks workspace first
+        and a workspace bundle hides any user bundle of the same name —
+        the shadowed user bundle never appears in ``self._bundles`` and
+        its references are not loaded into the catalog.
+
+        Sources already loaded by :func:`load_config` (the workspace-tier
+        root bundle) have their ``bundle_name`` left as the default empty
+        string. Sources from the user-tier root bundle are loaded here
+        and likewise carry ``bundle_name = ""`` (the empty name is the
+        root-bundle sentinel; tier disambiguation lives on the
+        :class:`Bundle` itself, not on individual references).
         """
         self._bundles = []
 
         if not self._config:
             return
 
-        refs_dir = Path(self._config.references_dir)
-        if not refs_dir.is_absolute():
-            if self._workspace_path:
-                refs_dir = Path(self._workspace_path) / refs_dir
-            elif self._project_root:
-                refs_dir = Path(self._project_root) / refs_dir
-            else:
-                self._trace(
-                    "_discover_and_load_bundles: cannot resolve references_dir "
-                    "without workspace_path; bundle discovery skipped"
-                )
-                return
+        # Resolve the workspace tier root from the config (which may have
+        # an absolute or relative ``references_dir``). The user tier always
+        # lives under ``~/.jaato/references`` — :func:`resolve_bundle_roots`
+        # handles that — but we splice in the user pair manually so that a
+        # custom workspace ``references_dir`` (set in references.json) is
+        # still honored.
+        workspace_refs_dir: Optional[Path] = None
+        cfg_refs = Path(self._config.references_dir)
+        if cfg_refs.is_absolute():
+            workspace_refs_dir = cfg_refs
+        elif self._workspace_path:
+            workspace_refs_dir = Path(self._workspace_path) / cfg_refs
+        elif self._project_root:
+            workspace_refs_dir = Path(self._project_root) / cfg_refs
 
-        self._bundles = discover_bundles(refs_dir)
+        roots: List[Tuple[Path, str]] = []
+        if workspace_refs_dir is not None:
+            roots.append((workspace_refs_dir.resolve(), BUNDLE_TIER_WORKSPACE))
+        else:
+            self._trace(
+                "_discover_and_load_bundles: workspace references_dir "
+                "unresolved (no workspace_path); workspace tier skipped"
+            )
+        # User tier — always available.
+        for path, tier in resolve_bundle_roots(workspace_path=None):
+            if tier == BUNDLE_TIER_USER:
+                roots.append((path, tier))
+                break
+
+        self._bundles = discover_bundles(roots)
 
         if not self._bundles:
             self._trace("_discover_and_load_bundles: no bundles found")
             return
 
-        # Load sub-bundle references. The root bundle's refs are already
-        # in self._sources from the initial load_config() call; we only
-        # need to pick up the sub-bundles here.
+        # Load bundle references into the flat catalog. The workspace-tier
+        # root bundle's refs are already in self._sources from the initial
+        # load_config() call; everything else (workspace sub-bundles, plus
+        # all user-tier bundles that survived shadowing) is loaded here.
         existing_ids = {s.id for s in self._sources}
         project_root = self._project_root
         for bundle in self._bundles:
-            if bundle.name == ROOT_BUNDLE_NAME:
+            # Skip the workspace-tier root — already loaded by load_config().
+            if (
+                bundle.name == ROOT_BUNDLE_NAME
+                and bundle.tier == BUNDLE_TIER_WORKSPACE
+            ):
                 continue
-            sub_sources = discover_references(
+            bundle_sources = discover_references(
                 str(bundle.directory),
                 base_path=str(bundle.directory.parent),
                 project_root=project_root,
             )
-            for source in sub_sources:
+            for source in bundle_sources:
                 source.bundle_name = bundle.name
                 if source.id in existing_ids:
                     self._trace(
                         f"_discover_and_load_bundles: skipping duplicate id "
-                        f"'{source.id}' from bundle '{bundle.display_name}'"
+                        f"'{source.id}' from bundle '{bundle.qualified_ref}'"
                     )
                     continue
                 self._sources.append(source)
@@ -1196,7 +1234,7 @@ class ReferencesPlugin:
 
         self._trace(
             f"_discover_and_load_bundles: bundles="
-            f"{[b.display_name for b in self._bundles]}, "
+            f"{[b.qualified_ref for b in self._bundles]}, "
             f"total_sources={len(self._sources)}"
         )
 
