@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "harbor-jaato"
+version = "0.1.0"
+description = "Harbor BaseAgent that runs a jaato-server inside the eval environment"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BUSL-1.1"
+authors = [{ name = "jaato contributors" }]
+
+dependencies = [
+    "harbor",
+    "jaato-sdk>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+# Register with Harbor's agent discovery so `harbor run --agent jaato` works.
+[project.entry-points."harbor.agents"]
+jaato = "harbor_jaato:JaatoAgent"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harbor_jaato"]
