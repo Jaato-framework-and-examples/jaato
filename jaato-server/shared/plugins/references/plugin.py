@@ -18,6 +18,7 @@ Enrichment Support:
 import json
 import os
 import re
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,7 @@ from .bundle import (
     BUNDLE_TIER_WORKSPACE,
     Bundle,
     BundleRef,
+    EMBEDDING_CONFIG_FILENAME,
     ROOT_BUNDLE_NAME,
     VALID_BUNDLE_TIERS,
     detect_drift,
@@ -1645,7 +1647,8 @@ class ReferencesPlugin:
             "listReferences": self._execute_list,        # model tool
             "validateReference": self._execute_validate_reference,  # model tool
             "compute_embedding": self._execute_compute_embedding,  # model tool (gen-references agent)
-            "references": self._execute_references_cmd,  # user command
+            "references": self._execute_references_cmd,  # user command (reference ops)
+            "bundle": self._execute_bundle_cmd,           # user command (bundle ops)
         }
 
     def _execute_select(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -2053,13 +2056,18 @@ class ReferencesPlugin:
     def _execute_references_cmd(self, args: Dict[str, Any]) -> Any:
         """Execute the 'references' user command.
 
+        Subcommands cover *reference*-level operations only — listing,
+        selecting, unselecting individual references, and reloading the
+        catalog from disk. *Bundle*-level operations (create, delete,
+        add, eject, remove, reconcile, merge, pack, unpack) live under
+        the separate ``bundle`` user command; see
+        :meth:`_execute_bundle_cmd`.
+
         Subcommands:
             list [all|selected|unselected]  - List reference sources
             select <ref-id>                 - Select a reference source
             unselect <ref-id>               - Unselect a reference source
             reload                          - Reload catalog from disk
-            bundles                         - Show loaded knowledge bundles
-            reconcile [<bundle>]            - Reconcile bundle sidecars
             help                            - Show usage help
         """
         subcommand = args.get("subcommand", "list")
@@ -2079,29 +2087,87 @@ class ReferencesPlugin:
             return self._cmd_references_unselect(target)
         elif subcommand == "reload":
             return self._cmd_references_reload()
-        elif subcommand == "bundles":
-            return self._cmd_references_bundles()
-        elif subcommand == "reconcile":
-            return self._cmd_references_reconcile(target)
-        elif subcommand == "merge":
-            return self._cmd_references_merge(target)
-        elif subcommand == "pack":
-            return self._cmd_references_pack(target)
-        elif subcommand == "unpack":
-            return self._cmd_references_unpack(target)
         elif subcommand == "help":
             return self._cmd_references_help()
+        elif subcommand in (
+            "bundles", "reconcile", "merge", "pack", "unpack",
+        ):
+            return {
+                "error": (
+                    f"'references {subcommand}' has moved to the 'bundle' "
+                    f"command — try 'bundle "
+                    f"{('list' if subcommand == 'bundles' else subcommand)} ...' "
+                    f"or 'bundle help'."
+                )
+            }
         else:
             return {
                 "error": (
                     f"Unknown subcommand: {subcommand}. Use: list, select, "
-                    f"unselect, reload, bundles, reconcile, merge, pack, "
+                    f"unselect, reload, help. For bundle operations see "
+                    f"'bundle help'."
+                )
+            }
+
+    def _execute_bundle_cmd(self, args: Dict[str, Any]) -> Any:
+        """Execute the 'bundle' user command.
+
+        Bundle-level operations are split between membership ops
+        (``create``, ``delete``, ``add``, ``eject``, ``remove``) and
+        sidecar ops (``reconcile``, ``merge``, ``pack``, ``unpack``).
+        ``list`` shows what bundles exist; ``help`` documents the surface.
+
+        Subcommands:
+            list                                    Show loaded bundles
+            create <name> [--scope ws|user]         Create an empty bundle
+            delete <bundle-ref> [--force]           Remove a bundle directory
+            add <ref-id> --to <bundle-ref>          Place a ref in a bundle
+            eject <ref-id>                          Remove a ref from its bundle
+            remove <ref-id>                         Delete a ref entirely
+            reconcile [<ref>] [--scope ...]         Sync sidecars
+            merge <src> [--into <tgt>] [flags]      Merge bundles
+            pack <bundle-ref> [--to <archive>]      Build distributable archive
+            unpack <archive> [...]                  Install an archive
+            help                                    Show usage help
+        """
+        subcommand = args.get("subcommand", "list")
+        target = args.get("target", "")
+
+        self._trace(f"bundle cmd: subcommand={subcommand}, target={target}")
+
+        if subcommand == "list":
+            return self._cmd_bundle_list()
+        elif subcommand == "create":
+            return self._cmd_bundle_create(target)
+        elif subcommand == "delete":
+            return self._cmd_bundle_delete(target)
+        elif subcommand == "add":
+            return self._cmd_bundle_add(target)
+        elif subcommand == "eject":
+            return self._cmd_bundle_eject(target)
+        elif subcommand == "remove":
+            return self._cmd_bundle_remove(target)
+        elif subcommand == "reconcile":
+            return self._cmd_bundle_reconcile(target)
+        elif subcommand == "merge":
+            return self._cmd_bundle_merge(target)
+        elif subcommand == "pack":
+            return self._cmd_bundle_pack(target)
+        elif subcommand == "unpack":
+            return self._cmd_bundle_unpack(target)
+        elif subcommand == "help":
+            return self._cmd_bundle_help()
+        else:
+            return {
+                "error": (
+                    f"Unknown subcommand: {subcommand}. Use: list, create, "
+                    f"delete, add, eject, remove, reconcile, merge, pack, "
                     f"unpack, help"
                 )
             }
 
-    def _cmd_references_bundles(self) -> HelpLines:
-        """Execute 'references bundles' — show loaded knowledge bundles.
+    def _cmd_bundle_list(self) -> HelpLines:
+        """Execute 'bundle list' — show loaded knowledge bundles.
 
         One row per bundle: tier, name, source count, model, dimensions,
         and current drift status. The tier column distinguishes
@@ -2148,8 +2214,794 @@ class ReferencesPlugin:
             ))
         return HelpLines(lines=lines)
 
-    def _cmd_references_reconcile(self, target: str) -> Dict[str, Any]:
-        """Execute 'references reconcile [<bundle-ref>] [--scope <tier>]'.
+    def _cmd_bundle_create(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle create <name> [--scope workspace|user]'.
+
+        Creates an empty bundle directory with a fresh
+        ``embedding_config.json``. The bundle's embedding model and
+        dimensions are inherited from the active embedding provider so
+        that future references added to the bundle are vector-compatible
+        out of the box. With no provider available, the command refuses
+        — a sidecar can't be written without one.
+
+        ``<name>`` is the directory name on disk. The reserved value
+        ``"root"`` (or empty string) creates the tier-root bundle by
+        writing the manifest at the tier root itself.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        name: Optional[str] = None
+        scope: str = BUNDLE_TIER_WORKSPACE
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--scope":
+                if i + 1 >= len(tokens):
+                    return {"error": "--scope requires a value: workspace or user"}
+                value = tokens[i + 1]
+                if value not in VALID_BUNDLE_TIERS:
+                    return {
+                        "error": (
+                            f"Unknown scope {value!r}. Use 'workspace' or 'user'."
+                        )
+                    }
+                scope = value
+                i += 2
+                continue
+            if tok.startswith("--scope="):
+                value = tok.split("=", 1)[1]
+                if value not in VALID_BUNDLE_TIERS:
+                    return {
+                        "error": (
+                            f"Unknown scope {value!r}. Use 'workspace' or 'user'."
+                        )
+                    }
+                scope = value
+                i += 1
+                continue
+            if name is not None:
+                return {
+                    "error": "Usage: bundle create <name> [--scope workspace|user]"
+                }
+            name = tok
+            i += 1
+
+        if name is None:
+            return {
+                "error": "Usage: bundle create <name> [--scope workspace|user]"
+            }
+
+        # Normalize the root-bundle alias; everything else stays as-is.
+        if name in ("root", "(root)"):
+            name = ROOT_BUNDLE_NAME
+
+        # Refuse if a bundle with this name already exists in the chosen
+        # tier. A workspace bundle that shadows a user bundle of the
+        # same name still counts as "exists" — discovery returns the
+        # workspace one, and overwriting it is what ``--overwrite`` (on
+        # unpack) and ``delete --force`` (here) are for.
+        existing = next(
+            (
+                b for b in self._bundles
+                if b.name == name and b.tier == scope
+            ),
+            None,
+        )
+        if existing is not None:
+            return {
+                "error": (
+                    f"bundle '{existing.qualified_ref}' already exists at "
+                    f"{existing.directory}; use 'bundle delete' first or "
+                    f"pick a different name"
+                )
+            }
+
+        if self._embedding_provider is None:
+            return {
+                "error": (
+                    "bundle create requires an embedding provider — none "
+                    "is configured. Install sentence-transformers or "
+                    "configure an embedding provider before creating a bundle."
+                )
+            }
+        # Ensure the provider has loaded its model so .dimensions is accurate.
+        if not self._embedding_provider.available:
+            self._embedding_provider.load_model()
+        model_name = self._embedding_provider.model_name
+        dimensions = getattr(self._embedding_provider, "dimensions", None)
+        if not isinstance(dimensions, int) or dimensions <= 0:
+            return {
+                "error": (
+                    "embedding provider did not report a valid dimension; "
+                    "cannot write a bundle manifest without it"
+                )
+            }
+
+        tier_root = self._tier_root(scope)
+        if tier_root is None:
+            return {
+                "error": (
+                    f"cannot resolve tier root for scope={scope!r}; "
+                    f"workspace_path is unknown"
+                )
+            }
+
+        bundle_dir = tier_root if name == ROOT_BUNDLE_NAME else tier_root / name
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
+        if manifest_path.is_file():
+            return {
+                "error": (
+                    f"manifest already exists at {manifest_path} — refusing "
+                    f"to overwrite. Use 'bundle delete' or pick a different name."
+                )
+            }
+        sidecar_name = "references.embeddings.npy"
+        manifest_path.write_text(
+            json.dumps({
+                "embedding_model": model_name,
+                "embedding_dimensions": int(dimensions),
+                "embedding_sidecar": sidecar_name,
+                "rows": [],
+            }, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        # Re-discover so the new bundle is visible to subsequent ops.
+        self._discover_and_load_bundles()
+
+        new_bundle = next(
+            (
+                b for b in self._bundles
+                if b.name == name and b.tier == scope
+            ),
+            None,
+        )
+        qualified = (
+            new_bundle.qualified_ref if new_bundle is not None
+            else f"{scope}:{name or '(root)'}"
+        )
+        self._trace(
+            f"bundle create: {qualified} at {bundle_dir} "
+            f"model={model_name} dim={dimensions}"
+        )
+
+        return {
+            "status": "ok",
+            "bundle": qualified,
+            "directory": str(bundle_dir),
+            "embedding_model": model_name,
+            "embedding_dimensions": int(dimensions),
+            "help_lines": HelpLines(lines=[
+                ("CREATE", "bold"),
+                ("", ""),
+                (f"  bundle: {qualified}", ""),
+                (f"  directory: {bundle_dir}", ""),
+                (f"  model: {model_name} (dim={dimensions})", ""),
+            ]),
+        }
+
+    def _cmd_bundle_delete(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle delete <bundle-ref> [--force]'.
+
+        Removes the bundle directory and everything inside it. By
+        default refuses to delete a non-empty bundle (one with any
+        ``rows`` or any reference JSON files); pass ``--force`` to
+        override. Sources from the deleted bundle are dropped from the
+        live catalog.
+
+        For the *root* bundle the manifest, sidecar, and ``payload/``
+        subdirectory are removed but the tier root itself is left in
+        place — other sub-bundles may still live alongside it.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        bundle_token: Optional[str] = None
+        force = False
+        for tok in tokens:
+            if tok == "--force":
+                force = True
+                continue
+            if bundle_token is not None:
+                return {"error": "Usage: bundle delete <bundle-ref> [--force]"}
+            bundle_token = tok
+
+        if bundle_token is None:
+            return {"error": "Usage: bundle delete <bundle-ref> [--force]"}
+
+        try:
+            ref = parse_bundle_ref(bundle_token)
+        except ValueError as e:
+            return {"error": str(e)}
+        try:
+            bundle = find_bundle(
+                self._bundles, ref, default_scope=BUNDLE_TIER_WORKSPACE,
+            )
+        except AmbiguousBundleRefError as e:
+            return {"error": str(e)}
+        if bundle is None:
+            return {
+                "error": (
+                    f"Unknown bundle '{ref.display}'. Loaded bundles: "
+                    f"{[b.qualified_ref for b in self._bundles] or '(none)'}"
+                )
+            }
+
+        # Non-emptiness check: any rows OR any *.json reference files
+        # (excluding the manifest itself).
+        has_rows = bool(bundle.embedding_rows)
+        has_ref_files = any(
+            p.name != EMBEDDING_CONFIG_FILENAME
+            for p in bundle.directory.glob("*.json")
+        )
+        if (has_rows or has_ref_files) and not force:
+            return {
+                "error": (
+                    f"bundle '{bundle.qualified_ref}' is not empty "
+                    f"({len(bundle.embedding_rows)} row(s)); pass --force to "
+                    f"delete anyway"
+                )
+            }
+
+        # Drop the bundle's sources from the live catalog before we
+        # mutate the disk — keeps the in-memory state consistent if
+        # the rmtree raises mid-flight.
+        self._sources = [
+            s for s in self._sources if s.bundle_name != bundle.name
+        ]
+
+        if bundle.name == ROOT_BUNDLE_NAME:
+            # Root bundle: remove only the bundle artefacts, leaving the
+            # tier root dir for the other sub-bundles that live there.
+            for p in bundle.directory.glob("*.json"):
+                p.unlink()
+            for p in bundle.directory.glob("*.npy"):
+                p.unlink()
+            for p in bundle.directory.glob("*.npy.lock"):
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+            payload = bundle.directory / "payload"
+            if payload.is_dir():
+                shutil.rmtree(payload)
+        else:
+            shutil.rmtree(bundle.directory)
+
+        # Re-discover so self._bundles reflects the deletion.
+        self._discover_and_load_bundles()
+
+        self._trace(f"bundle delete: removed {bundle.qualified_ref}")
+        return {
+            "status": "ok",
+            "bundle": bundle.qualified_ref,
+            "directory": str(bundle.directory),
+            "forced": force,
+            "help_lines": HelpLines(lines=[
+                ("DELETE", "bold"),
+                ("", ""),
+                (f"  removed: {bundle.qualified_ref}", ""),
+                (f"  directory: {bundle.directory}", ""),
+            ]),
+        }
+
+    def _cmd_bundle_add(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle add <ref-id> --to <bundle-ref>'.
+
+        Relocates an existing reference's JSON file into the target
+        bundle's directory. The source can be in any state:
+
+        * **Free** (no enclosing bundle) — the JSON moves from the
+          tier-root references area into the target.
+        * **In another bundle** — the JSON moves from the source bundle's
+          directory into the target's. The source bundle's ``rows``
+          loses the id; the target's gains it (via reconcile).
+
+        After the move the target bundle is auto-reconciled so its
+        sidecar picks up the new row. The source bundle is also
+        reconciled so its ``rows`` no longer references the missing id.
+
+        Raises an error if the ref is already in the target bundle.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        ref_id_token: Optional[str] = None
+        target_token: Optional[str] = None
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--to":
+                if i + 1 >= len(tokens):
+                    return {"error": "--to requires a bundle reference"}
+                target_token = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--to="):
+                target_token = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if ref_id_token is not None:
+                return {"error": "Usage: bundle add <ref-id> --to <bundle-ref>"}
+            ref_id_token = tok
+            i += 1
+
+        if ref_id_token is None or target_token is None:
+            return {"error": "Usage: bundle add <ref-id> --to <bundle-ref>"}
+
+        # Resolve the source reference by id from the live catalog.
+        source = next(
+            (s for s in self._sources if s.id == ref_id_token), None,
+        )
+        if source is None:
+            return {
+                "error": (
+                    f"Unknown reference id {ref_id_token!r}. "
+                    f"Use 'references list' to see what's loaded."
+                )
+            }
+
+        # Resolve the target bundle.
+        try:
+            target_ref = parse_bundle_ref(target_token)
+        except ValueError as e:
+            return {"error": f"--to: {e}"}
+        try:
+            target = find_bundle(
+                self._bundles, target_ref, default_scope=BUNDLE_TIER_WORKSPACE,
+            )
+        except AmbiguousBundleRefError as e:
+            return {"error": f"--to: {e}"}
+        if target is None:
+            return {
+                "error": (
+                    f"Unknown target bundle '{target_ref.display}'. "
+                    f"Use 'bundle create' to make it first."
+                )
+            }
+
+        if source.bundle_name == target.name:
+            # Already lives in this bundle; nothing to do.
+            return {
+                "error": (
+                    f"reference {ref_id_token!r} is already in bundle "
+                    f"'{target.qualified_ref}'"
+                )
+            }
+
+        source_file = self._locate_ref_file(source)
+        if source_file is None:
+            return {
+                "error": (
+                    f"could not locate the JSON file for reference "
+                    f"{ref_id_token!r}; the catalog and disk may have "
+                    f"diverged — try 'references reload'"
+                )
+            }
+
+        # Identify the source bundle (if any) so we can reconcile it
+        # afterwards. ``None`` means the ref was free.
+        source_bundle = (
+            next(
+                (b for b in self._bundles if b.name == source.bundle_name),
+                None,
+            )
+            if source.bundle_name
+            else None
+        )
+
+        dest_file = target.directory / source_file.name
+        if dest_file.exists():
+            return {
+                "error": (
+                    f"target bundle already has a file named "
+                    f"{source_file.name}; rename it or remove it first"
+                )
+            }
+
+        target.directory.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source_file), str(dest_file))
+
+        # Update the in-memory source's bundle_name. The actual
+        # ReferenceSource list will be refreshed on the catalog reload.
+        source.bundle_name = target.name
+
+        return self._post_membership_change(
+            verb="add",
+            ref_id=ref_id_token,
+            source_bundle=source_bundle,
+            target_bundle=target,
+        )
+
+    def _cmd_bundle_eject(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle eject <ref-id>'.
+
+        Moves a reference's JSON file out of its current bundle and
+        into the tier root, where it remains discoverable by the
+        catalog but no longer counted by any bundle's manifest. Useful
+        when the operator wants to keep a reference around but
+        decouple it from a specific bundle's vector index.
+
+        Refuses to eject from a tier-root bundle whose tier root *is*
+        the bundle directory — there's no parent location to land in.
+        Refuses on free references (already not in a bundle).
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        if len(tokens) != 1:
+            return {"error": "Usage: bundle eject <ref-id>"}
+        ref_id = tokens[0]
+
+        source = next((s for s in self._sources if s.id == ref_id), None)
+        if source is None:
+            return {"error": f"Unknown reference id {ref_id!r}"}
+        if not source.bundle_name:
+            return {
+                "error": (
+                    f"reference {ref_id!r} is already free "
+                    f"(not in any bundle)"
+                )
+            }
+
+        bundle = next(
+            (b for b in self._bundles if b.name == source.bundle_name),
+            None,
+        )
+        if bundle is None:
+            return {
+                "error": (
+                    f"reference {ref_id!r} claims membership in bundle "
+                    f"'{source.bundle_name}' but that bundle is not loaded"
+                )
+            }
+
+        source_file = self._locate_ref_file(source)
+        if source_file is None:
+            return {
+                "error": (
+                    f"could not locate the JSON file for reference "
+                    f"{ref_id!r}; try 'references reload'"
+                )
+            }
+
+        # Eject destination: the tier root for the bundle's tier. If
+        # the bundle *is* the tier root (root bundle), there's no
+        # parent to eject into.
+        tier_root = self._tier_root(bundle.tier)
+        if tier_root is None:
+            return {
+                "error": (
+                    f"cannot resolve tier root for scope={bundle.tier!r}; "
+                    f"workspace_path is unknown"
+                )
+            }
+        if bundle.directory.resolve() == tier_root.resolve():
+            return {
+                "error": (
+                    f"bundle '{bundle.qualified_ref}' is the tier-root "
+                    f"bundle — there's no parent directory to eject to. "
+                    f"Use 'bundle add ... --to <other-bundle>' instead, "
+                    f"or 'bundle remove' to delete."
+                )
+            }
+
+        dest_file = tier_root / source_file.name
+        if dest_file.exists():
+            return {
+                "error": (
+                    f"tier root already has a file named "
+                    f"{source_file.name}; rename it before ejecting"
+                )
+            }
+        tier_root.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source_file), str(dest_file))
+        source.bundle_name = ""
+
+        return self._post_membership_change(
+            verb="eject",
+            ref_id=ref_id,
+            source_bundle=bundle,
+            target_bundle=None,
+        )
+
+    def _cmd_bundle_remove(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle remove <ref-id>'.
+
+        Permanently deletes the reference's JSON file from disk and
+        drops it from the live catalog. If the reference was in a
+        bundle, that bundle is reconciled so its ``rows`` no longer
+        cites the now-missing id.
+
+        This is symmetric with ``bundle delete`` but operates at the
+        per-reference level rather than the whole bundle.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(raw_args or "")
+        except ValueError as e:
+            return {"error": f"Failed to parse arguments: {e}"}
+
+        if len(tokens) != 1:
+            return {"error": "Usage: bundle remove <ref-id>"}
+        ref_id = tokens[0]
+
+        source = next((s for s in self._sources if s.id == ref_id), None)
+        if source is None:
+            return {"error": f"Unknown reference id {ref_id!r}"}
+
+        source_file = self._locate_ref_file(source)
+        if source_file is None:
+            return {
+                "error": (
+                    f"could not locate the JSON file for reference "
+                    f"{ref_id!r}; try 'references reload'"
+                )
+            }
+
+        source_bundle = (
+            next(
+                (b for b in self._bundles if b.name == source.bundle_name),
+                None,
+            )
+            if source.bundle_name
+            else None
+        )
+
+        source_file.unlink()
+
+        return self._post_membership_change(
+            verb="remove",
+            ref_id=ref_id,
+            source_bundle=source_bundle,
+            target_bundle=None,
+        )
+
+    def _post_membership_change(
+        self,
+        *,
+        verb: str,
+        ref_id: str,
+        source_bundle: Optional[Bundle],
+        target_bundle: Optional[Bundle],
+    ) -> Dict[str, Any]:
+        """Reconcile + reload after add / eject / remove.
+
+        Refreshes the live catalog so the moved/deleted reference is
+        reflected in ``self._sources`` (this includes free references
+        living at the workspace tier root, which are not picked up by
+        :meth:`_discover_and_load_bundles` alone), then reconciles the
+        source bundle (if any) and target bundle (if any) so their
+        sidecars match the new membership. Re-attaches matchers.
+
+        Args:
+            verb: The verb the operator invoked, used in the trace and
+                in the structured result envelope.
+            ref_id: The reference id involved.
+            source_bundle: Bundle the ref left, or ``None`` if it was
+                free. Reconciled to drop the orphan row from its
+                ``rows``.
+            target_bundle: Bundle the ref entered, or ``None`` for
+                eject/remove. Reconciled to embed the new row.
+
+        Returns:
+            The user-facing result dict (status / message / help_lines).
+        """
+        # Rebuild the master catalog from disk so a deleted JSON in the
+        # tier root (free reference) actually disappears from
+        # ``self._sources``. ``_reload_catalog`` walks the workspace
+        # tier root via ``load_config``; ``_discover_and_load_bundles``
+        # then re-attaches sub-bundle and user-tier sources on top.
+        if self._workspace_path:
+            self._reload_catalog(self._workspace_path)
+        self._discover_and_load_bundles()
+
+        reconciled_summaries: List[str] = []
+        if self._lookup_strategy in ("hybrid", "semantic_only"):
+            for bundle in (source_bundle, target_bundle):
+                if bundle is None:
+                    continue
+                # Re-resolve the bundle from the freshly reloaded list —
+                # the stale dataclass we hold may no longer match the
+                # current discovery output (in particular its
+                # ``embedding_rows`` and ``directory`` could have
+                # shifted on a delete).
+                live = next(
+                    (
+                        b for b in self._bundles
+                        if b.name == bundle.name and b.tier == bundle.tier
+                    ),
+                    None,
+                )
+                if live is None:
+                    continue
+                rec = reconcile_bundle(live, self._sources, self._embedding_provider)
+                reconciled_summaries.append(
+                    f"{live.qualified_ref}: {rec.summary()}"
+                )
+                if self._embedding_provider is not None:
+                    live.matcher = self._attach_matcher(
+                        live, self._embedding_provider.model_name,
+                    )
+                    if (
+                        live.name == ROOT_BUNDLE_NAME
+                        and live.tier == BUNDLE_TIER_WORKSPACE
+                    ):
+                        self._semantic_matcher = live.matcher
+
+        self._trace(
+            f"bundle {verb}: ref={ref_id!r} "
+            f"source={source_bundle.qualified_ref if source_bundle else '(free)'} "
+            f"target={target_bundle.qualified_ref if target_bundle else '(none)'} "
+            f"reconciled={reconciled_summaries}"
+        )
+
+        lines: List[Tuple[str, str]] = [
+            (verb.upper(), "bold"),
+            ("", ""),
+            (f"  reference: {ref_id}", ""),
+        ]
+        if source_bundle is not None:
+            lines.append((f"  from: {source_bundle.qualified_ref}", ""))
+        if target_bundle is not None:
+            lines.append((f"  to: {target_bundle.qualified_ref}", ""))
+        for summary in reconciled_summaries:
+            lines.append((f"  reconciled: {summary}", ""))
+
+        return {
+            "status": "ok",
+            "verb": verb,
+            "ref_id": ref_id,
+            "source_bundle": source_bundle.qualified_ref if source_bundle else None,
+            "target_bundle": target_bundle.qualified_ref if target_bundle else None,
+            "reconciled": reconciled_summaries,
+            "help_lines": HelpLines(lines=lines),
+        }
+
+    def _locate_ref_file(self, source: ReferenceSource) -> Optional[Path]:
+        """Find the on-disk JSON file backing ``source`` by id.
+
+        Reference JSONs aren't required to be named after their id, so
+        the lookup walks the candidate directory and reads each
+        ``*.json`` until it finds one whose ``id`` field matches.
+
+        The candidate directory is determined by ``bundle_name``:
+
+        * Bundled ref → the bundle's :attr:`Bundle.directory`.
+        * Free ref → the workspace tier's references root
+          (``<workspace>/.jaato/references/``). User-tier free
+          references are not currently loaded by the catalog, so they
+          aren't a candidate location.
+
+        Returns ``None`` when the ref's file can't be found (e.g. it
+        was renamed under us and the catalog is stale).
+        """
+        candidate_dir: Optional[Path] = None
+        if source.bundle_name:
+            for b in self._bundles:
+                if b.name == source.bundle_name:
+                    candidate_dir = b.directory
+                    break
+        else:
+            ws_root = self._tier_root(BUNDLE_TIER_WORKSPACE)
+            if ws_root is not None:
+                candidate_dir = ws_root
+
+        if candidate_dir is None or not candidate_dir.is_dir():
+            return None
+
+        for json_path in candidate_dir.glob("*.json"):
+            if json_path.name == EMBEDDING_CONFIG_FILENAME:
+                continue
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if isinstance(data, dict) and data.get("id") == source.id:
+                return json_path
+        return None
+
+    def _cmd_bundle_help(self) -> HelpLines:
+        """Return detailed help for the 'bundle' command."""
+        return HelpLines(lines=[
+            ("Bundle Command", "bold"),
+            ("", ""),
+            ("Manage knowledge bundles for the current session.", ""),
+            ("", ""),
+            ("USAGE", "bold"),
+            ("    bundle [subcommand] [args]", ""),
+            ("", ""),
+            ("SUBCOMMANDS", "bold"),
+            ("    list", "dim"),
+            ("        Show loaded bundles. Tier column distinguishes workspace", "dim"),
+            ("        bundles (./jaato/references) from user bundles (~/.jaato/references).", "dim"),
+            ("", ""),
+            ("    create <name> [--scope workspace|user]", "dim"),
+            ("        Create an empty bundle with a fresh manifest. Embedding", "dim"),
+            ("        model and dimensions come from the active provider.", "dim"),
+            ("", ""),
+            ("    delete <bundle-ref> [--force]", "dim"),
+            ("        Remove a bundle directory. Refuses if the bundle has any", "dim"),
+            ("        rows or reference JSONs unless --force is given.", "dim"),
+            ("", ""),
+            ("    add <ref-id> --to <bundle-ref>", "dim"),
+            ("        Place an existing reference (free, or in another bundle)", "dim"),
+            ("        into the target bundle. Auto-reconciles both sides.", "dim"),
+            ("", ""),
+            ("    eject <ref-id>", "dim"),
+            ("        Move a reference out of its current bundle, into the tier", "dim"),
+            ("        root. The reference stays in the catalog as a free ref.", "dim"),
+            ("", ""),
+            ("    remove <ref-id>", "dim"),
+            ("        Permanently delete a reference's JSON from disk and drop", "dim"),
+            ("        it from the catalog.", "dim"),
+            ("", ""),
+            ("    reconcile [<bundle-ref>] [--scope workspace|user|all]", "dim"),
+            ("        Bring a bundle's sidecar in sync with the catalog: embed", "dim"),
+            ("        newly dropped refs, refresh stale ones, drop orphans.", "dim"),
+            ("        With no argument, reconciles every workspace-tier bundle.", "dim"),
+            ("", ""),
+            ("    merge <source-ref> [--into <target-ref>] [flags]", "dim"),
+            ("        Merge a knowledge bundle into another. Cross-tier merges", "dim"),
+            ("        are supported: 'merge user:notes --into workspace:project'.", "dim"),
+            ("        Flags: --on-conflict reject|prefix|newer, --re-embed, --dry-run.", "dim"),
+            ("", ""),
+            ("    pack <bundle-ref> [--to <archive>]", "dim"),
+            ("        Build a self-contained .tar.gz archive for distribution.", "dim"),
+            ("        LOCAL payloads are bundled in; URL/MCP/INLINE refs pass through.", "dim"),
+            ("", ""),
+            ("    unpack <archive> [--into <bundle-ref>] [flags]", "dim"),
+            ("        Install an archive into a tier; auto-reconciles after.", "dim"),
+            ("        Flags: --overwrite, --merge, --no-reconcile.", "dim"),
+            ("", ""),
+            ("    help", "dim"),
+            ("        Show this help message.", "dim"),
+            ("", ""),
+            ("BUNDLE REFERENCES", "bold"),
+            ("    Most subcommands accept a bundle reference of the form:", "dim"),
+            ("        [<scope>:]<name>", "dim"),
+            ("    where <scope> is 'workspace' or 'user' and <name> is a bundle", "dim"),
+            ("    directory name (or 'root' / '(root)' for the root bundle).", "dim"),
+            ("    Bare names are resolved against the workspace tier first.", "dim"),
+            ("", ""),
+            ("EXAMPLES", "bold"),
+            ("    bundle list                                Show loaded bundles", "dim"),
+            ("    bundle create teammate                     New workspace bundle", "dim"),
+            ("    bundle create personal --scope user        New user bundle", "dim"),
+            ("    bundle add api-spec --to teammate          Move ref into a bundle", "dim"),
+            ("    bundle eject api-spec                      Pull ref out (still loaded)", "dim"),
+            ("    bundle remove api-spec                     Delete ref from disk", "dim"),
+            ("    bundle delete teammate                     Remove an empty bundle", "dim"),
+            ("    bundle delete teammate --force             Remove non-empty bundle", "dim"),
+            ("    bundle reconcile                           Reconcile workspace bundles", "dim"),
+            ("    bundle reconcile --scope all               Reconcile every loaded bundle", "dim"),
+            ("    bundle merge user:notes --into workspace:project", "dim"),
+            ("    bundle pack teammate                       Pack workspace:teammate", "dim"),
+            ("    bundle unpack ./teammate-workspace.tar.gz", "dim"),
+        ])
+
+
+    def _cmd_bundle_reconcile(self, target: str) -> Dict[str, Any]:
+        """Execute 'bundle reconcile [<bundle-ref>] [--scope <tier>]'.
 
         Argument forms:
 
@@ -2207,7 +3059,7 @@ class ReferencesPlugin:
             if bundle_token is not None:
                 return {
                     "error": (
-                        "Usage: references reconcile [<bundle-ref>] [--scope workspace|user|all]"
+                        "Usage: bundle reconcile [<bundle-ref>] [--scope workspace|user|all]"
                     )
                 }
             bundle_token = tok
@@ -2312,8 +3164,8 @@ class ReferencesPlugin:
             "help_lines": HelpLines(lines=lines),
         }
 
-    def _cmd_references_merge(self, raw_args: str) -> Dict[str, Any]:
-        """Execute 'references merge <source-ref> [--into <target-ref>] [flags]'.
+    def _cmd_bundle_merge(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle merge <source-ref> [--into <target-ref>] [flags]'.
 
         Source and target both accept the ``[<scope>:]<name>`` syntax
         parsed by :func:`parse_bundle_ref` (e.g., ``teammate``,
@@ -2347,7 +3199,7 @@ class ReferencesPlugin:
         if not source_arg:
             return {
                 "error": (
-                    "Usage: references merge <source-ref> [--into <target-ref>] "
+                    "Usage: bundle merge <source-ref> [--into <target-ref>] "
                     "[--on-conflict reject|prefix|newer] [--re-embed] [--dry-run]"
                 )
             }
@@ -2465,7 +3317,7 @@ class ReferencesPlugin:
             options=options,
         )
 
-        self._trace(f"references merge: {result.summary()}")
+        self._trace(f"bundle merge: {result.summary()}")
 
         # On a real (non-dry-run) success, update the in-memory catalog
         # so the next prompt/tool call sees the merged sources without
@@ -2559,8 +3411,8 @@ class ReferencesPlugin:
             payload["error"] = result.error
         return payload
 
-    def _cmd_references_pack(self, raw_args: str) -> Dict[str, Any]:
-        """Execute 'references pack <bundle-ref> [--to <archive>]'.
+    def _cmd_bundle_pack(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle pack <bundle-ref> [--to <archive>]'.
 
         Writes a self-contained ``.tar.gz`` archive of the named bundle
         — manifest + sidecar + reference JSONs + every LOCAL reference's
@@ -2598,14 +3450,14 @@ class ReferencesPlugin:
                 continue
             if bundle_token is not None:
                 return {
-                    "error": "Usage: references pack <bundle-ref> [--to <archive>]"
+                    "error": "Usage: bundle pack <bundle-ref> [--to <archive>]"
                 }
             bundle_token = tok
             i += 1
 
         if bundle_token is None:
             return {
-                "error": "Usage: references pack <bundle-ref> [--to <archive>]"
+                "error": "Usage: bundle pack <bundle-ref> [--to <archive>]"
             }
 
         try:
@@ -2657,7 +3509,7 @@ class ReferencesPlugin:
             return {"error": f"pack: I/O error: {e}"}
 
         self._trace(
-            f"references pack: bundle={bundle.qualified_ref} "
+            f"bundle pack: bundle={bundle.qualified_ref} "
             f"refs={result.ref_count} payloads={result.local_payloads} "
             f"size={result.bytes_written} -> {result.archive_path}"
         )
@@ -2686,8 +3538,8 @@ class ReferencesPlugin:
             "help_lines": HelpLines(lines=lines),
         }
 
-    def _cmd_references_unpack(self, raw_args: str) -> Dict[str, Any]:
-        """Execute 'references unpack <archive> [flags]'.
+    def _cmd_bundle_unpack(self, raw_args: str) -> Dict[str, Any]:
+        """Execute 'bundle unpack <archive> [flags]'.
 
         Extracts a packed archive into a tier on this side, then runs
         reconcile (unless ``--no-reconcile``) so the recipient's sidecar
@@ -2739,7 +3591,7 @@ class ReferencesPlugin:
             if archive_token is not None:
                 return {
                     "error": (
-                        "Usage: references unpack <archive> [--into <bundle-ref>] "
+                        "Usage: bundle unpack <archive> [--into <bundle-ref>] "
                         "[--overwrite|--merge] [--no-reconcile]"
                     )
                 }
@@ -2749,7 +3601,7 @@ class ReferencesPlugin:
         if archive_token is None:
             return {
                 "error": (
-                    "Usage: references unpack <archive> [--into <bundle-ref>] "
+                    "Usage: bundle unpack <archive> [--into <bundle-ref>] "
                     "[--overwrite|--merge] [--no-reconcile]"
                 )
             }
@@ -2829,7 +3681,7 @@ class ReferencesPlugin:
                 )
                 reconciled = True
                 self._trace(
-                    f"references unpack: reconcile[{new_bundle.qualified_ref}]: "
+                    f"bundle unpack: reconcile[{new_bundle.qualified_ref}]: "
                     f"{rec_result.summary()}"
                 )
                 # Re-attach matcher so the next semantic query picks up
@@ -3156,77 +4008,20 @@ class ReferencesPlugin:
             ("        Previously selected sources are preserved when they still", "dim"),
             ("        exist in the reloaded catalog.", "dim"),
             ("", ""),
-            ("    bundles", "dim"),
-            ("        Show loaded knowledge bundles. Each bundle is a directory", "dim"),
-            ("        (root or subdirectory) with its own embedding_config.json", "dim"),
-            ("        and sidecar matrix. The tier column distinguishes workspace", "dim"),
-            ("        bundles (./jaato/references) from user bundles (~/.jaato/references).", "dim"),
-            ("", ""),
-            ("    reconcile [<bundle-ref>] [--scope workspace|user|all]", "dim"),
-            ("        Bring a bundle's sidecar in sync with the catalog: embed", "dim"),
-            ("        newly dropped refs, refresh stale ones, drop orphans.", "dim"),
-            ("        With no argument, reconciles every workspace-tier bundle.", "dim"),
-            ("        Use --scope user or --scope all to widen. <bundle-ref>", "dim"),
-            ("        accepts 'name', 'workspace:name', or 'user:name'.", "dim"),
-            ("", ""),
-            ("    merge <source-ref> [--into <target-ref>] [flags]", "dim"),
-            ("        Merge a knowledge bundle into another. <source-ref> is", "dim"),
-            ("        either '[<scope>:]<name>' for a loaded bundle or a", "dim"),
-            ("        directory path containing an embedding_config.json.", "dim"),
-            ("        Default target is workspace:(root). Cross-tier merges", "dim"),
-            ("        are supported: 'merge user:notes --into workspace:project'.", "dim"),
-            ("        Flags:", "dim"),
-            ("          --on-conflict reject|prefix|newer  (default: reject)", "dim"),
-            ("          --re-embed                        (needed on model/dim mismatch)", "dim"),
-            ("          --dry-run                         (preview without writing)", "dim"),
-            ("", ""),
-            ("    pack <bundle-ref> [--to <archive>]", "dim"),
-            ("        Pack a bundle into a self-contained .tar.gz archive for", "dim"),
-            ("        distribution. LOCAL reference payloads are copied into", "dim"),
-            ("        the archive (deduped by source path, symlinks followed)", "dim"),
-            ("        so the recipient gets a complete, portable bundle.", "dim"),
-            ("        URL/MCP/INLINE refs pass through unchanged. Default", "dim"),
-            ("        output: ./<name>-<tier>.tar.gz in the workspace.", "dim"),
-            ("", ""),
-            ("    unpack <archive> [--into <bundle-ref>] [flags]", "dim"),
-            ("        Unpack a .tar.gz produced by 'pack' into a tier on this", "dim"),
-            ("        side. --into accepts '[<scope>:]<name>' (default:", "dim"),
-            ("        workspace:<archive's source name>). Auto-reconciles the", "dim"),
-            ("        new bundle so the sidecar matches this side's embedding", "dim"),
-            ("        model. Tar-traversal attempts are rejected.", "dim"),
-            ("        Flags:", "dim"),
-            ("          --overwrite      Replace an existing bundle of that name", "dim"),
-            ("          --merge          Merge into the existing bundle", "dim"),
-            ("          --no-reconcile   Skip the post-unpack reconcile pass", "dim"),
-            ("", ""),
             ("    help", "dim"),
             ("        Show this help message.", "dim"),
             ("", ""),
-            ("BUNDLE REFERENCES", "bold"),
-            ("    Most subcommands accept a bundle reference of the form:", "dim"),
-            ("        [<scope>:]<name>", "dim"),
-            ("    where <scope> is 'workspace' or 'user' and <name> is a bundle", "dim"),
-            ("    directory name (or 'root' / '(root)' for the root bundle).", "dim"),
-            ("    Bare names are resolved against the workspace tier first.", "dim"),
+            ("RELATED", "bold"),
+            ("    Bundle-level operations (create, delete, add, eject, remove,", "dim"),
+            ("    reconcile, merge, pack, unpack) live under the 'bundle'", "dim"),
+            ("    command — see 'bundle help'.", "dim"),
             ("", ""),
             ("EXAMPLES", "bold"),
-            ("    references                              List all references", "dim"),
-            ("    references list selected                Show only selected references", "dim"),
-            ("    references select my-ref-001            Select a reference by ID", "dim"),
-            ("    references reload                       Reload catalog from disk", "dim"),
-            ("    references bundles                      Show loaded bundles", "dim"),
-            ("    references reconcile                    Reconcile workspace bundles", "dim"),
-            ("    references reconcile --scope all        Reconcile every loaded bundle", "dim"),
-            ("    references reconcile user:teammate      Reconcile a single user bundle", "dim"),
-            ("    references merge teammate               Merge a workspace bundle into root", "dim"),
-            ("    references merge user:notes             Lift a user bundle into the workspace", "dim"),
-            ("    references merge user:notes --into workspace:project", "dim"),
-            ("    references merge ./incoming --on-conflict prefix", "dim"),
-            ("    references pack teammate                Pack workspace:teammate to ./teammate-workspace.tar.gz", "dim"),
-            ("    references pack user:notes --to ~/share/notes.tar.gz", "dim"),
-            ("    references unpack ./teammate-workspace.tar.gz", "dim"),
-            ("    references unpack share.tar.gz --into user:shared --overwrite", "dim"),
-            ("    references unpack share.tar.gz --merge   Merge instead of clobber", "dim"),
+            ("    references                          List all references", "dim"),
+            ("    references list selected            Show only selected references", "dim"),
+            ("    references select my-ref-001        Select a reference by ID", "dim"),
+            ("    references unselect my-ref-001      Unselect a reference by ID", "dim"),
+            ("    references reload                   Reload catalog from disk", "dim"),
         ])
 
     def _get_access_summary(self, source: ReferenceSource) -> str:
@@ -3346,13 +4141,27 @@ class ReferencesPlugin:
 
     def get_auto_approved_tools(self) -> List[str]:
         """All tools are auto-approved - this is a user-triggered plugin."""
-        return ["selectReferences", "listReferences", "validateReference", "compute_embedding", "references"]
+        return [
+            "selectReferences",
+            "listReferences",
+            "validateReference",
+            "compute_embedding",
+            "references",
+            "bundle",
+        ]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
 
-        Single 'references' command with subcommands: list, select, unselect, reload.
-        share_with_model=True so the model sees selection changes.
+        Two top-level commands:
+
+        * ``references`` — reference-level operations (list, select,
+          unselect, reload). ``share_with_model=True`` so the model
+          sees selection changes inside its own context.
+        * ``bundle`` — bundle-level operations (list, create, delete,
+          add, eject, remove, reconcile, merge, pack, unpack). Not
+          shared with the model — the human curates the bundle layout;
+          the model just consumes the resulting catalog.
         """
         return [
             UserCommand(
@@ -3362,7 +4171,7 @@ class ReferencesPlugin:
                 parameters=[
                     CommandParameter(
                         name="subcommand",
-                        description="Action: list, select, unselect, or reload",
+                        description="Action: list, select, unselect, reload, or help",
                         required=False,
                     ),
                     CommandParameter(
@@ -3373,32 +4182,56 @@ class ReferencesPlugin:
                     ),
                 ],
             ),
+            UserCommand(
+                name="bundle",
+                description=(
+                    "Manage knowledge bundles "
+                    "(list|create|delete|add|eject|remove|reconcile|merge|pack|unpack)"
+                ),
+                share_with_model=False,
+                parameters=[
+                    CommandParameter(
+                        name="subcommand",
+                        description=(
+                            "Action: list, create, delete, add, eject, remove, "
+                            "reconcile, merge, pack, unpack, or help"
+                        ),
+                        required=False,
+                    ),
+                    CommandParameter(
+                        name="target",
+                        description="Subcommand-specific argument tail",
+                        required=False,
+                        capture_rest=True,
+                    ),
+                ],
+            ),
         ]
 
     def get_command_completions(
         self, command: str, args: List[str]
     ) -> List[CommandCompletion]:
-        """Return completion options for the references command.
+        """Return completion options for ``references`` and ``bundle`` commands.
 
-        Provides multi-level completions:
-        - Level 1: list, select, unselect
-        - Level 2 for list: all, selected, unselected
-        - Level 2 for select: IDs of unselected selectable sources
-        - Level 2 for unselect: IDs of currently selected sources
+        The two commands share most of the autocompletion machinery
+        (bundle-ref completions, scope flags, etc.) but expose
+        different subcommand surfaces. Dispatched via ``command``.
         """
-        if command != "references":
-            return []
+        if command == "references":
+            return self._references_completions(args)
+        if command == "bundle":
+            return self._bundle_completions(args)
+        return []
 
+    def _references_completions(
+        self, args: List[str]
+    ) -> List[CommandCompletion]:
+        """Completions for the 'references' command (reference-level ops)."""
         subcommands = [
             CommandCompletion("list", "List reference sources"),
             CommandCompletion("select", "Select a reference source"),
             CommandCompletion("unselect", "Unselect a reference source"),
             CommandCompletion("reload", "Reload catalog from disk"),
-            CommandCompletion("bundles", "Show loaded knowledge bundles"),
-            CommandCompletion("reconcile", "Reconcile bundle sidecars"),
-            CommandCompletion("merge", "Merge a bundle into another"),
-            CommandCompletion("pack", "Pack a bundle into a distributable archive"),
-            CommandCompletion("unpack", "Unpack an archive into a tier"),
             CommandCompletion("help", "Show detailed help"),
         ]
 
@@ -3438,6 +4271,54 @@ class ReferencesPlugin:
                 ]
                 return [o for o in options if o.value.startswith(partial)]
 
+        return []
+
+    def _bundle_completions(
+        self, args: List[str]
+    ) -> List[CommandCompletion]:
+        """Completions for the 'bundle' command (bundle-level ops)."""
+        subcommands = [
+            CommandCompletion("list", "Show loaded knowledge bundles"),
+            CommandCompletion("create", "Create an empty bundle"),
+            CommandCompletion("delete", "Remove a bundle directory"),
+            CommandCompletion("add", "Place a reference into a bundle"),
+            CommandCompletion("eject", "Remove a reference from its bundle"),
+            CommandCompletion("remove", "Delete a reference entirely"),
+            CommandCompletion("reconcile", "Reconcile bundle sidecars"),
+            CommandCompletion("merge", "Merge a bundle into another"),
+            CommandCompletion("pack", "Pack a bundle into a distributable archive"),
+            CommandCompletion("unpack", "Unpack an archive into a tier"),
+            CommandCompletion("help", "Show detailed help"),
+        ]
+
+        if len(args) <= 1:
+            if args:
+                partial = args[0].lower()
+                return [s for s in subcommands if s.value.startswith(partial)]
+            return subcommands
+
+        subcommand = args[0].lower()
+        partial = args[-1].lower()
+
+        # Free-id helpers: any loaded ref id is a valid completion for
+        # add / eject / remove. We don't filter by current bundle —
+        # the handler will reject ineligible cases with a clearer error.
+        def _ref_id_completions() -> List[CommandCompletion]:
+            return [CommandCompletion(s.id, s.name) for s in self._sources]
+
+        # Per-subcommand positional completions on the second token.
+        if len(args) == 2:
+            if subcommand == "delete":
+                options = self._bundle_ref_completions(
+                    description_prefix="Delete",
+                    include_root=True,
+                )
+                return [o for o in options if o.value.startswith(partial)]
+
+            if subcommand in ("add", "eject", "remove"):
+                options = _ref_id_completions()
+                return [o for o in options if o.value.startswith(partial)]
+
             if subcommand == "reconcile":
                 options = self._bundle_ref_completions(
                     description_prefix="Reconcile",
@@ -3446,13 +4327,6 @@ class ReferencesPlugin:
                 return [o for o in options if o.value.startswith(partial)]
 
             if subcommand == "merge":
-                # Suggest loaded bundles (other than the workspace root)
-                # as first-argument completions for ``merge <source>``.
-                # The workspace root is omitted because the default
-                # target is also the workspace root and merging a
-                # bundle into itself isn't meaningful; path-based
-                # sources aren't enumerable so the user types them
-                # manually.
                 options = self._bundle_ref_completions(
                     description_prefix="Merge",
                     include_root=True,
@@ -3461,8 +4335,6 @@ class ReferencesPlugin:
                 return [o for o in options if o.value.startswith(partial)]
 
             if subcommand == "pack":
-                # First positional is the bundle to pack — any loaded
-                # bundle is a valid candidate.
                 options = self._bundle_ref_completions(
                     description_prefix="Pack",
                     include_root=True,
@@ -3472,9 +4344,35 @@ class ReferencesPlugin:
             # ``unpack`` takes an archive path; we can't enumerate paths
             # so we leave completion to the client's filename completion.
 
-        # Reconcile flag-value completions: ``reconcile --scope <tier>``.
-        if len(args) >= 2 and args[0].lower() == "reconcile":
-            partial = args[-1].lower()
+        # Subcommand-specific flag handling for tokens beyond the second.
+        if subcommand == "create":
+            if len(args) >= 3 and args[-2] == "--scope":
+                scopes = [
+                    CommandCompletion("workspace", "Workspace tier (default)"),
+                    CommandCompletion("user", "User tier (~/.jaato/references)"),
+                ]
+                return [s for s in scopes if s.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [CommandCompletion("--scope", "Tier (workspace|user)")]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "delete":
+            if partial.startswith("-") or not partial:
+                flags = [CommandCompletion("--force", "Delete non-empty bundles")]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "add":
+            if len(args) >= 3 and args[-2] == "--to":
+                options = self._bundle_ref_completions(
+                    description_prefix="Into",
+                    include_root=True,
+                )
+                return [o for o in options if o.value.startswith(partial)]
+            if partial.startswith("-") or not partial:
+                flags = [CommandCompletion("--to", "Target bundle (scope:name)")]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "reconcile":
             if len(args) >= 3 and args[-2] == "--scope":
                 scopes = [
                     CommandCompletion("workspace", "Workspace tier (default)"),
@@ -3486,19 +4384,13 @@ class ReferencesPlugin:
                 flags = [CommandCompletion("--scope", "Filter by tier")]
                 return [f for f in flags if f.value.startswith(partial or "-")]
 
-        # Trailing-flag completions for 'references merge'.
-        if len(args) >= 2 and args[0].lower() == "merge":
-            partial = args[-1].lower()
-            # Flag names come first.
+        if subcommand == "merge":
             flags = [
                 CommandCompletion("--into", "Target bundle (default: workspace:(root))"),
                 CommandCompletion("--on-conflict", "reject | prefix | newer"),
                 CommandCompletion("--re-embed", "Re-embed source against target model"),
                 CommandCompletion("--dry-run", "Preview without writing"),
             ]
-            if partial.startswith("-") or not partial:
-                return [f for f in flags if f.value.startswith(partial or "-")]
-            # Value completions for the flag immediately before us.
             if len(args) >= 3 and args[-2] == "--on-conflict":
                 vals = [
                     CommandCompletion("reject", "Abort on id collision (default)"),
@@ -3512,19 +4404,15 @@ class ReferencesPlugin:
                     include_root=True,
                 )
                 return [o for o in options if o.value.startswith(partial)]
-
-        # Trailing-flag completions for 'references pack'.
-        if len(args) >= 2 and args[0].lower() == "pack":
-            partial = args[-1].lower()
             if partial.startswith("-") or not partial:
-                flags = [
-                    CommandCompletion("--to", "Output archive path"),
-                ]
                 return [f for f in flags if f.value.startswith(partial or "-")]
 
-        # Trailing-flag completions for 'references unpack'.
-        if len(args) >= 2 and args[0].lower() == "unpack":
-            partial = args[-1].lower()
+        if subcommand == "pack":
+            if partial.startswith("-") or not partial:
+                flags = [CommandCompletion("--to", "Output archive path")]
+                return [f for f in flags if f.value.startswith(partial or "-")]
+
+        if subcommand == "unpack":
             if len(args) >= 3 and args[-2] == "--into":
                 options = self._bundle_ref_completions(
                     description_prefix="Install as",

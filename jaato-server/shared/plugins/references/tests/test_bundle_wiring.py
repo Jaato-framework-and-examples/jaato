@@ -272,14 +272,16 @@ class TestCrossBundleSemantic:
         assert [m.source_id for m in matches] == ["root-a"]
 
 
-class TestBundlesSubcommand:
-    def test_bundles_subcommand_lists_each_bundle(self, workspace):
+class TestBundleListSubcommand:
+    """``bundle list`` shows every loaded bundle with its tier."""
+
+    def test_bundle_list_lists_each_bundle(self, workspace):
         plugin = ReferencesPlugin()
         plugin.set_workspace_path(str(workspace))
         plugin.initialize({"lookup_strategy": "tags_only"})
 
-        result = plugin._execute_references_cmd(
-            {"subcommand": "bundles", "target": ""}
+        result = plugin._execute_bundle_cmd(
+            {"subcommand": "list", "target": ""}
         )
 
         # HelpLines object — flatten line text for inspection.
@@ -288,28 +290,28 @@ class TestBundlesSubcommand:
         assert "teammate" in text
         assert "mock-model" in text
 
-    def test_bundles_subcommand_with_no_bundles(self, tmp_path):
+    def test_bundle_list_with_no_bundles(self, tmp_path):
         ws = tmp_path / "ws"
         (ws / ".jaato" / "references").mkdir(parents=True)
         plugin = ReferencesPlugin()
         plugin.set_workspace_path(str(ws))
         plugin.initialize({"lookup_strategy": "tags_only"})
 
-        result = plugin._execute_references_cmd(
-            {"subcommand": "bundles", "target": ""}
+        result = plugin._execute_bundle_cmd(
+            {"subcommand": "list", "target": ""}
         )
 
         text = "\n".join(line for line, _tag in result.lines)
         assert "no bundles" in text.lower()
 
 
-class TestReconcileSubcommand:
+class TestBundleReconcileSubcommand:
     def test_reconcile_unknown_bundle_errors(self, workspace):
         plugin = ReferencesPlugin()
         plugin.set_workspace_path(str(workspace))
         plugin.initialize({"lookup_strategy": "tags_only"})
 
-        result = plugin._execute_references_cmd(
+        result = plugin._execute_bundle_cmd(
             {"subcommand": "reconcile", "target": "ghost-bundle"}
         )
 
@@ -317,12 +319,12 @@ class TestReconcileSubcommand:
         assert "ghost-bundle" in result["error"]
 
     def test_reconcile_root_alias(self, workspace):
-        """'references reconcile root' resolves to the root bundle."""
+        """'bundle reconcile root' resolves to the root bundle."""
         plugin = ReferencesPlugin()
         plugin.set_workspace_path(str(workspace))
         plugin.initialize({"lookup_strategy": "tags_only"})
 
-        result = plugin._execute_references_cmd(
+        result = plugin._execute_bundle_cmd(
             {"subcommand": "reconcile", "target": "root"}
         )
 
@@ -330,12 +332,14 @@ class TestReconcileSubcommand:
         assert len(result["results"]) == 1
         assert result["results"][0]["bundle"] == "(root)"
 
-    def test_reconcile_all_bundles_when_no_target(self, workspace):
+    def test_reconcile_workspace_default_when_no_target(self, workspace):
+        """No-arg reconcile defaults to workspace tier (matches the
+        write-default-to-workspace contract)."""
         plugin = ReferencesPlugin()
         plugin.set_workspace_path(str(workspace))
         plugin.initialize({"lookup_strategy": "tags_only"})
 
-        result = plugin._execute_references_cmd(
+        result = plugin._execute_bundle_cmd(
             {"subcommand": "reconcile", "target": ""}
         )
 
@@ -344,9 +348,11 @@ class TestReconcileSubcommand:
         assert bundles_touched == {"(root)", "teammate"}
 
 
-class TestUnknownSubcommand:
-    def test_unknown_subcommand_lists_new_ones_in_error(self, workspace):
-        """The error message mentions the new subcommands so users can discover them."""
+class TestReferencesUnknownSubcommand:
+    """The references command errors mention reference-level ops only;
+    bundle-level ops are redirected to the bundle command."""
+
+    def test_unknown_subcommand_points_at_references_surface(self, workspace):
         plugin = ReferencesPlugin()
         plugin.set_workspace_path(str(workspace))
         plugin.initialize({"lookup_strategy": "tags_only"})
@@ -356,5 +362,37 @@ class TestUnknownSubcommand:
         )
 
         assert "error" in result
-        assert "bundles" in result["error"]
-        assert "reconcile" in result["error"]
+        assert "list" in result["error"]
+        assert "bundle help" in result["error"]
+
+    def test_old_bundle_subcommands_redirect(self, workspace):
+        """``references bundles|reconcile|merge|pack|unpack`` are gone —
+        the dispatcher hints at the new home so users discover ``bundle``."""
+        plugin = ReferencesPlugin()
+        plugin.set_workspace_path(str(workspace))
+        plugin.initialize({"lookup_strategy": "tags_only"})
+
+        for old in ("bundles", "reconcile", "merge", "pack", "unpack"):
+            result = plugin._execute_references_cmd(
+                {"subcommand": old, "target": ""}
+            )
+            assert "error" in result, f"expected error for 'references {old}'"
+            assert "bundle" in result["error"].lower()
+
+
+class TestBundleUnknownSubcommand:
+    """The bundle command's unknown-subcommand error names the full surface."""
+
+    def test_unknown_bundle_subcommand_lists_known_verbs(self, workspace):
+        plugin = ReferencesPlugin()
+        plugin.set_workspace_path(str(workspace))
+        plugin.initialize({"lookup_strategy": "tags_only"})
+
+        result = plugin._execute_bundle_cmd(
+            {"subcommand": "nonsense", "target": ""}
+        )
+
+        assert "error" in result
+        assert "list" in result["error"]
+        assert "create" in result["error"]
+        assert "pack" in result["error"]
