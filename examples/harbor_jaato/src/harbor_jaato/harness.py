@@ -57,7 +57,7 @@ async def _drive(args: argparse.Namespace) -> int:
 
     client = IPCRecoveryClient(socket_path=args.socket)
     await client.connect()
-    await client.create_session(profile=args.profile)
+    await client.create_session(profile=args.profile, agent=args.agent)
     await client.send_message(instruction)
 
     permission_promoted = False
@@ -129,6 +129,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--instruction-file", required=True)
     p.add_argument("--profile", default="harbor")
+    p.add_argument("--agent", default="harbor-shell")
     p.add_argument("--result", required=True)
     p.add_argument("--socket", default="/tmp/jaato.sock")
     p.add_argument("-v", "--verbose", action="store_true")

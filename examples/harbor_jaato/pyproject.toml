@@ -25,3 +25,10 @@ jaato = "harbor_jaato:JaatoAgent"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/harbor_jaato"]
+
+# Hatch already includes data/*.md under packages = [...]; the
+# setuptools.package-data block below is kept for cross-tool
+# compatibility (per the harbor-jaato review checklist) so the
+# package builds correctly under either backend.
+[tool.setuptools.package-data]
+harbor_jaato = ["data/*.md"]

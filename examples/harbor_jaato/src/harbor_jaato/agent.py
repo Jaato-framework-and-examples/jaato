@@ -29,7 +29,7 @@ import json
 import logging
 import shlex
 import tempfile
-from importlib import metadata
+from importlib import metadata, resources
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,10 @@ CONTAINER_PKG_DIR = "/opt/harbor_jaato"
 CONTAINER_INSTRUCTION = f"{CONTAINER_JAATO_DIR}/instruction.txt"
 CONTAINER_RESULT = f"{CONTAINER_JAATO_DIR}/result.json"
 CONTAINER_PROFILE = f"{CONTAINER_JAATO_DIR}/profiles/harbor.json"
+CONTAINER_AGENT = f"{CONTAINER_JAATO_DIR}/agents/harbor-shell.md"
+
+AGENT_NAME = "harbor-shell"
+AGENT_RESOURCE = "data/harbor-shell.md"
 
 DEFAULT_PLUGINS = [
     "cli",
@@ -144,11 +148,12 @@ class JaatoAgent(BaseAgent):
             )
 
     async def _write_profile(self, environment: BaseEnvironment) -> None:
-        """Materialize ``.jaato/profiles/harbor.json`` inside the container.
+        """Materialize the profile and the ``harbor-shell`` agent definition.
 
-        Pinning model+provider in the profile (rather than passing them
-        through ``create_session``) keeps the harness profile-agnostic
-        and lets a future BaseAgent expose ``--profile`` directly.
+        The profile pins model + provider + plugin set; the agent
+        markdown supplies system instructions. ``create_session`` then
+        receives ``profile="harbor", agent="harbor-shell"`` and the
+        rendered agent body becomes the session's system prompt.
         """
         provider, model = self._split_model_name()
         profile = {
@@ -158,16 +163,18 @@ class JaatoAgent(BaseAgent):
             "provider": provider,
             "plugins": list(DEFAULT_PLUGINS),
             "plugin_configs": {},
-            "system_instructions": (
-                "You are operating inside a sandboxed evaluation "
-                "container. You have shell access. Complete the user "
-                "task; do not ask for confirmation."
-            ),
         }
-        await environment.exec(f"mkdir -p {CONTAINER_JAATO_DIR}/profiles")
+        await environment.exec(
+            f"mkdir -p {CONTAINER_JAATO_DIR}/profiles "
+            f"{CONTAINER_JAATO_DIR}/agents"
+        )
         await self._upload_text(
             environment, json.dumps(profile, indent=2), CONTAINER_PROFILE
         )
+        agent_md = resources.files("harbor_jaato").joinpath(
+            AGENT_RESOURCE
+        ).read_text()
+        await self._upload_text(environment, agent_md, CONTAINER_AGENT)
 
     async def _upload_text(
         self, environment: BaseEnvironment, text: str, dest: str
