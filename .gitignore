@@ -67,6 +67,8 @@ generated-tests/
 src/
 !web-client/src/
 !jaato-sdk-ts/src/
+!examples/*/src/
+!out-of-tree-plugins/*/src/
 **/target/
 
 # Logs
