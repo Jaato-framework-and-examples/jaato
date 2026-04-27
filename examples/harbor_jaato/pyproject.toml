@@ -23,12 +23,23 @@ dev = ["pytest>=7.0"]
 [project.entry-points."harbor.agents"]
 jaato = "harbor_jaato:JaatoAgent"
 
+# The parent repo's .gitignore has `src/` (with a negation for
+# examples/*/src/ in tracked-files terms only). Hatchling's default
+# file selector still inherits the broad `src/` exclude when walking
+# .gitignore patterns, so the wheel ships empty unless we either
+# (a) disable .gitignore awareness or (b) list files explicitly.
+# We do both: ignore-vcs turns off the gitignore filter, and
+# include= lists the package contents so the result is reproducible.
+[tool.hatch.build]
+ignore-vcs = true
+include = [
+    "src/harbor_jaato/**/*.py",
+    "src/harbor_jaato/data/*.md",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/harbor_jaato"]
 
-# Hatch already includes data/*.md under packages = [...]; the
-# setuptools.package-data block below is kept for cross-tool
-# compatibility (per the harbor-jaato review checklist) so the
-# package builds correctly under either backend.
+# Mirrored config for cross-tool builds (setuptools as a fallback).
 [tool.setuptools.package-data]
 harbor_jaato = ["data/*.md"]
