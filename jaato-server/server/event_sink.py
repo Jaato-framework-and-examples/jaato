@@ -34,6 +34,22 @@ class EventSink(Protocol):
         """
         ...
 
+    def broadcast_event(self, event: Event) -> None:
+        """Send an event to **every** connected client on this transport.
+
+        Used for daemon-wide events that don't belong to any specific
+        session — currently the HandoffGate event family
+        (``gate.announced`` / ``gate.released`` / ``gates.snapshot``)
+        emitted by the jaato-premium reactor framework.
+
+        Failures to deliver to individual clients are logged and
+        swallowed; one disconnected client must never block delivery
+        to the rest.
+
+        Thread-safe.
+        """
+        ...
+
     def set_client_session(self, client_id: str, session_id: str) -> None:
         """Associate a client with a session (for broadcast targeting)."""
         ...
@@ -81,6 +97,15 @@ class CompositeEventSink:
         """Fan-out to all registered sinks."""
         for sink in self._sinks:
             sink.send_event(client_id, event)
+
+    def broadcast_event(self, event: Event) -> None:
+        """Fan-out a daemon-wide broadcast across all registered sinks.
+
+        Each underlying sink iterates its own client registry and
+        delivers the event; this composite just forwards the call.
+        """
+        for sink in self._sinks:
+            sink.broadcast_event(event)
 
     def set_client_session(self, client_id: str, session_id: str) -> None:
         """Fan-out to all registered sinks."""

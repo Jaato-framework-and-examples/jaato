@@ -588,6 +588,24 @@ class JaatoIPCServer:
             return
         self.queue_event(client_id, event)
 
+    def broadcast_event(self, event: Event) -> None:
+        """Send an event to every connected IPC client (``EventSink`` protocol).
+
+        Used for daemon-wide events that don't belong to a specific
+        session.  Iterates a snapshot of the current client list, so
+        clients connecting/disconnecting during the broadcast do not
+        race with the iteration.
+
+        Per-client delivery failures are swallowed by ``queue_event``
+        (log-and-continue), so one stuck client never blocks the rest.
+
+        Thread-safe.
+        """
+        # Snapshot keys to avoid "dictionary changed size during iteration"
+        # when a client connects/disconnects mid-broadcast.
+        for client_id in list(self._event_queues.keys()):
+            self.queue_event(client_id, event)
+
     def queue_event(self, client_id: str, event: Event) -> None:
         """Queue an event for delivery to a client.
 

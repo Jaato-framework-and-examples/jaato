@@ -245,6 +245,15 @@ class EventType(str, Enum):
     PEER_STOP_REQUEST = "peer.stop_request"
     PEER_STOP_ACKNOWLEDGED = "peer.stop_acknowledged"
 
+    # HandoffGate events — emitted by the jaato-premium reactor framework
+    # when a daemon-side gate transitions state.  See
+    # docs/design/handoff-gate-api.md.  Wire types are pre-registered here
+    # in the public SDK so any client can deserialize them; production of
+    # these events is gated on premium being installed.
+    GATE_ANNOUNCED = "gate.announced"
+    GATE_RELEASED = "gate.released"
+    GATES_SNAPSHOT = "gates.snapshot"
+
 
 # =============================================================================
 # Base Event
@@ -1996,6 +2005,77 @@ class PeerAgentCompletedEvent(Event):
     workspace_modified: bool = False
 
 
+# =============================================================================
+# HandoffGate events (jaato-premium reactor framework)
+# =============================================================================
+
+class GateState(BaseModel):
+    """Snapshot of a single gate's state.
+
+    Used as the payload-level shape inside ``GatesSnapshotEvent`` and
+    accessible as a typed property on the live events.  Public/private
+    intent split is enforced server-side via ``public_intent_fields`` —
+    cross-tenant subscribers receive only the public keys; same-tenant
+    subscribers receive the full intent.
+
+    See ``docs/design/handoff-gate-api.md`` §3.4 for the canonical
+    intent shape.
+    """
+    gate_name: str = ""
+    tenant_id: str = ""
+    state: str = "green"  # "green" | "red"
+    owner: Optional[str] = None              # service-identity ID (when RED)
+    intent: Optional[Dict[str, Any]] = None  # populated when RED+announced
+    acquired_at: Optional[str] = None        # ISO 8601
+    expires_at: Optional[str] = None         # ISO 8601 (acquired_at + ttl)
+
+
+class GateAnnouncedEvent(Event):
+    """A reactor producer announced its intent on a held HandoffGate.
+
+    Fired after a producer reactor calls ``gate.try_acquire(...)`` and
+    then ``gate.announce(intent)``.  When ``intent.session_id`` is set,
+    subscribers can ``client.attach_session(intent['session_id'])`` to
+    observe the spawned session's events.
+    """
+    type: EventType = Field(default=EventType.GATE_ANNOUNCED)
+    gate_name: str = ""
+    tenant_id: str = ""
+    owner: str = ""                          # service-identity ID
+    intent: Dict[str, Any] = Field(default_factory=dict)
+    announced_at: str = ""                   # ISO 8601
+
+
+class GateReleasedEvent(Event):
+    """A held HandoffGate was released (work completed, failed, or timed out).
+
+    ``was_announced=False`` indicates the producer crashed or errored
+    between ``try_acquire`` and ``announce`` — subscribers that
+    auto-attached on the announce event simply have nothing to detach.
+    ``outcome.status='timeout'`` indicates the watchdog auto-released
+    on TTL expiry.
+    """
+    type: EventType = Field(default=EventType.GATE_RELEASED)
+    gate_name: str = ""
+    tenant_id: str = ""
+    owner: str = ""
+    outcome: Optional[Dict[str, Any]] = None
+    released_at: str = ""                    # ISO 8601
+    was_announced: bool = True
+
+
+class GatesSnapshotEvent(Event):
+    """All currently-RED gates, sent on subscribe so late subscribers catch up.
+
+    Mirrors ``SessionInfoEvent`` for sessions: rather than forcing
+    every subscriber to track gate state externally across reconnects,
+    the registry replays the live state once at subscription time.
+    """
+    type: EventType = Field(default=EventType.GATES_SNAPSHOT)
+    gates: List[GateState] = Field(default_factory=list)
+    snapshot_at: str = ""                    # ISO 8601
+
+
 class PeerStopRequestEvent(Event):
     """Request to cancel a running remote subagent.
 
@@ -2114,6 +2194,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PEER_AGENT_COMPLETED.value: PeerAgentCompletedEvent,
     EventType.PEER_STOP_REQUEST.value: PeerStopRequestEvent,
     EventType.PEER_STOP_ACKNOWLEDGED.value: PeerStopAcknowledgedEvent,
+    # HandoffGate (jaato-premium reactor framework)
+    EventType.GATE_ANNOUNCED.value: GateAnnouncedEvent,
+    EventType.GATE_RELEASED.value: GateReleasedEvent,
+    EventType.GATES_SNAPSHOT.value: GatesSnapshotEvent,
     # SDK feature parity — session-primitive verbs
     EventType.INJECT_PROMPT_REQUEST.value: InjectPromptRequest,
     EventType.REPLAY_MESSAGES_REQUEST.value: ReplayMessagesRequest,

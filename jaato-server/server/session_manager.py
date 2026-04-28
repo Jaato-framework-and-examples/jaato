@@ -167,6 +167,10 @@ class SessionManager:
 
         # Event routing callback
         self._event_callback: Optional[Callable[[str, Event], None]] = None
+        # Broadcast callback — wired to CompositeEventSink.broadcast_event
+        # by the daemon (see __main__.py).  Daemon-wide events (currently
+        # HandoffGate transitions from jaato-premium) flow through this.
+        self._broadcast_callback: Optional[Callable[[Event], None]] = None
 
         # Workspace file monitors keyed by session_id
         self._workspace_monitors: Dict[str, WorkspaceMonitor] = {}
@@ -419,6 +423,47 @@ class SessionManager:
             callback: Called with (client_id, event) for each event.
         """
         self._event_callback = callback
+
+    def set_broadcast_callback(
+        self,
+        callback: Callable[[Event], None],
+    ) -> None:
+        """Set callback for broadcasting events to **all** connected clients.
+
+        Used for daemon-wide events that don't belong to a specific
+        session — currently the HandoffGate event family
+        (``gate.announced`` / ``gate.released`` / ``gates.snapshot``)
+        emitted by the jaato-premium reactor framework.  Wired in
+        ``__main__.py`` to ``CompositeEventSink.broadcast_event``,
+        which fans out across the IPC and WS transports.
+
+        Args:
+            callback: Called with (event,) for each broadcast.
+        """
+        self._broadcast_callback = callback
+
+    def broadcast_event(self, event: Event) -> None:
+        """Deliver an event to every connected client across all transports.
+
+        Used by daemon extensions (notably the jaato-premium reactor
+        framework's HandoffGate registry) to publish events that aren't
+        tied to a specific session.  Per-session events should still go
+        through the regular ``_emit_to_client`` / ``_emit_to_session``
+        paths.
+
+        No-op if no broadcast callback is wired (e.g. early daemon
+        startup before transports are up).  Thread-safe: the underlying
+        ``CompositeEventSink.broadcast_event`` snapshots its client
+        registries before iterating.
+
+        Args:
+            event: The Event to broadcast.
+        """
+        callback = self._broadcast_callback
+        if callback is None:
+            logger.debug("broadcast_event: no broadcast callback wired; dropping %s", type(event).__name__)
+            return
+        callback(event)
 
     def _emit_to_client(self, client_id: str, event: Event) -> None:
         """Emit an event to a specific client."""

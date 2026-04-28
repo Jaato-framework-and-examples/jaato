@@ -259,6 +259,29 @@ class WSEventSinkAdapter:
 
         asyncio.run_coroutine_threadsafe(_send(), self._event_loop)
 
+    def broadcast_event(self, event) -> None:
+        """Send an event to every connected WebSocket client (thread-safe).
+
+        Used for daemon-wide events (HandoffGate transitions) that
+        don't belong to a session.  Snapshots the client id list before
+        scheduling the per-client sends so concurrent connect/disconnect
+        doesn't race with the iteration.
+        """
+        if not self._event_loop:
+            return
+        # Snapshot the keys before scheduling — _ws._clients can mutate
+        # while the coroutine is queued.
+        client_ids = list(self._ws._clients.keys())
+        if not client_ids:
+            return
+
+        async def _send_all():
+            for cid in client_ids:
+                if cid in self._ws._clients:
+                    await self._ws._send_to_client(cid, event)
+
+        asyncio.run_coroutine_threadsafe(_send_all(), self._event_loop)
+
     def set_client_session(self, client_id: str, session_id: str) -> None:
         """Associate a client with a session."""
         self._client_sessions[client_id] = session_id

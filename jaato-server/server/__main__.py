@@ -140,6 +140,20 @@ class _ExtensionContext:
         self.available_gc_plugins = available_gc_plugins
         self.gc_plugin_factories = gc_plugin_factories or {}
 
+    def broadcast_event(self, event) -> None:
+        """Broadcast a daemon-wide event to every connected IPC + WS client.
+
+        Used by extensions for events that don't belong to a specific
+        session — currently the jaato-premium reactor framework's
+        HandoffGate transitions (``gate.announced`` / ``gate.released`` /
+        ``gates.snapshot``).
+
+        Thin wrapper over ``self.session_manager.broadcast_event(...)``.
+        Provided as a stable extension-facing API so the underlying
+        implementation can move without breaking extensions.
+        """
+        self.session_manager.broadcast_event(event)
+
 
 def configure_logging(
     log_file: Optional[str] = None,
@@ -387,6 +401,9 @@ class JaatoDaemon:
 
         # Wire composite sink as session manager's event callback
         self._session_manager.set_event_callback(composite_sink.send_event)
+        # Also wire broadcast — daemon-wide events (HandoffGate transitions)
+        # fan out across all transports via CompositeEventSink.broadcast_event.
+        self._session_manager.set_broadcast_callback(composite_sink.broadcast_event)
 
         # Load daemon extensions (e.g., gossip clustering from jaato-premium)
         self._load_extensions()
