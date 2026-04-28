@@ -1971,8 +1971,15 @@ class OutputBuffer:
             selected_index=None
         )
 
-        # Insert at placeholder position (set when first tool was added)
+        # Insert at placeholder position (set when first tool was added).
+        # Re-establish lazily when missing — happens when this is the
+        # second-or-later finalization in a multi-wave turn.  The first
+        # wave clears the placeholder (line ~2010 below); a tool that was
+        # still incomplete then completing later would otherwise crash
+        # _safe_insert_line with ``None - int``.
         insert_pos = self._tool_placeholder_index
+        if insert_pos is None:
+            insert_pos = len(self._lines)
 
         # Insert just the tool_block - it renders its own separator (───)
         # Use _safe_insert_line to handle bounded deque (raises IndexError when full)
@@ -2001,8 +2008,13 @@ class OutputBuffer:
         )
         self._safe_insert_line(next_pos, trailing_line)
 
-        # Clear placeholder and active tools
-        self._tool_placeholder_index = None
+        # Reset placeholder.  When tools remain (multi-wave turn — some
+        # finished, others still running), point the placeholder at the
+        # current end of the buffer so the *next* finalization wave's
+        # ToolBlock lands after the one we just placed.  When all
+        # tools are done, clear it — the next tool start will
+        # re-establish a fresh placeholder via add_active_tool.
+        self._tool_placeholder_index = len(self._lines) if to_keep else None
         self._active_tools = to_keep
 
         # Now that tools are finalized, restore the expanded state if we had saved one
