@@ -217,6 +217,7 @@ class JaatoServer:
         profile: Optional[Any] = None,
         system_instruction_override: Optional[str] = None,
         suppress_base_instructions: bool = False,
+        agent_name: Optional[str] = None,
     ):
         """Initialize the server.
 
@@ -254,6 +255,12 @@ class JaatoServer:
                 the agent's own prompt and the tool-specific hints.
                 Forwarded to ``JaatoSession.configure``.  Ignored when
                 ``system_instruction_override`` is also set.
+            agent_name: Optional agent identifier resolved from
+                ``--agent <name>``.  When set, this becomes the main
+                agent's ``agent_id`` (instead of the default ``"main"``)
+                so reactor rules and other event consumers can route on
+                the agent's logical identity.  When ``None``, the main
+                agent's id remains ``"main"`` for backwards compatibility.
         """
         self.env_file = env_file
         self._env_overrides = env_overrides or {}
@@ -263,6 +270,15 @@ class JaatoServer:
         self._suppress_base_instructions = suppress_base_instructions
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
+
+        # Identity of this server's primary ("main") agent.  Defaults to
+        # the literal ``"main"`` when no ``--agent <name>`` was supplied.
+        # When an agent_name is given, that name is used as the agent_id
+        # so consumers (reactor rules, event subscribers) can match on
+        # the agent's logical identity.  All emit/lookup sites that
+        # previously hardcoded ``"main"`` should reference this attribute.
+        self._main_agent_id: str = agent_name or "main"
+        self._main_agent_display_name: Optional[str] = agent_name
 
         # Plug-in transformer chain for outbound events (seat 3 of the
         # four-seat pseudonymization design — see
@@ -290,7 +306,7 @@ class JaatoServer:
 
         # Agent tracking
         self._agents: Dict[str, AgentState] = {}
-        self._selected_agent_id: str = "main"
+        self._selected_agent_id: str = self._main_agent_id
 
         # Track original inputs for session export
         self._original_inputs: List[Dict] = []
@@ -305,7 +321,7 @@ class JaatoServer:
         self._pending_reference_selection_request_id: Optional[str] = None
 
         # Track which agent is currently executing a tool (for permission/clarification routing)
-        self._current_tool_agent_id: str = "main"
+        self._current_tool_agent_id: str = self._main_agent_id
 
 
         # Background model thread
@@ -832,7 +848,7 @@ class JaatoServer:
                 agent_name=display_name,
                 agent_type="subagent",
                 profile_name=profile.name if profile else "",
-                parent_agent_id="main",
+                parent_agent_id=self._main_agent_id,
                 created_at=created_at,
             ))
 
@@ -962,7 +978,7 @@ class JaatoServer:
         # The client will ignore this if it has no pending request
         if not self._pending_permission_request_id:
             emit(PermissionResolvedEvent(
-                agent_id="main",
+                agent_id=self._main_agent_id,
                 request_id="",  # Empty - client clears any pending request
                 tool_name="",
                 granted=False,
@@ -973,7 +989,7 @@ class JaatoServer:
         # Same for clarification requests
         if not self._pending_clarification_request_id:
             emit(ClarificationResolvedEvent(
-                agent_id="main",
+                agent_id=self._main_agent_id,
                 request_id="",
                 tool_name="",
                 qa_pairs=[],
@@ -983,7 +999,7 @@ class JaatoServer:
         # Same for reference selection requests
         if not self._pending_reference_selection_request_id:
             emit(ReferenceSelectionResolvedEvent(
-                agent_id="main",
+                agent_id=self._main_agent_id,
                 request_id="",
                 tool_name="",
                 selected_ids=[],
@@ -1522,11 +1538,11 @@ class JaatoServer:
             with _s6.sub("create_main_agent"):
                 self._create_main_agent()
         # Store GC config in main agent state
-        if "main" in self._agents and gc_threshold is not None:
-            self._agents["main"].gc_threshold = gc_threshold
-            self._agents["main"].gc_strategy = gc_strategy
-            self._agents["main"].gc_target_percent = gc_target_percent
-            self._agents["main"].gc_continuous_mode = gc_continuous_mode
+        if self._main_agent_id in self._agents and gc_threshold is not None:
+            self._agents[self._main_agent_id].gc_threshold = gc_threshold
+            self._agents[self._main_agent_id].gc_strategy = gc_strategy
+            self._agents[self._main_agent_id].gc_target_percent = gc_target_percent
+            self._agents[self._main_agent_id].gc_continuous_mode = gc_continuous_mode
 
         # Emit initial context update so toolbar shows correct usage at startup
         # This must happen after _create_main_agent() so client has the agent registered
@@ -1534,7 +1550,7 @@ class JaatoServer:
             usage = self._jaato.get_context_usage()
             context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
             self.emit(ContextUpdatedEvent(
-                agent_id="main",
+                agent_id=self._main_agent_id,
                 total_tokens=usage.get('total_tokens', 0),
                 prompt_tokens=usage.get('prompt_tokens', 0),
                 output_tokens=usage.get('output_tokens', 0),
@@ -1676,28 +1692,52 @@ class JaatoServer:
         """Name of the agent profile used for this session, if any."""
         return self._profile.name if self._profile else None
 
+    @property
+    def main_agent_id(self) -> str:
+        """Identity of the primary ("main") agent for this session.
+
+        Returns the value of ``--agent <name>`` when one was supplied at
+        session creation, otherwise the literal ``"main"``.  Callers
+        outside ``JaatoServer`` (notably ``SessionManager``) consult this
+        when matching incoming events or restoring per-agent state, so
+        their bookkeeping stays in sync with the agent_id the session
+        actually emits on the wire.
+        """
+        return self._main_agent_id
+
     def _create_main_agent(self) -> None:
         """Create the main agent entry.
 
         Note: This only creates the local AgentState tracking. The AgentCreatedEvent
         is already emitted via the UI hooks when set_ui_hooks() is called on JaatoClient,
         which triggers on_agent_created() in ServerAgentHooks.
+
+        The agent_id used here is ``self._main_agent_id`` — either the
+        literal ``"main"`` or the ``--agent <name>`` value supplied to
+        ``__init__``.  Hook-registered AgentState entries use the same
+        id, so the duplicate-creation guard below works in both modes.
         """
         logger.debug("  _create_main_agent: creating AgentState...")
 
         # Check if agent was already created by hooks
-        if "main" in self._agents:
-            logger.debug("  _create_main_agent: 'main' already exists (created by hooks), skipping")
+        if self._main_agent_id in self._agents:
+            logger.debug(
+                "  _create_main_agent: %r already exists (created by hooks), skipping",
+                self._main_agent_id,
+            )
             return
 
-        agent_name = self._profile.name if self._profile else "Main Agent"
+        display_name = (
+            self._main_agent_display_name
+            or (self._profile.name if self._profile else "Main Agent")
+        )
         agent = AgentState(
-            agent_id="main",
-            name=agent_name,
+            agent_id=self._main_agent_id,
+            name=display_name,
             agent_type="main",
         )
-        self._agents["main"] = agent
-        self._selected_agent_id = "main"
+        self._agents[self._main_agent_id] = agent
+        self._selected_agent_id = self._main_agent_id
         logger.debug("  _create_main_agent: agent state created")
 
         # Note: AgentCreatedEvent is NOT emitted here - it's handled by
@@ -2187,7 +2227,19 @@ class JaatoServer:
 
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")
         hooks = ServerAgentHooks()
-        if self._profile:
+        # Propagate the resolved agent identity to the JaatoClient/JaatoSession
+        # BEFORE set_ui_hooks runs.  ``set_ui_hooks`` reads ``self._agent_id``
+        # both to register the AgentState (via ``on_agent_created``) and to
+        # forward the id to the session (via ``session.set_ui_hooks``).
+        # Setting it here means every downstream consumer — most importantly
+        # ``LifecycleTools._execute_signal_completion`` and the reactor that
+        # matches on ``AgentCompletedEvent.agent_id`` — sees the agent's
+        # logical identity (e.g. ``"coordinator"``) instead of the
+        # default ``"main"``.
+        self._jaato._agent_id = self._main_agent_id
+        if self._main_agent_display_name:
+            self._jaato._agent_name = self._main_agent_display_name
+        elif self._profile:
             self._jaato._agent_name = self._profile.name
         logger.debug("  _setup_agent_hooks: calling jaato.set_ui_hooks...")
         self._jaato.set_ui_hooks(hooks)
@@ -2536,7 +2588,7 @@ class JaatoServer:
 
         def _get_agent_id(agent_name: Optional[str]) -> str:
             """Get agent ID from agent name."""
-            agent_id = "main" if agent_name is None else agent_name
+            agent_id = server._main_agent_id if agent_name is None else agent_name
             for aid, agent in server._agents.items():
                 if agent.profile_name == agent_name:
                     agent_id = aid
@@ -2594,7 +2646,7 @@ class JaatoServer:
         def output_callback(source: str, text: str, mode: str):
             """Emit AgentOutputEvent for plan messages."""
             server.emit(AgentOutputEvent(
-                agent_id="main",
+                agent_id=server._main_agent_id,
                 source=source,
                 text=text,
                 mode=mode,
@@ -2639,7 +2691,7 @@ class JaatoServer:
         # Output callback for channels
         def output_callback(source: str, text: str, mode: str):
             server.emit(AgentOutputEvent(
-                agent_id="main",
+                agent_id=server._main_agent_id,
                 source=source,
                 text=text,
                 mode=mode,
@@ -2739,7 +2791,7 @@ class JaatoServer:
 
         # Emit user message as output
         self.emit(AgentOutputEvent(
-            agent_id="main",
+            agent_id=self._main_agent_id,
             source="user",
             text=text,
             mode="write",
@@ -2747,7 +2799,7 @@ class JaatoServer:
 
         # Signal main agent is active
         self.emit(AgentStatusChangedEvent(
-            agent_id="main",
+            agent_id=self._main_agent_id,
             status="active",
         ))
 
@@ -2775,7 +2827,7 @@ class JaatoServer:
                     # Normal path: parent is idle between turns
                     server._trace(f"CONTINUATION: Child messages drained ({len(child_messages)} chars), triggering new turn")
                     server.emit(AgentStatusChangedEvent(
-                        agent_id="main",
+                        agent_id=server._main_agent_id,
                         status="active",
                     ))
                     server._start_model_thread(child_messages)
@@ -2833,13 +2885,14 @@ class JaatoServer:
                 gc_strategy = None
                 gc_target_percent = None
                 gc_continuous_mode = False
-                if "main" in server._agents:
-                    gc_threshold = server._agents["main"].gc_threshold
-                    gc_strategy = server._agents["main"].gc_strategy
-                    gc_target_percent = server._agents["main"].gc_target_percent
-                    gc_continuous_mode = server._agents["main"].gc_continuous_mode
+                if server._main_agent_id in server._agents:
+                    main_state = server._agents[server._main_agent_id]
+                    gc_threshold = main_state.gc_threshold
+                    gc_strategy = main_state.gc_strategy
+                    gc_target_percent = main_state.gc_target_percent
+                    gc_continuous_mode = main_state.gc_continuous_mode
                 server.emit(ContextUpdatedEvent(
-                    agent_id="main",
+                    agent_id=server._main_agent_id,
                     total_tokens=usage.total_tokens,
                     prompt_tokens=usage.prompt_tokens,
                     output_tokens=usage.output_tokens,
@@ -2894,7 +2947,7 @@ class JaatoServer:
                     # as a hidden prompt and let the model self-correct.
                     max_feedback_continuations = 2
                     for _attempt in range(max_feedback_continuations):
-                        main_agent = server._agents.get("main")
+                        main_agent = server._agents.get(server._main_agent_id)
                         if not main_agent or not main_agent.pending_formatter_feedback:
                             break
                         feedback = main_agent.pending_formatter_feedback
@@ -2919,13 +2972,14 @@ class JaatoServer:
                         gc_strategy = None
                         gc_target_percent = None
                         gc_continuous_mode = False
-                        if "main" in server._agents:
-                            gc_threshold = server._agents["main"].gc_threshold
-                            gc_strategy = server._agents["main"].gc_strategy
-                            gc_target_percent = server._agents["main"].gc_target_percent
-                            gc_continuous_mode = server._agents["main"].gc_continuous_mode
+                        if server._main_agent_id in server._agents:
+                            main_state = server._agents[server._main_agent_id]
+                            gc_threshold = main_state.gc_threshold
+                            gc_strategy = main_state.gc_strategy
+                            gc_target_percent = main_state.gc_target_percent
+                            gc_continuous_mode = main_state.gc_continuous_mode
                         server.emit(ContextUpdatedEvent(
-                            agent_id="main",
+                            agent_id=server._main_agent_id,
                             total_tokens=usage.get('total_tokens', 0),
                             prompt_tokens=usage.get('prompt_tokens', 0),
                             output_tokens=usage.get('output_tokens', 0),
@@ -2961,7 +3015,7 @@ class JaatoServer:
                 if pending:
                     server._trace(f"CONTINUATION: Processing stashed {len(pending)} chars")
                     server.emit(AgentStatusChangedEvent(
-                        agent_id="main",
+                        agent_id=server._main_agent_id,
                         status="active",
                     ))
                     server._start_model_thread(pending)
@@ -2973,7 +3027,7 @@ class JaatoServer:
                 #   "idle"  – waiting for user input or subagent results
                 #   "done"  – nothing left to do, session can exit
                 has_active_subagents = any(
-                    info.agent_id != "main" and info.completed_at is None
+                    info.agent_id != server._main_agent_id and info.completed_at is None
                     for info in server._agents.values()
                 )
                 if server._waiting_for_channel_input or has_active_subagents:
@@ -2981,7 +3035,7 @@ class JaatoServer:
                 else:
                     status = "done"
                 server.emit(AgentStatusChangedEvent(
-                    agent_id="main",
+                    agent_id=server._main_agent_id,
                     status=status,
                 ))
                 clear_logging_context()
@@ -3252,10 +3306,11 @@ class JaatoServer:
         if self._jaato:
             self._jaato.reset_session()
         self._original_inputs = []
-        if "main" in self._agents:
-            self._agents["main"].history = []
-            self._agents["main"].turn_accounting = []
-            self._agents["main"].context_usage = {}
+        if self._main_agent_id in self._agents:
+            main_state = self._agents[self._main_agent_id]
+            main_state.history = []
+            main_state.turn_accounting = []
+            main_state.context_usage = {}
 
         self.emit(SystemMessageEvent(
             message="History cleared",
@@ -3302,20 +3357,36 @@ class JaatoServer:
         """Get all tracked agents."""
         return self._agents.copy()
 
-    def get_history(self, agent_id: str = "main") -> List[Any]:
-        """Get conversation history for an agent."""
+    def get_history(self, agent_id: Optional[str] = None) -> List[Any]:
+        """Get conversation history for an agent.
+
+        ``agent_id=None`` resolves to the main agent's id (``main`` by
+        default, or the ``--agent <name>`` value when one was supplied).
+        """
+        if agent_id is None:
+            agent_id = self._main_agent_id
         if agent_id in self._agents:
             return self._agents[agent_id].history
         return []
 
-    def get_turn_accounting(self, agent_id: str = "main") -> List[Dict]:
-        """Get turn accounting for an agent."""
+    def get_turn_accounting(self, agent_id: Optional[str] = None) -> List[Dict]:
+        """Get turn accounting for an agent.
+
+        ``agent_id=None`` resolves to the main agent's id.
+        """
+        if agent_id is None:
+            agent_id = self._main_agent_id
         if agent_id in self._agents:
             return self._agents[agent_id].turn_accounting
         return []
 
-    def get_context_usage(self, agent_id: str = "main") -> Dict[str, Any]:
-        """Get context usage for an agent."""
+    def get_context_usage(self, agent_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get context usage for an agent.
+
+        ``agent_id=None`` resolves to the main agent's id.
+        """
+        if agent_id is None:
+            agent_id = self._main_agent_id
         if agent_id in self._agents:
             return self._agents[agent_id].context_usage
         return {}
@@ -3479,18 +3550,19 @@ class JaatoServer:
                 self._setup_plan_hooks()
                 self._setup_queue_channels()
                 self._create_main_agent()
-                if "main" in self._agents and gc_threshold is not None:
-                    self._agents["main"].gc_threshold = gc_threshold
-                    self._agents["main"].gc_strategy = gc_strategy
-                    self._agents["main"].gc_target_percent = gc_target_percent
-                    self._agents["main"].gc_continuous_mode = gc_continuous_mode
+                if self._main_agent_id in self._agents and gc_threshold is not None:
+                    main_state = self._agents[self._main_agent_id]
+                    main_state.gc_threshold = gc_threshold
+                    main_state.gc_strategy = gc_strategy
+                    main_state.gc_target_percent = gc_target_percent
+                    main_state.gc_continuous_mode = gc_continuous_mode
 
                 # Emit initial context update so toolbar shows correct usage
                 if self._jaato:
                     usage = self._jaato.get_context_usage()
                     context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
                     self.emit(ContextUpdatedEvent(
-                        agent_id="main",
+                        agent_id=self._main_agent_id,
                         total_tokens=usage.get('total_tokens', 0),
                         prompt_tokens=usage.get('prompt_tokens', 0),
                         output_tokens=usage.get('output_tokens', 0),

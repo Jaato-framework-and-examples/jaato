@@ -705,9 +705,15 @@ class SessionManager:
             session: The session being tracked.
             event: The event to process.
         """
-        # Track when agent becomes active (turn starts)
+        # Track when agent becomes active (turn starts).
+        # Compare against the session's main_agent_id (typically "main",
+        # but may be the ``--agent <name>`` value when one was supplied
+        # at session creation).
+        main_agent_id = (
+            session.server.main_agent_id if session.server else "main"
+        )
         if isinstance(event, AgentStatusChangedEvent):
-            if event.status == "active" and event.agent_id == "main":
+            if event.status == "active" and event.agent_id == main_agent_id:
                 # Main agent starting a turn - initialize tracking
                 # Note: We don't have user_prompt here, but we can still track tool calls
                 if not session.interrupted_turn:
@@ -921,7 +927,12 @@ class SessionManager:
                 profile.system_instructions = agent_instructions
 
         # Create JaatoServer for this session
-        # Provider is determined by env_file, with optional overrides
+        # Provider is determined by env_file, with optional overrides.
+        # ``agent_name`` propagates to the main agent's ``agent_id`` so
+        # reactor rules and event consumers can match on the agent's
+        # logical identity (e.g. ``"coordinator"``).  Without this, all
+        # AgentCompletedEvents would carry ``agent_id="main"`` regardless
+        # of which agent the session was launched with.
         server = JaatoServer(
             env_file=session_env_file,
             provider=None,  # Let env_file determine provider
@@ -934,6 +945,7 @@ class SessionManager:
             profile=profile,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=suppress_base_instructions,
+            agent_name=agent_name,
         )
 
         # Initialize the server (events go directly to requesting client).
@@ -1454,12 +1466,18 @@ class SessionManager:
             server._jaato.reset_session(state.history)
             logger.debug(f"Restored {len(state.history)} messages for session {session_id}")
 
+            # Resolve the session's main agent id once — it may be the
+            # default ``"main"`` or the ``--agent <name>`` value used at
+            # session creation.  Used as the ``_agents`` dict key and the
+            # emitted ``agent_id`` so consumers see consistent identity.
+            main_agent_id = server.main_agent_id
+
             # Also populate AgentState.history so emit_current_state() can
             # replay conversation content for reconnecting clients.
             # on_agent_history_updated is only called during send_message(),
             # so we must set it explicitly after disk load.
-            if "main" in server._agents:
-                server._agents["main"].history = list(state.history)
+            if main_agent_id in server._agents:
+                server._agents[main_agent_id].history = list(state.history)
 
             # Restore turn accounting (reset_session clears it, so we restore after)
             if state.turn_accounting:
@@ -1468,10 +1486,11 @@ class SessionManager:
                 logger.debug(f"Restored {len(state.turn_accounting)} turn accounting entries for session {session_id}")
 
                 # Update server's agent state and emit context update
-                if "main" in server._agents:
-                    server._agents["main"].turn_accounting = list(state.turn_accounting)
+                if main_agent_id in server._agents:
+                    main_state = server._agents[main_agent_id]
+                    main_state.turn_accounting = list(state.turn_accounting)
                     usage = server._jaato.get_context_usage()
-                    server._agents["main"].context_usage = {
+                    main_state.context_usage = {
                         'total_tokens': usage.get('total_tokens', 0),
                         'prompt_tokens': usage.get('prompt_tokens', 0),
                         'output_tokens': usage.get('output_tokens', 0),
@@ -1479,7 +1498,7 @@ class SessionManager:
                     }
                     # Emit context update so clients show correct usage
                     server.emit(ContextUpdatedEvent(
-                        agent_id="main",
+                        agent_id=main_agent_id,
                         total_tokens=usage.get('total_tokens', 0),
                         prompt_tokens=usage.get('prompt_tokens', 0),
                         output_tokens=usage.get('output_tokens', 0),
@@ -1650,7 +1669,7 @@ class SessionManager:
                 agent_name=profile.name if profile else agent_id,
                 agent_type="subagent",
                 profile_name=profile.name if profile else "",
-                parent_agent_id="main",
+                parent_agent_id=server.main_agent_id,
                 created_at=created_at,
             ))
 
@@ -1802,8 +1821,10 @@ class SessionManager:
                 history = session.server._jaato.get_history()
             turn_accounting = []
 
-            if session.server and "main" in session.server._agents:
-                turn_accounting = session.server._agents["main"].turn_accounting
+            if session.server:
+                main_id = session.server.main_agent_id
+                if main_id in session.server._agents:
+                    turn_accounting = session.server._agents[main_id].turn_accounting
 
             # Resolve storage directory from workspace
             if session.workspace_path:
@@ -3080,10 +3101,13 @@ class SessionManager:
                 ))
 
         elif isinstance(event, GetInstructionBudgetRequest):
-            # Get instruction budget for the requested agent
-            agent_id = event.agent_id or "main"
+            # Get instruction budget for the requested agent.  ``None`` (or
+            # the legacy default ``"main"``) targets this server's main
+            # agent, whose actual id may be a custom ``--agent <name>``.
+            main_id = server.main_agent_id
+            agent_id = event.agent_id or main_id
 
-            if agent_id == "main":
+            if agent_id == main_id or agent_id == "main":
                 # Main agent budget from JaatoClient session
                 jaato_session = server._jaato.get_session() if server._jaato else None
                 if jaato_session and jaato_session.instruction_budget:
