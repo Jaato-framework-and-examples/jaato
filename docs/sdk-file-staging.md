@@ -127,6 +127,145 @@ The two paths share the same write code (`_write_staged_payload` in
 - It can stage files into an *already-existing* workspace mid-session.
 - It has its own response event with explicit per-file results.
 
+## Client integration: jaato-client-telegram
+
+The Telegram bot (`jaato-client-telegram`) uses a single `WSTransport`
+connection managed by `SessionPool`. Each Telegram user gets an
+isolated session on the server. To adopt `StageFilesRequest`, the
+following changes are needed.
+
+### 1. Track workspace_id per session
+
+Currently `SessionPool` stores `SessionMetadata(session_id, …)` but
+does not capture the workspace path or basename from the
+`SessionInfoEvent`. The event carries `workspace_path` which encodes
+the workspace basename (e.g. `/data/workspaces/ws_a1b2c3d4` → basename
+`ws_a1b2c3d4`).
+
+**Change:** Extend `SessionMetadata` with a `workspace_id: str` field
+(default `""`). Populate it in the `SessionInfoEvent` handler (both
+`WSTransport._receiver_loop` and `SessionPool.on_session_info_event`).
+
+### 2. Add `stage_files()` to WSTransport
+
+The transport's `send()` method only handles TEXT frames via
+`serialize_event()`. Staging requires sending the TEXT request followed
+by N raw BINARY frames. Add a dedicated method:
+
+```python
+async def stage_files(
+    self,
+    workspace_id: str,
+    specs: list[StagedFileSpec],
+    payloads: list[bytes],
+) -> StageFilesEvent:
+    """Send StageFilesRequest + binary frames, await StageFilesEvent."""
+    if not self._ws or not self._connected:
+        raise RuntimeError("Not connected")
+    if len(specs) != len(payloads):
+        raise ValueError("specs and payloads must have the same length")
+
+    request = StageFilesRequest(
+        workspace_id=workspace_id,
+        files=specs,
+    )
+    await self._ws.send(serialize_event(request))
+
+    for data in payloads:
+        await self._ws.send(data)
+
+    # The receiver loop will route the StageFilesEvent to the calling
+    # session's queue. Block until it arrives.
+    future = asyncio.get_running_loop().create_future()
+    self._stage_files_future = future
+    try:
+        return await asyncio.wait_for(future, timeout=120.0)
+    finally:
+        self._stage_files_future = None
+```
+
+The `_receiver_loop` must also be updated to recognise
+`StageFilesEvent` and resolve this future (same pattern as the
+existing `_session_future` for `SessionInfoEvent`).
+
+**Imports to add** in `transport.py`:
+- `StageFilesRequest`, `StageFilesEvent`, `StagedFileSpec` from
+  `jaato_sdk.events`.
+
+### 3. Add `stage_files()` to SessionPool
+
+Expose a convenience method that resolves the workspace_id from the
+session's metadata:
+
+```python
+async def stage_files(
+    self,
+    chat_id: int,
+    files: list[tuple[str, bytes, str | None]],
+) -> StageFilesEvent:
+    """Stage files into the session's workspace.
+
+    Args:
+        chat_id: Telegram chat_id.
+        files: List of (name, raw_bytes, content_type_or_None).
+
+    Returns:
+        StageFilesEvent from the server.
+    """
+    meta = self._sessions.get(chat_id)
+    if not meta:
+        raise RuntimeError(f"No session for chat_id {chat_id}")
+    specs = [
+        StagedFileSpec(name=name, size=len(data), content_type=ct)
+        for name, data, ct in files
+    ]
+    payloads = [data for _, data, _ in files]
+    return await self._transport.stage_files(
+        workspace_id=meta.workspace_id,
+        specs=specs,
+        payloads=payloads,
+    )
+```
+
+### 4. Wire into file-handling flows
+
+The Telegram bot already has a `FileHandler` that downloads documents
+and photos sent by users. After download, instead of saving locally,
+the handler can call `session_pool.stage_files()` to push the file
+into the agent's workspace. The agent then sees it at the declared
+workspace-relative path.
+
+### 5. Error handling
+
+After receiving the `StageFilesEvent`, check `failed[]` before
+proceeding. Each entry has `{"name", "category", "error"}`. Surface
+`"unsafe_path"` and `"size_limit_*"` as user-facing messages;
+`"io_error"` as a transient retry; `"workspace_not_found"` as a
+session reset.
+
+### 6. File size guard on the Telegram side
+
+Telegram's Bot API limits downloads to 20 MB. The server caps are
+10 MB per file and 50 MB total. Add a pre-send check:
+
+```python
+STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024   # 10 MB
+STAGE_TOTAL_LIMIT   = 50 * 1024 * 1024   # 50 MB
+```
+
+Reject files that exceed these limits before sending the request,
+giving the user an immediate error message rather than waiting for
+a server round-trip.
+
+### Files to modify
+
+| File | Change |
+|------|--------|
+| `transport.py` | Add `stage_files()` method; handle `StageFilesEvent` in receiver loop; add imports |
+| `session_pool.py` | Add `workspace_id` to `SessionMetadata`; add `stage_files()` convenience method; extract workspace_id from `SessionInfoEvent` |
+| `bot.py` | No changes needed (wiring is in session_pool/transport) |
+| `handlers/` | Call `pool.stage_files()` from file-handling handlers after user sends a document |
+
 ## Future work
 
 Already on the design backlog (see `project_backlog_sdk_file_staging`):

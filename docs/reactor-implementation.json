@@ -1,0 +1,20 @@
+{
+  "id": "reactor-implementation",
+  "name": "Reactor Engine — Complete Reference",
+  "description": "Comprehensive reference for the reactor engine in jaato-premium: rules-driven event-action system, rule authoring (reactors.json), JMESPath where clauses, template substitution, action scripts, ActionContext API (fork, inject, spawn, webhook, shell, emit_event), completion payload schemas for typed agent handoffs, agent handoff patterns (simple completion, typed conditional, multi-validator fan-in, webhook notification, rule chaining), hot-reloading, and runtime internals including the event bus bridge and completeStepWithOutput integration.",
+  "type": "local",
+  "path": "/home/apanoia/Sources/Jaato-framework-and-examples/jaato/docs/reactor-implementation.md",
+  "mode": "selectable",
+  "tags": ["reactor", "event-action", "reactors-json", "event-bus", "EventType", "JMESPath", "where-clause", "action-script", "ActionContext", "fork", "handoff", "agent-handoff", "completion-payload", "completion_payload_schema", "signal_completion", "template-substitution", "hot-reload", "FileWatcher", "ReactorEngine", "jaato-premium"],
+  "fetchHint": "Read the full document at the path above. Covers reactor rules, event types, action scripts, completion schemas, and handoff patterns.",
+  "contents": {
+    "templates": null,
+    "validation": null,
+    "policies": null,
+    "scripts": null
+  },
+  "embedding": {
+    "index": 0,
+    "source_hash": "sha256:b7153e1b4fb3dbaaf7f41c95c0fcb26ca3efa4ab5bc90155a623e053e181dd25"
+  }
+}
