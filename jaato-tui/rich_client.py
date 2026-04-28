@@ -991,6 +991,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     pending_post_auth_setup: Optional[dict] = None
     model_running = False
     should_exit = False
+    detach_info: Optional[tuple[str, str]] = None  # (session_id, socket_path) when user chose detach
     server_commands: list = []  # Commands from server for help display
     available_sessions: list = []  # Sessions from server for completion
     available_tools: list = []  # Tools from server for completion
@@ -2162,7 +2163,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal pending_workspace_mismatch_request, pending_post_auth_setup
-        nonlocal model_running, should_exit
+        nonlocal model_running, should_exit, detach_info
         pending_exit_confirmation = False
 
         ipc_trace("Input handler starting")
@@ -2408,11 +2409,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         else:
                             display.add_system_message("Session preserved on server.", style="system_success")
                         display.add_system_message("", style="hint")
-                        display.add_system_message("To reconnect:", style="system_info")
-                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="system_info")
-                        display.add_system_message("", style="hint")
                         display.add_system_message(f"Session ID: {session_id}", style="hint")
                         display.add_system_message("", style="hint")
+                        # Stash reconnect info so we can print it to the terminal after the
+                        # TUI tears down its alternate screen (otherwise the in-display hint
+                        # disappears with the rest of the buffer).
+                        detach_info = (session_id, socket_path)
                         should_exit = True
                         display.stop()
                         break
@@ -2666,6 +2668,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     finally:
         await client.disconnect()
+
+    # After the TUI's alternate screen has been torn down, print a reconnect
+    # helper to the regular terminal so the user can see it on returning to
+    # their shell. Only emitted when the user chose "detach" on exit.
+    if detach_info is not None:
+        detached_session_id, detached_socket = detach_info
+        from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH
+        cmd = f"jaato --session {detached_session_id}"
+        if detached_socket and detached_socket != DEFAULT_SOCKET_PATH:
+            cmd += f" --connect {detached_socket}"
+        print(f"To reconnect: {cmd}")
 
 
 def _run_init(target: str = ".jaato") -> None:
