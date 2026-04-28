@@ -503,6 +503,7 @@ class PTDisplay:
         self._workspace_panel = WorkspacePanel(
             toggle_key=self._keybinding_config.toggle_workspace,
             open_file_key=self._keybinding_config.workspace_open_file,
+            diff_key=self._keybinding_config.workspace_diff,
             clear_key=self._keybinding_config.workspace_clear,
             paste_ref_key=self._keybinding_config.workspace_paste_ref,
             hide_key=self._keybinding_config.workspace_hide,
@@ -1145,17 +1146,26 @@ class PTDisplay:
             and not self._waiting_for_channel_input
         )
 
-    def _open_workspace_file(self) -> None:
+    def _open_workspace_file(self, action: str = "raw") -> None:
         """Open the workspace panel's selected file in an external program.
 
         Resolves the relative file path shown in the workspace panel against
         the session workspace root, then chooses a launcher via
-        :func:`openers.resolve_opener`.  By default this is ``$EDITOR`` (or
-        ``$VISUAL``, falling back to ``vi``); users can override per-extension
-        via ``.jaato/openers.json`` or ``~/.jaato/openers.json`` (e.g. open
-        ``*.md`` with ``glow``).  The launch happens inside ``run_in_terminal``
-        so the TUI is properly suspended and restored.  Does nothing if the
-        cursor is on a directory or the file doesn't exist on disk.
+        :func:`openers.resolve_opener` for the given *action*.  The default
+        ``"raw"`` action falls back to ``$EDITOR`` (or ``$VISUAL`` → ``vi``);
+        the ``"diff"`` action has no built-in fallback — if no pattern in
+        ``.jaato/openers.json`` defines it, this is a no-op.  Users override
+        per-extension via ``.jaato/openers.json`` or ``~/.jaato/openers.json``
+        using either a bare string (treated as ``raw``) or an action dict
+        (e.g. ``{"raw": "glow -p", "diff": "git diff HEAD --"}``).  The
+        launch happens inside ``run_in_terminal`` so the TUI is properly
+        suspended and restored.  Does nothing if the cursor is on a
+        directory, the file doesn't exist on disk, or the resolver returns
+        an empty argv (no opener configured for the action).
+
+        Args:
+            action: Opener action name — ``"raw"`` (default) for
+                editor-style open, ``"diff"`` for a diff viewer.
         """
         import os
         import subprocess
@@ -1179,7 +1189,12 @@ class PTDisplay:
         if not os.path.isfile(abs_path):
             return
 
-        argv = resolve_opener(rel_path, self._openers) + [abs_path]
+        opener_argv = resolve_opener(rel_path, self._openers, action=action)
+        if not opener_argv:
+            # No opener configured for this action (only happens for
+            # non-``raw`` actions; ``raw`` always has the editor fallback).
+            return
+        argv = opener_argv + [abs_path]
 
         async def _open():
             def _run():
@@ -2396,6 +2411,18 @@ class PTDisplay:
             has priority.
             """
             self._open_workspace_file()
+
+        @kb.add(*keys.get_key_args("workspace_diff"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_diff(event):
+            """Open the selected workspace file in the external diff viewer.
+
+            Resolves the ``"diff"`` action from ``.jaato/openers.json``.  No-op
+            if no pattern defines a diff opener for the file.  Same gating as
+            ``workspace_open_file`` — only fires when the panel has focus and
+            the input buffer is empty.
+            """
+            self._open_workspace_file(action="diff")
 
         @kb.add(*keys.get_key_args("workspace_clear"),
                 filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
