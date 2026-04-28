@@ -42,6 +42,7 @@ from .session_logging import set_logging_context, clear_logging_context
 from jaato_sdk.events import (
     Event,
     EventType,
+    PROTOCOL_VERSION,
     ConnectedEvent,
     ErrorEvent,
     SystemMessageEvent,
@@ -1041,7 +1042,7 @@ class JaatoWSServer:
                 server_info["model_name"] = self._jaato_server.model_name
 
             connected_event = ConnectedEvent(
-                protocol_version="1.0",
+                protocol_version=PROTOCOL_VERSION,
                 server_info=server_info,
             )
             await websocket.send(serialize_event(connected_event))

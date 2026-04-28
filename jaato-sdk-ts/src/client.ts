@@ -81,14 +81,57 @@ interface HandlerEntry {
 }
 
 /**
- * The earliest jaato-server version this SDK is wire-compatible with.
+ * The earliest wire-protocol version this SDK is compatible with.
  *
- * Bumped whenever the SDK starts depending on a new server feature
- * (e.g. a new WS verb).  Mirrors the TUI's MIN_SERVER_VERSION
- * convention — clients refuse to connect to older daemons rather
- * than send requests the server can't handle.
+ * Bumped when the SDK depends on a new wire shape — typically when
+ * gap-numbered changes land in `events.py`.  Compat is checked on
+ * connect against ``ConnectedEvent.protocol_version`` from the daemon.
+ *
+ * Distinct from the daemon's *package* version (``server_version``),
+ * which is no longer used for compat checks — it remains in
+ * ``server_info`` for diagnostics only.
+ *
+ * See ``docs/sdk-protocol-versioning.md`` for the bump policy.
  */
-export const MIN_SERVER_VERSION = "0.5.27";
+export const MIN_PROTOCOL_VERSION = "1.0";
+
+/**
+ * Parse ``"MAJOR.MINOR"`` into ``[major, minor]``.  Extra components
+ * are tolerated and dropped (e.g. ``"1.0.5"`` → ``[1, 0]``).  Returns
+ * ``null`` on malformed input rather than throwing — the compat check
+ * treats unparseable as incompatible.
+ */
+function _parseProtocolVersion(v: string): [number, number] | null {
+  const parts = v.split(".");
+  if (parts.length < 2) return null;
+  const major = parseInt(parts[0]!, 10);
+  const minor = parseInt(parts[1]!, 10);
+  if (Number.isNaN(major) || Number.isNaN(minor)) return null;
+  return [major, minor];
+}
+
+/**
+ * Whether ``serverProtocol`` satisfies ``clientMin``.
+ *
+ * Rule (semver-flavoured):
+ * - Server's MAJOR must equal client's MAJOR.  Different majors mean
+ *   incompatible wire shapes.
+ * - Server's MINOR must be >= client's required minor.  Server minor
+ *   higher is fine — additive optional fields the client may not yet
+ *   read.
+ *
+ * Either side malformed → ``false`` (refuse rather than guess).
+ */
+export function isProtocolCompatible(
+  serverProtocol: string,
+  clientMin: string,
+): boolean {
+  const s = _parseProtocolVersion(serverProtocol);
+  const c = _parseProtocolVersion(clientMin);
+  if (s == null || c == null) return false;
+  if (s[0] !== c[0]) return false;
+  return s[1] >= c[1];
+}
 
 /**
  * Constructor options for {@link JaatoClient}.
@@ -107,11 +150,12 @@ export interface JaatoClientOptions {
    */
   headers?: Record<string, string>;
   /**
-   * Override the SDK's compile-time minimum.  Use only for
-   * development; production deployments should leave this unset
-   * so the SDK refuses to connect to incompatible servers.
+   * Override the SDK's compile-time minimum protocol version.  Use
+   * only for development against unreleased daemons; production
+   * deployments should leave this unset so the SDK refuses to connect
+   * to incompatible servers.
    */
-  minServerVersion?: string;
+  minProtocolVersion?: string;
   /**
    * Recovery policy for automatic reconnection.  Override fields
    * piecewise; unspecified fields fall back to
@@ -162,6 +206,7 @@ export class JaatoClient {
   private _transport: Transport | null = null;
   private _state: ConnectionState = ConnectionState.DISCONNECTED;
   private _serverVersion: string | null = null;
+  private _serverProtocolVersion: string | null = null;
   private _clientId: string | null = null;
   private _sessionId: string | null = null;
   private _statusHandlers: Array<(s: ConnectionStatus) => void> = [];
@@ -224,9 +269,22 @@ export class JaatoClient {
     return this._state === ConnectionState.CONNECTED;
   }
 
-  /** Server version reported in {@link ConnectedEvent}, after handshake. */
+  /**
+   * Server's package version reported in {@link ConnectedEvent}, after
+   * handshake.  **Diagnostics only** — compat is checked against
+   * {@link serverProtocolVersion}.
+   */
   get serverVersion(): string | null {
     return this._serverVersion;
+  }
+
+  /**
+   * Server's wire-protocol version from {@link ConnectedEvent}, after
+   * handshake.  This is what the compat check ran against — distinct
+   * from {@link serverVersion} (the daemon's package version).
+   */
+  get serverProtocolVersion(): string | null {
+    return this._serverProtocolVersion;
   }
 
   /** Client ID assigned by the server in {@link ConnectedEvent}. */
@@ -976,13 +1034,24 @@ export class JaatoClient {
     const serverInfo = connected.server_info ?? {};
     this._serverVersion = (serverInfo.server_version as string) ?? null;
     this._clientId = (serverInfo.client_id as string) ?? null;
+    this._serverProtocolVersion = connected.protocol_version ?? null;
 
-    // Version gate.
-    const minRequired = this._options.minServerVersion ?? MIN_SERVER_VERSION;
-    if (this._serverVersion != null && _compareVersions(this._serverVersion, minRequired) < 0) {
+    // Wire-protocol compat gate.  Compares against
+    // ``protocol_version`` (not the daemon package version) — the
+    // package can bump without changing the wire and vice versa.
+    const minRequired =
+      this._options.minProtocolVersion ?? MIN_PROTOCOL_VERSION;
+    if (
+      this._serverProtocolVersion == null ||
+      !isProtocolCompatible(this._serverProtocolVersion, minRequired)
+    ) {
       this._transport = null;
-      transport.close(1002, "incompatible server version");
-      throw new IncompatibleServerError(this._serverVersion, minRequired);
+      transport.close(1002, "incompatible protocol version");
+      throw new IncompatibleServerError(
+        this._serverProtocolVersion ?? "unknown",
+        minRequired,
+        this._serverVersion ?? undefined,
+      );
     }
 
     // Send ClientConfigRequest (handshake completion from our side).

@@ -38,7 +38,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
 
 from jaato_sdk.client._handler_registry import (
     EventHandler,
@@ -97,24 +97,108 @@ else:
     DEFAULT_PID_FILE = "/tmp/jaato.pid"
 
 
-class IncompatibleServerError(Exception):
-    """Raised when the server version is below the client's minimum requirement.
+def _parse_protocol_version(v: str) -> Tuple[int, int]:
+    """Parse a ``"MAJOR.MINOR"`` semver string into a tuple.
 
-    This error is non-retryable: an old server will not become newer on retry.
-    Clients should catch this and display a clear upgrade message.
+    Lenient — extra components ("1.0.5") are tolerated; the trailing
+    parts are dropped.  Non-numeric tokens yield ``ValueError``.
+    """
+    parts = v.split(".")
+    if len(parts) < 2:
+        raise ValueError(f"Protocol version must be MAJOR.MINOR, got {v!r}")
+    return int(parts[0]), int(parts[1])
+
+
+def _protocol_compatible(server_version: str, client_min: str) -> bool:
+    """Return whether ``server_version`` satisfies the client's minimum.
+
+    Compat rule (semver-flavoured):
+
+    - Server's MAJOR must equal the client's MAJOR.  A different major
+      means the server has shape changes the client cannot parse, or
+      uses fields the client expects to find but doesn't.
+    - Server's MINOR must be >= the client's required minor.  Server
+      minor *higher* is fine — additive optional fields the client
+      hasn't been taught about yet.
+
+    Either side malformed (or ``None``) → ``False``.  Refuse rather
+    than risk parsing garbage; the caller treats this as "unknown
+    protocol" and surfaces ``IncompatibleServerError``.
+    """
+    if not isinstance(server_version, str) or not isinstance(client_min, str):
+        return False
+    try:
+        server_major, server_minor = _parse_protocol_version(server_version)
+        client_major, client_minor = _parse_protocol_version(client_min)
+    except (ValueError, TypeError):
+        return False
+    if server_major != client_major:
+        return False
+    return server_minor >= client_minor
+
+
+class IncompatibleServerError(Exception):
+    """Raised when the server's protocol version is incompatible.
+
+    Non-retryable: an old (or wrong-major) server will not become
+    compatible on retry.  Clients should catch this and prompt the
+    operator with the protocol-version mismatch — telling them the
+    *protocol* version is the actionable signal, not the package
+    version (which may not have changed when shapes broke).
 
     Attributes:
-        server_version: The version reported by the server.
-        min_version: The minimum version required by the client.
+        server_protocol: ``ConnectedEvent.protocol_version`` from the
+            daemon — the wire-protocol version it speaks.
+        min_protocol: The client's required minimum protocol version.
+        server_version: The daemon's package version (read from
+            ``server_info["server_version"]``), kept for diagnostics
+            only.  When the field is absent we report ``"unknown"``.
     """
 
-    def __init__(self, server_version: str, min_version: str):
-        self.server_version = server_version
-        self.min_version = min_version
+    def __init__(
+        self,
+        server_protocol: str,
+        min_protocol: str,
+        server_version: Optional[str] = None,
+    ):
+        self.server_protocol = server_protocol
+        self.min_protocol = min_protocol
+        self.server_version = server_version or "unknown"
+        try:
+            sm, sn = _parse_protocol_version(server_protocol)
+            cm, cn = _parse_protocol_version(min_protocol)
+            if sm != cm:
+                hint = (
+                    f"major-version mismatch (server speaks {sm}.x, client "
+                    f"needs {cm}.x) — wire shapes are incompatible"
+                )
+            elif sn < cn:
+                hint = (
+                    f"server minor {sn} is below client's required minor "
+                    f"{cn} — daemon is missing fields the client depends on"
+                )
+            else:
+                hint = "version mismatch"
+        except (ValueError, TypeError):
+            hint = "unparseable protocol version"
         super().__init__(
-            f"Server version {server_version} is not supported by this client "
-            f"(requires >= {min_version}). Please upgrade the server."
+            f"Server protocol {server_protocol} is not supported by this "
+            f"client (requires >= {min_protocol}): {hint}. "
+            f"Daemon package: {self.server_version}."
         )
+
+    # =========================================================================
+    # Backwards-compat properties
+    # =========================================================================
+    # Pre-1.0 callers read ``.min_version`` and used the deprecated
+    # ``server_version``-driven check.  Map them to the new fields so a
+    # ``except IncompatibleServerError as e: print(e.min_version)`` site
+    # keeps working without code changes.
+
+    @property
+    def min_version(self) -> str:
+        """Alias for ``min_protocol`` (pre-1.0 compatibility)."""
+        return self.min_protocol
 
 
 class IPCClient:
@@ -131,12 +215,19 @@ class IPCClient:
     - Windows: Named pipes (\\.\pipe\pipename)
     """
 
+    # Minimum wire-protocol version this client speaks.  See
+    # ``docs/sdk-protocol-versioning.md`` for the bump policy.
+    # Override per-instance via the ``min_protocol_version`` ctor arg
+    # for development against unreleased daemons.
+    MIN_PROTOCOL_VERSION: str = "1.0"
+
     def __init__(
         self,
         socket_path: str = DEFAULT_SOCKET_PATH,
         auto_start: bool = True,
         env_file: str = ".env",
         workspace_path: Optional[str] = None,
+        min_protocol_version: Optional[str] = None,
     ):
         """Initialize the IPC client.
 
@@ -147,11 +238,19 @@ class IPCClient:
             workspace_path: Working directory sent to the server for file
                 operations and sandbox scoping.  Falls back to
                 ``os.getcwd()`` when not provided.
+            min_protocol_version: Override the class-level
+                ``MIN_PROTOCOL_VERSION`` for this connection.  Use only
+                for development against unreleased daemons; production
+                deployments should pin a real minimum at the class
+                level so the SDK refuses to talk to incompatible servers.
         """
         self.socket_path = socket_path
         self.auto_start = auto_start
         self.env_file = env_file
         self.workspace_path = workspace_path
+        self._min_protocol_version: str = (
+            min_protocol_version or self.MIN_PROTOCOL_VERSION
+        )
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -159,6 +258,7 @@ class IPCClient:
         self._session_id: Optional[str] = None
         self._client_id: Optional[str] = None
         self._server_version: Optional[str] = None
+        self._server_protocol_version: Optional[str] = None
 
         # Event handler registry.  Owned and dispatched from this
         # client's event loop; not thread-safe.  See _handler_registry
@@ -302,8 +402,24 @@ class IPCClient:
         Returns the ``server_version`` string from the ``ConnectedEvent``
         server_info dict, or ``None`` if the server did not report one
         (pre-0.2.28 servers).
+
+        **Diagnostics only** — compat is checked against
+        ``server_protocol_version``.  Two daemons with different
+        package versions can speak the same protocol; package version
+        on its own says nothing about wire compatibility.
         """
         return self._server_version
+
+    @property
+    def server_protocol_version(self) -> Optional[str]:
+        """Get the server's wire-protocol version, available after connect().
+
+        Returns the ``protocol_version`` string from ``ConnectedEvent``,
+        or ``None`` if the connection hasn't completed handshake yet.
+        This is the version the compat check ran against — different
+        from the daemon's package version (see ``server_version``).
+        """
+        return self._server_protocol_version
 
     def supports_reconnection(self) -> bool:
         """Check if this client supports reconnection.
@@ -503,6 +619,23 @@ class IPCClient:
                 if isinstance(event, ConnectedEvent):
                     self._client_id = event.server_info.get("client_id")
                     self._server_version = event.server_info.get("server_version")
+                    self._server_protocol_version = event.protocol_version
+
+                    # Wire-protocol compat gate.  Refuse to keep the
+                    # connection alive when the server's protocol
+                    # version is incompatible — the operator's right
+                    # next step is to upgrade one side, not retry.
+                    if not _protocol_compatible(
+                        self._server_protocol_version,
+                        self._min_protocol_version,
+                    ):
+                        await self.disconnect()
+                        raise IncompatibleServerError(
+                            server_protocol=self._server_protocol_version,
+                            min_protocol=self._min_protocol_version,
+                            server_version=self._server_version,
+                        )
+
                     # Send our working directory to the server
                     import os
                     cwd = self.workspace_path or os.getcwd()
@@ -513,6 +646,8 @@ class IPCClient:
                     # Send client config with env overrides
                     await self._send_client_config()
                     return True
+        except IncompatibleServerError:
+            raise
         except Exception as e:
             await self.disconnect()
             raise ConnectionError(f"Handshake failed: {e}")
@@ -535,6 +670,7 @@ class IPCClient:
         self._session_id = None
         self._client_id = None
         self._server_version = None
+        self._server_protocol_version = None
 
     async def _send_client_config(self) -> None:
         """Send client configuration to the server.

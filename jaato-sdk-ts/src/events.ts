@@ -5336,7 +5336,6 @@ export type EventType45 =
   | "peer.stop_request"
   | "peer.stop_acknowledged";
 export type Timestamp45 = string;
-export type SchemaVersion = string;
 export type Name = string;
 export type Description1 = string;
 export type Plugins = string[];
@@ -12266,26 +12265,27 @@ export interface SessionDescriptionUpdatedEvent {
  * ``parse_errors`` rather than mixed into ``profiles`` — a picker
  * can surface them separately or hide them entirely.
  *
- * The ``schema_version`` field is bumped only on breaking changes to
- * the shape of ``profiles[i]`` or this event.  Consumers can pin a
- * minimum version and refuse to render unknown shapes.  Forward-
- * compatible additions (new optional fields on ``ProfileSummary``)
- * do *not* bump the version.
+ * The shape of this event (and of nested ``ProfileSummary``) is
+ * versioned by the global ``ConnectedEvent.protocol_version``.  Pre-
+ * 1.0 versions of the SDK had a per-event ``schema_version`` field
+ * here; that was promoted to the global protocol version in v1.0 and
+ * removed from this event.
  */
 export interface SessionProfilesEvent {
   type?: EventType45;
   timestamp?: Timestamp45;
-  schema_version?: SchemaVersion;
   profiles?: Profiles;
   parse_errors?: ParseErrors;
 }
 /**
  * Stable summary of a profile, safe to expose to external clients.
  *
- * Versioned by ``SessionProfilesEvent.schema_version``.  Sensitive
- * material is intentionally omitted: env *values* are summarised by
- * name only; ``system_instructions``, ``icon_name`` and ``inherits``
- * are not exposed (deprecated or already resolved during discovery).
+ * Versioned by the global ``ConnectedEvent.protocol_version`` —
+ * breaking changes to this shape bump the protocol's MAJOR; additive
+ * optional fields bump the MINOR.  Sensitive material is intentionally
+ * omitted: env *values* are summarised by name only;
+ * ``system_instructions``, ``icon_name`` and ``inherits`` are not
+ * exposed (deprecated or already resolved during discovery).
  * Structural config (``plugin_configs``, ``model_tiers``,
  * ``runtime_limits``, ``gc``) is exposed as-is — profile authors are
  * expected to use ``${VAR}`` indirection for secrets and put the

@@ -12,7 +12,7 @@
 import { strict as assert } from "node:assert";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
-import { JaatoClient, MIN_SERVER_VERSION } from "./client.js";
+import { JaatoClient, MIN_PROTOCOL_VERSION } from "./client.js";
 import {
   ConnectionClosedError,
   IncompatibleServerError,
@@ -98,11 +98,14 @@ function restoreWebSocket(): void {
   lastInstance = null;
 }
 
-function makeConnectedEvent(serverVersion = MIN_SERVER_VERSION): JaatoEvent {
+function makeConnectedEvent(
+  protocolVersion = MIN_PROTOCOL_VERSION,
+  serverVersion = "0.7.1",
+): JaatoEvent {
   return {
     type: EventTypeValue.CONNECTED,
     timestamp: new Date().toISOString(),
-    protocol_version: "1.0",
+    protocol_version: protocolVersion,
     server_info: {
       client_id: "client_1",
       server_version: serverVersion,
@@ -112,7 +115,8 @@ function makeConnectedEvent(serverVersion = MIN_SERVER_VERSION): JaatoEvent {
 
 async function connectAndAck(
   client: JaatoClient,
-  serverVersion = MIN_SERVER_VERSION,
+  protocolVersion = MIN_PROTOCOL_VERSION,
+  serverVersion = "0.7.1",
 ): Promise<void> {
   const connectPromise = client.connect();
   // Let the WS open microtask fire, then emit ConnectedEvent.
@@ -121,7 +125,7 @@ async function connectAndAck(
   if (lastInstance == null) {
     throw new Error("MockWebSocket was not constructed");
   }
-  lastInstance.emit(makeConnectedEvent(serverVersion));
+  lastInstance.emit(makeConnectedEvent(protocolVersion, serverVersion));
   await connectPromise;
 }
 
@@ -141,7 +145,8 @@ describe("JaatoClient handshake", () => {
     assert.equal(client.state, ConnectionState.DISCONNECTED);
     await connectAndAck(client);
     assert.equal(client.state, ConnectionState.CONNECTED);
-    assert.equal(client.serverVersion, MIN_SERVER_VERSION);
+    assert.equal(client.serverProtocolVersion, MIN_PROTOCOL_VERSION);
+    assert.equal(client.serverVersion, "0.7.1");
     assert.equal(client.clientId, "client_1");
     await client.close();
   });
@@ -153,21 +158,30 @@ describe("JaatoClient handshake", () => {
     await client.close();
   });
 
-  test("incompatible server version throws IncompatibleServerError", async () => {
+  test("incompatible major-version protocol throws IncompatibleServerError", async () => {
     const client = new JaatoClient({ url: "ws://localhost:8080" });
     const connectPromise = client.connect();
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     await new Promise<void>((resolve) => queueMicrotask(resolve));
-    lastInstance!.emit(makeConnectedEvent("0.0.1"));
+    // Server speaks 2.x; client requires 1.x — major mismatch.
+    lastInstance!.emit(makeConnectedEvent("2.0"));
     await assert.rejects(connectPromise, IncompatibleServerError);
   });
 
-  test("explicit minServerVersion override is honoured", async () => {
+  test("server with newer minor still connects (additive forward-compat)", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    // Server is at 1.5; client requires 1.0 — fine, server has more.
+    await connectAndAck(client, "1.5");
+    assert.equal(client.state, ConnectionState.CONNECTED);
+    await client.close();
+  });
+
+  test("explicit minProtocolVersion override is honoured", async () => {
     const client = new JaatoClient({
       url: "ws://localhost:8080",
-      minServerVersion: "0.0.1",
+      minProtocolVersion: "1.0",
     });
-    await connectAndAck(client, "0.0.5");
+    await connectAndAck(client, "1.2");
     assert.equal(client.state, ConnectionState.CONNECTED);
     await client.close();
   });

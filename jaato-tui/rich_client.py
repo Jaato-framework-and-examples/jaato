@@ -879,9 +879,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         WorkspaceFilesSnapshotEvent,
     )
 
-    # Minimum server version this TUI release requires.
-    # Bump this when the TUI starts depending on a new server feature.
-    MIN_SERVER_VERSION = "0.2.27"
+    # Minimum wire-protocol version this TUI release requires.
+    # Bump when the TUI starts depending on a new wire shape; package
+    # version (server_version) is no longer used for the compat check.
+    MIN_PROTOCOL_VERSION = "1.0"
 
     # Load keybindings and theme
     keybindings = load_keybindings()
@@ -968,7 +969,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             except Exception:
                 pass
 
-    # Create IPC client with recovery support
+    # Create IPC client with recovery support.  ``min_protocol_version``
+    # is forwarded to the inner IPCClient; the SDK runs the compat
+    # check during connect handshake and raises IncompatibleServerError
+    # on mismatch — no external check needed.
     client: IPCRecoveryClient = IPCRecoveryClient(
         socket_path=socket_path,
         config=recovery_config,
@@ -976,6 +980,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         env_file=env_file,
         workspace_path=workspace_path,
         on_status_change=on_connection_status,
+        min_protocol_version=MIN_PROTOCOL_VERSION,
     )
 
     # State tracking
@@ -1149,13 +1154,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             print("Connection failed: Server did not respond with handshake")
             return
 
-        # Check server version against our minimum requirement
-        sv = client.server_version
-        if sv is not None:
-            def _parse_version(v: str) -> tuple:
-                return tuple(int(x) for x in v.split("."))
-            if _parse_version(sv) < _parse_version(MIN_SERVER_VERSION):
-                raise IncompatibleServerError(sv, MIN_SERVER_VERSION)
+        # Wire-protocol compat is checked inside the SDK during
+        # handshake; an incompatible daemon raises IncompatibleServerError
+        # before connect() returns, caught by the outer except below.
 
         print("Connected!")
 

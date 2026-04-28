@@ -346,7 +346,7 @@ event stream and are correlated by `request_id` where applicable.
 
 | Method | WS verb | Purpose |
 |---|---|---|
-| `connect()` | (handshake) | Open WS, await `ConnectedEvent`, enforce `MIN_SERVER_VERSION` |
+| `connect()` | (handshake) | Open WS, await `ConnectedEvent`, enforce `MIN_PROTOCOL_VERSION` (semver compat against `protocol_version`; package `server_version` is diagnostics only) |
 | `close()` | — | Close WS and cancel any pending reconnect |
 | `subscribe(type, handler)` | — | Subscribe to a specific event type — handler receives the narrowed interface |
 | `subscribeOnce(type, handler)` | — | Same as `subscribe`, but fires once then auto-unsubscribes |
@@ -574,20 +574,20 @@ Once those land, the publish flow is the same as
 appears on the registry. The CI staleness gate already prevents
 publishes that would carry a stale `events.ts`.
 
-Versioning policy mirrors the Python SDK: minor bumps for
-additive surface (new methods, new event types), patch bumps for
-fixes, major bumps for protocol-breaking changes. The `MIN_SERVER_VERSION`
-constant in `src/client.ts` documents the minimum compatible
-jaato-server version (currently `0.5.27`).
+Versioning policy for the npm package mirrors the Python SDK: minor
+bumps for additive surface (new methods, new event types), patch bumps
+for fixes, major bumps for SDK-shape breaks.
 
-**Server pinning recommendation.** Although `MIN_SERVER_VERSION`
-is `0.5.27` (the Phase-1 cut where the SDK's typed verbs landed),
-consumers should pin **`jaato-server >= 0.5.28`** in production —
-0.5.28 fixed a Phase-0 regression where `AgentCompletedEvent.token_usage`
-would crash any agent calling `signal_completion` with a typed
-completion payload.  The SDK floor stays at 0.5.27 because the
-client itself works against either; the recommendation is
-operational.
+**Wire-protocol versioning is separate.** The exported
+`MIN_PROTOCOL_VERSION` (currently `"1.0"`) is the minimum
+``ConnectedEvent.protocol_version`` this SDK will accept from the
+daemon. On `connect()` the client checks that the daemon's
+`protocol_version` matches its major and is at least the client's
+required minor; mismatch raises `IncompatibleServerError`. The
+daemon's package version (`server_version`) is surfaced as
+`client.serverVersion` for diagnostics but is **not** the compat
+signal. See [`docs/sdk-protocol-versioning.md`](../docs/sdk-protocol-versioning.md)
+for the bump policy and CHANGELOG.
 
 ## License
 

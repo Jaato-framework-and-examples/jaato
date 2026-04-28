@@ -45,25 +45,65 @@ export class ConnectionClosedError extends Error {
 }
 
 /**
- * The server reported a version older than this SDK supports.
+ * The server's wire-protocol version is incompatible with this SDK.
  *
- * Non-retryable: an old server will not become newer on retry.
- * Catch this and surface a clear "upgrade the server" message.
+ * Non-retryable — an old (or wrong-major) daemon will not become
+ * compatible on retry.  Catch this and surface a clear protocol-
+ * version mismatch message; the package version is reported for
+ * diagnostics but isn't the actionable signal.
  *
  * Mirrors jaato-sdk/jaato_sdk/client/ipc.py:IncompatibleServerError
  * one-for-one — the property names match.
  */
 export class IncompatibleServerError extends Error {
+  /** Wire-protocol version reported by the daemon. */
+  readonly serverProtocol: string;
+  /** Minimum protocol version this client requires. */
+  readonly minProtocol: string;
+  /**
+   * Daemon package version (from ``server_info.server_version``).
+   * Diagnostics only — not used by the compat check.
+   */
   readonly serverVersion: string;
-  readonly minVersion: string;
 
-  constructor(serverVersion: string, minVersion: string) {
+  constructor(
+    serverProtocol: string,
+    minProtocol: string,
+    serverVersion?: string,
+  ) {
+    const sv = serverVersion ?? "unknown";
+    const sParts = serverProtocol.split(".").map((p) => parseInt(p, 10));
+    const cParts = minProtocol.split(".").map((p) => parseInt(p, 10));
+    let hint = "version mismatch";
+    if (
+      !Number.isNaN(sParts[0]) &&
+      !Number.isNaN(cParts[0]) &&
+      sParts[0] !== cParts[0]
+    ) {
+      hint =
+        `major-version mismatch (server speaks ${sParts[0]}.x, ` +
+        `client needs ${cParts[0]}.x) — wire shapes are incompatible`;
+    } else if (
+      !Number.isNaN(sParts[1]) &&
+      !Number.isNaN(cParts[1]) &&
+      sParts[1] < cParts[1]
+    ) {
+      hint =
+        `server minor ${sParts[1]} is below client's required minor ` +
+        `${cParts[1]} — daemon is missing fields the client depends on`;
+    }
     super(
-      `Server version ${serverVersion} is not supported by this client ` +
-      `(requires >= ${minVersion}). Please upgrade the server.`,
+      `Server protocol ${serverProtocol} is not supported by this client ` +
+        `(requires >= ${minProtocol}): ${hint}. Daemon package: ${sv}.`,
     );
     this.name = "IncompatibleServerError";
-    this.serverVersion = serverVersion;
-    this.minVersion = minVersion;
+    this.serverProtocol = serverProtocol;
+    this.minProtocol = minProtocol;
+    this.serverVersion = sv;
+  }
+
+  /** Alias for {@link minProtocol} (pre-1.0 compatibility). */
+  get minVersion(): string {
+    return this.minProtocol;
   }
 }

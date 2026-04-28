@@ -2,7 +2,8 @@
 
 Pins the stable shape exposed to external clients (daruma-operate and
 similar orchestrators).  Any change to these tests is a wire-protocol
-contract change and requires bumping ``schema_version``.
+contract change and requires bumping the global ``PROTOCOL_VERSION``
+in ``jaato_sdk.events``.
 """
 
 from jaato_sdk.events import (
@@ -48,12 +49,17 @@ def test_profile_summary_env_var_names_only_keys_no_values():
     assert "env_vars" not in serialized
 
 
-def test_session_profiles_event_default_schema_version():
-    """``schema_version`` defaults to ``"1.0"``."""
+def test_session_profiles_event_defaults():
+    """Default-constructed event has empty lists, no schema_version field.
+
+    Versioning lives on the global ``ConnectedEvent.protocol_version``
+    in v1.0+ — this event no longer carries its own.
+    """
     ev = SessionProfilesEvent()
-    assert ev.schema_version == "1.0"
     assert ev.profiles == []
     assert ev.parse_errors == []
+    # Deliberate negative: schema_version was removed in v1.0.
+    assert not hasattr(ev, "schema_version")
 
 
 def test_session_profiles_event_round_trip_full_shape():
@@ -86,7 +92,6 @@ def test_session_profiles_event_round_trip_full_shape():
     restored = deserialize_event(serialize_event(ev))
 
     assert isinstance(restored, SessionProfilesEvent)
-    assert restored.schema_version == "1.0"
     assert len(restored.profiles) == 1
     p = restored.profiles[0]
     assert p.name == "researcher"

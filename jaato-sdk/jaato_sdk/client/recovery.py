@@ -158,6 +158,7 @@ class IPCRecoveryClient:
         env_file: str = ".env",
         workspace_path: Optional[Path] = None,
         on_status_change: Optional[StatusCallback] = None,
+        min_protocol_version: Optional[str] = None,
     ):
         """Initialize the recovery client.
 
@@ -170,12 +171,16 @@ class IPCRecoveryClient:
             workspace_path: Workspace path for loading project-level config.
             on_status_change: Callback invoked on connection status changes.
                 Receives a ConnectionStatus object.
+            min_protocol_version: Override the inner IPCClient's
+                ``MIN_PROTOCOL_VERSION``. Forwarded verbatim — see
+                ``IPCClient.__init__`` for semantics.
         """
         self._socket_path = socket_path
         self._auto_start = auto_start
         self._env_file = env_file
         self._workspace_path = workspace_path
         self._on_status_change = on_status_change
+        self._min_protocol_version = min_protocol_version
 
         # Load config if not provided
         if config is None:
@@ -292,6 +297,7 @@ class IPCRecoveryClient:
                 auto_start=self._auto_start,
                 env_file=self._env_file,
                 workspace_path=str(self._workspace_path) if self._workspace_path else None,
+                min_protocol_version=self._min_protocol_version,
             )
 
             # When auto-start is enabled, the inner connect() may need to:
@@ -1080,6 +1086,7 @@ class IPCRecoveryClient:
             auto_start=False,  # Don't auto-start during reconnection
             env_file=self._env_file,
             workspace_path=str(self._workspace_path) if self._workspace_path else None,
+            min_protocol_version=self._min_protocol_version,
         )
 
         # Connect with timeout

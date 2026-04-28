@@ -75,6 +75,7 @@ def _get_display_path(path: str) -> str:
 from jaato_sdk.events import (
     Event,
     EventType,
+    PROTOCOL_VERSION,
     ConnectedEvent,
     ErrorEvent,
     SystemMessageEvent,
@@ -401,7 +402,7 @@ class JaatoIPCServer:
         # Send connected event
         try:
             connected_event = ConnectedEvent(
-                protocol_version="1.0",
+                protocol_version=PROTOCOL_VERSION,
                 server_info={
                     "client_id": client_id,
                     "transport": "ipc",

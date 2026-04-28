@@ -27,6 +27,35 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 # =============================================================================
+# Protocol version
+# =============================================================================
+
+# Wire-protocol version, semver-style ``"MAJOR.MINOR"``.
+#
+# - **MAJOR** bumps when a wire field is removed, renamed, or retyped
+#   (anything an existing client cannot ignore-and-keep-working through).
+# - **MINOR** bumps when a new optional field is added that older
+#   clients can safely ignore (pydantic ``extra='ignore'`` already
+#   handles this on the read side).
+#
+# Clients carry their own ``MIN_PROTOCOL_VERSION`` and refuse to
+# connect when the server's major differs from theirs, or when the
+# server's minor is below their minimum.  Server's minor *above* the
+# client's minimum is fine — the client just won't see the newer
+# fields.
+#
+# DO NOT confuse with the ``server_version`` carried in
+# ``ConnectedEvent.server_info`` — that's the daemon package version,
+# kept for diagnostics only ("which build is the daemon?").  Compat
+# is checked against ``protocol_version`` exclusively from v1.0
+# onwards.
+#
+# See ``docs/sdk-protocol-versioning.md`` for the bump policy and the
+# CHANGELOG of past versions.
+PROTOCOL_VERSION = "1.0"
+
+
+# =============================================================================
 # Event Types
 # =============================================================================
 
@@ -875,10 +904,12 @@ class SessionDescriptionUpdatedEvent(Event):
 class ProfileSummary(BaseModel):
     """Stable summary of a profile, safe to expose to external clients.
 
-    Versioned by ``SessionProfilesEvent.schema_version``.  Sensitive
-    material is intentionally omitted: env *values* are summarised by
-    name only; ``system_instructions``, ``icon_name`` and ``inherits``
-    are not exposed (deprecated or already resolved during discovery).
+    Versioned by the global ``ConnectedEvent.protocol_version`` —
+    breaking changes to this shape bump the protocol's MAJOR; additive
+    optional fields bump the MINOR.  Sensitive material is intentionally
+    omitted: env *values* are summarised by name only;
+    ``system_instructions``, ``icon_name`` and ``inherits`` are not
+    exposed (deprecated or already resolved during discovery).
     Structural config (``plugin_configs``, ``model_tiers``,
     ``runtime_limits``, ``gc``) is exposed as-is — profile authors are
     expected to use ``${VAR}`` indirection for secrets and put the
@@ -933,14 +964,13 @@ class SessionProfilesEvent(Event):
     ``parse_errors`` rather than mixed into ``profiles`` — a picker
     can surface them separately or hide them entirely.
 
-    The ``schema_version`` field is bumped only on breaking changes to
-    the shape of ``profiles[i]`` or this event.  Consumers can pin a
-    minimum version and refuse to render unknown shapes.  Forward-
-    compatible additions (new optional fields on ``ProfileSummary``)
-    do *not* bump the version.
+    The shape of this event (and of nested ``ProfileSummary``) is
+    versioned by the global ``ConnectedEvent.protocol_version``.  Pre-
+    1.0 versions of the SDK had a per-event ``schema_version`` field
+    here; that was promoted to the global protocol version in v1.0 and
+    removed from this event.
     """
     type: EventType = Field(default=EventType.SESSION_PROFILES)
-    schema_version: str = "1.0"
     profiles: List[ProfileSummary] = Field(default_factory=list)
     parse_errors: List[ProfileParseError] = Field(default_factory=list)
 

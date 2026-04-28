@@ -1,7 +1,6 @@
 {
   "type": "session.profiles",
   "timestamp": "<TIMESTAMP>",
-  "schema_version": "1.0",
   "profiles": [],
   "parse_errors": []
 }

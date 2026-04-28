@@ -380,9 +380,17 @@ client = IPCRecoveryClient(on_status_change=on_status)
 
 The recovery loop classifies errors as **transient** (retried — `ConnectionRefusedError`, `ConnectionResetError`, timeouts) or **permanent** (not retried — `IncompatibleServerError`, `FileNotFoundError`, permission/auth failures). Permanent errors transition straight to `CLOSED`.
 
-### Server version mismatch
+### Protocol version mismatch
 
-Each client can pin a minimum server version. If the connected server is older, `connect()` raises `IncompatibleServerError` (which the recovery client classifies as permanent — no retries). Catch it and prompt the user to upgrade.
+Each client pins a minimum **wire-protocol** version (`MIN_PROTOCOL_VERSION = "1.0"` on `IPCClient`, overridable per-instance via the `min_protocol_version=` constructor arg). On `connect()` the SDK reads `ConnectedEvent.protocol_version` from the daemon and runs a semver-flavoured compat check:
+
+- Server major must equal client major (otherwise wire shapes are incompatible)
+- Server minor must be ≥ client's required minor (otherwise daemon is missing fields the client expects)
+- Server with newer minor is fine — additive optional fields the client will ignore
+
+Mismatch raises `IncompatibleServerError` carrying both `server_protocol` and `min_protocol`, with a hint in the message about *why* (major mismatch vs missing minor). The recovery client classifies it as permanent — no retries. The daemon's package version (`server_version`) is reported for diagnostics but **not** used for the compat check; pin against `protocol_version` so a daemon bug-fix release doesn't require every client to re-pin.
+
+See [docs/sdk-protocol-versioning.md](../docs/sdk-protocol-versioning.md) for the bump policy and the CHANGELOG of past wire versions.
 
 ## Configuration
 

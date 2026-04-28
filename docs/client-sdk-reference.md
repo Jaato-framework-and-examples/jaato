@@ -105,9 +105,7 @@ Both transports follow the same post-connect handshake:
 1. **Server → Client:** `ConnectedEvent` with `protocol_version`, `server_info` (includes `client_id`, `server_version`)
 2. **Client → Server:** `ClientConfigRequest` with trace paths, working directory, env file path, and `PresentationContext`
 
-**Version gating:** Both SDKs enforce a minimum server version:
-- Python: `IncompatibleServerError` raised if server version < minimum
-- TypeScript: `MIN_SERVER_VERSION = "0.5.27"` constant in `src/client.ts`
+**Version gating:** Both SDKs enforce a minimum **wire-protocol** version (`MIN_PROTOCOL_VERSION = "1.0"`) checked against `ConnectedEvent.protocol_version` during handshake. Compat is semver-flavoured (major must match; server minor must be ≥ client's required minor). The daemon's package version (`server_version`) is surfaced for diagnostics but no longer used for compat. Mismatch raises `IncompatibleServerError`. See [`docs/sdk-protocol-versioning.md`](sdk-protocol-versioning.md) for bump policy and CHANGELOG.
 
 ---
 

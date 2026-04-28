@@ -21,6 +21,7 @@ export type {
 } from "./event-typing.js";
 export {
   JaatoClient,
-  MIN_SERVER_VERSION,
+  MIN_PROTOCOL_VERSION,
+  isProtocolCompatible,
   type JaatoClientOptions,
 } from "./client.js";

@@ -50,7 +50,6 @@ class TestSessionProfilesEvent:
         restored = deserialize_event(json_str)
 
         assert isinstance(restored, SessionProfilesEvent)
-        assert restored.schema_version == "1.0"
         assert len(restored.profiles) == 2
         assert restored.profiles[0].name == "researcher"
         assert restored.profiles[0].model == "claude-sonnet-4-20250514"
