@@ -823,7 +823,7 @@ authz decisions are correct on synthetic identities.
   isolation
 - `docs/design/handoff-gate-api.md` — gate visibility consumes this
   design
-- `docs/design/task-graph-reactor.md` — orchestrators consume per-tenant
+- `docs/design/task-graph-orchestrator.md` — orchestrators consume per-tenant
   identity
 - `docs/apparmor-setup.md` — kernel-level isolation that complements
   RBAC

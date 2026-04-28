@@ -740,7 +740,7 @@ gate events ignore them.
 - `docs/design/daemon-extensions.md` — public extension surface
 - `docs/design/multi-tenancy.md` — tenant scoping, RBAC, service
   identities consumed by §3, §4, §7, §10 of this doc
-- `docs/design/task-graph-reactor.md` — DAG orchestrator that consumes
+- `docs/design/task-graph-orchestrator.md` — DAG orchestrator that consumes
   these events
 - `docs/jaato_memory_assessment.md:381` — original "reactor singleton"
   backlog item
