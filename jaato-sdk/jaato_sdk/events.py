@@ -84,6 +84,7 @@ class EventType(str, Enum):
     TURN_COMPLETED = "turn.completed"
     TURN_PROGRESS = "turn.progress"
     INSTRUCTION_BUDGET_UPDATED = "instruction_budget.updated"
+    GC_CONFIG = "gc.config"
 
     # Instruction budget (Client <-> Server)
     INSTRUCTION_BUDGET_REQUEST = "instruction_budget.request"  # Client -> Server
@@ -609,22 +610,79 @@ class PlanClearedEvent(Event):
     agent_id: str = ""
 
 
-class ContextUpdatedEvent(Event):
-    """Context window usage has changed."""
-    type: EventType = Field(default=EventType.CONTEXT_UPDATED)
-    agent_id: str = ""
-    total_tokens: int = 0
+class UsageBreakdown(BaseModel):
+    """Provider-agnostic per-turn usage shape carried by Context/Turn events.
+
+    Single source of truth for token + cost reporting on the wire.  All
+    optional fields default to ``None`` so a provider that doesn't
+    report a given dimension simply omits it instead of zero-padding
+    (which would make a ``0`` cache hit indistinguishable from "no
+    caching support").
+
+    ``cost_usd`` is populated by the daemon when either:
+    - the provider reports a real cost (e.g. ``claude_cli`` exposes
+      ``total_cost_usd`` from the underlying CLI), or
+    - the operator has loaded a pricing table at
+      ``.jaato/pricing.json`` (Litellm-compatible) and the model name
+      is found there.
+
+    When neither source has a number, ``cost_usd`` is ``None`` —
+    consumers must not assume zero means free.
+    """
+    model_config = ConfigDict(extra='ignore')
+
     prompt_tokens: int = 0
     output_tokens: int = 0
+    total_tokens: int = 0
+    # Prompt-cache token counts (None when provider does not support caching)
+    cache_read_tokens: Optional[int] = None
+    cache_creation_tokens: Optional[int] = None
+    # Reasoning tokens (OpenAI o-series) — billed as output
+    reasoning_tokens: Optional[int] = None
+    # Thinking tokens (Anthropic / Gemini extended thinking)
+    # Subset of output_tokens; useful for UI breakdowns
+    thinking_tokens: Optional[int] = None
+    # Cost in USD; None when neither provider nor pricing table knows
+    cost_usd: Optional[float] = None
+
+
+class GCConfigEvent(Event):
+    """GC configuration snapshot for the active session.
+
+    Emitted on session init and whenever the GC plugin is reconfigured.
+    Carries only configuration — actual usage lives in
+    ``ContextUpdatedEvent``. Splitting these two concerns avoids the
+    pre-1.0 hack where ``ContextUpdatedEvent`` doubled as a status-bar
+    config carrier.
+    """
+    type: EventType = Field(default=EventType.GC_CONFIG)
+    agent_id: str = ""
+    threshold: Optional[float] = None       # GC trigger threshold percentage
+    strategy: Optional[str] = None          # "truncate" | "summarize" | "hybrid" | "budget"
+    target_percent: Optional[float] = None  # Target usage after GC
+    continuous_mode: bool = False           # True if GC runs after every turn
+
+
+class ContextUpdatedEvent(Event):
+    """Context window usage has changed.
+
+    Carries a typed ``usage`` (``UsageBreakdown``) shared with
+    ``TurnCompletedEvent`` and ``TurnProgressEvent`` so consumers can
+    treat the three events uniformly. Context-window framing fields
+    (``context_limit``, ``percent_used``, ``tokens_remaining``,
+    ``turns``) stay on this event because they describe the *window*,
+    not the most recent generation.
+
+    GC configuration moved to ``GCConfigEvent`` in v1.0 — query that
+    event (or read it from session init) for status-bar display.
+    """
+    type: EventType = Field(default=EventType.CONTEXT_UPDATED)
+    agent_id: str = ""
+    usage: UsageBreakdown = Field(default_factory=UsageBreakdown)
     context_limit: int = 0
     percent_used: float = 0.0
     tokens_remaining: int = 0
     turns: int = 0
-    # GC configuration (included for status bar display)
-    gc_threshold: Optional[float] = None  # GC trigger threshold percentage
-    gc_strategy: Optional[str] = None  # GC strategy name (e.g., "truncate", "hybrid")
-    gc_target_percent: Optional[float] = None  # Target usage after GC
-    gc_continuous_mode: bool = False  # True if GC runs after every turn
 
 
 class InstructionBudgetEvent(Event):
@@ -647,48 +705,38 @@ class InstructionBudgetEvent(Event):
 class TurnCompletedEvent(Event):
     """A conversation turn has completed.
 
-    Includes optional prompt-cache token fields so clients (e.g. TUI) can
-    display cache hit rates.  ``cache_read_tokens`` is the number of prompt
-    tokens served from cache (90% cost saving on Anthropic);
-    ``cache_creation_tokens`` is the number written *into* the cache (1.25x
-    write premium on Anthropic).  Both are ``None`` when the provider does
-    not support prompt caching.
+    The ``usage`` field carries the provider-agnostic
+    ``UsageBreakdown`` (token counts, cache hits, reasoning/thinking
+    tokens, cost when known).  Treat it as the canonical per-turn
+    usage record — it's the same shape ``TurnProgressEvent`` and
+    ``ContextUpdatedEvent`` use.
     """
     type: EventType = Field(default=EventType.TURN_COMPLETED)
     agent_id: str = ""
     turn_number: int = 0
-    prompt_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
+    usage: UsageBreakdown = Field(default_factory=UsageBreakdown)
     duration_seconds: float = 0.0
     function_calls: List[Dict[str, Any]] = Field(default_factory=list)
     # Formatted output text (with syntax highlighting, validation, etc.)
     # Client can use this to replace raw streaming output with formatted version
     formatted_text: Optional[str] = None
-    # Prompt-cache token counts (None when provider does not support caching)
-    cache_read_tokens: Optional[int] = None
-    cache_creation_tokens: Optional[int] = None
 
 
 class TurnProgressEvent(Event):
     """Incremental progress during turn execution.
 
-    Emitted after each model response within a turn, enabling real-time
-    token tracking before the turn completes.  Includes optional cache
-    token fields mirroring ``TurnCompletedEvent``.
+    Emitted after each model response within a turn, enabling
+    real-time token tracking before the turn completes.  The
+    ``usage`` field is the same provider-agnostic shape used by
+    ``TurnCompletedEvent`` and ``ContextUpdatedEvent``.
     """
     type: EventType = Field(default=EventType.TURN_PROGRESS)
     agent_id: str = ""
-    total_tokens: int = 0
-    prompt_tokens: int = 0
-    output_tokens: int = 0
+    usage: UsageBreakdown = Field(default_factory=UsageBreakdown)
     context_limit: int = 0
     percent_used: float = 0.0
     tokens_remaining: int = 0
     pending_tool_calls: int = 0  # How many tool calls remain
-    # Prompt-cache token counts (None when provider does not support caching)
-    cache_read_tokens: Optional[int] = None
-    cache_creation_tokens: Optional[int] = None
 
 
 class SystemMessageEvent(Event):
@@ -824,17 +872,77 @@ class SessionDescriptionUpdatedEvent(Event):
     description: str = ""
 
 
+class ProfileSummary(BaseModel):
+    """Stable summary of a profile, safe to expose to external clients.
+
+    Versioned by ``SessionProfilesEvent.schema_version``.  Sensitive
+    material is intentionally omitted: env *values* are summarised by
+    name only; ``system_instructions``, ``icon_name`` and ``inherits``
+    are not exposed (deprecated or already resolved during discovery).
+    Structural config (``plugin_configs``, ``model_tiers``,
+    ``runtime_limits``, ``gc``) is exposed as-is — profile authors are
+    expected to use ``${VAR}`` indirection for secrets and put the
+    actual values in ``env`` (which is summarised by key).
+    """
+    model_config = ConfigDict(extra='ignore')
+
+    # Identity
+    name: str
+    description: str = ""
+
+    # Capabilities
+    plugins: List[str] = Field(default_factory=list)
+    preloaded_plugins: List[str] = Field(default_factory=list)
+    plugin_configs: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+    # Runtime
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    max_turns: int = 10
+    model_tiers: Dict[str, Any] = Field(default_factory=dict)
+    gc: Optional[Dict[str, Any]] = None
+    runtime_limits: Optional[Dict[str, Any]] = None
+    completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
+
+    # Env: variable NAMES the profile expects to find at runtime —
+    # values never leave the daemon
+    env_var_names: List[str] = Field(default_factory=list)
+
+
+class ProfileParseError(BaseModel):
+    """Profile file that failed to parse during discovery.
+
+    Carried in ``SessionProfilesEvent.parse_errors`` (a separate field
+    from ``profiles``) so a picker can surface broken files distinctly
+    rather than treating them as unusable entries in the main list.
+    """
+    model_config = ConfigDict(extra='ignore')
+
+    name: str   # filename stem of the broken file
+    error: str  # human-readable parse-error message
+
+
 class SessionProfilesEvent(Event):
     """List of available agent profiles for session creation.
 
-    Sent in response to a ``session.profiles`` command. Each profile
-    is a summary dict containing the profile's name, description,
-    model, provider, and list of plugins — enough for a client to
-    display a profile picker.
+    Sent in response to a ``session.profiles`` command.  Each profile
+    is a typed ``ProfileSummary`` carrying enough metadata for a
+    profile picker UI without leaking secrets.
+
+    Profiles that failed to parse during discovery are reported in
+    ``parse_errors`` rather than mixed into ``profiles`` — a picker
+    can surface them separately or hide them entirely.
+
+    The ``schema_version`` field is bumped only on breaking changes to
+    the shape of ``profiles[i]`` or this event.  Consumers can pin a
+    minimum version and refuse to render unknown shapes.  Forward-
+    compatible additions (new optional fields on ``ProfileSummary``)
+    do *not* bump the version.
     """
     type: EventType = Field(default=EventType.SESSION_PROFILES)
-    profiles: List[Dict[str, Any]] = Field(default_factory=list)
-    # ^ [{name, description, model, provider, plugins}, ...]
+    schema_version: str = "1.0"
+    profiles: List[ProfileSummary] = Field(default_factory=list)
+    parse_errors: List[ProfileParseError] = Field(default_factory=list)
 
 
 # =============================================================================
@@ -1001,10 +1109,25 @@ class EventsSubscribedEvent(Event):
 
 
 class CommandRequest(Event):
-    """Execute a command (like 'model', 'save', 'resume', etc.)."""
+    """Execute a command (like 'model', 'save', 'resume', etc.).
+
+    ``args`` carries CLI-style positional/flag arguments — the same
+    array a TUI user would type after the command name.
+
+    ``payload`` is an opt-in escape hatch for SDK consumers that need
+    to pass structured data argv can't ergonomically carry (e.g.
+    ``session.new`` with an inline profile spec dict).  Commands that
+    accept ``payload`` document their expected keys in the relevant
+    server handler; the wire stays generic.
+
+    The TUI never produces ``payload`` (its input is always argv-shaped),
+    so commands that *only* read from ``payload`` are SDK-only by
+    construction.
+    """
     type: EventType = Field(default=EventType.COMMAND)
     command: str = ""
     args: List[str] = Field(default_factory=list)
+    payload: Optional[Dict[str, Any]] = None
 
 
 class GetInstructionBudgetRequest(Event):
@@ -1897,6 +2020,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PLAN_STEP_UPDATED.value: PlanStepUpdatedEvent,
     EventType.PLAN_CLEARED.value: PlanClearedEvent,
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,
+    EventType.GC_CONFIG.value: GCConfigEvent,
     EventType.INSTRUCTION_BUDGET_UPDATED.value: InstructionBudgetEvent,
     EventType.TURN_COMPLETED.value: TurnCompletedEvent,
     EventType.TURN_PROGRESS.value: TurnProgressEvent,

@@ -850,6 +850,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ToolCallEndEvent,
         ToolOutputEvent,
         ContextUpdatedEvent,
+        GCConfigEvent,
         InstructionBudgetEvent,
         TurnCompletedEvent,
         TurnProgressEvent,
@@ -1651,30 +1652,34 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if agent_id:
                     agent_registry.update_context_usage(
                         agent_id=agent_id,
-                        total_tokens=event.total_tokens,
-                        prompt_tokens=event.prompt_tokens,
-                        output_tokens=event.output_tokens,
+                        total_tokens=event.usage.total_tokens,
+                        prompt_tokens=event.usage.prompt_tokens,
+                        output_tokens=event.usage.output_tokens,
                         turns=event.turns,
                         percent_used=event.percent_used,
                     )
-                    # Update GC config if present in event
-                    if event.gc_threshold is not None or event.gc_continuous_mode:
-                        agent_registry.update_gc_config(
-                            agent_id,
-                            event.gc_threshold,
-                            event.gc_strategy,
-                            event.gc_target_percent,
-                            event.gc_continuous_mode,
-                        )
                 # Also update display (fallback if no registry)
                 usage = {
-                    "prompt_tokens": event.prompt_tokens,
-                    "output_tokens": event.output_tokens,
-                    "total_tokens": event.total_tokens,
+                    "prompt_tokens": event.usage.prompt_tokens,
+                    "output_tokens": event.usage.output_tokens,
+                    "total_tokens": event.usage.total_tokens,
                     "context_size": event.context_limit,
                     "percent_used": event.percent_used,
                 }
                 display.update_context_usage(usage)
+
+            elif isinstance(event, GCConfigEvent):
+                # GC config moved to its own event in v1.0+ (was previously
+                # piggy-backed on ContextUpdatedEvent).
+                agent_id = event.agent_id or agent_registry.get_selected_agent_id()
+                if agent_id:
+                    agent_registry.update_gc_config(
+                        agent_id,
+                        event.threshold,
+                        event.strategy,
+                        event.target_percent,
+                        event.continuous_mode,
+                    )
 
             elif isinstance(event, InstructionBudgetEvent):
                 # Update budget panel with new budget data
@@ -1708,17 +1713,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if agent_id and agent_registry:
                     agent_registry.update_context_usage(
                         agent_id=agent_id,
-                        total_tokens=event.total_tokens,
-                        prompt_tokens=event.prompt_tokens,
-                        output_tokens=event.output_tokens,
+                        total_tokens=event.usage.total_tokens,
+                        prompt_tokens=event.usage.prompt_tokens,
+                        output_tokens=event.usage.output_tokens,
                         turns=0,  # Not updated during turn
                         percent_used=event.percent_used,
                     )
                 # Update display status bar
                 usage = {
-                    "prompt_tokens": event.prompt_tokens,
-                    "output_tokens": event.output_tokens,
-                    "total_tokens": event.total_tokens,
+                    "prompt_tokens": event.usage.prompt_tokens,
+                    "output_tokens": event.usage.output_tokens,
+                    "total_tokens": event.usage.total_tokens,
                     "context_size": event.context_limit,
                     "percent_used": event.percent_used,
                 }
@@ -1732,9 +1737,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if buffer:
                     buffer.flush()
                     # Show turn summary in output buffer
-                    if event.total_tokens > 0:
+                    if event.usage.total_tokens > 0:
                         buffer.add_system_message(
-                            f"─── tokens: {event.prompt_tokens:,} in / {event.output_tokens:,} out / {event.total_tokens:,} total",
+                            f"─── tokens: {event.usage.prompt_tokens:,} in / {event.usage.output_tokens:,} out / {event.usage.total_tokens:,} total",
                             "dim",
                         )
                         if event.duration_seconds:
@@ -1746,7 +1751,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         # same formula — see jaato_sdk.helpers.compute_cache_hit_percent
                         # for the rationale (returns None when the provider
                         # doesn't report cache stats; 0.0 vs None matters).
-                        if event.cache_read_tokens:
+                        if event.usage.cache_read_tokens:
                             from jaato_sdk import compute_cache_hit_percent
                             hit_pct = compute_cache_hit_percent(event)
                             if hit_pct is not None:
@@ -1754,6 +1759,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                                     f"─── cache hit: {hit_pct:.0f}%",
                                     "dim",
                                 )
+                        if event.usage.cost_usd is not None:
+                            buffer.add_system_message(
+                                f"─── cost: ${event.usage.cost_usd:.4f}",
+                                "dim",
+                            )
                 model_running = False
                 display.refresh()
 

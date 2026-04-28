@@ -44,9 +44,9 @@ def compute_cache_hit_percent(event: CacheReportingEvent) -> Optional[float]:
 
         Otherwise the percentage in the range ``[0.0, 100.0]``.
     """
-    if event.cache_read_tokens is None:
+    if event.usage.cache_read_tokens is None:
         return None
-    total = event.cache_read_tokens + event.prompt_tokens
+    total = event.usage.cache_read_tokens + event.usage.prompt_tokens
     if total == 0:
         return 0.0
-    return event.cache_read_tokens / total * 100.0
+    return event.usage.cache_read_tokens / total * 100.0

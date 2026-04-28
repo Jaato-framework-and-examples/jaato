@@ -85,9 +85,11 @@ from jaato_sdk.events import (
     PlanStepUpdatedEvent,
     PlanClearedEvent,
     ContextUpdatedEvent,
+    GCConfigEvent,
     InstructionBudgetEvent,
     TurnCompletedEvent,
     TurnProgressEvent,
+    UsageBreakdown,
     SystemMessageEvent,
     HelpTextEvent,
     InitProgressEvent,
@@ -303,6 +305,15 @@ class JaatoServer:
         self.permission_plugin: Optional[PermissionPlugin] = None
         self.todo_plugin: Optional[TodoPlugin] = None
         self.ledger = TokenLedger()
+
+        # Pricing table — loaded lazily on first use; populates
+        # UsageBreakdown.cost_usd on emitted Context/Turn events when
+        # the active model is known to the table.  Empty when no
+        # .jaato/pricing.json is present, so cost stays None and
+        # consumers know "I don't have a number" vs. "free".
+        from shared.pricing import PricingTable
+        self._pricing: PricingTable = PricingTable.empty()
+        self._pricing_loaded: bool = False
 
         # Agent tracking
         self._agents: Dict[str, AgentState] = {}
@@ -656,6 +667,58 @@ class JaatoServer:
     # Event Emission
     # =========================================================================
 
+    def _build_usage(
+        self,
+        prompt_tokens: int = 0,
+        output_tokens: int = 0,
+        total_tokens: int = 0,
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
+        reasoning_tokens: Optional[int] = None,
+        thinking_tokens: Optional[int] = None,
+        cost_usd_override: Optional[float] = None,
+    ) -> "UsageBreakdown":
+        """Construct a ``UsageBreakdown`` and populate ``cost_usd``.
+
+        Cost-resolution precedence:
+        1. ``cost_usd_override`` — caller-supplied (e.g. ``claude_cli``
+           reports ``total_cost_usd`` from the CLI; that's the fiscal
+           truth and beats any computed estimate).
+        2. ``self._pricing`` table lookup — operator-loaded
+           ``.jaato/pricing.json``; computed from rates and counts.
+        3. ``None`` — no source knew, consumer must not assume zero.
+        """
+        # Lazy-load pricing on first call so we don't read the JSON
+        # for sessions that never check cost.
+        if not self._pricing_loaded:
+            from shared.pricing import load_pricing
+            self._pricing = load_pricing(self._workspace_path)
+            self._pricing_loaded = True
+
+        if cost_usd_override is not None:
+            cost: Optional[float] = cost_usd_override
+        elif self._model_name and self._pricing.has(self._model_name):
+            cost = self._pricing.cost_for_usage(
+                self._model_name,
+                prompt_tokens=prompt_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+            )
+        else:
+            cost = None
+
+        return UsageBreakdown(
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            reasoning_tokens=reasoning_tokens,
+            thinking_tokens=thinking_tokens,
+            cost_usd=cost,
+        )
+
     def emit(self, event: Event) -> None:
         """Emit an event to all subscribed clients and to the EventBus.
 
@@ -859,9 +922,11 @@ class JaatoServer:
                 context_limit = session.get_context_limit()
                 emit(ContextUpdatedEvent(
                     agent_id=agent_id,
-                    total_tokens=usage.get('total_tokens', 0),
-                    prompt_tokens=usage.get('prompt_tokens', 0),
-                    output_tokens=usage.get('output_tokens', 0),
+                    usage=self._build_usage(
+                        prompt_tokens=usage.get('prompt_tokens', 0),
+                        output_tokens=usage.get('output_tokens', 0),
+                        total_tokens=usage.get('total_tokens', 0),
+                    ),
                     context_limit=context_limit,
                     percent_used=usage.get('percent_used', 0.0),
                     tokens_remaining=max(0, context_limit - usage.get('total_tokens', 0)),
@@ -1551,17 +1616,23 @@ class JaatoServer:
             context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
             self.emit(ContextUpdatedEvent(
                 agent_id=self._main_agent_id,
-                total_tokens=usage.get('total_tokens', 0),
-                prompt_tokens=usage.get('prompt_tokens', 0),
-                output_tokens=usage.get('output_tokens', 0),
+                usage=self._build_usage(
+                    prompt_tokens=usage.get('prompt_tokens', 0),
+                    output_tokens=usage.get('output_tokens', 0),
+                    total_tokens=usage.get('total_tokens', 0),
+                ),
                 context_limit=context_limit,
                 percent_used=usage.get('percent_used', 0.0),
                 tokens_remaining=usage.get('tokens_remaining', context_limit),
                 turns=usage.get('turns', 0),
-                gc_threshold=gc_threshold,
-                gc_strategy=gc_strategy,
-                gc_target_percent=gc_target_percent,
-                gc_continuous_mode=gc_continuous_mode,
+            ))
+            # GC config is emitted as its own event in v1.0+; see GCConfigEvent.
+            self.emit(GCConfigEvent(
+                agent_id=self._main_agent_id,
+                threshold=gc_threshold,
+                strategy=gc_strategy,
+                target_percent=gc_target_percent,
+                continuous_mode=gc_continuous_mode,
             ))
 
         self._emit_init_progress("Setting up session", "done", 6, total_steps)
@@ -2035,13 +2106,15 @@ class JaatoServer:
                 server.emit(TurnCompletedEvent(
                     agent_id=agent_id,
                     turn_number=turn_number,
-                    prompt_tokens=prompt_tokens,
-                    output_tokens=output_tokens,
-                    total_tokens=total_tokens,
+                    usage=server._build_usage(
+                        prompt_tokens=prompt_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=total_tokens,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_creation_tokens=cache_creation_tokens,
+                    ),
                     duration_seconds=duration_seconds,
                     function_calls=function_calls,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
                 ))
 
             def on_agent_context_updated(self, agent_id, total_tokens, prompt_tokens,
@@ -2055,29 +2128,31 @@ class JaatoServer:
                         'percent_used': percent_used,
                     }
                 context_limit = server._jaato.get_context_limit() if server._jaato else 0
-                # Get GC config from agent state
-                gc_threshold = None
-                gc_strategy = None
-                gc_target_percent = None
-                gc_continuous_mode = False
+                # Pull cache tokens from the most recent turn entry so the
+                # usage matches Turn{Completed,Progress}Event in expressivity.
+                # The protocol callback doesn't carry them, but we have the
+                # turn accounting at hand.
+                cache_read_tokens = None
+                cache_creation_tokens = None
                 if agent_id in server._agents:
-                    gc_threshold = server._agents[agent_id].gc_threshold
-                    gc_strategy = server._agents[agent_id].gc_strategy
-                    gc_target_percent = server._agents[agent_id].gc_target_percent
-                    gc_continuous_mode = server._agents[agent_id].gc_continuous_mode
+                    accounting = server._agents[agent_id].turn_accounting
+                    if accounting:
+                        last_turn = accounting[-1]
+                        cache_read_tokens = last_turn.get('cache_read')
+                        cache_creation_tokens = last_turn.get('cache_creation')
                 server.emit(ContextUpdatedEvent(
                     agent_id=agent_id,
-                    total_tokens=total_tokens,
-                    prompt_tokens=prompt_tokens,
-                    output_tokens=output_tokens,
+                    usage=server._build_usage(
+                        prompt_tokens=prompt_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=total_tokens,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_creation_tokens=cache_creation_tokens,
+                    ),
                     context_limit=context_limit,
                     percent_used=percent_used,
                     tokens_remaining=max(0, context_limit - total_tokens),
                     turns=turns,
-                    gc_threshold=gc_threshold,
-                    gc_strategy=gc_strategy,
-                    gc_target_percent=gc_target_percent,
-                    gc_continuous_mode=gc_continuous_mode,
                 ))
 
             def on_agent_gc_config(self, agent_id, threshold, strategy, target_percent=None, continuous_mode=False):
@@ -2087,23 +2162,18 @@ class JaatoServer:
                     server._agents[agent_id].gc_strategy = strategy
                     server._agents[agent_id].gc_target_percent = target_percent
                     server._agents[agent_id].gc_continuous_mode = continuous_mode
-                    # Emit ContextUpdatedEvent with GC config so client gets notified
-                    agent = server._agents[agent_id]
-                    server.emit(ContextUpdatedEvent(
-                        agent_id=agent_id,
-                        gc_threshold=threshold,
-                        gc_strategy=strategy,
-                        gc_target_percent=target_percent,
-                        gc_continuous_mode=continuous_mode,
-                        # Include current context usage if available
-                        total_tokens=agent.context_usage.get('total_tokens', 0),
-                        prompt_tokens=agent.context_usage.get('prompt_tokens', 0),
-                        output_tokens=agent.context_usage.get('output_tokens', 0),
-                        context_limit=agent.context_usage.get('context_limit', 0),
-                        percent_used=agent.context_usage.get('percent_used', 0.0),
-                        tokens_remaining=agent.context_usage.get('tokens_remaining', 0),
-                        turns=agent.context_usage.get('turns', 0),
-                    ))
+                # GC config is its own concern, emitted on its own event.
+                # Pre-1.0 versions piggy-backed it onto ContextUpdatedEvent,
+                # which conflated context-usage with GC configuration; the
+                # split lets clients render a status bar from one event and
+                # configure GC from another.
+                server.emit(GCConfigEvent(
+                    agent_id=agent_id,
+                    threshold=threshold,
+                    strategy=strategy,
+                    target_percent=target_percent,
+                    continuous_mode=continuous_mode,
+                ))
 
             def on_agent_history_updated(self, agent_id, history):
                 if agent_id in server._agents:
@@ -2214,15 +2284,17 @@ class JaatoServer:
                 context_limit = server._jaato.get_context_limit() if server._jaato else 0
                 server.emit(TurnProgressEvent(
                     agent_id=agent_id,
-                    total_tokens=total_tokens,
-                    prompt_tokens=prompt_tokens,
-                    output_tokens=output_tokens,
+                    usage=server._build_usage(
+                        prompt_tokens=prompt_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=total_tokens,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_creation_tokens=cache_creation_tokens,
+                    ),
                     context_limit=context_limit,
                     percent_used=percent_used,
                     tokens_remaining=max(0, context_limit - total_tokens),
                     pending_tool_calls=pending_tool_calls,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
                 ))
 
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")
@@ -2880,30 +2952,23 @@ class JaatoServer:
                 # Get current turn count from accounting
                 turn_accounting = server._jaato.get_turn_accounting()
                 turns = len(turn_accounting)
-                # Get GC config from main agent state
-                gc_threshold = None
-                gc_strategy = None
-                gc_target_percent = None
-                gc_continuous_mode = False
-                if server._main_agent_id in server._agents:
-                    main_state = server._agents[server._main_agent_id]
-                    gc_threshold = main_state.gc_threshold
-                    gc_strategy = main_state.gc_strategy
-                    gc_target_percent = main_state.gc_target_percent
-                    gc_continuous_mode = main_state.gc_continuous_mode
                 server.emit(ContextUpdatedEvent(
                     agent_id=server._main_agent_id,
-                    total_tokens=usage.total_tokens,
-                    prompt_tokens=usage.prompt_tokens,
-                    output_tokens=usage.output_tokens,
+                    usage=server._build_usage(
+                        prompt_tokens=usage.prompt_tokens,
+                        output_tokens=usage.output_tokens,
+                        total_tokens=usage.total_tokens,
+                        cache_read_tokens=getattr(usage, 'cache_read_tokens', None),
+                        cache_creation_tokens=getattr(usage, 'cache_creation_tokens', None),
+                        reasoning_tokens=getattr(usage, 'reasoning_tokens', None),
+                        thinking_tokens=getattr(usage, 'thinking_tokens', None),
+                        # Provider-side cost wins; falls back to pricing table
+                        cost_usd_override=getattr(usage, 'cost_usd', None),
+                    ),
                     context_limit=context_limit,
                     percent_used=percent_used,
                     tokens_remaining=max(0, context_limit - usage.total_tokens),
                     turns=turns,
-                    gc_threshold=gc_threshold,
-                    gc_strategy=gc_strategy,
-                    gc_target_percent=gc_target_percent,
-                    gc_continuous_mode=gc_continuous_mode,
                 ))
 
         def gc_threshold_callback(percent_used: float, threshold: float) -> None:
@@ -2967,30 +3032,17 @@ class JaatoServer:
                     if server._jaato:
                         usage = server._jaato.get_context_usage()
                         context_limit = server._jaato.get_context_limit()
-                        # Get GC config from main agent state
-                        gc_threshold = None
-                        gc_strategy = None
-                        gc_target_percent = None
-                        gc_continuous_mode = False
-                        if server._main_agent_id in server._agents:
-                            main_state = server._agents[server._main_agent_id]
-                            gc_threshold = main_state.gc_threshold
-                            gc_strategy = main_state.gc_strategy
-                            gc_target_percent = main_state.gc_target_percent
-                            gc_continuous_mode = main_state.gc_continuous_mode
                         server.emit(ContextUpdatedEvent(
                             agent_id=server._main_agent_id,
-                            total_tokens=usage.get('total_tokens', 0),
-                            prompt_tokens=usage.get('prompt_tokens', 0),
-                            output_tokens=usage.get('output_tokens', 0),
+                            usage=server._build_usage(
+                                prompt_tokens=usage.get('prompt_tokens', 0),
+                                output_tokens=usage.get('output_tokens', 0),
+                                total_tokens=usage.get('total_tokens', 0),
+                            ),
                             context_limit=context_limit,
                             percent_used=usage.get('percent_used', 0),
                             tokens_remaining=usage.get('tokens_remaining', 0),
                             turns=usage.get('turns', 0),
-                            gc_threshold=gc_threshold,
-                            gc_strategy=gc_strategy,
-                            gc_target_percent=gc_target_percent,
-                            gc_continuous_mode=gc_continuous_mode,
                         ))
 
             except KeyboardInterrupt:
@@ -3563,17 +3615,22 @@ class JaatoServer:
                     context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
                     self.emit(ContextUpdatedEvent(
                         agent_id=self._main_agent_id,
-                        total_tokens=usage.get('total_tokens', 0),
-                        prompt_tokens=usage.get('prompt_tokens', 0),
-                        output_tokens=usage.get('output_tokens', 0),
+                        usage=self._build_usage(
+                            prompt_tokens=usage.get('prompt_tokens', 0),
+                            output_tokens=usage.get('output_tokens', 0),
+                            total_tokens=usage.get('total_tokens', 0),
+                        ),
                         context_limit=context_limit,
                         percent_used=usage.get('percent_used', 0.0),
                         tokens_remaining=usage.get('tokens_remaining', context_limit),
                         turns=usage.get('turns', 0),
-                        gc_threshold=gc_threshold,
-                        gc_strategy=gc_strategy,
-                        gc_target_percent=gc_target_percent,
-                        gc_continuous_mode=gc_continuous_mode,
+                    ))
+                    self.emit(GCConfigEvent(
+                        agent_id=self._main_agent_id,
+                        threshold=gc_threshold,
+                        strategy=gc_strategy,
+                        target_percent=gc_target_percent,
+                        continuous_mode=gc_continuous_mode,
                     ))
 
                 self._emit_init_progress("Setting up session", "done", 6, 6)

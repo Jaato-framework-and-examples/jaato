@@ -52,6 +52,7 @@ from jaato_sdk.events import (
     SessionDescriptionUpdatedEvent,
     SessionProfilesEvent,
     ContextUpdatedEvent,
+    UsageBreakdown,
     AgentCreatedEvent,
     InstructionBudgetEvent,
     InterruptedTurnRecoveredEvent,
@@ -797,6 +798,7 @@ class SessionManager:
         system_instruction_override: Optional[str] = None,
         suppress_base_instructions: bool = False,
         initial_session_state: Optional[Dict[str, Any]] = None,
+        inline_profile_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -846,6 +848,16 @@ class SessionManager:
                 Values must be JSON-serialisable; encrypt before
                 attach if confidentiality is needed (the framework
                 treats values as opaque).
+            inline_profile_data: Optional dict carrying the same shape
+                as a profile JSON file on disk (model, provider,
+                plugins, plugin_configs, system_instructions, gc, etc.).
+                Lets SDK consumers create sessions with a custom
+                runtime config without having to write a profile to
+                ``.jaato/profiles/``.  Mutually exclusive with
+                ``profile_name``.  The ``model`` key is required (no
+                silent fallback) so caller intent is explicit.  The
+                helper ``shared.plugins.subagent.config.build_inline_profile``
+                does the parsing.
 
         Returns:
             The session ID (empty string on failure).
@@ -879,8 +891,22 @@ class SessionManager:
         logger.info(f"Creating session for client {client_id}: env_file={session_env_file}")
         logger.info(f"  Client config: {client_config}")
 
-        # Resolve agent profile if requested
+        # Resolve agent profile if requested.  The two paths
+        # (named-on-disk vs inline-spec from the SDK) are mutually
+        # exclusive — a request that supplies both is rejected up
+        # front rather than silently picking one.
         profile = None
+        if profile_name and inline_profile_data:
+            self._emit_to_client(client_id, ErrorEvent(
+                error=(
+                    "session.new: 'profile' name and inline 'spec' are "
+                    "mutually exclusive — pass exactly one"
+                ),
+                error_type="InvalidSessionSpec",
+                recoverable=True,
+            ))
+            return ""
+
         if profile_name:
             resolve_path = workspace_path or str(pathlib.Path.home())
             profile, error = self._resolve_profile(profile_name, resolve_path)
@@ -892,6 +918,31 @@ class SessionManager:
                 ))
                 return ""
             logger.info(f"  Using profile: {profile_name}")
+        elif inline_profile_data is not None:
+            from shared.plugins.subagent.config import build_inline_profile
+            if not inline_profile_data.get("model"):
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=(
+                        "session.new: inline spec requires a 'model' field "
+                        "— defaults are not silently applied"
+                    ),
+                    error_type="InvalidSessionSpec",
+                    recoverable=True,
+                ))
+                return ""
+            try:
+                profile = build_inline_profile(inline_profile_data)
+            except ValueError as exc:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=f"session.new: {exc}",
+                    error_type="InvalidSessionSpec",
+                    recoverable=True,
+                ))
+                return ""
+            logger.info(
+                f"  Using inline profile spec (model={profile.model}, "
+                f"plugins={profile.plugins})"
+            )
 
         # Resolve agent if requested — the agent's rendered markdown
         # becomes the session's system instructions.
@@ -1499,9 +1550,11 @@ class SessionManager:
                     # Emit context update so clients show correct usage
                     server.emit(ContextUpdatedEvent(
                         agent_id=main_agent_id,
-                        total_tokens=usage.get('total_tokens', 0),
-                        prompt_tokens=usage.get('prompt_tokens', 0),
-                        output_tokens=usage.get('output_tokens', 0),
+                        usage=server._build_usage(
+                            prompt_tokens=usage.get('prompt_tokens', 0),
+                            output_tokens=usage.get('output_tokens', 0),
+                            total_tokens=usage.get('total_tokens', 0),
+                        ),
                         context_limit=usage.get('context_limit', 0),
                         percent_used=usage.get('percent_used', 0.0),
                         tokens_remaining=usage.get('tokens_remaining', 0),
@@ -1680,9 +1733,11 @@ class SessionManager:
                 context_limit = session.get_context_limit()
                 server.emit(ContextUpdatedEvent(
                     agent_id=agent_id,
-                    total_tokens=usage.get('total_tokens', 0),
-                    prompt_tokens=usage.get('prompt_tokens', 0),
-                    output_tokens=usage.get('output_tokens', 0),
+                    usage=server._build_usage(
+                        prompt_tokens=usage.get('prompt_tokens', 0),
+                        output_tokens=usage.get('output_tokens', 0),
+                        total_tokens=usage.get('total_tokens', 0),
+                    ),
                     context_limit=context_limit,
                     percent_used=usage.get('percent_used', 0.0),
                     tokens_remaining=max(0, context_limit - usage.get('total_tokens', 0)),
@@ -2481,12 +2536,21 @@ class SessionManager:
     def list_profiles(
         self,
         workspace_path: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List["ProfileSummary"], List["ProfileParseError"]]:
         """List available agent profiles.
 
         Discovers profiles from three sources in decreasing precedence:
         workspace ``.jaato/profiles/``, user ``~/.jaato/profiles/``,
         and premium entry-point profiles.
+
+        Profiles that fail to parse are returned in the second element
+        (parse errors) so the caller can surface them distinctly from
+        usable profiles — picker UIs typically render the two lists
+        differently (badges vs. the main grid).
+
+        Sensitive material is filtered: env *values* are dropped (only
+        variable names survive); ``system_instructions`` and
+        ``inherits`` are not exposed (deprecated or already resolved).
 
         Args:
             workspace_path: Workspace directory to discover profiles from.
@@ -2494,31 +2558,41 @@ class SessionManager:
                 returned).
 
         Returns:
-            List of profile summary dicts with keys: name, description,
-            model, provider, icon_name, plugins.
+            Tuple ``(profiles, parse_errors)``.  ``profiles`` is the
+            list of typed ``ProfileSummary`` records; ``parse_errors``
+            is the list of files that failed discovery.
         """
+        from dataclasses import asdict
         from shared.plugins.subagent.config import discover_profiles
+        from jaato_sdk.events import ProfileSummary, ProfileParseError
 
         discovery = discover_profiles(".jaato/profiles", base_path=workspace_path or ".")
-        result = []
+        summaries: List[ProfileSummary] = []
         for name, profile in discovery.profiles.items():
-            result.append({
-                "name": name,
-                "description": profile.description,
-                "model": profile.model,
-                "provider": profile.provider,
-                "plugins": profile.plugins,
-            })
-        # Surface parse errors so the profile listing shows broken files
-        for stem, error in discovery.errors.items():
-            result.append({
-                "name": stem,
-                "description": f"[parse error] {error}",
-                "model": None,
-                "provider": None,
-                "plugins": [],
-            })
-        return result
+            summaries.append(ProfileSummary(
+                name=name,
+                description=profile.description,
+                plugins=profile.plugins,
+                preloaded_plugins=sorted(profile.preloaded_plugins),
+                plugin_configs=profile.plugin_configs,
+                model=profile.model,
+                provider=profile.provider,
+                max_turns=profile.max_turns,
+                model_tiers=profile.model_tiers,
+                gc=asdict(profile.gc) if profile.gc else None,
+                runtime_limits=(
+                    asdict(profile.runtime_limits)
+                    if profile.runtime_limits else None
+                ),
+                completion_payload_schema=profile.completion_payload_schema,
+                env_var_names=sorted(profile.env.keys()),
+            ))
+
+        parse_errors: List[ProfileParseError] = [
+            ProfileParseError(name=stem, error=error)
+            for stem, error in discovery.errors.items()
+        ]
+        return summaries, parse_errors
 
     def list_sessions(self) -> List[RuntimeSessionInfo]:
         """List all sessions (in-memory and on-disk).

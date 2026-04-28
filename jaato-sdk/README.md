@@ -12,20 +12,24 @@ pip install --extra-index-url https://test.pypi.org/simple/ jaato-sdk
 
 ```python
 import asyncio
-from jaato_sdk import IPCRecoveryClient
-from jaato_sdk.events import AgentOutputEvent, ToolCallStartEvent
+from jaato_sdk import IPCRecoveryClient, EventType
 
 async def main():
     client = IPCRecoveryClient()  # default: /tmp/jaato.sock (Windows: \\.\pipe\jaato)
+
+    # Typed event handlers — register before connect() to capture
+    # the inaugural ConnectedEvent.
+    client.subscribe(EventType.AGENT_OUTPUT, lambda e: print(e.text, end=""))
+    client.subscribe(EventType.TOOL_CALL_START, lambda e: print(f"\n[tool: {e.tool_name}]"))
+
     await client.connect()
     await client.create_session()
     await client.send_message("Hello!")
 
-    async for event in client.events():
-        if isinstance(event, AgentOutputEvent):
-            print(event.text, end="", flush=True)
-        elif isinstance(event, ToolCallStartEvent):
-            print(f"\n[tool: {event.tool_name}]")
+    # Drive the event loop so the dispatcher fires.  Either iterate
+    # client.events() (legacy style) or await client.drain_events()
+    # to let your subscribers do the work.
+    await client.drain_events()
 
 asyncio.run(main())
 ```
@@ -110,10 +114,14 @@ client.send_message("Read config.json")
 ├─ ToolOutputEvent      {chunk: "..."}                      # if the tool streams
 ├─ ToolCallEndEvent     {call_id: "...", success: true}
 ├─ AgentOutputEvent     {source: "model", text: "The file..."}
-└─ TurnCompletedEvent   {token_usage: {...}}
+└─ TurnCompletedEvent   {usage: UsageBreakdown(...), duration_seconds: 1.5}
 ```
 
 `AgentOutputEvent.mode` is `"write"` for a new block of output and `"append"` for streaming continuation chunks. `source` is one of `"model"`, `"tool"`, `"system"`, or a plugin name.
+
+The three usage-bearing events (`TurnCompletedEvent`, `TurnProgressEvent`, `ContextUpdatedEvent`) all carry the same `UsageBreakdown` shape — token counts, cache hits, reasoning/thinking tokens, and `cost_usd` populated when the daemon can derive it. Cost resolution: provider-reported (e.g. claude_cli) wins over pricing-table computed from `.jaato/pricing.json`; otherwise `None` (never silently zero). See [docs/sdk-pricing.md](../docs/sdk-pricing.md) for the full pricing contract.
+
+GC configuration is its own event (`GCConfigEvent`) since v1.0 — subscribe to that for status-bar GC display rather than reading from `ContextUpdatedEvent`.
 
 ### Permission flow
 
@@ -134,13 +142,26 @@ Permission response keys (returned in `response_options`):
 
 | Key | Meaning |
 |-----|---------|
-| `y` | yes, this once |
-| `n` | no |
-| `a` | always allow this tool |
-| `t` | allow for the rest of this turn |
-| `i` | allow until the session goes idle |
-| `never` | blacklist this tool |
-| `e` | edit the arguments and re-prompt (pass `edited_arguments=...`) |
+| `y` | allow this tool execution |
+| `n` | deny this tool execution |
+| `a` / `always` | allow and whitelist the tool for this session |
+| `t` / `turn` | allow remaining tool calls this turn |
+| `i` / `idle` | allow until the session goes idle |
+| `once` | allow once without remembering |
+| `all` | allow all future requests in this session |
+| `never` | deny and blacklist the tool for this session |
+| `c:<text>` | deny **with feedback** the model sees as the tool result |
+| `yc:<text>` | allow **with feedback** the model sees alongside the tool result |
+| `e` | edit the arguments and re-prompt (pass `edited_arguments=...`); only offered when the request has editable content |
+
+The two comment variants let you steer the model without simply rejecting the call. Pass them to `respond_to_permission` as a single string with the prefix and the text:
+
+```python
+await client.respond_to_permission(request_id, "c:please check the file size first")
+await client.respond_to_permission(request_id, "yc:ok but write the result to /tmp/audit.log")
+```
+
+The server strips the `c:` / `yc:` prefix and forwards the comment to the model alongside the deny/allow decision. Empty text after the prefix falls back to plain `n` / `y`.
 
 ### Cancellation
 
@@ -191,17 +212,63 @@ await client.close()            # permanent (recovery client only)
 ### Sessions
 
 ```python
+# By profile name — references .jaato/profiles/<name>.json on the server
 await client.create_session(
     name="my-session",
-    profile="researcher",       # name of a profile under .jaato/profiles/
-    agent="reviewer",           # agent name; its rendered markdown becomes system instructions
+    profile="researcher",
+    agent="reviewer",
     agent_params={"focus": "security"},
 )
+
+# By inline spec — same shape as a profile JSON, no disk file needed
+await client.create_session(
+    name="ops-task",
+    profile={
+        "model": "claude-sonnet-4-5",
+        "provider": "anthropic",
+        "plugins": ["cli", "web_search"],
+        "system_instructions": "You are an operations engineer.",
+        # Any other field a profile JSON accepts: plugin_configs, gc,
+        # env, max_turns, runtime_limits, model_tiers, ...
+    },
+)
+
 await client.attach_session(session_id)
 await client.get_default_session()
 await client.list_sessions()           # response arrives as SessionListEvent
 await client.list_profiles()           # response arrives as SessionProfilesEvent
 ```
+
+#### Profile picker — SessionProfilesEvent shape
+
+`list_profiles()` triggers a `SessionProfilesEvent` with a stable, versioned shape — pin against `schema_version` if you build a profile-picker UI:
+
+```python
+event.schema_version       # "1.0" — bumped only on breaking shape changes
+event.profiles             # List[ProfileSummary]
+event.parse_errors         # List[ProfileParseError] — broken files surface here, not in `profiles`
+```
+
+`ProfileSummary` exposes the safe-to-display subset of a profile (full field list in `jaato_sdk/events.py`):
+
+| Field | Purpose |
+|---|---|
+| `name`, `description` | identity |
+| `plugins`, `preloaded_plugins`, `plugin_configs` | capabilities |
+| `model`, `provider`, `max_turns`, `model_tiers` | runtime |
+| `gc`, `runtime_limits`, `completion_payload_schema` | structural config (dicts, expose as-is) |
+| `env_var_names` | **names only** — env values never leave the daemon |
+
+Deliberately **not** exposed: `system_instructions` (deprecated, now lives in agents), `icon_name` (deprecated), `inherits` (resolved during discovery), env values (sensitive). Profile-author secrets should always go through `${VAR}` indirection in `env`.
+
+#### `profile` parameter polymorphism
+
+The `profile` parameter is polymorphic:
+
+- **`str`** → references a profile JSON on the server's disk under `.jaato/profiles/`. Use this when an operator has curated profiles for human users.
+- **`dict`** → inline spec with the same shape. Use this when you're an orchestrator with your own governance layer and don't want to depend on disk files.
+
+The two forms are mutually exclusive — pass one or the other. The server validates inline specs and rejects them with an `ErrorEvent` if `model` is missing (no silent default fallback). `agent` and `agent_params` are independent of `profile` and compose with either form: profile decides *capabilities* (model, plugins, GC), agent decides *persona* (system instructions / personality).
 
 `create_session()` returns the new session id when no event iterator is active; otherwise it is fire-and-forget and the id arrives via the event stream as a `SessionInfoEvent`.
 
@@ -227,18 +294,57 @@ await client.disable_tool("bash")
 
 ### Event stream
 
+There are two ways to consume events: typed subscriptions (recommended) or the raw async iterator. They cooperate — subscribers always fire, and the iterator yields the same events.
+
+#### Typed subscriptions
+
 ```python
-async for event in client.events():
-    handle(event)
+from jaato_sdk import EventType
+
+# One handler per type — only fires for that event type.
+unsub = client.subscribe(EventType.PERMISSION_REQUESTED, on_perm)
+
+# Fire once, then auto-unsubscribe.
+unsub = client.subscribe_once(EventType.AGENT_COMPLETED, on_done)
+
+# Catchall (every event regardless of type).
+unsub = client.subscribe_all(lambda e: log(e))
+
+# Register many in one call; unsub_all() removes them atomically.
+unsub_all = client.subscribe_many({
+    EventType.PERMISSION_REQUESTED: on_perm,
+    EventType.TOOL_CALL_START:      on_tool_start,
+    EventType.AGENT_COMPLETED:      on_done,
+})
 ```
 
-The iterator exits cleanly on disconnect. With `IPCRecoveryClient`, it survives reconnects: events from the new connection are yielded transparently after the gap.
+Handlers may be sync (`def`) or async (`async def`). Async handlers are scheduled fire-and-forget on the current event loop — order of *delivery* is FIFO, but order of *completion* is not guaranteed. Exceptions and rejections are logged and swallowed; one bad handler never breaks the stream or affects others. Subscribing during dispatch only takes effect for the next event (the handler list is snapshotted before iterating).
 
-For a callback-style API:
+For the dispatcher to actually fire handlers, your code must drive the loop:
 
 ```python
+# Option A — let subscribers do all the work
+await client.drain_events()
+
+# Option B — iterate and react to specific events directly
+async for event in client.events():
+    ...
+```
+
+The async iterator exits cleanly on disconnect. With `IPCRecoveryClient`, it survives reconnects: events from the new connection are yielded transparently after the gap, and subscribed handlers continue firing without re-registration.
+
+#### Migration from `set_event_callback`
+
+The old single-callback API was removed in jaato-sdk 0.4.0 — replace it with `subscribe_all`:
+
+```python
+# before
 client.set_event_callback(handle)
 await client.receive_events()
+
+# after
+client.subscribe_all(handle)
+await client.drain_events()
 ```
 
 ## Auto-reconnection
@@ -337,6 +443,7 @@ from jaato_sdk.events import (
     ClarificationRequestedEvent, ReferenceSelectionRequestedEvent,
     PlanUpdatedEvent, PlanStepUpdatedEvent, PlanClearedEvent,
     ContextUpdatedEvent, TurnCompletedEvent, TurnProgressEvent,
+    UsageBreakdown, GCConfigEvent,
     SystemMessageEvent, ErrorEvent, RetryEvent, InitProgressEvent,
     SessionInfoEvent, SessionListEvent, SessionProfilesEvent,
 

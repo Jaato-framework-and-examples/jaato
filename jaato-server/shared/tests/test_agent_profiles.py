@@ -24,28 +24,25 @@ class TestSessionProfilesEvent:
     def test_session_profiles_event_serialization(self):
         """SessionProfilesEvent serializes and deserializes correctly."""
         from jaato_sdk.events import (
+            ProfileSummary,
             SessionProfilesEvent,
             serialize_event,
             deserialize_event,
         )
 
         profiles = [
-            {
-                "name": "researcher",
-                "description": "Research profile",
-                "model": "claude-sonnet-4-20250514",
-                "provider": "anthropic",
-                "icon_name": "search",
-                "plugins": ["cli", "web_search"],
-            },
-            {
-                "name": "coder",
-                "description": "Coding profile",
-                "model": None,
-                "provider": None,
-                "icon_name": "code",
-                "plugins": ["cli", "file_edit", "lsp"],
-            },
+            ProfileSummary(
+                name="researcher",
+                description="Research profile",
+                model="claude-sonnet-4-20250514",
+                provider="anthropic",
+                plugins=["cli", "web_search"],
+            ),
+            ProfileSummary(
+                name="coder",
+                description="Coding profile",
+                plugins=["cli", "file_edit", "lsp"],
+            ),
         ]
 
         event = SessionProfilesEvent(profiles=profiles)
@@ -53,9 +50,13 @@ class TestSessionProfilesEvent:
         restored = deserialize_event(json_str)
 
         assert isinstance(restored, SessionProfilesEvent)
+        assert restored.schema_version == "1.0"
         assert len(restored.profiles) == 2
-        assert restored.profiles[0]["name"] == "researcher"
-        assert restored.profiles[1]["plugins"] == ["cli", "file_edit", "lsp"]
+        assert restored.profiles[0].name == "researcher"
+        assert restored.profiles[0].model == "claude-sonnet-4-20250514"
+        assert restored.profiles[1].plugins == ["cli", "file_edit", "lsp"]
+        # New: parse_errors is its own field, defaults empty
+        assert restored.parse_errors == []
 
     def test_session_profiles_event_empty(self):
         """SessionProfilesEvent works with no profiles."""
@@ -71,6 +72,7 @@ class TestSessionProfilesEvent:
 
         assert isinstance(restored, SessionProfilesEvent)
         assert restored.profiles == []
+        assert restored.parse_errors == []
 
 
 class TestSessionInfoProfileName:

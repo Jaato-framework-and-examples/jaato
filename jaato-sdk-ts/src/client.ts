@@ -59,6 +59,26 @@ import {
   type PermissionSetDefaultRequest,
   type PermissionPolicySnapshotRequest,
 } from "./events.js";
+import type {
+  CatchallEventHandler,
+  EventByType,
+  EventHandler,
+  SubscribeManyMap,
+  Unsubscribe,
+} from "./event-typing.js";
+
+/**
+ * Internal record of a registered handler.
+ *
+ * Stored in {@link JaatoClient}'s typed-handler map (keyed by EventType
+ * string) or catchall list. `id` is unique across all entries and used
+ * by the unsubscribe closure to find and remove this record.
+ */
+interface HandlerEntry {
+  handler: (event: JaatoEvent) => void | Promise<void>;
+  once: boolean;
+  id: number;
+}
 
 /**
  * The earliest jaato-server version this SDK is wire-compatible with.
@@ -145,7 +165,15 @@ export class JaatoClient {
   private _clientId: string | null = null;
   private _sessionId: string | null = null;
   private _statusHandlers: Array<(s: ConnectionStatus) => void> = [];
-  private _eventHandlers: Array<(e: JaatoEvent) => void> = [];
+  // Typed handler buckets keyed by EventType string.  Catchall handlers
+  // live in `_catchallHandlers`.  Mutated and dispatched on the JS event
+  // loop only — no thread safety guarantees because there is no other
+  // thread.  `_dispatchEvent` snapshots both buckets before iterating
+  // so subscribe/unsubscribe calls inside a handler only take effect
+  // for the next event.
+  private _typedHandlers: Map<EventType, HandlerEntry[]> = new Map();
+  private _catchallHandlers: HandlerEntry[] = [];
+  private _handlerIdCounter = 0;
   private _bufferedEvents: JaatoEvent[] = [];
   private _eventLoopActive = false;
   private _reconnectAttempts = 0;
@@ -263,75 +291,110 @@ export class JaatoClient {
     this._transition(ConnectionState.CLOSED);
   }
 
-  // ──── Event stream ───────────────────────────────────────────────
+  // ──── Event subscription API ─────────────────────────────────────
 
   /**
-   * Subscribe a handler for every incoming event.
+   * Subscribe to events of a specific type.
    *
-   * Handlers are invoked synchronously on event arrival.  Throwing
-   * inside a handler is logged and swallowed — it never breaks the
-   * event loop or other subscribers.
+   * The handler receives only events whose `type` field equals
+   * `eventType`. Sync handlers run inline; async handlers are
+   * dispatched fire-and-forget — order of *delivery* is FIFO, but
+   * order of *completion* of async handlers is not guaranteed.
    *
-   * @returns Unsubscribe function.
+   * Throwing inside a handler (or rejecting an async handler) is
+   * logged and swallowed — it never breaks the event loop or affects
+   * other subscribers.
+   *
+   * @returns Idempotent unsubscribe function.
    */
-  subscribe(handler: (event: JaatoEvent) => void): () => void {
-    this._eventHandlers.push(handler);
-    return (): void => {
-      const i = this._eventHandlers.indexOf(handler);
-      if (i >= 0) this._eventHandlers.splice(i, 1);
-    };
+  subscribe<T extends EventType>(
+    eventType: T,
+    handler: EventHandler<T>,
+  ): Unsubscribe {
+    return this._addTypedHandler(eventType, handler as HandlerEntry["handler"], false);
   }
 
   /**
-   * Async iterator alternative to {@link subscribe}.
+   * Subscribe to a single event of `eventType`, then auto-unsubscribe.
    *
-   * Yields events as they arrive.  When the connection drops and
-   * {@link RecoveryConfig.autoReconnect} is true, the iterator
-   * suspends until the next CONNECTED state and then resumes.
-   * When the connection enters CLOSED, the iterator returns.
+   * The handler fires exactly once when the next matching event
+   * arrives. The returned unsubscribe can be called early to cancel.
    */
-  async *events(): AsyncIterableIterator<JaatoEvent> {
-    const queue: JaatoEvent[] = [];
-    const waiters: Array<(e: JaatoEvent | null) => void> = [];
-    let stop = false;
+  subscribeOnce<T extends EventType>(
+    eventType: T,
+    handler: EventHandler<T>,
+  ): Unsubscribe {
+    return this._addTypedHandler(eventType, handler as HandlerEntry["handler"], true);
+  }
 
-    const handler = (e: JaatoEvent): void => {
-      if (waiters.length > 0) {
-        const w = waiters.shift()!;
-        w(e);
-      } else {
-        queue.push(e);
-      }
-    };
-    const statusUnsub = this.onStatus((status) => {
-      if (status.state === ConnectionState.CLOSED) {
-        stop = true;
-        while (waiters.length) {
-          const w = waiters.shift()!;
-          w(null);
-        }
-      }
-    });
-    const unsub = this.subscribe(handler);
+  /**
+   * Subscribe to every event regardless of type (catchall firehose).
+   *
+   * Use sparingly — typed `subscribe` is preferred when you only care
+   * about a specific event family.
+   */
+  subscribeAll(handler: CatchallEventHandler): Unsubscribe {
+    return this._addCatchallHandler(handler, false);
+  }
 
-    try {
-      while (!stop) {
-        if (queue.length > 0) {
-          yield queue.shift()!;
-          continue;
-        }
-        const next = await new Promise<JaatoEvent | null>((res) => {
-          waiters.push(res);
-        });
-        if (next == null) {
-          return;
-        }
-        yield next;
+  /**
+   * Register multiple typed handlers in one call.
+   *
+   * Returns a single unsubscribe that removes all of them atomically —
+   * useful for "set up my client" call sites that want a single cleanup
+   * point.
+   */
+  subscribeMany(map: SubscribeManyMap): Unsubscribe {
+    const unsubs: Unsubscribe[] = [];
+    for (const key of Object.keys(map) as EventType[]) {
+      const handler = map[key];
+      if (handler) {
+        unsubs.push(
+          this._addTypedHandler(key, handler as HandlerEntry["handler"], false),
+        );
       }
-    } finally {
-      unsub();
-      statusUnsub();
     }
+    return (): void => {
+      for (const u of unsubs) u();
+    };
+  }
+
+  private _addTypedHandler(
+    type: EventType,
+    handler: HandlerEntry["handler"],
+    once: boolean,
+  ): Unsubscribe {
+    const id = ++this._handlerIdCounter;
+    const entry: HandlerEntry = { handler, once, id };
+    let bucket = this._typedHandlers.get(type);
+    if (!bucket) {
+      bucket = [];
+      this._typedHandlers.set(type, bucket);
+    }
+    bucket.push(entry);
+    return (): void => this._removeTypedHandlerId(type, id);
+  }
+
+  private _addCatchallHandler(
+    handler: HandlerEntry["handler"],
+    once: boolean,
+  ): Unsubscribe {
+    const id = ++this._handlerIdCounter;
+    const entry: HandlerEntry = { handler, once, id };
+    this._catchallHandlers.push(entry);
+    return (): void => this._removeCatchallHandlerId(id);
+  }
+
+  private _removeTypedHandlerId(type: EventType, id: number): void {
+    const bucket = this._typedHandlers.get(type);
+    if (!bucket) return;
+    const i = bucket.findIndex((e) => e.id === id);
+    if (i >= 0) bucket.splice(i, 1);
+  }
+
+  private _removeCatchallHandlerId(id: number): void {
+    const i = this._catchallHandlers.findIndex((e) => e.id === id);
+    if (i >= 0) this._catchallHandlers.splice(i, 1);
   }
 
   // ──── Typed methods (parity with Python IPCClient) ───────────────
@@ -433,14 +496,39 @@ export class JaatoClient {
    */
   async createSession(options: {
     name?: string;
-    profile?: string;
+    /**
+     * Either a profile **name** (string) referencing a JSON file under
+     * ``.jaato/profiles/`` on the server, **or** an inline **spec**
+     * record with the same shape — recognised keys include ``model``
+     * (required), ``provider``, ``plugins``, ``plugin_configs``,
+     * ``system_instructions``, ``gc``, ``env``, ``max_turns``,
+     * ``runtime_limits``, ``model_tiers``, ``completion_payload_schema``.
+     * The two forms are mutually exclusive — pass one or the other.
+     * The server validates the dict and rejects it with a clear
+     * ``ErrorEvent`` if ``model`` is missing.
+     */
+    profile?: string | Record<string, unknown>;
     agent?: string;
     agentParams?: Record<string, string>;
   } = {}): Promise<void> {
     const args: string[] = options.name ? [options.name] : [];
-    if (options.profile) {
+    let payload: Record<string, unknown> | undefined;
+
+    if (typeof options.profile === "string") {
       args.push("--profile", options.profile);
+    } else if (
+      options.profile !== undefined &&
+      options.profile !== null &&
+      typeof options.profile === "object"
+    ) {
+      payload = { spec: options.profile };
+    } else if (options.profile !== undefined && options.profile !== null) {
+      throw new TypeError(
+        `createSession: 'profile' must be string (name) or object ` +
+          `(inline spec), got ${typeof options.profile}`,
+      );
     }
+
     if (options.agent) {
       args.push("--agent", options.agent);
     }
@@ -453,6 +541,7 @@ export class JaatoClient {
       type: EventTypeValue.COMMAND,
       command: "session.new",
       args,
+      payload,
     } as CommandRequest);
   }
 
@@ -831,7 +920,7 @@ export class JaatoClient {
     predicate: (event: JaatoEvent) => boolean,
   ): Promise<T> {
     return new Promise<T>((resolve) => {
-      const unsub = this.subscribe((event) => {
+      const unsub = this.subscribeAll((event) => {
         if (predicate(event)) {
           unsub();
           resolve(event as T);
@@ -912,6 +1001,12 @@ export class JaatoClient {
       clientId: this._clientId ?? undefined,
     });
 
+    // Surface the inaugural ConnectedEvent to subscribers — handlers
+    // registered before connect() rely on this to react to the very
+    // first connection (parity with Python's IPCClient, which yields
+    // ConnectedEvent through its events() loop).
+    this._dispatchEvent(connected);
+
     // Buffer the post-handshake events that arrived between now and
     // when the event loop picks up.  The loop drains _bufferedEvents
     // first so handshake-phase events aren't dropped.
@@ -952,14 +1047,45 @@ export class JaatoClient {
     if (maybeSession && event.type === EventTypeValue.SESSION_INFO) {
       this._sessionId = maybeSession;
     }
-    for (const h of this._eventHandlers) {
-      try {
-        h(event);
-      } catch (err) {
-        // Swallow — never let a subscriber crash the dispatcher.
-        // eslint-disable-next-line no-console
-        console.error("[JaatoClient] subscriber threw:", err);
+
+    // Snapshot before iterating so subscribe/unsubscribe calls made
+    // inside a handler only take effect for the *next* event.
+    const typedSnapshot = this._typedHandlers.get(event.type as EventType);
+    const typedEntries = typedSnapshot ? typedSnapshot.slice() : [];
+    const catchallEntries = this._catchallHandlers.slice();
+
+    for (const entry of typedEntries) {
+      if (entry.once) {
+        this._removeTypedHandlerId(event.type as EventType, entry.id);
       }
+      this._invokeHandler(entry.handler, event);
+    }
+
+    for (const entry of catchallEntries) {
+      if (entry.once) {
+        this._removeCatchallHandlerId(entry.id);
+      }
+      this._invokeHandler(entry.handler, event);
+    }
+  }
+
+  private _invokeHandler(
+    handler: HandlerEntry["handler"],
+    event: JaatoEvent,
+  ): void {
+    let result: void | Promise<void>;
+    try {
+      result = handler(event);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[JaatoClient] subscriber threw:", err);
+      return;
+    }
+    if (result && typeof (result as Promise<void>).then === "function") {
+      (result as Promise<void>).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.error("[JaatoClient] async subscriber rejected:", err);
+      });
     }
   }
 

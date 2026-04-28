@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-sdk"
-version = "0.3.4"
+version = "0.7.0"
 description = "Jaato SDK - Protocol and client library for jaato server"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -39,3 +39,12 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["jaato_sdk*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "load: load/perf tests — opt-in via -m load (skipped by default)",
+]
+# Skip load tests in normal runs.  To run only the load tests:
+#     pytest -m load jaato-sdk/jaato_sdk/tests/
+addopts = "-m 'not load'"
+asyncio_mode = "auto"

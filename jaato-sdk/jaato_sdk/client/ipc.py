@@ -4,7 +4,7 @@ This module provides a client for connecting to the Jaato server
 via Unix domain socket (Unix/Linux/macOS) or named pipe (Windows).
 
 Usage:
-    from jaato_sdk.client import IPCClient
+    from jaato_sdk import IPCClient, EventType
 
     # On Unix:
     client = IPCClient("/tmp/jaato.sock")
@@ -14,10 +14,17 @@ Usage:
 
     await client.connect()
 
+    # Subscribe to specific event types (typed handlers)
+    client.subscribe(
+        EventType.PERMISSION_REQUESTED,
+        lambda e: print(f"perm: {e.tool_name}"),
+    )
+
     # Send a message
     await client.send_message("Hello, world!")
 
-    # Receive events
+    # Either iterate events directly, or use drain_events() to let
+    # subscribed handlers do the work:
     async for event in client.events():
         print(event)
 """
@@ -31,7 +38,13 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
+
+from jaato_sdk.client._handler_registry import (
+    EventHandler,
+    Unsubscribe,
+    _HandlerRegistry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,8 +160,10 @@ class IPCClient:
         self._client_id: Optional[str] = None
         self._server_version: Optional[str] = None
 
-        # Event callback
-        self._on_event: Optional[Callable[[Event], None]] = None
+        # Event handler registry.  Owned and dispatched from this
+        # client's event loop; not thread-safe.  See _handler_registry
+        # for snapshot/unsubscribe semantics.
+        self._registry = _HandlerRegistry()
 
         # Buffer for events consumed during request-response operations
         # (e.g. create_session reads events until SessionInfoEvent; any
@@ -301,13 +316,48 @@ class IPCClient:
         """
         return self._session_id is not None
 
-    def set_event_callback(self, callback: Callable[[Event], None]) -> None:
-        """Set callback for received events.
+    # =========================================================================
+    # Event Subscription API
+    # =========================================================================
 
-        Args:
-            callback: Function called with each received event.
+    def subscribe(
+        self,
+        event_type: EventType,
+        handler: EventHandler,
+    ) -> Unsubscribe:
+        """Subscribe to events of a specific type.
+
+        Sync handlers run inline; async handlers are scheduled
+        fire-and-forget on the current event loop. Returns an idempotent
+        unsubscribe callable.
         """
-        self._on_event = callback
+        return self._registry.subscribe(event_type, handler)
+
+    def subscribe_once(
+        self,
+        event_type: EventType,
+        handler: EventHandler,
+    ) -> Unsubscribe:
+        """Subscribe to a single event of ``event_type`` then auto-unsubscribe."""
+        return self._registry.subscribe_once(event_type, handler)
+
+    def subscribe_all(self, handler: EventHandler) -> Unsubscribe:
+        """Subscribe to every event regardless of type (catchall firehose)."""
+        return self._registry.subscribe_all(handler)
+
+    def subscribe_many(
+        self,
+        handlers: Dict[EventType, EventHandler],
+    ) -> Unsubscribe:
+        """Register multiple typed handlers in one call.
+
+        Returns a single unsubscribe that removes all of them atomically.
+        """
+        return self._registry.subscribe_many(handlers)
+
+    def _dispatch(self, event: Event) -> None:
+        """Forward to the embedded handler registry."""
+        self._registry.dispatch(event)
 
     # =========================================================================
     # Connection Management
@@ -839,7 +889,7 @@ class IPCClient:
     async def create_session(
         self,
         name: Optional[str] = None,
-        profile: Optional[str] = None,
+        profile: Optional[Union[str, Dict[str, Any]]] = None,
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
         timeout: float = 60.0,
@@ -858,9 +908,20 @@ class IPCClient:
 
         Args:
             name: Optional session name.
-            profile: Optional runtime profile name (model, plugins, env).
+            profile: Either a profile **name** (str) referencing a
+                file in ``.jaato/profiles/`` on the server, **or** an
+                inline **spec dict** with the same shape — recognised
+                keys include ``model`` (required), ``provider``,
+                ``plugins``, ``plugin_configs``, ``system_instructions``,
+                ``gc``, ``env``, ``max_turns``, ``runtime_limits``,
+                ``model_tiers``, ``completion_payload_schema``.  The
+                server validates the dict and rejects it with a clear
+                ``ErrorEvent`` if ``model`` is missing.  The two forms
+                are mutually exclusive — pass one or the other.
             agent: Optional agent name. The agent's rendered markdown
-                becomes the session's system instructions.
+                becomes the session's system instructions.  Orthogonal
+                to ``profile`` — agent describes the session's persona,
+                profile describes its capabilities; they compose freely.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.  Only used when *agent* is specified.
             timeout: Maximum seconds to wait for session creation when
@@ -870,10 +931,23 @@ class IPCClient:
         Returns:
             The new session ID, or None if fire-and-forget / failed /
             timed out.
+
+        Raises:
+            TypeError: If ``profile`` is not None, str, or dict.
         """
-        args = [name] if name else []
-        if profile:
+        args: List[str] = [name] if name else []
+        payload: Optional[Dict[str, Any]] = None
+
+        if isinstance(profile, str):
             args.extend(["--profile", profile])
+        elif isinstance(profile, dict):
+            payload = {"spec": profile}
+        elif profile is not None:
+            raise TypeError(
+                f"create_session: 'profile' must be str (profile name) or "
+                f"dict (inline spec), got {type(profile).__name__}"
+            )
+
         if agent:
             args.extend(["--agent", agent])
         if agent_params:
@@ -882,6 +956,7 @@ class IPCClient:
         await self._send_event(CommandRequest(
             command="session.new",
             args=args,
+            payload=payload,
         ))
 
         # If events() is already consuming the socket, we must not read
@@ -1385,8 +1460,7 @@ class IPCClient:
             while self._buffered_events:
                 event = self._buffered_events.pop(0)
                 logger.debug(f"events(): yielding buffered {type(event).__name__}")
-                if self._on_event:
-                    self._on_event(event)
+                self._dispatch(event)
                 yield event
 
             while self._connected:
@@ -1406,9 +1480,7 @@ class IPCClient:
                         self._session_id = event.session_id
                         logger.debug(f"events(): session_id updated to {event.session_id}")
 
-                    # Call callback if set
-                    if self._on_event:
-                        self._on_event(event)
+                    self._dispatch(event)
 
                     yield event
 
@@ -1437,10 +1509,15 @@ class IPCClient:
         finally:
             self._events_active = False
 
-    async def receive_events(self) -> None:
-        """Receive events and call the callback.
+    async def drain_events(self) -> None:
+        """Drive the event loop, dispatching to subscribed handlers.
 
-        Runs until disconnected. Use set_event_callback() first.
+        Runs until disconnected. Convenience wrapper for callers that
+        only want handler-based delivery and don't need to iterate
+        ``events()`` manually. Equivalent to::
+
+            async for _ in client.events():
+                pass
         """
-        async for event in self.events():
-            pass  # Callback is called in events()
+        async for _ in self.events():
+            pass

@@ -400,6 +400,49 @@ describe("JaatoClient session management", () => {
     assert.ok(args.includes("code-reviewer"));
     assert.ok(args.includes("topic=auth"));
     assert.ok(args.includes("depth=deep"));
+    // Profile-by-name path → no payload, all-via-argv.
+    assert.equal((ev as { payload?: unknown }).payload, undefined);
+  });
+
+  test("createSession with inline profile dict routes to payload", async () => {
+    const spec = {
+      model: "claude-sonnet-4-5",
+      provider: "anthropic",
+      plugins: ["cli", "web_search"],
+      system_instructions: "You are a researcher.",
+    };
+    await client.createSession({ profile: spec });
+    const [ev] = getSent();
+    const args = (ev as { args?: string[] }).args ?? [];
+    // No --profile flag in argv when the spec is inline.
+    assert.ok(!args.includes("--profile"));
+    assert.deepEqual((ev as { payload?: unknown }).payload, { spec });
+  });
+
+  test("createSession inline profile composes with name + agent", async () => {
+    await client.createSession({
+      name: "ops-task",
+      profile: { model: "claude-sonnet-4-5" },
+      agent: "reviewer",
+      agentParams: { focus: "security" },
+    });
+    const [ev] = getSent();
+    const args = (ev as { args?: string[] }).args ?? [];
+    assert.equal(args[0], "ops-task");
+    assert.ok(args.includes("--agent"));
+    assert.ok(args.includes("reviewer"));
+    assert.ok(args.includes("focus=security"));
+    assert.deepEqual((ev as { payload?: unknown }).payload, {
+      spec: { model: "claude-sonnet-4-5" },
+    });
+  });
+
+  test("createSession rejects invalid profile types", async () => {
+    await assert.rejects(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      client.createSession({ profile: 42 as any }),
+      TypeError,
+    );
   });
 
   test("attachSession sends session.attach and updates sessionId", async () => {
@@ -644,8 +687,10 @@ describe("JaatoClient event stream", () => {
   test("subscribe receives events emitted from the server", async () => {
     const client = new JaatoClient({ url: "ws://localhost:8080" });
     const received: JaatoEvent[] = [];
-    client.subscribe((e) => received.push(e));
+    client.subscribeAll((e) => received.push(e));
     await connectAndAck(client);
+    // Drop the inaugural ConnectedEvent that fires during handshake.
+    received.length = 0;
 
     const evt = {
       type: EventTypeValue.AGENT_OUTPUT,
@@ -665,15 +710,17 @@ describe("JaatoClient event stream", () => {
   test("unsubscribe stops handler invocation", async () => {
     const client = new JaatoClient({ url: "ws://localhost:8080" });
     const received: JaatoEvent[] = [];
-    const unsub = client.subscribe((e) => received.push(e));
+    const unsub = client.subscribeAll((e) => received.push(e));
     await connectAndAck(client);
+    // After connect the inaugural ConnectedEvent has been dispatched.
+    const baseline = received.length;
     unsub();
     lastInstance!.emit({
       type: EventTypeValue.SYSTEM_MESSAGE,
       timestamp: new Date().toISOString(),
     } as unknown as JaatoEvent);
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
-    assert.equal(received.length, 0);
+    assert.equal(received.length, baseline);
     await client.close();
   });
 });
@@ -743,5 +790,297 @@ describe("JaatoClient reconnect", () => {
     await client.close();
     assert.equal(client.state, ConnectionState.CLOSED);
     await assert.rejects(client.connect(), ConnectionClosedError);
+  });
+});
+
+// ──── Subscribe API parity tests ─────────────────────────────────
+//
+// Mirror jaato-sdk/jaato_sdk/tests/test_subscribe_api.py one-to-one
+// to keep cross-language semantics in lockstep.
+
+function _output(text = "x"): JaatoEvent {
+  return {
+    type: EventTypeValue.AGENT_OUTPUT,
+    timestamp: new Date().toISOString(),
+    agent_id: "main",
+    source: "model",
+    text,
+    mode: "append",
+  } as unknown as JaatoEvent;
+}
+
+function _completed(): JaatoEvent {
+  return {
+    type: EventTypeValue.AGENT_COMPLETED,
+    timestamp: new Date().toISOString(),
+  } as unknown as JaatoEvent;
+}
+
+function _perm(): JaatoEvent {
+  return {
+    type: EventTypeValue.PERMISSION_REQUESTED,
+    timestamp: new Date().toISOString(),
+    request_id: "r1",
+    tool_name: "cli",
+    arguments: {},
+  } as unknown as JaatoEvent;
+}
+
+describe("JaatoClient subscribe API", () => {
+  beforeEach(() => installMockWebSocket());
+  afterEach(() => restoreWebSocket());
+
+  test("subscribe filters by type", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const seen: string[] = [];
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, (e) => seen.push(e.text));
+
+    lastInstance!.emit(_output("a"));
+    lastInstance!.emit(_completed());
+    lastInstance!.emit(_output("b"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    assert.deepEqual(seen, ["a", "b"]);
+    await client.close();
+  });
+
+  test("subscribeAll receives everything", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const seen: string[] = [];
+    client.subscribeAll((e) => seen.push(e.type));
+
+    lastInstance!.emit(_output());
+    lastInstance!.emit(_completed());
+    lastInstance!.emit(_perm());
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    assert.deepEqual(seen, [
+      EventTypeValue.AGENT_OUTPUT,
+      EventTypeValue.AGENT_COMPLETED,
+      EventTypeValue.PERMISSION_REQUESTED,
+    ]);
+    await client.close();
+  });
+
+  test("subscribeOnce fires exactly once", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const seen: string[] = [];
+    client.subscribeOnce(EventTypeValue.AGENT_OUTPUT, (e) => seen.push(e.text));
+
+    lastInstance!.emit(_output("first"));
+    lastInstance!.emit(_output("second"));
+    lastInstance!.emit(_output("third"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    assert.deepEqual(seen, ["first"]);
+    await client.close();
+  });
+
+  test("subscribeMany atomic unsub", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const seen: Array<[string, ...unknown[]]> = [];
+    const unsubAll = client.subscribeMany({
+      [EventTypeValue.AGENT_OUTPUT]: (e) => seen.push(["out", e.text]),
+      [EventTypeValue.AGENT_COMPLETED]: () => seen.push(["done"]),
+      [EventTypeValue.PERMISSION_REQUESTED]: (e) => seen.push(["perm", e.tool_name]),
+    });
+
+    lastInstance!.emit(_output("hi"));
+    lastInstance!.emit(_completed());
+    lastInstance!.emit(_perm());
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    unsubAll();
+    lastInstance!.emit(_output("after"));
+    lastInstance!.emit(_completed());
+    lastInstance!.emit(_perm());
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    assert.deepEqual(seen, [
+      ["out", "hi"],
+      ["done"],
+      ["perm", "cli"],
+    ]);
+    await client.close();
+  });
+
+  test("async handler does not block stream", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const order: Array<[string, string]> = [];
+
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, async (e) => {
+      await new Promise<void>((r) => setTimeout(r, 50));
+      order.push(["async-done", e.text]);
+    });
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, (e) => {
+      order.push(["sync", e.text]);
+    });
+
+    lastInstance!.emit(_output("first"));
+    lastInstance!.emit(_output("second"));
+    await new Promise<void>((r) => setTimeout(r, 100));
+
+    const syncs = order.filter((o) => o[0] === "sync");
+    const asyncs = order.filter((o) => o[0] === "async-done").sort();
+    assert.deepEqual(syncs, [
+      ["sync", "first"],
+      ["sync", "second"],
+    ]);
+    assert.deepEqual(asyncs, [
+      ["async-done", "first"],
+      ["async-done", "second"],
+    ]);
+    await client.close();
+  });
+
+  test("async handlers run concurrently", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const timings: Array<[number, number]> = [];
+
+    const slow = async (): Promise<void> => {
+      const start = Date.now();
+      await new Promise<void>((r) => setTimeout(r, 50));
+      timings.push([start, Date.now()]);
+    };
+
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, slow);
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, slow);
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, slow);
+
+    lastInstance!.emit(_output());
+    await new Promise<void>((r) => setTimeout(r, 120));
+
+    assert.equal(timings.length, 3);
+    const starts = timings.map((t) => t[0]).sort();
+    const ends = timings.map((t) => t[1]).sort();
+    assert.ok(
+      starts[2]! < ends[0]!,
+      "Handlers serialized instead of running concurrently",
+    );
+    await client.close();
+  });
+
+  test("sync exception is isolated", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const seen: Array<[string, string]> = [];
+
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, () => {
+      throw new Error("intentional");
+    });
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, (e) =>
+      seen.push(["good", e.text]),
+    );
+
+    lastInstance!.emit(_output("a"));
+    lastInstance!.emit(_output("b"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    assert.deepEqual(seen, [
+      ["good", "a"],
+      ["good", "b"],
+    ]);
+    await client.close();
+  });
+
+  test("async rejection is isolated", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const seen: string[] = [];
+
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, async () => {
+      await new Promise<void>((r) => setTimeout(r, 5));
+      throw new Error("intentional async failure");
+    });
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, (e) => seen.push(e.text));
+
+    lastInstance!.emit(_output("a"));
+    lastInstance!.emit(_output("b"));
+    await new Promise<void>((r) => setTimeout(r, 30));
+
+    assert.deepEqual(seen, ["a", "b"]);
+    await client.close();
+  });
+
+  test("unsub during dispatch takes effect next event", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const seen: Array<[string, string]> = [];
+    let unsubB: (() => void) | null = null;
+
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, (e) => {
+      seen.push(["a", e.text]);
+      if (unsubB) {
+        unsubB();
+        unsubB = null;
+      }
+    });
+    unsubB = client.subscribe(EventTypeValue.AGENT_OUTPUT, (e) =>
+      seen.push(["b", e.text]),
+    );
+
+    lastInstance!.emit(_output("first"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+    assert.ok(seen.some(([h, t]) => h === "b" && t === "first"));
+
+    lastInstance!.emit(_output("second"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+    assert.ok(!seen.some(([h, t]) => h === "b" && t === "second"));
+    assert.ok(seen.some(([h, t]) => h === "a" && t === "second"));
+    await client.close();
+  });
+
+  test("handler registered before connect captures inaugural events", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    const seen: string[] = [];
+    client.subscribe(EventTypeValue.CONNECTED, () => seen.push("connected"));
+
+    await connectAndAck(client);
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    assert.deepEqual(seen, ["connected"]);
+    await client.close();
+  });
+
+  test("no replay on late subscribe", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+
+    lastInstance!.emit(_output("missed"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    const seen: string[] = [];
+    client.subscribe(EventTypeValue.AGENT_OUTPUT, (e) => seen.push(e.text));
+
+    lastInstance!.emit(_output("seen"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    assert.deepEqual(seen, ["seen"]);
+    await client.close();
+  });
+
+  test("unsubscribe is idempotent", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client);
+    const seen: string[] = [];
+    const unsub = client.subscribe(EventTypeValue.AGENT_OUTPUT, (e) =>
+      seen.push(e.text),
+    );
+
+    lastInstance!.emit(_output("a"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+    unsub();
+    unsub(); // second call must not throw
+    lastInstance!.emit(_output("b"));
+    await new Promise<void>((r) => setTimeout(r, 5));
+
+    assert.deepEqual(seen, ["a"]);
+    await client.close();
   });
 });

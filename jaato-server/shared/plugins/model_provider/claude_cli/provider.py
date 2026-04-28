@@ -796,6 +796,9 @@ class ClaudeCLIProvider:
                         output_tokens=msg.usage.output_tokens,
                         cache_read_tokens=msg.usage.cache_read_tokens,
                         cache_creation_tokens=msg.usage.cache_creation_tokens,
+                        # CLI-reported cost is the fiscal truth — wins
+                        # over any pricing-table estimate in the daemon.
+                        cost_usd=msg.total_cost_usd,
                     )
                 if msg.is_error:
                     finish_reason = FinishReason.ERROR
@@ -948,6 +951,7 @@ class ClaudeCLIProvider:
                             output_tokens=msg.usage.output_tokens,
                             cache_read_tokens=msg.usage.cache_read_tokens,
                             cache_creation_tokens=msg.usage.cache_creation_tokens,
+                            cost_usd=msg.total_cost_usd,
                         )
                         if on_usage_update:
                             on_usage_update(self._last_usage)

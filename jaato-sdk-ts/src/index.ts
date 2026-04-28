@@ -12,6 +12,13 @@ export * from "./events.js";
 export * from "./helpers.js";
 export * from "./errors.js";
 export * from "./state.js";
+export type {
+  CatchallEventHandler,
+  EventByType,
+  EventHandler,
+  SubscribeManyMap,
+  Unsubscribe,
+} from "./event-typing.js";
 export {
   JaatoClient,
   MIN_SERVER_VERSION,

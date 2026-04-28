@@ -360,6 +360,14 @@ class TokenUsage:
     reasoning_tokens: Optional[int] = None
     # Thinking tokens (Anthropic/Gemini extended thinking)
     thinking_tokens: Optional[int] = None
+    # Provider-reported cost in USD.  Set when the provider's wire
+    # protocol gives us a number (e.g. ``claude_cli`` reads
+    # ``total_cost_usd`` from the underlying CLI output).  When the
+    # provider doesn't report cost, this stays ``None`` and the
+    # daemon falls back to a pricing-table lookup at the framework
+    # boundary.  Provider-reported values always win — they're
+    # closer to the source of truth.
+    cost_usd: Optional[float] = None
 
 
 class FinishReason(str, Enum):

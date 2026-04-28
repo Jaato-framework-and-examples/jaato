@@ -629,6 +629,87 @@ def _normalize_inherits(value: Any) -> Optional[List[str]]:
     return None
 
 
+def build_inline_profile(
+    data: Dict[str, Any],
+    name: str = "<inline>",
+    description: str = "Inline session spec",
+) -> 'SubagentProfile':
+    """Construct a ``SubagentProfile`` from a dict supplied by an SDK client.
+
+    Mirrors the field set understood by ``_load_profiles_from_directory``
+    so an inline spec on ``session.new`` accepts the same JSON shape as a
+    profile file on disk. ``inherits`` is intentionally ignored — inline
+    specs are atomic, not chained — and ``name`` / ``description`` default
+    to safe placeholders since SDK clients aren't required to invent them.
+
+    Args:
+        data: The dict carried in ``CommandRequest.payload['spec']``.
+            Recognized keys: ``model``, ``provider``, ``plugins``,
+            ``plugin_configs``, ``system_instructions``, ``max_turns``,
+            ``gc``, ``env``, ``completion_payload_schema``,
+            ``runtime_limits``, ``model_tiers``.
+        name: Display name for logs and traces. Default ``<inline>``.
+        description: Human-readable description for the profile.
+
+    Returns:
+        A fully-formed ``SubagentProfile`` ready to hand to
+        ``JaatoServer(profile=...)``.
+
+    Raises:
+        ValueError: If a structured sub-field (``gc``, ``runtime_limits``)
+            fails to parse. Surfaced so the caller can emit a clear
+            ``ErrorEvent`` rather than swallowing the failure.
+    """
+    gc_config = None
+    if data.get('gc'):
+        gc_config = GCProfileConfig.from_dict(data['gc'])
+
+    runtime_limits = None
+    if data.get('runtime_limits'):
+        if not isinstance(data['runtime_limits'], dict):
+            raise ValueError(
+                "Invalid runtime_limits in inline spec: expected dict, "
+                f"got {type(data['runtime_limits']).__name__}"
+            )
+        try:
+            runtime_limits = RuntimeLimits.from_dict(data['runtime_limits'])
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid runtime_limits in inline spec: {exc}")
+
+    raw_plugins = data.get('plugins', [])
+    clean_plugins, preloaded = parse_plugin_list(raw_plugins)
+
+    raw_env = data.get('env', {})
+    env = (
+        {str(k): str(v) for k, v in raw_env.items()}
+        if isinstance(raw_env, dict) else {}
+    )
+
+    raw_model_tiers = data.get('model_tiers') or {}
+    model_tiers = (
+        {str(k): v for k, v in raw_model_tiers.items()}
+        if isinstance(raw_model_tiers, dict) else {}
+    )
+
+    return SubagentProfile(
+        name=name,
+        description=description,
+        plugins=clean_plugins,
+        preloaded_plugins=preloaded,
+        plugin_configs=data.get('plugin_configs', {}),
+        system_instructions=data.get('system_instructions'),
+        model=data.get('model'),
+        provider=data.get('provider'),
+        max_turns=data.get('max_turns', 10),
+        gc=gc_config,
+        env=env,
+        inherits=None,
+        completion_payload_schema=data.get('completion_payload_schema'),
+        runtime_limits=runtime_limits,
+        model_tiers=model_tiers,
+    )
+
+
 def resolve_profiles(
     profiles: Dict[str, 'SubagentProfile'],
 ) -> Tuple[Dict[str, 'SubagentProfile'], Dict[str, str]]:

@@ -141,7 +141,12 @@ class CommandRouter:
             workspace_path = self._event_sink.get_client_workspace(client_id)
 
             if cmd == "session.new":
-                self._handle_session_new(client_id, event.args, workspace_path)
+                self._handle_session_new(
+                    client_id,
+                    event.args,
+                    workspace_path,
+                    payload=event.payload,
+                )
                 return
 
             elif cmd == "session.attach":
@@ -154,10 +159,13 @@ class CommandRouter:
 
             elif cmd == "session.profiles":
                 from jaato_sdk.events import SessionProfilesEvent
-                profiles = self._session_manager.list_profiles(
+                profiles, parse_errors = self._session_manager.list_profiles(
                     workspace_path=workspace_path,
                 )
-                self._event_sink.send_event(client_id, SessionProfilesEvent(profiles=profiles))
+                self._event_sink.send_event(client_id, SessionProfilesEvent(
+                    profiles=profiles,
+                    parse_errors=parse_errors,
+                ))
                 return
 
             elif cmd == "session.default":
@@ -220,11 +228,15 @@ class CommandRouter:
     # ------------------------------------------------------------------
 
     def _handle_session_new(
-        self, client_id: str, args: list, workspace_path: Optional[str],
+        self,
+        client_id: str,
+        args: list,
+        workspace_path: Optional[str],
+        payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Handle ``session.new`` command.
 
-        Accepted flags:
+        Accepted flags (CLI argv path, used by the TUI):
             --profile <name>            Runtime config (model, plugins, GC, etc.)
             --agent <name>              Agent whose rendered markdown becomes
                                         the session's system instructions
@@ -246,6 +258,16 @@ class CommandRouter:
                                         agent's ``{{param}}`` placeholders)
 
         Remaining bare arguments are treated as the session name.
+
+        SDK-only path (not exposed in TUI argv):
+            ``payload['spec']``  — Inline profile spec dict (model, provider,
+                                  plugins, plugin_configs, system_instructions,
+                                  gc, etc.).  Mutually exclusive with the
+                                  ``--profile`` flag above.  Lets SDK clients
+                                  create sessions with custom config without
+                                  writing a profile JSON to disk.  Validation
+                                  and parsing happen in
+                                  ``SessionManager.create_session``.
         """
         name = None
         profile_name = None
@@ -282,6 +304,12 @@ class CommandRouter:
             elif name is None:
                 name = arg
 
+        # Inline profile spec — SDK-only escape hatch carried in
+        # CommandRequest.payload (no argv equivalent).  Validation
+        # (mutual exclusion with profile_name, required fields) lives
+        # in SessionManager.create_session so both paths share it.
+        inline_profile_data = (payload or {}).get("spec")
+
         created_by = self._event_sink.get_client_user(client_id)
         new_session_id = self._session_manager.create_session(
             client_id, name, workspace_path=workspace_path,
@@ -291,6 +319,7 @@ class CommandRouter:
             created_by=created_by,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=suppress_base_instructions,
+            inline_profile_data=inline_profile_data,
         )
         if new_session_id:
             # Update logging context now that session_id is known.

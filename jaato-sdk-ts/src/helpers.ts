@@ -41,15 +41,16 @@ export type CacheReportingEvent = TurnCompletedEvent | TurnProgressEvent;
  * Otherwise the percentage in the range `[0.0, 100.0]`.
  */
 export function computeCacheHitPercent(event: CacheReportingEvent): number | null {
-  if (event.cache_read_tokens == null) {
+  const usage = event.usage;
+  if (usage == null || usage.cache_read_tokens == null) {
     return null;
   }
   // prompt_tokens has a default of 0 on the Python side, so undefined
   // here is the same as 0 — treat them uniformly.
-  const promptTokens = event.prompt_tokens ?? 0;
-  const total = event.cache_read_tokens + promptTokens;
+  const promptTokens = usage.prompt_tokens ?? 0;
+  const total = usage.cache_read_tokens + promptTokens;
   if (total === 0) {
     return 0.0;
   }
-  return (event.cache_read_tokens / total) * 100.0;
+  return (usage.cache_read_tokens / total) * 100.0;
 }

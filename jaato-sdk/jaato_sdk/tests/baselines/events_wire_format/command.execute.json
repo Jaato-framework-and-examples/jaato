@@ -2,5 +2,6 @@
   "type": "command.execute",
   "timestamp": "<TIMESTAMP>",
   "command": "",
-  "args": []
+  "args": [],
+  "payload": null
 }

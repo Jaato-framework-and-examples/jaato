@@ -8,7 +8,7 @@ mirror in ``jaato-sdk-ts/src/helpers.ts`` must be updated too.
 import pytest
 
 from jaato_sdk import compute_cache_hit_percent
-from jaato_sdk.events import TurnCompletedEvent, TurnProgressEvent
+from jaato_sdk.events import TurnCompletedEvent, TurnProgressEvent, UsageBreakdown
 
 
 def _completed(
@@ -17,9 +17,11 @@ def _completed(
     cache_creation_tokens=None,
 ) -> TurnCompletedEvent:
     return TurnCompletedEvent(
-        prompt_tokens=prompt_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_creation_tokens=cache_creation_tokens,
+        usage=UsageBreakdown(
+            prompt_tokens=prompt_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        ),
     )
 
 
@@ -29,9 +31,11 @@ def _progress(
     cache_creation_tokens=None,
 ) -> TurnProgressEvent:
     return TurnProgressEvent(
-        prompt_tokens=prompt_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_creation_tokens=cache_creation_tokens,
+        usage=UsageBreakdown(
+            prompt_tokens=prompt_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        ),
     )
 
 

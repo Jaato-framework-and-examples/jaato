@@ -39,14 +39,20 @@ import random
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Optional, Union
 
+from jaato_sdk.client._handler_registry import (
+    EventHandler,
+    Unsubscribe,
+    _HandlerRegistry,
+)
 from jaato_sdk.client.config import RecoveryConfig
 from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, IPCClient, IncompatibleServerError
 from jaato_sdk.events import (
     ConnectedEvent,
     ErrorEvent,
     Event,
+    EventType,
     SessionInfoEvent,
     SystemMessageEvent,
 )
@@ -197,6 +203,11 @@ class IPCRecoveryClient:
         self._event_queue: asyncio.Queue[Event] = asyncio.Queue()
         self._event_task: Optional[asyncio.Task] = None
         self._events_running = False
+
+        # Subscribers live at this layer so they survive reconnections
+        # (the inner IPCClient is recreated on each reconnect, but the
+        # recovery wrapper keeps the same registry).
+        self._registry = _HandlerRegistry()
 
     # =========================================================================
     # Properties
@@ -421,7 +432,7 @@ class IPCRecoveryClient:
     async def create_session(
         self,
         name: Optional[str] = None,
-        profile: Optional[str] = None,
+        profile: Optional[Union[str, Dict[str, Any]]] = None,
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
     ) -> Optional[str]:
@@ -429,7 +440,11 @@ class IPCRecoveryClient:
 
         Args:
             name: Optional name for the session.
-            profile: Optional runtime profile name (model, plugins, env).
+            profile: Either a profile **name** (str) referencing a file
+                under ``.jaato/profiles/``, **or** an inline **spec dict**
+                (``model``, ``plugins``, ``system_instructions``, ...).
+                See ``IPCClient.create_session`` for the full list.
+                Mutually exclusive forms — pass one or the other.
             agent: Optional agent name. The agent's rendered markdown
                 becomes the session's system instructions.
             agent_params: Parameter values for the agent's ``{{param}}``
@@ -441,6 +456,7 @@ class IPCRecoveryClient:
         Raises:
             ReconnectingError: If currently reconnecting.
             ConnectionClosedError: If connection is closed.
+            TypeError: If ``profile`` is not None, str, or dict.
         """
         self._check_can_send()
 
@@ -741,12 +757,51 @@ class IPCRecoveryClient:
     # Event Stream
     # =========================================================================
 
+    # =========================================================================
+    # Event Subscription API (mirrors IPCClient; survives reconnections)
+    # =========================================================================
+
+    def subscribe(
+        self,
+        event_type: EventType,
+        handler: EventHandler,
+    ) -> Unsubscribe:
+        """Subscribe to events of a specific type.
+
+        Subscriptions live on the recovery wrapper, so they keep working
+        across reconnections without the caller re-registering anything.
+        """
+        return self._registry.subscribe(event_type, handler)
+
+    def subscribe_once(
+        self,
+        event_type: EventType,
+        handler: EventHandler,
+    ) -> Unsubscribe:
+        """Subscribe to one event of ``event_type`` then auto-unsubscribe."""
+        return self._registry.subscribe_once(event_type, handler)
+
+    def subscribe_all(self, handler: EventHandler) -> Unsubscribe:
+        """Subscribe to every event regardless of type."""
+        return self._registry.subscribe_all(handler)
+
+    def subscribe_many(
+        self,
+        handlers: Dict[EventType, EventHandler],
+    ) -> Unsubscribe:
+        """Register multiple typed handlers; single unsub removes all."""
+        return self._registry.subscribe_many(handlers)
+
     async def events(self) -> AsyncIterator[Event]:
         """Async iterator for receiving events with automatic reconnection.
 
         Yields events from the server. If the connection is lost and
         recovery is enabled, automatically attempts to reconnect.
         During reconnection, yields SystemMessageEvents with status updates.
+
+        Subscribed handlers are dispatched at this layer (before yielding)
+        so they continue firing across reconnections without the caller
+        having to re-register.
 
         Yields:
             Events from the server.
@@ -766,6 +821,8 @@ class IPCRecoveryClient:
                         if isinstance(event, SessionInfoEvent):
                             if event.session_id:
                                 self._session_id = event.session_id
+
+                        self._registry.dispatch(event)
 
                         yield event
 

@@ -130,6 +130,10 @@ jaato-sdk-ts/src/events.ts     (generated, committed)
 CI fails any PR that touches `events.py` without re-running codegen and
 committing the regenerated `events.ts`.
 
+### Per-turn usage shape
+
+The three usage-bearing events (`TurnCompletedEvent`, `TurnProgressEvent`, `ContextUpdatedEvent`) all expose a typed `usage: UsageBreakdown` field carrying token counts (prompt/output/total), cache hits, reasoning/thinking tokens, and `cost_usd` when the daemon can derive it. Cost resolution: provider-reported wins over pricing-table computed from `.jaato/pricing.json`; otherwise `null`. See `docs/sdk-pricing.md` for the full pricing contract. GC configuration moved to its own `GCConfigEvent` in v1.0.
+
 ## Regenerating
 
 From the repo root:
@@ -195,17 +199,74 @@ const client = new JaatoClient({
   },
 });
 
-// Subscribe to all events.
-const unsub = client.subscribe((event) => {
-  if (event.type === EventType.AGENT_OUTPUT) {
-    document.getElementById("chat")!.append(event.text);
-  }
+// Typed subscriptions — handler receives the narrowed event type.
+const unsub = client.subscribe("agent.output", (event) => {
+  document.getElementById("chat")!.append(event.text);
 });
 
+// Or use the generated string-literal enum if you prefer constants:
+// client.subscribe(EventTypeValue.AGENT_OUTPUT, handler);
+
 await client.connect();
+
+// By profile name — references .jaato/profiles/<name>.json on the server
 await client.createSession({ profile: "researcher" });
+
+// By inline spec — same shape as a profile JSON, no disk file needed
+await client.createSession({
+  profile: {
+    model: "claude-sonnet-4-5",
+    provider: "anthropic",
+    plugins: ["cli", "web_search"],
+    system_instructions: "You are an operations engineer.",
+    // plugin_configs, gc, env, max_turns, runtime_limits, model_tiers, ...
+  },
+});
+
 await client.sendMessage("Summarise the latest commits.");
 ```
+
+The `profile` option is polymorphic:
+
+- **`string`** → references a profile JSON on the server's disk under `.jaato/profiles/`. Use this when an operator has curated profiles for human users.
+- **`object`** → inline spec with the same shape. Use this when you're an orchestrator with your own governance layer and don't want to depend on disk files.
+
+The two forms are mutually exclusive — pass one or the other. The server validates inline specs and rejects them with an `ErrorEvent` if `model` is missing (no silent default fallback). `agent` and `agentParams` are independent of `profile` and compose with either form: profile decides *capabilities* (model, plugins, GC), agent decides *persona* (system instructions / personality).
+
+### Event subscription API
+
+| Method | Receives | Use when |
+|---|---|---|
+| `subscribe(type, handler)` | only events of `type`, narrowed | the common case — you care about specific events |
+| `subscribeOnce(type, handler)` | first matching event, then auto-unsub | you want to react to a one-shot lifecycle event |
+| `subscribeAll(handler)` | every event, untyped | logging, telemetry, or a generic firehose |
+| `subscribeMany({ ... })` | typed handlers grouped under one unsub | "configure my whole client" call sites |
+
+```typescript
+import { EventTypeValue } from "@jaato/sdk";
+
+// One handler per type — `event` is automatically narrowed.
+client.subscribe("permission.requested", (event) => {
+  console.log(event.request_id);  // typed as PermissionRequestedEvent
+});
+
+// Fire once, then auto-unsubscribe.
+client.subscribeOnce("agent.completed", onDone);
+
+// Catchall (every event).
+const unsub = client.subscribeAll((event) => log(event));
+
+// Many at once — single unsub removes them all atomically.
+const unsubAll = client.subscribeMany({
+  "permission.requested": onPerm,
+  "tool.call_start":      onToolStart,
+  "agent.completed":      onDone,
+});
+```
+
+Every `subscribe*` returns an idempotent unsubscribe. Handlers may be sync or `async`; async handlers are dispatched fire-and-forget — *delivery* is FIFO across events, but *completion* of async handlers is not ordered. Exceptions and rejections are logged and swallowed; one bad handler never breaks the stream or affects others. Subscribing during dispatch only takes effect for the next event (the handler list is snapshotted before iterating).
+
+> **Migration from `@jaato/sdk` < 0.2:** the catchall `subscribe(handler)` was renamed to `subscribeAll(handler)`, and the `events()` async iterator was removed. Use `subscribe(type, handler)` for typed handlers and `subscribeAll` when you need every event.
 
 If you want to react to connection-state transitions yourself
 (e.g. show a "Reconnecting…" banner) instead of relying on the
@@ -236,8 +297,9 @@ await client.sendRawEvent({
   type: "reconnect.list",
   filter: { only_attached: true },
 });
-// Response arrives via subscribe() — caller filters by type.
-client.subscribe((event) => {
+// Response arrives via subscribeAll() — caller filters by type since
+// the verb's response shape isn't in the public JaatoEvent union.
+client.subscribeAll((event) => {
   if (event.type === "reconnect.list_response") {
     console.log(event);  // Caller knows the shape; SDK doesn't.
   }
@@ -286,8 +348,10 @@ event stream and are correlated by `request_id` where applicable.
 |---|---|---|
 | `connect()` | (handshake) | Open WS, await `ConnectedEvent`, enforce `MIN_SERVER_VERSION` |
 | `close()` | — | Close WS and cancel any pending reconnect |
-| `subscribe(handler)` | — | Receive every incoming `JaatoEvent` |
-| `events()` | — | Async iterator alternative to `subscribe` |
+| `subscribe(type, handler)` | — | Subscribe to a specific event type — handler receives the narrowed interface |
+| `subscribeOnce(type, handler)` | — | Same as `subscribe`, but fires once then auto-unsubscribes |
+| `subscribeAll(handler)` | — | Catchall — receive every incoming `JaatoEvent` |
+| `subscribeMany(map)` | — | Register many typed handlers atomically; returned unsub removes them all |
 | `onStatus(handler)` | — | Connection-state transitions |
 
 **Conversation**
@@ -305,11 +369,11 @@ event stream and are correlated by `request_id` where applicable.
 
 | Method | WS verb |
 |---|---|
-| `createSession({ name?, profile?, agent?, agentParams? })` | `command.execute` `session.new` |
+| `createSession({ name?, profile?, agent?, agentParams? })` | `command.execute` `session.new` — `profile` is `string` (profile name on disk) or `object` (inline spec); inline spec rides on `CommandRequest.payload`, no disk file needed |
 | `attachSession(sessionId)` | `command.execute` `session.attach` |
 | `getDefaultSession()` | `command.execute` `session.default` |
 | `listSessions()` | `command.execute` `session.list` |
-| `listProfiles()` | `command.execute` `session.profiles` |
+| `listProfiles()` | `command.execute` `session.profiles` — response is a `SessionProfilesEvent` with `schema_version: "1.0"`, a typed `profiles: ProfileSummary[]` array, and a separate `parse_errors: ProfileParseError[]` for files that failed discovery. `ProfileSummary` is the safe-to-display subset (name, description, plugins, model, provider, plugin_configs, gc, model_tiers, runtime_limits, completion_payload_schema, env_var_names — values never exposed). |
 | `endSession()` | `command.execute` `session.end` (terminate current attached session) |
 | `deleteSession(sessionId)` | `command.execute` `session.delete` (purge from disk + memory) |
 
@@ -341,6 +405,31 @@ event stream and are correlated by `request_id` where applicable.
 | `setDefaultPolicy(policy)` | `permission.set_default` |
 | `requestPolicySnapshot(requestId?)` | `permission.policy_snapshot.request` |
 | `respondToPermission(requestId, response, editedArgs?)` | `permission.response` |
+
+`response` is one of the keys offered by the server in `PermissionRequestedEvent.response_options`. The defaults:
+
+| Key | Meaning |
+|-----|---------|
+| `y` | allow this tool execution |
+| `n` | deny this tool execution |
+| `a` / `always` | allow and whitelist the tool for this session |
+| `t` / `turn` | allow remaining tool calls this turn |
+| `i` / `idle` | allow until the session goes idle |
+| `once` | allow once without remembering |
+| `all` | allow all future requests in this session |
+| `never` | deny and blacklist the tool for this session |
+| `c:<text>` | deny **with feedback** the model sees as the tool result |
+| `yc:<text>` | allow **with feedback** the model sees alongside the tool result |
+| `e` | edit arguments and re-prompt (pass `editedArgs`); only when the request has editable content |
+
+The two comment variants let you steer the model without simply rejecting the call:
+
+```typescript
+await client.respondToPermission(requestId, "c:please check the file size first");
+await client.respondToPermission(requestId, "yc:ok but write the result to /tmp/audit.log");
+```
+
+The server strips the `c:` / `yc:` prefix and forwards the comment to the model alongside the deny/allow decision. Empty text after the prefix falls back to plain `n` / `y`.
 
 **Prompts (mid-flow)**
 

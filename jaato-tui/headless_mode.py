@@ -347,9 +347,9 @@ async def run_headless_mode(
             elif isinstance(event, ContextUpdatedEvent):
                 renderer.on_context_updated(
                     agent_id=event.agent_id or "main",
-                    total_tokens=event.total_tokens or 0,
-                    prompt_tokens=event.prompt_tokens or 0,
-                    output_tokens=event.output_tokens or 0,
+                    total_tokens=event.usage.total_tokens or 0,
+                    prompt_tokens=event.usage.prompt_tokens or 0,
+                    output_tokens=event.usage.output_tokens or 0,
                     turns=event.turns or 0,
                     percent_used=event.percent_used or 0.0,
                 )
