@@ -675,17 +675,17 @@ Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p
 
 The `open_editor` keybinding (Ctrl+G) opens the current input in your external editor (`$EDITOR` or `$VISUAL`, defaults to `vi`). Useful for composing complex multi-line prompts.
 
-The `workspace_open_file` keybinding (Enter by default, when workspace panel is open) opens the file at the cursor in your external editor (`$EDITOR` or `$VISUAL`, defaults to `vi`). The workspace panel must be visible and the input buffer empty for this keybinding to activate.
+The `workspace_open_file` keybinding (Enter by default, when workspace panel is open) opens the file at the cursor in your external editor (`$EDITOR` or `$VISUAL`, defaults to `vi`). The workspace panel must be visible and the input buffer empty for this keybinding to activate.  The companion `workspace_diff` keybinding (`d` by default) opens the same file in an external diff viewer instead — it resolves the `diff` action from `openers.json` and is a no-op if no pattern defines one.
 
-**Per-extension openers**: the launched program can be customized per file pattern via `.jaato/openers.json` (project) or `~/.jaato/openers.json` (user). Maps fnmatch globs to commands; project entries override user entries. `$EDITOR` and `$VISUAL` are valid placeholders (both resolve to the default editor). Longest matching pattern wins; on a tie, basename match beats path match.
+**Per-extension openers**: the launched program can be customized per file pattern via `.jaato/openers.json` (project) or `~/.jaato/openers.json` (user). Maps fnmatch globs to either a single command string (the `raw` action — opens in editor) or an object of `{action: command}` entries (currently `raw` and `diff`). Project entries override user entries **per action**, so a user-level `diff` opener survives a project that only redefines `raw`. `$EDITOR` and `$VISUAL` are valid placeholders (both resolve to the default editor). Longest matching pattern wins; on a tie, basename match beats path match. **Per-action fallthrough**: if the most-specific matching pattern doesn't define the requested action, the resolver walks the next-most-specific match — so a catch-all `"*"` entry can supply defaults.
 
 ```json
 {
-  "*.md":       "glow -p",
+  "*.md":       { "raw": "glow -p", "diff": "git diff HEAD --" },
   "*.markdown": "glow -p",
-  "*.png":      "chafa",
+  "*.png":      { "raw": "chafa" },
   "docs/*":     "less",
-  "*":          "$EDITOR"
+  "*":          { "raw": "$EDITOR", "diff": "git diff HEAD --" }
 }
 ```
 

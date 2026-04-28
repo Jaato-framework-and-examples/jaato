@@ -164,7 +164,8 @@ DEFAULT_KEYBINDINGS = {
 
     # Workspace file panel
     "toggle_workspace": "c-w",  # Toggle workspace file panel
-    "workspace_open_file": "enter",  # Open selected file in external editor
+    "workspace_open_file": "enter",  # Open selected file in external editor (raw action)
+    "workspace_diff": "d",  # Open selected file in external diff viewer (diff action)
     "workspace_clear": "delete",  # Clear workspace file list
     "workspace_paste_ref": ["escape", "p"],  # Paste selected file/dir as @reference into input
     "workspace_hide": "h",  # Hide selected entry (per-session, client-side filter)
@@ -371,6 +372,7 @@ class KeybindingConfig:
     # Workspace file panel
     toggle_workspace: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_workspace"])
     workspace_open_file: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_open_file"])
+    workspace_diff: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_diff"])
     workspace_clear: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_clear"])
     workspace_paste_ref: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_paste_ref"].copy() if isinstance(DEFAULT_KEYBINDINGS["workspace_paste_ref"], list) else DEFAULT_KEYBINDINGS["workspace_paste_ref"])
     workspace_hide: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["workspace_hide"])
@@ -580,6 +582,7 @@ class KeybindingConfig:
             "tool_output_down": self.tool_output_down,
             "toggle_workspace": self.toggle_workspace,
             "workspace_open_file": self.workspace_open_file,
+            "workspace_diff": self.workspace_diff,
             "workspace_clear": self.workspace_clear,
             "workspace_paste_ref": self.workspace_paste_ref,
             "workspace_hide": self.workspace_hide,
@@ -772,6 +775,7 @@ def generate_example_config() -> str:
 
         "toggle_workspace": "c-w",
         "workspace_open_file": "enter",
+        "workspace_diff": "d",
         "workspace_clear": "delete",
         "workspace_paste_ref": ["escape", "p"],
         "workspace_hide": "h",

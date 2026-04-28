@@ -94,6 +94,7 @@ class WorkspacePanel:
         self,
         toggle_key: Optional[KeyBinding] = None,
         open_file_key: Optional[KeyBinding] = None,
+        diff_key: Optional[KeyBinding] = None,
         clear_key: Optional[KeyBinding] = None,
         paste_ref_key: Optional[KeyBinding] = None,
         hide_key: Optional[KeyBinding] = None,
@@ -106,7 +107,11 @@ class WorkspacePanel:
             toggle_key: Keybinding used to toggle the panel.  Shown in the
                         footer hint.
             open_file_key: Keybinding used to open the selected file in an
-                          external editor.  Shown in the footer hint.
+                          external editor (the ``raw`` opener action).
+                          Shown in the footer hint.
+            diff_key: Keybinding used to open the selected file in an
+                     external diff viewer (the ``diff`` opener action).
+                     Shown in the footer hint.
             clear_key: Keybinding used to clear the file list.  Shown in the
                        footer hint.
             paste_ref_key: Keybinding used to paste the selected file or
@@ -151,6 +156,7 @@ class WorkspacePanel:
 
         self._toggle_key = toggle_key or "c-w"
         self._open_file_key = open_file_key or "enter"
+        self._diff_key = diff_key or "d"
         self._clear_key = clear_key or "delete"
         self._paste_ref_key = paste_ref_key or ["escape", "p"]
         self._hide_key = hide_key or "h"
@@ -751,8 +757,9 @@ class WorkspacePanel:
 
         close_hint = f"[{format_key_for_display(self._toggle_key)} close]"
         open_hint = f"{format_key_for_display(self._open_file_key)} open"
+        diff_hint = f"{format_key_for_display(self._diff_key)} diff"
         clear_hint = f"{format_key_for_display(self._clear_key)} clear"
-        primary_hint = f"↑↓ · ◂▸ · {open_hint} · {clear_hint} "
+        primary_hint = f"↑↓ · ◂▸ · {open_hint} · {diff_hint} · {clear_hint} "
 
         footer1 = Text()
         footer1.append(tally, style="dim")
