@@ -548,31 +548,39 @@ caveats remain.
 
 ## Publishing
 
-**Status: not yet on npm.** `npm install @jaato/sdk` will fail
-until the first publish lands. Use one of the local-consumption
-options above in the meantime.
+`@jaato/sdk` is published to npmjs.com under the `@jaato` scope.
 
-What's still needed before the first publish:
+### Cutting a release
 
-* **A publish workflow** in `.github/workflows/publish-npm-sdk-ts.yml`
-  that runs `npm run build` + `npm test` + `npm publish` on
-  `workflow_dispatch`. Mirror of the existing
-  `publish-testpypi-{server,sdk,tui}.yml` workflows but for npm.
-* **An npm registry decision** — public npmjs.com under the
-  `@jaato` scope (requires registering the org or claiming the
-  scope), or GitHub Packages for now (no extra setup; consumers
-  add a `.npmrc` pointing at `npm.pkg.github.com`). The two are
-  switchable later.
-* **An access token** in the repo's `Settings → Secrets`
-  (`NPM_TOKEN` for npmjs.com, or the existing `GITHUB_TOKEN`
-  for GitHub Packages) that the workflow exposes via
-  `NODE_AUTH_TOKEN`.
+1. Bump `version` in `package.json` (semver per policy below).
+2. Commit + push to `main`.
+3. Trigger the publish workflow:
+   ```bash
+   gh workflow run publish-npm-sdk-ts.yml --ref main
+   gh run watch --exit-status   # optional, follow the run
+   ```
 
-Once those land, the publish flow is the same as
-`jaato-server` / `jaato-sdk`: bump the version in
-`package.json`, commit, trigger the workflow, the new version
-appears on the registry. The CI staleness gate already prevents
-publishes that would carry a stale `events.ts`.
+The workflow (`.github/workflows/publish-npm-sdk-ts.yml`) does the
+gates in order:
+
+1. Codegen staleness check — `events.ts` must be up to date with
+   `events.py`. Mirror of the on-PR `codegen-ts-events.yml` check.
+2. `npm install` + `npm run build` + `npm test` — same suite that
+   runs locally.
+3. Version-already-on-registry check — `https://registry.npmjs.org/@jaato/sdk/<version>`
+   returns 404 (free), 200 (already published — fail), anything else
+   (transient — fail loudly rather than guess).
+4. `npm publish --access public` — scoped packages default to
+   restricted on npm; the flag makes the package installable
+   without auth.
+
+Authentication uses an `NPM_TOKEN` secret in the GitHub `npm-sdk`
+environment (granular access token with read+write on `@jaato/*`).
+Migrating to npm Trusted Publishing (OIDC, no token) is a one-step
+change once the package is on the registry — see the workflow file
+header for the migration note.
+
+### Versioning policy
 
 Versioning policy for the npm package mirrors the Python SDK: minor
 bumps for additive surface (new methods, new event types), patch bumps
