@@ -60,13 +60,15 @@ roles like operator and superuser.
 
 | Term | Definition |
 |---|---|
-| **Identity** | The authenticated principal: `(user_id, tenant_id, roles)`. Established by auth middleware, stamped on `ClientConnection`. |
-| **Tenant** | A scope unit. Owns sessions, ledger entries, plugin state. A user belongs to exactly one tenant in v1; multi-tenant membership is v2. |
-| **Role** | A named set of permissions. Roles are tenant-scoped or global. |
+| **Identity** | The authenticated principal. Stamped on `ClientConnection`. May be a human user or a service. |
+| **Tenant** | A scope unit. Owns sessions, ledger entries, plugin state. A user can belong to multiple tenants (data model supports it from v1; the per-connection UX selects one active tenant). The synthetic tenant `_daemon` represents daemon-wide work with no user owner. |
+| **Membership** | A `(tenant_id, role_set)` pair. A user has zero or more memberships. The active membership is selected per connection. |
+| **Role** | A named set of permissions, defined in `roles.json`. |
 | **Permission** | A `(action, resource_type)` tuple, e.g. `(read, session)`, `(write, gate)`. |
 | **Scope** | The breadth of a permission: `self`, `tenant`, `global`. |
-| **Resource** | A scoped object: a session, a gate, a ledger entry, a plugin record. Always carries an owner tenant. |
-| **Action** | A verb: `read`, `attach`, `write`, `delete`, `list`, `mutate`. |
+| **Resource** | A scoped object: a session, a gate, a ledger entry, a plugin record. Always carries an owner `tenant_id`. |
+| **Action** | A verb: `read`, `attach`, `write`, `delete`, `list`, `mutate`, `elevate`. |
+| **Service identity** | A non-human principal (reactor, peer daemon, admin tool). Authenticated via service token, scoped to a tenant or `_daemon`. See §6.5. |
 
 ## 4. Identity Model
 
@@ -78,49 +80,112 @@ roles like operator and superuser.
 
 ### 4.2 Extended `ClientIdentity`
 
-Replace the bare `user_id` with a structured identity object:
+Replace the bare `user_id` with a structured identity object that
+supports multi-tenant membership:
 
 ```python
 @dataclass(frozen=True)
+class Membership:
+    tenant_id: str
+    roles: FrozenSet[str]               # roles within this tenant
+
+@dataclass(frozen=True)
 class ClientIdentity:
     user_id: str
-    tenant_id: str
-    roles: FrozenSet[str]                    # role names, e.g. {"tenant-user"}
-    auth_method: str                         # "bearer", "oidc", "ipc-local"
+    memberships: FrozenSet[Membership]   # zero or more
+    active_tenant: str                   # selected per connection
+    auth_method: str                     # "bearer", "oidc", "ipc-local", "service-token"
     authenticated_at: datetime
-    expires_at: Optional[datetime] = None    # for OIDC tokens
+    expires_at: Optional[datetime] = None
+    is_service: bool = False             # True for reactors / peer daemons
 
     @property
-    def is_anonymous(self) -> bool:
-        return self.user_id == ANONYMOUS_USER_ID
+    def active_roles(self) -> FrozenSet[str]:
+        for m in self.memberships:
+            if m.tenant_id == self.active_tenant:
+                return m.roles
+        return frozenset()
+
+    @property
+    def has_global_role(self) -> bool:
+        """A role is 'global' if defined as scope=global in roles.json
+        and the membership granting it is on the special _global tenant."""
 ```
 
-`ClientConnection.identity: Optional[ClientIdentity]` replaces
-`user_id`. `set_client_user(client_id, user_id)` becomes
-`set_client_identity(client_id, identity)`. The legacy method is kept
-as a shim that constructs a `ClientIdentity(user_id=..., tenant_id="default", roles={"tenant-user"})`.
+The active tenant is set at connect time (default: first membership)
+and can be switched via a `client.set_active_tenant(tenant_id)`
+command. Switching is itself an authz-checked action.
+
+Storing memberships rather than a flat `(tenant_id, roles)` pair pays
+the schema cost once. The day a user joins a second tenant, no
+migration is needed.
 
 ### 4.3 Single-tenant default
 
 When the daemon starts without `--multi-tenant`:
 
-- All connections receive a synthetic identity:
-  `ClientIdentity(user_id="local", tenant_id="default", roles={"superuser"}, auth_method="ipc-local")`.
+- All connections receive a synthetic identity with one membership on
+  the `default` tenant carrying a synthetic `_local-superuser` role
+  granting all actions.
 - Auth middleware is bypassed.
-- Authorization checks short-circuit to allow.
+- Authorization checks still run (so the code path is identical) but
+  always ALLOW.
+- Audit logging is **off** by default in single-tenant; turn on with
+  `--audit-log` if a hobby user wants it. (No silent disk growth.)
 
-This keeps every existing deployment working with zero config changes.
+### 4.4 Public-tier identity backends (no premium required)
 
-### 4.4 Multi-tenant mode
+Multi-tenant mode must work without `jaato-premium`. The public daemon
+ships two identity backends:
+
+1. **Local user file (`local-users`).** A JSON file at
+   `~/.jaato/users.json` mapping `user_id → {password_hash, memberships,
+   service_token?}`. Authenticates against bearer tokens or
+   username+password. Suitable for self-hosted single-machine
+   multi-user setups.
+2. **Service token (`service-token`).** Static tokens for non-human
+   callers. Stored at `~/.jaato/service_tokens.json` with the same
+   permissions as `local-users`. Used by reactors and peer daemons.
+
+Premium adds:
+
+3. **OIDC (`oidc`).** Validates ID tokens from Keycloak / Auth0 / etc.,
+   maps OIDC `groups` claim to memberships via a configurable mapper.
+
+The auth backend is selected by `--auth-backend local-users|oidc` (or
+a chain via `--auth-backend local-users,oidc`). Premium-only backends
+fail to start without the premium extension installed, with a clear
+error message.
+
+### 4.5 Multi-tenant mode
 
 When the daemon starts with `--multi-tenant`:
 
 - Connections without identity are rejected at the transport layer.
-- IPC connections require identity from a local-auth source (SSO ticket
-  file, local socket peer cred lookup, or premium SSO).
-- WS connections require OIDC or bearer-with-identity-binding.
-- Anonymous connections receive `ClientIdentity(roles=frozenset())` and
-  can do nothing — every authz check denies.
+- IPC connections require either the `local-users` backend or
+  premium SSO (peer-cred lookup is a future enhancement).
+- WS connections require one of the configured backends.
+- Anonymous connections never receive an identity — they're refused at
+  transport before any session work begins.
+
+### 4.6 Identity expiry mid-session
+
+OIDC tokens expire. The flow:
+
+1. On every command, the daemon checks `identity.expires_at`. If past
+   or within a `renewal_window` (default 60s), it triggers a
+   client-side renewal request via a typed event
+   (`IdentityRenewalRequiredEvent`).
+2. The client refreshes (transparent in OIDC SDKs) and sends
+   `IdentityRefreshRequest` with the new token. The daemon re-authzes
+   and updates `ClientConnection.identity`.
+3. If renewal fails or times out (default 30s), the connection enters
+   **degraded mode**: existing sessions continue running but
+   write-actions deny. After `degraded_grace` (default 5 min) the
+   connection is closed.
+
+This preserves long-running sessions across token expiry without
+requiring full reconnection.
 
 ## 5. Tenancy Model
 
@@ -133,10 +198,10 @@ Every scoped resource gains a `tenant_id` field:
 | `Session` | `created_by` (user) | `tenant_id` (owner tenant) |
 | Headless session | `_HEADLESS_CLIENT_ID` | `tenant_id` (inherited from spawning context — see §5.3) |
 | `TokenLedger` entry | `session_id` only | `tenant_id`, `user_id` |
-| `HandoffGate` | name only | `tenant_id` (or `global=True` for daemon-wide gates like `memory-advisor`) |
-| Plugin state record (memory entry, todo, reference) | `session_id` | `tenant_id` |
+| `HandoffGate` | name only | `tenant_id` (`_daemon` for daemon-wide gates) |
 | MCP server config | shared | per-tenant namespace |
 | Permission grants (whitelist/blacklist) | per-session | per-tenant policy + per-session override |
+| **Plugin state** (memory, todo, references) | per-session | **out of scope for v1** — see §7.4 |
 
 ### 5.2 Default tenant
 
@@ -147,17 +212,20 @@ first read; new resources stamp it on creation.
 
 ### 5.3 Headless session attribution
 
-A reactor that calls `create_headless_session` must declare the tenant
+A reactor that calls `create_headless_session` declares the tenant
 context. Three sources, in priority order:
 
 1. **Triggering session** — if the reactor fires in response to an event
    from session X, the new session inherits `X.tenant_id`.
 2. **Explicit override** — `create_headless_session(tenant_id=...)` for
    reactors that need to spawn into a specific tenant (e.g. cross-tenant
-   admin tooling).
-3. **Daemon-wide** — `tenant_id=None` for true daemon-wide work
-   (memory-advisor consolidating *only* daemon-owned state). These
-   sessions are visible only to operators with `global` scope.
+   admin tooling — requires the reactor's service identity to have
+   the relevant `(write, session)` perm in the target tenant).
+3. **Daemon-wide** — `tenant_id="_daemon"` for true daemon-wide work
+   (memory-advisor consolidating daemon-owned state). The `_daemon`
+   tenant is treated identically to any other tenant by the authz
+   service — only identities with explicit `_daemon` membership see
+   its resources. There is no special-case code path.
 
 A reactor that omits all three in multi-tenant mode raises at spawn
 time. No silent default.
@@ -172,51 +240,73 @@ tenants, computed from their roles (§6).
 
 ### 6.1 Role model
 
-Roles are config-driven. Default roles ship with the daemon and can be
-extended via a policy file at `.jaato/rbac/policy.json`.
+Roles are config-driven and split across two files with different
+ownership and change cadence:
 
-| Role | Scope | Permissions |
-|---|---|---|
-| `tenant-user` | self | `(read, session)`, `(attach, session)`, `(write, session)`, `(delete, session)` on **own sessions**; `(read, ledger)` for self; `(read, gate)` for own-tenant gates |
-| `tenant-admin` | tenant | All `tenant-user` perms across the tenant; `(list, session)` tenant-wide; `(read, ledger)` tenant-wide |
-| `operator` | global | `(read, session)`, `(list, session)`, `(read, gate)`, `(read, ledger)`, `(read, audit)` across **all tenants**. **No write actions.** |
-| `superuser` | global | `*` — every action, every tenant. Use sparingly; every action is audited. |
-| `service` | tenant or global | For non-human callers (reactors, peer daemons). Permissions configured per service identity. |
+- `.jaato/rbac/roles.json` — **role definitions** (permissions per
+  role). Owned by platform engineering; changes rarely.
+- `.jaato/rbac/assignments.json` — **user → membership** mapping.
+  Owned by HR / SSO sync; changes often. May be sourced from an IdP
+  instead of a file (the IdP's group-to-role mapper writes
+  memberships at auth time).
 
-Custom roles compose these primitives. A role definition:
+Default roles shipped with the daemon:
+
+| Role | Scope | Permissions | Notes |
+|---|---|---|---|
+| `tenant-user` | self | `read`, `attach`, `write`, `delete` on own sessions; `read` ledger for self; `read` gate for own-tenant gates | Default for any human user |
+| `tenant-user-admin` | tenant | Manages **memberships** within a tenant — add/remove users, change role assignments | Carved out from the old `tenant-admin` |
+| `tenant-data-admin` | tenant | All `tenant-user` perms across the tenant; `list, session` tenant-wide; `read, ledger` tenant-wide | Sees every user's work in the tenant |
+| `operator` | global | Read-only across all tenants: `read, session`, `list, session`, `read, gate`, `read, ledger-summary`, `read, audit` | Monitors, supports, troubleshoots |
+| `support-engineer` | global | Operator perms plus `attach, session` (read-only attach — see §7.2) | Can observe live sessions during support |
+| `billing-reader` | global | `read, ledger-summary` only (no `read, ledger-detail` — token counts, not prompt content) | For finance / FinOps |
+| `service` | per-instance | Configured per service identity in §6.5 | For reactors, peer daemons |
+
+`superuser` is **not** a default role. There is no role that grants
+write actions across tenants in the standard catalogue. Cross-tenant
+write is achieved via **break-glass elevation** (§6.6), which is
+time-bounded, justified, and audited at a higher tier.
+
+A role definition file:
 
 ```jsonc
-// .jaato/rbac/policy.json
+// .jaato/rbac/roles.json
 {
-  "roles": {
-    "billing-reader": {
-      "scope": "global",
-      "permissions": [
-        ["read", "ledger"],
-        ["read", "session"]
-      ]
-    },
-    "support-engineer": {
-      "scope": "global",
-      "permissions": [
-        ["read", "session"],
-        ["read", "gate"],
-        ["read", "audit"],
-        ["attach", "session"]
-      ]
-    }
+  "billing-reader": {
+    "scope": "global",
+    "permissions": [
+      ["read", "ledger-summary"]
+    ]
   },
-  "user_roles": {
-    "alice@example.com": ["tenant-admin"],
-    "ops@example.com": ["operator", "billing-reader"]
+  "support-engineer": {
+    "scope": "global",
+    "permissions": [
+      ["read", "session"],
+      ["read", "gate"],
+      ["read", "audit"],
+      ["attach", "session"]
+    ]
   }
 }
 ```
 
-User → role mapping comes from either:
+Assignment file:
 
-- The policy file's `user_roles` map (simple deployments).
-- An identity provider claim (premium SSO maps OIDC `groups` → role names).
+```jsonc
+// .jaato/rbac/assignments.json
+{
+  "alice@example.com": [
+    {"tenant_id": "acme", "roles": ["tenant-data-admin"]}
+  ],
+  "ops@example.com": [
+    {"tenant_id": "_global", "roles": ["operator", "billing-reader"]}
+  ]
+}
+```
+
+Global roles attach to the synthetic `_global` tenant — keeping the
+data shape uniform (everything is a membership) and avoiding
+"global-or-tenant-id" branches.
 
 ### 6.2 Authorization service
 
@@ -253,24 +343,147 @@ Every scoped operation calls the service. The natural enforcement points:
 | `session.list` command | filter results by `(list, session)` per tenant | `command_router.py` (list handler) |
 | `inject_prompt_to_session` | `(write, session)` against target's `tenant_id` | `session_manager.py:1149` |
 | `session.new` | `(write, session)` in caller's tenant | `command_router.py:285` |
-| EventBus fan-out | `(read, session)` per attached client per event | `session_manager.py:446` |
-| `HandoffGate` event delivery | `(read, gate)` per subscriber per event | proposed in `handoff-gate-api.md` |
-| Ledger query | `(read, ledger)` filtered by tenant | `token_accounting.py` |
-| Plugin state read | `(read, <plugin>)` filtered by tenant | per-plugin |
+| `subagent_spawn` | `(write, session)` in parent's tenant | `subagent/plugin.py` |
+| `set_active_tenant` | `(switch, tenant)` — caller must hold a membership in target | new |
+| Reactor handler entry | `(execute, reactor)` against the reactor's service identity | new — see §6.5 |
+| `create_headless_session` from reactor | `(write, session)` in target tenant against reactor's identity | `session_manager.py:1053` |
+| EventBus fan-out | per-event filter when actor.tenant ≠ session.tenant (see §7.2) | `session_manager.py:446` |
+| `HandoffGate` event delivery | `(read, gate)` per subscriber per event | `handoff-gate-api.md` |
+| Ledger query | `(read, ledger-summary)` or `(read, ledger-detail)` filtered by tenant | `token_accounting.py` |
+| MCP tool call | `(invoke, mcp_tool)` filtered by tenant namespace | `mcp_context_manager.py` |
 
-### 6.4 Default-deny in multi-tenant mode
+### 6.4 Conflict resolution & rule precedence
+
+A user may hold multiple roles in one membership. Decision rules:
+
+1. **Default deny.** No matching rule → DENY.
+2. **Explicit deny wins.** A role with `permissions_deny: [...]` blocks
+   even other roles that would allow. This is how tenant-level deny
+   policies (e.g. "tenant X bans `Bash(rm)`") cannot be overridden.
+3. **Most specific scope wins ties.** `self` > `tenant` > `global`. A
+   `tenant-user` rule on the user's own session takes precedence over
+   a `global` rule that also matches.
+4. **Audit on conflict.** When two rules match with different
+   decisions, the audit record carries `matched_rule` *and*
+   `dissenting_rules` so operators can debug policy.
+
+### 6.5 Default-deny in multi-tenant mode
 
 In `--multi-tenant`:
 
 - Missing identity → DENY with reason `"unauthenticated"`.
 - Identity present but no matching rule → DENY with reason
   `"no rule matched"`.
-- Cross-tenant action without `global` scope role → DENY with reason
-  `"cross-tenant action requires operator or superuser"`.
+- Cross-tenant action without an explicit cross-tenant permission →
+  DENY with reason `"cross-tenant action requires explicit role"`.
 
-In single-tenant: the synthetic `superuser` identity short-circuits all
-checks to ALLOW. The service is still consulted (for audit log
-consistency) but never denies.
+In single-tenant: the synthetic identity's `_local-superuser` role
+matches every action; the service is still consulted (so the code path
+is uniform) but never denies. Audit logging is off unless explicitly
+enabled.
+
+### 6.6 Service identities
+
+Every reactor, peer daemon, and admin tool runs under a **service
+identity**. Service identities are the answer to "who is acting?" when
+no human is in the loop, and they're authzed identically to user
+identities — the only differences are how they authenticate and how
+their assignments are managed.
+
+#### 6.6.1 Declaration
+
+A reactor declares its service identity in its extension manifest:
+
+```toml
+# pyproject.toml of a reactor extension
+[project.entry-points."jaato.extensions"]
+memory_advisor = "jaato_premium.memory_advisor:create_extension"
+
+[tool.jaato.service_identity]
+name = "memory-advisor"
+default_tenant = "_daemon"
+required_permissions = [
+  ["read", "session"],
+  ["write", "session"],     # spawns headless sessions
+  ["read", "memory"],
+  ["write", "memory"],
+]
+```
+
+At extension load time the daemon:
+
+1. Reads the manifest's `[tool.jaato.service_identity]` block.
+2. Looks up `~/.jaato/service_tokens.json` for a token under the
+   declared `name`. If absent and in single-tenant mode, generates one
+   and writes it; in multi-tenant mode, refuses to load with a clear
+   error pointing the operator to `jaato-admin service-token create`.
+3. Constructs a `ClientIdentity(is_service=True, ...)` and binds it to
+   the extension's runtime context.
+
+The reactor uses `context.service_identity` instead of any caller's
+identity when calling `create_headless_session`,
+`inject_prompt_to_session`, or any other authzed surface.
+
+#### 6.6.2 Manifest vs assignment
+
+`required_permissions` in the manifest is a **declaration** of what
+the reactor needs. The actual grant lives in `assignments.json` like
+any other identity. On load, the daemon checks declaration ⊆ grant; if
+the grant is short, the reactor refuses to start with a clear error
+listing the missing permissions. This makes capability changes
+explicit — bumping a reactor's permissions is a deliberate config
+change, not a drive-by code edit.
+
+#### 6.6.3 Reactor execution authz
+
+When a reactor handler fires on an event, the daemon wraps the
+invocation in an `(execute, reactor)` authz check. This is mostly a
+no-op in normal operation (the service identity has the perm by
+declaration) but it's the hook for:
+
+- Disabling a misbehaving reactor without uninstalling it
+  (`jaato-admin reactor disable memory-advisor`).
+- Per-tenant reactor allow-lists (a tenant can opt out of a daemon's
+  shared reactors).
+- Audit attribution for reactor actions.
+
+#### 6.6.4 Subagents & nested reactors
+
+A subagent inherits the parent session's tenant — its writes are
+attributed to the parent. A reactor that spawns a session that itself
+triggers a reactor: each layer's actions are audited under the
+*invoking* identity, not the user who started the chain. The audit
+record carries a `chain` field tracing back to the original human
+caller for debugging.
+
+### 6.7 Break-glass elevation
+
+Cross-tenant write actions (rare, dangerous) are not granted
+statically. Instead, an operator with `(elevate, tenant)` permission
+on a target tenant can request a **break-glass elevation**:
+
+```
+client.request_elevation(
+    target_tenant="acme",
+    actions=[("write", "session"), ("delete", "session")],
+    duration_seconds=900,
+    justification="incident #12345 — purging runaway agent",
+)
+```
+
+The daemon:
+
+1. Records the request in the audit log at tier WARN.
+2. Optionally requires a second approver (configurable per tenant).
+3. Grants a time-bounded role (`break-glass:tenant=acme:expires=...`)
+   for the requested duration.
+4. Logs every action taken under the elevation at tier WARN with the
+   elevation request ID.
+5. On expiry, revokes the role and emits a `BreakGlassExpiredEvent`.
+
+This replaces the `superuser` role for normal operation. A daemon
+without any operator with `(elevate, *)` simply has no path to
+cross-tenant write — that's the secure default.
 
 ## 7. Per-Resource Walk-Through
 
@@ -287,13 +500,33 @@ consistency) but never denies.
 
 ### 7.2 Events
 
-- EventBus fan-out remains by `attached_clients`, but adding a client to
-  `attached_clients` is now itself an authz check (§7.1).
-- This means once you're attached you see everything from that session
-  — no per-event filtering needed for normal events. The model is:
-  *attach is the gate; once through, the stream is open*.
-- Exception: cross-tenant events (gate events with global scope) need
-  per-event filtering. See §7.5.
+EventBus fan-out remains by `attached_clients`, but the model has two
+tiers based on whether the actor and the session share a tenant:
+
+**Same-tenant attach (cheap path).** When `actor.active_tenant ==
+session.tenant_id`, the attach authz check is the only gate. The full
+event stream flows through unfiltered. This is the dominant case
+(tenant users attaching to their own sessions, tenant-data-admins
+attaching within their tenant) and adding per-event checks would be
+pure overhead.
+
+**Cross-tenant attach (filtered path).** When `actor.active_tenant !=
+session.tenant_id` — an operator or support-engineer attaching across
+tenants — every event is authz-checked individually. Sensitive event
+types (`MessageEvent` with raw prompt content, tool arguments,
+completion payloads) are either redacted or dropped based on the
+actor's `(read, session-content)` perm. Operational events
+(`AgentCompletedEvent` summary, `TokenUsageEvent`,
+`PermissionRequestedEvent`) flow through unredacted.
+
+The split lets cross-tenant actors monitor session health without
+seeing user prompts. A `support-engineer` with explicit
+`(read, session-content)` (e.g. granted via break-glass) gets the
+unfiltered stream; without it, they see only operational events.
+
+Per-event audit records for cross-tenant attach include the actor and
+the event type but not the content — the audit log itself stays out of
+the data path.
 
 ### 7.3 Ledger
 
@@ -304,33 +537,53 @@ consistency) but never denies.
   `tenant_id` field to each entry. Single-tenant entries get
   `tenant_id="default"`.
 
-### 7.4 Plugin state
+### 7.4 Plugin state (deferred to v2)
 
-- Memory, todo, references, etc. each store records that today key on
-  `session_id`. The data layer adds `tenant_id` to record schemas.
-- Memory consolidation (raw → curated) is per-tenant. The
-  memory-advisor reactor reads only its tenant's raw queue. For
-  daemon-wide memory (e.g. system-prompts the daemon offers all
-  tenants), a separate `global` namespace exists.
-- Plugin queries from a session are scoped to `session.tenant_id`
-  automatically — the plugin asks the runtime for the active tenant
-  at query time.
+Plugin *config* is per-tenant in v1: which MCP servers are available,
+which memory namespace the session uses, which references catalogue.
+This is enough to give tenants distinct *capabilities* without
+auditing every plugin's storage layer.
+
+Plugin *state* (memory entries, todos, references, knowledge bundles)
+stays **per-session** in v1. Cross-session aggregation within a tenant
+(e.g. memory-advisor consolidating across sessions) is deferred to v2
+because:
+
+- Each plugin has its own storage layout — memory has raw + curated,
+  todo has list-of-items, references has fragment files. Auditing all
+  for cross-tenant leakage is a separate workstream.
+- The natural primary key today is `session_id`, not `tenant_id`. A
+  schema change that adds `tenant_id` to every record file is a large
+  migration with risk that v1 doesn't need.
+- A tenant-scoped session doesn't leak per-session state to other
+  tenants today, because attach is gated. The remaining concern is
+  cross-tenant *aggregation* (a memory consolidator running across
+  multiple users in one tenant), which is a feature, not a regression.
+
+When v2 adds tenant-scoped aggregation, the schema change adds
+`tenant_id` to plugin records, and aggregating plugins (memory-advisor)
+gain a tenant filter. v1 doesn't promise this and doesn't break it.
 
 ### 7.5 HandoffGate
 
 Three changes to the gate doc (`handoff-gate-api.md`):
 
-1. **Gates carry `tenant_id`.** Daemon-wide gates set `tenant_id=None`.
+1. **Gates carry `tenant_id`.** Every gate is tenant-scoped. Daemon-wide
+   gates use the synthetic `_daemon` tenant — no special-case branch.
 2. **Event delivery is filtered.** `GateAnnouncedEvent` /
    `GateReleasedEvent` deliver only to subscribers where
-   `(read, gate)` is permitted for that gate's tenant.
-3. **Anonymous gate intent.** When a gate is announced cross-tenant
-   (an operator inspecting), the `intent` payload may omit fields
-   marked sensitive in the gate's schema. The gate definition declares
-   `public_intent_fields: Set[str]` and operators see only those unless
-   they have `superuser`.
+   `(read, gate)` is permitted for that gate's tenant. Same-tenant
+   subscribers see the full intent; cross-tenant subscribers see only
+   `public_intent_fields`.
+3. **Public intent fields.** Each gate definition declares
+   `public_intent_fields: Set[str]`. Gate intents are split into
+   public (operational health) and private (workload content).
+   Operators with `(read, gate)` see public fields across tenants;
+   private fields require same-tenant `(read, gate)` or break-glass
+   elevation.
 
-This addresses the §9 visibility concern in the gate doc directly.
+This addresses the §9 visibility concern in the gate doc directly,
+without introducing a `tenant_id=None` special case.
 
 ### 7.6 MCP servers
 
@@ -368,10 +621,16 @@ AppArmor profiles deny sibling sessions *and* sibling tenants.
 ### 8.1 What gets audited
 
 - Every cross-tenant action by a non-tenant-user identity.
-- Every `superuser` action, period.
+- Every action under a break-glass elevation (tier WARN, with
+  elevation request ID).
 - Every `mutate` action on tenant policy, RBAC config, or auth state.
 - Every authorization denial (rate-limited; not for unauthenticated
   request floods).
+- Every reactor `(execute, reactor)` invocation when the reactor's
+  service identity has cross-tenant scope.
+
+In single-tenant deployments audit is **off** by default; opt in via
+`--audit-log` if needed.
 
 ### 8.2 Audit record
 
@@ -408,16 +667,30 @@ class IPCClient:
     @property
     def identity(self) -> ClientIdentity:
         """The identity the daemon assigned this connection."""
-    
+
+    async def set_active_tenant(self, tenant_id: str) -> None:
+        """Switch the active tenant (must hold a membership)."""
+
     async def list_sessions(
         self,
         tenant_id: Optional[str] = None,
     ) -> List[SessionInfo]:
         """List sessions visible to this identity. Filtered server-side."""
-    
+
     async def list_tenants(self) -> List[TenantInfo]:
-        """List tenants this identity can see. Tenant users see one;
-        operators see all."""
+        """List tenants this identity has memberships in.
+        Operators with global scope see all."""
+
+    async def request_elevation(
+        self,
+        target_tenant: str,
+        actions: List[Tuple[str, str]],
+        duration_seconds: int,
+        justification: str,
+    ) -> ElevationGrant:
+        """Request a break-glass elevation. Returns a grant token
+        scoped to the actions and duration; subsequent commands
+        within the window run under the elevated permissions."""
 ```
 
 ### 9.2 TypeScript
@@ -425,17 +698,25 @@ class IPCClient:
 Mirror surface:
 
 ```typescript
-interface ClientIdentity {
-  userId: string;
+interface Membership {
   tenantId: string;
   roles: Set<string>;
+}
+
+interface ClientIdentity {
+  userId: string;
+  memberships: Membership[];
+  activeTenant: string;
   authMethod: string;
+  isService: boolean;
 }
 
 class IpcClient {
   readonly identity: ClientIdentity;
+  setActiveTenant(tenantId: string): Promise<void>;
   listSessions(opts?: { tenantId?: string }): Promise<SessionInfo[]>;
   listTenants(): Promise<TenantInfo[]>;
+  requestElevation(opts: ElevationRequest): Promise<ElevationGrant>;
 }
 ```
 
@@ -463,63 +744,67 @@ authz decisions are correct on synthetic identities.
 ### 10.3 Phase 2 — multi-tenant mode opt-in
 
 - `--multi-tenant` daemon flag.
-- When enabled: identity required, default-deny, full audit.
+- When enabled: identity required, default-deny, audit on by default.
+- Public-tier `local-users` and `service-token` backends shipped in
+  the public daemon (§4.4). Multi-tenant works without premium.
 - Premium SSO extension wires real OIDC identity.
-- Per-tenant directory layout for workspaces, MCP, plugin state.
+- Per-tenant directory layout for workspaces, MCP namespaces.
 
 ### 10.4 Phase 3 — admin tooling
 
-- `jaato-admin` CLI for managing tenants, users, role assignments.
+- `jaato-admin` CLI for tenants, users, role assignments, service
+  tokens, break-glass approvals.
 - Operator dashboard via SDK.
 - Tenant import/export.
 
+### 10.5 Phase 4 — plugin state per-tenant (deferred from v1)
+
+- Add `tenant_id` to memory, todo, references record schemas.
+- Migrate aggregating plugins (memory-advisor) to filter by tenant.
+- Lazy migration on read; write-back on next mutation.
+
 ## 11. Open Questions
 
-1. **Multi-tenant membership.** v1 is one user → one tenant. Real
-   orgs need users in multiple tenants (a contractor working across
-   two clients). Add a `tenant_memberships: Set[(tenant_id, role_set)]`
-   field and let the client pick an active tenant per session?
-   Probably yes in v2.
-
-2. **Tenant hierarchy.** Some orgs want "parent tenant inherits child
+1. **Tenant hierarchy.** Some orgs want "parent tenant inherits child
    visibility." Ship flat tenants in v1; add hierarchy if demand
    surfaces.
 
-3. **Service identities for reactors.** A reactor isn't a human user.
-   Should reactors get a `service` role with their own identity?
-   Probably yes — gives audit log clarity and tenant-scoped reactors
-   for cross-tenant operations.
+2. **Policy file reload.** Edit `.jaato/rbac/{roles,assignments}.json`
+   → daemon re-reads on SIGHUP? File watcher? Static-only? Recommend
+   file watcher with atomic reload, similar to the openers.json
+   pattern.
 
-4. **Policy file reload.** Edit `.jaato/rbac/policy.json` → daemon
-   re-reads on SIGHUP? File watcher? Static-only? Recommend file
-   watcher with atomic reload, similar to the openers.json pattern.
-
-5. **Audit retention.** Append-only JSONL grows unbounded. Rotation
+3. **Audit retention.** Append-only JSONL grows unbounded. Rotation
    policy: keep N days online, archive older to compressed format,
    support external sink (Splunk, Loki, S3). v2.
 
-6. **Per-tenant rate limiting.** Adjacent to RBAC, often discussed
+4. **Per-tenant rate limiting.** Adjacent to RBAC, often discussed
    together. Probably its own design doc; integrates via the same
    identity surface.
 
-7. **Cross-tenant explicit grants.** A user grants temporary read
-   access to their session for a support engineer. Capability tokens
-   with TTL? Defer to v2.
+5. **Capability tokens for explicit cross-tenant grants.** A user
+   grants temporary read access to their session for a support
+   engineer without going through break-glass. Capability tokens
+   with TTL? v2 candidate; break-glass covers the urgent case for v1.
 
-8. **Ledger redaction.** Operators reading the ledger see token
-   counts but should they see the prompts? Probably not by default.
-   Add a `ledger.read_redacted` permission for non-superuser global
-   read.
+6. **Ledger split: summary vs detail.** The roles table already
+   distinguishes `read, ledger-summary` from `read, ledger-detail`
+   (token counts vs prompt content). Concrete schema split deferred
+   to implementation: probably two JSONL files.
 
-9. **Identity expiry mid-session.** OIDC token expires while a
-   session is running. Renew on next request? Force reconnect?
-   Affects long-running sessions. Suggest: best-effort renew,
-   degraded mode if refresh fails (sessions continue but writes
-   blocked until re-auth).
+7. **Multi-daemon RBAC.** Peer cluster of daemons with shared tenants.
+   Federation model? Each daemon trusts identities from a common IdP.
+   Out of scope for v1.
 
-10. **Multi-daemon RBAC.** Peer cluster of daemons with shared tenants.
-    Federation model? Each daemon trusts identities from a common IdP.
-    Out of scope for v1.
+8. **Service identity rotation.** Service tokens are static. For
+   long-lived deployments, periodic rotation is needed. Add a
+   `jaato-admin service-token rotate` command and a grace window
+   where the old token still works. v2.
+
+9. **Reactor opt-out per tenant.** A tenant should be able to disable
+   a daemon-shared reactor (e.g. memory-advisor) for privacy or
+   policy reasons. Implement as a tenant config flag the reactor
+   checks at handler entry; defer the UI / admin command to v2.
 
 ## 12. Out of Scope
 
