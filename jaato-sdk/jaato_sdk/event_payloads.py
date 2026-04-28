@@ -241,54 +241,60 @@ class PlanStepUpdatedPayload(TypedDict):
 class TurnCompletedPayload(TypedDict):
     """EventType.TURN_COMPLETED — conversation turn finished.
 
-    Source: ``TurnCompletedEvent``
+    Source: ``TurnCompletedEvent``.  ``usage`` mirrors the
+    ``UsageBreakdown`` shape on the wire (token counts, cache hits,
+    reasoning/thinking tokens, optional ``cost_usd``).
     """
     agent_id: str
     turn_number: int
-    prompt_tokens: int
-    output_tokens: int
-    total_tokens: int
+    usage: Dict[str, Any]
     duration_seconds: float
     function_calls: List[Dict[str, Any]]
     formatted_text: NotRequired[Optional[str]]
-    cache_read_tokens: NotRequired[Optional[int]]
-    cache_creation_tokens: NotRequired[Optional[int]]
 
 
 class TurnProgressPayload(TypedDict):
     """EventType.TURN_PROGRESS — incremental progress during turn.
 
-    Source: ``TurnProgressEvent``
+    Source: ``TurnProgressEvent``.  See ``TurnCompletedPayload`` for
+    the ``usage`` shape.
     """
     agent_id: str
-    total_tokens: int
-    prompt_tokens: int
-    output_tokens: int
+    usage: Dict[str, Any]
     context_limit: int
     percent_used: float
     tokens_remaining: int
     pending_tool_calls: int
-    cache_read_tokens: NotRequired[Optional[int]]
-    cache_creation_tokens: NotRequired[Optional[int]]
 
 
 class ContextUpdatedPayload(TypedDict):
     """EventType.CONTEXT_UPDATED — context window usage changed.
 
-    Source: ``ContextUpdatedEvent``
+    Source: ``ContextUpdatedEvent``.  GC config moved to
+    ``GCConfigPayload`` in v1.0; this payload now carries usage
+    framing only.
     """
     agent_id: str
-    total_tokens: int
-    prompt_tokens: int
-    output_tokens: int
+    usage: Dict[str, Any]
     context_limit: int
     percent_used: float
     tokens_remaining: int
     turns: int
-    gc_threshold: NotRequired[Optional[float]]
-    gc_strategy: NotRequired[Optional[str]]
-    gc_target_percent: NotRequired[Optional[float]]
-    gc_continuous_mode: NotRequired[bool]
+
+
+class GCConfigPayload(TypedDict):
+    """EventType.GC_CONFIG — garbage-collection configuration snapshot.
+
+    Source: ``GCConfigEvent``. Emitted on session init and whenever
+    the GC plugin is reconfigured. Pre-1.0 these fields lived on
+    ``ContextUpdatedEvent``; the split lets clients render a status
+    bar from one event and configure GC from another.
+    """
+    agent_id: str
+    threshold: NotRequired[Optional[float]]
+    strategy: NotRequired[Optional[str]]
+    target_percent: NotRequired[Optional[float]]
+    continuous_mode: NotRequired[bool]
 
 
 class PermissionRequestedPayload(TypedDict):
