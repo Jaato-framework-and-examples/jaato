@@ -246,10 +246,11 @@ class EventType(str, Enum):
     PEER_STOP_ACKNOWLEDGED = "peer.stop_acknowledged"
 
     # HandoffGate events — emitted by the jaato-premium reactor framework
-    # when a daemon-side gate transitions state.  See
-    # docs/design/handoff-gate-api.md.  Wire types are pre-registered here
-    # in the public SDK so any client can deserialize them; production of
-    # these events is gated on premium being installed.
+    # when a daemon-side gate transitions state.  See docs/sdk/gate-events.md
+    # for the public wire contract; full design lives in
+    # jaato-premium/docs/design/handoff-gate-api.md.  Wire types are
+    # pre-registered here in the public SDK so any client can deserialize
+    # them; production of these events is gated on premium being installed.
     GATE_ANNOUNCED = "gate.announced"
     GATE_RELEASED = "gate.released"
     GATES_SNAPSHOT = "gates.snapshot"
@@ -2018,7 +2019,7 @@ class GateState(BaseModel):
     cross-tenant subscribers receive only the public keys; same-tenant
     subscribers receive the full intent.
 
-    See ``docs/design/handoff-gate-api.md`` §3.4 for the canonical
+    See ``jaato-premium/docs/design/handoff-gate-api.md`` §3.4 for the canonical
     intent shape.
     """
     gate_name: str = ""
