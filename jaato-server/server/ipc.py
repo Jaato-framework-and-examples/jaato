@@ -219,6 +219,15 @@ class JaatoIPCServer:
         self._client_counter = 0
         self._lock = asyncio.Lock()
 
+        # Custom message-type handlers registered by daemon extensions
+        # via ``register_message_handler``.  Fires when a client sends
+        # a JSON message whose ``type`` field doesn't match any built-
+        # in event class (parallel to the WS path's
+        # ``_message_handlers`` at ``websocket.py``).  Built-in types
+        # cannot be overridden — those still take the typed-event
+        # dispatch in ``_handle_message``.
+        self._message_handlers: Dict[str, Any] = {}
+
         # Event loop reference for thread-safe operations
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -495,6 +504,53 @@ class JaatoIPCServer:
         await writer.drain()
         logger.debug("_write_message: drain() completed")
 
+    def register_message_handler(
+        self,
+        message_type: str,
+        handler: Any,
+    ) -> None:
+        """Register an async handler for a custom IPC message type.
+
+        Symmetric to :meth:`JaatoWSServer.register_message_handler`.
+        Daemon extensions call this (via
+        ``_ExtensionContext.ipc_server`` or the unified
+        ``_ExtensionContext.register_message_handler``) to handle
+        custom message types on IPC connections — the same
+        connections used for built-in session/command messages.
+
+        The handler is called when a client sends a JSON message
+        whose ``type`` field matches *message_type* and no built-in
+        event class deserialises from it.  Built-in types cannot be
+        overridden.
+
+        Handler signature is intentionally **transport-agnostic**
+        (no raw socket passed) so the same callback works on both
+        IPC and WS sides:
+
+            async def handler(message: dict, client_id: str, user: Optional[str]) -> None
+
+        - ``message``: the parsed JSON dict.
+        - ``client_id``: server-assigned client identifier — feed
+          back into ``ctx.emit_to_client(client_id, event)`` to
+          target the reply.
+        - ``user``: authenticated user identifier or ``None``
+          (always ``None`` on IPC today; included for symmetry with
+          WS, which does carry an authenticated user when SSO is
+          wired up).
+
+        Args:
+            message_type: The ``type`` field value to match
+                (e.g., ``"gates.list"``).
+            handler: Async callback with the signature above.
+        """
+        if message_type in self._message_handlers:
+            logger.warning(
+                "Overwriting existing IPC handler for message type '%s'",
+                message_type,
+            )
+        self._message_handlers[message_type] = handler
+        logger.debug("Registered IPC message handler: %s", message_type)
+
     async def _handle_message(self, client_id: str, message: str) -> None:
         """Handle an incoming message from a client."""
         try:
@@ -503,6 +559,31 @@ class JaatoIPCServer:
             await self._send_error(client_id, f"Invalid JSON: {e}")
             return
         except ValueError as e:
+            # Unknown event type — check extension message handlers
+            # before falling through to error.  Mirrors the WS
+            # dispatch fallthrough at ``websocket.py``.
+            try:
+                raw = json.loads(message)
+            except json.JSONDecodeError:
+                await self._send_error(client_id, str(e))
+                return
+            msg_type = raw.get("type", "")
+            handler = self._message_handlers.get(msg_type)
+            if handler:
+                async with self._lock:
+                    client = self._clients.get(client_id)
+                user = getattr(client, "user_id", None) if client else None
+                try:
+                    await handler(raw, client_id, user)
+                except Exception:
+                    logger.exception(
+                        "IPC message handler for '%s' raised", msg_type,
+                    )
+                    await self._send_error(
+                        client_id,
+                        f"Handler for '{msg_type}' raised — see daemon log",
+                    )
+                return
             await self._send_error(client_id, str(e))
             return
 

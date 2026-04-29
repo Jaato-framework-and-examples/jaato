@@ -369,7 +369,7 @@ class IntrospectionPlugin:
                     allowed_plugins = set(raw)
                     allowed_plugins.add("introspection")
 
-            # Merge all known categories: from schemas + registered descriptions
+            # Merge all known categories: from schemas + registered descriptions.
             all_categories = dict.fromkeys(
                 sorted(
                     set(session_counts.keys())
@@ -383,6 +383,35 @@ class IntrospectionPlugin:
                 available = session_counts.get(cat, 0)
                 total = global_counts.get(cat, 0)
 
+                # Skip categories the session has zero access to.  When
+                # a profile's plugin list excludes a plugin, that plugin's
+                # registered category (e.g. ``"MCP"`` from
+                # ``mcp.plugin.set_plugin_registry``) and any category
+                # description still live in the registry — but listing
+                # them in introspection output leaks plugin/protocol
+                # names the model cannot actually invoke and primes
+                # hallucinations ("MCP server failed", etc.).  Two
+                # exceptions:
+                #   1. No allowed-plugin filter is in effect — caller
+                #      has unrestricted view (e.g. an admin-tier session
+                #      enumerating the daemon).
+                #   2. The category is intrinsically empty for everyone
+                #      (``total == 0``) AND has no description hint —
+                #      nothing to leak.
+                if available == 0 and allowed_plugins is not None:
+                    if total > 0:
+                        # Session-invisible plugin contributes tools to
+                        # this category — hide entirely.  Don't surface
+                        # the plugin name in an "enable X" hint either.
+                        continue
+                    # total == 0: only a category description hint
+                    # references this category.  If a hint is registered
+                    # AND the category isn't part of the session's
+                    # plugin set, hide it too — that's exactly the MCP
+                    # leak path (registered description with no tools).
+                    if cat in category_hints:
+                        continue
+
                 entry: Dict[str, Any] = {
                     "id": name_to_id(cat, prefix="c"),
                     "name": cat,
@@ -390,28 +419,23 @@ class IntrospectionPlugin:
                     "description": category_hints.get(cat, ""),
                 }
 
-                # Add availability hint when the session doesn't have
-                # access to all tools in the category, including which
-                # plugins would need to be enabled.
+                # Annotate partial availability only when the session
+                # already sees SOME tools in this category — the
+                # all-zero case is filtered out above.
                 if available == 0 and total == 0:
                     entry["availability"] = "no tools loaded"
                 elif available < total and allowed_plugins is not None:
                     missing = sorted(
                         category_plugins.get(cat, set()) - allowed_plugins
                     )
-                    if available == 0:
+                    if missing:
                         entry["availability"] = (
-                            f"not enabled ({total} tools available "
-                            f"via plugins: {', '.join(missing)})"
-                            if missing
-                            else f"not enabled ({total} tools)"
+                            f"partial ({available}/{total} tools — "
+                            f"{', '.join(missing)} not enabled for this profile)"
                         )
                     else:
                         entry["availability"] = (
-                            f"partial ({available}/{total} tools — "
-                            f"enable {', '.join(missing)} for full access)"
-                            if missing
-                            else f"partial ({available}/{total} tools)"
+                            f"partial ({available}/{total} tools)"
                         )
                 # else: fully available — no extra annotation needed
 

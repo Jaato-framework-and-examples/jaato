@@ -306,9 +306,17 @@ def _expand_string(s: str, context: Dict[str, str]) -> str:
 
     Two-phase expansion:
 
-    1. **Variable substitution** — ``${VAR}`` patterns are replaced from
-       *context* first, then ``os.environ``.  Undefined variables are kept
-       as-is (``${UNKNOWN}`` stays literal).
+    1. **Variable substitution** — ``${VAR}`` patterns are replaced in
+       this order: *context* (caller-provided), then the session-scoped
+       env (``get_session_env``, populated from the session's
+       ``env_file``), then the daemon's ``os.environ``.  Undefined
+       variables are kept as-is (``${UNKNOWN}`` stays literal).
+
+       The session-env tier exists so that plugins reading expanded
+       config values (e.g. service_connector resolving
+       ``base_url: http://127.0.0.1:${SERVICE_PORT}``) see the variables
+       defined in the session's ``.env`` file even when the daemon was
+       started without those vars in its process env.
 
     2. **Secret URI resolution** — if the *fully expanded* string matches
        ``scheme://path[#key]`` and a :class:`SecretResolver` is registered
@@ -331,13 +339,21 @@ def _expand_string(s: str, context: Dict[str, str]) -> str:
         SecretResolutionError: If a secret URI is recognised but the
             resolver fails (auth error, not found, backend unreachable).
     """
+    # Imported lazily to avoid a circular import — session_context lives
+    # at the package root and importing it at module load time would
+    # pull in the JaatoSession TYPE_CHECKING ladder.
+    from shared.session_context import get_session_env
+
     # Phase 1: ${VAR} expansion
     if '${' in s:
         def replace_var(match: re.Match) -> str:
             var_name = match.group(1)
-            # First check context, then environment
+            # First check context, then session env, then process env.
             if var_name in context:
                 return context[var_name]
+            session_val = get_session_env(var_name)
+            if session_val is not None:
+                return session_val
             return os.environ.get(var_name, match.group(0))  # Keep original if not found
 
         # Match ${VAR_NAME} pattern
@@ -1160,14 +1176,17 @@ def _scan_profiles_dir(
 
 def discover_profiles(
     profiles_dir: str,
-    base_path: Optional[str] = None
+    base_path: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> ProfileDiscoveryResult:
     """Discover subagent profiles from multiple sources.
 
     Scans up to three locations for ``.json`` / ``.yaml`` / ``.yml``
     profile files, in decreasing order of precedence:
 
-    1. **Workspace** — ``{base_path}/{profiles_dir}``
+    1. **Workspace** —
+       * if ``config_root`` is set: ``<config_root>/profiles/``;
+       * else: ``{base_path}/{profiles_dir}`` (today's behavior).
     2. **User**      — ``~/.jaato/profiles/``
     3. **Premium**   — profiles registered via ``jaato.premium`` entry points
 
@@ -1176,8 +1195,13 @@ def discover_profiles(
 
     Args:
         profiles_dir: Directory path to scan (relative or absolute).
+            Ignored when ``config_root`` is set.
         base_path: Base path for resolving relative profiles_dir.
                    Defaults to current working directory.
+        config_root: Optional override for the workspace tier.  When set,
+            scans ``<config_root>/profiles/`` instead of
+            ``{base_path}/{profiles_dir}``.  See
+            :func:`shared.config_resolver.resolve_config_search_path`.
 
     Returns:
         ProfileDiscoveryResult with discovered profiles and any parse errors.
@@ -1185,13 +1209,26 @@ def discover_profiles(
     if base_path is None:
         base_path = os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
 
+    # When no explicit ``config_root`` is provided, fall back to the
+    # ``JAATO_CONFIG_ROOT`` env var.  ``JaatoServer._in_workspace``
+    # exports it for the duration of session-bound work, so plugins
+    # whose ``initialize()`` runs inside that context — including the
+    # subagent plugin's first call here — pick up the override even
+    # though the registry's ``set_config_root`` broadcast hasn't fired
+    # yet (broadcasts run AFTER plugin init).
+    effective_config_root = config_root or os.environ.get('JAATO_CONFIG_ROOT')
+
     profiles: Dict[str, SubagentProfile] = {}
     errors: Dict[str, str] = {}
 
-    # 1. Workspace profiles
-    profiles_path = Path(profiles_dir)
-    if not profiles_path.is_absolute():
-        profiles_path = Path(base_path) / profiles_path
+    # 1. Workspace tier — config_root override takes precedence; fall
+    #    back to <base_path>/<profiles_dir> when no override is in effect.
+    if effective_config_root:
+        profiles_path = Path(effective_config_root).expanduser().resolve() / "profiles"
+    else:
+        profiles_path = Path(profiles_dir)
+        if not profiles_path.is_absolute():
+            profiles_path = Path(base_path) / profiles_path
     _scan_profiles_dir(profiles_path, profiles, errors)
 
     # 2. User-level profiles from ~/.jaato/profiles/

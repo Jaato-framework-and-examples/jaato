@@ -238,6 +238,15 @@ class ZhipuAIProvider(AnthropicProvider):
         if config is None:
             config = ProviderConfig()
 
+        # Pull the workspace_path / config_root that the runtime injected
+        # into ``config.extra``.  Threading them through the auth
+        # resolver makes credential lookup independent of the
+        # ``JAATO_CONFIG_ROOT`` env var, which is unreliable for
+        # headless reactor-spawned sessions running in fresh threads
+        # outside any active ``_in_workspace`` context.
+        _ws_path = config.extra.get('workspace_path') if config.extra else None
+        _config_root = config.extra.get('config_root') if config.extra else None
+
         # Resolve API key from config, environment, or stored credentials.
         # Track which source was used for the "Connected to" message.
         self._auth_info: str = ""
@@ -247,10 +256,14 @@ class ZhipuAIProvider(AnthropicProvider):
         elif resolve_api_key():
             self._api_key = resolve_api_key()
             self._auth_info = "API key (env ZHIPUAI_API_KEY)"
-        elif get_stored_api_key():
-            self._api_key = get_stored_api_key()
+        elif get_stored_api_key(workspace_path=_ws_path, config_root=_config_root):
+            self._api_key = get_stored_api_key(
+                workspace_path=_ws_path, config_root=_config_root,
+            )
             from .auth import get_credential_file_path
-            cred_path = get_credential_file_path()
+            cred_path = get_credential_file_path(
+                workspace_path=_ws_path, config_root=_config_root,
+            )
             self._auth_info = f"API key from {cred_path}" if cred_path else "API key (stored)"
         else:
             self._api_key = None
@@ -268,7 +281,9 @@ class ZhipuAIProvider(AnthropicProvider):
         )
         # Check stored base_url only if using default (not overridden)
         if self._base_url == DEFAULT_ZHIPUAI_BASE_URL:
-            stored_base_url = get_stored_base_url()
+            stored_base_url = get_stored_base_url(
+                workspace_path=_ws_path, config_root=_config_root,
+            )
             if stored_base_url:
                 self._base_url = stored_base_url
 

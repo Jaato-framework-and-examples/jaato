@@ -31,20 +31,26 @@ logger = logging.getLogger(__name__)
 def resolve_script_path(
     path: str,
     workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> Optional[Path]:
     """Resolve a script path through the standard ``.jaato/`` tier.
 
     Resolution order:
 
     1. If ``path`` is absolute, use it directly (must exist).
-    2. If ``workspace_path`` is given, try ``<workspace>/.jaato/<path>``.
-    3. Fall back to ``~/.jaato/<path>``.
+    2. **Workspace tier** —
+       * if ``config_root`` is set: ``<config_root>/<path>``;
+       * else if ``workspace_path`` is set: ``<workspace>/.jaato/<path>``.
+    3. **User tier** — ``~/.jaato/<path>`` (always tried).
 
     Args:
         path: Script reference — absolute, or relative to ``.jaato/``.
         workspace_path: Workspace directory for relative resolution.
-            When ``None``, only the home-level ``~/.jaato/`` tier is tried
-            for relative paths.
+            When ``None`` and ``config_root`` is also ``None``, only
+            the home-level ``~/.jaato/`` tier is tried for relative paths.
+        config_root: Optional override for the workspace tier.  When set,
+            ``<config_root>/<path>`` replaces ``<workspace>/.jaato/<path>``.
+            See :func:`shared.config_resolver.resolve_config_search_path`.
 
     Returns:
         Resolved ``Path`` pointing at an existing file, or ``None`` when
@@ -55,7 +61,11 @@ def resolve_script_path(
     if p.is_absolute():
         return p if p.is_file() else None
 
-    if workspace_path:
+    if config_root:
+        cr_path = Path(config_root).expanduser().resolve() / path
+        if cr_path.is_file():
+            return cr_path
+    elif workspace_path:
         ws_path = Path(workspace_path) / ".jaato" / path
         if ws_path.is_file():
             return ws_path

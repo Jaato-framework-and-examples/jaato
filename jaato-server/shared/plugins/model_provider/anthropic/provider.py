@@ -202,12 +202,20 @@ class AnthropicProvider:
         if config is None:
             config = ProviderConfig()
 
-        # Set workspace path from config.extra if provided
-        # This ensures token resolution can find workspace-specific OAuth tokens
-        # even when JAATO_WORKSPACE_ROOT env var isn't set (e.g., subagent spawning)
+        # Stash the config so post-init helpers (token refresh, status
+        # reporting) can reuse the workspace_path / config_root that
+        # the runtime injected.
+        self._config = config
+
+        # Pull workspace_path / config_root from config.extra (injected
+        # by JaatoRuntime.create_provider).  Threading them explicitly
+        # makes credential lookup independent of the
+        # ``JAATO_WORKSPACE_ROOT`` / ``JAATO_CONFIG_ROOT`` env vars,
+        # which are unreliable for headless reactor-spawned sessions
+        # running in fresh threads outside any active ``_in_workspace``
+        # context.
         workspace_path = config.extra.get('workspace_path')
-        if workspace_path and not os.environ.get('JAATO_WORKSPACE_ROOT'):
-            os.environ['JAATO_WORKSPACE_ROOT'] = workspace_path
+        config_root = config.extra.get('config_root')
 
         # Resolve credentials in priority order:
         # 1. PKCE OAuth tokens (from interactive login, stored in config dir)
@@ -221,7 +229,9 @@ class AnthropicProvider:
 
         # Try PKCE OAuth first (interactive login tokens)
         try:
-            self._pkce_access_token = get_valid_access_token()
+            self._pkce_access_token = get_valid_access_token(
+                workspace_path=workspace_path, config_root=config_root,
+            )
             if self._pkce_access_token:
                 self._use_pkce = True
                 self._auth_info = "PKCE OAuth"
@@ -339,11 +349,18 @@ class AnthropicProvider:
         if not self._use_pkce:
             return
 
-        tokens = load_tokens()
+        # Pull the workspace_path / config_root the runtime injected
+        # so refresh writes back to the same credential file we
+        # originally loaded from.
+        extra = getattr(self._config, 'extra', None) or {}
+        ws_path = extra.get('workspace_path')
+        cr = extra.get('config_root')
+
+        tokens = load_tokens(workspace_path=ws_path, config_root=cr)
         if tokens and tokens.is_expired:
             try:
                 new_tokens = refresh_tokens(tokens.refresh_token)
-                save_tokens(new_tokens)
+                save_tokens(new_tokens, workspace_path=ws_path, config_root=cr)
                 self._pkce_access_token = new_tokens.access_token
                 # Recreate client with new token
                 self._client = self._create_client()
@@ -420,10 +437,21 @@ class AnthropicProvider:
         # A broken token file used to look identical to "never logged in",
         # which is the exact "provider error not being surfaced" bug the
         # branch name calls out.
-        tokens, load_error = try_load_tokens_with_reason()
+        # Pull workspace_path / config_root from config.extra so
+        # verify_auth surfaces credentials from the same path the
+        # runtime configured the provider with.
+        extra = getattr(self._config, 'extra', None) or {}
+        ws_path = extra.get('workspace_path')
+        cr = extra.get('config_root')
+
+        tokens, load_error = try_load_tokens_with_reason(
+            workspace_path=ws_path, config_root=cr,
+        )
         if tokens:
             try:
-                pkce_token = get_valid_access_token()
+                pkce_token = get_valid_access_token(
+                    workspace_path=ws_path, config_root=cr,
+                )
                 if pkce_token:
                     if on_message:
                         on_message("Found valid PKCE OAuth token")

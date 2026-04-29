@@ -89,7 +89,56 @@ class AppArmorManager:
     #       to selected reference paths (selectReferences) without
     #       editing the base profile.  Empty/missing dir is a no-op
     #       thanks to ``if exists``, so existing sessions keep working.
-    _TEMPLATE_VERSION = 5
+    #   6 — ``{config_root_rules}`` placeholder grants read access to a
+    #       client-supplied ``config_root`` override (from
+    #       ``ClientConfigRequest.config_root``) so opt-in IPC AppArmor
+    #       confinement (``IPCClient(apparmor=True)``) can serve
+    #       framework config from somewhere other than the workspace.
+    #   7 — Two additions:
+    #       (a) Runtime-injected ``{env_file_rule}`` placeholder so
+    #           reactor-spawned sessions can read the client-supplied
+    #           env_file (``ClientConfigRequest.env_file``) from inside
+    #           the parent's confined thread.
+    #       (b) ``include if exists "~/.jaato/apparmor-fragments/*.rules"``
+    #           directive at end of profile.  Daemon extensions drop
+    #           their own fragment files there to grant access to
+    #           extension-owned state (e.g. premium reactor's
+    #           ``handoff_gates.json``) without polluting the public
+    #           template with extension-specific paths.  Empty/missing
+    #           dir is a no-op thanks to ``if exists``.
+    #   8 — Two fixes for confined IPC sessions surfaced in early
+    #       runs:
+    #       (a) ``~/.jaato/references/`` granted read so the
+    #           references plugin can ``initialize()`` (it scans the
+    #           directory at construction time).  Without this the
+    #           plugin fails to expose, agents lose preselected
+    #           reference content, and start hallucinating "no
+    #           services configured".
+    #       (b) Extension-fragments include resolved to an absolute
+    #           path at render time (``{fragments_dir}`` placeholder)
+    #           instead of ``@{{HOME}}/...``.  ``apparmor_parser``
+    #           running under sudo evaluates ``@{{HOME}}`` against
+    #           the parser's environment, not the daemon user's
+    #           home, so the include silently misses extension
+    #           fragments.
+    #   9 — Extension fragments are now INLINED at render time
+    #       instead of resolved via ``include if exists`` directive.
+    #       Even with absolute paths, ``apparmor_parser`` was finding
+    #       fragment files via the include glob but not inlining
+    #       their content into the parsed profile (silent miss with
+    #       no error).  Reading the fragments at render time and
+    #       embedding them directly below the header sidesteps the
+    #       parser quirk and produces a self-contained profile
+    #       that's also easier to debug from kernel denial logs.
+    #  10 — Comment block introducing the inline-fragments section
+    #       cleaned up to remove backtick-wrapped strings and
+    #       brace-wrapped placeholder names.  ``str.format()`` was
+    #       substituting placeholder names mentioned inside the
+    #       comment, which produced a corrupted profile (backticks
+    #       and stray fragment content escaping into the comment
+    #       body) and tripped the AppArmor lexer with
+    #       ``unexpected character: '`'`` errors at load time.
+    _TEMPLATE_VERSION = 10
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -123,6 +172,17 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # readable so discover_profiles() can scan all three tiers.
   {premium_rules}
 
+  # ---- client-supplied config_root (read-only, optional) ----
+  # When the client connects with ``config_root`` set on
+  # ``ClientConfigRequest`` (decoupling read-only framework config from
+  # the agent's workspace), the profiles, agent .md files, prompts,
+  # references, completion_schemas, instructions, scripts, and services
+  # all live under that root rather than ``<workspace>/.jaato/``.  We
+  # grant read access to it so the daemon's discovery sites — and
+  # plugins that surface those files to the agent (references,
+  # prompt_library, etc.) — can keep working under confinement.
+  {config_root_rules}
+
   # ---- user-global jaato config (read-only) ----
   # Allow agent/profile/prompt/theme definitions from ~/.jaato/.
   # NOT allowed: credentials, *_auth.json, sibling workspaces.
@@ -138,9 +198,21 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   @{{HOME}}/.jaato/themes/**       r,
   @{{HOME}}/.jaato/services/       r,
   @{{HOME}}/.jaato/services/**     r,
+  @{{HOME}}/.jaato/references/     r,
+  @{{HOME}}/.jaato/references/**   r,
   @{{HOME}}/.jaato/keybindings.json r,
   @{{HOME}}/.jaato/theme.json       r,
   @{{HOME}}/.jaato/gc.json          r,
+
+  # ---- client-supplied env_file (read-only, optional) ----
+  # When the client passes ``env_file`` on ``ClientConfigRequest``,
+  # the daemon's session-creation path reads it to populate provider
+  # config (PROJECT_ID, JAATO_PROVIDER, etc.).  Reactor-spawned
+  # subagents go through the same path during ``create_session``,
+  # which fires from inside the parent's confined thread — without
+  # this grant, every reactor-spawned session fails with
+  # ``Permission denied`` on the env file.
+  {env_file_rule}
 
   # ---- global memories (read-write) ----
   # All sessions can propose and read cross-session memories.
@@ -255,6 +327,32 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # race between profile load and first selection.  Removed at session
   # teardown via _remove_all_reference_fragments().
   include if exists "{refs_include_glob}"
+
+  # ---- extension-supplied fragments (host-wide, optional) ----
+  # Daemon extensions (e.g. premium's reactor framework) may need
+  # additional grants for state files they own (reactor handoff
+  # gates, future cluster-state files, etc.) without leaking their
+  # specific paths into this public template.  Each extension drops
+  # a "*.rules" file at "~/.jaato/apparmor-fragments/" containing
+  # bare rules; the daemon's AppArmorManager._render_profile reads
+  # every matching file at session-creation time and INLINES the
+  # contents directly below this header.
+  #
+  # Inlining (instead of "include if exists") because apparmor_parser
+  # does not reliably expand globbed include paths in confinement
+  # context — fragments would land on disk but silently miss the
+  # profile, leaving confined sessions with Permission denied on
+  # extension-owned state.  Inline expansion at render time
+  # eliminates that whole class of failure.  Empty / missing dir is
+  # a no-op (the placeholder renders as a single comment line).
+  #
+  # Note: this comment block deliberately avoids backtick-wrapped
+  # strings and brace-wrapped tokens.  str.format() applied to this
+  # template substitutes any brace-pair like {{NAME}} (or {{NAME}})
+  # even inside comments, so embedding placeholder names would either
+  # corrupt the rendered profile (when the name resolves) or raise
+  # KeyError (when it does not).
+{extension_fragments_inline}
 }}
 '''
 
@@ -400,6 +498,8 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         self,
         session_id: str,
         workspace_path: str,
+        config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
     ) -> bool:
         """Create and load an AppArmor profile for a session.
 
@@ -411,6 +511,23 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             session_id: Session identifier (used in profile name).
             workspace_path: Absolute path to the session's workspace
                 directory.
+            config_root: Optional path to the client's
+                ``config_root`` override.  When set, the profile grants
+                read access to ``{config_root}/`` and ``{config_root}/**``
+                so the daemon's discovery sites can read profiles,
+                agent .md files, prompts, etc. from that root under
+                confinement.  When ``None``, the agent reads framework
+                config exclusively from the user-tier ``~/.jaato/``
+                rules already in the template.
+            env_file: Optional absolute path to the client-supplied
+                env_file (from ``ClientConfigRequest.env_file``).  When
+                set, the profile grants read access to that exact file
+                so reactor-spawned sessions can populate provider
+                config (PROJECT_ID, JAATO_PROVIDER, …) during
+                ``create_session`` from inside the parent's confined
+                thread.  Without this, a confined parent that triggers
+                a reactor-spawned child fails with ``Permission
+                denied`` on the env file.
 
         Returns:
             True on success, False on failure (logged, not raised).
@@ -420,7 +537,9 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
         profile_name = self.get_profile_name(session_id)
         profile_path = self._profile_dir / profile_name
-        profile_content = self._render_profile(session_id, workspace_path)
+        profile_content = self._render_profile(
+            session_id, workspace_path, config_root, env_file,
+        )
 
         try:
             profile_path.write_text(profile_content)
@@ -772,7 +891,13 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         """Return the AppArmor profile name for a session."""
         return f"jaato-ws-{session_id}"
 
-    def _render_profile(self, session_id: str, workspace_path: str) -> str:
+    def _render_profile(
+        self,
+        session_id: str,
+        workspace_path: str,
+        config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
+    ) -> str:
         """Render the profile template with session-specific values.
 
         The template uses Python ``str.format()`` placeholders.
@@ -788,6 +913,56 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         else:
             premium_rules = "# (no premium package installed)"
 
+        if config_root:
+            cr = str(Path(config_root).expanduser().resolve())
+            config_root_rules = (
+                f"{cr}/         r,\n"
+                f"  {cr}/**       r,"
+            )
+        else:
+            config_root_rules = "# (no client-supplied config_root override)"
+
+        if env_file:
+            ef = str(Path(env_file).expanduser().resolve())
+            env_file_rule = f"{ef} r,"
+        else:
+            env_file_rule = "# (no client-supplied env_file)"
+
+        # Inline extension-supplied fragments at render time.  Reads
+        # every ``*.rules`` file under ``~/.jaato/apparmor-fragments/``
+        # and concatenates the contents below the header in
+        # PROFILE_TEMPLATE.  Each fragment's content is wrapped with a
+        # ``# === <filename> ===`` comment so kernel denials can be
+        # traced back to the originating extension when debugging
+        # ``dmesg | grep apparmor`` output.
+        fragments_dir = (
+            Path("~/.jaato/apparmor-fragments").expanduser().resolve()
+        )
+        extension_fragments_inline = (
+            "  # (no extension fragments)"
+        )
+        if fragments_dir.is_dir():
+            chunks: List[str] = []
+            for path in sorted(fragments_dir.glob("*.rules")):
+                try:
+                    body = path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    logger.warning(
+                        "Skipping unreadable AppArmor fragment %s: %s",
+                        path, exc,
+                    )
+                    continue
+                # Indent each line by two spaces to match the
+                # surrounding profile body's indentation.  Strip
+                # trailing whitespace per-line, preserve blanks.
+                indented = "\n".join(
+                    f"  {line.rstrip()}" if line.strip() else ""
+                    for line in body.splitlines()
+                )
+                chunks.append(f"  # === {path.name} ===\n{indented}")
+            if chunks:
+                extension_fragments_inline = "\n\n".join(chunks)
+
         return self.PROFILE_TEMPLATE.format(
             template_version=self._TEMPLATE_VERSION,
             session_id=session_id,
@@ -795,7 +970,10 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             venv_path=str(self._venv_path),
             source_root=str(self._source_root),
             premium_rules=premium_rules,
+            config_root_rules=config_root_rules,
+            env_file_rule=env_file_rule,
             refs_include_glob=f"{self._refs_dir(session_id)}/*",
+            extension_fragments_inline=extension_fragments_inline,
         )
 
     def _refs_dir(self, session_id: str) -> Path:

@@ -28,6 +28,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -42,6 +43,54 @@ from shared.subprocess_runner import run_command as _run_command, RunResult
 
 if TYPE_CHECKING:
     from ..permission.plugin import PermissionPlugin
+
+
+def tokenize_prompt_args(text: str) -> List[str]:
+    """Split a prompt-args string into tokens, respecting double-quoted spans.
+
+    Used by both the ``%name args...`` text path (in
+    :class:`server.session_manager.SessionManager._expand_prompt_references`)
+    and the ``/prompt name args...`` slash-command path
+    (:meth:`PromptLibraryPlugin._execute_user_command`) so that
+    multi-word values can be delivered without positional misalignment.
+
+    Tokenization rules:
+      * Whitespace separates tokens (same as ``str.split``).
+      * Double-quoted spans (``"foo bar"``) are kept as a single token,
+        with the surrounding quotes stripped.  Useful for named args
+        like ``key="value with spaces"``.
+      * Apostrophes (``'``) are **literal** characters — many natural
+        languages (Spanish, French, English contractions) embed them
+        in regular text, so honoring them as quote chars would corrupt
+        common values.  This is the key divergence from default POSIX
+        ``shlex.split``.
+      * Backslash escapes inside double-quoted spans are honored
+        (``"a\\"b"`` → ``a"b``).
+      * Unterminated quotes degrade gracefully: the function falls back
+        to plain whitespace splitting and returns the raw tokens, so
+        malformed input is never a hard error at this layer.
+
+    Args:
+        text: The args portion of a prompt invocation, after the
+            ``%name`` or subcommand has been stripped.
+
+    Returns:
+        Token list ready to feed to the positional / ``key=value``
+        partitioner in :meth:`_execute_prompt_command`.
+    """
+    if not text:
+        return []
+    lex = shlex.shlex(text, posix=True)
+    lex.whitespace_split = True
+    lex.quotes = '"'
+    lex.commenters = ''
+    try:
+        return list(lex)
+    except ValueError:
+        # Unterminated quote or similar — fall back to plain split so
+        # malformed input still produces *some* tokenization rather
+        # than failing the whole prompt expansion.
+        return text.split()
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, HelpLines
@@ -129,6 +178,12 @@ class PromptLibraryPlugin:
 
     def __init__(self):
         self._workspace_path: Optional[str] = None
+        # Optional override for the read-only framework-config root.
+        # When non-None, prompt/agent/skill discovery uses
+        # ``<config_root>/{prompts,agents,skills,commands}/`` in place
+        # of the workspace tier; the user tier (``~/.jaato/...``) is
+        # always honored.  Set by ``PluginRegistry.set_config_root``.
+        self._config_root: Optional[str] = None
         self._initialized = False
         self._agent_name: Optional[str] = None
         # Cache of discovered prompts (refreshed on each list)
@@ -178,6 +233,19 @@ class PromptLibraryPlugin:
         """Set the workspace root path (called by registry)."""
         self._workspace_path = path
         self._trace(f"set_workspace_path: {path}")
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Adopt the registry-broadcast ``config_root`` override.
+
+        When ``path`` is non-None, prompt/agent/skill/command discovery
+        routes the workspace tier to ``<path>/<subdir>/`` instead of
+        ``<workspace>/.jaato/<subdir>/``.  ``.claude/`` interop dirs
+        stay anchored to ``<workspace>/`` regardless because they're
+        external tooling artifacts.  When ``path`` is ``None``, the
+        plugin falls back to today's workspace-anchored discovery.
+        """
+        self._config_root = path
+        self._trace(f"set_config_root: {path}")
 
     def set_confirm_callback(
         self,
@@ -256,38 +324,50 @@ class PromptLibraryPlugin:
 
         sources = []
 
-        # Workspace-relative sources (only when workspace is set)
-        if workspace:
+        # Workspace tier — config_root takes precedence when set,
+        # routing the workspace .jaato/{agents,prompts,skills,commands}
+        # subdirectories to ``<config_root>/{...}/`` instead.
+        # ``.claude/`` interop dirs stay anchored to the actual
+        # workspace because they're external (Claude Code) artifacts.
+        jaato_workspace_root: Optional[Path] = None
+        if self._config_root:
+            jaato_workspace_root = Path(self._config_root).expanduser().resolve()
+        elif workspace:
+            jaato_workspace_root = workspace / ".jaato"
+
+        if jaato_workspace_root is not None:
             sources.extend([
-                # Jaato agents — parameterized prompts used as session identity
                 PromptSource(
-                    path=workspace / ".jaato" / "agents",
+                    path=jaato_workspace_root / "agents",
                     source_name="project-agents",
                     entry_file=PROMPT_ENTRY_FILE,
                     writable=True,
                 ),
-                # Jaato native prompts (writable)
                 PromptSource(
-                    path=workspace / ".jaato" / "prompts",
+                    path=jaato_workspace_root / "prompts",
                     source_name="project",
                     entry_file=PROMPT_ENTRY_FILE,
                     writable=True,
                 ),
-                # Jaato skills (writable, for ClawdHub installs)
                 PromptSource(
-                    path=workspace / ".jaato" / "skills",
+                    path=jaato_workspace_root / "skills",
                     source_name="project-skills",
                     entry_file=SKILL_ENTRY_FILE,
                     writable=True,
                 ),
-                # Legacy slash_command directory (read-only, superseded by prompts/skills)
                 PromptSource(
-                    path=workspace / ".jaato" / "commands",
+                    path=jaato_workspace_root / "commands",
                     source_name="legacy-commands",
                     entry_file=PROMPT_ENTRY_FILE,
                     writable=False,
                 ),
-                # Claude Code interop (read-only)
+            ])
+
+        # Claude-Code interop sources stay anchored to the actual
+        # workspace dir even when config_root is set — they're
+        # external tooling artifacts that live outside our control.
+        if workspace:
+            sources.extend([
                 PromptSource(
                     path=workspace / ".claude" / "skills",
                     source_name="claude-skills",
@@ -2061,7 +2141,7 @@ description: {description}
         # Extract args - could be a list or have 'args' key
         positional_args = args.get('args', [])
         if isinstance(positional_args, str):
-            positional_args = positional_args.split() if positional_args else []
+            positional_args = tokenize_prompt_args(positional_args)
 
         return self._execute_prompt_command({'args': positional_args})
 

@@ -31,12 +31,25 @@ DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_CONTEXT_LENGTH = 32768
 
 
-def resolve_api_key() -> Optional[str]:
+def resolve_api_key(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Resolve NIM API key from environment or stored credentials.
 
     Resolution priority:
     1. JAATO_NIM_API_KEY environment variable
-    2. Stored credentials from nim-auth plugin
+    2. Stored credentials from nim-auth plugin (resolves under
+       ``config_root`` then workspace then ``~/.jaato/`` per
+       :func:`shared.config_resolver.resolve_config_search_path`).
+
+    Args:
+        workspace_path: Optional explicit workspace path passed through to
+            the credential lookup.
+        config_root: Optional read-only-config root override.  When set,
+            stored credentials are looked up under
+            ``<config_root>/nim_auth.json`` instead of
+            ``<workspace>/.jaato/nim_auth.json``.
 
     Returns:
         API key if found, None otherwise.
@@ -46,7 +59,9 @@ def resolve_api_key() -> Optional[str]:
         return env_key
     try:
         from .auth import get_stored_api_key
-        return get_stored_api_key()
+        return get_stored_api_key(
+            workspace_path=workspace_path, config_root=config_root,
+        )
     except ImportError:
         return None
 

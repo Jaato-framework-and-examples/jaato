@@ -164,6 +164,11 @@ class PluginRegistry:
         self._core_auto_approved: Set[str] = set()  # Auto-approved core tools
         # Workspace path for plugins that need it
         self._workspace_path: Optional[str] = None
+        # Optional override for the read-only framework-config root.
+        # When None (the default), plugins that consult
+        # ``shared.config_resolver.resolve_config_search_path`` fall back
+        # to ``<workspace_path>/.jaato/`` (today's behavior).
+        self._config_root: Optional[str] = None
         # Cache: tool_name -> plugin for get_plugin_for_tool() lookups
         self._tool_plugin_cache: Dict[str, ToolPlugin] = {}
         # Bootstrap timing: plugin name -> timing data
@@ -907,6 +912,32 @@ class PluginRegistry:
                 plugin.set_plugin_registry(self)
                 _trace(f" Plugin '{name}' re-wired with registry")
 
+            # Re-broadcast workspace_path / config_root onto the
+            # re-initialized plugin.  These are normally pushed by
+            # ``set_workspace_path`` / ``set_config_root`` broadcast
+            # methods that fire only on registry-level state changes —
+            # not on per-plugin re-init.  Without this replay, a
+            # subagent that re-exposes a plugin with a tweaked config
+            # (e.g. agent_name injected) silently rebuilds the plugin
+            # with no awareness of the broadcasted overrides, causing
+            # path-anchored state (schema_store base, config-anchored
+            # caches, etc.) to drift back to defaults.
+            if hasattr(plugin, 'set_workspace_path') and self._workspace_path:
+                try:
+                    plugin.set_workspace_path(self._workspace_path)
+                    _trace(f" Plugin '{name}' replayed set_workspace_path")
+                except Exception as exc:
+                    _trace(f" Plugin '{name}' set_workspace_path replay failed: {exc}")
+            if (
+                hasattr(plugin, 'set_config_root')
+                and getattr(self, '_config_root', None) is not None
+            ):
+                try:
+                    plugin.set_config_root(self._config_root)
+                    _trace(f" Plugin '{name}' replayed set_config_root")
+                except Exception as exc:
+                    _trace(f" Plugin '{name}' set_config_root replay failed: {exc}")
+
             # Restore any authorized/denied paths that were lost during
             # re-initialization (the plugin's config reload may not have
             # all tiers — e.g. subagent has no parent's session config).
@@ -1075,6 +1106,41 @@ class PluginRegistry:
             The workspace path, or None if not set.
         """
         return self._workspace_path
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Set the read-only framework-config root override and broadcast.
+
+        Plugins that implement ``set_config_root(path)`` will be
+        notified.  Plugins without that method are skipped (parity
+        with :meth:`set_workspace_path`).  When ``path`` is ``None``,
+        plugins fall back to ``<workspace_path>/.jaato/`` for config
+        reads (today's behavior).
+
+        Args:
+            path: Absolute path to the config root, or ``None`` to
+                clear any prior override.
+        """
+        self._config_root: Optional[str] = path
+        _trace(f"set_config_root: {path}")
+
+        for name in self._exposed:
+            plugin = self._plugins.get(name)
+            if plugin and hasattr(plugin, 'set_config_root'):
+                try:
+                    plugin.set_config_root(path)
+                    _trace(f"  -> {name}.set_config_root()")
+                except Exception as exc:
+                    _trace(f"  -> {name}.set_config_root() failed: {exc}")
+
+    def get_config_root(self) -> Optional[str]:
+        """Get the current read-only framework-config root override.
+
+        Returns:
+            The config_root override, or ``None`` if no override is in
+            effect (the default — loaders fall back to
+            ``<workspace_path>/.jaato/``).
+        """
+        return getattr(self, '_config_root', None)
 
     def broadcast_history_cleared(self) -> None:
         """Notify all plugins that the session history has been cleared.

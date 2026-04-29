@@ -29,6 +29,7 @@ COMPLETION_SCHEMAS_SUBDIR = "completion_schemas"
 def resolve_completion_schema(
     schema_ref: Union[str, Dict[str, Any], None],
     workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Resolve a profile's ``completion_payload_schema`` field to a JSON Schema dict.
 
@@ -46,6 +47,9 @@ def resolve_completion_schema(
             ``None``, only the absolute-path and home-tier
             (``~/.jaato/completion_schemas/<path>``) are tried for relative
             references.
+        config_root: Optional override for the workspace tier.  When set,
+            ``<config_root>/completion_schemas/<path>`` replaces
+            ``<workspace>/.jaato/completion_schemas/<path>``.
 
     Returns:
         The resolved JSON Schema dict, or ``None`` when ``schema_ref`` is
@@ -67,12 +71,13 @@ def resolve_completion_schema(
         )
         return None
 
-    resolved = _resolve_schema_path(schema_ref, workspace_path)
+    resolved = _resolve_schema_path(schema_ref, workspace_path, config_root)
     if resolved is None:
         logger.warning(
             "completion_payload_schema path not found in any tier: %s "
-            "(tried absolute, <workspace>/.jaato/%s/, ~/.jaato/%s/)",
-            schema_ref, COMPLETION_SCHEMAS_SUBDIR, COMPLETION_SCHEMAS_SUBDIR,
+            "(tried absolute, config_root/%s/, <workspace>/.jaato/%s/, ~/.jaato/%s/)",
+            schema_ref, COMPLETION_SCHEMAS_SUBDIR,
+            COMPLETION_SCHEMAS_SUBDIR, COMPLETION_SCHEMAS_SUBDIR,
         )
         return None
 
@@ -99,15 +104,17 @@ def resolve_completion_schema(
 def _resolve_schema_path(
     path: str,
     workspace_path: Optional[str],
+    config_root: Optional[str] = None,
 ) -> Optional[Path]:
     """Three-tier path resolution for completion schemas.
 
     Resolution order:
 
     1. If ``path`` is absolute, use it directly (must exist).
-    2. If ``workspace_path`` is given, try
-       ``<workspace>/.jaato/completion_schemas/<path>``.
-    3. Fall back to ``~/.jaato/completion_schemas/<path>``.
+    2. **Workspace tier** —
+       * if ``config_root`` is set: ``<config_root>/completion_schemas/<path>``;
+       * else if ``workspace_path`` is set: ``<workspace>/.jaato/completion_schemas/<path>``.
+    3. **User tier** — ``~/.jaato/completion_schemas/<path>``.
 
     Returns the resolved ``Path`` pointing at an existing file, or
     ``None`` when no tier matches.
@@ -116,7 +123,11 @@ def _resolve_schema_path(
     if p.is_absolute():
         return p if p.is_file() else None
 
-    if workspace_path:
+    if config_root:
+        cr_path = Path(config_root).expanduser().resolve() / COMPLETION_SCHEMAS_SUBDIR / path
+        if cr_path.is_file():
+            return cr_path
+    elif workspace_path:
         ws_path = Path(workspace_path) / ".jaato" / COMPLETION_SCHEMAS_SUBDIR / path
         if ws_path.is_file():
             return ws_path

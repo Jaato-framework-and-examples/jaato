@@ -128,6 +128,9 @@ class BundlePlugin:
         """Cache the workspace path for tier-relative output defaults."""
         self._workspace_path = path
 
+    def get_system_instructions(self) -> Optional[str]:
+        return None
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """No model-invokable tools — bundles are an operator concern."""
         return []

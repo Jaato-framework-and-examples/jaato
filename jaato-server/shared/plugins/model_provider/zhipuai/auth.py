@@ -52,26 +52,43 @@ class ZhipuAICredentials:
         )
 
 
-def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
+def _get_token_storage_path(
+    for_write: bool = False,
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Path:
     """Get path to credentials storage file.
 
     Follows jaato convention:
-    1. Project .jaato/ first (project-specific auth)
-    2. Home ~/.jaato/ second (user-level default)
+    1. Project tier — ``<config_root>/zhipuai_auth.json`` when
+       ``config_root`` is set, else
+       ``<workspace>/.jaato/zhipuai_auth.json``.  Project-specific auth.
+    2. Home tier — ``~/.jaato/zhipuai_auth.json``.  User-level default.
 
     Uses JAATO_WORKSPACE_ROOT env var if set (for subagents), otherwise Path.cwd().
+    Uses JAATO_CONFIG_ROOT env var as a fallback for ``config_root``,
+    so subagents and long-lived plugins inherit the override that
+    ``JaatoServer`` exported on session activation.
 
     Args:
         for_write: If True, returns the path to write to (prefers project dir
                    if it exists, otherwise home). If False, returns the first
                    existing file or the default write location.
+        workspace_path: Optional explicit workspace path override.
+        config_root: Optional explicit read-only-config root override.
+            When set, replaces the workspace-anchored project tier.
+            See :mod:`shared.config_resolver`.
 
     Returns:
         Path to credentials storage file.
     """
     # Use explicit workspace path if set (thread-safe for subagents)
     workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    project_path = Path(workspace) / ".jaato" / "zhipuai_auth.json"
+    effective_config_root = config_root or os.environ.get("JAATO_CONFIG_ROOT")
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "zhipuai_auth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "zhipuai_auth.json"
     home_path = Path.home() / ".jaato" / "zhipuai_auth.json"
 
     if for_write:
@@ -99,7 +116,10 @@ def save_credentials(credentials: ZhipuAICredentials, workspace_path: Optional[s
         os.chmod(path, 0o600)
 
 
-def load_credentials(workspace_path: Optional[str] = None) -> Optional[ZhipuAICredentials]:
+def load_credentials(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[ZhipuAICredentials]:
     """Load credentials from persistent storage.
 
     Returns None if the file is absent **or** if it cannot be parsed.  When
@@ -108,13 +128,19 @@ def load_credentials(workspace_path: Optional[str] = None) -> Optional[ZhipuAICr
     is visible in the provider trace log instead of being silently
     swallowed.  Callers that need to surface the specific failure reason
     should use :func:`try_load_credentials_with_reason` instead.
+
+    See :func:`_get_token_storage_path` for the resolver chain;
+    ``config_root`` overrides the workspace tier when set.
     """
-    creds, _ = try_load_credentials_with_reason(workspace_path=workspace_path)
+    creds, _ = try_load_credentials_with_reason(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     return creds
 
 
 def try_load_credentials_with_reason(
     workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> Tuple[Optional[ZhipuAICredentials], Optional[str]]:
     """Load credentials and return a reason string when the load fails.
 
@@ -131,7 +157,9 @@ def try_load_credentials_with_reason(
     "not configured" from "configured but broken" and surface the actual
     error instead of reporting "No credentials found".
     """
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
 
     if not path.exists():
         return None, None
@@ -160,26 +188,39 @@ def try_load_credentials_with_reason(
         return None, reason
 
 
-def clear_credentials(workspace_path: Optional[str] = None) -> None:
+def clear_credentials(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> None:
     """Clear stored credentials."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if path.exists():
         path.unlink()
 
 
-def get_stored_api_key(workspace_path: Optional[str] = None) -> Optional[str]:
+def get_stored_api_key(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Get stored API key if available.
 
     Returns:
         API key string, or None if not stored.
     """
-    creds = load_credentials(workspace_path=workspace_path)
+    creds = load_credentials(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if creds:
         return creds.api_key
     return None
 
 
-def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[str]:
+def get_credential_file_path(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Return the path of the credential file that would be loaded.
 
     Used by the provider to report which credential source was used
@@ -190,7 +231,9 @@ def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[s
         String path like ``"~/.jaato/zhipuai_auth.json"`` or
         ``".jaato/zhipuai_auth.json"``, or None.
     """
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if not path.exists():
         return None
     home = Path.home()
@@ -199,13 +242,18 @@ def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[s
     return str(path)
 
 
-def get_stored_base_url() -> Optional[str]:
+def get_stored_base_url(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Get stored custom base URL if available.
 
     Returns:
         Base URL string, or None if not stored.
     """
-    creds = load_credentials()
+    creds = load_credentials(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if creds:
         return creds.base_url
     return None

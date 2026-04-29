@@ -6,7 +6,32 @@ Jaato's WebSocket server can confine each session to its own workspace directory
 
 AppArmor isolation is for **multi-tenant deployments** where the jaato server accepts WebSocket connections from untrusted or semi-trusted clients (dashboards, web components, remote teams). Each client's session gets a kernel-enforced sandbox.
 
-For local IPC usage (single user, `jaato` TUI), AppArmor is unnecessary — the user already has full filesystem access.
+For local IPC usage (single user, `jaato` TUI), AppArmor is unnecessary by default — the user already has full filesystem access.
+
+For **orchestrator-driven IPC harnesses** where the agent itself is the threat surface (LLM-driven tool calls in a sandbox directory, model-generated paths that need kernel enforcement), AppArmor is opt-in via the SDK:
+
+```python
+from jaato_sdk.client import IPCClient
+
+client = IPCClient(
+    socket_path="/tmp/jaato.sock",
+    workspace_path="/path/to/sandbox",       # rw inside the profile
+    config_root="/path/to/project/.jaato",   # readonly inside the profile
+    apparmor=True,                           # opt-in confinement
+)
+```
+
+When `apparmor=True`, the daemon provisions a per-session AppArmor profile (same machinery as the WS path). The agent's tool plugins (`cli`, `file_edit`, `interactive_shell`, etc.) can read / write inside `workspace_path`, read inside `config_root` and `~/.jaato/`, but cannot escape to arbitrary filesystem locations.
+
+Default remains `False` so the long-standing IPC behavior (sessions run unconfined for the local user's TUI) is unchanged.
+
+When AppArmor is unavailable on the host (non-Linux, kernel module not loaded, `apparmor_parser` missing) the session falls back to running unconfined — but **not silently**. The daemon always emits a `SystemMessageEvent` to the client describing the outcome:
+
+- `[apparmor] confinement applied (workspace=..., config_root=...)` (style `"info"`) when enforcement is in effect.
+- `[apparmor] requested but AppArmor is unavailable on this host (...) — running unconfined` (style `"warning"`) when it isn't.
+- `[apparmor] profile provisioning failed (see daemon log) — running unconfined` (style `"warning"`) when provisioning fails.
+
+Surface these in your IPC client's event loop so the user can see at a glance whether kernel confinement is really active, instead of having to tail `/tmp/jaato.log`.
 
 ## Prerequisites
 
@@ -145,6 +170,35 @@ The server logs which mode is active at startup:
 AppArmor confinement enabled          → kernel-enforced isolation
 AppArmor confinement not available    → directory sandboxing only
 ```
+
+## Extension fragments
+
+Daemon extensions (e.g. `jaato_premium.reactors`) sometimes need additional grants for state files they own — `~/.jaato/handoff_gates.json` for the reactor's HandoffGate registry, future cluster-state files, etc. Patching those paths into the public profile template would leak extension-specific knowledge into the framework, so the contract is **fragments**:
+
+The profile template ends with:
+
+```
+include if exists "~/.jaato/apparmor-fragments/*.rules"
+```
+
+Each extension drops a `*.rules` file at startup (or installation time) into `~/.jaato/apparmor-fragments/`. The `apparmor_parser` splices every file there into every confined session.
+
+**Example** — the premium reactor's fragment grants its handoff-gates state file:
+
+```
+# ~/.jaato/apparmor-fragments/premium-reactor.rules
+@{HOME}/.jaato/handoff_gates.json     rwk,
+@{HOME}/.jaato/.handoff_gates.*.tmp   rwk,
+```
+
+**Conventions**:
+
+- Filename pattern: `<extension-name>.rules`. One file per extension keeps cleanup obvious.
+- Only put rules inside (no `profile { ... }` wrapper — these are spliced into the existing profile).
+- Use `@{HOME}` for the user's home directory; AppArmor expands it at parse time.
+- Empty / missing dir is a no-op thanks to `if exists`, so unconfined deployments and extension-less builds keep working.
+
+When adding a new fragment, restart any running sessions for the new rules to take effect — `apparmor_parser` reads the include at profile-load time, not on every transition.
 
 ## Troubleshooting
 

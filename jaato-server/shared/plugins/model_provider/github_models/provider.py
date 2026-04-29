@@ -315,6 +315,12 @@ class GitHubModelsProvider:
         if config is None:
             config = ProviderConfig()
 
+        # Stash the config so post-init helpers (verify_auth, refresh)
+        # can read the same workspace_path / config_root the runtime
+        # injected, instead of relying on env vars that aren't reliable
+        # for headless reactor-spawned sessions.
+        self._config = config
+
         # Set workspace path from config.extra if provided
         # This ensures token resolution can find workspace-specific OAuth tokens
         # even when JAATO_WORKSPACE_ROOT env var isn't set (e.g., subagent spawning)
@@ -447,7 +453,11 @@ class GitHubModelsProvider:
         # used to produce the same generic "no credentials found"
         # message, hiding the actual fixable problem (corrupt JSON,
         # missing field, permission error) from the user.
-        _, load_error = try_load_tokens_with_reason()
+        extra = getattr(self._config, 'extra', None) or {}
+        _, load_error = try_load_tokens_with_reason(
+            workspace_path=extra.get('workspace_path'),
+            config_root=extra.get('config_root'),
+        )
         if load_error and on_message:
             on_message(
                 f"GitHub OAuth token file found but could not be loaded: "

@@ -92,6 +92,7 @@ class JaatoClient:
 
     def __init__(self, provider_name: Optional[str] = None,
                  workspace_path: Optional[str] = None,
+                 config_root: Optional[str] = None,
                  instruction_token_cache: Optional[InstructionTokenCache] = None,
                  daemon_session_id: Optional[str] = None):
         """Initialize JaatoClient with specified provider.
@@ -102,6 +103,13 @@ class JaatoClient:
             workspace_path: Explicit workspace directory path. When running as
                 a daemon, the process cwd differs from the client's workspace.
                 Passed through to ``JaatoRuntime`` for instruction loading.
+            config_root: Optional override for the read-only framework-config
+                root.  When ``None``, the runtime falls back to
+                ``<workspace_path>/.jaato/`` for instruction discovery and
+                anything else that consults
+                :func:`shared.config_resolver.resolve_config_search_path`.
+                When set, that workspace-anchored search is replaced with
+                this path.  See ``shared/config_resolver.py``.
             instruction_token_cache: Optional shared cache for instruction token
                 counts.  When provided (e.g. from ``SessionManager``), cached
                 counts survive across session creates/restores.
@@ -113,6 +121,7 @@ class JaatoClient:
         self._session: Optional[JaatoSession] = None
         self._provider_name: Optional[str] = provider_name or get_default_provider()
         self._workspace_path: Optional[str] = workspace_path
+        self._config_root: Optional[str] = config_root
         self._instruction_token_cache: Optional[InstructionTokenCache] = instruction_token_cache
 
         # Store model name for session creation
@@ -376,6 +385,7 @@ class JaatoClient:
         self._runtime = JaatoRuntime(
             provider_name=self._provider_name,
             workspace_path=ws,
+            config_root=self._config_root,
             instruction_token_cache=self._instruction_token_cache,
         )
         self._runtime.connect(project, location)

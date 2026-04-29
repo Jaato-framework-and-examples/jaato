@@ -458,21 +458,27 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
 
 
 # Token storage location
-def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
+def _get_token_storage_path(
+    for_write: bool = False,
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Path:
     """Get path to token storage file.
 
     Follows jaato convention:
-    1. Project .jaato/ first (project-specific auth)
-    2. Home ~/.jaato/ second (user-level default)
+    1. Project tier — ``<config_root>/anthropic_oauth.json`` when set,
+       else ``<workspace>/.jaato/anthropic_oauth.json``.
+    2. Home tier — ``~/.jaato/anthropic_oauth.json``.
 
     Uses JAATO_WORKSPACE_ROOT env var if set (for subagents), otherwise Path.cwd().
+    Uses JAATO_CONFIG_ROOT env var when ``config_root`` is unset.
     This avoids race conditions when subagents run in thread pools with
     process-wide CWD changes.
 
     Args:
-        for_write: If True, returns the path to write to (prefers project dir
-                   if it exists, otherwise home). If False, returns the first
-                   existing file or the default write location.
+        for_write: If True, returns the path to write to.
+        workspace_path: Optional explicit workspace path override.
+        config_root: Optional explicit read-only-config root override.
 
     Returns:
         Path to token storage file.
@@ -480,7 +486,11 @@ def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[st
     # Use explicit workspace path if set (thread-safe for subagents)
     # Falls back to CWD for main agent
     workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    project_path = Path(workspace) / ".jaato" / "anthropic_oauth.json"
+    effective_config_root = config_root or os.environ.get("JAATO_CONFIG_ROOT")
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "anthropic_oauth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "anthropic_oauth.json"
     home_path = Path.home() / ".jaato" / "anthropic_oauth.json"
 
     if for_write:
@@ -495,9 +505,15 @@ def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[st
         return home_path
 
 
-def save_tokens(tokens: OAuthTokens, workspace_path: Optional[str] = None) -> None:
+def save_tokens(
+    tokens: OAuthTokens,
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> None:
     """Save tokens to persistent storage."""
-    path = _get_token_storage_path(for_write=True, workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        for_write=True, workspace_path=workspace_path, config_root=config_root,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
@@ -508,7 +524,10 @@ def save_tokens(tokens: OAuthTokens, workspace_path: Optional[str] = None) -> No
         os.chmod(path, 0o600)
 
 
-def load_tokens(workspace_path: Optional[str] = None) -> Optional[OAuthTokens]:
+def load_tokens(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[OAuthTokens]:
     """Load tokens from persistent storage.
 
     Returns None if the file is absent **or** cannot be parsed.  A broken
@@ -519,12 +538,15 @@ def load_tokens(workspace_path: Optional[str] = None) -> Optional[OAuthTokens]:
     ``verify_auth`` distinguish "never logged in" from "auth file is
     broken".
     """
-    tokens, _ = try_load_tokens_with_reason(workspace_path=workspace_path)
+    tokens, _ = try_load_tokens_with_reason(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     return tokens
 
 
 def try_load_tokens_with_reason(
     workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> Tuple[Optional["OAuthTokens"], Optional[str]]:
     """Load OAuth tokens and return a reason string when the load fails.
 
@@ -539,7 +561,9 @@ def try_load_tokens_with_reason(
     JSON, permission error, missing field) instead of a generic "no
     credentials" message.
     """
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
 
     if not path.exists():
         return None, None
@@ -568,14 +592,22 @@ def try_load_tokens_with_reason(
         return None, reason
 
 
-def clear_tokens(workspace_path: Optional[str] = None) -> None:
+def clear_tokens(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> None:
     """Clear stored tokens."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if path.exists():
         path.unlink()
 
 
-def get_valid_access_token() -> Optional[str]:
+def get_valid_access_token(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Get a valid access token, refreshing if needed.
 
     Returns:
@@ -584,14 +616,18 @@ def get_valid_access_token() -> Optional[str]:
     Raises:
         RuntimeError: If refresh fails.
     """
-    tokens = load_tokens()
+    tokens = load_tokens(workspace_path=workspace_path, config_root=config_root)
     if not tokens:
         return None
 
     # Refresh if expired
     if tokens.is_expired:
         tokens = refresh_tokens(tokens.refresh_token)
-        save_tokens(tokens)
+        save_tokens(
+            tokens,
+            workspace_path=workspace_path,
+            config_root=config_root,
+        )
 
     return tokens.access_token
 
@@ -623,11 +659,17 @@ def _get_pending_auth_path(for_write: bool = False) -> Path:
     """Get path to pending auth state file.
 
     Follows same convention as token storage:
-    1. Project .jaato/ first
-    2. Home ~/.jaato/ second
+    1. Project tier — ``<config_root>/anthropic_pending_auth.json`` when
+       ``JAATO_CONFIG_ROOT`` is set, else
+       ``<workspace>/.jaato/anthropic_pending_auth.json``.
+    2. Home tier — ``~/.jaato/anthropic_pending_auth.json``.
     """
     workspace = os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    project_path = Path(workspace) / ".jaato" / "anthropic_pending_auth.json"
+    effective_config_root = os.environ.get("JAATO_CONFIG_ROOT")
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "anthropic_pending_auth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "anthropic_pending_auth.json"
     home_path = Path.home() / ".jaato" / "anthropic_pending_auth.json"
 
     if for_write:

@@ -124,6 +124,12 @@ class ReferencesPlugin:
         self._project_root: Optional[str] = None
         # Workspace path set by PluginRegistry.set_workspace_path()
         self._workspace_path: Optional[str] = None
+        # Optional override for the read-only framework-config root,
+        # set by PluginRegistry.set_config_root().  When non-None,
+        # ``resolve_bundle_roots`` and other config-root-aware lookups
+        # use this path in place of the workspace tier.  See
+        # ``shared/config_resolver.py``.
+        self._config_root: Optional[str] = None
         # Plugin registry for cross-plugin communication (e.g., authorizing external paths)
         self._plugin_registry = None
         # Transitive reference metadata: maps each transitively discovered ID
@@ -231,6 +237,20 @@ class ReferencesPlugin:
         # (happens when workspace wasn't available at init time)
         if not self._sources:
             self._reload_catalog(path)
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Adopt the registry-broadcast config_root override.
+
+        Called by :meth:`PluginRegistry.set_config_root` whenever the
+        session's ``config_root`` changes.  Only stores the value —
+        the actual lookup honoring it lives in
+        :func:`resolve_bundle_roots` (which the plugin invokes when
+        scanning bundle roots).  When ``path`` is ``None`` the plugin
+        falls back to ``<workspace_path>/.jaato/`` for the workspace
+        tier (today's behavior).
+        """
+        self._config_root = path
+        self._trace(f"set_config_root: {path}")
 
     def _reload_catalog(self, workspace_path: str) -> None:
         """Reload the master catalog from .jaato/references/ using the given workspace.
@@ -1200,10 +1220,23 @@ class ReferencesPlugin:
         # handles that — but we splice in the user pair manually so that a
         # custom workspace ``references_dir`` (set in references.json) is
         # still honored.
+        #
+        # ``config_root`` overrides the workspace tier when set: a
+        # custom ``references_dir`` of ``".jaato/references"`` becomes
+        # ``<config_root>/references`` (the leading ``.jaato/`` is
+        # stripped because ``config_root`` already plays that role).
         workspace_refs_dir: Optional[Path] = None
         cfg_refs = Path(self._config.references_dir)
         if cfg_refs.is_absolute():
             workspace_refs_dir = cfg_refs
+        elif self._config_root:
+            cr = Path(self._config_root).expanduser().resolve()
+            parts = cfg_refs.parts
+            if parts and parts[0] == ".jaato":
+                inner = Path(*parts[1:]) if len(parts) > 1 else Path()
+            else:
+                inner = cfg_refs
+            workspace_refs_dir = cr / inner
         elif self._workspace_path:
             workspace_refs_dir = Path(self._workspace_path) / cfg_refs
         elif self._project_root:

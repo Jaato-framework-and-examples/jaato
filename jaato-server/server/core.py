@@ -297,6 +297,7 @@ class JaatoServer:
             Callable[[Event], Event]
         ] = []
         self._workspace_path = workspace_path
+        self._config_root: Optional[str] = None
         self._session_id = session_id
 
         # Core components
@@ -408,6 +409,33 @@ class JaatoServer:
         self._workspace_path = path
         # Propagate to plugins that need workspace awareness
         self._update_plugin_workspace(path)
+
+    @property
+    def config_root(self) -> Optional[str]:
+        """Get the read-only framework-config root override.
+
+        When ``None`` (the default), the daemon falls back to
+        ``<workspace_path>/.jaato/`` for read-only config discovery
+        (profiles, agents, prompts, references, completion_schemas,
+        instructions, scripts, services).  When set, that workspace-
+        anchored search is replaced with this path.  See
+        ``shared/config_resolver.py`` for the resolver chain.
+        """
+        return self._config_root
+
+    @config_root.setter
+    def config_root(self, path: Optional[str]) -> None:
+        """Set the read-only framework-config root override.
+
+        Mirrors :attr:`workspace_path` propagation: pushes the new
+        value through to the registry / runtime / session so plugins
+        that consult :func:`shared.config_resolver.resolve_config_search_path`
+        pick it up on their next discovery.
+        """
+        self._config_root = path
+        # Propagate to plugins that need config-root awareness; mirrors
+        # how _update_plugin_workspace pushes workspace_path through.
+        self._update_plugin_config_root(path)
 
     @property
     def terminal_width(self) -> int:
@@ -564,6 +592,11 @@ class JaatoServer:
         """Context manager to set workspace environment for the current scope.
 
         Sets JAATO_WORKSPACE_ROOT env var for plugins that read it during init.
+        Also sets JAATO_CONFIG_ROOT when a session-level override is in
+        effect, so auth-credential resolvers (which today key off
+        ``JAATO_WORKSPACE_ROOT`` to find ``<workspace>/.jaato/<provider>_auth.json``)
+        can route to the explicit config-root path instead.
+
         Does NOT call os.chdir() — that is process-global and not thread-safe,
         which corrupts cwd for concurrent sessions in daemon mode.
         All workspace-dependent code uses explicit absolute paths (cwd= in
@@ -574,14 +607,21 @@ class JaatoServer:
             return
 
         original_workspace_env = os.environ.get("JAATO_WORKSPACE_ROOT")
+        original_config_root_env = os.environ.get("JAATO_CONFIG_ROOT")
         try:
             os.environ["JAATO_WORKSPACE_ROOT"] = self._workspace_path
+            if self._config_root:
+                os.environ["JAATO_CONFIG_ROOT"] = self._config_root
             yield
         finally:
             if original_workspace_env is not None:
                 os.environ["JAATO_WORKSPACE_ROOT"] = original_workspace_env
             elif "JAATO_WORKSPACE_ROOT" in os.environ:
                 del os.environ["JAATO_WORKSPACE_ROOT"]
+            if original_config_root_env is not None:
+                os.environ["JAATO_CONFIG_ROOT"] = original_config_root_env
+            elif "JAATO_CONFIG_ROOT" in os.environ:
+                del os.environ["JAATO_CONFIG_ROOT"]
 
     @contextlib.contextmanager
     def _with_session_env(self):
@@ -662,6 +702,25 @@ class JaatoServer:
 
         self.registry.set_workspace_path(path)
         logger.debug(f"Broadcast workspace_path to plugins: {path}")
+
+    def _update_plugin_config_root(self, path: Optional[str]) -> None:
+        """Update config-root-aware plugins with the new override.
+
+        Mirrors :meth:`_update_plugin_workspace`.  Plugins that perform
+        read-only config discovery (profile loader, references config
+        loader, completion-schema loader, instructions loader, etc.)
+        consult :func:`shared.config_resolver.resolve_config_search_path`
+        — passing ``None`` falls back to today's
+        ``<workspace>/.jaato/`` chain, while a non-``None`` value
+        overrides the workspace tier.  Plugins that don't implement
+        ``set_config_root`` are simply skipped (parity with
+        ``set_workspace_path``).
+        """
+        if not hasattr(self, 'registry') or not self.registry:
+            return
+
+        self.registry.set_config_root(path)
+        logger.debug(f"Broadcast config_root to plugins: {path}")
 
     # =========================================================================
     # Event Emission
@@ -1224,6 +1283,7 @@ class JaatoServer:
                                 self._jaato = JaatoClient(
                                     provider_name=provider_to_use,
                                     workspace_path=self._workspace_path,
+                                    config_root=self._config_root,
                                     instruction_token_cache=self._instruction_token_cache,
                                     daemon_session_id=self._session_id,
                                 )
@@ -1319,6 +1379,20 @@ class JaatoServer:
                         with _s3.sub("set_workspace_path"):
                             if self._workspace_path:
                                 self.registry.set_workspace_path(self._workspace_path)
+                            # Mirror the workspace_path broadcast for
+                            # config_root.  The session_manager sets
+                            # ``server.config_root`` BEFORE
+                            # ``initialize()`` so plugins can load
+                            # their config from the right place; that
+                            # setter calls ``_update_plugin_config_root``
+                            # but the registry doesn't exist yet at
+                            # that point and the broadcast is a no-op.
+                            # Replay it here so the registry's stored
+                            # ``_config_root`` is populated and any
+                            # later ``set_config_root`` calls (e.g.
+                            # from re-discovery) inherit the value.
+                            if self._config_root:
+                                self.registry.set_config_root(self._config_root)
 
                         with _s3.sub("permission_init"):
                             self.permission_plugin = PermissionPlugin()
@@ -1831,9 +1905,14 @@ class JaatoServer:
         if self.registry:
             formatter_registry.set_tool_registry(self.registry)
 
-        # Try to load config from project directory (workspace) or user directory
-        # Use workspace_path if available, otherwise fall back to relative path
-        if self._workspace_path:
+        # Try to load config from project directory (workspace), an
+        # explicit config_root override, or the user directory.  The
+        # config_root path takes precedence over the workspace tier so
+        # the daemon can read formatters even when the agent's sandbox
+        # filesystem doesn't expose ``.jaato/``.
+        if self._config_root:
+            project_config = os.path.join(self._config_root, "formatters.json")
+        elif self._workspace_path:
             project_config = os.path.join(self._workspace_path, ".jaato/formatters.json")
         else:
             project_config = ".jaato/formatters.json"

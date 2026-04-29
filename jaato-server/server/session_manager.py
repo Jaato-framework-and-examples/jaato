@@ -99,6 +99,7 @@ class Session:
     description: Optional[str] = None
     is_dirty: bool = False  # True if has unsaved changes
     workspace_path: Optional[str] = None  # Client's working directory
+    config_root: Optional[str] = None  # Read-only framework-config root override
     user_inputs: List[str] = field(default_factory=list)  # Command history for prompt restoration
     interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
     provisioned: bool = False  # True if workspace was auto-provisioned by server
@@ -210,6 +211,7 @@ class SessionManager:
         agent_name: str,
         params: Optional[Dict[str, str]],
         workspace_path: Optional[str],
+        config_root: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Resolve an agent by name from .jaato/agents/ and .jaato/prompts/.
 
@@ -221,6 +223,11 @@ class SessionManager:
             agent_name: Agent name (filename stem).
             params: Parameter values for ``{{param}}`` placeholders.
             workspace_path: Workspace directory for agent resolution.
+            config_root: Optional override for the workspace tier.  When
+                set, scans ``<config_root>/agents/`` and
+                ``<config_root>/prompts/`` instead of the
+                workspace-anchored paths.  See
+                :func:`shared.config_resolver.resolve_config_search_path`.
 
         Returns:
             Dict with ``system_instructions``, ``description``,
@@ -229,7 +236,11 @@ class SessionManager:
         import re
 
         search_dirs = []
-        if workspace_path:
+        if config_root:
+            cr = pathlib.Path(config_root).expanduser().resolve()
+            search_dirs.append(cr / "agents")
+            search_dirs.append(cr / "prompts")
+        elif workspace_path:
             search_dirs.append(pathlib.Path(workspace_path) / ".jaato" / "agents")
             search_dirs.append(pathlib.Path(workspace_path) / ".jaato" / "prompts")
         search_dirs.append(pathlib.Path.home() / ".jaato" / "agents")
@@ -333,18 +344,22 @@ class SessionManager:
         self,
         profile_name: str,
         workspace_path: str,
+        config_root: Optional[str] = None,
     ) -> Tuple[Optional[Any], Optional[str]]:
         """Resolve an agent profile by name.
 
-        Discovers profiles from workspace ``.jaato/profiles/``,
-        user ``~/.jaato/profiles/``, and premium entry points, then
-        returns the matching ``SubagentProfile``.  When the profile
-        is not found, the second element carries a user-friendly error
-        message (e.g. a JSON parse error for a broken profile file).
+        Discovers profiles from the workspace tier (``<config_root>/profiles/``
+        when set, else ``<workspace_path>/.jaato/profiles/``), the user tier
+        (``~/.jaato/profiles/``), and premium entry points, then returns the
+        matching ``SubagentProfile``.  When the profile is not found, the
+        second element carries a user-friendly error message (e.g. a JSON
+        parse error for a broken profile file).
 
         Args:
             profile_name: Name of the profile to look up.
             workspace_path: Workspace directory containing ``.jaato/profiles/``.
+            config_root: Optional override for the workspace tier — see
+                :func:`shared.config_resolver.resolve_config_search_path`.
 
         Returns:
             Tuple of ``(profile, None)`` on success, or
@@ -352,7 +367,11 @@ class SessionManager:
         """
         from shared.plugins.subagent.config import discover_profiles
 
-        result = discover_profiles(".jaato/profiles", base_path=workspace_path)
+        result = discover_profiles(
+            ".jaato/profiles",
+            base_path=workspace_path,
+            config_root=config_root,
+        )
         profile = result.profiles.get(profile_name)
         if profile is not None:
             return profile, None
@@ -671,6 +690,13 @@ class SessionManager:
             self._client_config[client_id]['working_dir'] = event.working_dir
             logger.info(f"Client {client_id} set working_dir={event.working_dir}")
 
+        # Store config_root override (read-only framework config root).
+        # When unset, the daemon falls back to ``working_dir/.jaato/`` per
+        # ``shared.config_resolver.resolve_config_search_path``.
+        if event.config_root:
+            self._client_config[client_id]['config_root'] = event.config_root
+            logger.info(f"Client {client_id} set config_root={event.config_root}")
+
         # Store client's env_file path for session creation
         if event.env_file:
             self._client_config[client_id]['env_file'] = event.env_file
@@ -681,6 +707,19 @@ class SessionManager:
             self._client_config[client_id]['permission_timeout'] = event.permission_timeout
             logger.info(f"Client {client_id} set permission_timeout={event.permission_timeout}")
 
+        # Store opt-in AppArmor confinement flag.  Default is False —
+        # IPC sessions historically run unconfined because the local
+        # user already has full filesystem access.  Setting True asks
+        # the daemon to provision a per-session AppArmor profile when
+        # the client's next session is created (see session-creation
+        # hook registered in ``__main__.py``).  When AppArmor is
+        # unavailable the session falls back to running unconfined,
+        # but the hook emits a ``SystemMessageEvent`` describing the
+        # outcome — never a silent fallback.
+        if getattr(event, 'apparmor', False):
+            self._client_config[client_id]['apparmor'] = True
+            logger.info(f"Client {client_id} set apparmor=True")
+
         # Apply to current session if client is attached to one
         session_id = self._client_to_session.get(client_id)
         if session_id:
@@ -690,6 +729,12 @@ class SessionManager:
                 if event.working_dir:
                     session.server.workspace_path = event.working_dir
                     session.workspace_path = event.working_dir
+                if event.config_root:
+                    # Mirrors workspace_path propagation: stash on the
+                    # JaatoServer so JaatoRuntime / JaatoSession can read
+                    # it when threading through discovery sites.
+                    session.server.config_root = event.config_root
+                    session.config_root = event.config_root
                 if event.permission_timeout is not None:
                     self._apply_permission_timeout(session.server, event.permission_timeout)
 
@@ -711,6 +756,9 @@ class SessionManager:
         if 'working_dir' in config:
             server.workspace_path = config['working_dir']
             logger.debug(f"Applied working_dir={config['working_dir']} to server for client {client_id}")
+        if 'config_root' in config:
+            server.config_root = config['config_root']
+            logger.debug(f"Applied config_root={config['config_root']} to server for client {client_id}")
         if 'permission_timeout' in config:
             self._apply_permission_timeout(server, config['permission_timeout'])
 
@@ -844,6 +892,7 @@ class SessionManager:
         suppress_base_instructions: bool = False,
         initial_session_state: Optional[Dict[str, Any]] = None,
         inline_profile_data: Optional[Dict[str, Any]] = None,
+        config_root: Optional[str] = None,
     ) -> str:
         """Create a new session and attach the client.
 
@@ -926,12 +975,38 @@ class SessionManager:
         # which in turn determines the provider.
         client_config = self._client_config.get(client_id, {})
         session_env_file = client_config.get('env_file')
+
+        # Inherit config_root from the client's handshake (set via
+        # ``ClientConfigRequest.config_root``) when the caller didn't
+        # pass one explicitly.  An explicit per-session override (e.g.
+        # from a future inline-spec field) takes precedence over the
+        # client-level default.
+        if config_root is None:
+            config_root = client_config.get('config_root')
+        import os
         if not session_env_file and workspace_path:
             # Default to workspace/.env
-            import os
             workspace_env = os.path.join(workspace_path, '.env')
             if os.path.exists(workspace_env):
                 session_env_file = workspace_env
+
+        # Headless reactor-spawned sessions never get a client-config
+        # entry (their ``client_id`` is the synthetic ``_headless`` id),
+        # so the lookup above falls through.  When a ``config_root``
+        # was supplied, the project's ``.env`` typically lives **next
+        # to** the config_root dir (the orchestrator passes
+        # ``<project>/.jaato`` as config_root, so ``<project>/.env``
+        # is one level up).  Honoring that convention here means
+        # reactor-spawned sessions inherit env-driven config — most
+        # importantly the ``JAATO_REDACTION_ENABLED=off`` flag — so
+        # PII pseudonymization stays disabled when the workspace owner
+        # asked for it to be off.
+        if not session_env_file and config_root:
+            config_root_parent_env = os.path.join(
+                os.path.dirname(os.path.abspath(config_root)), '.env',
+            )
+            if os.path.exists(config_root_parent_env):
+                session_env_file = config_root_parent_env
 
         logger.info(f"Creating session for client {client_id}: env_file={session_env_file}")
         logger.info(f"  Client config: {client_config}")
@@ -954,7 +1029,9 @@ class SessionManager:
 
         if profile_name:
             resolve_path = workspace_path or str(pathlib.Path.home())
-            profile, error = self._resolve_profile(profile_name, resolve_path)
+            profile, error = self._resolve_profile(
+                profile_name, resolve_path, config_root=config_root,
+            )
             if profile is None:
                 self._emit_to_client(client_id, ErrorEvent(
                     error=error,
@@ -993,7 +1070,9 @@ class SessionManager:
         # becomes the session's system instructions.
         agent_instructions = None
         if agent_name:
-            agent_result = self._resolve_agent(agent_name, agent_params, workspace_path)
+            agent_result = self._resolve_agent(
+                agent_name, agent_params, workspace_path, config_root=config_root,
+            )
             if agent_result is None:
                 self._emit_to_client(client_id, ErrorEvent(
                     error=f"Agent '{agent_name}' not found in .jaato/agents/ or .jaato/prompts/",
@@ -1006,7 +1085,9 @@ class SessionManager:
             if not profile_name and agent_result.get("default_profile"):
                 default_prof = agent_result["default_profile"]
                 resolve_path = workspace_path or str(pathlib.Path.home())
-                profile, error = self._resolve_profile(default_prof, resolve_path)
+                profile, error = self._resolve_profile(
+                    default_prof, resolve_path, config_root=config_root,
+                )
                 if profile:
                     logger.info(f"  Using agent's default profile: {default_prof}")
                 else:
@@ -1044,6 +1125,12 @@ class SessionManager:
             agent_name=agent_name,
         )
 
+        # Push the resolved config_root onto the JaatoServer BEFORE
+        # ``initialize`` so plugins discovered during init see the
+        # override on their first ``set_config_root`` notification.
+        if config_root:
+            server.config_root = config_root
+
         # Initialize the server (events go directly to requesting client).
         # On failure, core.py already emits a detailed ConfigurationError —
         # no need for a redundant SessionError here.
@@ -1079,6 +1166,7 @@ class SessionManager:
             description=None,
             is_dirty=True,  # New session needs saving
             workspace_path=workspace_path,
+            config_root=config_root,
             provisioned=provisioned,
             created_by=created_by,
         )
@@ -1167,6 +1255,7 @@ class SessionManager:
         initial_history: Optional[List[Any]] = None,
         initial_session_state: Optional[Dict[str, Any]] = None,
         session_name: Optional[str] = None,
+        config_root: Optional[str] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -1222,6 +1311,7 @@ class SessionManager:
             profile_name=profile_name,
             agent_name=agent_name,
             initial_session_state=initial_session_state,
+            config_root=config_root,
         )
         if not session_id:
             return ""
@@ -2361,7 +2451,12 @@ class SessionManager:
             newline_pos = text.find('\n', args_start)
             args_end = newline_pos if newline_pos != -1 else len(text)
             args_text = text[args_start:args_end].strip()
-            prompt_args = args_text.split() if args_text else []
+            # Tokenize via the prompt library's shared splitter so that
+            # ``%name key="value with spaces"`` and ``%name "positional
+            # value"`` work consistently across the text path and the
+            # slash-command path.
+            from shared.plugins.prompt_library.plugin import tokenize_prompt_args
+            prompt_args = tokenize_prompt_args(args_text)
 
             # Strip the % prefix regardless of whether we find the prompt
             result = result[:match.start()] + prompt_name + result[match.end():]
@@ -2581,6 +2676,7 @@ class SessionManager:
     def list_profiles(
         self,
         workspace_path: Optional[str] = None,
+        config_root: Optional[str] = None,
     ) -> Tuple[List["ProfileSummary"], List["ProfileParseError"]]:
         """List available agent profiles.
 
@@ -2611,7 +2707,11 @@ class SessionManager:
         from shared.plugins.subagent.config import discover_profiles
         from jaato_sdk.events import ProfileSummary, ProfileParseError
 
-        discovery = discover_profiles(".jaato/profiles", base_path=workspace_path or ".")
+        discovery = discover_profiles(
+            ".jaato/profiles",
+            base_path=workspace_path or ".",
+            config_root=config_root,
+        )
         summaries: List[ProfileSummary] = []
         for name, profile in discovery.profiles.items():
             summaries.append(ProfileSummary(
