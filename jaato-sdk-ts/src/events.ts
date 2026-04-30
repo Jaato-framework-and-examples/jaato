@@ -103,6 +103,9 @@ export type JaatoEvents =
   | PeerAgentCompletedEvent
   | PeerStopRequestEvent
   | PeerStopAcknowledgedEvent
+  | GateAnnouncedEvent
+  | GateReleasedEvent
+  | GatesSnapshotEvent
   | InjectPromptRequest
   | ReplayMessagesRequest
   | ReplayMessagesResultEvent
@@ -221,7 +224,10 @@ export type EventType =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp = string;
 export type ProtocolVersion = string;
 /**
@@ -330,7 +336,10 @@ export type EventType1 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp1 = string;
 export type AgentId = string;
 export type AgentName = string;
@@ -444,7 +453,10 @@ export type EventType2 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp2 = string;
 export type AgentId1 = string;
 export type Source = string;
@@ -556,7 +568,10 @@ export type EventType3 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp3 = string;
 export type AgentId2 = string;
 export type Status = string;
@@ -667,7 +682,10 @@ export type EventType4 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp4 = string;
 export type AgentId3 = string;
 export type CompletedAt = string;
@@ -786,7 +804,10 @@ export type EventType5 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp5 = string;
 export type AgentId4 = string;
 export type ToolName = string;
@@ -897,7 +918,10 @@ export type EventType6 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp6 = string;
 export type AgentId5 = string;
 export type ToolName1 = string;
@@ -1015,7 +1039,10 @@ export type EventType7 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp7 = string;
 export type AgentId6 = string;
 export type CallId2 = string;
@@ -1126,7 +1153,10 @@ export type EventType8 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp8 = string;
 export type AgentId7 = string;
 export type RequestId = string;
@@ -1244,7 +1274,10 @@ export type EventType9 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp9 = string;
 export type AgentId8 = string;
 export type RequestId1 = string;
@@ -1365,7 +1398,10 @@ export type EventType10 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp10 = string;
 export type AgentId9 = string;
 export type RequestId2 = string;
@@ -1479,7 +1515,10 @@ export type EventType11 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp11 = string;
 export type EffectiveDefault = string;
 export type SuspensionScope = string | null;
@@ -1589,7 +1628,10 @@ export type EventType12 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp12 = string;
 export type AgentId10 = string;
 export type RequestId3 = string;
@@ -1702,7 +1744,10 @@ export type EventType13 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp13 = string;
 export type AgentId11 = string;
 export type RequestId4 = string;
@@ -1815,7 +1860,10 @@ export type EventType14 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp14 = string;
 export type AgentId12 = string;
 export type RequestId5 = string;
@@ -1934,7 +1982,10 @@ export type EventType15 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp15 = string;
 export type AgentId13 = string;
 export type RequestId6 = string;
@@ -2046,7 +2097,10 @@ export type EventType16 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp16 = string;
 export type AgentId14 = string;
 export type RequestId7 = string;
@@ -2161,7 +2215,10 @@ export type EventType17 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp17 = string;
 export type RequestId8 = string;
 export type Answers = string[];
@@ -2271,7 +2328,10 @@ export type EventType18 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp18 = string;
 export type AgentId15 = string;
 export type RequestId9 = string;
@@ -2383,7 +2443,10 @@ export type EventType19 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp19 = string;
 export type AgentId16 = string;
 export type RequestId10 = string;
@@ -2495,7 +2558,10 @@ export type EventType20 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp20 = string;
 export type RequestId11 = string;
 export type Response = string;
@@ -2605,7 +2671,10 @@ export type EventType21 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp21 = string;
 export type RequestId12 = string;
 export type SessionId = string;
@@ -2721,7 +2790,10 @@ export type EventType22 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp22 = string;
 export type RequestId13 = string;
 export type SessionId1 = string;
@@ -2833,7 +2905,10 @@ export type EventType23 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp23 = string;
 export type RequestId14 = string;
 export type Response1 = string;
@@ -2943,7 +3018,10 @@ export type EventType24 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp24 = string;
 export type RequestId15 = string;
 export type ProviderName = string;
@@ -3061,7 +3139,10 @@ export type EventType25 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp25 = string;
 export type RequestId16 = string;
 export type Connect = boolean;
@@ -3173,7 +3254,10 @@ export type EventType26 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp26 = string;
 export type AgentId17 = string;
 export type PlanName = string;
@@ -3286,7 +3370,10 @@ export type EventType27 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp27 = string;
 export type AgentId18 = string;
 export type StepId = string;
@@ -3414,7 +3501,10 @@ export type EventType28 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp28 = string;
 export type AgentId19 = string;
 /**
@@ -3523,7 +3613,10 @@ export type EventType29 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp29 = string;
 export type AgentId20 = string;
 export type PromptTokens = number;
@@ -3644,7 +3737,10 @@ export type EventType30 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp30 = string;
 export type AgentId21 = string;
 export type Threshold = number | null;
@@ -3757,7 +3853,10 @@ export type EventType31 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp31 = string;
 export type AgentId22 = string;
 /**
@@ -3866,7 +3965,10 @@ export type EventType32 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp32 = string;
 export type AgentId23 = string;
 export type TurnNumber = number;
@@ -3981,7 +4083,10 @@ export type EventType33 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp33 = string;
 export type AgentId24 = string;
 export type ContextLimit1 = number;
@@ -4094,7 +4199,10 @@ export type EventType34 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp34 = string;
 export type Message = string;
 export type Style = string;
@@ -4204,7 +4312,10 @@ export type EventType35 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp35 = string;
 export type Lines = unknown[][];
 /**
@@ -4313,7 +4424,10 @@ export type EventType36 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp36 = string;
 export type Step = string;
 export type Status2 = string;
@@ -4426,7 +4540,10 @@ export type EventType37 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp37 = string;
 export type Error3 = string;
 export type ErrorType = string;
@@ -4537,7 +4654,10 @@ export type EventType38 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp38 = string;
 export type Message2 = string;
 export type Attempt = number;
@@ -4650,7 +4770,10 @@ export type EventType39 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp39 = string;
 export type Sessions = {
   [k: string]: unknown;
@@ -4761,7 +4884,10 @@ export type EventType40 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp40 = string;
 export type SessionId2 = string;
 export type SessionName = string;
@@ -4891,7 +5017,10 @@ export type EventType41 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp41 = string;
 export type Memories1 = {
   [k: string]: unknown;
@@ -5002,7 +5131,10 @@ export type EventType42 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp42 = string;
 export type Paths = {
   [k: string]: string;
@@ -5113,7 +5245,10 @@ export type EventType43 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp43 = string;
 export type Services1 = {
   [k: string]: unknown;
@@ -5224,7 +5359,10 @@ export type EventType44 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp44 = string;
 export type SessionId3 = string;
 export type Description = string;
@@ -5334,7 +5472,10 @@ export type EventType45 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp45 = string;
 export type Name = string;
 export type Description1 = string;
@@ -5466,7 +5607,10 @@ export type EventType46 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp46 = string;
 export type Text1 = string;
 export type Attachments = {
@@ -5579,7 +5723,10 @@ export type EventType47 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp47 = string;
 export type RequestId17 = string;
 export type Response2 = string;
@@ -5692,7 +5839,10 @@ export type EventType48 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp48 = string;
 export type RequestId18 = string;
 export type QuestionIndex2 = number;
@@ -5803,7 +5953,10 @@ export type EventType49 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp49 = string;
 export type AgentId25 = string | null;
 /**
@@ -5912,7 +6065,10 @@ export type EventType50 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp50 = string;
 export type Name2 = string;
 /**
@@ -6021,7 +6177,10 @@ export type EventType51 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp51 = string;
 export type AgentId26 = string;
 export type EventNames = string[];
@@ -6131,7 +6290,10 @@ export type EventType52 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp52 = string;
 export type Command = string;
 export type Args = string[];
@@ -6244,7 +6406,10 @@ export type EventType53 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp53 = string;
 export type AgentId27 = string | null;
 /**
@@ -6353,7 +6518,10 @@ export type EventType54 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp54 = string;
 /**
  * All event types in the protocol.
@@ -6461,7 +6629,10 @@ export type EventType55 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp55 = string;
 export type Commands = {
   [k: string]: string;
@@ -6572,7 +6743,10 @@ export type EventType56 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp56 = string;
 /**
  * All event types in the protocol.
@@ -6680,7 +6854,10 @@ export type EventType57 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp57 = string;
 export type Tools1 = {
   [k: string]: unknown;
@@ -6792,7 +6969,10 @@ export type EventType58 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp58 = string;
 /**
  * All event types in the protocol.
@@ -6900,7 +7080,10 @@ export type EventType59 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp59 = string;
 export type ToolName11 = string;
 /**
@@ -7009,7 +7192,10 @@ export type EventType60 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp60 = string;
 export type Tools2 = {
   [k: string]: unknown;
@@ -7120,7 +7306,10 @@ export type EventType61 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp61 = string;
 export type CallId4 = string;
 export type AgentId28 = string;
@@ -7231,7 +7420,10 @@ export type EventType62 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp62 = string;
 export type CallId5 = string;
 export type Result1 = string;
@@ -7342,7 +7534,10 @@ export type EventType63 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp63 = string;
 export type AgentId29 = string;
 /**
@@ -7451,7 +7646,10 @@ export type EventType64 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp64 = string;
 export type AgentId30 = string;
 export type History = {
@@ -7566,16 +7764,21 @@ export type EventType65 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp65 = string;
 export type TraceLogPath = string | null;
 export type ProviderTraceLog = string | null;
 export type WorkingDir = string | null;
+export type ConfigRoot = string | null;
 export type EnvFile = string | null;
 export type Presentation = {
   [k: string]: unknown;
 } | null;
 export type PermissionTimeout = number | null;
+export type Apparmor = boolean;
 /**
  * All event types in the protocol.
  */
@@ -7682,7 +7885,10 @@ export type EventType66 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp66 = string;
 export type Text2 = string;
 export type PositionInQueue = number;
@@ -7792,7 +7998,10 @@ export type EventType67 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp67 = string;
 export type Text3 = string;
 /**
@@ -7901,7 +8110,10 @@ export type EventType68 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp68 = string;
 export type PartialResponseChars = number;
 export type UserPromptPreview = string;
@@ -8011,7 +8223,10 @@ export type EventType69 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp69 = string;
 export type SessionId4 = string;
 export type AgentId31 = string;
@@ -8123,7 +8338,10 @@ export type EventType70 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp70 = string;
 /**
  * All event types in the protocol.
@@ -8231,7 +8449,10 @@ export type EventType71 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp71 = string;
 export type Root = string;
 export type Workspaces = {
@@ -8343,7 +8564,10 @@ export type EventType72 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp72 = string;
 export type Name3 = string;
 /**
@@ -8452,7 +8676,10 @@ export type EventType73 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp73 = string;
 export type Name4 = string;
 export type Path = string;
@@ -8562,7 +8789,10 @@ export type EventType74 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp74 = string;
 export type Name5 = string;
 /**
@@ -8671,7 +8901,10 @@ export type EventType75 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp75 = string;
 export type Workspace = string;
 export type Configured = boolean;
@@ -8785,7 +9018,10 @@ export type EventType76 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp76 = string;
 export type Provider2 = string;
 export type Model2 = string | null;
@@ -8896,7 +9132,10 @@ export type EventType77 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp77 = string;
 export type Workspace1 = string;
 export type Provider3 = string;
@@ -9009,7 +9248,10 @@ export type EventType78 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp78 = string;
 export type Changes = {
   [k: string]: string;
@@ -9120,7 +9362,10 @@ export type EventType79 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp79 = string;
 export type Files = {
   [k: string]: string;
@@ -9232,7 +9477,10 @@ export type EventType80 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp80 = string;
 export type WorkspaceId = string;
 export type Name6 = string;
@@ -9346,7 +9594,10 @@ export type EventType81 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp81 = string;
 export type WorkspaceId1 = string;
 export type Staged = string[];
@@ -9459,7 +9710,10 @@ export type EventType82 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp82 = string;
 export type ServerId = string;
 export type ServerName = string;
@@ -9581,7 +9835,10 @@ export type EventType83 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp83 = string;
 export type RequestId19 = string;
 export type OriginServer = string;
@@ -9700,7 +9957,10 @@ export type EventType84 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp84 = string;
 export type RequestId20 = string;
 export type RemoteAgentId = string;
@@ -9810,7 +10070,10 @@ export type EventType85 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp85 = string;
 export type RequestId21 = string;
 export type Reason = string;
@@ -9920,7 +10183,10 @@ export type EventType86 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp86 = string;
 export type RequestId22 = string;
 export type RemoteAgentId1 = string;
@@ -10032,7 +10298,10 @@ export type EventType87 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp87 = string;
 export type RequestId23 = string;
 export type RemoteAgentId2 = string;
@@ -10146,7 +10415,10 @@ export type EventType88 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp88 = string;
 export type RequestId24 = string;
 export type RemoteAgentId3 = string;
@@ -10256,7 +10528,10 @@ export type EventType89 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp89 = string;
 export type RequestId25 = string;
 export type RemoteAgentId4 = string;
@@ -10366,11 +10641,15 @@ export type EventType90 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp90 = string;
-export type Text5 = string;
-export type SourceType = string;
-export type SourceId = string | null;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -10477,15 +10756,19 @@ export type EventType91 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp91 = string;
-export type RequestId26 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
+  [k: string]: unknown;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -10592,11 +10875,22 @@ export type EventType92 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp92 = string;
-export type RequestId27 = string;
-export type ResponseText = string;
-export type Error8 = string;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -10703,12 +10997,14 @@ export type EventType93 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp93 = string;
-export type RequestId28 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type Text5 = string;
+export type SourceType = string;
+export type SourceId = string | null;
 /**
  * All event types in the protocol.
  */
@@ -10815,11 +11111,18 @@ export type EventType94 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp94 = string;
-export type RequestId29 = string;
-export type ForkIndex = number;
-export type Error9 = string;
+export type RequestId26 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -10926,10 +11229,14 @@ export type EventType95 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp95 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type RequestId27 = string;
+export type ResponseText = string;
+export type Error8 = string;
 /**
  * All event types in the protocol.
  */
@@ -11036,10 +11343,15 @@ export type EventType96 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp96 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type RequestId28 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11146,11 +11458,14 @@ export type EventType97 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp97 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type RequestId29 = string;
+export type ForkIndex = number;
+export type Error9 = string;
 /**
  * All event types in the protocol.
  */
@@ -11257,9 +11572,13 @@ export type EventType98 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp98 = string;
-export type Target1 = string;
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -11366,9 +11685,13 @@ export type EventType99 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp99 = string;
-export type Policy = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -11475,9 +11798,14 @@ export type EventType100 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp100 = string;
-export type RequestId30 = string;
+export type Target = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -11584,8 +11912,347 @@ export type EventType101 =
   | "peer.agent_output"
   | "peer.agent_completed"
   | "peer.stop_request"
-  | "peer.stop_acknowledged";
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
 export type Timestamp101 = string;
+export type Target1 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType102 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "gc.config"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "event.external"
+  | "inject_prompt.request"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp102 = string;
+export type Policy = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType103 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "gc.config"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "event.external"
+  | "inject_prompt.request"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp103 = string;
+export type RequestId30 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType104 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "gc.config"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "event.external"
+  | "inject_prompt.request"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp104 = string;
 export type RequestId31 = string;
 export type DefaultPolicy = string;
 export type SessionDefaultPolicy = string | null;
@@ -12560,9 +13227,11 @@ export interface ClientConfigRequest {
   trace_log_path?: TraceLogPath;
   provider_trace_log?: ProviderTraceLog;
   working_dir?: WorkingDir;
+  config_root?: ConfigRoot;
   env_file?: EnvFile;
   presentation?: Presentation;
   permission_timeout?: PermissionTimeout;
+  apparmor?: Apparmor;
 }
 /**
  * Sent when a user prompt is queued during model processing.
@@ -12944,6 +13613,79 @@ export interface PeerStopAcknowledgedEvent {
   remote_agent_id?: RemoteAgentId4;
 }
 /**
+ * A reactor producer announced its intent on a held HandoffGate.
+ *
+ * Fired after a producer reactor calls ``gate.try_acquire(...)`` and
+ * then ``gate.announce(intent)``.  When ``intent.session_id`` is set,
+ * subscribers can ``client.attach_session(intent['session_id'])`` to
+ * observe the spawned session's events.
+ */
+export interface GateAnnouncedEvent {
+  type?: EventType90;
+  timestamp?: Timestamp90;
+  gate_name?: GateName;
+  tenant_id?: TenantId;
+  owner?: Owner;
+  intent?: Intent;
+  announced_at?: AnnouncedAt;
+}
+export interface Intent {
+  [k: string]: unknown;
+}
+/**
+ * A held HandoffGate was released (work completed, failed, or timed out).
+ *
+ * ``was_announced=False`` indicates the producer crashed or errored
+ * between ``try_acquire`` and ``announce`` — subscribers that
+ * auto-attached on the announce event simply have nothing to detach.
+ * ``outcome.status='timeout'`` indicates the watchdog auto-released
+ * on TTL expiry.
+ */
+export interface GateReleasedEvent {
+  type?: EventType91;
+  timestamp?: Timestamp91;
+  gate_name?: GateName1;
+  tenant_id?: TenantId1;
+  owner?: Owner1;
+  outcome?: Outcome;
+  released_at?: ReleasedAt;
+  was_announced?: WasAnnounced;
+}
+/**
+ * All currently-RED gates, sent on subscribe so late subscribers catch up.
+ *
+ * Mirrors ``SessionInfoEvent`` for sessions: rather than forcing
+ * every subscriber to track gate state externally across reconnects,
+ * the registry replays the live state once at subscription time.
+ */
+export interface GatesSnapshotEvent {
+  type?: EventType92;
+  timestamp?: Timestamp92;
+  gates?: Gates;
+  snapshot_at?: SnapshotAt;
+}
+/**
+ * Snapshot of a single gate's state.
+ *
+ * Used as the payload-level shape inside ``GatesSnapshotEvent`` and
+ * accessible as a typed property on the live events.  Public/private
+ * intent split is enforced server-side via ``public_intent_fields`` —
+ * cross-tenant subscribers receive only the public keys; same-tenant
+ * subscribers receive the full intent.
+ *
+ * See ``jaato-premium/docs/design/handoff-gate-api.md`` §3.4 for the canonical
+ * intent shape.
+ */
+export interface GateState {
+  gate_name?: GateName2;
+  tenant_id?: TenantId2;
+  state?: State;
+  owner?: Owner2;
+  intent?: Intent1;
+  acquired_at?: AcquiredAt;
+  expires_at?: ExpiresAt;
+}
+/**
  * Inject a prompt into a session's message queue.
  *
  * Maps to :meth:`JaatoSession.inject_prompt`.  ``source_type``
@@ -12960,8 +13702,8 @@ export interface PeerStopAcknowledgedEvent {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType90;
-  timestamp?: Timestamp90;
+  type?: EventType93;
+  timestamp?: Timestamp93;
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
@@ -12981,8 +13723,8 @@ export interface InjectPromptRequest {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType91;
-  timestamp?: Timestamp91;
+  type?: EventType94;
+  timestamp?: Timestamp94;
   request_id?: RequestId26;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
@@ -12991,8 +13733,8 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType92;
-  timestamp?: Timestamp92;
+  type?: EventType95;
+  timestamp?: Timestamp95;
   request_id?: RequestId27;
   response_text?: ResponseText;
   error?: Error8;
@@ -13013,8 +13755,8 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType93;
-  timestamp?: Timestamp93;
+  type?: EventType96;
+  timestamp?: Timestamp96;
   request_id?: RequestId28;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
@@ -13024,8 +13766,8 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType94;
-  timestamp?: Timestamp94;
+  type?: EventType97;
+  timestamp?: Timestamp97;
   request_id?: RequestId29;
   fork_index?: ForkIndex;
   error?: Error9;
@@ -13039,8 +13781,8 @@ export interface ResolveForkPointResultEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType95;
-  timestamp?: Timestamp95;
+  type?: EventType98;
+  timestamp?: Timestamp98;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -13052,8 +13794,8 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType96;
-  timestamp?: Timestamp96;
+  type?: EventType99;
+  timestamp?: Timestamp99;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -13064,8 +13806,8 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType97;
-  timestamp?: Timestamp97;
+  type?: EventType100;
+  timestamp?: Timestamp100;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -13079,8 +13821,8 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType98;
-  timestamp?: Timestamp98;
+  type?: EventType101;
+  timestamp?: Timestamp101;
   target?: Target1;
 }
 /**
@@ -13091,16 +13833,16 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType99;
-  timestamp?: Timestamp99;
+  type?: EventType102;
+  timestamp?: Timestamp102;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType100;
-  timestamp?: Timestamp100;
+  type?: EventType103;
+  timestamp?: Timestamp103;
   request_id?: RequestId30;
 }
 /**
@@ -13112,8 +13854,8 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType101;
-  timestamp?: Timestamp101;
+  type?: EventType104;
+  timestamp?: Timestamp104;
   request_id?: RequestId31;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
@@ -13248,4 +13990,7 @@ export const EventTypeValue = {
   PEER_AGENT_COMPLETED: "peer.agent_completed",
   PEER_STOP_REQUEST: "peer.stop_request",
   PEER_STOP_ACKNOWLEDGED: "peer.stop_acknowledged",
+  GATE_ANNOUNCED: "gate.announced",
+  GATE_RELEASED: "gate.released",
+  GATES_SNAPSHOT: "gates.snapshot",
 } as const;
