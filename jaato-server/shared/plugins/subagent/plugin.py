@@ -2461,7 +2461,10 @@ class SubagentPlugin:
             parent_session = self._parent_session
             logger.debug(f"SUBAGENT_DEBUG: Saved parent_session={parent_session} (is None={parent_session is None})")
 
-            # Create session
+            # Create session.  Pass ``agent_params`` through so the
+            # spawned subagent's dynamic-instructions render scripts
+            # (the ``{{!py:scripts/X.py}}`` placeholders) can read the
+            # forwarded ``case_data`` from the spawn call.
             session = self._runtime.create_session(
                 model=model,
                 tools=profile.plugins,
@@ -2469,6 +2472,7 @@ class SubagentPlugin:
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                 provider_name=provider,
                 preloaded_plugins=profile.preloaded_plugins or None,
+                agent_params=agent_params_arg,
             )
             logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")
 
