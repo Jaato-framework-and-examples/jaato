@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.6.4"
+version = "0.6.5"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -115,6 +115,7 @@ jaato-server = "server.__main__:main"
 [project.entry-points."jaato.plugins"]
 artifact_tracker = "shared.plugins.artifact_tracker:create_plugin"
 background = "shared.plugins.background:create_plugin"
+bundle = "shared.plugins.bundle:create_plugin"
 calculator = "shared.plugins.calculator:create_plugin"
 cli = "shared.plugins.cli:create_plugin"
 environment = "shared.plugins.environment:create_plugin"
