@@ -104,6 +104,72 @@ Composes with `openrouter/auto`: auto picks the model, `provider` constrains
 the upstream pool that model can run on. Full reference at
 https://openrouter.ai/docs/features/provider-routing.
 
+### Thinking / Reasoning Profile Example
+
+Reasoning-focused profile pinned to a thinking-capable model:
+
+```json
+{
+  "name": "openrouter-reasoner",
+  "model": "openrouter/openai/o1-preview",
+  "provider": "openrouter",
+  "plugin_configs": {
+    "openrouter": {
+      "enable_thinking": true,
+      "thinking_level": "high"
+    }
+  }
+}
+```
+
+The `level` form (`low`/`medium`/`high`) is preferred over `thinking_budget`
+when targeting a mix of upstreams — OpenAI's o-series ignores arbitrary
+token caps, but every reasoning-capable upstream understands `effort`.
+
+Use `thinking_budget` instead when you specifically want a hard token cap
+(DeepSeek-R1, Anthropic thinking models honor it):
+
+```json
+"plugin_configs": {
+  "openrouter": {
+    "enable_thinking": true,
+    "thinking_budget": 8192
+  }
+}
+```
+
+**Cross-provider portability**: `enable_thinking`, `thinking_budget` and
+`thinking_level` are the same keys the Anthropic and Antigravity providers
+already accept. Switching `"provider": "anthropic"` → `"openrouter"` keeps
+the same `plugin_configs` thinking entry working — no rewrite needed.
+
+### Combined Example
+
+`provider` routing + thinking compose freely:
+
+```json
+{
+  "name": "openrouter-private-reasoner",
+  "model": "openrouter/auto",
+  "provider": "openrouter",
+  "plugin_configs": {
+    "openrouter": {
+      "provider": {
+        "sort": "price",
+        "data_collection": "deny",
+        "require_parameters": true
+      },
+      "enable_thinking": true,
+      "thinking_level": "medium"
+    }
+  }
+}
+```
+
+This profile says: "Auto-pick the model, only from privacy-respecting
+upstreams that support tool calling, sorted by price; turn on
+medium-effort reasoning."
+
 ## Attribution Headers
 
 OpenRouter uses two optional headers for app rankings on
