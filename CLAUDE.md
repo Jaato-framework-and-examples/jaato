@@ -133,6 +133,7 @@ Four plugin types:
 - `model_provider/ollama/`: Ollama local models (Anthropic-compatible API)
 - `model_provider/lmstudio/`: LM Studio local models (OpenAI-compat chat + native load-control)
 - `model_provider/nim/`: NVIDIA NIM (OpenAI-compatible API, hosted + self-hosted)
+- `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
 
 ### Tool Execution Flow
 
@@ -565,6 +566,31 @@ session profile — see "Profile schema" below for the plumbing):
 3. **Self-hosted**: Set `JAATO_NIM_BASE_URL` to a local endpoint (no key needed)
 
 Available models include Llama 3.3/3.1, DeepSeek-R1, Nemotron, and other NIM catalog models.
+
+### OpenRouter
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_OPENROUTER_API_KEY` | API key (`sk-or-...` from https://openrouter.ai/settings/keys) |
+| `JAATO_OPENROUTER_BASE_URL` | Endpoint (default: `https://openrouter.ai/api/v1`) |
+| `JAATO_OPENROUTER_MODEL` | Default model name |
+| `JAATO_OPENROUTER_CONTEXT_LENGTH` | Override context window size |
+| `JAATO_OPENROUTER_HTTP_REFERER` | App-attribution: `HTTP-Referer` header for OpenRouter rankings |
+| `JAATO_OPENROUTER_APP_TITLE` | App-attribution: `X-OpenRouter-Title` header for OpenRouter rankings |
+
+**Authentication Options (in priority order):**
+1. **Environment variable**: Set `JAATO_OPENROUTER_API_KEY`
+2. **Stored credentials**: `openrouter-auth key <api_key>` — validates against `GET /api/v1/key` and stores securely
+
+OpenRouter is a unified gateway exposing 300+ models from many vendors (OpenAI,
+Anthropic, Google, Meta, Mistral, DeepSeek, ...) behind a single OpenAI-compatible
+API. Models use the `vendor/model` form, e.g. `anthropic/claude-3.5-sonnet`,
+`openai/gpt-4o`, `meta-llama/llama-3.3-70b-instruct`. Use `openrouter/auto` to let
+OpenRouter pick the best model per request.
+
+`list_models()` queries `GET /api/v1/models` (no auth required) and `connect()`
+caches per-model `context_length` from that catalog. The OpenAI SDK's
+`default_headers` carry the optional `HTTP-Referer` and `X-OpenRouter-Title`
+attribution headers automatically.
 
 ### Claude CLI Provider
 | Variable | Purpose |
