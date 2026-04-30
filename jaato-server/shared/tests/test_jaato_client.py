@@ -123,6 +123,7 @@ class TestJaatoClientConnect:
 
         mock_runtime_class.assert_called_once_with(provider_name="github_models",
                                                          workspace_path=None,
+                                                         config_root=None,
                                                          instruction_token_cache=None)
 
     @patch('shared.jaato_client.JaatoRuntime')
