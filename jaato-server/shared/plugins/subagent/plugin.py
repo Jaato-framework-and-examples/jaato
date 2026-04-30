@@ -2282,7 +2282,12 @@ class SubagentPlugin:
         # Display name: prefer custom_name over profile.name
         display_name = custom_name or profile.name
 
-        # Submit to thread pool (always async)
+        # Submit to thread pool (always async).  ``agent_params_arg``
+        # comes from the spawn_subagent tool args (a dict the
+        # supervisor passed for {{name}} substitution and forwarded
+        # case data); thread it through so the subagent's
+        # dynamic-instructions render scripts see it as
+        # ``RenderContext.agent_params``.
         self._executor.submit(
             self._run_subagent_async,
             agent_id,
@@ -2291,6 +2296,7 @@ class SubagentPlugin:
             parent_cwd,
             owner_id,
             display_name,
+            agent_params_arg,
         )
 
         # Return immediately with subagent_id (matches parameter name for close/cancel/send tools)
@@ -2317,6 +2323,7 @@ class SubagentPlugin:
         parent_cwd: str,
         owner_id: int = 0,
         display_name: Optional[str] = None,
+        agent_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Run a subagent asynchronously with output forwarding to parent.
 
@@ -2331,6 +2338,10 @@ class SubagentPlugin:
             owner_id: ``id()`` of the parent session that owns this subagent.
             display_name: Custom display name for the agent (from spawn_subagent's
                 ``name`` parameter). Falls back to ``profile.name`` when ``None``.
+            agent_params: Spawn-time parameters dict (forwarded ``case_data``,
+                etc.) — passed through to ``runtime.create_session()`` so the
+                child session's dynamic-instructions render scripts can read
+                ``RenderContext.agent_params``.
         """
         # Get workspace path from runtime registry as authoritative source
         # The parent_cwd parameter might be wrong if spawn_subagent couldn't resolve it correctly
@@ -2472,7 +2483,7 @@ class SubagentPlugin:
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                 provider_name=provider,
                 preloaded_plugins=profile.preloaded_plugins or None,
-                agent_params=agent_params_arg,
+                agent_params=agent_params,
             )
             logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")
 
