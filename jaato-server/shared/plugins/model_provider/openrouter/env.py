@@ -21,6 +21,10 @@ ENV_OPENROUTER_CONTEXT_LENGTH = "JAATO_OPENROUTER_CONTEXT_LENGTH"
 ENV_OPENROUTER_HTTP_REFERER = "JAATO_OPENROUTER_HTTP_REFERER"
 ENV_OPENROUTER_APP_TITLE = "JAATO_OPENROUTER_APP_TITLE"
 
+# OpenRouter uses these header names for app attribution / rankings.
+HEADER_HTTP_REFERER = "HTTP-Referer"
+HEADER_APP_TITLE = "X-OpenRouter-Title"
+
 # Default OpenRouter endpoint.  The same key works for all upstream models.
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 

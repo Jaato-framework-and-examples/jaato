@@ -40,7 +40,7 @@ class APIKeyNotFoundError(OpenRouterError):
 
         lines.extend([
             "To authenticate:",
-            "  1. Get an API key from https://openrouter.ai/keys",
+            "  1. Get an API key from https://openrouter.ai/settings/keys",
             "  2. Set JAATO_OPENROUTER_API_KEY=sk-or-...",
             "     or run 'openrouter-auth key sk-or-...' to store it.",
         ])
@@ -65,7 +65,7 @@ class AuthenticationError(OpenRouterError):
         lines.extend([
             "",
             "To fix:",
-            "  1. Verify your API key at https://openrouter.ai/keys",
+            "  1. Verify your API key at https://openrouter.ai/settings/keys",
             "  2. Check that the key has not been revoked",
             "  3. Generate a new key if needed",
         ])

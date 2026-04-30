@@ -1,7 +1,7 @@
 """Authentication module for OpenRouter.
 
 OpenRouter uses simple bearer-token authentication with API keys that
-look like ``sk-or-v1-...`` (issued from https://openrouter.ai/keys).
+look like ``sk-or-v1-...`` (issued from https://openrouter.ai/settings/keys).
 This module provides:
 
 - Secure local storage of API keys (mode 0600, project / home fallback)
