@@ -227,6 +227,17 @@ class JaatoSession:
         # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
         self._completion_payload_schema: Optional[Any] = None
 
+        # Completion lifecycle tracking — flipped True by
+        # ``LifecycleTools._execute_signal_completion`` on the first
+        # successful invocation.  The completion-nudge guard reads this
+        # at loop-exit (top-level: ``core.py`` model_thread finally;
+        # subagent: end of ``_run_subagent_async``) to decide whether
+        # to inject a nudge prompt back into the session asking the
+        # agent to call ``signal_completion`` before terminating.
+        # ``_completion_nudges_fired`` bounds the retry budget.
+        self._signal_completion_called: bool = False
+        self._completion_nudges_fired: int = 0
+
         # Per-turn model-tier config.  ``_tier_config`` is the resolved
         # view (built from profile.tiers or env vars).  ``_active_tier``
         # tracks which tier the session is currently operating in;

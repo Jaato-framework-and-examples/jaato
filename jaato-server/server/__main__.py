@@ -629,6 +629,19 @@ class JaatoDaemon:
         # availability detection).
         apparmor_holder: list = [None]
 
+        # Capture the daemon's main asyncio loop here (this method
+        # runs from ``async start()``).  Passed to AppArmorManager so
+        # that mutations triggered from confined worker threads can be
+        # dispatched onto this loop for execution in an unconfined
+        # context — eliminates the daemon-restart workaround that was
+        # otherwise needed when ``selectReferences`` (or any other
+        # confined-worker-driven AppArmor mutation) hit EACCES on the
+        # ``/etc/apparmor.d/jaato/`` file write.
+        try:
+            daemon_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            daemon_loop = None
+
         def _ipc_apparmor_session_hook(server, session_id: str) -> None:
             from jaato_sdk.events import SystemMessageEvent
 
@@ -712,8 +725,13 @@ class JaatoDaemon:
             # session's own workspace_path is fine and keeps the
             # interface uniform across IPC + WS use.
             if apparmor_holder[0] is None:
+                # ``daemon_loop`` was captured above when this method
+                # was invoked from ``async start()``.  Passing it lets
+                # AppArmorManager dispatch confined-worker mutations
+                # back onto the unconfined main loop.
                 apparmor_holder[0] = AppArmorManager(
                     workspace_root=sess.workspace_path,
+                    loop=daemon_loop,
                 )
 
             apparmor = apparmor_holder[0]

@@ -28,6 +28,8 @@ the ``server → shared`` boundary so that ``ToolExecutor`` (in ``shared/``)
 can confine tools without importing ``server.apparmor``.
 """
 
+import asyncio
+import concurrent.futures
 import logging
 import os
 import platform
@@ -37,7 +39,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, ContextManager, Dict, Optional
+from typing import Any, Callable, ContextManager, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +363,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         workspace_root: str,
         venv_path: Optional[str] = None,
         profile_dir: str = "/etc/apparmor.d/jaato",
+        loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         """Initialize the AppArmor manager.
 
@@ -372,6 +375,12 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
                 confined process).  Defaults to ``sys.prefix``.
             profile_dir: Directory to write profile files.  Defaults to
                 ``/etc/apparmor.d/jaato``.
+            loop: The daemon's main asyncio loop, captured at startup.
+                Used by ``_run_unconfined`` to dispatch ``/etc/apparmor.d/``
+                file writes from confined worker threads onto the
+                always-unconfined main loop.  When ``None``, mutations
+                run in the calling thread (suitable for tests or
+                non-confined deployments).
         """
         import sys
 
@@ -413,6 +422,74 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         # The guard lock protects the dict itself.
         self._session_locks: Dict[str, threading.Lock] = {}
         self._session_locks_guard = threading.Lock()
+
+        # Daemon's main asyncio loop, captured at startup by the IPC /
+        # WS apparmor hook.  Mutations to /etc/apparmor.d/jaato/ that
+        # originate from confined worker threads (e.g. the references
+        # plugin's selectReferences tool) get dispatched here so the
+        # actual file write happens on the always-unconfined main loop
+        # thread.  Without this, confined workers EACCES on the file
+        # write and the only recovery is a daemon restart.
+        self._loop = loop
+
+    # ------------------------------------------------------------------
+    # Cross-thread dispatch: confined-worker → unconfined main loop
+    # ------------------------------------------------------------------
+
+    def _run_unconfined(self, fn: Callable[..., Any], *args, **kwargs) -> Any:
+        """Run *fn* on the daemon's main asyncio loop thread.
+
+        The daemon's main loop is the only thread we can reliably know
+        is unconfined — it's the thread that started the process before
+        any per-session AppArmor profile was loaded, and we never
+        confine it.  Worker pool threads (IPC executor, session
+        ``_model_thread``, etc.) can become confined either deliberately
+        (the tool executor's ``apparmor_confine`` context) or by
+        accident (a confine-restore failure leaving the thread stuck in
+        a per-session profile).  Reading
+        ``/proc/self/task/<tid>/attr/current`` to detect "am I confined"
+        is fragile — the kernel may report a profile name even after
+        the kernel-side profile has been unloaded, the proc semantics
+        vary across hosts, and a thread that's silently been confined
+        without our knowledge will lie.
+
+        So we don't ask "am I confined" — we ask "am I the loop thread".
+        If yes, run *fn* in place (avoids scheduling-on-self deadlock).
+        If no, dispatch *fn* to the loop unconditionally and block
+        until it returns.  This guarantees that every code path which
+        touches ``/etc/apparmor.d/jaato/`` runs on the loop thread,
+        which is the only thread we trust to be unconfined.
+
+        When ``self._loop`` is None (unit tests, non-AppArmor hosts),
+        *fn* runs in the calling thread.
+
+        Timeout: 60 s.  ``apparmor_parser -r`` can take 10–30 s on
+        slow hosts; 60 s leaves headroom without masking a stuck loop.
+        """
+        if self._loop is None:
+            return fn(*args, **kwargs)
+
+        # If we're already running on the loop thread, call directly.
+        # ``get_running_loop`` raises RuntimeError off-loop, which is
+        # the signal we need to dispatch.
+        try:
+            if asyncio.get_running_loop() is self._loop:
+                return fn(*args, **kwargs)
+        except RuntimeError:
+            pass
+
+        async def _coro():
+            return fn(*args, **kwargs)
+
+        future = asyncio.run_coroutine_threadsafe(_coro(), self._loop)
+        try:
+            return future.result(timeout=60)
+        except concurrent.futures.TimeoutError:
+            logger.error(
+                "AppArmor mutation timed out after 60s on main loop "
+                "(fn=%s)", getattr(fn, "__name__", repr(fn)),
+            )
+            raise
 
     # ------------------------------------------------------------------
     # Availability
@@ -503,6 +580,26 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
     ) -> bool:
         """Create and load an AppArmor profile for a session.
 
+        Dispatches to ``_provision_profile_impl`` via ``_run_unconfined``
+        so the file write + ``apparmor_parser -r`` reload run on the
+        unconfined main loop when called from a confined worker
+        (e.g. a reactor-spawned child session whose creation fires
+        from a confined parent thread).
+        """
+        return self._run_unconfined(
+            self._provision_profile_impl,
+            session_id, workspace_path, config_root, env_file,
+        )
+
+    def _provision_profile_impl(
+        self,
+        session_id: str,
+        workspace_path: str,
+        config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
+    ) -> bool:
+        """Inner body of :meth:`provision_profile`.
+
         Writes the rendered profile to
         ``{profile_dir}/jaato-ws-{session_id}`` and loads it with
         ``apparmor_parser -r``.
@@ -577,6 +674,15 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
     def teardown_profile(self, session_id: str) -> bool:
         """Unload and remove an AppArmor profile.
+
+        Dispatches to ``_teardown_profile_impl`` via ``_run_unconfined``
+        so unloading + file deletion run on the unconfined main loop
+        when called from a confined session-end path.
+        """
+        return self._run_unconfined(self._teardown_profile_impl, session_id)
+
+    def _teardown_profile_impl(self, session_id: str) -> bool:
+        """Inner body of :meth:`teardown_profile`.
 
         Runs ``apparmor_parser -R`` to unload the profile, then deletes
         the profile file.
@@ -753,6 +859,21 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
     ) -> bool:
         """Grant readonly access to *path* for the session's profile.
 
+        Dispatches to ``_add_reference_fragment_impl`` via
+        ``_run_unconfined`` so the fragment file write and the
+        ``apparmor_parser -r`` reload run on the unconfined main loop
+        when called from a confined worker thread (the typical path —
+        ``selectReferences`` runs from inside a tool call).
+        """
+        return self._run_unconfined(
+            self._add_reference_fragment_impl, session_id, ref_id, path,
+        )
+
+    def _add_reference_fragment_impl(
+        self, session_id: str, ref_id: str, path: str,
+    ) -> bool:
+        """Inner body of :meth:`add_reference_fragment`.
+
         Writes ``{refs_dir}/{safe_ref_id}`` and reloads the base
         profile.  Failure (validation, file write, parser reload) is
         logged and returned as ``False`` — the caller (references
@@ -819,6 +940,20 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         self, session_id: str, ref_id: str,
     ) -> bool:
         """Revoke readonly access previously granted to *ref_id*.
+
+        Dispatches to ``_remove_reference_fragment_impl`` via
+        ``_run_unconfined`` so the fragment file delete and the
+        ``apparmor_parser -r`` reload run on the unconfined main loop
+        when called from a confined worker thread.
+        """
+        return self._run_unconfined(
+            self._remove_reference_fragment_impl, session_id, ref_id,
+        )
+
+    def _remove_reference_fragment_impl(
+        self, session_id: str, ref_id: str,
+    ) -> bool:
+        """Inner body of :meth:`remove_reference_fragment`.
 
         Idempotent: missing fragment is treated as success.  Always
         succeeds at the kernel layer — even if reload fails the

@@ -727,9 +727,15 @@ class JaatoWSServer:
                 default_template=self._default_template,
             )
 
-            # Initialize AppArmor manager
+            # Initialize AppArmor manager.  Pass the daemon's main
+            # asyncio loop (we're inside ``async start()``) so that
+            # AppArmor mutations triggered from confined worker
+            # threads — e.g. selectReferences fragment writes — get
+            # dispatched here for execution in the unconfined main
+            # loop, instead of EACCESing on the file write.
             self._apparmor = AppArmorManager(
                 workspace_root=self._workspace_root,
+                loop=asyncio.get_running_loop(),
             )
             if self._apparmor_mode is False:
                 logger.info("AppArmor confinement disabled by configuration")

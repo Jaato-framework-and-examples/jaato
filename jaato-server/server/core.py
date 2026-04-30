@@ -3165,6 +3165,52 @@ class JaatoServer:
                     status = "idle"
                 else:
                     status = "done"
+
+                # Completion-nudge guard for top-level sessions.  When
+                # the loop is about to terminate (status="done") AND
+                # the agent never called ``signal_completion``, inject
+                # a framework reminder via ``_pending_continuation``
+                # and restart the model thread — the existing pending
+                # path above will pick it up next iteration.  Bounded
+                # by ``MAX_COMPLETION_NUDGES`` so a model that keeps
+                # ignoring the reminder eventually halts naturally.
+                # Mirrors the subagent-side guard in
+                # ``shared.plugins.subagent.plugin._run_subagent_async``.
+                MAX_COMPLETION_NUDGES = 2
+                jaato_session = (
+                    server._jaato.get_session()
+                    if server._jaato is not None else None
+                )
+                if (
+                    status == "done"
+                    and jaato_session is not None
+                    and not getattr(jaato_session, '_signal_completion_called', False)
+                    and getattr(jaato_session, '_completion_nudges_fired', 0) < MAX_COMPLETION_NUDGES
+                ):
+                    jaato_session._completion_nudges_fired += 1
+                    server._trace(
+                        f"COMPLETION_NUDGE: agent ended its loop without "
+                        f"signal_completion (nudge "
+                        f"{jaato_session._completion_nudges_fired}/"
+                        f"{MAX_COMPLETION_NUDGES}) — re-prompting"
+                    )
+                    nudge = (
+                        "Your session is about to end without calling "
+                        "`signal_completion`. The loop cannot close cleanly "
+                        "until you either continue the work with another "
+                        "tool call, or call `signal_completion` per your "
+                        "profile's payload schema with the appropriate "
+                        "decision and evidence. Please proceed with one of "
+                        "those two paths."
+                    )
+                    server.emit(AgentStatusChangedEvent(
+                        agent_id=server._main_agent_id,
+                        status="active",
+                    ))
+                    server._start_model_thread(nudge)
+                    clear_logging_context()
+                    return  # new thread handles idle/done status
+
                 server.emit(AgentStatusChangedEvent(
                     agent_id=server._main_agent_id,
                     status=status,

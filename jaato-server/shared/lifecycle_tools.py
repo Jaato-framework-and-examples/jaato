@@ -309,6 +309,13 @@ class LifecycleTools:
             payload=payload,
         )
 
+        # Flip the per-session completion flag so the loop-exit nudge
+        # guard knows this agent did its part — no nudge needed when
+        # the loop terminates from here.  Set BEFORE any subsequent
+        # work to keep the predicate consistent if anything below
+        # raises.
+        self._session._signal_completion_called = True
+
         logger.info(
             "Agent %s signaled completion: %s",
             agent_id,

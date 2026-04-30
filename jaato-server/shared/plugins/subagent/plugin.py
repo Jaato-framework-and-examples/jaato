@@ -128,6 +128,13 @@ class SubagentPlugin:
         self._plan_reporter: Optional[Any] = None  # TodoReporter instance
         # Workspace path (set by registry broadcast in server mode)
         self._workspace_path: Optional[str] = None
+        # Config-root override (set by registry broadcast in server mode).
+        # Profile discovery during ``initialize()`` runs before this
+        # broadcast fires, so headless reactor-spawned sessions miss the
+        # workspace-tier profiles.  ``set_config_root()`` re-discovers
+        # with the override so spawn_subagent finds project-tier
+        # profiles after the broadcast lands.
+        self._config_root: Optional[str] = None
         # Remote spawn handler registered by a daemon extension (e.g., gossip).
         # See ``register_remote_handler()`` for the protocol.
         self._remote_spawn_handler: Optional[Any] = None
@@ -1196,6 +1203,55 @@ class SubagentPlugin:
         """
         self._workspace_path = path
         logger.debug("SubagentPlugin: workspace path set to %s", path)
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Set the read-only framework-config root override.
+
+        Broadcast by ``PluginRegistry.set_config_root`` after plugin
+        initialisation, which runs without ``JAATO_CONFIG_ROOT`` exported
+        in the env (the ``_in_workspace`` context manager doesn't wrap
+        ``_run_load_plugins``).  As a result, the initial
+        ``discover_profiles()`` call in :meth:`initialize` only sees
+        user-tier (``~/.jaato/profiles/``) and premium-tier profiles;
+        workspace-tier profiles (``<config_root>/profiles/``) are
+        invisible.  Re-discover here, with the now-known config_root,
+        so ``spawn_subagent`` can resolve workspace-defined profile
+        names — essential for reactor-spawned headless sessions whose
+        config_root only becomes available after init.
+
+        Workspace-tier profiles take precedence over user/premium tiers
+        (matches the precedence in :func:`discover_profiles`).
+        Explicit profiles passed in the original ``SubagentConfig`` are
+        preserved and continue to win against discovered ones.
+
+        Args:
+            path: Absolute path to the read-only config root (e.g.
+                ``<project>/.jaato``), or None to clear.
+        """
+        self._config_root = path
+        if not self._initialized or self._config is None:
+            return
+        if not self._config.auto_discover_profiles:
+            return
+        try:
+            discovery = discover_profiles(
+                self._config.profiles_dir, config_root=path,
+            )
+        except Exception:
+            logger.exception(
+                "SubagentPlugin: re-discovery with config_root=%s failed", path,
+            )
+            return
+        added = 0
+        for name, profile in discovery.profiles.items():
+            if name not in self._config.profiles:
+                self._config.profiles[name] = profile
+                added += 1
+        logger.debug(
+            "SubagentPlugin: re-discovered profiles with config_root=%s "
+            "(added %d, total %d)",
+            path, added, len(self._config.profiles),
+        )
 
     def register_remote_handler(self, handler: Any) -> None:
         """Register a handler for remote subagent delegation.
@@ -2598,6 +2654,41 @@ class SubagentPlugin:
             # or queued for mid-turn processing if the session is busy.
             # No polling loop needed.
 
+            # Completion-nudge guard.  If the model loop exited without
+            # the agent ever calling ``signal_completion``, inject a
+            # framework reminder telling the model to either continue
+            # the work or signal completion now — and re-enter the
+            # loop with that prompt.  Bounded by ``MAX_COMPLETION_NUDGES``
+            # so a model that keeps narrating refusal eventually halts.
+            # The flag ``session._signal_completion_called`` is flipped
+            # in ``LifecycleTools._execute_signal_completion`` on
+            # successful invocation.
+            MAX_COMPLETION_NUDGES = 2
+            while (
+                not getattr(session, '_signal_completion_called', False)
+                and getattr(session, '_completion_nudges_fired', 0) < MAX_COMPLETION_NUDGES
+            ):
+                session._completion_nudges_fired += 1
+                logger.info(
+                    "COMPLETION_NUDGE [%s]: agent ended its loop without "
+                    "signal_completion (nudge %d/%d) — re-prompting",
+                    agent_id, session._completion_nudges_fired, MAX_COMPLETION_NUDGES,
+                )
+                nudge = (
+                    "Your session is about to end without calling "
+                    "`signal_completion`. The loop cannot close cleanly "
+                    "until you either continue the work with another "
+                    "tool call, or call `signal_completion` per your "
+                    "profile's payload schema with the appropriate "
+                    "decision and evidence. Please proceed with one of "
+                    "those two paths."
+                )
+                response = session.send_message(
+                    nudge,
+                    on_output=subagent_output_callback,
+                    on_usage_update=subagent_usage_callback
+                )
+
             # Update session info after completion
             usage = session.get_context_usage()
             # Debug: Log full usage info to trace token accounting issues
@@ -2650,6 +2741,22 @@ class SubagentPlugin:
                 # Note: "idle" status is emitted automatically by the
                 # running-state callback wired in set_running_state_callback
                 # when send_message() returns and the session phase goes IDLE.
+                #
+                # Emit the terminal "done" status here, mirroring what
+                # JaatoServer's model_thread does at ``core.py``'s
+                # finally block for top-level sessions.  Top-level and
+                # subagent agents now publish the same canonical
+                # loop-terminated signal, so a single subscriber (e.g.
+                # the completion-nudge guard) can detect "agent's
+                # lifecycle ended without ever calling
+                # signal_completion" uniformly across both layers.
+                # Distinct from "idle" (paused, may resume) — "done"
+                # fires once at the genuine end of the subagent's
+                # ``_run_subagent_async`` call.
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="done",
+                )
 
             clear_trace_agent_context()
 
