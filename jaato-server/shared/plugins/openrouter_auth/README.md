@@ -59,6 +59,48 @@ class OpenRouterAuthPlugin:
     def execute_user_command(cmd, args) -> str | HelpLines
 ```
 
+## Profile Knobs
+
+Under `plugin_configs.openrouter` in a profile JSON:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `api_key` | str | Override env / stored credentials per-profile |
+| `base_url` | str | Endpoint override |
+| `context_length` | int | Override the catalog-reported context window |
+| `http_referer` | str | `HTTP-Referer` header |
+| `app_title` | str | `X-OpenRouter-Title` header |
+| `provider` | dict | OpenRouter provider-routing dict — passed through verbatim |
+
+**`provider` routing** is OpenRouter's killer feature: most non-OpenAI/Anthropic
+models are served by several upstreams (Together, Fireworks, DeepInfra, Groq,
+…) with different price, latency, throughput, quantization, and data-collection
+policies. The dict constrains which upstream OpenRouter picks per request.
+
+```json
+{
+  "name": "openrouter-private",
+  "model": "openrouter/auto",
+  "provider": "openrouter",
+  "plugin_configs": {
+    "openrouter": {
+      "provider": {
+        "sort": "price",
+        "data_collection": "deny",
+        "ignore": ["Groq"],
+        "order": ["Fireworks", "DeepInfra"],
+        "allow_fallbacks": true,
+        "require_parameters": true
+      }
+    }
+  }
+}
+```
+
+Composes with `openrouter/auto`: auto picks the model, `provider` constrains
+the upstream pool that model can run on. Full reference at
+https://openrouter.ai/docs/features/provider-routing.
+
 ## Attribution Headers
 
 OpenRouter uses two optional headers for app rankings on

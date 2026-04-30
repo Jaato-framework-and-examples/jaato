@@ -42,6 +42,7 @@ Environment variables
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -152,6 +153,14 @@ class OpenRouterProvider:
         self._context_length: int = 0
         self._context_length_override: bool = False
 
+        # OpenRouter request-time routing controls.  ``provider`` is the
+        # killer feature of OpenRouter — it constrains which upstream
+        # provider serves each request (sort by price/throughput/latency,
+        # blacklist providers, require non-training upstreams, etc.).
+        # Stored once at initialize() and forwarded as a top-level body
+        # field on every ``chat.completions.create`` via ``extra_body``.
+        self._provider_routing: Optional[Dict[str, Any]] = None
+
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
         self._catalog_cache: Optional[List[Dict[str, Any]]] = None
@@ -208,9 +217,17 @@ class OpenRouterProvider:
                 - extra['context_length']: Override context window size
                 - extra['http_referer']: Override HTTP-Referer header
                 - extra['app_title']: Override X-OpenRouter-Title header
+                - extra['provider']: OpenRouter provider-routing dict
+                  (forwarded as a top-level request body field on every
+                  call).  Keys are passed through verbatim — see
+                  https://openrouter.ai/docs/features/provider-routing
+                  for the full list (``order``, ``allow_fallbacks``,
+                  ``require_parameters``, ``data_collection``,
+                  ``ignore``, ``quantizations``, ``sort``, ...).
 
         Raises:
             APIKeyNotFoundError: No API key found.
+            TypeError: If ``extra['provider']`` is set but isn't a dict.
         """
         if config is None:
             config = ProviderConfig()
@@ -237,6 +254,18 @@ class OpenRouterProvider:
                 self._context_length != DEFAULT_CONTEXT_LENGTH
             )
 
+        provider_routing = config.extra.get("provider")
+        if provider_routing is not None:
+            if not isinstance(provider_routing, dict):
+                raise TypeError(
+                    "OpenRouter 'provider' routing config must be a dict, "
+                    f"got {type(provider_routing).__name__}"
+                )
+            # Deep copy so later mutations to the profile dict (incl.
+            # nested ``ignore`` / ``order`` lists) don't leak into our
+            # request body.
+            self._provider_routing = copy.deepcopy(provider_routing)
+
         if not self._api_key:
             raise APIKeyNotFoundError(
                 checked_locations=get_checked_credential_locations(),
@@ -245,7 +274,8 @@ class OpenRouterProvider:
         self._client = self._create_client()
         self._trace(
             f"[INIT] client created, base_url={self._base_url}, "
-            f"referer={self._http_referer!r}, title={self._app_title!r}"
+            f"referer={self._http_referer!r}, title={self._app_title!r}, "
+            f"provider_routing={'configured' if self._provider_routing else 'none'}"
         )
 
     def _create_client(self) -> "OpenAI":
@@ -465,6 +495,24 @@ class OpenRouterProvider:
                     return ctx
         return None
 
+    def _build_extra_body(self) -> Dict[str, Any]:
+        """Build OpenRouter-specific top-level body fields for each request.
+
+        Currently emits only ``provider`` when configured.  Future
+        OpenRouter knobs (``transforms``, ``models`` fallback list,
+        ``reasoning``, server-side ``plugins``) will land here too —
+        this is the single funnel that translates session-level config
+        into per-request OpenRouter extras.
+
+        Returns:
+            Dict to merge into the request body via ``extra_body``.
+            Empty when no OpenRouter-specific knobs are configured.
+        """
+        body: Dict[str, Any] = {}
+        if self._provider_routing:
+            body["provider"] = self._provider_routing
+        return body
+
     # ==================== Stateless Completion ====================
 
     def complete(
@@ -502,6 +550,13 @@ class OpenRouterProvider:
                 kwargs["tools"] = openai_tools
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
+
+        # OpenRouter request-body extras (e.g. ``provider`` routing).  The
+        # OpenAI SDK has no typed parameter for these, so we pass them
+        # through ``extra_body`` which the SDK merges into the JSON body.
+        extra_body = self._build_extra_body()
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         try:
             if on_chunk:
