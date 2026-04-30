@@ -42,6 +42,7 @@ Environment variables
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -152,12 +153,36 @@ class OpenRouterProvider:
         self._context_length: int = 0
         self._context_length_override: bool = False
 
+        # OpenRouter request-time routing controls.  ``provider`` is the
+        # killer feature of OpenRouter — it constrains which upstream
+        # provider serves each request (sort by price/throughput/latency,
+        # blacklist providers, require non-training upstreams, etc.).
+        # Stored once at initialize() and forwarded as a top-level body
+        # field on every ``chat.completions.create`` via ``extra_body``.
+        self._provider_routing: Optional[Dict[str, Any]] = None
+
+        # Thinking / reasoning knobs — unified gate for both
+        # request-side emission of OpenRouter's ``reasoning`` block
+        # and response-side extraction of reasoning content.  Flat-key
+        # convention shared with Anthropic (``enable_thinking``,
+        # ``thinking_budget``) and Antigravity (``thinking_level``) so
+        # a profile can set them provider-agnostically — switching from
+        # anthropic to openrouter doesn't require rewriting the profile.
+        # Translated into OpenRouter's ``reasoning`` wire shape in
+        # ``_build_extra_body()`` and used to gate streaming/batch
+        # extraction below.
+        self._thinking_budget: int = 0
+        self._thinking_level: Optional[str] = None
+
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
         self._catalog_cache: Optional[List[Dict[str, Any]]] = None
 
-        # Thinking/reasoning configuration
-        self._enable_thinking: bool = True
+        # Thinking/reasoning configuration.  Defaults to False so
+        # nothing extra goes on the wire and reasoning content is not
+        # surfaced unless the profile / runtime opts in.  Matches the
+        # Anthropic provider's default.
+        self._enable_thinking: bool = False
 
         # Agent context for trace identification
         self._agent_type: str = "main"
@@ -208,9 +233,17 @@ class OpenRouterProvider:
                 - extra['context_length']: Override context window size
                 - extra['http_referer']: Override HTTP-Referer header
                 - extra['app_title']: Override X-OpenRouter-Title header
+                - extra['provider']: OpenRouter provider-routing dict
+                  (forwarded as a top-level request body field on every
+                  call).  Keys are passed through verbatim — see
+                  https://openrouter.ai/docs/features/provider-routing
+                  for the full list (``order``, ``allow_fallbacks``,
+                  ``require_parameters``, ``data_collection``,
+                  ``ignore``, ``quantizations``, ``sort``, ...).
 
         Raises:
             APIKeyNotFoundError: No API key found.
+            TypeError: If ``extra['provider']`` is set but isn't a dict.
         """
         if config is None:
             config = ProviderConfig()
@@ -237,6 +270,35 @@ class OpenRouterProvider:
                 self._context_length != DEFAULT_CONTEXT_LENGTH
             )
 
+        provider_routing = config.extra.get("provider")
+        if provider_routing is not None:
+            if not isinstance(provider_routing, dict):
+                raise TypeError(
+                    "OpenRouter 'provider' routing config must be a dict, "
+                    f"got {type(provider_routing).__name__}"
+                )
+            # Deep copy so later mutations to the profile dict (incl.
+            # nested ``ignore`` / ``order`` lists) don't leak into our
+            # request body.
+            self._provider_routing = copy.deepcopy(provider_routing)
+
+        # Flat thinking-knob convention shared with Anthropic / Antigravity.
+        self._enable_thinking = bool(
+            config.extra.get("enable_thinking", self._enable_thinking)
+        )
+        budget_extra = config.extra.get("thinking_budget")
+        if budget_extra is not None:
+            self._thinking_budget = int(budget_extra)
+        level_extra = config.extra.get("thinking_level")
+        if level_extra is not None:
+            level_str = str(level_extra).lower()
+            if level_str not in ("low", "medium", "high"):
+                raise ValueError(
+                    "OpenRouter 'thinking_level' must be one of "
+                    f"'low' / 'medium' / 'high', got {level_extra!r}"
+                )
+            self._thinking_level = level_str
+
         if not self._api_key:
             raise APIKeyNotFoundError(
                 checked_locations=get_checked_credential_locations(),
@@ -245,7 +307,8 @@ class OpenRouterProvider:
         self._client = self._create_client()
         self._trace(
             f"[INIT] client created, base_url={self._base_url}, "
-            f"referer={self._http_referer!r}, title={self._app_title!r}"
+            f"referer={self._http_referer!r}, title={self._app_title!r}, "
+            f"provider_routing={'configured' if self._provider_routing else 'none'}"
         )
 
     def _create_client(self) -> "OpenAI":
@@ -465,6 +528,40 @@ class OpenRouterProvider:
                     return ctx
         return None
 
+    def _build_extra_body(self) -> Dict[str, Any]:
+        """Build OpenRouter-specific top-level body fields for each request.
+
+        Currently emits ``provider`` (upstream routing) and ``reasoning``
+        (request-time thinking control) when configured.  Future
+        OpenRouter knobs (``transforms``, ``models`` fallback list,
+        server-side ``plugins``) will land here too — this is the
+        single funnel that translates session-level config into
+        per-request OpenRouter extras.
+
+        Reasoning emission rules:
+          - Gated on ``_enable_thinking`` (False ⇒ omit).
+          - Prefer ``thinking_level`` (→ ``effort``) over
+            ``thinking_budget`` (→ ``max_tokens``) when both are set —
+            ``effort`` is more portable across upstreams (OpenAI o-series
+            doesn't accept arbitrary token caps).
+
+        Returns:
+            Dict to merge into the request body via ``extra_body``.
+            Empty when no OpenRouter-specific knobs are configured.
+        """
+        body: Dict[str, Any] = {}
+        if self._provider_routing:
+            body["provider"] = self._provider_routing
+        if self._enable_thinking:
+            reasoning: Dict[str, Any] = {}
+            if self._thinking_level:
+                reasoning["effort"] = self._thinking_level
+            elif self._thinking_budget > 0:
+                reasoning["max_tokens"] = self._thinking_budget
+            if reasoning:
+                body["reasoning"] = reasoning
+        return body
+
     # ==================== Stateless Completion ====================
 
     def complete(
@@ -503,6 +600,13 @@ class OpenRouterProvider:
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
 
+        # OpenRouter request-body extras (e.g. ``provider`` routing).  The
+        # OpenAI SDK has no typed parameter for these, so we pass them
+        # through ``extra_body`` which the SDK merges into the JSON body.
+        extra_body = self._build_extra_body()
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
         try:
             if on_chunk:
                 provider_response = self._stream_response(
@@ -521,6 +625,13 @@ class OpenRouterProvider:
                     **kwargs,
                 )
                 provider_response = response_from_openai(response)
+
+            # Mirror the streaming-path gate: if reasoning isn't
+            # enabled for this session, drop any reasoning content
+            # the upstream emitted unsolicited (e.g. DeepSeek-R1
+            # always reasons regardless of request kwargs).
+            if not self._enable_thinking:
+                provider_response.thinking = None
 
             self._last_usage = provider_response.usage
 
@@ -829,8 +940,18 @@ class OpenRouterProvider:
         return self._is_reasoning_capable()
 
     def set_thinking_config(self, config: ThinkingConfig) -> None:
-        """Toggle whether to extract reasoning content from responses."""
+        """Apply a runtime thinking-config update.
+
+        Updates the gate (request emission + response extraction) and
+        the budget.  ``thinking_level`` is profile-only — there's no
+        equivalent in the framework's ``ThinkingConfig``, so dynamic
+        runtime updates can only adjust enabled/budget.  A profile that
+        sets ``thinking_level`` keeps it in effect across runtime
+        ``set_thinking_config`` calls.
+        """
         self._enable_thinking = config.enabled
+        if config.budget > 0:
+            self._thinking_budget = config.budget
 
     def _is_reasoning_capable(self) -> bool:
         """Best-effort check for upstream-model reasoning support."""

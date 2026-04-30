@@ -389,6 +389,290 @@ class TestAuthentication:
         assert headers.get(HEADER_APP_TITLE) == "Example App"
 
 
+class TestProviderRouting:
+    """Tests for the ``provider`` request-routing dict.
+
+    OpenRouter's killer feature: pin / blacklist / sort upstream
+    providers, require non-training upstreams, etc.  The dict is read
+    from ``ProviderConfig.extra['provider']`` (which the runtime sources
+    from ``plugin_configs.openrouter.provider``) and forwarded to every
+    request via the OpenAI SDK's ``extra_body`` parameter.
+    """
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_initialize_stores_provider_routing(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        routing = {
+            "sort": "price",
+            "data_collection": "deny",
+            "ignore": ["Groq"],
+            "order": ["Fireworks", "DeepInfra"],
+            "allow_fallbacks": True,
+        }
+        provider.initialize(ProviderConfig(api_key="sk-or-test", extra={"provider": routing}))
+        assert provider._provider_routing == routing
+        # Defensive copy — mutating the source dict mustn't affect us.
+        routing["ignore"].append("Together")
+        assert provider._provider_routing["ignore"] == ["Groq"]
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_initialize_no_provider_routing_means_none(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        assert provider._provider_routing is None
+        assert provider._build_extra_body() == {}
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_initialize_rejects_non_dict_provider(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(TypeError, match="provider.*must be a dict"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"provider": ["Anthropic", "OpenAI"]},
+            ))
+
+    def test_build_extra_body_includes_provider(self):
+        provider = OpenRouterProvider()
+        provider._provider_routing = {"sort": "throughput"}
+        assert provider._build_extra_body() == {"provider": {"sort": "throughput"}}
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_complete_forwards_provider_routing_via_extra_body(self, mock_client_class):
+        # Capture the kwargs passed to chat.completions.create.
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"provider": {"sort": "price", "data_collection": "deny"}},
+        ))
+        provider.connect("anthropic/claude-3.5-sonnet", skip_model_test=True)
+        provider.complete([Message.from_text(Role.USER, "hi")])
+
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["extra_body"] == {
+            "provider": {"sort": "price", "data_collection": "deny"},
+        }
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_complete_omits_extra_body_when_no_routing(self, mock_client_class):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        provider.connect("openai/gpt-4o", skip_model_test=True)
+        provider.complete([Message.from_text(Role.USER, "hi")])
+
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert "extra_body" not in call_kwargs
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_streaming_path_also_forwards_provider_routing(self, mock_client_class):
+        fake_client = MagicMock()
+        # Streaming returns an iterable of chunks; an empty list is fine
+        # — we only care about what was passed in.
+        fake_client.chat.completions.create.return_value = iter([])
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"provider": {"order": ["Fireworks"]}},
+        ))
+        provider.connect("meta-llama/llama-3.3-70b-instruct", skip_model_test=True)
+
+        chunks = []
+        provider.complete(
+            [Message.from_text(Role.USER, "hi")],
+            on_chunk=chunks.append,
+        )
+
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["extra_body"] == {"provider": {"order": ["Fireworks"]}}
+        # And the streaming flag must still be set on the same call.
+        assert call_kwargs.get("stream") is True
+
+
+class TestThinkingKnobs:
+    """Tests for the flat-key thinking convention (matches Anthropic / Antigravity).
+
+    OpenRouter accepts ``enable_thinking`` (bool), ``thinking_budget`` (int)
+    and ``thinking_level`` (low/medium/high) under
+    ``plugin_configs.openrouter`` — the same key names other thinking-capable
+    providers already accept — and translates them into OpenRouter's
+    ``reasoning`` request body shape (``effort`` / ``max_tokens``).
+    """
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_disabled_by_default(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        assert provider._enable_thinking is False
+        assert provider._build_extra_body() == {}
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_thinking_budget_emits_max_tokens(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"enable_thinking": True, "thinking_budget": 8192},
+        ))
+        assert provider._build_extra_body() == {
+            "reasoning": {"max_tokens": 8192},
+        }
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_thinking_level_emits_effort(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"enable_thinking": True, "thinking_level": "high"},
+        ))
+        assert provider._build_extra_body() == {
+            "reasoning": {"effort": "high"},
+        }
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_level_takes_precedence_over_budget(self, mock_client_class):
+        # ``effort`` is more portable across upstreams (OpenAI o-series doesn't
+        # accept arbitrary token caps), so when both are set we prefer it.
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={
+                "enable_thinking": True,
+                "thinking_budget": 8192,
+                "thinking_level": "medium",
+            },
+        ))
+        assert provider._build_extra_body() == {
+            "reasoning": {"effort": "medium"},
+        }
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_disabled_suppresses_reasoning_even_with_budget(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"enable_thinking": False, "thinking_budget": 8192},
+        ))
+        assert "reasoning" not in provider._build_extra_body()
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_invalid_level_raises(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(ValueError, match="thinking_level.*low.*medium.*high"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"enable_thinking": True, "thinking_level": "extreme"},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_complete_forwards_reasoning_via_extra_body(self, mock_client_class):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"enable_thinking": True, "thinking_level": "low"},
+        ))
+        provider.connect("openai/o1-preview", skip_model_test=True)
+        provider.complete([Message.from_text(Role.USER, "hi")])
+
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["extra_body"] == {"reasoning": {"effort": "low"}}
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_provider_routing_and_reasoning_compose_in_extra_body(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={
+                "provider": {"sort": "price"},
+                "enable_thinking": True,
+                "thinking_budget": 4096,
+            },
+        ))
+        body = provider._build_extra_body()
+        assert body == {
+            "provider": {"sort": "price"},
+            "reasoning": {"max_tokens": 4096},
+        }
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_set_thinking_config_runtime_update(self, mock_client_class):
+        # Framework-level ThinkingConfig updates should also flow.
+        from jaato_sdk.plugins.model_provider.types import ThinkingConfig as TC
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        assert provider._build_extra_body() == {}
+
+        provider.set_thinking_config(TC(enabled=True, budget=2048))
+        assert provider._build_extra_body() == {
+            "reasoning": {"max_tokens": 2048},
+        }
+
+        provider.set_thinking_config(TC(enabled=False, budget=2048))
+        assert "reasoning" not in provider._build_extra_body()
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_set_thinking_config_keeps_profile_level(self, mock_client_class):
+        # thinking_level has no equivalent in ThinkingConfig, so a runtime
+        # update without budget mustn't wipe the profile-set level.
+        from jaato_sdk.plugins.model_provider.types import ThinkingConfig as TC
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"enable_thinking": True, "thinking_level": "high"},
+        ))
+        provider.set_thinking_config(TC(enabled=True, budget=0))
+        # effort still wins because thinking_level is still set.
+        assert provider._build_extra_body() == {
+            "reasoning": {"effort": "high"},
+        }
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_disabled_drops_thinking_from_batch_response(self, mock_client_class):
+        # DeepSeek-R1 always reasons regardless of request — when the user
+        # disables thinking we still drop it on the way out so they don't
+        # see chain-of-thought they didn't ask for.
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="answer", reasoning="chain of thought", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))  # disabled
+        provider.connect("deepseek/deepseek-r1", skip_model_test=True)
+        result = provider.complete([Message.from_text(Role.USER, "hi")])
+        assert result.response.thinking is None
+
+
 class TestVerifyAuth:
     """Tests for verify_auth (must work before initialize)."""
 
