@@ -60,6 +60,14 @@ class LifecycleTools:
         self._payload_schema: Optional[Dict[str, Any]] = resolve_completion_schema(
             getattr(session, '_completion_payload_schema', None),
             workspace_path=getattr(session, 'workspace_path', None),
+            # JaatoSession adopts the runtime's config_root via
+            # ``runtime._config_root``; honor it here so a profile that
+            # references ``"completion_payload_schema": "<name>.json"``
+            # resolves under the override path instead of the
+            # workspace's ``.jaato/completion_schemas/``.
+            config_root=getattr(
+                getattr(session, 'runtime', None), '_config_root', None,
+            ),
         )
 
     def get_tool_schemas(self) -> List[ToolSchema]:
@@ -300,6 +308,13 @@ class LifecycleTools:
             turns_used=usage.get('turns'),
             payload=payload,
         )
+
+        # Flip the per-session completion flag so the loop-exit nudge
+        # guard knows this agent did its part — no nudge needed when
+        # the loop terminates from here.  Set BEFORE any subsequent
+        # work to keep the predicate consistent if anything below
+        # raises.
+        self._session._signal_completion_called = True
 
         logger.info(
             "Agent %s signaled completion: %s",

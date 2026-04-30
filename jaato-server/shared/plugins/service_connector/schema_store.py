@@ -98,6 +98,7 @@ class SchemaStore:
         self,
         workspace_path: Optional[str] = None,
         home_base_path: Optional[Path] = None,
+        config_root: Optional[str] = None,
     ):
         """Initialize the schema store.
 
@@ -110,9 +111,21 @@ class SchemaStore:
                 Passing an explicit path is mainly for tests that need
                 to isolate the user tier; production callers rely on
                 the default.
+            config_root: Optional override for the workspace tier.  When
+                set, the workspace base becomes ``<config_root>/services``
+                instead of ``<workspace>/.jaato/services``.  See
+                ``shared/config_resolver.py`` for the resolver chain.
         """
         self._workspace: Optional[Path] = Path(workspace_path) if workspace_path else None
-        self._base_path: Optional[Path] = self._workspace / DEFAULT_SERVICES_DIR if self._workspace else None
+        self._config_root: Optional[Path] = (
+            Path(config_root).expanduser().resolve() if config_root else None
+        )
+        if self._config_root is not None:
+            self._base_path: Optional[Path] = self._config_root / "services"
+        elif self._workspace is not None:
+            self._base_path = self._workspace / DEFAULT_SERVICES_DIR
+        else:
+            self._base_path = None
         # User-tier base path.  Unlike the workspace tier, this is
         # independent of the workspace setting and populated eagerly at
         # construction time (it comes from HOME, not from any caller-
@@ -138,13 +151,36 @@ class SchemaStore:
 
         Called by plugin wiring when workspace is set.  Does not touch
         the user-tier base path, which stays pinned to ``~/.jaato/services/``
-        regardless of workspace changes.
+        regardless of workspace changes.  When a ``config_root`` is
+        already in effect (set via :meth:`set_config_root`), the
+        workspace tier stays anchored to it and this call only updates
+        the underlying workspace reference for any future config_root
+        clearance.
 
         Args:
             path: New workspace path.
         """
         self._workspace = Path(path)
-        self._base_path = self._workspace / DEFAULT_SERVICES_DIR
+        if self._config_root is None:
+            self._base_path = self._workspace / DEFAULT_SERVICES_DIR
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Adopt the registry-broadcast ``config_root`` override.
+
+        When ``path`` is non-None, the workspace-tier base becomes
+        ``<path>/services`` instead of ``<workspace>/.jaato/services``.
+        When ``path`` is ``None``, falls back to the workspace tier
+        (today's default behavior).
+        """
+        self._config_root = (
+            Path(path).expanduser().resolve() if path else None
+        )
+        if self._config_root is not None:
+            self._base_path = self._config_root / "services"
+        elif self._workspace is not None:
+            self._base_path = self._workspace / DEFAULT_SERVICES_DIR
+        else:
+            self._base_path = None
 
     # ------------------------------------------------------------------
     # Tier iteration

@@ -14,7 +14,79 @@ from ..plugin import (
     PROMPT_ENTRY_FILE,
     SKILL_ENTRY_FILE,
     COMMAND_TIMEOUT,
+    tokenize_prompt_args,
 )
+
+
+class TestTokenizePromptArgs:
+    """Tests for the shlex-based prompt-args tokenizer.
+
+    The tokenizer powers both the ``%name args...`` text path
+    (session_manager) and the ``/prompt name args...`` slash-command
+    path (this plugin).  The contract differs from default
+    ``shlex.split`` in two important ways: only double quotes are
+    honored (apostrophes are literal so Spanish/French text doesn't
+    blow up), and unterminated quotes degrade to plain
+    whitespace-splitting rather than raising.
+    """
+
+    def test_plain_whitespace_split(self):
+        assert tokenize_prompt_args("a b c") == ["a", "b", "c"]
+
+    def test_empty_returns_empty_list(self):
+        assert tokenize_prompt_args("") == []
+        assert tokenize_prompt_args("   ") == []
+
+    def test_double_quoted_value_kept_as_one_token(self):
+        # Quotes are stripped after tokenization.
+        assert tokenize_prompt_args('"foo bar" baz') == ["foo bar", "baz"]
+
+    def test_named_arg_with_quoted_value(self):
+        # The ``key="value"`` form lands as a single ``key=value`` token
+        # so the downstream partitioner can split on the first ``=``.
+        assert tokenize_prompt_args('key="value with spaces"') == [
+            "key=value with spaces"
+        ]
+
+    def test_apostrophe_is_literal(self):
+        # Default POSIX shlex would treat ``'`` as a quote and choke
+        # on the unterminated single quote — we explicitly disable
+        # single-quote handling so natural-language values work.
+        assert tokenize_prompt_args("Profesor/a d'enseñanza") == [
+            "Profesor/a",
+            "d'enseñanza",
+        ]
+
+    def test_apostrophe_inside_quoted_value(self):
+        assert tokenize_prompt_args('name="O\'Brien"') == ["name=O'Brien"]
+
+    def test_url_token_unchanged(self):
+        # No quoting needed for typical URLs.
+        assert tokenize_prompt_args("https://example.com/x?y=1") == [
+            "https://example.com/x?y=1"
+        ]
+
+    def test_unterminated_quote_falls_back_to_split(self):
+        # Malformed input must not raise — the fallback path returns
+        # what plain ``str.split`` would produce.
+        assert tokenize_prompt_args('foo "unclosed bar') == [
+            "foo",
+            '"unclosed',
+            "bar",
+        ]
+
+    def test_escaped_quote_inside_double_quoted_span(self):
+        assert tokenize_prompt_args(r'msg="he said \"hi\""') == [
+            'msg=he said "hi"'
+        ]
+
+    def test_named_followed_by_positional(self):
+        # Mixed forms must coexist so the existing positional fallback
+        # keeps working when only some values need quoting.
+        assert tokenize_prompt_args('case_id=X tomador_nombre="María García"') == [
+            "case_id=X",
+            "tomador_nombre=María García",
+        ]
 
 
 class TestPromptLibraryPluginInitialization:

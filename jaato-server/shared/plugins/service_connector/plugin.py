@@ -102,13 +102,43 @@ class ServiceConnectorPlugin:
         if workspace:
             self._workspace_path = workspace
 
+        # Pull config_root from the registry rather than only from the
+        # set_config_root() broadcast, which won't fire again for
+        # plugin instances re-initialized inside subagent
+        # ``JaatoSession.configure`` (the registry only broadcasts on
+        # ``set_*`` mutations, not on every expose_tool).  Reading from
+        # the registry here makes the override survive
+        # shutdown→initialize cycles.
+        #
+        # Note ``_plugin_registry`` is set by ``set_plugin_registry``
+        # which fires AFTER initialize, so the attribute may not exist
+        # on first init — ``getattr`` with default keeps the lookup
+        # safe in that case.  For re-init (subagent re-expose) the
+        # attribute exists and the lookup works.
+        config_root = config.get("config_root")
+        registry_for_lookup = getattr(self, "_plugin_registry", None)
+        if not config_root and registry_for_lookup is not None:
+            try:
+                config_root = registry_for_lookup.get_config_root()
+            except Exception:
+                config_root = None
+
         self._auth_manager = AuthManager()
         self._http_client = ServiceHttpClient(auth_manager=self._auth_manager)
         self._validator = SchemaValidator()
-        self._schema_store = SchemaStore(workspace_path=self._workspace_path)
+        self._schema_store = SchemaStore(
+            workspace_path=self._workspace_path,
+            config_root=config_root,
+        )
 
         self._initialized = True
-        self._trace(f"initialize: workspace={self._workspace_path}")
+        registry_present = registry_for_lookup is not None
+        self._trace(
+            f"initialize: workspace={self._workspace_path} "
+            f"config_root={config_root} "
+            f"registry_attached={registry_present} "
+            f"agent_name={config.get('agent_name')!r}"
+        )
 
     def shutdown(self) -> None:
         """Shutdown the service connector plugin."""
@@ -161,6 +191,29 @@ class ServiceConnectorPlugin:
         if self._schema_store:
             self._schema_store.set_workspace_path(path)
         self._trace(f"set_workspace_path: {path}")
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Adopt the registry-broadcast ``config_root`` override.
+
+        Forwarded to the underlying :class:`SchemaStore` so the
+        workspace tier becomes ``<config_root>/services/`` instead of
+        ``<workspace>/.jaato/services/``.  When ``path`` is ``None``,
+        the schema store reverts to the workspace tier.
+        """
+        if self._schema_store:
+            self._schema_store.set_config_root(path)
+        self._trace(f"set_config_root: {path}")
+
+    def set_plugin_registry(self, registry) -> None:
+        """Store the plugin registry handle.
+
+        Called by :class:`PluginRegistry` after :meth:`initialize`.
+        The handle is used in subsequent re-inits (e.g. when a
+        subagent re-exposes this plugin with a different ``agent_name``
+        config) to fall back to ``registry.get_config_root()`` when
+        the per-call ``config`` dict doesn't carry one.
+        """
+        self._plugin_registry = registry
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for service connector tools."""
@@ -1681,28 +1734,40 @@ class ServiceConnectorPlugin:
         if not url and not service_name:
             return {"error": "Either url or service is required"}
 
-        # Get service config and endpoint schema
+        # Get service config and endpoint schema.
+        #
+        # Precedence: hand-curated manual definitions
+        # (``<base>/<name>/_service.yaml``, version-controlled by the
+        # operator) ALWAYS win over model-discovered ones
+        # (``<base>/_discovered/<name>.yaml``, written by
+        # ``discover_service``).  ``load_service_config`` already
+        # encodes this precedence — manual is checked before
+        # discovered within each tier.  We try it first so a stale or
+        # malformed discovered entry can never shadow a curated config.
         service_config = None
         endpoint_schema = None
 
         if service_name:
-            discovered = self._get_service(service_name)
-            if discovered:
-                service_config = discovered.config
-                # Find endpoint schema for validation
-                if path:
-                    for ep in discovered.endpoints:
-                        if ep.method == method and ep.path == path:
-                            endpoint_schema = ep
-                            break
-
-            # Also check manual config
-            if not service_config and self._schema_store:
+            if self._schema_store:
                 service_config = self._schema_store.load_service_config(service_name)
-                if path:
+                if service_config and path:
                     endpoint_schema = self._schema_store.find_endpoint(
                         service_name, method, path
                     )
+
+            # Fall back to the in-memory / discovered cache only when
+            # no manual config exists for this name.  This still
+            # supports services that were discovered but never given a
+            # ``_service.yaml`` file.
+            if not service_config:
+                discovered = self._get_service(service_name)
+                if discovered:
+                    service_config = discovered.config
+                    if path:
+                        for ep in discovered.endpoints:
+                            if ep.method == method and ep.path == path:
+                                endpoint_schema = ep
+                                break
 
             if not service_config:
                 return {"error": f"Service not found: {service_name}"}

@@ -226,6 +226,7 @@ class JaatoRuntime:
 
     def __init__(self, provider_name: str = "google_genai",
                  workspace_path: Optional[Path] = None,
+                 config_root: Optional[str] = None,
                  instruction_token_cache: Optional[InstructionTokenCache] = None):
         """Initialize JaatoRuntime.
 
@@ -235,6 +236,13 @@ class JaatoRuntime:
                 When running as a daemon, the process cwd may differ from the
                 client's workspace, so callers should pass the workspace path
                 explicitly. Falls back to ``Path.cwd()`` when not provided.
+            config_root: Optional override for the read-only framework-config
+                search root.  When unset, the daemon scans
+                ``<workspace_path>/.jaato/`` for profiles, agents, prompts,
+                references, completion_schemas, instructions, scripts,
+                services etc.  When set, that workspace-anchored search is
+                replaced with this path.  The ``~/.jaato/`` user tier is
+                always honored regardless.  See ``shared/config_resolver.py``.
             instruction_token_cache: Optional shared cache for instruction token
                 counts.  When provided (e.g. from ``SessionManager``), cached
                 counts survive across session creates/restores within the same
@@ -243,6 +251,7 @@ class JaatoRuntime:
         """
         self._provider_name: str = provider_name
         self._workspace_path: Optional[Path] = workspace_path
+        self._config_root: Optional[str] = config_root
         self._provider_config: Optional[ProviderConfig] = None
 
         # Multi-provider support: map provider_name -> ProviderConfig
@@ -323,8 +332,10 @@ class JaatoRuntime:
         """Load base system instructions from .jaato/instructions/ folder.
 
         Searches for instruction files in two locations (first match wins):
-        1. Current working directory: .jaato/instructions/
-        2. User config directory: ~/.jaato/instructions/
+        1. Workspace tier — ``<config_root>/instructions/`` when
+           ``config_root`` is set, else
+           ``<workspace_path>/.jaato/instructions/``.
+        2. User tier — ``~/.jaato/instructions/``.
 
         All ``*.md`` files found in the instructions folder are sorted by
         filename (so numeric prefixes like ``00-``, ``10-``, ``15-`` control
@@ -348,9 +359,18 @@ class JaatoRuntime:
             premium_parts = self._load_instruction_files(Path(premium_dir))
             all_parts.extend(premium_parts)
 
-        # 2. Workspace or user instructions (layered on top of premium)
+        # 2. Workspace or user instructions (layered on top of premium).
+        #    The workspace tier honors ``config_root`` when set so the
+        #    daemon can load instructions from a path the agent's
+        #    sandboxed filesystem can't reach.
+        if self._config_root:
+            workspace_instructions = (
+                Path(self._config_root).expanduser().resolve() / "instructions"
+            )
+        else:
+            workspace_instructions = base / ".jaato" / "instructions"
         search_dirs = [
-            base / ".jaato" / "instructions",
+            workspace_instructions,
             Path.home() / ".jaato" / "instructions",
         ]
 
@@ -365,9 +385,19 @@ class JaatoRuntime:
             self._base_system_instructions = "\n\n".join(all_parts)
             return
 
-        # Fallback: legacy single-file path
+        # Fallback: legacy single-file path.  Honors config_root for
+        # the workspace tier so an out-of-tree project layout still
+        # resolves to its single-file instructions when the user
+        # hasn't migrated to the multi-file folder layout yet.
+        if self._config_root:
+            legacy_workspace = (
+                Path(self._config_root).expanduser().resolve()
+                / "system_instructions.md"
+            )
+        else:
+            legacy_workspace = base / ".jaato" / "system_instructions.md"
         legacy_paths = [
-            base / ".jaato" / "system_instructions.md",
+            legacy_workspace,
             Path.home() / ".jaato" / "system_instructions.md",
         ]
 
@@ -1023,16 +1053,33 @@ class JaatoRuntime:
             )
             self._provider_configs[effective_provider] = config
 
-        # Inject workspace_path into config.extra for providers that need it
-        # (e.g., GitHub Models provider for OAuth token resolution)
+        # Inject workspace_path AND config_root into config.extra for
+        # providers that need them (auth-credential lookup paths, OAuth
+        # token resolution, etc.).  The env-var approach
+        # (``JAATO_CONFIG_ROOT`` exported by ``JaatoServer._in_workspace``)
+        # is not reliable for headless reactor-spawned sessions whose
+        # ``send_message`` runs in a fresh thread whose timing isn't
+        # tied to the parent's context-manager scope.  Carrying these
+        # on the provider config makes the value available to every
+        # call site without thread-local fragility.
         if self._registry:
+            from dataclasses import replace
             workspace_path = self._registry.get_workspace_path()
+            config_root = self._registry.get_config_root() or self._config_root
+            extra_with_paths = dict(config.extra)
             if workspace_path:
-                # Create a copy of config with workspace_path in extra to avoid
-                # modifying the stored config
-                from dataclasses import replace
-                extra_with_workspace = {**config.extra, 'workspace_path': workspace_path}
-                config = replace(config, extra=extra_with_workspace)
+                extra_with_paths['workspace_path'] = workspace_path
+            if config_root:
+                extra_with_paths['config_root'] = config_root
+            if extra_with_paths != config.extra:
+                config = replace(config, extra=extra_with_paths)
+        elif self._config_root:
+            # Even without a registry, prefer the runtime's stored
+            # config_root over an env-var fallback so the value travels
+            # with the call.
+            from dataclasses import replace
+            extra_with_paths = {**config.extra, 'config_root': self._config_root}
+            config = replace(config, extra=extra_with_paths)
 
         # Merge profile-level provider config.  Providers are plugins, so
         # their profile knobs sit under ``plugin_configs[provider_name]``.

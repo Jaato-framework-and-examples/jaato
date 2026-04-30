@@ -421,21 +421,27 @@ def poll_for_token(
 
 
 # Token storage location
-def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
+def _get_token_storage_path(
+    for_write: bool = False,
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Path:
     """Get path to token storage file.
 
     Follows jaato convention:
-    1. Project .jaato/ first (project-specific auth)
-    2. Home ~/.jaato/ second (user-level default)
+    1. Project tier — ``<config_root>/github_oauth.json`` when set,
+       else ``<workspace>/.jaato/github_oauth.json``.
+    2. Home tier — ``~/.jaato/github_oauth.json``.
 
     Uses JAATO_WORKSPACE_ROOT env var if set (for subagents), otherwise Path.cwd().
+    Uses JAATO_CONFIG_ROOT env var when ``config_root`` is unset.
     This avoids race conditions when subagents run in thread pools with
     process-wide CWD changes.
 
     Args:
-        for_write: If True, returns the path to write to (prefers project dir
-                   if it exists, otherwise home). If False, returns the first
-                   existing file or the default write location.
+        for_write: If True, returns the path to write to.
+        workspace_path: Optional explicit workspace path override.
+        config_root: Optional explicit read-only-config root override.
 
     Returns:
         Path to token storage file.
@@ -443,9 +449,13 @@ def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[st
     # Use explicit workspace path if set (thread-safe for subagents)
     # Falls back to CWD for main agent
     workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
+    effective_config_root = config_root or os.environ.get("JAATO_CONFIG_ROOT")
 
     # Project-level path
-    project_path = Path(workspace) / ".jaato" / "github_oauth.json"
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "github_oauth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "github_oauth.json"
 
     # User-level path (home directory)
     home_path = Path.home() / ".jaato" / "github_oauth.json"
@@ -470,14 +480,20 @@ def save_tokens(
     oauth_tokens: OAuthTokens,
     copilot_token: Optional[CopilotToken] = None,
     workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> None:
     """Save tokens to persistent storage.
 
     Args:
         oauth_tokens: OAuth tokens from device code flow.
         copilot_token: Optional Copilot token from exchange.
+        workspace_path: Optional explicit workspace path override.
+        config_root: Optional read-only-config root override.  See
+            :func:`_get_token_storage_path` for the resolver chain.
     """
-    path = _get_token_storage_path(for_write=True, workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        for_write=True, workspace_path=workspace_path, config_root=config_root,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = {
@@ -494,7 +510,10 @@ def save_tokens(
         os.chmod(path, 0o600)
 
 
-def load_tokens(workspace_path: Optional[str] = None) -> Optional[OAuthTokens]:
+def load_tokens(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[OAuthTokens]:
     """Load OAuth tokens from persistent storage.
 
     Returns None if the file is absent **or** cannot be parsed.  Broken
@@ -503,12 +522,15 @@ def load_tokens(workspace_path: Optional[str] = None) -> Optional[OAuthTokens]:
     the specific failure reason should use
     :func:`try_load_tokens_with_reason`.
     """
-    tokens, _ = try_load_tokens_with_reason(workspace_path=workspace_path)
+    tokens, _ = try_load_tokens_with_reason(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     return tokens
 
 
 def try_load_tokens_with_reason(
     workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> Tuple[Optional["OAuthTokens"], Optional[str]]:
     """Load OAuth tokens and return a reason string when loading fails.
 
@@ -525,7 +547,9 @@ def try_load_tokens_with_reason(
     but auth file is broken" and emit a specific, actionable error
     instead of a misleading "no credentials found".
     """
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
 
     if not path.exists():
         return None, None
@@ -618,9 +642,14 @@ def save_copilot_token(copilot_token: CopilotToken) -> None:
         pass
 
 
-def clear_tokens(workspace_path: Optional[str] = None) -> None:
+def clear_tokens(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> None:
     """Clear stored tokens."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if path.exists():
         path.unlink()
 
@@ -715,11 +744,17 @@ def _get_pending_auth_path(for_write: bool = False) -> Path:
     """Get path to pending auth state file.
 
     Follows same convention as token storage:
-    1. Project .jaato/ first
-    2. Home ~/.jaato/ second
+    1. Project tier — ``<config_root>/github_pending_auth.json`` when
+       ``JAATO_CONFIG_ROOT`` is set, else
+       ``<workspace>/.jaato/github_pending_auth.json``.
+    2. Home tier — ``~/.jaato/github_pending_auth.json``.
     """
     workspace = os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    project_path = Path(workspace) / ".jaato" / "github_pending_auth.json"
+    effective_config_root = os.environ.get("JAATO_CONFIG_ROOT")
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "github_pending_auth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "github_pending_auth.json"
     home_path = Path.home() / ".jaato" / "github_pending_auth.json"
 
     if for_write:

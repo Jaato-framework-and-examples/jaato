@@ -197,6 +197,13 @@ const client = new JaatoClient({
     autoReconnect: true,
     autoReattachSessionId: true,  // re-attach session automatically after a reconnect
   },
+  clientConfig: {
+    // Optional fields, all forwarded to the server as a
+    // ClientConfigRequest in the post-connect handshake.  Type is
+    // Omit<ClientConfigRequest, "type" | "timestamp">.
+    config_root: "/path/to/project/.jaato",   // see "config_root" below
+    apparmor: false,                          // see "apparmor" below
+  },
 });
 
 // Typed subscriptions — handler receives the narrowed event type.
@@ -230,6 +237,27 @@ The `profile` option is polymorphic:
 
 - **`string`** → references a profile JSON on the server's disk under `.jaato/profiles/`. Use this when an operator has curated profiles for human users.
 - **`object`** → inline spec with the same shape. Use this when you're an orchestrator with your own governance layer and don't want to depend on disk files.
+
+### `clientConfig.config_root`
+
+Decouples *where the agent runs* (`workspace_path`, set transport-side per WS workspace) from *where the daemon reads its read-only framework config* — profiles, agent .md files, prompts, references, completion_schemas, instructions, scripts, services. The daemon scans `<config_root>` instead of `<workspace_path>/.jaato/`. The user-tier `~/.jaato/` is always honored.
+
+Pair with a `workspace_path` that does **not** contain a `.jaato/` symlink to give the agent's filesystem tools no visibility into the framework config.
+
+### `clientConfig.apparmor`
+
+Default `false`. Set to `true` to ask the daemon to confine each session created on this connection with a per-session AppArmor profile. Useful for orchestrator-style harnesses where the LLM-driven tool plugins (`cli`, `file_edit`, `interactive_shell`) are the threat surface and a hallucinated path should be blocked at the kernel level rather than only inside the workspace dir.
+
+The profile grants:
+- `workspace_path` — read/write
+- `config_root` — read-only (when set)
+- `~/.jaato/{agents,profiles,prompts,references,...}` — read-only
+- `~/.jaato/memories` — read/write
+- venv + jaato source tree — read-only
+
+When AppArmor is unavailable on the host (non-Linux, kernel module not loaded, `apparmor_parser` missing) the session falls back to running unconfined — but **does not** fail silently. The daemon emits a `SystemMessageEvent` to the client with prefix `[apparmor] ...` (style `info` when confinement is in effect, style `warning` when it isn't). Surface those in your event handlers so the user can see at a glance whether kernel confinement is really active.
+
+Note: WS workspaces provisioned by the daemon (when the WS server has a `workspace_root` configured) are confined automatically by the WS path regardless of this flag — set `apparmor: true` only when running over plain IPC or against a WS server that doesn't manage its own workspace tree. See [`docs/apparmor-setup.md`](../docs/apparmor-setup.md) on the server repo for prerequisites.
 
 The two forms are mutually exclusive — pass one or the other. The server validates inline specs and rejects them with an `ErrorEvent` if `model` is missing (no silent default fallback). `agent` and `agentParams` are independent of `profile` and compose with either form: profile decides *capabilities* (model, plugins, GC), agent decides *persona* (system instructions / personality).
 

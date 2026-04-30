@@ -188,8 +188,24 @@ class NIMProvider:
         if config is None:
             config = ProviderConfig()
 
+        # Stash the config so post-init helpers (e.g.
+        # ``_get_credential_source_description``) can reuse the
+        # workspace_path / config_root that the runtime injected.
+        self._config = config
+
+        # Pull workspace_path / config_root from config.extra (injected
+        # by JaatoRuntime.create_provider) so credential lookup
+        # resolves under the session's explicit config_root rather
+        # than relying on the JAATO_CONFIG_ROOT env var (which is
+        # unreliable for headless reactor-spawned sessions running in
+        # fresh threads outside any active ``_in_workspace`` context).
+        _ws_path = config.extra.get('workspace_path') if config.extra else None
+        _config_root = config.extra.get('config_root') if config.extra else None
+
         # Resolve configuration
-        self._api_key = config.api_key or resolve_api_key()
+        self._api_key = config.api_key or resolve_api_key(
+            workspace_path=_ws_path, config_root=_config_root,
+        )
         self._base_url = config.extra.get("base_url") or resolve_base_url()
 
         context_length_extra = config.extra.get("context_length")
@@ -330,7 +346,13 @@ class NIMProvider:
 
         try:
             from .auth import get_credential_file_path
-            cred_path = get_credential_file_path()
+            # Threading config_root through the auth resolver — see
+            # the connect() docstring for the rationale.
+            extra = getattr(self._config, 'extra', None) or {}
+            cred_path = get_credential_file_path(
+                workspace_path=extra.get('workspace_path'),
+                config_root=extra.get('config_root'),
+            )
             if cred_path:
                 return f"NIM API key ({cred_path})"
         except ImportError:

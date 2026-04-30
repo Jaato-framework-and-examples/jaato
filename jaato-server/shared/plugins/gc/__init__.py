@@ -115,6 +115,7 @@ def load_gc_from_file(
     file_path: Optional[str] = None,
     agent_name: Optional[str] = None,
     workspace_root: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> Optional[tuple["GCPlugin", "GCConfig"]]:
     """Load GC configuration from a JSON file.
 
@@ -122,8 +123,10 @@ def load_gc_from_file(
     GC plugin with its config.
 
     Resolution order (when ``file_path`` is not provided):
-        1. ``<workspace_root>/.jaato/gc.json`` if ``workspace_root`` is set,
-           otherwise ``./.jaato/gc.json`` (relative to cwd, legacy behavior).
+        1. ``<config_root>/gc.json`` if ``config_root`` is set,
+           else ``<workspace_root>/.jaato/gc.json`` if ``workspace_root``
+           is set, else ``./.jaato/gc.json`` (relative to cwd, legacy
+           behavior).
         2. ``~/.jaato/gc.json`` (user-level fallback).
 
     When ``file_path`` is given:
@@ -173,7 +176,9 @@ def load_gc_from_file(
             explicit = Path(workspace_root) / explicit
         candidates.append(explicit)
     else:
-        if workspace_root:
+        if config_root:
+            candidates.append(Path(config_root).expanduser().resolve() / "gc.json")
+        elif workspace_root:
             candidates.append(Path(workspace_root) / ".jaato" / "gc.json")
         else:
             candidates.append(Path(".jaato") / "gc.json")

@@ -90,6 +90,13 @@ class _ExtensionContext:
             route special WebSocket connections to custom handlers, or
             ``ws_server.register_message_handler(type, callback)`` to
             handle custom message types on client connections.
+        ipc_server: The ``JaatoIPCServer`` instance if ``--ipc-socket``
+            was passed, or ``None`` otherwise.  Extensions can call
+            ``ipc_server.register_message_handler(type, callback)`` to
+            handle custom message types on IPC connections, mirroring
+            the WS surface.  Most extensions should prefer the
+            unified :meth:`register_message_handler` on this context
+            object — it fans out to both transports in one call.
         web_socket: The raw ``--web-socket`` CLI argument string (e.g.
             ``:8080``, ``0.0.0.0:8080``), or ``None``.
         ipc_socket: The raw ``--ipc-socket`` CLI argument string, or ``None``.
@@ -110,7 +117,7 @@ class _ExtensionContext:
     """
 
     __slots__ = (
-        "session_manager", "ws_server", "web_socket",
+        "session_manager", "ws_server", "ipc_server", "web_socket",
         "ipc_socket", "server_name", "dashboard_port",
         "available_plugins", "plugin_registry",
         "available_gc_plugins", "gc_plugin_factories",
@@ -128,9 +135,11 @@ class _ExtensionContext:
         plugin_registry=None,
         available_gc_plugins: frozenset = frozenset(),
         gc_plugin_factories: dict = None,
+        ipc_server=None,
     ):
         self.session_manager = session_manager
         self.ws_server = ws_server
+        self.ipc_server = ipc_server
         self.web_socket = web_socket
         self.ipc_socket = ipc_socket
         self.server_name = server_name
@@ -139,6 +148,83 @@ class _ExtensionContext:
         self.plugin_registry = plugin_registry
         self.available_gc_plugins = available_gc_plugins
         self.gc_plugin_factories = gc_plugin_factories or {}
+
+    def broadcast_event(self, event) -> None:
+        """Broadcast a daemon-wide event to every connected IPC + WS client.
+
+        Used by extensions for events that don't belong to a specific
+        session — currently the jaato-premium reactor framework's
+        HandoffGate transitions (``gate.announced`` / ``gate.released`` /
+        ``gates.snapshot``).
+
+        Thin wrapper over ``self.session_manager.broadcast_event(...)``.
+        Provided as a stable extension-facing API so the underlying
+        implementation can move without breaking extensions.
+        """
+        self.session_manager.broadcast_event(event)
+
+    def emit_to_client(self, client_id: str, event) -> None:
+        """Send an event to a single client, addressed by ``client_id``.
+
+        Targeted-emit complement to :meth:`broadcast_event`.  Used by
+        extension message handlers (registered via
+        :meth:`register_message_handler`) that need to reply to the
+        sender — e.g. a ``gates.list`` request expects only its sender
+        to receive the snapshot, not every connected client.
+
+        Routes through the SessionManager's per-client emit path so
+        the event fans out to the right transport (IPC or WS) for the
+        ``client_id``.  Silently no-ops when the ``client_id`` is
+        unknown (caller doesn't have to track client lifecycles).
+        """
+        try:
+            self.session_manager._emit_to_client(client_id, event)
+        except Exception:
+            # Don't let a client-targeted send failure propagate into
+            # extension code — handlers shouldn't have to wrap their
+            # own emit calls in try/except.  The session manager
+            # already logs send failures internally.
+            pass
+
+    def register_message_handler(self, message_type: str, handler) -> None:
+        """Register a custom message-type handler for both transports.
+
+        Convenience wrapper that fans out a single registration to
+        both ``ws_server`` and ``ipc_server`` (whichever is present),
+        so an extension can wire a verb like ``gates.list`` once and
+        have it reach both IPC and WS clients.
+
+        Handler signature is the transport-agnostic shape used by
+        :meth:`JaatoIPCServer.register_message_handler`:
+
+            async def handler(message: dict, client_id: str, user: Optional[str]) -> None
+
+        Reply via :meth:`emit_to_client` for targeted responses or
+        :meth:`broadcast_event` for fan-out.
+
+        For WS-only handlers that need raw-socket access (rare —
+        e.g. streaming protocols that bypass the typed-event bus),
+        register against ``ws_server.register_message_handler``
+        directly with the WS-specific
+        ``(ws, raw_dict, user, client_id)`` signature.
+
+        Args:
+            message_type: The ``type`` field value to match
+                (e.g., ``"gates.list"``).
+            handler: Async callback with the signature above.
+        """
+        if self.ipc_server is not None:
+            self.ipc_server.register_message_handler(message_type, handler)
+        if self.ws_server is not None:
+            # The WS path uses a different handler signature
+            # ``(ws, raw_dict, user, client_id)``.  Wrap the unified
+            # handler so the same callable works on both sides:
+            # we emulate the unified shape by ignoring ``ws``
+            # (handlers reply via ``ctx.emit_to_client`` rather than
+            # raw ``ws.send``) and reordering the kwargs.
+            async def _ws_adapter(ws, raw, user, client_id, _h=handler):
+                await _h(raw, client_id, user)
+            self.ws_server.register_message_handler(message_type, _ws_adapter)
 
 
 def configure_logging(
@@ -291,6 +377,15 @@ class JaatoDaemon:
         # Initialize session manager
         self._session_manager = SessionManager()
 
+        # Register the IPC-aware AppArmor session hook.  Fires for any
+        # session whose creating client opted in via
+        # ``ClientConfigRequest.apparmor=True`` (the default is
+        # ``False``, preserving today's IPC behavior).  WS-provisioned
+        # sessions are still handled by the WS server's own hook —
+        # this one stays out of their lane by checking that the
+        # session's workspace is NOT under the WS workspace_root.
+        self._register_ipc_apparmor_hook()
+
         # Discover session-independent plugins (auth plugins).
         self._discover_daemon_plugins()
 
@@ -387,6 +482,9 @@ class JaatoDaemon:
 
         # Wire composite sink as session manager's event callback
         self._session_manager.set_event_callback(composite_sink.send_event)
+        # Also wire broadcast — daemon-wide events (HandoffGate transitions)
+        # fan out across all transports via CompositeEventSink.broadcast_event.
+        self._session_manager.set_broadcast_callback(composite_sink.broadcast_event)
 
         # Load daemon extensions (e.g., gossip clustering from jaato-premium)
         self._load_extensions()
@@ -491,6 +589,191 @@ class JaatoDaemon:
     # The router is wired in start() and delegates to SessionManager.
     # ------------------------------------------------------------------
 
+
+    # ------------------------------------------------------------------
+    # IPC AppArmor opt-in hook
+    # ------------------------------------------------------------------
+
+    def _register_ipc_apparmor_hook(self) -> None:
+        """Register a session hook that confines IPC sessions when opted in.
+
+        Fires for every session created on this daemon.  Skips sessions
+        whose creating client did not set
+        ``ClientConfigRequest.apparmor=True`` (the default).  Skips
+        WS-provisioned sessions (handled by the WS server's own hook).
+        When AppArmor is unavailable on the host (non-Linux, kernel
+        module not loaded, ``apparmor_parser`` missing), the session
+        falls back to ``sandbox_mode = "soft"`` and the hook emits a
+        ``SystemMessageEvent`` (style ``"warning"``, prefix
+        ``[apparmor]``) to the client so the user can see at a glance
+        that confinement was requested but not applied — silent
+        fallbacks make security regressions invisible.
+
+        The AppArmor manager is constructed lazily on first opt-in so
+        deployments that never opt in pay zero startup cost.  The
+        manager is process-singleton: subsequent opt-ins reuse it.
+
+        Profile cleanup is handled per-session via
+        ``apparmor.teardown_profile`` from the session-end path; the
+        WS workspace reaper handles WS-provisioned sessions, while
+        IPC sessions tear down at session.end (see
+        ``SessionManager.end_session``).
+        """
+        from server.apparmor import AppArmorManager
+
+        # Captured by the closure: lazily-allocated AppArmor manager.
+        # Wrap in a list for write-from-closure (avoids ``nonlocal`` —
+        # this method is on a class but the hook doesn't need
+        # ``self``; if the manager is reused across daemon restarts
+        # that's fine because it's stateless beyond cached
+        # availability detection).
+        apparmor_holder: list = [None]
+
+        # Capture the daemon's main asyncio loop here (this method
+        # runs from ``async start()``).  Passed to AppArmorManager so
+        # that mutations triggered from confined worker threads can be
+        # dispatched onto this loop for execution in an unconfined
+        # context — eliminates the daemon-restart workaround that was
+        # otherwise needed when ``selectReferences`` (or any other
+        # confined-worker-driven AppArmor mutation) hit EACCES on the
+        # ``/etc/apparmor.d/jaato/`` file write.
+        try:
+            daemon_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            daemon_loop = None
+
+        def _ipc_apparmor_session_hook(server, session_id: str) -> None:
+            from jaato_sdk.events import SystemMessageEvent
+
+            sm = self._session_manager
+            if sm is None:
+                return
+
+            def _notify(message: str, style: str) -> None:
+                """Surface an apparmor-status line to the client terminal.
+
+                Hooks log to the daemon's /tmp/jaato.log, which the
+                IPC client can't see.  A SystemMessageEvent rides the
+                normal event stream so the orchestrator (or any other
+                IPC client) can print it next to its own output and
+                the user knows whether kernel confinement is actually
+                in effect for this run.
+                """
+                logger.info("[apparmor] %s", message)
+                try:
+                    sm._emit_to_session(session_id, SystemMessageEvent(
+                        message=f"[apparmor] {message}",
+                        style=style,
+                    ))
+                except Exception:
+                    # Emit failure must not break session creation.
+                    logger.warning(
+                        "Failed to emit apparmor status event for %s",
+                        session_id, exc_info=True,
+                    )
+
+            # Find the client_id that created this session.  When
+            # multiple clients attach (mid-session attach via
+            # session.connect), we still want the CREATOR's opt-in to
+            # decide confinement — that's the one whose
+            # ClientConfigRequest set apparmor.  The reverse lookup
+            # below picks the first client mapped to this session,
+            # which at hook-fire time is the creator (the mapping is
+            # set in create_session before _run_session_hooks).
+            creating_client = None
+            for cid, sid in sm._client_to_session.items():
+                if sid == session_id:
+                    creating_client = cid
+                    break
+            if creating_client is None:
+                return
+
+            client_config = sm._client_config.get(creating_client, {})
+            if not client_config.get("apparmor"):
+                return
+
+            sess = sm.get_session(session_id)
+            if not sess or not sess.workspace_path:
+                _notify(
+                    "requested but session has no workspace_path — "
+                    "running unconfined",
+                    style="warning",
+                )
+                return
+
+            # If a WS server is running and this workspace is under
+            # its workspace_root, the WS hook owns confinement for
+            # this session.  Don't double-provision.
+            if self._ws_server is not None:
+                ws_root = getattr(self._ws_server, "_workspace_root", None)
+                if ws_root:
+                    try:
+                        ws_root_real = os.path.realpath(ws_root)
+                        sess_real = os.path.realpath(sess.workspace_path)
+                        if (
+                            sess_real == ws_root_real
+                            or sess_real.startswith(ws_root_real + os.sep)
+                        ):
+                            return
+                    except OSError:
+                        pass
+
+            # Lazy-init the AppArmor manager.  ``workspace_root`` on
+            # the manager is unused for profile rendering today (the
+            # template doesn't reference it — sibling-deny is implicit
+            # via AppArmor's default-deny policy), so passing the
+            # session's own workspace_path is fine and keeps the
+            # interface uniform across IPC + WS use.
+            if apparmor_holder[0] is None:
+                # ``daemon_loop`` was captured above when this method
+                # was invoked from ``async start()``.  Passing it lets
+                # AppArmorManager dispatch confined-worker mutations
+                # back onto the unconfined main loop.
+                apparmor_holder[0] = AppArmorManager(
+                    workspace_root=sess.workspace_path,
+                    loop=daemon_loop,
+                )
+
+            apparmor = apparmor_holder[0]
+            if not apparmor.is_available():
+                sess.sandbox_mode = "soft"
+                _notify(
+                    "requested but AppArmor is unavailable on this "
+                    "host (non-Linux, kernel module not loaded, or "
+                    "apparmor_parser missing) — running unconfined",
+                    style="warning",
+                )
+                return
+
+            config_root = client_config.get("config_root")
+            env_file = client_config.get("env_file")
+            if not apparmor.provision_profile(
+                session_id,
+                sess.workspace_path,
+                config_root=config_root,
+                env_file=env_file,
+            ):
+                sess.sandbox_mode = "soft"
+                _notify(
+                    "profile provisioning failed (see daemon log) — "
+                    "running unconfined",
+                    style="warning",
+                )
+                return
+
+            from server.apparmor import make_confine_context
+            confine_context = make_confine_context(
+                apparmor.get_profile_name(session_id)
+            )
+            server.set_apparmor_confinement(confine_context)
+            sess.sandbox_mode = "apparmor"
+            _notify(
+                f"confinement applied (workspace={sess.workspace_path}, "
+                f"config_root={config_root or '(none)'})",
+                style="info",
+            )
+
+        self._session_manager.add_session_hook(_ipc_apparmor_session_hook)
 
     # ------------------------------------------------------------------
     # Daemon Extensions (entry-point-based lifecycle objects)
@@ -605,6 +888,7 @@ class JaatoDaemon:
         context = _ExtensionContext(
             session_manager=self._session_manager,
             ws_server=self._ws_server,
+            ipc_server=self._ipc_server,
             web_socket=self.web_socket,
             ipc_socket=self.ipc_socket,
             server_name=self._server_name,

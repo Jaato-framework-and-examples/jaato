@@ -245,6 +245,16 @@ class EventType(str, Enum):
     PEER_STOP_REQUEST = "peer.stop_request"
     PEER_STOP_ACKNOWLEDGED = "peer.stop_acknowledged"
 
+    # HandoffGate events — emitted by the jaato-premium reactor framework
+    # when a daemon-side gate transitions state.  See docs/sdk/gate-events.md
+    # for the public wire contract; full design lives in
+    # jaato-premium/docs/design/handoff-gate-api.md.  Wire types are
+    # pre-registered here in the public SDK so any client can deserialize
+    # them; production of these events is gated on premium being installed.
+    GATE_ANNOUNCED = "gate.announced"
+    GATE_RELEASED = "gate.released"
+    GATES_SNAPSHOT = "gates.snapshot"
+
 
 # =============================================================================
 # Base Event
@@ -1820,6 +1830,16 @@ class ClientConfigRequest(Event):
     provider_trace_log: Optional[str] = None  # client: PROVIDER_TRACE_LOG → server: JAATO_PROVIDER_TRACE
     # Client's working directory (for finding config files like .lsp.json)
     working_dir: Optional[str] = None
+    # Optional override for the read-only framework-config search root.
+    # When unset (the default), the daemon scans
+    # ``<working_dir>/.jaato/`` for profiles, agents, prompts,
+    # references, completion_schemas, instructions, scripts, services,
+    # etc.  When set, it scans ``<config_root>`` instead — letting
+    # clients decouple the agent's filesystem (``working_dir`` /
+    # workspace) from where the framework reads its config.  The user
+    # tier (``~/.jaato/``) is always honored regardless.  See
+    # ``shared/config_resolver.py``.
+    config_root: Optional[str] = None
     # Path to client's .env file - server loads this for session creation
     # This provides all provider-related env vars (PROJECT_ID, JAATO_PROVIDER, etc.)
     env_file: Optional[str] = None
@@ -1832,6 +1852,29 @@ class ClientConfigRequest(Event):
     # Permission timeout override (seconds). 0 = wait forever.
     # WS clients typically set 0 since the user may not be watching.
     permission_timeout: Optional[int] = None
+    # Opt-in AppArmor confinement for this client's sessions.
+    #
+    # ``False`` (the default) preserves the long-standing IPC behavior:
+    # sessions run unconfined because the local user already has full
+    # filesystem access.  ``True`` asks the daemon to provision a
+    # per-session AppArmor profile (same machinery used for WS-
+    # provisioned workspaces) confining the session's tool plugins to
+    # ``working_dir`` (rw), ``config_root`` (read-only), the standard
+    # user-tier ``~/.jaato/`` config, and the venv / source tree.
+    #
+    # Useful for orchestrator-driven test harnesses that want
+    # kernel-enforced isolation of the agent's filesystem even though
+    # they connect over IPC — the threat model there is the LLM going
+    # off-script, not the local user.
+    #
+    # When AppArmor is unavailable on the host (non-Linux, kernel
+    # module not loaded, ``apparmor_parser`` missing) the session
+    # falls back to running unconfined — but the daemon always emits
+    # a ``SystemMessageEvent`` describing the outcome (``[apparmor]
+    # confinement applied (...)`` for info, ``[apparmor] requested
+    # but ...`` for warnings) so the client can surface it to the
+    # user.  See ``docs/apparmor-setup.md`` for the prerequisites.
+    apparmor: bool = False
 
 
 # =============================================================================
@@ -1996,6 +2039,77 @@ class PeerAgentCompletedEvent(Event):
     workspace_modified: bool = False
 
 
+# =============================================================================
+# HandoffGate events (jaato-premium reactor framework)
+# =============================================================================
+
+class GateState(BaseModel):
+    """Snapshot of a single gate's state.
+
+    Used as the payload-level shape inside ``GatesSnapshotEvent`` and
+    accessible as a typed property on the live events.  Public/private
+    intent split is enforced server-side via ``public_intent_fields`` —
+    cross-tenant subscribers receive only the public keys; same-tenant
+    subscribers receive the full intent.
+
+    See ``jaato-premium/docs/design/handoff-gate-api.md`` §3.4 for the canonical
+    intent shape.
+    """
+    gate_name: str = ""
+    tenant_id: str = ""
+    state: str = "green"  # "green" | "red"
+    owner: Optional[str] = None              # service-identity ID (when RED)
+    intent: Optional[Dict[str, Any]] = None  # populated when RED+announced
+    acquired_at: Optional[str] = None        # ISO 8601
+    expires_at: Optional[str] = None         # ISO 8601 (acquired_at + ttl)
+
+
+class GateAnnouncedEvent(Event):
+    """A reactor producer announced its intent on a held HandoffGate.
+
+    Fired after a producer reactor calls ``gate.try_acquire(...)`` and
+    then ``gate.announce(intent)``.  When ``intent.session_id`` is set,
+    subscribers can ``client.attach_session(intent['session_id'])`` to
+    observe the spawned session's events.
+    """
+    type: EventType = Field(default=EventType.GATE_ANNOUNCED)
+    gate_name: str = ""
+    tenant_id: str = ""
+    owner: str = ""                          # service-identity ID
+    intent: Dict[str, Any] = Field(default_factory=dict)
+    announced_at: str = ""                   # ISO 8601
+
+
+class GateReleasedEvent(Event):
+    """A held HandoffGate was released (work completed, failed, or timed out).
+
+    ``was_announced=False`` indicates the producer crashed or errored
+    between ``try_acquire`` and ``announce`` — subscribers that
+    auto-attached on the announce event simply have nothing to detach.
+    ``outcome.status='timeout'`` indicates the watchdog auto-released
+    on TTL expiry.
+    """
+    type: EventType = Field(default=EventType.GATE_RELEASED)
+    gate_name: str = ""
+    tenant_id: str = ""
+    owner: str = ""
+    outcome: Optional[Dict[str, Any]] = None
+    released_at: str = ""                    # ISO 8601
+    was_announced: bool = True
+
+
+class GatesSnapshotEvent(Event):
+    """All currently-RED gates, sent on subscribe so late subscribers catch up.
+
+    Mirrors ``SessionInfoEvent`` for sessions: rather than forcing
+    every subscriber to track gate state externally across reconnects,
+    the registry replays the live state once at subscription time.
+    """
+    type: EventType = Field(default=EventType.GATES_SNAPSHOT)
+    gates: List[GateState] = Field(default_factory=list)
+    snapshot_at: str = ""                    # ISO 8601
+
+
 class PeerStopRequestEvent(Event):
     """Request to cancel a running remote subagent.
 
@@ -2114,6 +2228,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PEER_AGENT_COMPLETED.value: PeerAgentCompletedEvent,
     EventType.PEER_STOP_REQUEST.value: PeerStopRequestEvent,
     EventType.PEER_STOP_ACKNOWLEDGED.value: PeerStopAcknowledgedEvent,
+    # HandoffGate (jaato-premium reactor framework)
+    EventType.GATE_ANNOUNCED.value: GateAnnouncedEvent,
+    EventType.GATE_RELEASED.value: GateReleasedEvent,
+    EventType.GATES_SNAPSHOT.value: GatesSnapshotEvent,
     # SDK feature parity — session-primitive verbs
     EventType.INJECT_PROMPT_REQUEST.value: InjectPromptRequest,
     EventType.REPLAY_MESSAGES_REQUEST.value: ReplayMessagesRequest,

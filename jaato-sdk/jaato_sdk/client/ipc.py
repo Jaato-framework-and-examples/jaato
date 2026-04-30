@@ -227,6 +227,8 @@ class IPCClient:
         auto_start: bool = True,
         env_file: str = ".env",
         workspace_path: Optional[str] = None,
+        config_root: Optional[str] = None,
+        apparmor: bool = False,
         min_protocol_version: Optional[str] = None,
     ):
         """Initialize the IPC client.
@@ -238,6 +240,39 @@ class IPCClient:
             workspace_path: Working directory sent to the server for file
                 operations and sandbox scoping.  Falls back to
                 ``os.getcwd()`` when not provided.
+            config_root: Optional override for where the daemon reads
+                read-only framework config (profiles, agents, prompts,
+                references, completion_schemas, instructions, scripts,
+                services).  When unset, the daemon falls back to
+                ``<workspace_path>/.jaato/``; when set, that
+                workspace-anchored search is replaced with this path.
+                The ``~/.jaato/`` user-tier fallback is always honored.
+                Pair with a ``workspace_path`` that does **not** contain
+                a ``.jaato/`` symlink to give the agent's filesystem
+                tools no visibility into the framework config.  See
+                ``shared/config_resolver.py`` for the resolver contract.
+            apparmor: Opt-in AppArmor confinement for sessions on this
+                connection.  Defaults to ``False`` to preserve the
+                long-standing IPC behavior (sessions run unconfined).
+                Set to ``True`` to ask the daemon to provision a per-
+                session AppArmor profile that confines the agent's
+                tool plugins to ``workspace_path`` (rw),
+                ``config_root`` (read-only), the standard
+                ``~/.jaato/`` config, and the venv / source tree.
+                Useful for orchestrator-driven harnesses where the
+                agent itself is the threat surface, not the local user.
+                When AppArmor is unavailable on the host (non-Linux,
+                kernel module not loaded, ``apparmor_parser`` missing)
+                the session falls back to running unconfined.  This
+                is **not** a silent fallback: the daemon always emits
+                a ``SystemMessageEvent`` to the client describing the
+                outcome (style ``"info"`` with prefix
+                ``[apparmor] confinement applied (...)`` when
+                enforcement is in effect, style ``"warning"`` with
+                prefix ``[apparmor] requested but ...`` otherwise),
+                so the caller can surface it in the event loop and
+                the user knows whether kernel confinement is really
+                active.  See ``docs/apparmor-setup.md``.
             min_protocol_version: Override the class-level
                 ``MIN_PROTOCOL_VERSION`` for this connection.  Use only
                 for development against unreleased daemons; production
@@ -248,6 +283,8 @@ class IPCClient:
         self.auto_start = auto_start
         self.env_file = env_file
         self.workspace_path = workspace_path
+        self.config_root = config_root
+        self.apparmor = apparmor
         self._min_protocol_version: str = (
             min_protocol_version or self.MIN_PROTOCOL_VERSION
         )
@@ -733,7 +770,9 @@ class IPCClient:
             trace_log_path=trace_log,
             provider_trace_log=provider_trace,
             working_dir=working_dir,
+            config_root=self.config_root,
             env_file=env_file_abs,
+            apparmor=self.apparmor,
             presentation=presentation.to_dict(),
         ))
 

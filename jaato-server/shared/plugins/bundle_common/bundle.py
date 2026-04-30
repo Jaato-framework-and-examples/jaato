@@ -279,12 +279,25 @@ def resolve_bundle_roots(
     *,
     domain_subpath: Path,
     user_home: Optional[Path] = None,
+    config_root: Optional[str] = None,
 ) -> List[Tuple[Path, str]]:
     """Return the ordered list of ``(root_dir, tier)`` pairs to scan.
 
     Discovery walks workspace first, then user; the order matters
     because workspace bundles **shadow** user bundles of the same
     name in :func:`discover_bundles`.
+
+    The workspace tier is determined by:
+
+    1. If ``config_root`` is set: ``Path(config_root) / <domain>`` —
+       lets a session decouple where it reads config from where its
+       agent's filesystem tools point (see
+       :func:`shared.config_resolver.resolve_config_search_path`).
+    2. Else if ``workspace_path`` is set: ``workspace_path / domain_subpath``
+       — today's behavior, unchanged.
+    3. Else: workspace tier omitted; only the user tier is scanned.
+
+    The user tier (``~/<domain_subpath>``) is always appended.
 
     Args:
         workspace_path: Workspace root, or ``None`` if unknown. When
@@ -293,9 +306,17 @@ def resolve_bundle_roots(
         domain_subpath: Plugin-relative tier-root suffix, e.g.
             ``Path(".jaato/references")`` for the references plugin or
             ``Path(".jaato/agents")`` for an agent plugin. Joined with
-            both the workspace path and ``Path.home()``.
+            both the workspace path and ``Path.home()``.  When
+            ``config_root`` is set, only the *trailing* segment of
+            ``domain_subpath`` is joined onto ``config_root`` (the
+            ``.jaato/`` prefix that already lives in ``config_root``
+            is stripped) — so callers don't have to choose between two
+            shapes.
         user_home: Override for ``Path.home()``. Test seam — production
             code passes ``None`` to use the real home directory.
+        config_root: Optional read-only-config root override (see
+            :func:`shared.config_resolver.resolve_config_search_path`).
+            When ``None`` (the default), behavior is unchanged.
 
     Returns:
         Ordered list of ``(absolute_root_dir, tier_name)``. Roots that
@@ -303,8 +324,32 @@ def resolve_bundle_roots(
         treats a missing root as "no bundles in this tier" without
         raising.
     """
+    # When no explicit ``config_root`` is provided, honor the
+    # ``JAATO_CONFIG_ROOT`` env var (exported by
+    # ``JaatoServer._in_workspace``).  This lets plugins whose
+    # ``initialize()`` runs before the registry's ``set_config_root``
+    # broadcast — and therefore can't read the override from
+    # ``self._config_root`` — still pick it up on first discovery.
+    import os as _os
+    effective_config_root = config_root or _os.environ.get('JAATO_CONFIG_ROOT')
+
     roots: List[Tuple[Path, str]] = []
-    if workspace_path is not None:
+    if effective_config_root:
+        # ``domain_subpath`` ships as ``Path(".jaato/<domain>")`` from
+        # most callers; ``config_root`` is already the analog of
+        # ``<workspace>/.jaato``, so we want only the inner segments
+        # (e.g. ``"references"``).  ``Path.parts`` lets us strip the
+        # leading ``.jaato`` if present without touching the rest.
+        parts = domain_subpath.parts
+        if parts and parts[0] == ".jaato":
+            inner = Path(*parts[1:]) if len(parts) > 1 else Path()
+        else:
+            inner = domain_subpath
+        roots.append((
+            Path(effective_config_root).expanduser().resolve() / inner,
+            BUNDLE_TIER_WORKSPACE,
+        ))
+    elif workspace_path is not None:
         roots.append((
             Path(workspace_path).resolve() / domain_subpath,
             BUNDLE_TIER_WORKSPACE,

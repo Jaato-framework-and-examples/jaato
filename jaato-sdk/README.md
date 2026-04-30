@@ -176,11 +176,34 @@ client = IPCRecoveryClient(
     auto_start=True,                  # spawn server daemon if not running
     env_file=".env",                  # client env forwarded to server (relative to workspace)
     workspace_path=Path.cwd(),        # what the server sees as the working directory
+    config_root=None,                 # optional: <path>/.jaato override for read-only config
+    apparmor=False,                   # optional: opt into per-session AppArmor confinement
     on_status_change=lambda s: ...,   # ConnectionStatus callback
 )
 ```
 
 `IPCClient` takes the same parameters minus `config` and `on_status_change`.
+
+### `config_root`
+
+When set, decouples *where the agent runs* (`workspace_path`) from *where the daemon reads its read-only framework config* — profiles, agent .md files, prompts, references, completion_schemas, instructions, scripts, services. The daemon scans `<config_root>` instead of `<workspace_path>/.jaato/`. The user-tier `~/.jaato/` is always honored.
+
+Pair with a `workspace_path` that does **not** contain a `.jaato/` symlink to give the agent's filesystem tools no visibility into the framework config.
+
+### `apparmor`
+
+Default `False`. Set to `True` to ask the daemon to confine each session created on this connection with a per-session AppArmor profile. Useful for orchestrator-driven harnesses where the LLM-driven tool plugins (`cli`, `file_edit`, `interactive_shell`) are the threat surface and a hallucinated path should be blocked at the kernel level rather than only inside the sandbox dir.
+
+The profile grants:
+- `workspace_path` — read/write
+- `config_root` — read-only (when set)
+- `~/.jaato/{agents,profiles,prompts,...}` — read-only
+- `~/.jaato/memories` — read/write
+- venv + jaato source tree — read-only
+
+When AppArmor is unavailable on the host (non-Linux, kernel module not loaded, `apparmor_parser` missing) the session falls back to running unconfined — but **does not** fail silently. The daemon always emits a `SystemMessageEvent` to the client describing the outcome: style `"info"` with prefix `[apparmor] confinement applied (...)` when enforcement is in effect, or style `"warning"` with prefix `[apparmor] requested but ...` when it isn't (and why). Print these in your event-handling loop so the user can see at a glance whether kernel confinement is really active for the run, instead of having to tail `/tmp/jaato.log`. See [`docs/apparmor-setup.md`](../docs/apparmor-setup.md) for prerequisites.
+
+The default remains `False` so today's TUI / IPC behavior is unchanged: a local user already has full filesystem access and confining their sessions adds friction without adding security.
 
 ## Client State
 
