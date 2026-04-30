@@ -234,12 +234,17 @@ class TestProfileTemplateIncludesRefsDir:
         assert "include if exists" in rendered
         assert refs_glob in rendered
 
-    def test_template_version_bumped_to_5(self, manager):
-        # Bumping the version is what invalidates apparmor_parser's
-        # cache for confined sessions; without the bump, sessions with
-        # cached v4 profiles would not pick up the include directive.
+    def test_template_version_header_present(self, manager):
+        # The rendered profile must always carry a
+        # ``jaato-apparmor-template-version: <N>`` header.  The number
+        # is whatever ``AppArmorManager._TEMPLATE_VERSION`` currently
+        # is — bumping the version is what invalidates apparmor_parser's
+        # cache for confined sessions, so the header MUST match the
+        # source-of-truth constant exactly (no drift between the
+        # constant and the rendered output).
         rendered = manager._render_profile("sess123", "/workspace")
-        assert "jaato-apparmor-template-version: 5" in rendered
+        expected = f"jaato-apparmor-template-version: {manager._TEMPLATE_VERSION}"
+        assert expected in rendered
 
 
 class TestPathValidation:
