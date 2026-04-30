@@ -300,6 +300,73 @@ class LifecycleTools:
             if k in ('total_tokens', 'prompt_tokens', 'output_tokens')
             and isinstance(v, int)
         }
+        # Render profile-declared completion artefacts, if any.  This
+        # is the output-side body-wired counterpart to dynamic-
+        # instructions prefetch: deterministic projection of the
+        # validated payload onto disk, executed by the framework so
+        # the agent never had to call writeNewFile itself for files
+        # whose content is a function of the payload alone.  See
+        # ``shared/dynamic_instructions.py:render_completion_artifacts``.
+        # When a renderer with ``on_error="fail_completion"`` fails,
+        # we surface the error to the model as a structured retry
+        # prompt — same pattern as schema validation failure — and
+        # do NOT fire on_agent_completed (the completion isn't really
+        # complete until its mandatory side effects landed).
+        artifacts = getattr(self._session, "_completion_artifacts", None) or []
+        if artifacts and payload is not None:
+            from .dynamic_instructions import (
+                build_render_context,
+                render_completion_artifacts,
+            )
+            ctx = build_render_context(
+                self._session,
+                agent_params=getattr(self._session, "_agent_params", {}),
+            )
+            artifact_outcome = render_completion_artifacts(payload, ctx, artifacts)
+            if artifact_outcome.failed:
+                # Hard failure — return self-correction prompt to the
+                # model.  The agent's signal_completion did NOT fire
+                # on_agent_completed, _signal_completion_called stays
+                # False, so the loop continues / nudge guard can act.
+                fail_lines = "\n".join(
+                    f"- {getattr(a, 'output', '?')}: {msg}"
+                    for a, msg in artifact_outcome.failed
+                )
+                logger.error(
+                    "signal_completion: %d artefact(s) failed to render; "
+                    "returning self-correction prompt:\n%s",
+                    len(artifact_outcome.failed), fail_lines,
+                )
+                return {
+                    "error": "artifact_render_failed",
+                    "message": (
+                        "signal_completion succeeded validation but "
+                        "the framework could not render the profile's "
+                        "required output artefact(s).  Inspect the "
+                        "error(s) below, fix any payload fields the "
+                        "renderer needs, and call signal_completion "
+                        "again."
+                    ),
+                    "artifact_errors": [
+                        {
+                            "output": getattr(a, "output", None),
+                            "renderer": getattr(a, "renderer", None),
+                            "error": msg,
+                        }
+                        for a, msg in artifact_outcome.failed
+                    ],
+                }
+            # Soft failures — log but proceed.
+            for artifact, msg in artifact_outcome.warned:
+                logger.warning(
+                    "completion-artifact warned (output=%s renderer=%s): %s",
+                    getattr(artifact, "output", None),
+                    getattr(artifact, "renderer", None),
+                    msg,
+                )
+        else:
+            artifact_outcome = None
+
         hooks.on_agent_completed(
             agent_id=agent_id,
             completed_at=datetime.now(),
@@ -329,4 +396,6 @@ class LifecycleTools:
         }
         if payload is not None:
             result["payload"] = payload
+        if artifact_outcome and artifact_outcome.written:
+            result["artifacts_written"] = list(artifact_outcome.written)
         return result
