@@ -179,6 +179,190 @@ def expand_py_placeholders(content: str, context: RenderContext) -> str:
     return _PY_PLACEHOLDER.sub(_replace, content)
 
 
+@dataclass
+class ArtifactRenderResult:
+    """Outcome of running a profile's ``completion_artifacts`` list.
+
+    Each artifact lands in exactly one of three buckets, mirroring the
+    profile-declared ``on_error`` policy:
+
+    Attributes:
+        written: Absolute paths of artefacts the framework successfully
+            wrote.  Surfaced into the signal_completion result so the
+            agent (and downstream consumers) know what landed.
+        warned: List of ``(artifact, error_message)`` tuples for
+            artefacts whose ``on_error="warn"`` policy let them fail
+            non-fatally.  Logged but the completion still succeeds.
+        failed: List of ``(artifact, error_message)`` tuples for
+            artefacts whose ``on_error="fail_completion"`` policy
+            forces a hard failure.  Caller MUST treat the agent's
+            ``signal_completion`` as failed and return a
+            self-correction prompt.
+    """
+    written: List[str] = field(default_factory=list)
+    warned: List[tuple] = field(default_factory=list)
+    failed: List[tuple] = field(default_factory=list)
+
+
+def _resolve_output_path(
+    template: str,
+    payload: Dict[str, Any],
+    context: "RenderContext",
+) -> str:
+    """Substitute ``{field}`` placeholders in an output path template.
+
+    Lookup precedence: payload fields → agent_params → a small set of
+    session-derived values (``case_id``, ``workspace_path``).  Unknown
+    placeholders raise ``KeyError`` deliberately — silent miss would
+    write files to weirdly-named paths.
+
+    Relative paths resolve under ``context.workspace_path`` so a
+    template like ``output/{case_id}/policy.md`` lands inside the
+    session's sandbox, not the daemon's cwd.
+    """
+    fields: Dict[str, Any] = {}
+    if context.workspace_path:
+        fields["workspace_path"] = context.workspace_path
+    fields.update(context.agent_params or {})
+    if isinstance(payload, dict):
+        fields.update(payload)
+    case_id_val = (
+        payload.get("case_id") if isinstance(payload, dict) else None
+    ) or context.agent_params.get("case_id")
+    if case_id_val:
+        fields["case_id"] = case_id_val
+
+    rendered = template.format_map(fields)
+
+    import os as _os
+    if not _os.path.isabs(rendered) and context.workspace_path:
+        rendered = _os.path.join(context.workspace_path, rendered)
+    return rendered
+
+
+def render_completion_artifacts(
+    payload: Dict[str, Any],
+    context: "RenderContext",
+    artifacts: List[Any],
+) -> ArtifactRenderResult:
+    """Run profile-declared renderers and write artefact files.
+
+    Output-side counterpart to :func:`expand_py_placeholders`: where
+    that function injects script output INTO the agent's prompt, this
+    one writes script output OUT to disk after the agent has finished
+    its turn.  Called from
+    :meth:`LifecycleTools._execute_signal_completion` after the
+    payload validates against the profile's
+    ``completion_payload_schema``.
+
+    Each artifact is a ``CompletionArtifact`` (typed as ``Any`` here
+    to avoid a top-level subagent-config import).  For each entry:
+
+    1. Resolve ``renderer`` via the standard ``script_loader`` tier.
+    2. Load its ``render(payload, context) -> str | bytes`` callable.
+    3. Resolve the ``output`` template against payload + agent_params
+       + session-derived fields (``case_id``, ``workspace_path``).
+    4. Write the rendered content atomically (``.tmp`` + ``rename``).
+    5. Bucket success / warned-error / failed-error per the entry's
+       ``on_error`` policy.
+
+    Args:
+        payload: The agent's validated ``signal_completion`` payload.
+        context: :class:`RenderContext` (same shape used by
+            ``expand_py_placeholders`` on the input side).
+        artifacts: List of ``CompletionArtifact`` entries from the
+            session's profile.
+
+    Returns:
+        :class:`ArtifactRenderResult` summarising the outcome.
+    """
+    result = ArtifactRenderResult()
+    if not artifacts:
+        return result
+
+    import os as _os
+
+    for artifact in artifacts:
+        renderer_ref = getattr(artifact, "renderer", None)
+        output_template = getattr(artifact, "output", None)
+        on_error = getattr(artifact, "on_error", "fail_completion")
+        if not renderer_ref or not output_template:
+            err = f"missing renderer or output ({artifact!r})"
+            (result.failed if on_error == "fail_completion" else result.warned).append(
+                (artifact, err)
+            )
+            continue
+
+        path = resolve_script_path(
+            renderer_ref,
+            workspace_path=context.workspace_path,
+            config_root=context.config_root,
+        )
+        if path is None:
+            err = f"renderer not found: {renderer_ref}"
+            logger.warning("completion-artifact: %s", err)
+            (result.failed if on_error == "fail_completion" else result.warned).append(
+                (artifact, err)
+            )
+            continue
+
+        fn = load_script_symbol(
+            path, symbol="render", module_prefix="_jaato_artifact",
+        )
+        if fn is None:
+            err = f"renderer load error: {renderer_ref}"
+            (result.failed if on_error == "fail_completion" else result.warned).append(
+                (artifact, err)
+            )
+            continue
+
+        try:
+            content = fn(payload, context)
+        except Exception as exc:
+            logger.exception(
+                "completion-artifact: render failed for %s", renderer_ref,
+            )
+            err = f"renderer exception: {renderer_ref}: {exc}"
+            (result.failed if on_error == "fail_completion" else result.warned).append(
+                (artifact, err)
+            )
+            continue
+
+        try:
+            output_path = _resolve_output_path(output_template, payload, context)
+        except KeyError as exc:
+            err = (
+                f"output path template references unknown field {exc} "
+                f"(template={output_template!r})"
+            )
+            (result.failed if on_error == "fail_completion" else result.warned).append(
+                (artifact, err)
+            )
+            continue
+
+        try:
+            _os.makedirs(_os.path.dirname(output_path), exist_ok=True)
+            tmp_path = output_path + ".tmp"
+            mode = "wb" if isinstance(content, (bytes, bytearray)) else "w"
+            kwargs: Dict[str, Any] = {"mode": mode}
+            if mode == "w":
+                kwargs["encoding"] = "utf-8"
+            with open(tmp_path, **kwargs) as fh:
+                fh.write(content)
+            _os.replace(tmp_path, output_path)
+            result.written.append(output_path)
+        except OSError as exc:
+            logger.exception(
+                "completion-artifact: write failed for %s", output_path,
+            )
+            err = f"write failed: {output_path}: {exc}"
+            (result.failed if on_error == "fail_completion" else result.warned).append(
+                (artifact, err)
+            )
+
+    return result
+
+
 def build_render_context(session: Any, agent_params: Optional[Dict[str, Any]] = None) -> RenderContext:
     """Build a :class:`RenderContext` from a configured ``JaatoSession``.
 

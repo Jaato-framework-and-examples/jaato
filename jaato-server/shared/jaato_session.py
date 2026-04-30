@@ -227,6 +227,18 @@ class JaatoSession:
         # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
         self._completion_payload_schema: Optional[Any] = None
 
+        # Profile-declared output artefacts.  Each entry is a
+        # ``CompletionArtifact`` (renderer / output / on_error) — when
+        # ``signal_completion`` validates against
+        # ``_completion_payload_schema``, ``LifecycleTools`` runs each
+        # renderer in turn, passing the validated payload, and writes
+        # the result to the templated output path.  Empty list = legacy
+        # behaviour (agents call ``writeNewFile`` themselves).
+        # ``CompletionArtifact`` typed as ``Any`` here to avoid a top-
+        # level subagent-config import; concrete type is
+        # ``shared.plugins.subagent.config.CompletionArtifact``.
+        self._completion_artifacts: List[Any] = []
+
         # Completion lifecycle tracking — flipped True by
         # ``LifecycleTools._execute_signal_completion`` on the first
         # successful invocation.  The completion-nudge guard reads this
@@ -1322,6 +1334,7 @@ class JaatoSession:
         completion_payload_schema: Optional[Any] = None,
         tier_config: Optional['ModelTierConfig'] = None,
         agent_params: Optional[Dict[str, Any]] = None,
+        completion_artifacts: Optional[List[Any]] = None,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1375,6 +1388,12 @@ class JaatoSession:
         # in __init__.
         if agent_params is not None:
             self._agent_params = dict(agent_params)
+
+        # Profile-declared output artefacts (rendered after
+        # signal_completion validates).  See ``_completion_artifacts``
+        # doc in __init__.
+        if completion_artifacts is not None:
+            self._completion_artifacts = list(completion_artifacts)
 
         # Tier mode: when a tier_config is supplied, the session's
         # initial model is overridden by the initial tier's model so the

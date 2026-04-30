@@ -1797,6 +1797,11 @@ class JaatoServer:
                     self._profile.completion_payload_schema
                 )
 
+            if self._profile.completion_artifacts:
+                kwargs["completion_artifacts"] = (
+                    self._profile.completion_artifacts
+                )
+
         # Per-turn model-tier config: profile-declared model_tiers win;
         # otherwise env vars (JAATO_TIER_*) are consulted; otherwise
         # the session stays in single-model mode (no enter_tier tool,

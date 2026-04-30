@@ -877,6 +877,7 @@ class JaatoRuntime:
         completion_payload_schema: Optional[Any] = None,
         tier_config: Optional['ModelTierConfig'] = None,
         agent_params: Optional[Dict[str, Any]] = None,
+        completion_artifacts: Optional[List[Any]] = None,
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -952,6 +953,7 @@ class JaatoRuntime:
             completion_payload_schema=completion_payload_schema,
             tier_config=tier_config,
             agent_params=agent_params,
+            completion_artifacts=completion_artifacts,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 

@@ -545,6 +545,39 @@ class GCProfileConfig:
 
 
 @dataclass
+class CompletionArtifact:
+    """A profile-declared file rendered from the agent's signal_completion payload.
+
+    Output-side counterpart to dynamic-instructions prefetch scripts.
+    The framework executes the renderer after ``signal_completion``'s
+    payload validates against ``completion_payload_schema``; the agent
+    never calls ``writeNewFile`` itself for these files — same body-
+    wired pattern as input-side prefetch (the model produces the
+    structured data, the body deterministically projects it onto disk).
+
+    Attributes:
+        renderer: Script path resolved through the standard
+            ``script_loader`` tier (workspace ``.jaato/<path>`` →
+            user ``~/.jaato/<path>``).  Script must define
+            ``def render(payload: dict, context) -> str | bytes``.
+        output: Output file path, with simple ``{field}`` templating.
+            Substitutes from the payload first, then ``agent_params``,
+            then a small set of session-derived values (``case_id``,
+            ``agent_id``, ``workspace_path``).  Relative paths resolve
+            under the session's ``workspace_path``.
+        on_error: How a render failure (script raised, file write
+            failed) is surfaced.  ``"fail_completion"`` returns a
+            validation_failed-style error to the model so it retries;
+            ``"warn"`` logs and continues, the completion still
+            succeeds and the missing artifact is the operator's
+            problem.  Default ``"fail_completion"``.
+    """
+    renderer: str
+    output: str
+    on_error: str = "fail_completion"
+
+
+@dataclass
 class SubagentProfile:
     """Configuration profile for a subagent.
 
@@ -612,6 +645,7 @@ class SubagentProfile:
     env: Dict[str, str] = field(default_factory=dict)
     inherits: Optional[List[str]] = None
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
+    completion_artifacts: List[CompletionArtifact] = field(default_factory=list)
     runtime_limits: Optional[RuntimeLimits] = None
     # Per-turn model-tier config.  Empty dict means "single-model
     # mode" — the framework falls back to env vars (JAATO_TIER_*) at
@@ -643,6 +677,58 @@ def _normalize_inherits(value: Any) -> Optional[List[str]]:
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return None
+
+
+def _parse_completion_artifacts(value: Any) -> List[CompletionArtifact]:
+    """Parse a profile's ``completion_artifacts`` list from raw JSON.
+
+    Accepts a list of dicts each shaped like
+    ``{"renderer": "scripts/foo.py", "output": "out/{case_id}/foo",
+    "on_error": "fail_completion"}``.  Skips malformed entries with a
+    warning rather than raising — partial profiles are loadable and
+    the missing artifact surfaces at completion time as a normal
+    "renderer not found" error.
+
+    Returns an empty list when ``value`` is ``None``, missing, or not
+    a list.
+    """
+    if not isinstance(value, list):
+        return []
+    out: List[CompletionArtifact] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            logger.warning(
+                "completion_artifacts: skipping non-dict entry: %r", entry,
+            )
+            continue
+        renderer = entry.get("renderer")
+        output = entry.get("output")
+        if not isinstance(renderer, str) or not renderer.strip():
+            logger.warning(
+                "completion_artifacts: skipping entry without 'renderer': %r",
+                entry,
+            )
+            continue
+        if not isinstance(output, str) or not output.strip():
+            logger.warning(
+                "completion_artifacts: skipping entry without 'output': %r",
+                entry,
+            )
+            continue
+        on_error = entry.get("on_error", "fail_completion")
+        if on_error not in ("fail_completion", "warn"):
+            logger.warning(
+                "completion_artifacts: invalid on_error=%r for renderer=%r, "
+                "defaulting to 'fail_completion'",
+                on_error, renderer,
+            )
+            on_error = "fail_completion"
+        out.append(CompletionArtifact(
+            renderer=renderer.strip(),
+            output=output.strip(),
+            on_error=on_error,
+        ))
+    return out
 
 
 def build_inline_profile(
@@ -721,6 +807,7 @@ def build_inline_profile(
         env=env,
         inherits=None,
         completion_payload_schema=data.get('completion_payload_schema'),
+        completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
         runtime_limits=runtime_limits,
         model_tiers=model_tiers,
     )
@@ -960,6 +1047,17 @@ def _merge_profiles(
         'completion_payload_schema', child.completion_payload_schema
     )
 
+    # completion_artifacts: concatenation across parent → child.  Each
+    # entry is independent (different output paths, different
+    # renderers); concatenating preserves both parent's and child's
+    # declarations without conflict semantics.  Child entries appear
+    # last so they take precedence if any future logic compares by
+    # output-path uniqueness.
+    merged_completion_artifacts: List[CompletionArtifact] = []
+    for parent in parents:
+        merged_completion_artifacts.extend(parent.completion_artifacts)
+    merged_completion_artifacts.extend(child.completion_artifacts)
+
     # --- Concatenation: system_instructions ---
     instruction_parts = []
     for parent in parents:
@@ -995,6 +1093,7 @@ def _merge_profiles(
         env=merged_env,
         inherits=None,  # Fully resolved
         completion_payload_schema=merged_completion_schema,
+        completion_artifacts=merged_completion_artifacts,
         runtime_limits=merged_runtime_limits,
     )
 
@@ -1146,6 +1245,7 @@ def _scan_profiles_dir(
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
+        completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
         )
@@ -1323,6 +1423,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
+        completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
         )
