@@ -602,6 +602,9 @@ attribution headers automatically.
 | `http_referer` | str | `HTTP-Referer` header for app rankings |
 | `app_title` | str | `X-OpenRouter-Title` header for app rankings |
 | `provider` | dict | OpenRouter [provider routing](https://openrouter.ai/docs/features/provider-routing) — pin / blacklist / sort upstreams. Forwarded verbatim on every request via the OpenAI SDK's `extra_body`. |
+| `enable_thinking` | bool | Turn on extended-reasoning request emission and response extraction. Defaults False. Same key Anthropic / Antigravity already accept. |
+| `thinking_budget` | int | Max reasoning tokens. Mapped to OpenRouter's `reasoning.max_tokens`. Same key Anthropic / Antigravity accept. |
+| `thinking_level` | str | `"low"` / `"medium"` / `"high"` — high-level effort. Mapped to OpenRouter's `reasoning.effort`. Same key Antigravity accepts (matches Gemini 3 thinking levels). When both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams — OpenAI o-series doesn't accept arbitrary token caps). |
 
 The `provider` dict is the unique-value knob — it constrains which upstream
 host serves a request. Composes with `model: "openrouter/auto"`: auto picks

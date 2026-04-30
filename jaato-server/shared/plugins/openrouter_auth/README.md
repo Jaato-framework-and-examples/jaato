@@ -71,6 +71,9 @@ Under `plugin_configs.openrouter` in a profile JSON:
 | `http_referer` | str | `HTTP-Referer` header |
 | `app_title` | str | `X-OpenRouter-Title` header |
 | `provider` | dict | OpenRouter provider-routing dict — passed through verbatim |
+| `enable_thinking` | bool | Turn on extended reasoning (request + response). Same key the Anthropic / Antigravity providers already accept. |
+| `thinking_budget` | int | Reasoning token cap → OpenRouter's `reasoning.max_tokens`. |
+| `thinking_level` | str | `low` / `medium` / `high` → OpenRouter's `reasoning.effort`. Wins over `thinking_budget` when both are set (more portable across upstreams). |
 
 **`provider` routing** is OpenRouter's killer feature: most non-OpenAI/Anthropic
 models are served by several upstreams (Together, Fireworks, DeepInfra, Groq,
