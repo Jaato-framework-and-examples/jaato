@@ -249,6 +249,16 @@ class JaatoSession:
         self._tier_config: Optional['ModelTierConfig'] = None
         self._active_tier: Optional[str] = None
 
+        # Spawn-time parameters passed to this session by the caller
+        # (typically ``spawn_subagent(agent_params={...})``).  Carried
+        # through to dynamic-instructions render scripts as
+        # ``RenderContext.agent_params`` so they can read forwarded
+        # ``case_data`` and other per-spawn fields without parsing
+        # the prompt text.  Empty for top-level sessions whose prompt
+        # carries case data inline.  See
+        # ``shared/dynamic_instructions.py``.
+        self._agent_params: Dict[str, Any] = {}
+
         # Provider for this session (created during configure())
         self._provider: Optional['ModelProviderPlugin'] = None
 
@@ -1311,6 +1321,7 @@ class JaatoSession:
         workspace_path: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
         tier_config: Optional['ModelTierConfig'] = None,
+        agent_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1358,6 +1369,12 @@ class JaatoSession:
         # LifecycleTools at construction time using session.workspace_path)
         if completion_payload_schema is not None:
             self._completion_payload_schema = completion_payload_schema
+
+        # Spawn-time agent_params (forwarded case_data etc.) for
+        # dynamic-instructions render scripts.  See ``_agent_params`` doc
+        # in __init__.
+        if agent_params is not None:
+            self._agent_params = dict(agent_params)
 
         # Tier mode: when a tier_config is supplied, the session's
         # initial model is overridden by the initial tier's model so the
@@ -1600,6 +1617,27 @@ class JaatoSession:
                 additional=system_instructions,
                 presentation_context=self._presentation_context,
                 include_base=not suppress_base_instructions,
+            )
+
+        # Dynamic-instructions expansion ({{!py:script.py}}).  Walks
+        # the assembled system_instruction for placeholders and
+        # substitutes each with the output of the named user script.
+        # Scripts run on the framework's authority with a RenderContext
+        # carrying session/runtime/registry/workspace_path/config_root/
+        # agent_params handles, plus an os.environ snapshot.  This is
+        # the input-side symmetric counterpart to reactor actions:
+        # the agent never sees these scripts as choices to make, only
+        # their output as content already present in its prompt.
+        # See ``shared/dynamic_instructions.py`` and
+        # ``project_backlog_dynamic_instructions`` (2026-04-30 addendum).
+        if self._system_instruction and "{{!py:" in self._system_instruction:
+            from .dynamic_instructions import (
+                expand_py_placeholders,
+                build_render_context,
+            )
+            ctx = build_render_context(self, agent_params=self._agent_params)
+            self._system_instruction = expand_py_placeholders(
+                self._system_instruction, ctx,
             )
 
         # Store user commands
