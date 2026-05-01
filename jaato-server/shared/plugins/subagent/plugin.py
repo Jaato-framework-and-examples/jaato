@@ -2232,6 +2232,72 @@ class SubagentPlugin:
                     agent_name_arg, agent_result["missing_params"],
                 )
 
+        # ── Spawn-payload schema validation ──────────────────────────
+        # Symmetric to ``signal_completion``'s ``completion_payload_schema``:
+        # when the profile declares ``spawn_payload_schema``, validate
+        # ``agent_params`` against it BEFORE creating the session, so
+        # missing-field bugs surface at the spawn boundary (where the
+        # caller can fix them in a retry) instead of at the body-wired
+        # prefetch's runtime check.  The detector for rewind-with-hint
+        # picks up the error message and lets the supervisor re-call
+        # spawn_subagent with the missing fields populated.
+        if profile.spawn_payload_schema is not None:
+            try:
+                from shared.spawn_schema_loader import resolve_spawn_schema
+                workspace_for_schema = (
+                    parent_cwd
+                    or (self._runtime.registry.get_workspace_path()
+                        if self._runtime and self._runtime.registry else None)
+                    or os.environ.get('JAATO_WORKSPACE_ROOT')
+                )
+                resolved_schema = resolve_spawn_schema(
+                    profile.spawn_payload_schema,
+                    workspace_path=workspace_for_schema,
+                    config_root=self._config_root,
+                )
+                if resolved_schema is not None:
+                    import jsonschema
+                    try:
+                        jsonschema.validate(
+                            instance=agent_params_arg or {},
+                            schema=resolved_schema,
+                        )
+                    except jsonschema.ValidationError as exc:
+                        # Collect every required field that's still
+                        # missing so the supervisor can fix them all in
+                        # one retry instead of hammering the spawn-loop.
+                        required = list(resolved_schema.get('required') or [])
+                        missing = [
+                            f for f in required
+                            if not agent_params_arg or f not in agent_params_arg
+                        ]
+                        details = (
+                            f"missing required fields: {missing}. "
+                            if missing
+                            else f"first failure: {exc.message}. "
+                        )
+                        return SubagentResult(
+                            success=False,
+                            response='',
+                            error=(
+                                f"spawn_subagent({profile_name!r}) failed "
+                                f"agent_params validation: {details}"
+                                f"The '{profile_name}' profile requires "
+                                f"agent_params matching its spawn_payload_schema "
+                                f"({profile.spawn_payload_schema!r}). "
+                                f"Re-call spawn_subagent with the missing "
+                                f"fields populated from the prompt's case data — "
+                                f"do not paraphrase or omit."
+                            ),
+                        ).to_dict()
+            except Exception as exc:
+                # Schema-loader bug or jsonschema crash — degrade gracefully:
+                # log and skip validation rather than blocking the spawn.
+                logger.warning(
+                    "spawn_payload_schema validation skipped for profile "
+                    "%s: %s", profile_name, exc,
+                )
+
         # Build the full prompt
         full_prompt = task
         if context:

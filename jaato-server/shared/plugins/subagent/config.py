@@ -645,6 +645,7 @@ class SubagentProfile:
     env: Dict[str, str] = field(default_factory=dict)
     inherits: Optional[List[str]] = None
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
+    spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
     completion_artifacts: List[CompletionArtifact] = field(default_factory=list)
     runtime_limits: Optional[RuntimeLimits] = None
     # Per-turn model-tier config.  Empty dict means "single-model
@@ -807,6 +808,7 @@ def build_inline_profile(
         env=env,
         inherits=None,
         completion_payload_schema=data.get('completion_payload_schema'),
+        spawn_payload_schema=data.get('spawn_payload_schema'),
         completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
         runtime_limits=runtime_limits,
         model_tiers=model_tiers,
@@ -1047,6 +1049,13 @@ def _merge_profiles(
         'completion_payload_schema', child.completion_payload_schema
     )
 
+    # spawn_payload_schema: same scalar-override semantics — symmetric
+    # to completion_payload_schema but constrains the agent_params dict
+    # passed to spawn_subagent at the spawn boundary.
+    merged_spawn_schema = _resolve_scalar(
+        'spawn_payload_schema', child.spawn_payload_schema
+    )
+
     # completion_artifacts: concatenation across parent → child.  Each
     # entry is independent (different output paths, different
     # renderers); concatenating preserves both parent's and child's
@@ -1093,6 +1102,7 @@ def _merge_profiles(
         env=merged_env,
         inherits=None,  # Fully resolved
         completion_payload_schema=merged_completion_schema,
+        spawn_payload_schema=merged_spawn_schema,
         completion_artifacts=merged_completion_artifacts,
         runtime_limits=merged_runtime_limits,
     )
@@ -1245,6 +1255,7 @@ def _scan_profiles_dir(
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
+            spawn_payload_schema=data.get('spawn_payload_schema'),
         completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
@@ -1443,6 +1454,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
+            spawn_payload_schema=data.get('spawn_payload_schema'),
         completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
