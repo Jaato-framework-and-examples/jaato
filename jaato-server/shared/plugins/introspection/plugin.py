@@ -316,6 +316,27 @@ class IntrospectionPlugin:
         # Get tool schemas filtered by session's allowed plugins
         all_schemas = self._get_session_allowed_schemas()
 
+        # ── Soft-nudge for preloaded tools ──────────────────────────────
+        # When a profile preloads a plugin (e.g. ``service_connector(preload)``
+        # in policy_admin.json), that plugin's tools land in the session's
+        # initial tool schema — they don't need ``list_tools`` discovery.
+        # But agents (especially smaller models) habitually call
+        # ``list_tools`` to "verify" a tool exists, then conclude
+        # "absent from list_tools result → tool unavailable" because
+        # list_tools by design returns only deferred tools.
+        #
+        # Surface the preloaded tools in the response as a hint so the
+        # agent doesn't draw the wrong inference from absence-from-list.
+        # Per memory ``project_backlog_introspection_soft_nudge_for_preloaded``.
+        preloaded_tools_hint: List[str] = []
+        if self._session is not None:
+            preloaded_plugins = getattr(self._session, "_preloaded_plugins", None) or set()
+            if preloaded_plugins and self._registry is not None:
+                for tool_schema in self._registry.get_exposed_tool_schemas():
+                    plugin = self._registry.get_plugin_for_tool(tool_schema.name)
+                    if plugin and plugin.name in preloaded_plugins:
+                        preloaded_tools_hint.append(tool_schema.name)
+
         # Read category descriptions from the registry — needed by both
         # the summary path and the category-detail path.
         category_hints = (
@@ -441,7 +462,7 @@ class IntrospectionPlugin:
 
                 categories_list.append(entry)
 
-            return {
+            response: Dict[str, Any] = {
                 "categories": categories_list,
                 "total_tools": len(all_schemas),
                 "hint": "Call list_tools(category_id='<id>') to see tools in a specific category.",
@@ -450,6 +471,17 @@ class IntrospectionPlugin:
                     "jaato.introspection.total_tools": len(all_schemas),
                 },
             }
+            if preloaded_tools_hint:
+                response["preloaded_tools_already_in_schema"] = sorted(
+                    set(preloaded_tools_hint)
+                )
+                response["preloaded_tools_note"] = (
+                    "These tools are PRELOADED in your initial tool schema "
+                    "and intentionally do NOT appear in the categories above. "
+                    "list_tools returns only deferred (discoverable) tools. "
+                    "Call preloaded tools directly without further discovery."
+                )
+            return response
 
         # Category specified - return tools in that category.
         # No string-based validation needed — category was resolved from
