@@ -62,7 +62,7 @@ class LifecycleTools:
             workspace_path=getattr(session, 'workspace_path', None),
             # JaatoSession adopts the runtime's config_root via
             # ``runtime._config_root``; honor it here so a profile that
-            # references ``"completion_payload_schema": "<name>.json"``
+            # references ``"completion_payload_schema": "completion_schemas/<name>.json"``
             # resolves under the override path instead of the
             # workspace's ``.jaato/completion_schemas/``.
             config_root=getattr(

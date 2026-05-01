@@ -816,12 +816,13 @@ like `output/{case_id}/policy.md` lands inside the session's sandbox.
 ```json
 {
   "name": "policy_admin",
-  "completion_payload_schema": "policy_admin.json",
+  "completion_payload_schema": "completion_schemas/policy_admin.json",
   "completion_artifacts": [
     {
       "renderer": "scripts/policy_md_renderer.py",
       "output": "output/{case_id}/policy.md",
-      "on_error": "fail_completion"
+      "on_error": "fail_completion",
+      "description": "Renders the issued policy markdown deterministically from the structured payload."
     }
   ]
 }
@@ -857,6 +858,64 @@ structured payload.
 The mental check: **could a non-agent function produce this file
 content from the payload alone?** Yes → declare it as a
 `completion_artifact`. No → leave it to the agent.
+
+#### Path conventions
+
+All path-typed fields in the profile are **config-root-relative** with
+the standard tier resolution (`<config_root>/<path>` →
+`<workspace>/.jaato/<path>` → `~/.jaato/<path>`):
+
+| Field | Example value | Resolves to |
+|---|---|---|
+| `completion_payload_schema` | `"completion_schemas/policy_admin.json"` | `<config_root>/completion_schemas/policy_admin.json` |
+| `spawn_payload_schema` | `"spawn_schemas/pricing.json"` | `<config_root>/spawn_schemas/pricing.json` |
+| `completion_artifacts.renderer` | `"scripts/policy_md_renderer.py"` | `<config_root>/scripts/policy_md_renderer.py` |
+| `completion_artifacts.output` | `"output/{case_id}/policy.md"` | `<workspace>/output/{case_id}/policy.md` (workspace-relative — outputs land where the agent runs, not in `.jaato/`) |
+
+There is **no auto-prefixing** — write the explicit subdir in the
+path. Server `0.6.11+` falls back to legacy bare-filename forms
+(`"policy_admin.json"`) with an INFO-level deprecation log; new
+profiles should use the explicit form.
+
+#### Validator-as-renderer pattern (server `0.6.12+`)
+
+When you want the renderer's *side effect* (validation that consults
+runtime state and raises on bad payloads) without producing an actual
+file, omit `output`:
+
+```json
+{
+  "name": "auto_underwriter",
+  "completion_artifacts": [
+    {
+      "renderer": "scripts/auto_underwriter_spawn_proof.py",
+      "on_error": "fail_completion",
+      "description": "Validator: walks session history for actual spawn_subagent calls; rejects payloads claiming subagent_outcomes for profiles never spawned."
+    }
+  ]
+}
+```
+
+The framework runs the renderer for its raise/return semantics but
+does not write a file. The return string (if non-empty) is logged at
+INFO for audit. `on_error: fail_completion` propagates raises into a
+retry signal for the agent — same as for renderers that DO produce a
+file.
+
+This is how the demo's `auto_underwriter_spawn_proof.py` and
+`pricing_completion_validator.py` close the agent-payload-faithfulness
+gap that schema validation alone can't reach (schema validates
+*shape*; these validators check *semantic correctness* against the
+session's actual spawn history and the deterministic rule-table
+re-computation).
+
+#### `description` field (server `0.6.12+`)
+
+Each `completion_artifacts` entry accepts an optional `description`
+string. Ignored at runtime; consumed by docs / introspection /
+profile-explorer tooling. Use it to document **why** the renderer is
+wired in, so the rationale travels with the wiring instead of living
+in commit messages.
 
 #### Inheritance
 
