@@ -1103,6 +1103,65 @@ class SessionManager:
                     logger.info("  Agent instructions override profile's system_instructions (deprecated)")
                 profile.system_instructions = agent_instructions
 
+        # ── Spawn-payload schema validation ──────────────────────────
+        # Symmetric to the subagent plugin's check at the function-call
+        # boundary: when the resolved profile declares
+        # ``spawn_payload_schema``, validate the caller-supplied
+        # ``agent_params`` dict against it BEFORE creating the session.
+        # Catches missing-required-field bugs from BOTH spawn paths
+        # (model-driven spawn_subagent AND reactor-side
+        # create_headless_session) at a single chokepoint.
+        if (
+            profile is not None
+            and getattr(profile, 'spawn_payload_schema', None) is not None
+        ):
+            try:
+                from shared.spawn_schema_loader import resolve_spawn_schema
+                resolved_schema = resolve_spawn_schema(
+                    profile.spawn_payload_schema,
+                    workspace_path=workspace_path,
+                    config_root=config_root,
+                )
+                if resolved_schema is not None:
+                    import jsonschema
+                    try:
+                        jsonschema.validate(
+                            instance=agent_params or {},
+                            schema=resolved_schema,
+                        )
+                    except jsonschema.ValidationError as exc:
+                        required = list(resolved_schema.get('required') or [])
+                        missing = [
+                            f for f in required
+                            if not agent_params or f not in agent_params
+                        ]
+                        details = (
+                            f"missing required fields: {missing}. "
+                            if missing
+                            else f"first failure: {exc.message}. "
+                        )
+                        err_msg = (
+                            f"create_session(profile={profile_name!r}) failed "
+                            f"agent_params validation: {details}"
+                            f"The profile requires agent_params matching its "
+                            f"spawn_payload_schema "
+                            f"({profile.spawn_payload_schema!r})."
+                        )
+                        logger.error(err_msg)
+                        self._emit_to_client(client_id, ErrorEvent(
+                            error=err_msg,
+                            error_type="SpawnPayloadValidationError",
+                            recoverable=True,
+                        ))
+                        return ""
+            except Exception as exc:
+                # Schema-loader bug or jsonschema crash — log and skip
+                # validation rather than blocking session creation.
+                logger.warning(
+                    "spawn_payload_schema validation skipped for profile "
+                    "%s: %s", profile_name, exc,
+                )
+
         # Create JaatoServer for this session
         # Provider is determined by env_file, with optional overrides.
         # ``agent_name`` propagates to the main agent's ``agent_id`` so
@@ -1256,6 +1315,7 @@ class SessionManager:
         initial_session_state: Optional[Dict[str, Any]] = None,
         session_name: Optional[str] = None,
         config_root: Optional[str] = None,
+        agent_params: Optional[Dict[str, str]] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -1310,6 +1370,7 @@ class SessionManager:
             workspace_path=workspace_path,
             profile_name=profile_name,
             agent_name=agent_name,
+            agent_params=agent_params,
             initial_session_state=initial_session_state,
             config_root=config_root,
         )
