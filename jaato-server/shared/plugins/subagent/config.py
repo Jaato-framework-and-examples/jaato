@@ -1321,7 +1321,27 @@ def discover_profiles(
     profiles: Dict[str, SubagentProfile] = {}
     errors: Dict[str, str] = {}
 
-    # 1. Workspace tier — config_root override takes precedence; fall
+    # 1.a Workspace profile-set overlay (NEW, optional).
+    #
+    # When ``JAATO_PROFILE_SET`` is set and ``<config_root>/profile-sets/<set>/``
+    # exists, scan it FIRST so its entries land in the profiles dict before
+    # the regular profiles/ scan — ``_scan_profiles_dir`` skips already-present
+    # names, so first-scanned wins.  Used by the model-set switcher (e.g.
+    # ``--model-set dumb``) to override per-agent ``model`` / ``provider`` /
+    # ``plugin_configs`` while inheriting everything else from the regular
+    # ``profiles/`` tier (typically via ``inherits: [_base_<agent>]``).
+    #
+    # When the env var isn't set, this is a no-op and behaviour matches
+    # the pre-existing single-dir scan.
+    profile_set = os.environ.get('JAATO_PROFILE_SET')
+    if profile_set and effective_config_root:
+        set_path = (
+            Path(effective_config_root).expanduser().resolve()
+            / "profile-sets" / profile_set
+        )
+        _scan_profiles_dir(set_path, profiles, errors)
+
+    # 1.b Workspace tier — config_root override takes precedence; fall
     #    back to <base_path>/<profiles_dir> when no override is in effect.
     if effective_config_root:
         profiles_path = Path(effective_config_root).expanduser().resolve() / "profiles"
