@@ -2217,6 +2217,7 @@ class SubagentPlugin:
             from server.session_manager import SessionManager
             agent_result = SessionManager._resolve_agent(
                 agent_name_arg, agent_params_arg, parent_cwd,
+                config_root=self._config_root,
             )
             if agent_result is None:
                 return SubagentResult(
