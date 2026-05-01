@@ -565,16 +565,31 @@ class CompletionArtifact:
             then a small set of session-derived values (``case_id``,
             ``agent_id``, ``workspace_path``).  Relative paths resolve
             under the session's ``workspace_path``.
+
+            **Optional — validator-as-renderer pattern.**  When
+            ``output`` is omitted (``null`` / missing), the framework
+            runs the renderer for its side-effect (typically validation:
+            raise → on_error fires) but does not write a file to disk.
+            The renderer's return string is logged at INFO for audit
+            traceability but not persisted.  This lets a profile wire
+            in a "validator that consults runtime state and rejects
+            bad payloads" without inventing a fake output path.
         on_error: How a render failure (script raised, file write
             failed) is surfaced.  ``"fail_completion"`` returns a
             validation_failed-style error to the model so it retries;
             ``"warn"`` logs and continues, the completion still
             succeeds and the missing artifact is the operator's
             problem.  Default ``"fail_completion"``.
+        description: Optional human-readable note on what this
+            artifact does and why it's wired in.  Ignored at runtime;
+            consumed by docs / introspection / profile-explorer
+            tooling.  Use for inline documentation in profile YAML/JSON
+            so the wiring's rationale travels with the wiring.
     """
     renderer: str
-    output: str
+    output: Optional[str] = None
     on_error: str = "fail_completion"
+    description: Optional[str] = None
 
 
 @dataclass
@@ -681,14 +696,22 @@ def _normalize_inherits(value: Any) -> Optional[List[str]]:
 
 
 def _parse_completion_artifacts(value: Any) -> List[CompletionArtifact]:
-    """Parse a profile's ``completion_artifacts`` list from raw JSON.
+    """Parse a profile's ``completion_artifacts`` list from raw JSON/YAML.
 
     Accepts a list of dicts each shaped like
     ``{"renderer": "scripts/foo.py", "output": "out/{case_id}/foo",
-    "on_error": "fail_completion"}``.  Skips malformed entries with a
-    warning rather than raising — partial profiles are loadable and
-    the missing artifact surfaces at completion time as a normal
-    "renderer not found" error.
+    "on_error": "fail_completion", "description": "..."}``.
+
+    ``output`` is **optional** — when omitted, the renderer runs as a
+    validator-only hook (its return string is logged but no file is
+    written).  See :class:`CompletionArtifact` docstring.
+
+    ``description`` is optional documentation that travels with the
+    wiring; ignored at runtime.
+
+    Skips malformed entries with a warning rather than raising —
+    partial profiles are loadable and the missing artifact surfaces
+    at completion time as a normal "renderer not found" error.
 
     Returns an empty list when ``value`` is ``None``, missing, or not
     a list.
@@ -703,17 +726,25 @@ def _parse_completion_artifacts(value: Any) -> List[CompletionArtifact]:
             )
             continue
         renderer = entry.get("renderer")
-        output = entry.get("output")
+        output = entry.get("output")  # optional now
         if not isinstance(renderer, str) or not renderer.strip():
             logger.warning(
                 "completion_artifacts: skipping entry without 'renderer': %r",
                 entry,
             )
             continue
-        if not isinstance(output, str) or not output.strip():
+        # output is now optional.  When present it must be a non-empty
+        # string; when absent the renderer runs validator-only.
+        normalized_output: Optional[str]
+        if output is None or output == "":
+            normalized_output = None
+        elif isinstance(output, str) and output.strip():
+            normalized_output = output.strip()
+        else:
             logger.warning(
-                "completion_artifacts: skipping entry without 'output': %r",
-                entry,
+                "completion_artifacts: invalid 'output' value (must be a "
+                "non-empty string or omitted) for renderer=%r: %r",
+                renderer, output,
             )
             continue
         on_error = entry.get("on_error", "fail_completion")
@@ -724,10 +755,19 @@ def _parse_completion_artifacts(value: Any) -> List[CompletionArtifact]:
                 on_error, renderer,
             )
             on_error = "fail_completion"
+        description = entry.get("description")
+        if description is not None and not isinstance(description, str):
+            logger.warning(
+                "completion_artifacts: 'description' must be a string for "
+                "renderer=%r (got %s); ignoring",
+                renderer, type(description).__name__,
+            )
+            description = None
         out.append(CompletionArtifact(
             renderer=renderer.strip(),
-            output=output.strip(),
+            output=normalized_output,
             on_error=on_error,
+            description=description.strip() if description else None,
         ))
     return out
 

@@ -286,12 +286,14 @@ def render_completion_artifacts(
         renderer_ref = getattr(artifact, "renderer", None)
         output_template = getattr(artifact, "output", None)
         on_error = getattr(artifact, "on_error", "fail_completion")
-        if not renderer_ref or not output_template:
-            err = f"missing renderer or output ({artifact!r})"
+        if not renderer_ref:
+            err = f"missing renderer ({artifact!r})"
             (result.failed if on_error == "fail_completion" else result.warned).append(
                 (artifact, err)
             )
             continue
+        # output is optional — when None, this entry is a
+        # validator-as-renderer (runs for side-effect, no file write).
 
         path = resolve_script_path(
             renderer_ref,
@@ -326,6 +328,26 @@ def render_completion_artifacts(
             (result.failed if on_error == "fail_completion" else result.warned).append(
                 (artifact, err)
             )
+            continue
+
+        # Validator-as-renderer: ``output`` is None → run for side-effect,
+        # log the (typically empty) return, do not write a file.  The
+        # renderer's value here is whatever it raised (caught above) or
+        # whatever it returned (logged).  ``on_error`` still governs how
+        # raises propagate.
+        if output_template is None:
+            if isinstance(content, (str, bytes, bytearray)) and content:
+                preview = (
+                    content[:200] if isinstance(content, str)
+                    else content[:200].decode("utf-8", errors="replace")
+                )
+                logger.info(
+                    "completion-artifact: validator-only renderer %r emitted: %s",
+                    renderer_ref, preview,
+                )
+            # Track as written-with-no-path so callers can count
+            # validator-passed entries; the empty-string sentinel marks it.
+            result.written.append("")
             continue
 
         try:
