@@ -108,13 +108,27 @@ def _resolve_schema_path(
 ) -> Optional[Path]:
     """Three-tier path resolution for completion schemas.
 
+    Canonical convention (since path-symmetry refactor): paths in
+    profile JSON are config-root-relative and include the
+    ``completion_schemas/`` subdir explicitly — same shape as
+    ``scripts/<name>.py`` for renderers (resolved by ``script_loader``).
+    Profile authors write::
+
+        "completion_payload_schema": "completion_schemas/refund.json"
+
     Resolution order:
 
     1. If ``path`` is absolute, use it directly (must exist).
-    2. **Workspace tier** —
-       * if ``config_root`` is set: ``<config_root>/completion_schemas/<path>``;
-       * else if ``workspace_path`` is set: ``<workspace>/.jaato/completion_schemas/<path>``.
-    3. **User tier** — ``~/.jaato/completion_schemas/<path>``.
+    2. **Explicit form (canonical)** —
+       * if ``config_root`` is set: ``<config_root>/<path>``;
+       * else if ``workspace_path`` is set: ``<workspace>/.jaato/<path>``.
+    3. **Backward-compat auto-prefix fallback** — for paths written
+       without the ``completion_schemas/`` subdir (legacy style),
+       ``<config_root>/completion_schemas/<path>`` /
+       ``<workspace>/.jaato/completion_schemas/<path>``.  Logged at
+       INFO with a deprecation hint so operators can migrate.
+    4. **User tier** — same two-step (explicit then auto-prefix
+       fallback) under ``~/.jaato/``.
 
     Returns the resolved ``Path`` pointing at an existing file, or
     ``None`` when no tier matches.
@@ -123,17 +137,50 @@ def _resolve_schema_path(
     if p.is_absolute():
         return p if p.is_file() else None
 
+    # ── Explicit form (canonical) — path includes the subdir ──────────
     if config_root:
-        cr_path = Path(config_root).expanduser().resolve() / COMPLETION_SCHEMAS_SUBDIR / path
+        cr_path = Path(config_root).expanduser().resolve() / path
         if cr_path.is_file():
             return cr_path
     elif workspace_path:
-        ws_path = Path(workspace_path) / ".jaato" / COMPLETION_SCHEMAS_SUBDIR / path
+        ws_path = Path(workspace_path) / ".jaato" / path
         if ws_path.is_file():
             return ws_path
 
-    home_path = Path.home() / ".jaato" / COMPLETION_SCHEMAS_SUBDIR / path
-    if home_path.is_file():
-        return home_path
+    home_path_explicit = Path.home() / ".jaato" / path
+    if home_path_explicit.is_file():
+        return home_path_explicit
+
+    # ── Backward-compat auto-prefix fallback (legacy "<name>.json") ────
+    # Eventually deprecated; warn callers using the legacy form once.
+    if config_root:
+        cr_legacy = Path(config_root).expanduser().resolve() / COMPLETION_SCHEMAS_SUBDIR / path
+        if cr_legacy.is_file():
+            logger.info(
+                "completion_payload_schema %r resolved via legacy auto-prefix "
+                "(<config_root>/%s/<path>); migrate to explicit "
+                "%r for forward compatibility.",
+                path, COMPLETION_SCHEMAS_SUBDIR, f"{COMPLETION_SCHEMAS_SUBDIR}/{path}",
+            )
+            return cr_legacy
+    elif workspace_path:
+        ws_legacy = Path(workspace_path) / ".jaato" / COMPLETION_SCHEMAS_SUBDIR / path
+        if ws_legacy.is_file():
+            logger.info(
+                "completion_payload_schema %r resolved via legacy auto-prefix "
+                "(<workspace>/.jaato/%s/<path>); migrate to explicit "
+                "%r for forward compatibility.",
+                path, COMPLETION_SCHEMAS_SUBDIR, f"{COMPLETION_SCHEMAS_SUBDIR}/{path}",
+            )
+            return ws_legacy
+
+    home_path_legacy = Path.home() / ".jaato" / COMPLETION_SCHEMAS_SUBDIR / path
+    if home_path_legacy.is_file():
+        logger.info(
+            "completion_payload_schema %r resolved via legacy auto-prefix "
+            "(~/.jaato/%s/<path>); migrate to explicit %r for forward compatibility.",
+            path, COMPLETION_SCHEMAS_SUBDIR, f"{COMPLETION_SCHEMAS_SUBDIR}/{path}",
+        )
+        return home_path_legacy
 
     return None

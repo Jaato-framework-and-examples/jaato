@@ -113,32 +113,66 @@ def _resolve_schema_path(
 ) -> Optional[Path]:
     """Three-tier path resolution for spawn schemas.
 
-    Resolution order:
+    Canonical convention (since path-symmetry refactor): paths in
+    profile JSON are config-root-relative and include the
+    ``spawn_schemas/`` subdir explicitly — same shape as
+    ``scripts/<name>.py`` for renderers and
+    ``completion_schemas/<name>.json`` for completion validators.
+    Profile authors write::
 
-    1. If ``path`` is absolute, use it directly (must exist).
-    2. **Workspace tier** —
-       * if ``config_root`` is set: ``<config_root>/spawn_schemas/<path>``;
-       * else if ``workspace_path`` is set: ``<workspace>/.jaato/spawn_schemas/<path>``.
-    3. **User tier** — ``~/.jaato/spawn_schemas/<path>``.
+        "spawn_payload_schema": "spawn_schemas/refund.json"
 
-    Returns the resolved ``Path`` pointing at an existing file, or
-    ``None`` when no tier matches.
+    Resolution order mirrors ``completion_schema_loader``: explicit
+    form first, then a backward-compat auto-prefix fallback (logged
+    at INFO with a deprecation hint), then the user tier.
     """
     p = Path(path)
     if p.is_absolute():
         return p if p.is_file() else None
 
+    # ── Explicit form (canonical) ────────────────────────────────────
     if config_root:
-        cr_path = Path(config_root).expanduser().resolve() / SPAWN_SCHEMAS_SUBDIR / path
+        cr_path = Path(config_root).expanduser().resolve() / path
         if cr_path.is_file():
             return cr_path
     elif workspace_path:
-        ws_path = Path(workspace_path) / ".jaato" / SPAWN_SCHEMAS_SUBDIR / path
+        ws_path = Path(workspace_path) / ".jaato" / path
         if ws_path.is_file():
             return ws_path
 
-    home_path = Path.home() / ".jaato" / SPAWN_SCHEMAS_SUBDIR / path
-    if home_path.is_file():
-        return home_path
+    home_path_explicit = Path.home() / ".jaato" / path
+    if home_path_explicit.is_file():
+        return home_path_explicit
+
+    # ── Backward-compat auto-prefix fallback ─────────────────────────
+    if config_root:
+        cr_legacy = Path(config_root).expanduser().resolve() / SPAWN_SCHEMAS_SUBDIR / path
+        if cr_legacy.is_file():
+            logger.info(
+                "spawn_payload_schema %r resolved via legacy auto-prefix "
+                "(<config_root>/%s/<path>); migrate to explicit "
+                "%r for forward compatibility.",
+                path, SPAWN_SCHEMAS_SUBDIR, f"{SPAWN_SCHEMAS_SUBDIR}/{path}",
+            )
+            return cr_legacy
+    elif workspace_path:
+        ws_legacy = Path(workspace_path) / ".jaato" / SPAWN_SCHEMAS_SUBDIR / path
+        if ws_legacy.is_file():
+            logger.info(
+                "spawn_payload_schema %r resolved via legacy auto-prefix "
+                "(<workspace>/.jaato/%s/<path>); migrate to explicit "
+                "%r for forward compatibility.",
+                path, SPAWN_SCHEMAS_SUBDIR, f"{SPAWN_SCHEMAS_SUBDIR}/{path}",
+            )
+            return ws_legacy
+
+    home_path_legacy = Path.home() / ".jaato" / SPAWN_SCHEMAS_SUBDIR / path
+    if home_path_legacy.is_file():
+        logger.info(
+            "spawn_payload_schema %r resolved via legacy auto-prefix "
+            "(~/.jaato/%s/<path>); migrate to explicit %r for forward compatibility.",
+            path, SPAWN_SCHEMAS_SUBDIR, f"{SPAWN_SCHEMAS_SUBDIR}/{path}",
+        )
+        return home_path_legacy
 
     return None
