@@ -1499,10 +1499,20 @@ class JaatoSession:
             # Refresh runtime's tool cache to include the newly registered core tools
             self._runtime.refresh_tool_cache()
 
-            # Re-fetch tools to include core tools, and update session tools
-            self._tools = self._runtime.get_tool_schemas(tools)
-            executors = self._runtime.get_executors(tools)
-            for name, fn in executors.items():
+            # Merge newly-registered core tools (stream, event_bus) into the
+            # carefully-built _tools — additive only.  Re-assigning
+            # ``self._tools`` from a fresh ``get_tool_schemas`` call without
+            # ``preloaded_plugins=`` silently re-applies the discoverability
+            # filter and drops preloaded plugins' discoverable tools.
+            existing_names = {s.name for s in self._tools}
+            refreshed_schemas = self._runtime.get_tool_schemas(
+                tools, preloaded_plugins=self._preloaded_plugins
+            )
+            for schema in refreshed_schemas:
+                if schema.name not in existing_names:
+                    self._tools.append(schema)
+                    existing_names.add(schema.name)
+            for name, fn in self._runtime.get_executors(tools).items():
                 self._executor.register(name, fn)
 
             # Register lifecycle tools (signal_completion) directly on this
