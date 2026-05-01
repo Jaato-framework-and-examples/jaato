@@ -540,34 +540,12 @@ class PluginRegistry:
                 module = importlib.import_module(f".{name}", package="shared.plugins")
                 import_ms = (time.perf_counter() - t0) * 1000
 
-                # Check plugin kind - only load plugins matching requested kind.
-                # Distinguish "kind mismatch" (legitimate skip — we're
-                # discovering a different kind) from "PLUGIN_KIND missing"
-                # (likely a plugin author bug — log a warning).
-                module_kind = getattr(module, 'PLUGIN_KIND', None)
-                if module_kind is None:
-                    # Only warn once per (module, plugin_kind) pair so we
-                    # don't spam every discovery pass.
-                    if not hasattr(self, '_warned_missing_kind'):
-                        self._warned_missing_kind: Set[str] = set()
-                    if name not in self._warned_missing_kind:
-                        self._warned_missing_kind.add(name)
-                        # Suppress for plugins that legitimately have no
-                        # PLUGIN_KIND yet (e.g., test fixtures, README dirs).
-                        # The warning targets real plugin directories with
-                        # a create_plugin() factory but no kind marker.
-                        if hasattr(module, 'create_plugin'):
-                            logger.warning(
-                                "Plugin module '%s' has no PLUGIN_KIND in "
-                                "__init__.py — it will be silently skipped "
-                                "by directory discovery. Add "
-                                "'PLUGIN_KIND = \"tool\"' (or \"enrichment\", "
-                                "\"gc\", \"session\", \"model_provider\") to "
-                                "%s/__init__.py and export it in __all__.",
-                                name, name,
-                            )
-                    continue
-                if module_kind != plugin_kind:
+                # Only act on modules that opt in via PLUGIN_KIND matching
+                # this scan. Absent PLUGIN_KIND means the module belongs to
+                # another registry (formatter_pipeline, JaatoRuntime direct
+                # import, etc.) — skip silently, since create_plugin is a
+                # convention shared across registries.
+                if getattr(module, 'PLUGIN_KIND', None) != plugin_kind:
                     continue
 
                 if hasattr(module, 'create_plugin'):
