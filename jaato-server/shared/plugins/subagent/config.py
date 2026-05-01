@@ -1389,7 +1389,16 @@ def discover_profiles(
     #
     # When the env var isn't set, this is a no-op and behaviour matches
     # the pre-existing single-dir scan.
-    profile_set = os.environ.get('JAATO_PROFILE_SET')
+    #
+    # Resolution rule (per the workspace-tied env-var contract): the
+    # value is read via ``get_session_env``, which checks the per-
+    # session contextvar (populated from the session's ``env_file``)
+    # before falling back to the daemon's ``os.environ``.  This keeps
+    # profile-set selection workspace-scoped — different sessions on
+    # the same daemon can run different sets concurrently, and switching
+    # sets does NOT require restarting the daemon.
+    from shared.session_context import get_session_env
+    profile_set = get_session_env('JAATO_PROFILE_SET')
     if profile_set and effective_config_root:
         set_path = (
             Path(effective_config_root).expanduser().resolve()
