@@ -278,15 +278,60 @@ def check_path_with_jaato_containment(
     Returns:
         True if path is allowed, False otherwise.
     """
-    if not workspace_root:
-        # No sandboxing configured
-        return True
-
     # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
     path = msys2_to_windows_path(path)
 
     # Make path absolute
     abs_path = os.path.abspath(path)
+    real_abs_path = os.path.realpath(abs_path)
+
+    # Hard denylist — applies even when workspace_root is unset.
+    #
+    # /proc/**/attr/** and /proc/**/task/**/attr/** carry process
+    # security attributes.  Writing to /proc/self/attr/current with
+    # the literal string ``changeprofile unconfined`` transitions the
+    # current task out of any AppArmor profile that permits the
+    # ``change_profile -> unconfined`` capability — including the
+    # jaato-ws-* per-session profiles, which need that capability
+    # for the framework's apparmor_confine.__exit__ to restore
+    # unconfined when a tool finishes.  Without an application-layer
+    # denylist, an agent driving a path-taking in-process tool
+    # (file_edit, readFile, glob_files) at /proc/self/attr/current
+    # can escape confinement entirely.  Verified empirically against
+    # apparmor.py template v10 (2026-05-01).
+    #
+    # See ``server/apparmor.py:296`` for the kernel-level analysis
+    # and ``project_backlog_apparmor_child_subprofile`` for the
+    # subprocess-side fix that complements this in-process gate.
+    proc_attr = (
+        "/proc/self/attr/",
+        "/proc/thread-self/attr/",
+    )
+    proc_task_attr_marker = "/attr/"  # combined with /proc/.../task/.../
+    if (
+        abs_path.startswith(proc_attr) or real_abs_path.startswith(proc_attr)
+    ):
+        return False
+    # /proc/<pid>/attr/* and /proc/<pid>/task/<tid>/attr/*
+    if abs_path.startswith("/proc/") or real_abs_path.startswith("/proc/"):
+        for candidate in (abs_path, real_abs_path):
+            parts = candidate.split("/")
+            # parts: ['', 'proc', '<pid>', 'attr', ...] OR
+            #        ['', 'proc', '<pid>', 'task', '<tid>', 'attr', ...]
+            if (
+                (len(parts) >= 4 and parts[1] == "proc" and parts[3] == "attr")
+                or (
+                    len(parts) >= 6
+                    and parts[1] == "proc"
+                    and parts[3] == "task"
+                    and parts[5] == "attr"
+                )
+            ):
+                return False
+
+    if not workspace_root:
+        # No further sandboxing configured (after the global denylist above).
+        return True
 
     # Check if path is explicitly denied (takes precedence over all other rules)
     if plugin_registry and hasattr(plugin_registry, 'is_path_denied'):

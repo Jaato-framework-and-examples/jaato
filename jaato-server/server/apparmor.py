@@ -294,8 +294,8 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   deny capability sys_ptrace,
 
   # ---- profile transitions ----
-  # Allow the framework to restore the unconfined state on tool exit.
-  # Two rules are both required:
+  # Required for the framework's apparmor_confine.__exit__ to restore
+  # unconfined when a tool finishes.  Two rules are both needed:
   #
   #   1. ``change_profile -> unconfined`` — authorizes the semantic
   #      transition (AppArmor capability check).
@@ -303,20 +303,50 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   #      the file-write that EXECUTES the transition (AppArmor file check).
   #
   # Without both, apparmor_confine().__exit__ silently fails to restore
-  # and the thread stays trapped in this profile.  That's worse than a
-  # single-tool failure: thread-pool workers are reused across sessions,
-  # so a trapped worker picked up for verify_auth in the next session
-  # will get EACCES on ~/.jaato/*_auth.json, and one picked up for an
-  # external-sandbox-added path will get EACCES reading that path —
-  # both failures were observed in session 20260421_202113 before this
-  # rule was added.
+  # and the thread stays trapped in this profile.  Thread-pool workers
+  # are reused across sessions, so a trapped worker picked up for
+  # verify_auth in the next session gets EACCES on ~/.jaato/*_auth.json,
+  # and one picked up for an external-sandbox-added path gets EACCES
+  # reading that path — both observed in session 20260421_202113 before
+  # this rule landed.
   #
-  # Note: the write rule does NOT let agent code escape confinement on
-  # its own.  The ``change_profile`` capability is the actual gate —
-  # this profile permits transitions only to ``unconfined``, and only
-  # the framework's apparmor_confine context manager invokes the write.
-  # Agent tool code writing arbitrary text to attr/current wouldn't
-  # satisfy AppArmor's expected format and would be ignored.
+  # !!! KNOWN ESCAPE VECTOR !!!
+  # These rules ARE exploitable from any code running under this profile,
+  # not just the framework's __exit__.  Verified empirically against
+  # template version 10 (jaato-ws-20260501_123847, 2026-05-01):
+  #
+  #     sudo aa-exec -p jaato-ws-... -- python3 -c '
+  #         open("/proc/self/attr/current","w").write("changeprofile unconfined")
+  #         os.listdir("/etc/apt/apt.conf.d")  # 19 entries — UNCONFINED'
+  #
+  # write_ok=True, opendir succeeded.  The kernel gates by writer's
+  # profile capabilities, not by who-in-userspace called write().  Two
+  # surfaces inside jaato that can hit this:
+  #
+  #   - Subprocesses inherit the profile via fork+exec.  cli /
+  #     interactive_shell tool calls can write the same string from
+  #     model-controlled scripts.
+  #   - In-process tools running on the worker thread (file_edit,
+  #     readFile, glob_files, ...) are themselves in this profile.
+  #     If their path validation lets the agent target
+  #     /proc/self/attr/current, the write succeeds and the worker
+  #     thread itself becomes unconfined for every subsequent call.
+  #
+  # Mitigations today (defense in depth, none kernel-enforced via this
+  # profile):
+  #
+  #   - sandbox_utils.check_path_with_jaato_containment denies
+  #     /proc/**/attr/** explicitly (even when workspace_root is unset),
+  #     so file_edit / readFile / glob_files reject the in-process attack.
+  #   - cli / interactive_shell subprocesses still inherit the rules.
+  #     This is a known gap.
+  #
+  # Tracked fix: child subprofile (jaato-ws-S//child) for subprocesses
+  # that drops both rules; parent keeps them for the framework's __exit__.
+  # Helper-thread "do unconfine from outside the profile" doesn't work
+  # because proc_pid_attr_write enforces ``current != task → -EACCES`` —
+  # only the task itself can write its own attr/current.
+  # See ``project_backlog_apparmor_child_subprofile`` memory.
   change_profile -> unconfined,
   /proc/self/attr/current      w,
   /proc/self/task/*/attr/current w,
