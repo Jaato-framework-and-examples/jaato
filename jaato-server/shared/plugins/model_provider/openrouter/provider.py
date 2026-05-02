@@ -174,6 +174,16 @@ class OpenRouterProvider:
         self._thinking_budget: int = 0
         self._thinking_level: Optional[str] = None
 
+        # Sampling parameters.  ``None`` defers to the upstream's default
+        # so the wire stays minimal unless the profile opts in.  Values
+        # are read from ``config.extra.{temperature, top_p, top_k}`` —
+        # this is how a profile expresses per-model tuning (e.g. Qwen
+        # 2.5 wants temperature=0.55 / top_p=1 per the upstream's docs;
+        # rather than hardcode that, the dumb-set profile sets the knobs).
+        self._temperature: Optional[float] = None
+        self._top_p: Optional[float] = None
+        self._top_k: Optional[int] = None
+
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
         self._catalog_cache: Optional[List[Dict[str, Any]]] = None
@@ -281,6 +291,23 @@ class OpenRouterProvider:
             # nested ``ignore`` / ``order`` lists) don't leak into our
             # request body.
             self._provider_routing = copy.deepcopy(provider_routing)
+
+        # Sampling-parameter knobs.  Some upstreams (notably AtlasCloud's
+        # Qwen serving) reject requests without explicit per-model
+        # temperature / top_p values that the model expects; per-profile
+        # configuration of these is the principled way to express
+        # model-specific tuning without hardcoding a "if model == qwen"
+        # branch in framework code.  ``None`` means "let the upstream
+        # apply its own defaults".
+        temp_extra = config.extra.get("temperature")
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = config.extra.get("top_p")
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = config.extra.get("top_k")
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
 
         # Flat thinking-knob convention shared with Anthropic / Antigravity.
         self._enable_thinking = bool(
@@ -600,12 +627,22 @@ class OpenRouterProvider:
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
 
+        # Sampling parameters from the profile (None ⇒ upstream default).
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        if self._top_p is not None:
+            kwargs["top_p"] = self._top_p
+        if self._top_k is not None:
+            kwargs["extra_body"] = {"top_k": self._top_k}
+
         # OpenRouter request-body extras (e.g. ``provider`` routing).  The
         # OpenAI SDK has no typed parameter for these, so we pass them
         # through ``extra_body`` which the SDK merges into the JSON body.
         extra_body = self._build_extra_body()
         if extra_body:
-            kwargs["extra_body"] = extra_body
+            existing = kwargs.get("extra_body", {})
+            existing.update(extra_body)
+            kwargs["extra_body"] = existing
 
         try:
             if on_chunk:

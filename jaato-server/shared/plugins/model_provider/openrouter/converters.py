@@ -61,6 +61,55 @@ def register_tool_name_mapping(sanitized: str, original: str) -> None:
 
 # ==================== ToolSchema Conversion ====================
 
+def _sanitize_parameters_for_strict_upstreams(
+    parameters: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Strip JSON-Schema constructs that strict OpenAI-compat upstreams reject.
+
+    OpenRouter routes to many upstreams, several of which (AtlasCloud's
+    Qwen serving observed 2026-05-02; others suspected) run our tool
+    definitions through a strict JSON-Schema validator before invoking
+    the model and reject borderline-valid forms with HTTP 400 ``bad
+    request``.  The most common culprit is ``required: []`` on object
+    schemas — an empty array is technically valid JSON Schema but
+    several validators trip on it.  Other minor cleanups land here too.
+
+    Mutations:
+      - Drop ``required`` keys whose value is an empty list (recursively).
+      - Rewrite ``const: X`` to ``enum: [X]`` (semantically equivalent
+        but more widely supported — JSON Schema's ``const`` keyword is
+        2019-09+ and several strict validators don't recognize it).
+
+    The function returns a deep-cloned, sanitized copy; the input
+    dict is left untouched.  When the input is ``None`` (tool with no
+    parameters), an empty ``{"type": "object", "properties": {}}`` is
+    returned so the OpenAI tool-definition shape stays valid.
+    """
+    if parameters is None:
+        return {"type": "object", "properties": {}}
+
+    def _clean(node: Any) -> Any:
+        if isinstance(node, dict):
+            cleaned: Dict[str, Any] = {}
+            for k, v in node.items():
+                # Strip ``required: []`` — strict upstreams reject empty arrays.
+                if k == "required" and isinstance(v, list) and len(v) == 0:
+                    continue
+                # Rewrite ``const: X`` → ``enum: [X]`` for older validators.
+                # Skip the rewrite when ``enum`` is also present at the same
+                # level (caller intentionally combined them — leave alone).
+                if k == "const" and "enum" not in node:
+                    cleaned["enum"] = [v]
+                    continue
+                cleaned[k] = _clean(v)
+            return cleaned
+        if isinstance(node, list):
+            return [_clean(item) for item in node]
+        return node
+
+    return _clean(parameters)
+
+
 def tool_schema_to_openai(schema: ToolSchema) -> Dict[str, Any]:
     """Convert a ``ToolSchema`` to the OpenAI tool definition dict."""
     return {
@@ -68,7 +117,7 @@ def tool_schema_to_openai(schema: ToolSchema) -> Dict[str, Any]:
         "function": {
             "name": name_to_id(schema.name),
             "description": schema.description,
-            "parameters": schema.parameters,
+            "parameters": _sanitize_parameters_for_strict_upstreams(schema.parameters),
         },
     }
 
