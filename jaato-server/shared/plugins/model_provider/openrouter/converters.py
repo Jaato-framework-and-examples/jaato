@@ -231,9 +231,90 @@ def message_from_openai(msg: Dict[str, Any]) -> Message:
     return Message(role=Role.USER, parts=parts)
 
 
+def _repair_history_shape_for_strict_upstreams(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Repair an OpenAI message list for upstreams that strictly enforce
+    the OpenAI Chat Completions spec on the ``messages`` field.
+
+    The framework's session-level ``ensure_tool_call_integrity`` enforces
+    Anthropic-format validity (no orphan ``tool_use`` / ``tool_result``
+    pairs).  OpenAI's spec adds further constraints that some upstream
+    providers (AtlasCloud's Qwen serving observed 2026-05-02; others
+    suspected) enforce strictly and reject with HTTP 400 when violated:
+
+      - The first message in ``messages[]`` MUST NOT be role=``tool``.
+        GC pruning that drops the leading system/user prefix can leave
+        a ``tool`` message exposed at index 0.
+      - Each role=``tool`` message's ``tool_call_id`` MUST match an
+        ``id`` in a preceding role=``assistant`` message's
+        ``tool_calls[]`` array.  GC pruning that drops the assistant
+        frame while keeping the tool result produces an "orphan"
+        tool message that strict validators reject.
+
+    The repair is conservative — it only **drops** invalid frames;
+    it never invents content.  Drops are silent (no error raised) so
+    the agent can recover gracefully with whatever history remains.
+
+    Returns a new list; the input is not mutated.
+
+    Failure modes the repair catches:
+      - ``[user, tool, ...]``                       → drop tool head
+      - ``[user, tool, tool, ...]``                  → drop tool head(s)
+      - ``[..., tool(id=X), ...]`` no preceding asst → drop the orphan
+      - GC removed an asst frame's tool_calls       → tool responses become orphans → drop
+
+    Failure modes the repair does NOT catch (deferred to future work):
+      - assistant with ``tool_calls`` followed by NO tool responses
+        (orphan assistant) — generally OpenAI accepts this for an
+        in-progress turn; only some upstreams reject.
+      - tool ordering: spec wants tool responses in the same order
+        as assistant's tool_calls; harmless if shuffled in practice.
+    """
+    if not messages:
+        return messages
+
+    out: List[Dict[str, Any]] = []
+    seen_assistant_tool_ids: set = set()
+
+    for msg in messages:
+        role = msg.get("role")
+        if role == "tool":
+            tc_id = msg.get("tool_call_id")
+            if tc_id and tc_id in seen_assistant_tool_ids:
+                out.append(msg)
+            # else: drop (orphan tool response — its assistant frame is gone)
+            continue
+
+        if role == "assistant":
+            tool_calls = msg.get("tool_calls") or []
+            for tc in tool_calls:
+                tc_id = tc.get("id")
+                if tc_id:
+                    seen_assistant_tool_ids.add(tc_id)
+
+        out.append(msg)
+
+    # Drop any leading tool messages — they made it through the per-message
+    # check (e.g. their assistant precedes the GC truncation point) but a
+    # tool message at position 0 still violates the OpenAI spec.
+    while out and out[0].get("role") == "tool":
+        out.pop(0)
+
+    return out
+
+
 def history_to_openai(history: List[Message]) -> List[Dict[str, Any]]:
-    """Convert internal history to an OpenAI message list."""
-    return [message_to_openai(m) for m in (history or [])]
+    """Convert internal history to an OpenAI message list.
+
+    Runs a final shape-repair pass so strict OpenAI-compat upstreams
+    (e.g. AtlasCloud / Qwen) don't reject post-GC history with HTTP 400
+    for orphan tool responses or leading tool messages.  See
+    :func:`_repair_history_shape_for_strict_upstreams` for the
+    constraints enforced.
+    """
+    converted = [message_to_openai(m) for m in (history or [])]
+    return _repair_history_shape_for_strict_upstreams(converted)
 
 
 # ==================== Response Conversion ====================
