@@ -274,9 +274,46 @@ class ZhipuAIProvider(AnthropicProvider):
 
         self._trace(f"[INIT] API key resolved (len={len(self._api_key)})")
 
-        # Resolve base URL from config, environment, or stored credentials
+        # Parse extra config — namespaced into the same layers as the
+        # anthropic provider (server 0.6.24+):
+        #
+        #   plugin_configs.zhipuai:
+        #     <top-level>           # auth / identity (api_key)
+        #     api_params:           # Anthropic-compatible request body
+        #                           # (temperature, top_p, top_k, max_tokens,
+        #                           #  enable_thinking, thinking_budget)
+        #     framework_overrides:  # rare escape hatches (base_url, context_length)
+        #
+        # Backward compatibility: every key is also read from the legacy
+        # flat position with a one-time deprecation warning per key.
+        api_params = config.extra.get("api_params") or {}
+        framework_overrides = config.extra.get("framework_overrides") or {}
+
+        def _knob(
+            key: str, *, layer: Dict[str, Any], default: Any = None,
+        ) -> Any:
+            """Read a config knob from its nested layer first, falling
+            back to the legacy flat ``config.extra[key]`` position with
+            a deprecation warning when only the flat form is present."""
+            if key in layer:
+                return layer[key]
+            if key in config.extra:
+                logger.warning(
+                    "Zhipuai profile uses legacy flat config key %r — "
+                    "move under the appropriate nested layer "
+                    "(api_params / framework_overrides) per the 0.6.24+ "
+                    "namespacing.  Flat-key support will be removed in a "
+                    "future release.",
+                    key,
+                )
+                return config.extra[key]
+            return default
+
+        # Resolve base URL from config, environment, or stored credentials.
+        # (framework_overrides — base URL is a deployment escape hatch,
+        # not a per-request knob.)
         self._base_url = (
-            config.extra.get("base_url")
+            _knob("base_url", layer=framework_overrides)
             or resolve_base_url()
         )
         # Check stored base_url only if using default (not overridden)
@@ -291,20 +328,40 @@ class ZhipuAIProvider(AnthropicProvider):
         self._base_url = self._base_url.rstrip("/")
         self._trace(f"[INIT] base_url={self._base_url}")
 
-        # Optional context length override
+        # Optional context length override (framework_overrides layer).
         self._context_length_override = (
-            config.extra.get("context_length") or resolve_context_length()
+            _knob("context_length", layer=framework_overrides)
+            or resolve_context_length()
         )
         if self._context_length_override:
             self._trace(f"[INIT] context_length_override={self._context_length_override}")
 
-        # Extended thinking: configurable for GLM-4.7 which has native CoT reasoning
-        self._enable_thinking = config.extra.get(
-            "enable_thinking", resolve_enable_thinking()
+        # Extended thinking: configurable for GLM-4.7+ which has native
+        # CoT reasoning (api_params layer — these translate to wire fields).
+        self._enable_thinking = _knob(
+            "enable_thinking", layer=api_params, default=resolve_enable_thinking(),
         )
-        self._thinking_budget = config.extra.get(
-            "thinking_budget", resolve_thinking_budget()
+        self._thinking_budget = _knob(
+            "thinking_budget", layer=api_params, default=resolve_thinking_budget(),
         )
+
+        # Sampling parameters (api_params layer).  ``None`` means "omit
+        # from the request and let GLM apply its server-side default"
+        # (Anthropic-compat → temperature=1.0).  These reach
+        # ``messages.create()`` via the inherited ``complete()`` method
+        # in AnthropicProvider, which reads ``self._temperature`` etc.
+        temp_extra = _knob("temperature", layer=api_params)
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = _knob("top_p", layer=api_params)
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = _knob("top_k", layer=api_params)
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        max_tokens_extra = _knob("max_tokens", layer=api_params)
+        if max_tokens_extra is not None:
+            self._max_tokens_override = int(max_tokens_extra)
 
         # Zhipu AI doesn't use OAuth/PKCE - set to disabled
         self._use_pkce = False

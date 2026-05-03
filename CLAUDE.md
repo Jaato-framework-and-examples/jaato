@@ -464,13 +464,43 @@ The device code flow uses GitHub Copilot's OAuth client ID and doesn't require c
 2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token`
 3. **API Key** (`sk-ant-api03-...`): Uses API credits
 
-Configuration options via `ProviderConfig.extra`:
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enable_caching` | bool | False | Enable prompt caching (90% cost reduction) |
-| `enable_thinking` | bool | False | Enable extended thinking |
-| `thinking_budget` | int | 10000 | Max thinking tokens when enabled |
-| `cache_history` | bool | True | Cache historical messages |
+**Profile knobs** (under `plugin_configs.anthropic`) — namespaced into
+three layers since server 0.6.24 (no `routing` layer because Anthropic's
+API has no gateway routing extension):
+
+```yaml
+plugin_configs:
+  anthropic:
+    # Top-level — auth / identity (rarely set per-profile; usually env vars)
+    api_key: "sk-ant-..."          # overrides env / OAuth
+    oauth_token: "sk-ant-oat01-..." # OAuth token for subscription
+
+    # api_params — Anthropic Messages API request body fields
+    api_params:
+      temperature: 0.0             # 0.0-1.0 (server default 1.0)
+      top_p: 0.95
+      top_k: 40
+      max_tokens: 4096             # overrides framework default
+      enable_thinking: true        # extended reasoning
+      thinking_budget: 10000       # max thinking tokens
+
+    # framework_overrides — rare escape hatches (none defined today;
+    # reserved for future use like context_length overrides)
+```
+
+| Layer | Keys | Purpose |
+|-------|------|---------|
+| top-level | `api_key`, `oauth_token` | auth / identity |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget` | Anthropic Messages API body fields. Sampling params are omitted from the request when unset, letting Anthropic apply its server-side defaults. Setting `temperature: 0.0` is the framework's determinism knob. |
+| `framework_overrides` | (reserved) | Future escape hatches |
+
+(Prompt caching is managed by the `cache_anthropic` plugin, not via
+`api_params`.)
+
+**Backward compatibility:** the same keys are also accepted at the
+legacy flat position (`temperature:` directly under `anthropic:`) with
+a one-time deprecation warning per key.  Flat-key support will be
+removed in a future server release.
 
 ### Ollama (Local Models)
 | Variable | Purpose |

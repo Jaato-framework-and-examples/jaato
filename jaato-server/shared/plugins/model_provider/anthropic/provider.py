@@ -16,9 +16,12 @@ Features:
 """
 
 import json
+import logging
 import os
 import re
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from ..base import (
     FunctionCallDetectedCallback,
@@ -157,6 +160,18 @@ class AnthropicProvider:
         self._enable_thinking: bool = False
         self._thinking_budget: int = 10000
 
+        # Sampling parameters (None = let the API apply its server-side
+        # default — Anthropic Messages API defaults to temperature=1.0).
+        # Wired through to ``messages.create()`` only when set on a
+        # profile, mirroring openrouter's namespaced api_params layer.
+        self._temperature: Optional[float] = None
+        self._top_p: Optional[float] = None
+        self._top_k: Optional[int] = None
+        # Profile-level override of the framework's hard-coded
+        # DEFAULT_MAX_TOKENS / EXTENDED_MAX_TOKENS choice.  ``None``
+        # keeps the existing thinking-aware default selection.
+        self._max_tokens_override: Optional[int] = None
+
         # Per-call accounting (updated after each complete() call)
         self._last_usage: TokenUsage = TokenUsage()
 
@@ -257,13 +272,70 @@ class AnthropicProvider:
                 checked_locations=get_checked_credential_locations()
             )
 
-        # Parse extra config (config.extra takes precedence over env vars)
-        self._enable_thinking = config.extra.get(
-            "enable_thinking", resolve_enable_thinking()
+        # Parse extra config — namespaced into the same four layers as
+        # the openrouter provider (server 0.6.23+):
+        #
+        #   plugin_configs.anthropic:
+        #     <top-level>           # auth / identity (api_key, oauth_token)
+        #     api_params:           # Anthropic Messages API request body
+        #                           # (temperature, top_p, top_k, max_tokens,
+        #                           #  enable_thinking, thinking_budget)
+        #     framework_overrides:  # rare escape hatches (none defined for
+        #                           # anthropic today; reserved for future use)
+        #
+        # The ``routing`` layer is omitted — Anthropic's API has no gateway
+        # routing extension equivalent to OpenRouter's ``provider`` field.
+        #
+        # Backward compatibility: every key is also read from the legacy
+        # flat position with a one-time deprecation warning per key.  Flat
+        # support will be removed in a future release.
+        api_params = config.extra.get("api_params") or {}
+        framework_overrides = config.extra.get("framework_overrides") or {}
+
+        def _knob(
+            key: str, *, layer: Dict[str, Any], default: Any = None,
+        ) -> Any:
+            """Read a config knob from its nested layer first, falling
+            back to the legacy flat ``config.extra[key]`` position with
+            a deprecation warning when only the flat form is present."""
+            if key in layer:
+                return layer[key]
+            if key in config.extra:
+                logger.warning(
+                    "Anthropic profile uses legacy flat config key %r — "
+                    "move under the appropriate nested layer "
+                    "(api_params / framework_overrides) per the 0.6.24+ "
+                    "namespacing.  Flat-key support will be removed in a "
+                    "future release.",
+                    key,
+                )
+                return config.extra[key]
+            return default
+
+        # Thinking knobs (kept on api_params since they translate to wire
+        # fields — Anthropic's ``thinking`` request body extension).
+        self._enable_thinking = _knob(
+            "enable_thinking", layer=api_params, default=resolve_enable_thinking(),
         )
-        self._thinking_budget = config.extra.get(
-            "thinking_budget", resolve_thinking_budget()
+        self._thinking_budget = _knob(
+            "thinking_budget", layer=api_params, default=resolve_thinking_budget(),
         )
+
+        # Sampling parameters.  ``None`` means "omit from the request and
+        # let Anthropic apply its server-side default" (temperature=1.0).
+        # Profiles wanting determinism set ``api_params.temperature: 0.0``.
+        temp_extra = _knob("temperature", layer=api_params)
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = _knob("top_p", layer=api_params)
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = _knob("top_k", layer=api_params)
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        max_tokens_extra = _knob("max_tokens", layer=api_params)
+        if max_tokens_extra is not None:
+            self._max_tokens_override = int(max_tokens_extra)
 
         # Create the client based on auth method
         # Priority: PKCE OAuth > env var OAuth > API key
@@ -995,11 +1067,26 @@ class AnthropicProvider:
         # Build API kwargs from explicit parameters (NOT instance state)
         kwargs: Dict[str, Any] = {}
 
-        # Max tokens (higher if thinking is enabled)
-        if self._enable_thinking and self._is_thinking_capable():
+        # Max tokens.  Profile override (api_params.max_tokens) wins;
+        # otherwise pick the framework default based on whether thinking
+        # is enabled (extended needs more output room for the trace +
+        # the answer).
+        if self._max_tokens_override is not None:
+            kwargs["max_tokens"] = self._max_tokens_override
+        elif self._enable_thinking and self._is_thinking_capable():
             kwargs["max_tokens"] = EXTENDED_MAX_TOKENS
         else:
             kwargs["max_tokens"] = DEFAULT_MAX_TOKENS
+
+        # Sampling parameters (api_params.{temperature, top_p, top_k}).
+        # Only sent when the profile set them — omitting them lets
+        # Anthropic apply its server-side defaults (temperature=1.0).
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        if self._top_p is not None:
+            kwargs["top_p"] = self._top_p
+        if self._top_k is not None:
+            kwargs["top_k"] = self._top_k
 
         # System instruction (parameterized)
         system_blocks = self._build_system_blocks_from(system_instruction)
