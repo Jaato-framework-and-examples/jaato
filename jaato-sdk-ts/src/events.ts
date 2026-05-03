@@ -18,6 +18,7 @@ export type JaatoEvents =
   | AgentOutputEvent
   | AgentStatusChangedEvent
   | AgentCompletedEvent
+  | SessionTerminatedEvent
   | ToolCallStartEvent
   | ToolCallEndEvent
   | ToolOutputEvent
@@ -128,6 +129,7 @@ export type EventType =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -240,6 +242,7 @@ export type EventType1 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -357,6 +360,7 @@ export type EventType2 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -472,6 +476,7 @@ export type EventType3 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -586,6 +591,7 @@ export type EventType4 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -708,6 +714,7 @@ export type EventType5 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -809,9 +816,9 @@ export type EventType5 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp5 = string;
-export type AgentId4 = string;
-export type ToolName = string;
-export type CallId = string | null;
+export type SessionId = string;
+export type AgentId4 = string | null;
+export type Reason = string;
 /**
  * All event types in the protocol.
  */
@@ -822,6 +829,7 @@ export type EventType6 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -924,15 +932,8 @@ export type EventType6 =
   | "gates.snapshot";
 export type Timestamp6 = string;
 export type AgentId5 = string;
-export type ToolName1 = string;
-export type CallId1 = string | null;
-export type Success1 = boolean;
-export type DurationSeconds = number;
-export type ErrorMessage = string | null;
-export type Backgrounded = boolean;
-export type ContinuationId = string | null;
-export type ShowOutput = boolean | null;
-export type ShowPopup = boolean | null;
+export type ToolName = string;
+export type CallId = string | null;
 /**
  * All event types in the protocol.
  */
@@ -943,6 +944,7 @@ export type EventType7 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1045,8 +1047,15 @@ export type EventType7 =
   | "gates.snapshot";
 export type Timestamp7 = string;
 export type AgentId6 = string;
-export type CallId2 = string;
-export type Chunk = string;
+export type ToolName1 = string;
+export type CallId1 = string | null;
+export type Success1 = boolean;
+export type DurationSeconds = number;
+export type ErrorMessage = string | null;
+export type Backgrounded = boolean;
+export type ContinuationId = string | null;
+export type ShowOutput = boolean | null;
+export type ShowPopup = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -1057,6 +1066,7 @@ export type EventType8 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1159,15 +1169,8 @@ export type EventType8 =
   | "gates.snapshot";
 export type Timestamp8 = string;
 export type AgentId7 = string;
-export type RequestId = string;
-export type ToolName2 = string;
-export type ResponseOptions = {
-  [k: string]: string;
-}[];
-export type PromptLines = string[] | null;
-export type FormatHint = string | null;
-export type Warnings = string | null;
-export type WarningLevel = string | null;
+export type CallId2 = string;
+export type Chunk = string;
 /**
  * All event types in the protocol.
  */
@@ -1178,6 +1181,7 @@ export type EventType9 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1280,18 +1284,15 @@ export type EventType9 =
   | "gates.snapshot";
 export type Timestamp9 = string;
 export type AgentId8 = string;
-export type RequestId1 = string;
-export type ToolName3 = string;
-export type CallId3 = string | null;
-export type ResponseOptions1 = {
+export type RequestId = string;
+export type ToolName2 = string;
+export type ResponseOptions = {
   [k: string]: string;
 }[];
-export type ToolArgs2 = {
-  [k: string]: unknown;
-} | null;
-export type EditableMetadata = {
-  [k: string]: unknown;
-} | null;
+export type PromptLines = string[] | null;
+export type FormatHint = string | null;
+export type Warnings = string | null;
+export type WarningLevel = string | null;
 /**
  * All event types in the protocol.
  */
@@ -1302,6 +1303,7 @@ export type EventType10 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1404,11 +1406,18 @@ export type EventType10 =
   | "gates.snapshot";
 export type Timestamp10 = string;
 export type AgentId9 = string;
-export type RequestId2 = string;
-export type ToolName4 = string;
-export type Granted = boolean;
-export type Method = string;
-export type Comment = string;
+export type RequestId1 = string;
+export type ToolName3 = string;
+export type CallId3 = string | null;
+export type ResponseOptions1 = {
+  [k: string]: string;
+}[];
+export type ToolArgs2 = {
+  [k: string]: unknown;
+} | null;
+export type EditableMetadata = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -1419,6 +1428,7 @@ export type EventType11 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1520,8 +1530,12 @@ export type EventType11 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp11 = string;
-export type EffectiveDefault = string;
-export type SuspensionScope = string | null;
+export type AgentId10 = string;
+export type RequestId2 = string;
+export type ToolName4 = string;
+export type Granted = boolean;
+export type Method = string;
+export type Comment = string;
 /**
  * All event types in the protocol.
  */
@@ -1532,6 +1546,7 @@ export type EventType12 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1633,11 +1648,8 @@ export type EventType12 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp12 = string;
-export type AgentId10 = string;
-export type RequestId3 = string;
-export type ToolName5 = string;
-export type ContextLines = string[];
-export type TotalQuestions = number;
+export type EffectiveDefault = string;
+export type SuspensionScope = string | null;
 /**
  * All event types in the protocol.
  */
@@ -1648,6 +1660,7 @@ export type EventType13 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1750,10 +1763,10 @@ export type EventType13 =
   | "gates.snapshot";
 export type Timestamp13 = string;
 export type AgentId11 = string;
-export type RequestId4 = string;
-export type ToolName6 = string;
-export type QuestionIndex = number;
-export type TotalQuestions1 = number;
+export type RequestId3 = string;
+export type ToolName5 = string;
+export type ContextLines = string[];
+export type TotalQuestions = number;
 /**
  * All event types in the protocol.
  */
@@ -1764,6 +1777,7 @@ export type EventType14 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1866,16 +1880,10 @@ export type EventType14 =
   | "gates.snapshot";
 export type Timestamp14 = string;
 export type AgentId12 = string;
-export type RequestId5 = string;
-export type QuestionIndex1 = number;
-export type TotalQuestions2 = number;
-export type QuestionType = string;
-export type QuestionText = string;
-export type Options =
-  | {
-      [k: string]: string;
-    }[]
-  | null;
+export type RequestId4 = string;
+export type ToolName6 = string;
+export type QuestionIndex = number;
+export type TotalQuestions1 = number;
 /**
  * All event types in the protocol.
  */
@@ -1886,6 +1894,7 @@ export type EventType15 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -1988,9 +1997,16 @@ export type EventType15 =
   | "gates.snapshot";
 export type Timestamp15 = string;
 export type AgentId13 = string;
-export type RequestId6 = string;
-export type ToolName7 = string;
-export type QaPairs = string[][];
+export type RequestId5 = string;
+export type QuestionIndex1 = number;
+export type TotalQuestions2 = number;
+export type QuestionType = string;
+export type QuestionText = string;
+export type Options =
+  | {
+      [k: string]: string;
+    }[]
+  | null;
 /**
  * All event types in the protocol.
  */
@@ -2001,6 +2017,7 @@ export type EventType16 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -2103,12 +2120,9 @@ export type EventType16 =
   | "gates.snapshot";
 export type Timestamp16 = string;
 export type AgentId14 = string;
-export type RequestId7 = string;
-export type ToolName8 = string;
-export type Context = string;
-export type Questions = {
-  [k: string]: unknown;
-}[];
+export type RequestId6 = string;
+export type ToolName7 = string;
+export type QaPairs = string[][];
 /**
  * All event types in the protocol.
  */
@@ -2119,6 +2133,7 @@ export type EventType17 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -2220,8 +2235,13 @@ export type EventType17 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp17 = string;
-export type RequestId8 = string;
-export type Answers = string[];
+export type AgentId15 = string;
+export type RequestId7 = string;
+export type ToolName8 = string;
+export type Context = string;
+export type Questions = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -2232,6 +2252,7 @@ export type EventType18 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -2333,10 +2354,8 @@ export type EventType18 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp18 = string;
-export type AgentId15 = string;
-export type RequestId9 = string;
-export type ToolName9 = string;
-export type PromptLines1 = string[];
+export type RequestId8 = string;
+export type Answers = string[];
 /**
  * All event types in the protocol.
  */
@@ -2347,6 +2366,7 @@ export type EventType19 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -2449,9 +2469,9 @@ export type EventType19 =
   | "gates.snapshot";
 export type Timestamp19 = string;
 export type AgentId16 = string;
-export type RequestId10 = string;
-export type ToolName10 = string;
-export type SelectedIds = string[];
+export type RequestId9 = string;
+export type ToolName9 = string;
+export type PromptLines1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -2462,6 +2482,7 @@ export type EventType20 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -2563,8 +2584,10 @@ export type EventType20 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp20 = string;
-export type RequestId11 = string;
-export type Response = string;
+export type AgentId17 = string;
+export type RequestId10 = string;
+export type ToolName10 = string;
+export type SelectedIds = string[];
 /**
  * All event types in the protocol.
  */
@@ -2575,6 +2598,7 @@ export type EventType21 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -2676,14 +2700,8 @@ export type EventType21 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp21 = string;
-export type RequestId12 = string;
-export type SessionId = string;
-export type SessionWorkspace = string;
-export type ClientWorkspace = string;
-export type ResponseOptions2 = {
-  [k: string]: string;
-}[];
-export type PromptLines2 = string[];
+export type RequestId11 = string;
+export type Response = string;
 /**
  * All event types in the protocol.
  */
@@ -2694,6 +2712,7 @@ export type EventType22 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -2795,10 +2814,14 @@ export type EventType22 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp22 = string;
-export type RequestId13 = string;
+export type RequestId12 = string;
 export type SessionId1 = string;
-export type Action = string;
-export type NewSessionId = string | null;
+export type SessionWorkspace = string;
+export type ClientWorkspace = string;
+export type ResponseOptions2 = {
+  [k: string]: string;
+}[];
+export type PromptLines2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -2809,6 +2832,7 @@ export type EventType23 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -2910,8 +2934,10 @@ export type EventType23 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp23 = string;
-export type RequestId14 = string;
-export type Response1 = string;
+export type RequestId13 = string;
+export type SessionId2 = string;
+export type Action = string;
+export type NewSessionId = string | null;
 /**
  * All event types in the protocol.
  */
@@ -2922,6 +2948,7 @@ export type EventType24 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3023,16 +3050,8 @@ export type EventType24 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp24 = string;
-export type RequestId15 = string;
-export type ProviderName = string;
-export type ProviderDisplayName = string;
-export type AvailableModels = {
-  [k: string]: string;
-}[];
-export type HasActiveSession = boolean;
-export type CurrentProvider = string;
-export type CurrentModel = string;
-export type WorkspacePath = string;
+export type RequestId14 = string;
+export type Response1 = string;
 /**
  * All event types in the protocol.
  */
@@ -3043,6 +3062,7 @@ export type EventType25 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3144,10 +3164,16 @@ export type EventType25 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp25 = string;
-export type RequestId16 = string;
-export type Connect = boolean;
-export type ModelName = string;
-export type PersistEnv = boolean;
+export type RequestId15 = string;
+export type ProviderName = string;
+export type ProviderDisplayName = string;
+export type AvailableModels = {
+  [k: string]: string;
+}[];
+export type HasActiveSession = boolean;
+export type CurrentProvider = string;
+export type CurrentModel = string;
+export type WorkspacePath = string;
 /**
  * All event types in the protocol.
  */
@@ -3158,6 +3184,7 @@ export type EventType26 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3259,11 +3286,10 @@ export type EventType26 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp26 = string;
-export type AgentId17 = string;
-export type PlanName = string;
-export type Steps = {
-  [k: string]: unknown;
-}[];
+export type RequestId16 = string;
+export type Connect = boolean;
+export type ModelName = string;
+export type PersistEnv = boolean;
 /**
  * All event types in the protocol.
  */
@@ -3274,6 +3300,7 @@ export type EventType27 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3376,25 +3403,10 @@ export type EventType27 =
   | "gates.snapshot";
 export type Timestamp27 = string;
 export type AgentId18 = string;
-export type StepId = string;
-export type Sequence = number;
-export type Content = string;
-export type Status1 = string;
-export type Result = string | null;
-export type Error2 = string | null;
-export type BlockedBy =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type DependsOn =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type ReceivedOutputs = {
+export type PlanName = string;
+export type Steps = {
   [k: string]: unknown;
-} | null;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -3405,6 +3417,7 @@ export type EventType28 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3507,6 +3520,25 @@ export type EventType28 =
   | "gates.snapshot";
 export type Timestamp28 = string;
 export type AgentId19 = string;
+export type StepId = string;
+export type Sequence = number;
+export type Content = string;
+export type Status1 = string;
+export type Result = string | null;
+export type Error2 = string | null;
+export type BlockedBy =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type DependsOn =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type ReceivedOutputs = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -3517,6 +3549,7 @@ export type EventType29 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3619,18 +3652,6 @@ export type EventType29 =
   | "gates.snapshot";
 export type Timestamp29 = string;
 export type AgentId20 = string;
-export type PromptTokens = number;
-export type OutputTokens = number;
-export type TotalTokens = number;
-export type CacheReadTokens = number | null;
-export type CacheCreationTokens = number | null;
-export type ReasoningTokens = number | null;
-export type ThinkingTokens = number | null;
-export type CostUsd = number | null;
-export type ContextLimit = number;
-export type PercentUsed = number;
-export type TokensRemaining = number;
-export type Turns = number;
 /**
  * All event types in the protocol.
  */
@@ -3641,6 +3662,7 @@ export type EventType30 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3743,10 +3765,18 @@ export type EventType30 =
   | "gates.snapshot";
 export type Timestamp30 = string;
 export type AgentId21 = string;
-export type Threshold = number | null;
-export type Strategy = string | null;
-export type TargetPercent = number | null;
-export type ContinuousMode = boolean;
+export type PromptTokens = number;
+export type OutputTokens = number;
+export type TotalTokens = number;
+export type CacheReadTokens = number | null;
+export type CacheCreationTokens = number | null;
+export type ReasoningTokens = number | null;
+export type ThinkingTokens = number | null;
+export type CostUsd = number | null;
+export type ContextLimit = number;
+export type PercentUsed = number;
+export type TokensRemaining = number;
+export type Turns = number;
 /**
  * All event types in the protocol.
  */
@@ -3757,6 +3787,7 @@ export type EventType31 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3859,6 +3890,10 @@ export type EventType31 =
   | "gates.snapshot";
 export type Timestamp31 = string;
 export type AgentId22 = string;
+export type Threshold = number | null;
+export type Strategy = string | null;
+export type TargetPercent = number | null;
+export type ContinuousMode = boolean;
 /**
  * All event types in the protocol.
  */
@@ -3869,6 +3904,7 @@ export type EventType32 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -3971,12 +4007,6 @@ export type EventType32 =
   | "gates.snapshot";
 export type Timestamp32 = string;
 export type AgentId23 = string;
-export type TurnNumber = number;
-export type DurationSeconds1 = number;
-export type FunctionCalls = {
-  [k: string]: unknown;
-}[];
-export type FormattedText = string | null;
 /**
  * All event types in the protocol.
  */
@@ -3987,6 +4017,7 @@ export type EventType33 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -4089,10 +4120,12 @@ export type EventType33 =
   | "gates.snapshot";
 export type Timestamp33 = string;
 export type AgentId24 = string;
-export type ContextLimit1 = number;
-export type PercentUsed1 = number;
-export type TokensRemaining1 = number;
-export type PendingToolCalls = number;
+export type TurnNumber = number;
+export type DurationSeconds1 = number;
+export type FunctionCalls = {
+  [k: string]: unknown;
+}[];
+export type FormattedText = string | null;
 /**
  * All event types in the protocol.
  */
@@ -4103,6 +4136,7 @@ export type EventType34 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -4204,8 +4238,11 @@ export type EventType34 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp34 = string;
-export type Message = string;
-export type Style = string;
+export type AgentId25 = string;
+export type ContextLimit1 = number;
+export type PercentUsed1 = number;
+export type TokensRemaining1 = number;
+export type PendingToolCalls = number;
 /**
  * All event types in the protocol.
  */
@@ -4216,6 +4253,7 @@ export type EventType35 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -4317,7 +4355,8 @@ export type EventType35 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp35 = string;
-export type Lines = unknown[][];
+export type Message = string;
+export type Style = string;
 /**
  * All event types in the protocol.
  */
@@ -4328,6 +4367,7 @@ export type EventType36 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -4429,11 +4469,7 @@ export type EventType36 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp36 = string;
-export type Step = string;
-export type Status2 = string;
-export type Message1 = string;
-export type StepNumber = number;
-export type TotalSteps = number;
+export type Lines = unknown[][];
 /**
  * All event types in the protocol.
  */
@@ -4444,6 +4480,7 @@ export type EventType37 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -4545,9 +4582,11 @@ export type EventType37 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp37 = string;
-export type Error3 = string;
-export type ErrorType = string;
-export type Recoverable = boolean;
+export type Step = string;
+export type Status2 = string;
+export type Message1 = string;
+export type StepNumber = number;
+export type TotalSteps = number;
 /**
  * All event types in the protocol.
  */
@@ -4558,6 +4597,7 @@ export type EventType38 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -4659,11 +4699,9 @@ export type EventType38 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp38 = string;
-export type Message2 = string;
-export type Attempt = number;
-export type MaxAttempts = number;
-export type Delay = number;
-export type ErrorType1 = string;
+export type Error3 = string;
+export type ErrorType = string;
+export type Recoverable = boolean;
 /**
  * All event types in the protocol.
  */
@@ -4674,6 +4712,7 @@ export type EventType39 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -4775,9 +4814,11 @@ export type EventType39 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp39 = string;
-export type Sessions = {
-  [k: string]: unknown;
-}[];
+export type Message2 = string;
+export type Attempt = number;
+export type MaxAttempts = number;
+export type Delay = number;
+export type ErrorType1 = string;
 /**
  * All event types in the protocol.
  */
@@ -4788,6 +4829,7 @@ export type EventType40 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -4889,26 +4931,7 @@ export type EventType40 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp40 = string;
-export type SessionId2 = string;
-export type SessionName = string;
-export type ModelProvider = string;
-export type ModelName1 = string;
-export type ProfileName1 = string | null;
-export type Sessions1 = {
-  [k: string]: unknown;
-}[];
-export type Tools = {
-  [k: string]: unknown;
-}[];
-export type Models = string[];
-export type UserInputs = string[];
-export type Memories = {
-  [k: string]: unknown;
-}[];
-export type SandboxPaths = {
-  [k: string]: string;
-}[];
-export type Services = {
+export type Sessions = {
   [k: string]: unknown;
 }[];
 /**
@@ -4921,6 +4944,7 @@ export type EventType41 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5022,7 +5046,26 @@ export type EventType41 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp41 = string;
-export type Memories1 = {
+export type SessionId3 = string;
+export type SessionName = string;
+export type ModelProvider = string;
+export type ModelName1 = string;
+export type ProfileName1 = string | null;
+export type Sessions1 = {
+  [k: string]: unknown;
+}[];
+export type Tools = {
+  [k: string]: unknown;
+}[];
+export type Models = string[];
+export type UserInputs = string[];
+export type Memories = {
+  [k: string]: unknown;
+}[];
+export type SandboxPaths = {
+  [k: string]: string;
+}[];
+export type Services = {
   [k: string]: unknown;
 }[];
 /**
@@ -5035,6 +5078,7 @@ export type EventType42 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5136,8 +5180,8 @@ export type EventType42 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp42 = string;
-export type Paths = {
-  [k: string]: string;
+export type Memories1 = {
+  [k: string]: unknown;
 }[];
 /**
  * All event types in the protocol.
@@ -5149,6 +5193,7 @@ export type EventType43 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5250,8 +5295,8 @@ export type EventType43 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp43 = string;
-export type Services1 = {
-  [k: string]: unknown;
+export type Paths = {
+  [k: string]: string;
 }[];
 /**
  * All event types in the protocol.
@@ -5263,6 +5308,7 @@ export type EventType44 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5364,8 +5410,9 @@ export type EventType44 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp44 = string;
-export type SessionId3 = string;
-export type Description = string;
+export type Services1 = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -5376,6 +5423,7 @@ export type EventType45 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5477,30 +5525,8 @@ export type EventType45 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp45 = string;
-export type Name = string;
-export type Description1 = string;
-export type Plugins = string[];
-export type PreloadedPlugins = string[];
-export type Model = string | null;
-export type Provider = string | null;
-export type MaxTurns = number;
-export type Gc = {
-  [k: string]: unknown;
-} | null;
-export type RuntimeLimits = {
-  [k: string]: unknown;
-} | null;
-export type CompletionPayloadSchema =
-  | string
-  | {
-      [k: string]: unknown;
-    }
-  | null;
-export type EnvVarNames = string[];
-export type Profiles = ProfileSummary[];
-export type Name1 = string;
-export type Error4 = string;
-export type ParseErrors = ProfileParseError[];
+export type SessionId4 = string;
+export type Description = string;
 /**
  * All event types in the protocol.
  */
@@ -5511,6 +5537,7 @@ export type EventType46 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5612,11 +5639,30 @@ export type EventType46 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp46 = string;
-export type Text1 = string;
-export type Attachments = {
+export type Name = string;
+export type Description1 = string;
+export type Plugins = string[];
+export type PreloadedPlugins = string[];
+export type Model = string | null;
+export type Provider = string | null;
+export type MaxTurns = number;
+export type Gc = {
   [k: string]: unknown;
-}[];
-export type ParallelTools = boolean | null;
+} | null;
+export type RuntimeLimits = {
+  [k: string]: unknown;
+} | null;
+export type CompletionPayloadSchema =
+  | string
+  | {
+      [k: string]: unknown;
+    }
+  | null;
+export type EnvVarNames = string[];
+export type Profiles = ProfileSummary[];
+export type Name1 = string;
+export type Error4 = string;
+export type ParseErrors = ProfileParseError[];
 /**
  * All event types in the protocol.
  */
@@ -5627,6 +5673,7 @@ export type EventType47 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5728,11 +5775,11 @@ export type EventType47 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp47 = string;
-export type RequestId17 = string;
-export type Response2 = string;
-export type EditedArguments = {
+export type Text1 = string;
+export type Attachments = {
   [k: string]: unknown;
-} | null;
+}[];
+export type ParallelTools = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -5743,6 +5790,7 @@ export type EventType48 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5844,9 +5892,11 @@ export type EventType48 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp48 = string;
-export type RequestId18 = string;
-export type QuestionIndex2 = number;
-export type Response3 = string;
+export type RequestId17 = string;
+export type Response2 = string;
+export type EditedArguments = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -5857,6 +5907,7 @@ export type EventType49 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -5958,7 +6009,9 @@ export type EventType49 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp49 = string;
-export type AgentId25 = string | null;
+export type RequestId18 = string;
+export type QuestionIndex2 = number;
+export type Response3 = string;
 /**
  * All event types in the protocol.
  */
@@ -5969,6 +6022,7 @@ export type EventType50 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6070,7 +6124,7 @@ export type EventType50 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp50 = string;
-export type Name2 = string;
+export type AgentId26 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -6081,6 +6135,7 @@ export type EventType51 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6182,8 +6237,7 @@ export type EventType51 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp51 = string;
-export type AgentId26 = string;
-export type EventNames = string[];
+export type Name2 = string;
 /**
  * All event types in the protocol.
  */
@@ -6194,6 +6248,7 @@ export type EventType52 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6295,11 +6350,8 @@ export type EventType52 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp52 = string;
-export type Command = string;
-export type Args = string[];
-export type Payload1 = {
-  [k: string]: unknown;
-} | null;
+export type AgentId27 = string;
+export type EventNames = string[];
 /**
  * All event types in the protocol.
  */
@@ -6310,6 +6362,7 @@ export type EventType53 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6411,7 +6464,11 @@ export type EventType53 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp53 = string;
-export type AgentId27 = string | null;
+export type Command = string;
+export type Args = string[];
+export type Payload1 = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -6422,6 +6479,7 @@ export type EventType54 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6523,6 +6581,7 @@ export type EventType54 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp54 = string;
+export type AgentId28 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -6533,6 +6592,7 @@ export type EventType55 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6634,9 +6694,6 @@ export type EventType55 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp55 = string;
-export type Commands = {
-  [k: string]: string;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -6647,6 +6704,7 @@ export type EventType56 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6748,6 +6806,9 @@ export type EventType56 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp56 = string;
+export type Commands = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -6758,6 +6819,7 @@ export type EventType57 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6859,10 +6921,6 @@ export type EventType57 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp57 = string;
-export type Tools1 = {
-  [k: string]: unknown;
-}[];
-export type Message3 = string;
 /**
  * All event types in the protocol.
  */
@@ -6873,6 +6931,7 @@ export type EventType58 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -6974,6 +7033,10 @@ export type EventType58 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp58 = string;
+export type Tools1 = {
+  [k: string]: unknown;
+}[];
+export type Message3 = string;
 /**
  * All event types in the protocol.
  */
@@ -6984,6 +7047,7 @@ export type EventType59 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -7085,7 +7149,6 @@ export type EventType59 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp59 = string;
-export type ToolName11 = string;
 /**
  * All event types in the protocol.
  */
@@ -7096,6 +7159,7 @@ export type EventType60 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -7197,9 +7261,7 @@ export type EventType60 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp60 = string;
-export type Tools2 = {
-  [k: string]: unknown;
-}[];
+export type ToolName11 = string;
 /**
  * All event types in the protocol.
  */
@@ -7210,6 +7272,7 @@ export type EventType61 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -7311,9 +7374,9 @@ export type EventType61 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp61 = string;
-export type CallId4 = string;
-export type AgentId28 = string;
-export type ToolName12 = string;
+export type Tools2 = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -7324,6 +7387,7 @@ export type EventType62 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -7425,9 +7489,9 @@ export type EventType62 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp62 = string;
-export type CallId5 = string;
-export type Result1 = string;
-export type Error5 = string;
+export type CallId4 = string;
+export type AgentId29 = string;
+export type ToolName12 = string;
 /**
  * All event types in the protocol.
  */
@@ -7438,6 +7502,7 @@ export type EventType63 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -7539,7 +7604,9 @@ export type EventType63 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp63 = string;
-export type AgentId29 = string;
+export type CallId5 = string;
+export type Result1 = string;
+export type Error5 = string;
 /**
  * All event types in the protocol.
  */
@@ -7550,6 +7617,7 @@ export type EventType64 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -7652,12 +7720,6 @@ export type EventType64 =
   | "gates.snapshot";
 export type Timestamp64 = string;
 export type AgentId30 = string;
-export type History = {
-  [k: string]: unknown;
-}[];
-export type TurnAccounting = {
-  [k: string]: number;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -7668,6 +7730,7 @@ export type EventType65 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -7769,16 +7832,13 @@ export type EventType65 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp65 = string;
-export type TraceLogPath = string | null;
-export type ProviderTraceLog = string | null;
-export type WorkingDir = string | null;
-export type ConfigRoot = string | null;
-export type EnvFile = string | null;
-export type Presentation = {
+export type AgentId31 = string;
+export type History = {
   [k: string]: unknown;
-} | null;
-export type PermissionTimeout = number | null;
-export type Apparmor = boolean;
+}[];
+export type TurnAccounting = {
+  [k: string]: number;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -7789,6 +7849,7 @@ export type EventType66 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -7890,8 +7951,16 @@ export type EventType66 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp66 = string;
-export type Text2 = string;
-export type PositionInQueue = number;
+export type TraceLogPath = string | null;
+export type ProviderTraceLog = string | null;
+export type WorkingDir = string | null;
+export type ConfigRoot = string | null;
+export type EnvFile = string | null;
+export type Presentation = {
+  [k: string]: unknown;
+} | null;
+export type PermissionTimeout = number | null;
+export type Apparmor = boolean;
 /**
  * All event types in the protocol.
  */
@@ -7902,6 +7971,7 @@ export type EventType67 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8003,7 +8073,8 @@ export type EventType67 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp67 = string;
-export type Text3 = string;
+export type Text2 = string;
+export type PositionInQueue = number;
 /**
  * All event types in the protocol.
  */
@@ -8014,6 +8085,7 @@ export type EventType68 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8115,8 +8187,7 @@ export type EventType68 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp68 = string;
-export type PartialResponseChars = number;
-export type UserPromptPreview = string;
+export type Text3 = string;
 /**
  * All event types in the protocol.
  */
@@ -8127,6 +8198,7 @@ export type EventType69 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8228,10 +8300,8 @@ export type EventType69 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp69 = string;
-export type SessionId4 = string;
-export type AgentId31 = string;
-export type RecoveredCalls = number;
-export type ActionTaken = string;
+export type PartialResponseChars = number;
+export type UserPromptPreview = string;
 /**
  * All event types in the protocol.
  */
@@ -8242,6 +8312,7 @@ export type EventType70 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8343,6 +8414,10 @@ export type EventType70 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp70 = string;
+export type SessionId5 = string;
+export type AgentId32 = string;
+export type RecoveredCalls = number;
+export type ActionTaken = string;
 /**
  * All event types in the protocol.
  */
@@ -8353,6 +8428,7 @@ export type EventType71 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8454,10 +8530,6 @@ export type EventType71 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp71 = string;
-export type Root = string;
-export type Workspaces = {
-  [k: string]: unknown;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -8468,6 +8540,7 @@ export type EventType72 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8569,7 +8642,10 @@ export type EventType72 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp72 = string;
-export type Name3 = string;
+export type Root = string;
+export type Workspaces = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -8580,6 +8656,7 @@ export type EventType73 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8681,8 +8758,7 @@ export type EventType73 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp73 = string;
-export type Name4 = string;
-export type Path = string;
+export type Name3 = string;
 /**
  * All event types in the protocol.
  */
@@ -8693,6 +8769,7 @@ export type EventType74 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8794,7 +8871,8 @@ export type EventType74 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp74 = string;
-export type Name5 = string;
+export type Name4 = string;
+export type Path = string;
 /**
  * All event types in the protocol.
  */
@@ -8805,6 +8883,7 @@ export type EventType75 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -8906,12 +8985,7 @@ export type EventType75 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp75 = string;
-export type Workspace = string;
-export type Configured = boolean;
-export type Provider1 = string | null;
-export type Model1 = string | null;
-export type AvailableProviders = string[];
-export type MissingFields = string[];
+export type Name5 = string;
 /**
  * All event types in the protocol.
  */
@@ -8922,6 +8996,7 @@ export type EventType76 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9023,9 +9098,12 @@ export type EventType76 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp76 = string;
-export type Provider2 = string;
-export type Model2 = string | null;
-export type ApiKey = string | null;
+export type Workspace = string;
+export type Configured = boolean;
+export type Provider1 = string | null;
+export type Model1 = string | null;
+export type AvailableProviders = string[];
+export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -9036,6 +9114,7 @@ export type EventType77 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9137,11 +9216,9 @@ export type EventType77 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp77 = string;
-export type Workspace1 = string;
-export type Provider3 = string;
-export type Model3 = string | null;
-export type Success2 = boolean;
-export type Error6 = string | null;
+export type Provider2 = string;
+export type Model2 = string | null;
+export type ApiKey = string | null;
 /**
  * All event types in the protocol.
  */
@@ -9152,6 +9229,7 @@ export type EventType78 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9253,9 +9331,11 @@ export type EventType78 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp78 = string;
-export type Changes = {
-  [k: string]: string;
-}[];
+export type Workspace1 = string;
+export type Provider3 = string;
+export type Model3 = string | null;
+export type Success2 = boolean;
+export type Error6 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -9266,6 +9346,7 @@ export type EventType79 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9367,10 +9448,9 @@ export type EventType79 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp79 = string;
-export type Files = {
+export type Changes = {
   [k: string]: string;
 }[];
-export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -9381,6 +9461,7 @@ export type EventType80 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9482,12 +9563,10 @@ export type EventType80 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp80 = string;
-export type WorkspaceId = string;
-export type Name6 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files1 = StagedFileSpec[];
+export type Files = {
+  [k: string]: string;
+}[];
+export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -9498,6 +9577,7 @@ export type EventType81 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9599,11 +9679,12 @@ export type EventType81 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp81 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
-}[];
+export type WorkspaceId = string;
+export type Name6 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files1 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -9614,6 +9695,7 @@ export type EventType82 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9715,20 +9797,11 @@ export type EventType82 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp82 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -9739,6 +9812,7 @@ export type EventType83 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9840,17 +9914,20 @@ export type EventType83 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp83 = string;
-export type RequestId19 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -9861,6 +9938,7 @@ export type EventType84 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -9962,8 +10040,17 @@ export type EventType84 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp84 = string;
-export type RequestId20 = string;
-export type RemoteAgentId = string;
+export type RequestId19 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -9974,6 +10061,7 @@ export type EventType85 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -10075,8 +10163,8 @@ export type EventType85 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp85 = string;
-export type RequestId21 = string;
-export type Reason = string;
+export type RequestId20 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -10087,6 +10175,7 @@ export type EventType86 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -10188,10 +10277,8 @@ export type EventType86 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp86 = string;
-export type RequestId22 = string;
-export type RemoteAgentId1 = string;
-export type Text4 = string;
-export type Source1 = string;
+export type RequestId21 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -10202,6 +10289,7 @@ export type EventType87 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -10303,12 +10391,10 @@ export type EventType87 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp87 = string;
-export type RequestId23 = string;
-export type RemoteAgentId2 = string;
-export type Success3 = boolean;
-export type Summary = string;
-export type Error7 = string;
-export type WorkspaceModified = boolean;
+export type RequestId22 = string;
+export type RemoteAgentId1 = string;
+export type Text4 = string;
+export type Source1 = string;
 /**
  * All event types in the protocol.
  */
@@ -10319,6 +10405,7 @@ export type EventType88 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -10420,8 +10507,12 @@ export type EventType88 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp88 = string;
-export type RequestId24 = string;
-export type RemoteAgentId3 = string;
+export type RequestId23 = string;
+export type RemoteAgentId2 = string;
+export type Success3 = boolean;
+export type Summary = string;
+export type Error7 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -10432,6 +10523,7 @@ export type EventType89 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -10533,8 +10625,8 @@ export type EventType89 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp89 = string;
-export type RequestId25 = string;
-export type RemoteAgentId4 = string;
+export type RequestId24 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -10545,6 +10637,7 @@ export type EventType90 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -10646,10 +10739,8 @@ export type EventType90 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp90 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId25 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -10660,6 +10751,7 @@ export type EventType91 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -10761,14 +10853,10 @@ export type EventType91 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp91 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -10779,6 +10867,7 @@ export type EventType92 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -10880,17 +10969,14 @@ export type EventType92 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp92 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
   [k: string]: unknown;
 } | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -10901,6 +10987,7 @@ export type EventType93 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11002,9 +11089,17 @@ export type EventType93 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp93 = string;
-export type Text5 = string;
-export type SourceType = string;
-export type SourceId = string | null;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -11015,6 +11110,7 @@ export type EventType94 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11116,13 +11212,9 @@ export type EventType94 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp94 = string;
-export type RequestId26 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type Text5 = string;
+export type SourceType = string;
+export type SourceId = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11133,6 +11225,7 @@ export type EventType95 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11234,9 +11327,13 @@ export type EventType95 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp95 = string;
-export type RequestId27 = string;
-export type ResponseText = string;
-export type Error8 = string;
+export type RequestId26 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -11247,6 +11344,7 @@ export type EventType96 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11348,10 +11446,9 @@ export type EventType96 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp96 = string;
-export type RequestId28 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type RequestId27 = string;
+export type ResponseText = string;
+export type Error8 = string;
 /**
  * All event types in the protocol.
  */
@@ -11362,6 +11459,7 @@ export type EventType97 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11463,9 +11561,10 @@ export type EventType97 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp97 = string;
-export type RequestId29 = string;
-export type ForkIndex = number;
-export type Error9 = string;
+export type RequestId28 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11476,6 +11575,7 @@ export type EventType98 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11577,8 +11677,9 @@ export type EventType98 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp98 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type RequestId29 = string;
+export type ForkIndex = number;
+export type Error9 = string;
 /**
  * All event types in the protocol.
  */
@@ -11589,6 +11690,7 @@ export type EventType99 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11690,8 +11792,8 @@ export type EventType99 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp99 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -11702,6 +11804,7 @@ export type EventType100 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11803,9 +11906,8 @@ export type EventType100 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp100 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -11816,6 +11918,7 @@ export type EventType101 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -11917,7 +12020,9 @@ export type EventType101 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp101 = string;
-export type Target1 = string;
+export type Target = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -11928,6 +12033,7 @@ export type EventType102 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -12029,7 +12135,7 @@ export type EventType102 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp102 = string;
-export type Policy = string;
+export type Target1 = string;
 /**
  * All event types in the protocol.
  */
@@ -12040,6 +12146,7 @@ export type EventType103 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -12141,7 +12248,7 @@ export type EventType103 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp103 = string;
-export type RequestId30 = string;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -12152,6 +12259,7 @@ export type EventType104 =
   | "agent.output"
   | "agent.status_changed"
   | "agent.completed"
+  | "session.terminated"
   | "tool.call_start"
   | "tool.call_end"
   | "tool.output"
@@ -12253,6 +12361,119 @@ export type EventType104 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp104 = string;
+export type RequestId30 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType105 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "session.terminated"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "gc.config"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "event.external"
+  | "inject_prompt.request"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp105 = string;
 export type RequestId31 = string;
 export type DefaultPolicy = string;
 export type SessionDefaultPolicy = string | null;
@@ -12332,12 +12553,50 @@ export interface AgentCompletedEvent {
   payload?: Payload;
 }
 /**
+ * Session has fully wound down — safe to disconnect or
+ * ``delete_session``.
+ *
+ * Fires in two scenarios:
+ *
+ * 1. **Natural completion**: emitted spontaneously after the
+ *    agent's terminal completion (``AgentCompletedEvent``) AND
+ *    the framework's post-completion wrap-up has drained
+ *    (``_is_running`` returned False, plugin-on-end hooks ran,
+ *    journal flushed).  Test harnesses can subscribe to this
+ *    instead of the legacy "subscribe AGENT_COMPLETED + wait
+ *    10s for TURN_COMPLETED" heuristic.
+ *
+ * 2. **Client-requested**: emitted in response to ``session.end``
+ *    after the daemon has stopped any in-flight activity and run
+ *    cleanup.  Replaces the legacy
+ *    ``SystemMessageEvent("[SESSION_TERMINATED]")`` string-based
+ *    marker.
+ *
+ * The ``reason`` field distinguishes the two paths so consumers
+ * can handle them differently if needed.
+ *
+ * Canonical pattern (test harness):
+ *
+ *     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
+ *     sid = await client.create_session(...)
+ *     await client.send_message(...)
+ *     await on_done.wait()
+ *     # Session has fully wound down.  Optionally delete_session(sid).
+ */
+export interface SessionTerminatedEvent {
+  type?: EventType5;
+  timestamp?: Timestamp5;
+  session_id?: SessionId;
+  agent_id?: AgentId4;
+  reason?: Reason;
+}
+/**
  * Tool execution has started.
  */
 export interface ToolCallStartEvent {
-  type?: EventType5;
-  timestamp?: Timestamp5;
-  agent_id?: AgentId4;
+  type?: EventType6;
+  timestamp?: Timestamp6;
+  agent_id?: AgentId5;
   tool_name?: ToolName;
   tool_args?: ToolArgs;
   call_id?: CallId;
@@ -12349,9 +12608,9 @@ export interface ToolArgs {
  * Tool execution has completed.
  */
 export interface ToolCallEndEvent {
-  type?: EventType6;
-  timestamp?: Timestamp6;
-  agent_id?: AgentId5;
+  type?: EventType7;
+  timestamp?: Timestamp7;
+  agent_id?: AgentId6;
   tool_name?: ToolName1;
   call_id?: CallId1;
   success?: Success1;
@@ -12366,9 +12625,9 @@ export interface ToolCallEndEvent {
  * Live output chunk from a running tool (tail -f style).
  */
 export interface ToolOutputEvent {
-  type?: EventType7;
-  timestamp?: Timestamp7;
-  agent_id?: AgentId6;
+  type?: EventType8;
+  timestamp?: Timestamp8;
+  agent_id?: AgentId7;
   call_id?: CallId2;
   chunk?: Chunk;
 }
@@ -12378,9 +12637,9 @@ export interface ToolOutputEvent {
  * Includes pre-formatted prompt lines (with diff for file edits) when available.
  */
 export interface PermissionRequestedEvent {
-  type?: EventType8;
-  timestamp?: Timestamp8;
-  agent_id?: AgentId7;
+  type?: EventType9;
+  timestamp?: Timestamp9;
+  agent_id?: AgentId8;
   request_id?: RequestId;
   tool_name?: ToolName2;
   tool_args?: ToolArgs1;
@@ -12400,9 +12659,9 @@ export interface ToolArgs1 {
  * This lightweight control event separates content delivery from input control.
  */
 export interface PermissionInputModeEvent {
-  type?: EventType9;
-  timestamp?: Timestamp9;
-  agent_id?: AgentId8;
+  type?: EventType10;
+  timestamp?: Timestamp10;
+  agent_id?: AgentId9;
   request_id?: RequestId1;
   tool_name?: ToolName3;
   call_id?: CallId3;
@@ -12414,9 +12673,9 @@ export interface PermissionInputModeEvent {
  * Permission has been resolved (granted or denied).
  */
 export interface PermissionResolvedEvent {
-  type?: EventType10;
-  timestamp?: Timestamp10;
-  agent_id?: AgentId9;
+  type?: EventType11;
+  timestamp?: Timestamp11;
+  agent_id?: AgentId10;
   request_id?: RequestId2;
   tool_name?: ToolName4;
   granted?: Granted;
@@ -12430,8 +12689,8 @@ export interface PermissionResolvedEvent {
  * permission resolutions that change the effective policy.
  */
 export interface PermissionStatusEvent {
-  type?: EventType11;
-  timestamp?: Timestamp11;
+  type?: EventType12;
+  timestamp?: Timestamp12;
   effective_default?: EffectiveDefault;
   suspension_scope?: SuspensionScope;
 }
@@ -12439,9 +12698,9 @@ export interface PermissionStatusEvent {
  * Clarification session has started.
  */
 export interface ClarificationRequestedEvent {
-  type?: EventType12;
-  timestamp?: Timestamp12;
-  agent_id?: AgentId10;
+  type?: EventType13;
+  timestamp?: Timestamp13;
+  agent_id?: AgentId11;
   request_id?: RequestId3;
   tool_name?: ToolName5;
   context_lines?: ContextLines;
@@ -12454,9 +12713,9 @@ export interface ClarificationRequestedEvent {
  * This lightweight control event separates content delivery from input control.
  */
 export interface ClarificationInputModeEvent {
-  type?: EventType13;
-  timestamp?: Timestamp13;
-  agent_id?: AgentId11;
+  type?: EventType14;
+  timestamp?: Timestamp14;
+  agent_id?: AgentId12;
   request_id?: RequestId4;
   tool_name?: ToolName6;
   question_index?: QuestionIndex;
@@ -12466,9 +12725,9 @@ export interface ClarificationInputModeEvent {
  * A single clarification question to answer.
  */
 export interface ClarificationQuestionEvent {
-  type?: EventType14;
-  timestamp?: Timestamp14;
-  agent_id?: AgentId12;
+  type?: EventType15;
+  timestamp?: Timestamp15;
+  agent_id?: AgentId13;
   request_id?: RequestId5;
   question_index?: QuestionIndex1;
   total_questions?: TotalQuestions2;
@@ -12480,9 +12739,9 @@ export interface ClarificationQuestionEvent {
  * All clarification questions have been answered.
  */
 export interface ClarificationResolvedEvent {
-  type?: EventType15;
-  timestamp?: Timestamp15;
-  agent_id?: AgentId13;
+  type?: EventType16;
+  timestamp?: Timestamp16;
+  agent_id?: AgentId14;
   request_id?: RequestId6;
   tool_name?: ToolName7;
   qa_pairs?: QaPairs;
@@ -12495,9 +12754,9 @@ export interface ClarificationResolvedEvent {
  * in any order.
  */
 export interface ClarificationBatchEvent {
-  type?: EventType16;
-  timestamp?: Timestamp16;
-  agent_id?: AgentId14;
+  type?: EventType17;
+  timestamp?: Timestamp17;
+  agent_id?: AgentId15;
   request_id?: RequestId7;
   tool_name?: ToolName8;
   context?: Context;
@@ -12507,8 +12766,8 @@ export interface ClarificationBatchEvent {
  * Client responds with all answers at once (WS batch mode).
  */
 export interface ClarificationBatchResponseEvent {
-  type?: EventType17;
-  timestamp?: Timestamp17;
+  type?: EventType18;
+  timestamp?: Timestamp18;
   request_id?: RequestId8;
   answers?: Answers;
 }
@@ -12519,9 +12778,9 @@ export interface ClarificationBatchResponseEvent {
  * which references to include.
  */
 export interface ReferenceSelectionRequestedEvent {
-  type?: EventType18;
-  timestamp?: Timestamp18;
-  agent_id?: AgentId15;
+  type?: EventType19;
+  timestamp?: Timestamp19;
+  agent_id?: AgentId16;
   request_id?: RequestId9;
   tool_name?: ToolName9;
   prompt_lines?: PromptLines1;
@@ -12530,9 +12789,9 @@ export interface ReferenceSelectionRequestedEvent {
  * Reference selection has been completed.
  */
 export interface ReferenceSelectionResolvedEvent {
-  type?: EventType19;
-  timestamp?: Timestamp19;
-  agent_id?: AgentId16;
+  type?: EventType20;
+  timestamp?: Timestamp20;
+  agent_id?: AgentId17;
   request_id?: RequestId10;
   tool_name?: ToolName10;
   selected_ids?: SelectedIds;
@@ -12541,8 +12800,8 @@ export interface ReferenceSelectionResolvedEvent {
  * Respond to a reference selection request.
  */
 export interface ReferenceSelectionResponseRequest {
-  type?: EventType20;
-  timestamp?: Timestamp20;
+  type?: EventType21;
+  timestamp?: Timestamp21;
   request_id?: RequestId11;
   response?: Response;
 }
@@ -12554,10 +12813,10 @@ export interface ReferenceSelectionResponseRequest {
  * switch to the session's workspace or create a new session.
  */
 export interface WorkspaceMismatchRequestedEvent {
-  type?: EventType21;
-  timestamp?: Timestamp21;
+  type?: EventType22;
+  timestamp?: Timestamp22;
   request_id?: RequestId12;
-  session_id?: SessionId;
+  session_id?: SessionId1;
   session_workspace?: SessionWorkspace;
   client_workspace?: ClientWorkspace;
   response_options?: ResponseOptions2;
@@ -12567,10 +12826,10 @@ export interface WorkspaceMismatchRequestedEvent {
  * Workspace mismatch has been resolved.
  */
 export interface WorkspaceMismatchResolvedEvent {
-  type?: EventType22;
-  timestamp?: Timestamp22;
+  type?: EventType23;
+  timestamp?: Timestamp23;
   request_id?: RequestId13;
-  session_id?: SessionId1;
+  session_id?: SessionId2;
   action?: Action;
   new_session_id?: NewSessionId;
 }
@@ -12578,8 +12837,8 @@ export interface WorkspaceMismatchResolvedEvent {
  * Respond to a workspace mismatch request.
  */
 export interface WorkspaceMismatchResponseRequest {
-  type?: EventType23;
-  timestamp?: Timestamp23;
+  type?: EventType24;
+  timestamp?: Timestamp24;
   request_id?: RequestId14;
   response?: Response1;
 }
@@ -12590,8 +12849,8 @@ export interface WorkspaceMismatchResponseRequest {
  * multi-step wizard and sends back a single PostAuthSetupResponse.
  */
 export interface PostAuthSetupEvent {
-  type?: EventType24;
-  timestamp?: Timestamp24;
+  type?: EventType25;
+  timestamp?: Timestamp25;
   request_id?: RequestId15;
   provider_name?: ProviderName;
   provider_display_name?: ProviderDisplayName;
@@ -12605,8 +12864,8 @@ export interface PostAuthSetupEvent {
  * User's response to post-auth session setup prompt.
  */
 export interface PostAuthSetupResponse {
-  type?: EventType25;
-  timestamp?: Timestamp25;
+  type?: EventType26;
+  timestamp?: Timestamp26;
   request_id?: RequestId16;
   connect?: Connect;
   model_name?: ModelName;
@@ -12616,9 +12875,9 @@ export interface PostAuthSetupResponse {
  * Plan has been created or updated.
  */
 export interface PlanUpdatedEvent {
-  type?: EventType26;
-  timestamp?: Timestamp26;
-  agent_id?: AgentId17;
+  type?: EventType27;
+  timestamp?: Timestamp27;
+  agent_id?: AgentId18;
   plan_name?: PlanName;
   steps?: Steps;
 }
@@ -12634,9 +12893,9 @@ export interface PlanUpdatedEvent {
  * plan completed) use ``PlanUpdatedEvent`` with the full snapshot.
  */
 export interface PlanStepUpdatedEvent {
-  type?: EventType27;
-  timestamp?: Timestamp27;
-  agent_id?: AgentId18;
+  type?: EventType28;
+  timestamp?: Timestamp28;
+  agent_id?: AgentId19;
   step_id?: StepId;
   sequence?: Sequence;
   content?: Content;
@@ -12651,9 +12910,9 @@ export interface PlanStepUpdatedEvent {
  * Plan has been cleared/completed.
  */
 export interface PlanClearedEvent {
-  type?: EventType28;
-  timestamp?: Timestamp28;
-  agent_id?: AgentId19;
+  type?: EventType29;
+  timestamp?: Timestamp29;
+  agent_id?: AgentId20;
 }
 /**
  * Context window usage has changed.
@@ -12669,9 +12928,9 @@ export interface PlanClearedEvent {
  * event (or read it from session init) for status-bar display.
  */
 export interface ContextUpdatedEvent {
-  type?: EventType29;
-  timestamp?: Timestamp29;
-  agent_id?: AgentId20;
+  type?: EventType30;
+  timestamp?: Timestamp30;
+  agent_id?: AgentId21;
   usage?: UsageBreakdown;
   context_limit?: ContextLimit;
   percent_used?: PercentUsed;
@@ -12717,9 +12976,9 @@ export interface UsageBreakdown {
  * config carrier.
  */
 export interface GCConfigEvent {
-  type?: EventType30;
-  timestamp?: Timestamp30;
-  agent_id?: AgentId21;
+  type?: EventType31;
+  timestamp?: Timestamp31;
+  agent_id?: AgentId22;
   threshold?: Threshold;
   strategy?: Strategy;
   target_percent?: TargetPercent;
@@ -12738,9 +12997,9 @@ export interface GCConfigEvent {
  * - entries: Per-source breakdown (system, session, plugin, enrichment, conversation)
  */
 export interface InstructionBudgetEvent {
-  type?: EventType31;
-  timestamp?: Timestamp31;
-  agent_id?: AgentId22;
+  type?: EventType32;
+  timestamp?: Timestamp32;
+  agent_id?: AgentId23;
   budget_snapshot?: BudgetSnapshot;
 }
 export interface BudgetSnapshot {
@@ -12756,9 +13015,9 @@ export interface BudgetSnapshot {
  * ``ContextUpdatedEvent`` use.
  */
 export interface TurnCompletedEvent {
-  type?: EventType32;
-  timestamp?: Timestamp32;
-  agent_id?: AgentId23;
+  type?: EventType33;
+  timestamp?: Timestamp33;
+  agent_id?: AgentId24;
   turn_number?: TurnNumber;
   usage?: UsageBreakdown;
   duration_seconds?: DurationSeconds1;
@@ -12774,9 +13033,9 @@ export interface TurnCompletedEvent {
  * ``TurnCompletedEvent`` and ``ContextUpdatedEvent``.
  */
 export interface TurnProgressEvent {
-  type?: EventType33;
-  timestamp?: Timestamp33;
-  agent_id?: AgentId24;
+  type?: EventType34;
+  timestamp?: Timestamp34;
+  agent_id?: AgentId25;
   usage?: UsageBreakdown;
   context_limit?: ContextLimit1;
   percent_used?: PercentUsed1;
@@ -12787,8 +13046,8 @@ export interface TurnProgressEvent {
  * System message (info, warning, status).
  */
 export interface SystemMessageEvent {
-  type?: EventType34;
-  timestamp?: Timestamp34;
+  type?: EventType35;
+  timestamp?: Timestamp35;
   message?: Message;
   style?: Style;
 }
@@ -12799,8 +13058,8 @@ export interface SystemMessageEvent {
  * using the pager. Each line is a (text, style) tuple.
  */
 export interface HelpTextEvent {
-  type?: EventType35;
-  timestamp?: Timestamp35;
+  type?: EventType36;
+  timestamp?: Timestamp36;
   lines?: Lines;
 }
 /**
@@ -12810,8 +13069,8 @@ export interface HelpTextEvent {
  * Steps are shown in sequence with their status.
  */
 export interface InitProgressEvent {
-  type?: EventType36;
-  timestamp?: Timestamp36;
+  type?: EventType37;
+  timestamp?: Timestamp37;
   step?: Step;
   status?: Status2;
   message?: Message1;
@@ -12822,8 +13081,8 @@ export interface InitProgressEvent {
  * Error occurred.
  */
 export interface ErrorEvent {
-  type?: EventType37;
-  timestamp?: Timestamp37;
+  type?: EventType38;
+  timestamp?: Timestamp38;
   error?: Error3;
   error_type?: ErrorType;
   recoverable?: Recoverable;
@@ -12835,8 +13094,8 @@ export interface ErrorEvent {
  * and the system is retrying the request.
  */
 export interface RetryEvent {
-  type?: EventType38;
-  timestamp?: Timestamp38;
+  type?: EventType39;
+  timestamp?: Timestamp39;
   message?: Message2;
   attempt?: Attempt;
   max_attempts?: MaxAttempts;
@@ -12847,8 +13106,8 @@ export interface RetryEvent {
  * List of available sessions - for user display.
  */
 export interface SessionListEvent {
-  type?: EventType39;
-  timestamp?: Timestamp39;
+  type?: EventType40;
+  timestamp?: Timestamp40;
   sessions?: Sessions;
 }
 /**
@@ -12863,9 +13122,9 @@ export interface SessionListEvent {
  * Server pushes updates when state changes.
  */
 export interface SessionInfoEvent {
-  type?: EventType40;
-  timestamp?: Timestamp40;
-  session_id?: SessionId2;
+  type?: EventType41;
+  timestamp?: Timestamp41;
+  session_id?: SessionId3;
   session_name?: SessionName;
   model_provider?: ModelProvider;
   model_name?: ModelName1;
@@ -12886,8 +13145,8 @@ export interface ToolIdMappings {
  * List of available memories - for completion cache and pager display.
  */
 export interface MemoryListEvent {
-  type?: EventType41;
-  timestamp?: Timestamp41;
+  type?: EventType42;
+  timestamp?: Timestamp42;
   memories?: Memories1;
 }
 /**
@@ -12897,8 +13156,8 @@ export interface MemoryListEvent {
  * completion list for @@ (sandbox path) references.
  */
 export interface SandboxPathsEvent {
-  type?: EventType42;
-  timestamp?: Timestamp42;
+  type?: EventType43;
+  timestamp?: Timestamp43;
   paths?: Paths;
 }
 /**
@@ -12908,17 +13167,17 @@ export interface SandboxPathsEvent {
  * completion list for service names and HTTP methods.
  */
 export interface ServiceListEvent {
-  type?: EventType43;
-  timestamp?: Timestamp43;
+  type?: EventType44;
+  timestamp?: Timestamp44;
   services?: Services1;
 }
 /**
  * Session description was updated (by model calling session_describe).
  */
 export interface SessionDescriptionUpdatedEvent {
-  type?: EventType44;
-  timestamp?: Timestamp44;
-  session_id?: SessionId3;
+  type?: EventType45;
+  timestamp?: Timestamp45;
+  session_id?: SessionId4;
   description?: Description;
 }
 /**
@@ -12939,8 +13198,8 @@ export interface SessionDescriptionUpdatedEvent {
  * removed from this event.
  */
 export interface SessionProfilesEvent {
-  type?: EventType45;
-  timestamp?: Timestamp45;
+  type?: EventType46;
+  timestamp?: Timestamp46;
   profiles?: Profiles;
   parse_errors?: ParseErrors;
 }
@@ -12996,8 +13255,8 @@ export interface ProfileParseError {
  * Send a message to the model.
  */
 export interface SendMessageRequest {
-  type?: EventType46;
-  timestamp?: Timestamp46;
+  type?: EventType47;
+  timestamp?: Timestamp47;
   text?: Text1;
   attachments?: Attachments;
   parallel_tools?: ParallelTools;
@@ -13006,8 +13265,8 @@ export interface SendMessageRequest {
  * Respond to a permission request.
  */
 export interface PermissionResponseRequest {
-  type?: EventType47;
-  timestamp?: Timestamp47;
+  type?: EventType48;
+  timestamp?: Timestamp48;
   request_id?: RequestId17;
   response?: Response2;
   edited_arguments?: EditedArguments;
@@ -13016,8 +13275,8 @@ export interface PermissionResponseRequest {
  * Respond to a clarification question.
  */
 export interface ClarificationResponseRequest {
-  type?: EventType48;
-  timestamp?: Timestamp48;
+  type?: EventType49;
+  timestamp?: Timestamp49;
   request_id?: RequestId18;
   question_index?: QuestionIndex2;
   response?: Response3;
@@ -13026,9 +13285,9 @@ export interface ClarificationResponseRequest {
  * Stop current operation (cancel generation).
  */
 export interface StopRequest {
-  type?: EventType49;
-  timestamp?: Timestamp49;
-  agent_id?: AgentId25;
+  type?: EventType50;
+  timestamp?: Timestamp50;
+  agent_id?: AgentId26;
 }
 /**
  * External event injected by the host page via the web component.
@@ -13037,8 +13296,8 @@ export interface StopRequest {
  * so that agents subscribed via ``subscribeToEvents`` are notified.
  */
 export interface ExternalEventRequest {
-  type?: EventType50;
-  timestamp?: Timestamp50;
+  type?: EventType51;
+  timestamp?: Timestamp51;
   name?: Name2;
   data?: Data;
 }
@@ -13053,9 +13312,9 @@ export interface Data {
  * events.
  */
 export interface EventsSubscribedEvent {
-  type?: EventType51;
-  timestamp?: Timestamp51;
-  agent_id?: AgentId26;
+  type?: EventType52;
+  timestamp?: Timestamp52;
+  agent_id?: AgentId27;
   event_names?: EventNames;
 }
 /**
@@ -13075,8 +13334,8 @@ export interface EventsSubscribedEvent {
  * construction.
  */
 export interface CommandRequest {
-  type?: EventType52;
-  timestamp?: Timestamp52;
+  type?: EventType53;
+  timestamp?: Timestamp53;
   command?: Command;
   args?: Args;
   payload?: Payload1;
@@ -13088,23 +13347,23 @@ export interface CommandRequest {
  * If agent_id is None or empty, returns budget for main agent.
  */
 export interface GetInstructionBudgetRequest {
-  type?: EventType53;
-  timestamp?: Timestamp53;
-  agent_id?: AgentId27;
+  type?: EventType54;
+  timestamp?: Timestamp54;
+  agent_id?: AgentId28;
 }
 /**
  * Request list of available commands from server.
  */
 export interface CommandListRequest {
-  type?: EventType54;
-  timestamp?: Timestamp54;
+  type?: EventType55;
+  timestamp?: Timestamp55;
 }
 /**
  * List of available commands from server/plugins.
  */
 export interface CommandListEvent {
-  type?: EventType55;
-  timestamp?: Timestamp55;
+  type?: EventType56;
+  timestamp?: Timestamp56;
   commands?: Commands;
 }
 /**
@@ -13115,15 +13374,15 @@ export interface CommandListEvent {
  * by re-requesting the full command list from the daemon.
  */
 export interface CommandListRefreshEvent {
-  type?: EventType56;
-  timestamp?: Timestamp56;
+  type?: EventType57;
+  timestamp?: Timestamp57;
 }
 /**
  * Tool status information for client display.
  */
 export interface ToolStatusEvent {
-  type?: EventType57;
-  timestamp?: Timestamp57;
+  type?: EventType58;
+  timestamp?: Timestamp58;
   tools?: Tools1;
   message?: Message3;
 }
@@ -13138,8 +13397,8 @@ export interface ToolStatusEvent {
  * not a delta. Clients should replace their local lookup on each receive.
  */
 export interface ToolIdRegistryEvent {
-  type?: EventType58;
-  timestamp?: Timestamp58;
+  type?: EventType59;
+  timestamp?: Timestamp59;
   mappings?: Mappings;
 }
 export interface Mappings {
@@ -13152,8 +13411,8 @@ export interface Mappings {
  * Used by headless mode to disable tools before starting event handling.
  */
 export interface ToolDisableRequest {
-  type?: EventType59;
-  timestamp?: Timestamp59;
+  type?: EventType60;
+  timestamp?: Timestamp60;
   tool_name?: ToolName11;
 }
 /**
@@ -13164,8 +13423,8 @@ export interface ToolDisableRequest {
  * ``tool.execute_request`` and waits for ``tool.execute_result``.
  */
 export interface ToolsRegisterClientRequest {
-  type?: EventType60;
-  timestamp?: Timestamp60;
+  type?: EventType61;
+  timestamp?: Timestamp61;
   tools?: Tools2;
   categories?: Categories;
 }
@@ -13176,10 +13435,10 @@ export interface Categories {
  * Server requests the WS client to execute a client-registered tool.
  */
 export interface ToolExecuteRequestEvent {
-  type?: EventType61;
-  timestamp?: Timestamp61;
+  type?: EventType62;
+  timestamp?: Timestamp62;
   call_id?: CallId4;
-  agent_id?: AgentId28;
+  agent_id?: AgentId29;
   tool_name?: ToolName12;
   tool_args?: ToolArgs3;
 }
@@ -13190,8 +13449,8 @@ export interface ToolArgs3 {
  * Client returns the result of a client-side tool execution.
  */
 export interface ToolExecuteResultEvent {
-  type?: EventType62;
-  timestamp?: Timestamp62;
+  type?: EventType63;
+  timestamp?: Timestamp63;
   call_id?: CallId5;
   result?: Result1;
   error?: Error5;
@@ -13200,17 +13459,17 @@ export interface ToolExecuteResultEvent {
  * Client request for conversation history.
  */
 export interface HistoryRequest {
-  type?: EventType63;
-  timestamp?: Timestamp63;
-  agent_id?: AgentId29;
+  type?: EventType64;
+  timestamp?: Timestamp64;
+  agent_id?: AgentId30;
 }
 /**
  * Conversation history from server.
  */
 export interface HistoryEvent {
-  type?: EventType64;
-  timestamp?: Timestamp64;
-  agent_id?: AgentId30;
+  type?: EventType65;
+  timestamp?: Timestamp65;
+  agent_id?: AgentId31;
   history?: History;
   turn_accounting?: TurnAccounting;
 }
@@ -13222,8 +13481,8 @@ export interface HistoryEvent {
  * a ``PresentationContext`` on the server side.
  */
 export interface ClientConfigRequest {
-  type?: EventType65;
-  timestamp?: Timestamp65;
+  type?: EventType66;
+  timestamp?: Timestamp66;
   trace_log_path?: TraceLogPath;
   provider_trace_log?: ProviderTraceLog;
   working_dir?: WorkingDir;
@@ -13241,8 +13500,8 @@ export interface ClientConfigRequest {
  * pause point (between tool executions, after subagent completion, etc.).
  */
 export interface MidTurnPromptQueuedEvent {
-  type?: EventType66;
-  timestamp?: Timestamp66;
+  type?: EventType67;
+  timestamp?: Timestamp67;
   text?: Text2;
   position_in_queue?: PositionInQueue;
 }
@@ -13253,8 +13512,8 @@ export interface MidTurnPromptQueuedEvent {
  * by the model.
  */
 export interface MidTurnPromptInjectedEvent {
-  type?: EventType67;
-  timestamp?: Timestamp67;
+  type?: EventType68;
+  timestamp?: Timestamp68;
   text?: Text3;
 }
 /**
@@ -13265,8 +13524,8 @@ export interface MidTurnPromptInjectedEvent {
  * The partial response is preserved and the user's prompt is being processed.
  */
 export interface MidTurnInterruptEvent {
-  type?: EventType68;
-  timestamp?: Timestamp68;
+  type?: EventType69;
+  timestamp?: Timestamp69;
   partial_response_chars?: PartialResponseChars;
   user_prompt_preview?: UserPromptPreview;
 }
@@ -13278,10 +13537,10 @@ export interface MidTurnInterruptEvent {
  * for any pending tool calls.
  */
 export interface InterruptedTurnRecoveredEvent {
-  type?: EventType69;
-  timestamp?: Timestamp69;
-  session_id?: SessionId4;
-  agent_id?: AgentId31;
+  type?: EventType70;
+  timestamp?: Timestamp70;
+  session_id?: SessionId5;
+  agent_id?: AgentId32;
   recovered_calls?: RecoveredCalls;
   action_taken?: ActionTaken;
 }
@@ -13289,15 +13548,15 @@ export interface InterruptedTurnRecoveredEvent {
  * Client requests list of available workspaces.
  */
 export interface WorkspaceListRequest {
-  type?: EventType70;
-  timestamp?: Timestamp70;
+  type?: EventType71;
+  timestamp?: Timestamp71;
 }
 /**
  * Response to workspace.list - list of available workspaces.
  */
 export interface WorkspaceListEvent {
-  type?: EventType71;
-  timestamp?: Timestamp71;
+  type?: EventType72;
+  timestamp?: Timestamp72;
   root?: Root;
   workspaces?: Workspaces;
 }
@@ -13305,16 +13564,16 @@ export interface WorkspaceListEvent {
  * Client requests creation of a new workspace.
  */
 export interface WorkspaceCreateRequest {
-  type?: EventType72;
-  timestamp?: Timestamp72;
+  type?: EventType73;
+  timestamp?: Timestamp73;
   name?: Name3;
 }
 /**
  * Response to workspace.create - new workspace created.
  */
 export interface WorkspaceCreatedEvent {
-  type?: EventType73;
-  timestamp?: Timestamp73;
+  type?: EventType74;
+  timestamp?: Timestamp74;
   name?: Name4;
   path?: Path;
 }
@@ -13322,16 +13581,16 @@ export interface WorkspaceCreatedEvent {
  * Client selects a workspace to use for the session.
  */
 export interface WorkspaceSelectRequest {
-  type?: EventType74;
-  timestamp?: Timestamp74;
+  type?: EventType75;
+  timestamp?: Timestamp75;
   name?: Name5;
 }
 /**
  * Response to workspace.select - configuration status of selected workspace.
  */
 export interface ConfigStatusEvent {
-  type?: EventType75;
-  timestamp?: Timestamp75;
+  type?: EventType76;
+  timestamp?: Timestamp76;
   workspace?: Workspace;
   configured?: Configured;
   provider?: Provider1;
@@ -13343,8 +13602,8 @@ export interface ConfigStatusEvent {
  * Client updates workspace configuration (provider, model, API key).
  */
 export interface ConfigUpdateRequest {
-  type?: EventType76;
-  timestamp?: Timestamp76;
+  type?: EventType77;
+  timestamp?: Timestamp77;
   provider?: Provider2;
   model?: Model2;
   api_key?: ApiKey;
@@ -13353,8 +13612,8 @@ export interface ConfigUpdateRequest {
  * Response to config.update - configuration was updated.
  */
 export interface ConfigUpdatedEvent {
-  type?: EventType77;
-  timestamp?: Timestamp77;
+  type?: EventType78;
+  timestamp?: Timestamp78;
   workspace?: Workspace1;
   provider?: Provider3;
   model?: Model3;
@@ -13375,8 +13634,8 @@ export interface ConfigUpdatedEvent {
  *     ``"deleted"``  – file was previously tracked and is now gone.
  */
 export interface WorkspaceFilesChangedEvent {
-  type?: EventType78;
-  timestamp?: Timestamp78;
+  type?: EventType79;
+  timestamp?: Timestamp79;
   changes?: Changes;
 }
 /**
@@ -13387,8 +13646,8 @@ export interface WorkspaceFilesChangedEvent {
  * replaying individual deltas.
  */
 export interface WorkspaceFilesSnapshotEvent {
-  type?: EventType79;
-  timestamp?: Timestamp79;
+  type?: EventType80;
+  timestamp?: Timestamp80;
   files?: Files;
   total?: Total;
 }
@@ -13432,8 +13691,8 @@ export interface WorkspaceFilesSnapshotEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType80;
-  timestamp?: Timestamp80;
+  type?: EventType81;
+  timestamp?: Timestamp81;
   workspace_id?: WorkspaceId;
   files?: Files1;
 }
@@ -13481,8 +13740,8 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType81;
-  timestamp?: Timestamp81;
+  type?: EventType82;
+  timestamp?: Timestamp82;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -13495,8 +13754,8 @@ export interface StageFilesEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType82;
-  timestamp?: Timestamp82;
+  type?: EventType83;
+  timestamp?: Timestamp83;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion;
@@ -13521,8 +13780,8 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType83;
-  timestamp?: Timestamp83;
+  type?: EventType84;
+  timestamp?: Timestamp84;
   request_id?: RequestId19;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
@@ -13542,8 +13801,8 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType84;
-  timestamp?: Timestamp84;
+  type?: EventType85;
+  timestamp?: Timestamp85;
   request_id?: RequestId20;
   remote_agent_id?: RemoteAgentId;
 }
@@ -13554,10 +13813,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType85;
-  timestamp?: Timestamp85;
+  type?: EventType86;
+  timestamp?: Timestamp86;
   request_id?: RequestId21;
-  reason?: Reason;
+  reason?: Reason1;
 }
 /**
  * Streamed output chunk from a remote subagent.
@@ -13567,8 +13826,8 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType86;
-  timestamp?: Timestamp86;
+  type?: EventType87;
+  timestamp?: Timestamp87;
   request_id?: RequestId22;
   remote_agent_id?: RemoteAgentId1;
   text?: Text4;
@@ -13582,8 +13841,8 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType87;
-  timestamp?: Timestamp87;
+  type?: EventType88;
+  timestamp?: Timestamp88;
   request_id?: RequestId23;
   remote_agent_id?: RemoteAgentId2;
   success?: Success3;
@@ -13598,8 +13857,8 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType88;
-  timestamp?: Timestamp88;
+  type?: EventType89;
+  timestamp?: Timestamp89;
   request_id?: RequestId24;
   remote_agent_id?: RemoteAgentId3;
 }
@@ -13607,8 +13866,8 @@ export interface PeerStopRequestEvent {
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType89;
-  timestamp?: Timestamp89;
+  type?: EventType90;
+  timestamp?: Timestamp90;
   request_id?: RequestId25;
   remote_agent_id?: RemoteAgentId4;
 }
@@ -13621,8 +13880,8 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType90;
-  timestamp?: Timestamp90;
+  type?: EventType91;
+  timestamp?: Timestamp91;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -13642,8 +13901,8 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType91;
-  timestamp?: Timestamp91;
+  type?: EventType92;
+  timestamp?: Timestamp92;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -13659,8 +13918,8 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType92;
-  timestamp?: Timestamp92;
+  type?: EventType93;
+  timestamp?: Timestamp93;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -13702,8 +13961,8 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType93;
-  timestamp?: Timestamp93;
+  type?: EventType94;
+  timestamp?: Timestamp94;
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
@@ -13723,8 +13982,8 @@ export interface InjectPromptRequest {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType94;
-  timestamp?: Timestamp94;
+  type?: EventType95;
+  timestamp?: Timestamp95;
   request_id?: RequestId26;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
@@ -13733,8 +13992,8 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
+  type?: EventType96;
+  timestamp?: Timestamp96;
   request_id?: RequestId27;
   response_text?: ResponseText;
   error?: Error8;
@@ -13755,8 +14014,8 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType96;
-  timestamp?: Timestamp96;
+  type?: EventType97;
+  timestamp?: Timestamp97;
   request_id?: RequestId28;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
@@ -13766,8 +14025,8 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType97;
-  timestamp?: Timestamp97;
+  type?: EventType98;
+  timestamp?: Timestamp98;
   request_id?: RequestId29;
   fork_index?: ForkIndex;
   error?: Error9;
@@ -13781,8 +14040,8 @@ export interface ResolveForkPointResultEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType98;
-  timestamp?: Timestamp98;
+  type?: EventType99;
+  timestamp?: Timestamp99;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -13794,8 +14053,8 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType99;
-  timestamp?: Timestamp99;
+  type?: EventType100;
+  timestamp?: Timestamp100;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -13806,8 +14065,8 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType100;
-  timestamp?: Timestamp100;
+  type?: EventType101;
+  timestamp?: Timestamp101;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -13821,8 +14080,8 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType101;
-  timestamp?: Timestamp101;
+  type?: EventType102;
+  timestamp?: Timestamp102;
   target?: Target1;
 }
 /**
@@ -13833,16 +14092,16 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType102;
-  timestamp?: Timestamp102;
+  type?: EventType103;
+  timestamp?: Timestamp103;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType103;
-  timestamp?: Timestamp103;
+  type?: EventType104;
+  timestamp?: Timestamp104;
   request_id?: RequestId30;
 }
 /**
@@ -13854,8 +14113,8 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType104;
-  timestamp?: Timestamp104;
+  type?: EventType105;
+  timestamp?: Timestamp105;
   request_id?: RequestId31;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
@@ -13893,6 +14152,7 @@ export const EventTypeValue = {
   AGENT_OUTPUT: "agent.output",
   AGENT_STATUS_CHANGED: "agent.status_changed",
   AGENT_COMPLETED: "agent.completed",
+  SESSION_TERMINATED: "session.terminated",
   TOOL_CALL_START: "tool.call_start",
   TOOL_CALL_END: "tool.call_end",
   TOOL_OUTPUT: "tool.output",
