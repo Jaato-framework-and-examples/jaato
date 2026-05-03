@@ -23,6 +23,49 @@ defense-in-depth and on validation failure returns a structured error
 to the model so it can self-correct on its next turn.  The validated
 payload is forwarded to ``hooks.on_agent_completed(payload=...)`` for
 reactor consumers to read as typed fields.
+
+**Schema authoring convention (server 0.6.27+).**  When you author a
+``completion_payload_schema``, declare two optional string-array
+escape hatches alongside your data fields::
+
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [...],
+      "properties": {
+        ...your data fields...,
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": (
+            "Advisory non-fatal notes the agent surfaced (skip "
+            "decisions, defaulted values, ambiguities)."
+          )
+        },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": (
+            "Hard failures the agent recovered from "
+            "(degraded-mode signals)."
+          )
+        }
+      }
+    }
+
+Without these arrays + ``additionalProperties: false``, an agent
+whose persona instructs surfacing skip decisions / fallback choices /
+ambiguities has nowhere to put that prose.  The structured-output
+constraint forces a schema-violation retry, and the retry path is
+non-deterministic — different runs produce different stripped
+payloads.  Strip ``warnings`` and ``errors`` from the canonical
+hash in determinism tests; they are advisory by design and not
+load-bearing.
+
+For a worked example see ``feedback_completion_schema_warnings_field``
+in the project memory and the
+``docs/design/completion-payload-schema-conventions.md`` design
+document.
 """
 
 import logging
