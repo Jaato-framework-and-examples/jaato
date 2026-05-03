@@ -1,0 +1,10 @@
+{
+  "type": "gate.released",
+  "timestamp": "<TIMESTAMP>",
+  "gate_name": "",
+  "tenant_id": "",
+  "owner": "",
+  "outcome": null,
+  "released_at": "",
+  "was_announced": true
+}

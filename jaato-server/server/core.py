@@ -2148,6 +2148,23 @@ class JaatoServer:
                     payload=payload,
                 ))
 
+            def on_session_quiescent(self, agent_id, reason="natural"):
+                """Emit SessionTerminatedEvent after natural completion.
+
+                Called from JaatoSession after the turn that contained
+                ``signal_completion`` has fully wrapped up.  By the time
+                this fires, ``_is_running`` has gone False, the cancel
+                token is cleared, and the session is genuinely safe for
+                a client to ``end_session`` / ``delete_session`` /
+                ``disconnect`` without racing.
+                """
+                from jaato_sdk.events import SessionTerminatedEvent
+                server.emit(SessionTerminatedEvent(
+                    session_id=server.session_id or "",
+                    agent_id=agent_id,
+                    reason=reason,
+                ))
+
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,
                                         output_tokens, total_tokens, duration_seconds,
                                         function_calls, cache_read_tokens=None,

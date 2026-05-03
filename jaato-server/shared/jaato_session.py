@@ -4639,6 +4639,34 @@ NOTES
             self._cancel_token = None
             self._set_activity_phase(ActivityPhase.IDLE)
 
+            # Session quiescence hook (server 0.6.27+).  When the agent
+            # called ``signal_completion`` during this turn AND the
+            # turn has now fully wrapped up, the session is quiescent
+            # and safe to terminate.  Notify hooks so the JaatoServer
+            # adapter can emit ``SessionTerminatedEvent`` to attached
+            # clients — replaces the legacy "subscribe AGENT_COMPLETED
+            # + wait 10s for TURN_COMPLETED" heuristic.
+            if (
+                getattr(self, "_signal_completion_called", False)
+                and not getattr(self, "_session_quiescent_emitted", False)
+            ):
+                self._session_quiescent_emitted = True
+                hooks = getattr(self, "_ui_hooks", None) or getattr(
+                    self, "_callbacks", None
+                )
+                if hooks is not None and hasattr(hooks, "on_session_quiescent"):
+                    try:
+                        hooks.on_session_quiescent(
+                            agent_id=self._agent_id,
+                            reason="natural",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "on_session_quiescent hook raised: %s — "
+                            "event emission skipped, session will still "
+                            "wind down correctly", exc,
+                        )
+
             # Notify parent that this subagent is now idle
             # IDLE should be sent after COMPLETED (subagent ready for more work/cleanup),
             # but NOT after CANCELLED or ERROR (abnormal termination states).

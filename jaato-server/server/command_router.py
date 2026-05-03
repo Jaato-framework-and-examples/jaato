@@ -452,15 +452,55 @@ class CommandRouter:
             self._hint_available_auth_providers(client_id)
 
     def _handle_session_end(self, client_id: str, session_id: str) -> None:
-        """Handle ``session.end`` command."""
+        """Handle ``session.end`` command.
+
+        Cancellation-aware semantics (server 0.6.27+):
+
+        - If the session is NOT currently processing (the agent already
+          completed and the turn wrap-up has settled, OR the session is
+          idle), this is a clean termination — no in-flight work to
+          cancel, no spurious ``user_cancelled`` log marker.
+        - If the session IS processing, stop() cancels via the cancel
+          token (existing behavior).  This path is for explicit
+          mid-turn cancellation.
+
+        After either path, emits ``SessionTerminatedEvent`` (the new
+        first-class event) AND the legacy
+        ``SystemMessageEvent("[SESSION_TERMINATED]")`` for backward
+        compatibility with clients that haven't migrated to the typed
+        event yet.
+
+        ``reason`` field distinguishes:
+        - ``"client_request"`` — session was idle, end_session called
+          cleanly.
+        - ``"stopped"`` — session was processing, end_session cancelled.
+        """
         session = self._session_manager.get_client_session(client_id)
+        was_stopped = False
+        agent_id = None
         if session and session.server:
-            session.server.stop()
-        # Signal termination to all clients attached to this session
-        from jaato_sdk.events import SystemMessageEvent
+            agent_id = getattr(session.server, "_main_agent_id", None) or "main"
+            # stop() returns True only when it actually cancelled
+            # in-flight work.  An idle session returns False — the
+            # close is graceful and produces no user_cancelled marker.
+            was_stopped = bool(session.server.stop())
+
+        from jaato_sdk.events import SystemMessageEvent, SessionTerminatedEvent
+        # Typed event — the canonical signal for clients.
         self._session_manager._emit_to_session(
             session_id,
-            SystemMessageEvent(message="[SESSION_TERMINATED]", style="system")
+            SessionTerminatedEvent(
+                session_id=session_id,
+                agent_id=agent_id,
+                reason="stopped" if was_stopped else "client_request",
+            ),
+        )
+        # Legacy string-based marker — kept for backward compatibility.
+        # Clients reading the typed event can ignore this.  Will be
+        # deprecated in a future release.
+        self._session_manager._emit_to_session(
+            session_id,
+            SystemMessageEvent(message="[SESSION_TERMINATED]", style="system"),
         )
 
     def _handle_session_delete(self, client_id: str, args: list) -> None:

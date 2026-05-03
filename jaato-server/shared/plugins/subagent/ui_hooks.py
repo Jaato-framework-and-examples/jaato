@@ -117,6 +117,34 @@ class AgentUIHooks(Protocol):
         """
         ...
 
+    def on_session_quiescent(
+        self,
+        agent_id: str,
+        reason: str = "natural",
+    ) -> None:
+        """Called when the session has fully wound down after natural
+        completion — i.e., AFTER ``on_agent_completed`` AND the
+        framework's post-completion wrap-up has drained
+        (``_is_running`` returned False, plugin-on-end hooks ran).
+
+        Implementations typically emit ``SessionTerminatedEvent`` to
+        attached clients so they can react without needing the legacy
+        ``subscribe AGENT_COMPLETED + wait 10s for TURN_COMPLETED``
+        heuristic.
+
+        Args:
+            agent_id: Which agent's completion triggered the
+                quiescence.
+            reason: Why the session quiesced.  Currently always
+                ``"natural"`` for this hook (client-requested
+                terminations go through ``session.end`` which emits
+                its own typed event from the command router).
+                Reserved for future paths like ``"timeout"`` or
+                ``"error"`` if those become source-of-truth for
+                quiescence too.
+        """
+        ...
+
     def on_agent_turn_completed(
         self,
         agent_id: str,

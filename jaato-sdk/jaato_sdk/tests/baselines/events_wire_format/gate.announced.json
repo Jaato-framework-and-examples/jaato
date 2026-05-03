@@ -1,0 +1,9 @@
+{
+  "type": "gate.announced",
+  "timestamp": "<TIMESTAMP>",
+  "gate_name": "",
+  "tenant_id": "",
+  "owner": "",
+  "intent": {},
+  "announced_at": ""
+}

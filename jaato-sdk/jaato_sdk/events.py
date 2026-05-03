@@ -72,6 +72,12 @@ class EventType(str, Enum):
     AGENT_STATUS_CHANGED = "agent.status_changed"
     AGENT_COMPLETED = "agent.completed"
 
+    # Session lifecycle (Server -> Client)
+    # Fires when the session has fully wound down — emitted spontaneously
+    # after natural completion drains, OR in response to session.end.
+    # Replaces the [SESSION_TERMINATED] string-based marker.
+    SESSION_TERMINATED = "session.terminated"
+
     # Tool execution (Server -> Client)
     TOOL_CALL_START = "tool.call_start"
     TOOL_CALL_END = "tool.call_end"
@@ -349,6 +355,43 @@ class AgentCompletedEvent(Event):
     turns_used: Optional[int] = None
     error: str = ""  # Cancellation reason or error message
     payload: Optional[Dict[str, Any]] = None  # Validated typed payload from signal_completion
+
+
+class SessionTerminatedEvent(Event):
+    """Session has fully wound down — safe to disconnect or
+    ``delete_session``.
+
+    Fires in two scenarios:
+
+    1. **Natural completion**: emitted spontaneously after the
+       agent's terminal completion (``AgentCompletedEvent``) AND
+       the framework's post-completion wrap-up has drained
+       (``_is_running`` returned False, plugin-on-end hooks ran,
+       journal flushed).  Test harnesses can subscribe to this
+       instead of the legacy "subscribe AGENT_COMPLETED + wait
+       10s for TURN_COMPLETED" heuristic.
+
+    2. **Client-requested**: emitted in response to ``session.end``
+       after the daemon has stopped any in-flight activity and run
+       cleanup.  Replaces the legacy
+       ``SystemMessageEvent("[SESSION_TERMINATED]")`` string-based
+       marker.
+
+    The ``reason`` field distinguishes the two paths so consumers
+    can handle them differently if needed.
+
+    Canonical pattern (test harness):
+
+        client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
+        sid = await client.create_session(...)
+        await client.send_message(...)
+        await on_done.wait()
+        # Session has fully wound down.  Optionally delete_session(sid).
+    """
+    type: EventType = Field(default=EventType.SESSION_TERMINATED)
+    session_id: str = ""
+    agent_id: Optional[str] = None
+    reason: str = "natural"  # "natural" | "client_request" | "stopped" | "error"
 
 
 class ToolCallStartEvent(Event):
@@ -2139,6 +2182,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_OUTPUT.value: AgentOutputEvent,
     EventType.AGENT_STATUS_CHANGED.value: AgentStatusChangedEvent,
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
+    EventType.SESSION_TERMINATED.value: SessionTerminatedEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
     EventType.TOOL_OUTPUT.value: ToolOutputEvent,
