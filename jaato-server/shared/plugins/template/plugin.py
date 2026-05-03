@@ -191,6 +191,15 @@ class TemplatePlugin:
         self._initialized = False
         self._agent_name: Optional[str] = None
         self._base_path: Optional[Path] = None
+        # Optional override for the read-only framework-config root,
+        # set by ``PluginRegistry.set_config_root``.  When non-None,
+        # ``_templates_dir`` is resolved as ``<config_root>/templates``
+        # rather than ``<workspace>/.jaato/templates`` — supporting
+        # the sandbox + config_root pattern where the workspace is the
+        # ephemeral runtime sandbox but the framework config (incl.
+        # the template index) lives at the repo root.  Mirrors the
+        # references plugin's ``_config_root`` field.
+        self._config_root: Optional[str] = None
         self._templates_dir: Optional[Path] = None
         # Track extracted templates in this session: hash -> path
         self._extracted_templates: Dict[str, Path] = {}
@@ -236,14 +245,34 @@ class TemplatePlugin:
         if "base_path" in config:
             self._base_path = Path(config["base_path"])
 
-        # Templates directory under .jaato
-        if self._base_path is not None:
-            self._templates_dir = self._base_path / ".jaato" / "templates"
+        # Templates directory: prefer config_root when set, else fall
+        # back to <workspace>/.jaato/templates.
+        self._templates_dir = self._compute_templates_dir()
 
         self._initialized = True
         self._load_persisted_index()
         self._indexer.build_index(list(self._template_index.values()))
-        self._trace(f"initialized: base_path={self._base_path}, templates_dir={self._templates_dir}")
+        self._trace(f"initialized: base_path={self._base_path}, config_root={self._config_root}, templates_dir={self._templates_dir}")
+
+    def _compute_templates_dir(self) -> Optional[Path]:
+        """Resolve where the template index + standalone templates live.
+
+        Priority chain (mirrors the references plugin's resolution):
+
+        1. ``self._config_root`` if set (via ``set_config_root``) — the
+           sandbox + config_root pattern where the workspace is the
+           ephemeral sandbox but the framework's `.jaato/templates/`
+           lives at the repo root.  Resolves to
+           ``<config_root>/templates``.
+        2. ``self._base_path`` (workspace) — single-dir workspaces.
+           Resolves to ``<workspace>/.jaato/templates`` (legacy default).
+        3. None when neither is set — returned so callers can guard.
+        """
+        if self._config_root is not None:
+            return Path(self._config_root) / "templates"
+        if self._base_path is not None:
+            return self._base_path / ".jaato" / "templates"
+        return None
 
     def set_plugin_registry(self, registry) -> None:
         """Receive the plugin registry for cross-plugin communication.
@@ -266,12 +295,48 @@ class TemplatePlugin:
         so template resolution uses the workspace, not the server CWD.
         Also loads the persisted template index from disk so templates are
         available immediately — without depending on the references plugin.
+
+        When ``set_config_root`` has already been called with a non-None
+        value, the templates_dir resolution uses config_root instead of
+        the workspace path (see ``_compute_templates_dir``).
         """
         self._base_path = Path(path)
-        self._templates_dir = self._base_path / ".jaato" / "templates"
+        self._templates_dir = self._compute_templates_dir()
         self._load_persisted_index()
         self._indexer.build_index(list(self._template_index.values()))
-        self._trace(f"set_workspace_path: base_path={self._base_path}, templates_dir={self._templates_dir}")
+        self._trace(f"set_workspace_path: base_path={self._base_path}, config_root={self._config_root}, templates_dir={self._templates_dir}")
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Adopt the registry-broadcast config_root override.
+
+        Called by :meth:`PluginRegistry.set_config_root` whenever the
+        session's ``config_root`` changes.  Re-resolves ``_templates_dir``
+        to use the new override (or fall back to the workspace tier
+        when ``path`` is ``None``) and reloads the persisted template
+        index from the new location.
+
+        This enables the sandbox + config_root pattern (handoff_test +
+        kb-enablement-2.0): the workspace is the ephemeral runtime
+        sandbox, but the framework's ``.jaato/templates/index.json``
+        lives at the repo root.  Without this method, the template
+        plugin would be pinned to the sandbox and miss the committed
+        template catalog.
+
+        Mirrors the references plugin's ``set_config_root`` (lines
+        241-253 of ``shared/plugins/references/plugin.py``).
+
+        Args:
+            path: The config_root to adopt, or ``None`` to fall back
+                to the workspace tier.
+        """
+        self._config_root = path
+        self._templates_dir = self._compute_templates_dir()
+        # Reload the index from the (potentially) new location so
+        # listAvailableTemplates / renderTemplateToFile pick up the
+        # right catalog without requiring a session restart.
+        self._load_persisted_index()
+        self._indexer.build_index(list(self._template_index.values()))
+        self._trace(f"set_config_root: {path}, templates_dir={self._templates_dir}")
 
     def _load_persisted_index(self) -> None:
         """Load the template index from .jaato/templates/index.json if it exists.

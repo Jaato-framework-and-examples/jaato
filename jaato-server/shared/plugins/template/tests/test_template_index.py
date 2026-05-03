@@ -581,6 +581,105 @@ class TestPluginLifecycle:
         assert plugin._plugin_registry is registry
 
 
+class TestConfigRootResolution:
+    """Tests for the layered templates_dir resolution introduced in 0.6.26.
+
+    The template plugin now mirrors the references plugin's
+    ``set_config_root`` pattern: when ``config_root`` is set,
+    ``_templates_dir`` resolves to ``<config_root>/templates`` instead
+    of ``<workspace>/.jaato/templates``.  Falls back to the workspace
+    tier when ``config_root`` is None.
+
+    See plugin docstring for ``_compute_templates_dir``.
+    """
+
+    def test_workspace_only_uses_workspace_jaato_templates(self, tmp_path):
+        """No config_root → resolves to <workspace>/.jaato/templates (legacy)."""
+        ws = tmp_path / "sandbox"
+        ws.mkdir()
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+        assert p._templates_dir == ws / ".jaato" / "templates"
+
+    def test_set_config_root_flips_resolution(self, tmp_path):
+        """set_config_root after init re-resolves templates_dir."""
+        ws = tmp_path / "sandbox"
+        cr = tmp_path / "repo" / ".jaato"
+        ws.mkdir()
+        cr.mkdir(parents=True)
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+        assert p._templates_dir == ws / ".jaato" / "templates"
+        p.set_config_root(str(cr))
+        assert p._templates_dir == cr / "templates"
+
+    def test_set_config_root_none_falls_back_to_workspace(self, tmp_path):
+        """Setting config_root then resetting to None falls back to workspace."""
+        ws = tmp_path / "sandbox"
+        cr = tmp_path / "repo" / ".jaato"
+        ws.mkdir()
+        cr.mkdir(parents=True)
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+        p.set_config_root(str(cr))
+        assert p._templates_dir == cr / "templates"
+        p.set_config_root(None)
+        assert p._templates_dir == ws / ".jaato" / "templates"
+
+    def test_config_root_wins_over_later_set_workspace_path(self, tmp_path):
+        """Once config_root is set, switching workspace doesn't dislodge it."""
+        ws1 = tmp_path / "sandbox1"
+        ws2 = tmp_path / "sandbox2"
+        cr = tmp_path / "repo" / ".jaato"
+        ws1.mkdir()
+        ws2.mkdir()
+        cr.mkdir(parents=True)
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws1)})
+        p.set_config_root(str(cr))
+        assert p._templates_dir == cr / "templates"
+        # Switch workspace — config_root must still win.
+        p.set_workspace_path(str(ws2))
+        assert p._templates_dir == cr / "templates", (
+            f"config_root should still win after set_workspace_path; "
+            f"got {p._templates_dir}"
+        )
+
+    def test_compute_templates_dir_returns_none_when_neither_set(self):
+        """Pure-helper test: no workspace, no config_root → None."""
+        p = TemplatePlugin()
+        assert p._compute_templates_dir() is None
+
+    def test_set_config_root_reloads_persisted_index(self, tmp_path):
+        """set_config_root reloads the index from the new location.
+
+        Writes an index at config_root/templates/index.json BEFORE
+        calling set_config_root; verifies the plugin picks it up
+        without a session restart.
+        """
+        ws = tmp_path / "sandbox"
+        cr = tmp_path / "repo" / ".jaato"
+        ws.mkdir()
+        cr.mkdir(parents=True)
+        # Seed an index at the config_root location.
+        templates_at_cr = cr / "templates"
+        templates_at_cr.mkdir()
+        index_path = templates_at_cr / "index.json"
+        # Use the actual schema-shaped index the plugin's loader expects.
+        # Runtime-persist schema: {"templates": {name: entry_dict, ...}}.
+        # Empty dict is a valid (but contentless) index — exercises the
+        # loader without requiring a real entry shape.
+        index_path.write_text('{"templates": {}}')
+
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+        # Before set_config_root: would look at ws/.jaato/templates (empty).
+        p.set_config_root(str(cr))
+        # After set_config_root: _templates_dir points at cr/templates,
+        # and _load_persisted_index ran (no exception).
+        assert p._templates_dir == templates_at_cr
+
+
 # ==================== Mustache Dotted-Path Preprocessing ====================
 
 class TestMustacheDottedPaths:
