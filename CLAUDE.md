@@ -592,39 +592,54 @@ caches per-model `context_length` from that catalog. The OpenAI SDK's
 `default_headers` carry the optional `HTTP-Referer` and `X-OpenRouter-Title`
 attribution headers automatically.
 
-**Profile knobs** (under `plugin_configs.openrouter`):
+**Profile knobs** (under `plugin_configs.openrouter`) — namespaced into
+four layers since server 0.6.23:
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `api_key` | str | API key (overrides env / stored credentials) |
-| `base_url` | str | Endpoint override (default `https://openrouter.ai/api/v1`) |
-| `context_length` | int | Override the catalog-reported context window |
-| `http_referer` | str | `HTTP-Referer` header for app rankings |
-| `app_title` | str | `X-OpenRouter-Title` header for app rankings |
-| `provider` | dict | OpenRouter [provider routing](https://openrouter.ai/docs/features/provider-routing) — pin / blacklist / sort upstreams. Forwarded verbatim on every request via the OpenAI SDK's `extra_body`. |
-| `enable_thinking` | bool | Turn on extended-reasoning request emission and response extraction. Defaults False. Same key Anthropic / Antigravity already accept. |
-| `thinking_budget` | int | Max reasoning tokens. Mapped to OpenRouter's `reasoning.max_tokens`. Same key Anthropic / Antigravity accept. |
-| `thinking_level` | str | `"low"` / `"medium"` / `"high"` — high-level effort. Mapped to OpenRouter's `reasoning.effort`. Same key Antigravity accepts (matches Gemini 3 thinking levels). When both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams — OpenAI o-series doesn't accept arbitrary token caps). |
+```yaml
+plugin_configs:
+  openrouter:
+    # Top-level — auth / identity
+    api_key: "sk-or-..."           # overrides env / stored credentials
+    http_referer: "https://..."    # HTTP-Referer header for app rankings
+    app_title: "MyApp"             # X-OpenRouter-Title header
 
-The `provider` dict is the unique-value knob — it constrains which upstream
-host serves a request. Composes with `model: "openrouter/auto"`: auto picks
-the model, `provider` constrains which upstreams that model can run on.
-Common keys: `order`, `allow_fallbacks`, `require_parameters`,
-`data_collection`, `ignore`, `quantizations`, `sort` (`price` / `throughput` /
-`latency`). Example profile:
+    # api_params — OpenAI Chat Completions request body fields
+    api_params:
+      temperature: 0.55            # sampling
+      top_p: 1.0
+      top_k: 40
+      max_tokens: 8192             # cap on response size
+      enable_thinking: true        # extended-reasoning request + extraction
+      thinking_budget: 16384       # → reasoning.max_tokens
+      thinking_level: "high"       # → reasoning.effort (low/medium/high)
 
-```json
-"plugin_configs": {
-  "openrouter": {
-    "provider": {
-      "sort": "price",
-      "data_collection": "deny",
-      "ignore": ["Groq"],
-      "require_parameters": true
-    }
-  }
-}
+    # routing — OpenRouter `provider` extension; forwarded via extra_body
+    routing:
+      sort: "price"                # price / throughput / latency
+      data_collection: "deny"
+      ignore: ["Groq"]
+      require_parameters: true
+      allow_fallbacks: true
+      # Any [provider routing](https://openrouter.ai/docs/features/provider-routing)
+      # key works (order, quantizations, ...) — passed through verbatim.
+
+    # framework_overrides — rare escape hatches
+    framework_overrides:
+      context_length: 32768        # override catalog-reported window
+      base_url: "https://..."      # endpoint override
 ```
+
+| Layer | Keys | Purpose |
+|-------|------|---------|
+| top-level | `api_key`, `http_referer`, `app_title` | auth / identity |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget`, `thinking_level` | OpenAI Chat Completions body fields. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). |
+| `routing` | OpenRouter [provider routing](https://openrouter.ai/docs/features/provider-routing) keys | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts). |
+| `framework_overrides` | `context_length`, `base_url` | rare escape hatches; normally context length is discovered from the OpenRouter catalog at connect time. |
+
+**Backward compatibility:** the same keys are also accepted at the
+legacy flat position (`temperature:` / `provider:` / `context_length:`
+directly under `openrouter:`) with a one-time deprecation warning per
+key.  Flat-key support will be removed in a future server release.
 
 ### Claude CLI Provider
 | Variable | Purpose |

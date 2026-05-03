@@ -426,12 +426,25 @@ class TestProviderRouting:
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_initialize_rejects_non_dict_provider(self, mock_client_class):
+        # Legacy flat ``provider:`` key still accepted (with a deprecation
+        # warning) for one release; type validation message references
+        # the new namespacing key (``routing``).
         mock_client_class.return_value = MagicMock()
         provider = OpenRouterProvider()
-        with pytest.raises(TypeError, match="provider.*must be a dict"):
+        with pytest.raises(TypeError, match="routing.*must be a dict"):
             provider.initialize(ProviderConfig(
                 api_key="sk-or-test",
                 extra={"provider": ["Anthropic", "OpenAI"]},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_initialize_rejects_non_dict_routing(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(TypeError, match="routing.*must be a dict"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"routing": ["Anthropic", "OpenAI"]},
             ))
 
     def test_build_extra_body_includes_provider(self):
@@ -671,6 +684,107 @@ class TestThinkingKnobs:
         provider.connect("deepseek/deepseek-r1", skip_model_test=True)
         result = provider.complete([Message.from_text(Role.USER, "hi")])
         assert result.response.thinking is None
+
+
+class TestConfigNamespacing:
+    """Tests for the four-layer config namespacing introduced in 0.6.23.
+
+    Layers (under ``plugin_configs.openrouter``):
+      - Top-level: api_key / http_referer / app_title
+      - api_params: temperature / top_p / top_k / enable_thinking / ...
+      - routing: OpenRouter ``provider`` extension dict
+      - framework_overrides: context_length / base_url
+
+    Backward compatibility: the same keys are also read from the legacy
+    flat position with a deprecation warning.
+    """
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_new_shape_no_deprecation_warning(self, mock_client_class, caplog):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with caplog.at_level("WARNING"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={
+                    "api_params": {"temperature": 0.55, "top_p": 1.0},
+                    "routing": {"sort": "throughput", "ignore": ["AtlasCloud"]},
+                    "framework_overrides": {"context_length": 32768},
+                },
+            ))
+        assert provider._temperature == 0.55
+        assert provider._top_p == 1.0
+        assert provider._provider_routing == {"sort": "throughput", "ignore": ["AtlasCloud"]}
+        assert provider._context_length == 32768
+        assert provider._context_length_override is True
+        legacy_warnings = [r for r in caplog.records if "legacy" in r.getMessage().lower()]
+        assert legacy_warnings == [], (
+            f"new shape should not emit deprecation warnings, got: "
+            f"{[r.getMessage() for r in legacy_warnings]}"
+        )
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_legacy_flat_shape_still_works_with_warnings(
+        self, mock_client_class, caplog,
+    ):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with caplog.at_level("WARNING"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={
+                    "temperature": 0.55,
+                    "top_p": 1.0,
+                    "provider": {"sort": "throughput"},
+                    "context_length": 32768,
+                },
+            ))
+        assert provider._temperature == 0.55
+        assert provider._top_p == 1.0
+        assert provider._provider_routing == {"sort": "throughput"}
+        assert provider._context_length == 32768
+        legacy_warnings = [r for r in caplog.records if "legacy" in r.getMessage().lower()]
+        assert len(legacy_warnings) >= 4, (
+            f"expected ≥4 deprecation warnings (temperature/top_p/provider/context_length), "
+            f"got {len(legacy_warnings)}"
+        )
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_new_layer_wins_over_legacy_flat_key(self, mock_client_class):
+        # When both the nested layer key and the legacy flat key are
+        # present, the nested form wins (legacy is the deprecation
+        # fallback only).
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={
+                "api_params": {"temperature": 0.7},
+                "temperature": 0.3,
+                "routing": {"sort": "price"},
+                "provider": {"sort": "throughput"},
+            },
+        ))
+        assert provider._temperature == 0.7
+        assert provider._provider_routing == {"sort": "price"}
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_thinking_knobs_in_api_params(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={
+                "api_params": {
+                    "enable_thinking": True,
+                    "thinking_budget": 16384,
+                    "thinking_level": "high",
+                },
+            },
+        ))
+        assert provider._enable_thinking is True
+        assert provider._thinking_budget == 16384
+        assert provider._thinking_level == "high"
 
 
 class TestVerifyAuth:

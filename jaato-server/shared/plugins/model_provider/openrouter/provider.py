@@ -44,8 +44,11 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from ._lazy import get_openai_client_class, get_openai_module
 
@@ -236,30 +239,87 @@ class OpenRouterProvider:
         Builds an OpenAI client pointed at OpenRouter and configures the
         attribution headers OpenRouter uses for app rankings.
 
+        ``config.extra`` is namespaced into four layers (server 0.6.23+):
+
+        - **Top-level** (auth / identity):
+            - ``api_key``, ``http_referer``, ``app_title``
+        - ``api_params`` (OpenAI Chat Completions request body fields):
+            - ``temperature``, ``top_p``, ``top_k``, ``max_tokens``
+            - ``enable_thinking``, ``thinking_budget``, ``thinking_level``
+        - ``routing`` (OpenRouter ``provider`` extension — a dict
+          forwarded verbatim via ``extra_body`` on every request):
+            - ``order``, ``allow_fallbacks``, ``require_parameters``,
+              ``data_collection``, ``ignore``, ``quantizations``,
+              ``sort``, ... (see
+              https://openrouter.ai/docs/features/provider-routing)
+        - ``framework_overrides`` (rare escape hatches):
+            - ``context_length``, ``base_url``
+
+        For backward compatibility, all of these are also accepted at
+        the legacy flat position (``config.extra['temperature']``, ...)
+        with a one-time deprecation warning.  The legacy ``provider:``
+        key is also accepted as an alias for ``routing:`` with the
+        same warning.  Flat-key support will be removed in a future
+        release.
+
         Args:
-            config: Configuration with authentication details.
-                - api_key: OpenRouter API key (sk-or-...)
-                - extra['base_url']: Override API endpoint
-                - extra['context_length']: Override context window size
-                - extra['http_referer']: Override HTTP-Referer header
-                - extra['app_title']: Override X-OpenRouter-Title header
-                - extra['provider']: OpenRouter provider-routing dict
-                  (forwarded as a top-level request body field on every
-                  call).  Keys are passed through verbatim — see
-                  https://openrouter.ai/docs/features/provider-routing
-                  for the full list (``order``, ``allow_fallbacks``,
-                  ``require_parameters``, ``data_collection``,
-                  ``ignore``, ``quantizations``, ``sort``, ...).
+            config: Configuration with authentication and provider knobs
+                (see namespacing layers above).
 
         Raises:
             APIKeyNotFoundError: No API key found.
-            TypeError: If ``extra['provider']`` is set but isn't a dict.
+            TypeError: If ``routing`` (or legacy ``provider``) is set
+                but isn't a dict.
+            ValueError: If ``thinking_level`` is not low/medium/high.
         """
         if config is None:
             config = ProviderConfig()
 
+        # The profile config is namespaced into four layers (see
+        # docs/design/provider-config-namespacing or the backlog memory
+        # ``project_backlog_provider_config_namespacing``):
+        #
+        #   plugin_configs.openrouter:
+        #     <top-level>           # auth / identity (api_key, http_referer, app_title)
+        #     api_params:           # OpenAI Chat Completions request body params
+        #       temperature, top_p, top_k, max_tokens
+        #       enable_thinking, thinking_budget, thinking_level
+        #     routing:              # OpenRouter `provider` extension (sort/ignore/order/...)
+        #     framework_overrides:  # rare escape hatches (context_length, base_url)
+        #
+        # Backward compatibility: every nested key is also read from the
+        # legacy flat position with a one-time deprecation warning.  The
+        # flat fallback will be removed in a future server release.
+        api_params = config.extra.get("api_params") or {}
+        routing_dict = config.extra.get("routing")
+        framework_overrides = config.extra.get("framework_overrides") or {}
+
+        def _knob(
+            key: str, *, layer: Dict[str, Any], default: Any = None,
+        ) -> Any:
+            """Read a config knob from its nested layer first, falling
+            back to the legacy flat ``config.extra[key]`` position with
+            a deprecation warning when only the flat form is present."""
+            if key in layer:
+                return layer[key]
+            if key in config.extra:
+                logger.warning(
+                    "OpenRouter profile uses legacy flat config key %r — "
+                    "move under the appropriate nested layer "
+                    "(api_params / routing / framework_overrides) per the "
+                    "0.6.22+ namespacing.  Flat-key support will be "
+                    "removed in a future release.",
+                    key,
+                )
+                return config.extra[key]
+            return default
+
         self._api_key = config.api_key or resolve_api_key()
-        self._base_url = config.extra.get("base_url") or resolve_base_url()
+        # Top-level: framework auth / identity.  These live at the top
+        # of plugin_configs.openrouter regardless of namespacing tier.
+        self._base_url = (
+            _knob("base_url", layer=framework_overrides) or resolve_base_url()
+        )
         self._http_referer = (
             config.extra.get("http_referer") or resolve_http_referer()
         )
@@ -267,7 +327,13 @@ class OpenRouterProvider:
             config.extra.get("app_title") or resolve_app_title()
         )
 
-        context_length_extra = config.extra.get("context_length")
+        # framework_overrides: rare escape hatches.  Normally
+        # context_length is discovered from the OpenRouter catalog at
+        # connect() time; only set the override when the catalog is
+        # wrong / unavailable / for self-hosted gateways.
+        context_length_extra = _knob(
+            "context_length", layer=framework_overrides,
+        )
         if context_length_extra:
             self._context_length = int(context_length_extra)
             self._context_length_override = True
@@ -280,43 +346,59 @@ class OpenRouterProvider:
                 self._context_length != DEFAULT_CONTEXT_LENGTH
             )
 
-        provider_routing = config.extra.get("provider")
-        if provider_routing is not None:
-            if not isinstance(provider_routing, dict):
+        # routing: OpenRouter's ``provider`` extension field (sort,
+        # ignore, order, allow_fallbacks, ...).  Stored as a dict and
+        # passed through verbatim via ``extra_body`` on each request.
+        # Legacy flat key was ``provider:`` which read confusingly as
+        # "provider config" rather than "OpenRouter routing extension".
+        if routing_dict is None:
+            # Fallback: legacy flat ``provider:`` key.
+            routing_dict = config.extra.get("provider")
+            if routing_dict is not None:
+                logger.warning(
+                    "OpenRouter profile uses legacy flat key 'provider:' for "
+                    "routing config — rename to 'routing:' under "
+                    "plugin_configs.openrouter.  Flat-key support will be "
+                    "removed in a future release."
+                )
+        if routing_dict is not None:
+            if not isinstance(routing_dict, dict):
                 raise TypeError(
-                    "OpenRouter 'provider' routing config must be a dict, "
-                    f"got {type(provider_routing).__name__}"
+                    "OpenRouter 'routing' config must be a dict, "
+                    f"got {type(routing_dict).__name__}"
                 )
             # Deep copy so later mutations to the profile dict (incl.
             # nested ``ignore`` / ``order`` lists) don't leak into our
             # request body.
-            self._provider_routing = copy.deepcopy(provider_routing)
+            self._provider_routing = copy.deepcopy(routing_dict)
 
-        # Sampling-parameter knobs.  Some upstreams (notably AtlasCloud's
-        # Qwen serving) reject requests without explicit per-model
-        # temperature / top_p values that the model expects; per-profile
-        # configuration of these is the principled way to express
-        # model-specific tuning without hardcoding a "if model == qwen"
-        # branch in framework code.  ``None`` means "let the upstream
-        # apply its own defaults".
-        temp_extra = config.extra.get("temperature")
+        # api_params: OpenAI Chat Completions request body fields.
+        # ``None`` means "let the upstream apply its own default".
+        # Some upstreams reject requests without explicit per-model
+        # temperature / top_p values; per-profile configuration of
+        # these is the principled way to express model-specific tuning.
+        temp_extra = _knob("temperature", layer=api_params)
         if temp_extra is not None:
             self._temperature = float(temp_extra)
-        top_p_extra = config.extra.get("top_p")
+        top_p_extra = _knob("top_p", layer=api_params)
         if top_p_extra is not None:
             self._top_p = float(top_p_extra)
-        top_k_extra = config.extra.get("top_k")
+        top_k_extra = _knob("top_k", layer=api_params)
         if top_k_extra is not None:
             self._top_k = int(top_k_extra)
 
-        # Flat thinking-knob convention shared with Anthropic / Antigravity.
-        self._enable_thinking = bool(
-            config.extra.get("enable_thinking", self._enable_thinking)
+        # Thinking knobs — framework abstractions that translate to
+        # OpenRouter's ``reasoning`` extension on the wire.  Live under
+        # api_params because they're agent-tuning knobs (not gateway
+        # routing concerns).
+        enable_thinking_extra = _knob(
+            "enable_thinking", layer=api_params, default=self._enable_thinking,
         )
-        budget_extra = config.extra.get("thinking_budget")
+        self._enable_thinking = bool(enable_thinking_extra)
+        budget_extra = _knob("thinking_budget", layer=api_params)
         if budget_extra is not None:
             self._thinking_budget = int(budget_extra)
-        level_extra = config.extra.get("thinking_level")
+        level_extra = _knob("thinking_level", layer=api_params)
         if level_extra is not None:
             level_str = str(level_extra).lower()
             if level_str not in ("low", "medium", "high"):
