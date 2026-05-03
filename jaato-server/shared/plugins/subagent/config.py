@@ -653,6 +653,18 @@ class SubagentProfile:
     preloaded_plugins: set = field(default_factory=set)
     plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     system_instructions: Optional[str] = None
+    # When True, drop the framework's BASE instructions layer (the
+    # "Principle 1: Transparency Mandate" and other always-on framework
+    # instructions) from this profile's system prompt.  Plugin-contributed
+    # instructions and the agent's own ``system_instructions`` are still
+    # included.  Useful for simple goal-focused agents (body-wired echo
+    # specialists, narrow-scope narrators) that don't benefit from the
+    # framework's general-purpose guidance and would rather have those
+    # tokens back for their actual work — typical savings 3-5k tokens
+    # per turn, which can be the difference between fitting in a small
+    # model's context window and triggering aggressive GC.  Defaults to
+    # ``False`` (full framework instructions).
+    suppress_base_instructions: bool = False
     model: Optional[str] = None
     provider: Optional[str] = None
     max_turns: int = 10
@@ -841,6 +853,7 @@ def build_inline_profile(
         preloaded_plugins=preloaded,
         plugin_configs=data.get('plugin_configs', {}),
         system_instructions=data.get('system_instructions'),
+        suppress_base_instructions=data.get('suppress_base_instructions', False),
         model=data.get('model'),
         provider=data.get('provider'),
         max_turns=data.get('max_turns', 10),
@@ -1128,6 +1141,16 @@ def _merge_profiles(
         errors[child_name] = conflict_msg
         return None
 
+    # ``suppress_base_instructions`` follows OR semantics: True if any
+    # layer in the chain (parents or child) sets it True.  Rationale:
+    # a base saying "I'm minimal, framework instructions add no value"
+    # shouldn't be silently overridable by an inheritor; an inheritor
+    # that genuinely wants base instructions back should not inherit
+    # from a minimalist parent.
+    merged_suppress_base = any(
+        getattr(p, 'suppress_base_instructions', False) for p in parents
+    ) or getattr(child, 'suppress_base_instructions', False)
+
     return SubagentProfile(
         name=child.name,
         description=child.description,
@@ -1135,6 +1158,7 @@ def _merge_profiles(
         preloaded_plugins=merged_preloaded,
         plugin_configs=merged_configs,
         system_instructions=merged_instructions,
+        suppress_base_instructions=merged_suppress_base,
         model=merged_model,
         provider=merged_provider,
         max_turns=merged_max_turns,
@@ -1288,6 +1312,7 @@ def _scan_profiles_dir(
             preloaded_plugins=preloaded,
             plugin_configs=data.get('plugin_configs', {}),
             system_instructions=data.get('system_instructions'),
+            suppress_base_instructions=data.get('suppress_base_instructions', False),
             model=data.get('model'),
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
@@ -1501,6 +1526,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             preloaded_plugins=preloaded,
             plugin_configs=data.get('plugin_configs', {}),
             system_instructions=data.get('system_instructions'),
+            suppress_base_instructions=data.get('suppress_base_instructions', False),
             model=data.get('model'),
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
@@ -1761,6 +1787,7 @@ class SubagentConfig:
                 preloaded_plugins=preloaded,
                 plugin_configs=profile_data.get('plugin_configs', {}),
                 system_instructions=profile_data.get('system_instructions'),
+                suppress_base_instructions=profile_data.get('suppress_base_instructions', False),
                 model=profile_data.get('model'),
                 provider=profile_data.get('provider'),
                 max_turns=profile_data.get('max_turns', 10),

@@ -2555,6 +2555,7 @@ class SubagentPlugin:
                 agent_params=agent_params,
                 completion_payload_schema=profile.completion_payload_schema,
                 completion_artifacts=profile.completion_artifacts,
+                suppress_base_instructions=getattr(profile, 'suppress_base_instructions', False),
             )
             logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")
 

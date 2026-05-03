@@ -1169,6 +1169,13 @@ class SessionManager:
         # logical identity (e.g. ``"coordinator"``).  Without this, all
         # AgentCompletedEvents would carry ``agent_id="main"`` regardless
         # of which agent the session was launched with.
+        # Resolve effective suppress_base_instructions: explicit kwarg wins
+        # if True; otherwise profile-level field controls.  Either source
+        # asking for True is sufficient (OR semantics).
+        effective_suppress_base = suppress_base_instructions or bool(
+            profile and getattr(profile, "suppress_base_instructions", False)
+        )
+
         server = JaatoServer(
             env_file=session_env_file,
             provider=None,  # Let env_file determine provider
@@ -1180,7 +1187,7 @@ class SessionManager:
             instruction_token_cache=self._instruction_token_cache,
             profile=profile,
             system_instruction_override=system_instruction_override,
-            suppress_base_instructions=suppress_base_instructions,
+            suppress_base_instructions=effective_suppress_base,
             agent_name=agent_name,
         )
 
