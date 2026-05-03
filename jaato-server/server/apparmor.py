@@ -1165,13 +1165,31 @@ def _get_thread_attr_path() -> str:
 def apparmor_confine(profile_name: str):
     """Context manager that confines the current thread to an AppArmor profile.
 
-    Writes *profile_name* to ``/proc/self/task/<tid>/attr/current`` on
-    entry, which transitions the calling OS thread into that profile.
-    On exit, writes ``unconfined`` to restore the thread.
+    Defensively writes ``unconfined`` first to the thread's ``attr/current``
+    to recover from any prior session's stuck-confinement state, then
+    writes *profile_name* to enter the requested profile.  On exit, writes
+    ``unconfined`` to restore the thread.
 
-    If the write fails (AppArmor not available, profile not loaded,
-    insufficient privileges), logs a warning and proceeds without
-    confinement — never raises.
+    **Cross-session state poisoning (the bug this defensive reset closes).**
+    ``run_in_executor`` reuses worker threads across asyncio tasks.  If a
+    prior session's exit path failed to restore unconfined (kernel
+    transient, profile-rule gap, etc.), the worker stays in the prior
+    profile.  When a NEW session is dispatched to the same worker:
+    1. Entry writes ``changeprofile <new>`` — the prior profile only has
+       ``change_profile -> unconfined`` (not ``-> <new>``), so the kernel
+       denies the write.
+    2. The exception-catching code below sets ``confined=False`` and
+       proceeds — but the thread is still stuck in the prior profile.
+    3. The yielded work runs under the prior profile's rules, hitting
+       EACCES on paths the new session's workspace expects.
+    The defensive ``changeprofile unconfined`` on entry breaks the cycle:
+    the prior profile grants the unconfine transition, restoration is
+    deterministic, and the new confinement enters from a known-clean
+    state every time.
+
+    If the entry write fails after the defensive reset (AppArmor not
+    available, profile not loaded, insufficient privileges), logs a
+    warning and proceeds without confinement — never raises.
 
     Args:
         profile_name: The AppArmor profile to confine to
@@ -1179,6 +1197,24 @@ def apparmor_confine(profile_name: str):
     """
     attr_path = _get_thread_attr_path()
     confined = False
+
+    # Defensive reset.  Recovers from a prior session's failed
+    # exit-restoration (see docstring).  Safe whether the thread is
+    # currently unconfined (no-op write) or stuck in a prior session's
+    # profile (rule grants change_profile -> unconfined).  Any failure
+    # here is unactionable — a failed reset will surface as a failed
+    # entry below, which IS handled.  Logged at debug for forensics.
+    try:
+        with open(attr_path, "w") as f:
+            f.write("changeprofile unconfined")
+    except (OSError, PermissionError) as e:
+        logger.debug(
+            "AppArmor: defensive pre-confine reset to unconfined failed "
+            "(thread %d, target %s): %s — likely already unconfined or "
+            "kernel state will surface in entry below",
+            threading.get_native_id(), profile_name, e,
+        )
+
     try:
         with open(attr_path, "w") as f:
             f.write(f"changeprofile {profile_name}")
@@ -1193,13 +1229,19 @@ def apparmor_confine(profile_name: str):
             try:
                 with open(attr_path, "w") as f:
                     f.write("changeprofile unconfined")
-            except (OSError, PermissionError):
+            except (OSError, PermissionError) as e:
                 # Cannot restore — thread stays confined until it exits.
-                # This is safe: the profile allows the session's workspace,
-                # and the thread will be reused for the same session.
-                logger.warning(
-                    "AppArmor: could not restore unconfined for thread %d",
-                    threading.get_native_id(),
+                # The defensive reset on the next confine entry will
+                # recover the state, but flag it loudly so the cause
+                # (transient kernel issue, missing profile rule, etc.)
+                # gets investigated rather than silently absorbed.
+                logger.error(
+                    "AppArmor: could not restore unconfined for thread %d "
+                    "(profile %s): %s — thread is stuck in this profile "
+                    "until it exits OR the next apparmor_confine() call "
+                    "on this thread (which defensively resets first). "
+                    "Investigate AppArmor kernel state if this persists.",
+                    threading.get_native_id(), profile_name, e,
                 )
 
 

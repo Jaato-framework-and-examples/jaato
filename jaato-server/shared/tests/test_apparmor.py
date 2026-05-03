@@ -165,6 +165,102 @@ class TestMakeConfineContext:
             pass  # body runs unconfined
 
 
+class TestApparmorConfineDefensiveReset:
+    """Tests for the defensive ``changeprofile unconfined`` write that
+    apparmor_confine performs on entry, recovering from a prior
+    session's stuck-confinement state.  See apparmor.py docstring for
+    the full bug rationale.
+    """
+
+    def test_entry_writes_unconfined_before_target_profile(self):
+        """On entry, apparmor_confine MUST write 'unconfined' before
+        writing the target profile name — the defensive reset that
+        breaks cross-session state poisoning."""
+        from server.apparmor import apparmor_confine
+        from unittest.mock import mock_open, patch
+
+        m = mock_open()
+        with patch("builtins.open", m):
+            with apparmor_confine("jaato-ws-test"):
+                pass
+        # write() called twice on entry (defensive unconfined + target)
+        # plus once on exit (restore unconfined).  Order matters.
+        write_calls = m().write.call_args_list
+        assert len(write_calls) >= 3, (
+            f"expected ≥3 attr/current writes (defensive-reset, entry, exit), "
+            f"got {len(write_calls)}: {[c.args[0] for c in write_calls]}"
+        )
+        # First write is defensive reset to unconfined
+        assert write_calls[0].args[0] == "changeprofile unconfined", (
+            f"first write must be the defensive unconfined reset, "
+            f"got {write_calls[0].args[0]!r}"
+        )
+        # Second write is the target profile entry
+        assert write_calls[1].args[0] == "changeprofile jaato-ws-test", (
+            f"second write must be the target profile entry, "
+            f"got {write_calls[1].args[0]!r}"
+        )
+        # Third (final) write is the exit restoration
+        assert write_calls[-1].args[0] == "changeprofile unconfined"
+
+    def test_defensive_reset_failure_does_not_block_entry(self):
+        """If the defensive unconfined write fails (already-unconfined
+        edge case may PermissionError), the entry write must still be
+        attempted — failures here are non-fatal."""
+        from server.apparmor import apparmor_confine
+        from unittest.mock import patch
+
+        # First open() call (defensive reset) raises; subsequent calls succeed.
+        call_count = [0]
+
+        def fake_open(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise PermissionError("simulated kernel transient")
+            from unittest.mock import mock_open
+            return mock_open()()
+
+        with patch("builtins.open", side_effect=fake_open):
+            with apparmor_confine("jaato-ws-test"):
+                pass
+        # Three open() calls total: defensive (failed), entry, exit.
+        assert call_count[0] >= 2, (
+            f"entry write must be attempted even when defensive reset failed; "
+            f"got {call_count[0]} open() calls"
+        )
+
+    def test_exit_restoration_failure_logged_at_error(self, caplog):
+        """When exit-time restoration fails, the message MUST be logged
+        at ERROR level (not warning) so it surfaces — the next entry's
+        defensive reset will recover the thread, but the underlying
+        cause (kernel state, missing rule, etc.) deserves attention."""
+        from server.apparmor import apparmor_confine
+        from unittest.mock import patch
+
+        # Defensive reset + entry succeed; exit raises.
+        call_count = [0]
+
+        def fake_open(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 3:  # exit-time restoration write
+                raise PermissionError("simulated stuck thread")
+            from unittest.mock import mock_open
+            return mock_open()()
+
+        with caplog.at_level("ERROR", logger="server.apparmor"):
+            with patch("builtins.open", side_effect=fake_open):
+                with apparmor_confine("jaato-ws-test"):
+                    pass
+        error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert any(
+            "could not restore unconfined" in r.getMessage().lower()
+            for r in error_records
+        ), (
+            f"expected ERROR-level log naming the restoration failure; "
+            f"got: {[r.getMessage() for r in caplog.records]}"
+        )
+
+
 class TestProvisionProfile:
     def test_writes_and_loads_profile(self, manager, profile_dir):
         manager._available = True
