@@ -1790,9 +1790,12 @@ class TestRenderShapeValidation:
         assert "validation_errors" in result
         assert not output_file.exists()
 
-    def test_section_list_of_strings_rejected(self, plugin):
+    def test_section_list_of_strings_rejected_when_item_keys_nonempty(self, plugin):
         """Section value is a list but items are strings, not dicts
-        — ``{{innerKey}}`` lookups would all resolve empty."""
+        — ``{{innerKey}}`` lookups would all resolve empty.  Only
+        rejected when ``item_keys`` is non-empty (i.e. body has
+        inner-field references).  See the 0.6.32 corner-case
+        relaxation for the empty-item_keys case."""
         template = textwrap.dedent("""\
             {{#fields}}
             private {{type}} {{name}};
@@ -1813,6 +1816,73 @@ class TestRenderShapeValidation:
             "expected dict" in e for e in result["validation_errors"]
         ), result
         assert not output_file.exists()
+
+    def test_list_of_strings_with_dot_iteration_allowed(self, plugin):
+        """Mustache ``{{#x}}{{.}}{{/x}}`` over a list of strings is
+        the canonical iteration-over-scalars idiom — must be
+        accepted.  Surfaced by kb-enablement-2.0 chunk-1 v13:
+        ``entityImports = ["java.time.LocalDate", ...]`` with body
+        ``import {{.}};`` was being hard-failed by 0.6.31's overly
+        strict rule, forcing the agent into incorrect dict-wrapping
+        workarounds (``[{"_": "..."}]``, ``[{"value": "..."}]``,
+        ``[{}]``) that produced 5 distinct hashes across 5 runs.
+
+        Fixed in 0.6.32: when ``item_keys=[]`` (no inner-field refs),
+        list items can be any type.
+        """
+        template = textwrap.dedent("""\
+            package com.example;
+            {{#entityImports}}
+            import {{.}};
+            {{/entityImports}}
+
+            public class Entity {}
+        """)
+        output_file = plugin._base_path / "out" / "Entity.java"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {
+                "entityImports": [
+                    "java.time.LocalDate",
+                    "java.math.BigDecimal",
+                    "java.util.UUID",
+                ],
+            },
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, result
+        content = output_file.read_text()
+        assert "import java.time.LocalDate;" in content
+        assert "import java.math.BigDecimal;" in content
+        assert "import java.util.UUID;" in content
+
+    def test_list_of_strings_with_plain_body_allowed(self, plugin):
+        """Section body with no inner refs at all (plain text repeated
+        per item) accepts a list of scalars — Mustache renders the
+        plain text once per list element."""
+        template = "{{#items}}- entry\n{{/items}}"
+        output_file = plugin._base_path / "out" / "items.txt"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {"items": ["a", "b", "c"]},
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, result
+        # 3 entries rendered, one per list item.
+        assert output_file.read_text().count("- entry") == 3
+
+    def test_list_of_mixed_scalars_allowed_when_item_keys_empty(self, plugin):
+        """Empty item_keys + list of mixed scalar types (str, int, bool):
+        validator allows it; Mustache renders ``{{.}}`` as the value's
+        string form."""
+        template = "{{#values}}* {{.}}\n{{/values}}"
+        output_file = plugin._base_path / "out" / "mixed.txt"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {"values": ["str", 42, True]},
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, result
 
     def test_boolean_conditional_idiom_allowed(self, plugin):
         """``{{#flag}}...{{/flag}}`` with ``flag=True`` is the canonical

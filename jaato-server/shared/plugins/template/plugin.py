@@ -2221,8 +2221,21 @@ Template rendering writes files to the workspace."""
           ``float`` (the silent-garbage failure mode — Mustache renders
           body once with the scalar as context, inner-field lookups
           all resolve to empty).
-        - ``kind=section`` value is a list AND any list item is not
-          a dict (catches list-of-strings instead of list-of-dicts).
+        - ``kind=section`` body references inner fields (non-empty
+          ``item_keys``) AND the value is a list whose items are not
+          dicts — body needs ``{{innerKey}}`` lookups, items can't
+          satisfy them.
+
+        Notably allowed (valid Mustache idioms):
+
+        - ``kind=section`` with ``item_keys=[]`` and value is a
+          list-of-scalars.  The body uses either ``{{.}}`` (current-
+          context iteration over scalars) or has no inner refs at
+          all (plain text repeated per item).  Rejecting list-of-
+          strings here was the 0.6.31 corner-case regression that
+          forced agents into ``[{"_": s}, {"_": s}]`` workarounds
+          and caused MORE variance than the original validator
+          eliminated.
 
         What this validator does NOT enforce — and why.
 
@@ -2317,19 +2330,30 @@ Template rendering writes files to the workspace."""
                 # method docstring for rationale.
                 item_keys = var.get("item_keys") or []
                 if isinstance(actual, list):
-                    # Inspect up to first 5 items.  Sectioned inputs
-                    # in code-gen are typically uniform shape, so
-                    # checking the first few catches systemic shape
-                    # errors without expensive iteration.
-                    for i, item in enumerate(actual[:5]):
-                        if not isinstance(item, dict):
-                            errors.append(
-                                f"variable {name!r} kind=section "
-                                f"item[{i}] is {type(item).__name__}, "
-                                f"expected dict (each list item must "
-                                f"be a dict carrying the section's "
-                                f"per-item fields)"
-                            )
+                    # When item_keys is empty the body has no
+                    # inner-field references — either the body is
+                    # plain text (renders once per item) or it uses
+                    # the current-context reference ``{{.}}`` to
+                    # render each scalar item as-is.  Both idioms
+                    # accept list-of-scalars; rejecting them was the
+                    # 0.6.31 corner-case regression that forced agents
+                    # into incorrect dict-wrapping workarounds.
+                    if item_keys:
+                        # Inspect up to first 5 items.  Sectioned
+                        # inputs in code-gen are typically uniform
+                        # shape, so checking the first few catches
+                        # systemic shape errors without expensive
+                        # iteration.
+                        for i, item in enumerate(actual[:5]):
+                            if not isinstance(item, dict):
+                                errors.append(
+                                    f"variable {name!r} kind=section "
+                                    f"item[{i}] is {type(item).__name__}, "
+                                    f"expected dict (each list item "
+                                    f"must be a dict carrying the "
+                                    f"section's per-item fields: "
+                                    f"{item_keys})"
+                                )
                 elif isinstance(actual, (bool, dict)) or actual is None:
                     # bool / None — boolean-conditional idiom.
                     # dict — single-context render idiom.
