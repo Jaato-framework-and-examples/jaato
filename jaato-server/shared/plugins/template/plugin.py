@@ -37,10 +37,35 @@ import json
 import os
 import re
 import tempfile
+import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+# pybars3's ``Compiler`` class holds CLASS-LEVEL mutable state
+# (``_handlebars``, ``_builder``, ``_compiler`` defined at class scope
+# in pybars/_compiler.py) — all instances share the same parser grammar
+# and CodeBuilder.  Per the upstream docstring: "The compiler is not
+# threadsafe: you need one per thread because of the state in
+# CodeBuilder."  Even creating a fresh ``Compiler()`` per call doesn't
+# isolate, because the class attributes are still process-wide.
+#
+# Symptoms when this races: ``'list' object has no attribute 'grow'``
+# or ``list indices must be integers, not str`` mid-compile, because
+# CodeBuilder.stack gets clobbered by another thread's reset.  Errors
+# typically recover on retry (no contention next time), but each
+# error-then-retry cycle perturbs agent output (the model resamples
+# its tool args, diverging across runs).
+#
+# This module-level lock serialises the ``_render_mustache`` critical
+# section across all TemplatePlugin instances in the process.  Cost:
+# pybars3 renders are fast (~50ms each); even 22 serialised renders
+# take ~1.1s vs theoretical 8-worker parallel ~140ms — but the
+# retry-storm savings from no contention typically amortise the
+# difference.  Other tool calls in the same parallel batch (file
+# operations, prefetch, etc.) are unaffected.
+_PYBARS_RENDER_LOCK = threading.Lock()
 
 from jaato_sdk.plugins.base import (
     PermissionDisplayInfo,
@@ -226,6 +251,18 @@ class TemplatePlugin:
         # embedded-template extraction pass in enrich_tool_result() has
         # its own content-hash dedup via ``_extracted_templates``.
         self._surfaced_template_names: Set[str] = set()
+
+        # Thread-local storage for ``//``-stripped-line numbers from the
+        # most recent ``_parse_mustache_structure`` call on THIS thread.
+        # Read by ``_execute_list_template_variables`` to surface a
+        # warning naming the stripped lines.  Stored thread-locally
+        # (rather than as a plain instance attribute) so concurrent
+        # listTemplateVariables calls from a parallel-tool batch don't
+        # clobber each other's stripped-lines list.  ``threading.local``
+        # is sufficient here because the writer and reader run on the
+        # SAME worker thread; we don't want propagation to nested
+        # contexts (which would re-introduce the race).
+        self._tls = threading.local()
 
     @property
     def name(self) -> str:
@@ -1980,9 +2017,15 @@ Template rendering writes files to the workspace."""
             variables = self._inject_list_metadata(variables)
             protected = self._protect_spring_placeholders(template)
             preprocessed = self._preprocess_mustache_dotted_paths(protected)
-            compiler = Compiler()
-            compiled_template = compiler.compile(preprocessed)
-            rendered = compiled_template(variables)
+            # pybars3 has process-wide shared state on the ``Compiler``
+            # class — the compile + render must run under the
+            # module-level lock to avoid concurrent mutation of
+            # CodeBuilder.stack between threads.  See the lock's
+            # docstring at module top for full rationale.
+            with _PYBARS_RENDER_LOCK:
+                compiler = Compiler()
+                compiled_template = compiler.compile(preprocessed)
+                rendered = compiled_template(variables)
             rendered = self._restore_spring_placeholders(rendered)
             return rendered, None
         except Exception as e:
@@ -2756,11 +2799,11 @@ Template rendering writes files to the workspace."""
         # Strip ``//`` host-language comment lines first.  References
         # inside such lines are documentation, not live Mustache
         # references — see ``_strip_host_comment_lines`` docstring.
-        # Stash stripped line numbers so the tool can surface a
-        # ``warnings`` field naming the lines that were skipped.
-        content, self._last_stripped_comment_lines = (
-            self._strip_host_comment_lines(content)
-        )
+        # Stash stripped line numbers in thread-local storage so the
+        # tool can surface a warning naming them — see ``self._tls``
+        # docstring at __init__ for the race rationale.
+        content, stripped = self._strip_host_comment_lines(content)
+        self._tls.last_stripped_comment_lines = stripped
 
         # Mustache triple-brace ``{{{x}}}`` is the unescaped-output
         # form.  Structurally it's identical to ``{{x}}`` — same
@@ -3014,7 +3057,10 @@ Template rendering writes files to the workspace."""
             # Per the standard completion-payload-schema convention
             # (see docs/design/completion-payload-schema-conventions.md),
             # warnings is the advisory escape hatch.
-            stripped = getattr(self, "_last_stripped_comment_lines", []) or []
+            # Read from thread-local set by ``_parse_mustache_structure``
+            # earlier in this same thread.  Default to ``[]`` when the
+            # parser hasn't run on this thread or stripped nothing.
+            stripped = getattr(self._tls, "last_stripped_comment_lines", []) or []
             if stripped:
                 result["warnings"] = [
                     (

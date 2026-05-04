@@ -2004,3 +2004,148 @@ class TestRenderShapeValidation:
         )
         assert result is not None
         assert result.get("validation_layer") == "shape_check"
+
+
+# ==================== Thread Safety (server 0.6.33+) ====================
+
+class TestRenderThreadSafety:
+    """``_render_mustache`` serialises pybars3 calls under a module-level
+    lock because pybars3's ``Compiler`` class has CLASS-LEVEL mutable
+    state — ``_handlebars``, ``_builder``, ``_compiler`` are class
+    attributes shared by every Compiler() instance process-wide.
+
+    Surfaced by kb-enablement-2.0 chunk-1 v15-retry: parallel-tool
+    batches of 22 renderTemplateToFile calls produced sporadic
+    ``'list' object has no attribute 'grow'`` and
+    ``list indices must be integers, not str`` errors mid-compile.
+    Each error triggered a model retry; retry sampling diverged across
+    runs, amplifying agent value-mapping drift on top of the visible
+    flakiness.
+
+    These tests verify the lock prevents concurrent compile from
+    crashing.  Without the lock these tests fail intermittently on
+    multi-core machines [the symptom is contention-rate-dependent].
+    """
+
+    def test_concurrent_renders_no_pybars_race(self, plugin):
+        """22 concurrent renderTemplateToFile calls must all succeed.
+
+        Mirrors the kb-enablement-2.0 chunk-1 codegen pattern: many
+        threads, each rendering a Mustache template with sections.
+        Pre-lock, ~5-15% failure rate under contention.  Post-lock,
+        zero failures.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        template = textwrap.dedent("""\
+            package {{basePackage}};
+
+            public class {{Entity}} {
+            {{#fields}}
+                private {{type}} {{name}};
+            {{/fields}}
+
+                public {{Entity}}({{#fields}}{{type}} {{name}}{{^last}}, {{/last}}{{/fields}}) {
+            {{#fields}}
+                    this.{{name}} = {{name}};
+            {{/fields}}
+                }
+            }
+        """)
+
+        def render_one(idx):
+            output = plugin._base_path / "out" / f"E{idx}.java"
+            return plugin._execute_render_template_to_file({
+                "template": template,
+                "variables": {
+                    "basePackage": "com.example",
+                    "Entity": f"E{idx}",
+                    "fields": [
+                        {"type": "String", "name": "id"},
+                        {"type": "Integer", "name": "n"},
+                        {"type": "Boolean", "name": "active"},
+                    ],
+                },
+                "output_path": str(output),
+            })
+
+        results = []
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = [ex.submit(render_one, i) for i in range(22)]
+            for f in as_completed(futures):
+                results.append(f.result())
+
+        # Every render must succeed — no pybars3 exceptions, no
+        # render_error states.
+        failures = [r for r in results if not r.get("success")]
+        assert not failures, (
+            f"Got {len(failures)}/22 render failures under concurrent load — "
+            f"pybars3 race not properly serialised.  First failure: {failures[0]}"
+        )
+
+    def test_concurrent_list_template_variables_warnings_isolated(
+        self, plugin, tmp_workspace
+    ):
+        """Concurrent ``listTemplateVariables`` calls must each see
+        their own stripped-comment-lines warning, not another thread's.
+
+        Pre-fix: ``self._last_stripped_comment_lines`` was instance-
+        scoped — thread A's writes clobbered thread B's reads, surfacing
+        wrong warnings to one or both callers.  Post-fix: thread-local
+        storage isolates per-thread.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Two distinct templates with distinct ``//`` comment patterns.
+        # Each thread should see its own comment lines surfaced.
+        tpl_dir = tmp_workspace / ".jaato" / "templates"
+        (tpl_dir / "A.tpl").write_text(textwrap.dedent("""\
+            // first comment with {{a_ref}}
+            {{#fields}}
+            value: {{name}}
+            {{/fields}}
+        """))
+        (tpl_dir / "B.tpl").write_text(textwrap.dedent("""\
+            // 1st B-line {{b1}}
+            // 2nd B-line {{b2}}
+            // 3rd B-line {{b3}}
+            {{#items}}
+            x: {{x}}
+            {{/items}}
+        """))
+        # Register both in the index.
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        def list_one(name):
+            return name, plugin._execute_list_template_variables({
+                "template_name": name,
+            })
+
+        results = []
+        # 16 calls — 8 of each — to ensure interleaving across the
+        # 8-worker pool.
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = []
+            for _ in range(8):
+                futures.append(ex.submit(list_one, "A.tpl"))
+                futures.append(ex.submit(list_one, "B.tpl"))
+            for f in as_completed(futures):
+                results.append(f.result())
+
+        # Every A.tpl result should report exactly 1 stripped line; every
+        # B.tpl result should report exactly 3.  Pre-fix, the warnings
+        # would cross-contaminate (A sees B's count or vice versa).
+        for name, result in results:
+            if name == "A.tpl":
+                warnings = result.get("warnings") or []
+                assert any("1 line" in w for w in warnings), (
+                    f"A.tpl thread saw cross-contaminated warnings: "
+                    f"{warnings}"
+                )
+            else:
+                warnings = result.get("warnings") or []
+                assert any("3 line" in w for w in warnings), (
+                    f"B.tpl thread saw cross-contaminated warnings: "
+                    f"{warnings}"
+                )
