@@ -558,9 +558,23 @@ class TemplatePlugin:
             ToolSchema(
                 name="listTemplateVariables",
                 description=(
-                    "List all variables required by a template. Call this before renderTemplateToFile "
-                    "to know exactly what variables to provide. Analyzes the template and returns "
-                    "all variable names that need to be substituted."
+                    "List all variables required by a template, with structural type info "
+                    "for each one. Call this before renderTemplateToFile to know exactly "
+                    "what variables to provide AND what shape each variable needs.\n\n"
+                    "Returns ``variables: list[{name, kind, item_keys?}]`` where:\n"
+                    "  - ``kind == 'scalar'``: provide a string/number/bool — used as ``{{name}}``.\n"
+                    "  - ``kind == 'section'``: provide a list of dicts — used as "
+                    "    ``{{#name}}...{{/name}}``. Each dict in the list MUST contain the "
+                    "    keys listed in ``item_keys`` (these are the field names the "
+                    "    template's body references inside the section). Example: "
+                    "    ``apiEndpoints`` with ``item_keys: ['methodName', 'path']`` means "
+                    "    pass ``[{'methodName': 'getCustomer', 'path': '/customers/{id}'}, ...]``.\n"
+                    "  - ``kind == 'inverted_section'``: provide a falsy value (empty list, "
+                    "    None, False) — block renders only when the value is empty/missing. "
+                    "    Used as ``{{^name}}...{{/name}}``.\n\n"
+                    "If you guess the wrong kind (e.g. pass a section as flat scalar, or a list "
+                    "of strings instead of list of dicts), pybars3 will raise a render error. "
+                    "Read the structural info from this tool's output rather than guessing."
                 ),
                 parameters={
                     "type": "object",
@@ -2431,17 +2445,149 @@ Template rendering writes files to the workspace."""
             "warnings": warnings,
         }
 
+    def _parse_mustache_structure(self, content: str) -> List[Dict[str, Any]]:
+        """Walk a Mustache template, classify each variable by kind.
+
+        Returns a list of variable descriptors:
+
+            [
+              {"name": "Entity", "kind": "scalar"},
+              {"name": "apiEndpoints", "kind": "section",
+               "item_keys": ["methodName", "path", "returnType"]},
+              {"name": "isEmpty", "kind": "inverted_section"},
+            ]
+
+        Kinds:
+        - ``"scalar"``: ``{{name}}`` — replaced verbatim with the value.
+        - ``"section"``: ``{{#name}}...{{/name}}`` — when ``name`` is
+          a list, the body renders once per item with each item as
+          context; ``item_keys`` collects the field names referenced
+          inside the body so the agent knows the inner shape required
+          for list-of-dicts use.
+        - ``"inverted_section"``: ``{{^name}}...{{/name}}`` — body
+          renders only when ``name`` is falsy/empty (no iteration);
+          inner references aren't item-keys, so we don't populate that
+          field.
+
+        When the same name appears as both scalar and section in the
+        same template, the section classification wins (it's the more
+        constrained shape — agents must satisfy the section contract).
+        """
+        # Match all {{...}} constructs in order so we can build a
+        # section stack and attribute scalar references to their
+        # enclosing sections.  Capture the optional prefix
+        # (``#`` / ``^`` / ``/`` / ``!``) and the name.
+        pattern = re.compile(r'\{\{([#^/!]?)([^}]+)\}\}')
+
+        variables: Dict[str, Dict[str, Any]] = {}
+        # Stack of (kind, name) for currently-open sections.  Only
+        # ``section`` (not ``inverted_section``) contributes
+        # item_keys to its body's scalar references — see the
+        # docstring rationale.
+        section_stack: List[tuple[str, str]] = []
+
+        for match in pattern.finditer(content):
+            prefix = match.group(1)
+            name = match.group(2).strip()
+
+            # Skip Mustache comments and current-context markers.
+            if prefix == '!':
+                continue
+            if name in ('.', 'this'):
+                continue
+
+            if prefix == '#':
+                # Opening section.  Promote scalar → section if it
+                # was already seen as a scalar; the constrained shape
+                # wins.
+                entry = variables.setdefault(
+                    name, {"name": name, "kind": "section", "item_keys": set()},
+                )
+                if entry["kind"] == "scalar":
+                    entry["kind"] = "section"
+                    entry.setdefault("item_keys", set())
+                section_stack.append(("section", name))
+            elif prefix == '^':
+                # Opening inverted section.
+                variables.setdefault(
+                    name, {"name": name, "kind": "inverted_section"},
+                )
+                section_stack.append(("inverted_section", name))
+            elif prefix == '/':
+                # Closing marker — pop the matching open section.  In
+                # well-formed templates the top of stack matches; in
+                # malformed templates we leave the stack alone rather
+                # than guess.
+                if section_stack and section_stack[-1][1] == name:
+                    section_stack.pop()
+            else:
+                # Scalar reference.  Two distinct cases:
+                # - Referenced OUTSIDE any section → top-level scalar
+                #   (the agent must provide the value at the top of
+                #   the variables dict).
+                # - Referenced INSIDE a ``section`` → item-key of
+                #   that section.  NOT also a top-level scalar (the
+                #   agent provides the value as a field on each list
+                #   item dict).
+                # If a name appears both inside-and-outside, it gets
+                # both: the top-level entry and the item-key entry.
+                if section_stack:
+                    outer_kind, outer_name = section_stack[-1]
+                    if outer_kind == "section" and outer_name != name:
+                        outer_entry = variables.get(outer_name)
+                        if outer_entry and outer_entry["kind"] == "section":
+                            # Leftmost token of dotted paths so
+                            # ``item.foo.bar`` records ``item`` —
+                            # the implicit item field.
+                            item_key = name.split(".")[0] if "." in name else name
+                            outer_entry["item_keys"].add(item_key)
+                    elif outer_kind == "inverted_section":
+                        # References inside an inverted section are
+                        # NOT item-keys (no iteration); they're
+                        # outer-scope scalars only meaningful when
+                        # the inverted condition fires.  Treat as
+                        # top-level scalars.
+                        variables.setdefault(
+                            name, {"name": name, "kind": "scalar"},
+                        )
+                else:
+                    # Outside any section: top-level scalar.
+                    variables.setdefault(name, {"name": name, "kind": "scalar"})
+
+        # Convert sets to sorted lists for stable output.
+        result = []
+        for name in sorted(variables.keys()):
+            entry = variables[name].copy()
+            if "item_keys" in entry:
+                entry["item_keys"] = sorted(list(entry["item_keys"]))
+            result.append(entry)
+        return result
+
     def _execute_list_template_variables(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Extract all undeclared variables from a template.
 
         Uses Jinja2's AST parser for Jinja2 templates to find undeclared variables,
-        or regex for Mustache templates.
+        or structural Mustache parsing for Mustache templates.
+
+        For Mustache (server 0.6.28+), each variable carries its kind
+        (``scalar`` / ``section`` / ``inverted_section``) and sections
+        also carry ``item_keys`` — the fields each list item must
+        provide when rendering.  This eliminates a non-determinism
+        source where agents would guess wrong shape on first attempt
+        (passing ``apiEndpoints`` as flat scalars or ``updateableFields``
+        as ``list[str]`` instead of ``list[dict]``), trigger a
+        ``pybars3`` render error, and self-correct on retry — with
+        the retry path producing different content across runs.
 
         Args:
             args: Tool arguments containing 'template_name'.
 
         Returns:
             Dict with 'variables' list and 'syntax' type, or 'error' on failure.
+            For Mustache: ``variables`` is ``list[{name, kind, item_keys?}]``.
+            For Jinja2: ``variables`` is ``list[{name, kind: "scalar"}]``
+            (kind detection for Jinja2 is a follow-up — current shape
+            is consistent in API but flat in semantics).
         """
         template_name = args.get("template_name", "")
 
@@ -2482,11 +2628,20 @@ Template rendering writes files to the workspace."""
                 env = Environment()
                 ast = env.parse(template_content)
                 variables = meta.find_undeclared_variables(ast)
+                # Wrap in the same structured shape Mustache returns
+                # so consumers don't need to branch on syntax.  Jinja2
+                # AST-based kind detection (for / if blocks) is a
+                # follow-up; for now mark all as "scalar" — agents
+                # using Jinja2 templates today have less determinism
+                # surface anyway.
                 return {
-                    "variables": sorted(list(variables)),
+                    "variables": [
+                        {"name": v, "kind": "scalar"}
+                        for v in sorted(variables)
+                    ],
                     "syntax": "jinja2",
                     "template_name": template_name,
-                    "count": len(variables)
+                    "count": len(variables),
                 }
             except Exception as e:
                 return {
@@ -2496,22 +2651,18 @@ Template rendering writes files to the workspace."""
                 }
 
         elif syntax == "mustache":
-            # Use regex to find {{variable}} patterns for Mustache
-            # Match simple variables {{var}}, but not section markers {{#...}}, {{/...}}, {{^...}}
-            # Also exclude comments {{!...}}
-            matches = re.findall(r'\{\{([^#/^!}]+)\}\}', template_content)
-            variables = set()
-            for m in matches:
-                var = m.strip()
-                # Skip special Mustache markers like {{.}} (current context) and {{this}}
-                if var and var not in ('.', 'this'):
-                    variables.add(var)
-
+            # Structural parse: classify each variable by kind
+            # (scalar / section / inverted_section) and collect
+            # ``item_keys`` for sections — the inner field names the
+            # agent must provide on each list-item dict.  See
+            # ``_parse_mustache_structure`` docstring for the full
+            # rules.
+            structured = self._parse_mustache_structure(template_content)
             return {
-                "variables": sorted(list(variables)),
+                "variables": structured,
                 "syntax": "mustache",
                 "template_name": template_name,
-                "count": len(variables)
+                "count": len(structured),
             }
 
         else:

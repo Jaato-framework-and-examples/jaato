@@ -483,7 +483,14 @@ class TestRenderWithIndex:
         assert "NonExistent.java.tpl" in result["error"]
 
     def test_list_variables_by_name(self, plugin, template_dir):
-        """listTemplateVariables should resolve template_name via index."""
+        """listTemplateVariables should resolve template_name via index.
+
+        Returns variables as list[{name, kind, item_keys?}] (server
+        0.6.28+).  The structured shape lets the agent know which
+        variables are scalars, which are sections (list-of-dicts
+        with item_keys), and which are inverted sections — eliminating
+        the first-attempt-render-failure non-determinism source.
+        """
         entries = plugin._discover_standalone_templates(template_dir)
         for entry in entries:
             plugin._template_index[entry.name] = entry
@@ -492,9 +499,16 @@ class TestRenderWithIndex:
             "template_name": "Repository.java.tpl",
         })
         assert "variables" in result, f"Expected variables, got: {result}"
-        assert "basePackage" in result["variables"]
-        assert "Entity" in result["variables"]
+        # Variables is now a list of {name, kind, item_keys?} dicts.
+        var_names = {v["name"] for v in result["variables"]}
+        assert "basePackage" in var_names
+        assert "Entity" in var_names
         assert result["template_name"] == "Repository.java.tpl"
+        # Each entry must have a 'kind' field.
+        assert all("kind" in v for v in result["variables"])
+        # Repository.java.tpl is a flat scalar template (Java
+        # interface) — no sections expected.
+        assert all(v["kind"] == "scalar" for v in result["variables"])
 
 
 # ==================== System Instruction Enrichment ====================
@@ -579,6 +593,124 @@ class TestPluginLifecycle:
         registry = MagicMock()
         plugin.set_plugin_registry(registry)
         assert plugin._plugin_registry is registry
+
+
+class TestMustacheStructuralParser:
+    """Tests for the structural Mustache parser introduced in 0.6.28.
+
+    ``_parse_mustache_structure`` walks the template and returns each
+    variable as ``{name, kind, item_keys?}`` so the model can tell
+    scalars (``{{x}}``) from sections (``{{#x}}...{{/x}}``, list of
+    dicts) from inverted sections (``{{^x}}...{{/x}}``, falsy-only).
+
+    See plugin docstring for the full classification rules.
+    """
+
+    def test_flat_scalars_only(self):
+        plugin = TemplatePlugin()
+        template = "package {{basePackage}}; class {{Entity}} {}"
+        result = plugin._parse_mustache_structure(template)
+        names = {v["name"]: v["kind"] for v in result}
+        assert names == {"basePackage": "scalar", "Entity": "scalar"}
+
+    def test_section_with_inner_item_keys(self):
+        plugin = TemplatePlugin()
+        template = "{{#apiEndpoints}}\n{{methodName}} {{path}}\n{{/apiEndpoints}}"
+        result = plugin._parse_mustache_structure(template)
+        # apiEndpoints is the only top-level entry; methodName and
+        # path appear ONLY inside the section, so they're item_keys
+        # not top-level scalars.
+        assert len(result) == 1
+        api = result[0]
+        assert api["name"] == "apiEndpoints"
+        assert api["kind"] == "section"
+        assert api["item_keys"] == ["methodName", "path"]
+
+    def test_inverted_section(self):
+        plugin = TemplatePlugin()
+        template = "{{^isEmpty}}has data{{/isEmpty}}"
+        result = plugin._parse_mustache_structure(template)
+        assert len(result) == 1
+        assert result[0]["name"] == "isEmpty"
+        assert result[0]["kind"] == "inverted_section"
+        # Inverted sections do not carry item_keys.
+        assert "item_keys" not in result[0]
+
+    def test_section_and_inverted_section_same_name(self):
+        """When a name is used as both ``{{#x}}`` and ``{{^x}}`` —
+        the section classification wins (more constrained shape).
+        """
+        plugin = TemplatePlugin()
+        template = "{{#items}}{{name}}{{/items}}{{^items}}empty{{/items}}"
+        result = plugin._parse_mustache_structure(template)
+        items = next(v for v in result if v["name"] == "items")
+        assert items["kind"] == "section"
+        assert items["item_keys"] == ["name"]
+
+    def test_top_level_scalar_not_polluted_by_section_inner(self):
+        """Scalars referenced ONLY inside sections must not appear at
+        top level — they're item_keys of the section, not top-level
+        variables the agent has to provide separately.
+        """
+        plugin = TemplatePlugin()
+        template = "{{Entity}}\n{{#fields}}{{name}}: {{type}}{{/fields}}"
+        result = plugin._parse_mustache_structure(template)
+        top_level = sorted(v["name"] for v in result if v["kind"] == "scalar")
+        assert top_level == ["Entity"], (
+            f"top-level scalars should be ['Entity'] only — name and "
+            f"type are item_keys of fields, not top-level. got {top_level}"
+        )
+
+    def test_scalar_referenced_both_inside_and_outside(self):
+        """When a name appears both at top level and inside a
+        section, it gets BOTH a top-level scalar entry AND an
+        item-keys entry — agent must provide both.
+        """
+        plugin = TemplatePlugin()
+        template = "{{Entity}}\n{{#fields}}// {{Entity}} field {{name}}{{/fields}}"
+        result = plugin._parse_mustache_structure(template)
+        # Entity is a top-level scalar AND an item-key of fields.
+        entity_top = next(v for v in result if v["name"] == "Entity")
+        assert entity_top["kind"] == "scalar"
+        fields = next(v for v in result if v["name"] == "fields")
+        assert fields["kind"] == "section"
+        assert "Entity" in fields["item_keys"]
+        assert "name" in fields["item_keys"]
+
+    def test_dotted_path_records_leftmost_token(self):
+        """``{{item.foo.bar}}`` inside a section records ``item`` as
+        the item-key — that's the field the agent provides; ``foo.bar``
+        is the access path the template walks at render time.
+        """
+        plugin = TemplatePlugin()
+        template = "{{#rows}}{{cell.text}}{{/rows}}"
+        result = plugin._parse_mustache_structure(template)
+        rows = next(v for v in result if v["name"] == "rows")
+        assert rows["kind"] == "section"
+        assert rows["item_keys"] == ["cell"]
+
+    def test_comments_and_current_context_skipped(self):
+        plugin = TemplatePlugin()
+        template = "{{!comment}}{{Entity}}{{.}}{{this}}"
+        result = plugin._parse_mustache_structure(template)
+        names = [v["name"] for v in result]
+        assert names == ["Entity"]
+
+    def test_execute_returns_structured_shape_for_mustache(self, plugin, template_dir):
+        """Public tool API returns the structured shape end-to-end
+        for Mustache templates.
+        """
+        entries = plugin._discover_standalone_templates(template_dir)
+        for entry in entries:
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "Repository.java.tpl",
+        })
+        assert "error" not in result
+        assert isinstance(result["variables"], list)
+        assert all(isinstance(v, dict) for v in result["variables"])
+        assert all("name" in v and "kind" in v for v in result["variables"])
 
 
 class TestConfigRootResolution:
