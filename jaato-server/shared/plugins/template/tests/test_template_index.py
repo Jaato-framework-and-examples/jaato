@@ -22,6 +22,7 @@ from shared.plugins.template.plugin import (
     TemplatePlugin,
     TemplateIndexEntry,
     TEMPLATE_FILE_EXTENSIONS,
+    PATH_ROUTING_FILENAME,
 )
 
 
@@ -3297,6 +3298,10 @@ class TestListVariablesHonorsIndex:
         assert "path" in names
         assert "Name" in names
 
+    # NOTE: TestPathRouting suite (0.6.40+) is appended at the end
+    # of this file.  This anchor only marks the place where the
+    # index-honoring tests end.
+
     def test_v20_kb_omission_repro(self, plugin, tmp_path):
         """Reproduction of kb-enablement-2.0 v20's regression class:
         kb-omission patched in the index, body refs basePackage and a
@@ -3336,3 +3341,268 @@ class TestListVariablesHonorsIndex:
         assert "basePackage" in names
         assert "Entity" in names
         assert "fields" in names
+
+
+# ==================== Path Routing (server 0.6.40+) ====================
+
+class TestPathRouting:
+    """Auto-discovered ``.jaato/template_routing.yaml`` declares
+    ``(glob, prefix)`` rules that prepend layout-specific prefixes to
+    rendered file paths.  Centralises the file-type → location heuristic
+    that consumers (jcmunuera/run-codegen.sh) previously baked into
+    Python.
+
+    Surfaced empirically by chunk-2 cascade probe: rendered output
+    landed Java sources directly under <basePackagePath>/... instead
+    of src/main/java/<basePackagePath>/..., making the result
+    non-buildable as a Maven project.
+    """
+
+    def _write_routing_yaml(self, plugin, content: str) -> Path:
+        """Materialise a template_routing.yaml at the plugin's resolved
+        config_root path (or workspace fallback) so the lazy loader
+        picks it up on next access."""
+        path = plugin._resolve_path_routing_path()
+        assert path is not None, "plugin must have _base_path set"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        # Invalidate cache so next call re-reads.
+        plugin._path_routing_rules = None
+        return path
+
+    def test_no_routing_file_is_noop(self, plugin):
+        """When no template_routing.yaml exists, _apply_path_routing
+        returns the input unchanged.  Pre-0.6.40 back-compat preserved."""
+        # No file written; cache is None / will load empty.
+        out = plugin._apply_path_routing("com/example/Customer.java")
+        assert out == "com/example/Customer.java"
+
+    def test_simple_java_rule_prepends_src_main_java(self, plugin):
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "**/*.java"
+                  prefix: "src/main/java"
+        """))
+        out = plugin._apply_path_routing("com/example/Customer.java")
+        assert out == "src/main/java/com/example/Customer.java"
+
+    def test_first_match_wins_test_before_main(self, plugin):
+        """**/*Test.java should match before **/*.java, routing tests
+        to src/test/java."""
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "**/*Test.java"
+                  prefix: "src/test/java"
+                - glob: "**/*.java"
+                  prefix: "src/main/java"
+        """))
+        # CustomerTest.java → test path
+        assert plugin._apply_path_routing(
+            "com/example/CustomerTest.java",
+        ) == "src/test/java/com/example/CustomerTest.java"
+        # Customer.java → main path
+        assert plugin._apply_path_routing(
+            "com/example/Customer.java",
+        ) == "src/main/java/com/example/Customer.java"
+
+    def test_yaml_extensions_route_to_resources(self, plugin):
+        """Multiple resource extensions need separate rules (no brace
+        expansion)."""
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "**/*.yml"
+                  prefix: "src/main/resources"
+                - glob: "**/*.yaml"
+                  prefix: "src/main/resources"
+                - glob: "**/*.properties"
+                  prefix: "src/main/resources"
+        """))
+        assert plugin._apply_path_routing("application.yml") == (
+            "src/main/resources/application.yml"
+        )
+        assert plugin._apply_path_routing("config.yaml") == (
+            "src/main/resources/config.yaml"
+        )
+        assert plugin._apply_path_routing("app.properties") == (
+            "src/main/resources/app.properties"
+        )
+
+    def test_pom_xml_empty_prefix_keeps_root_anchor(self, plugin):
+        """``pom.xml`` rule with empty prefix is the workspace-root
+        anchor — must not double-prefix or get caught by later rules."""
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "pom.xml"
+                  prefix: ""
+                - glob: "**/*.xml"
+                  prefix: "src/main/resources"
+        """))
+        # pom.xml matches first rule → unchanged
+        assert plugin._apply_path_routing("pom.xml") == "pom.xml"
+        # Other XML files match the catch-all
+        assert plugin._apply_path_routing("config/app.xml") == (
+            "src/main/resources/config/app.xml"
+        )
+
+    def test_idempotent_when_path_already_prefixed(self, plugin):
+        """When the resolved path already starts with the matched
+        rule's prefix (kb-author already prepended, or prior call
+        wrote the path), the prepend is a no-op."""
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "**/*.yml"
+                  prefix: "src/main/resources"
+        """))
+        # Already correctly prefixed
+        already = "src/main/resources/application.yml"
+        assert plugin._apply_path_routing(already) == already
+
+    def test_no_match_returns_unchanged(self, plugin):
+        """A path that no rule matches passes through unchanged.
+        Lets unfamiliar file types through without routing."""
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "**/*.java"
+                  prefix: "src/main/java"
+        """))
+        out = plugin._apply_path_routing("README.md")
+        assert out == "README.md"
+
+    def test_empty_yaml_is_noop(self, plugin):
+        """Empty / commented-out routing YAML loads to an empty rules
+        list and behaves like no file at all."""
+        self._write_routing_yaml(plugin, "# no rules\n")
+        assert plugin._apply_path_routing("a/b/c.java") == "a/b/c.java"
+
+    def test_malformed_yaml_falls_back_to_noop(self, plugin):
+        """Malformed YAML is logged but doesn't crash — rules cached
+        as empty, behaviour reverts to pre-0.6.40."""
+        self._write_routing_yaml(plugin, "this: is: not: valid: yaml: ::")
+        # Should not raise; falls back to no-routing.
+        out = plugin._apply_path_routing("a/b/c.java")
+        assert out == "a/b/c.java"
+
+    def test_explicit_leave_as_is_rule_before_catch_all(self, plugin):
+        """Empty-prefix rule serves as 'whitelist this path' — the
+        path matches the rule and returns unchanged, bypassing later
+        catch-all rules."""
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "src/**/*.java"
+                  prefix: ""                  # already in tree, leave alone
+                - glob: "**/*.java"
+                  prefix: "src/main/java"
+        """))
+        # Already-prefixed path matches the leave-as-is rule
+        assert plugin._apply_path_routing(
+            "src/main/java/com/Customer.java",
+        ) == "src/main/java/com/Customer.java"
+        # Bare path matches the catch-all
+        assert plugin._apply_path_routing(
+            "com/Customer.java",
+        ) == "src/main/java/com/Customer.java"
+
+    def test_render_e2e_routes_into_maven_layout(self, plugin, tmp_path):
+        """End-to-end: renderTemplateToFile with auto-derived path
+        passes through routing and lands the file at the routed
+        location.  Reproduces the chunk-2 cascade probe gap closure."""
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "pom.xml"
+                  prefix: ""
+                - glob: "**/*Test.java"
+                  prefix: "src/test/java"
+                - glob: "**/*.java"
+                  prefix: "src/main/java"
+        """))
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Entity.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/domain/{{Entity}}.java
+            package {{basePackage}}.domain;
+            public class {{Entity}} {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Entity.java.tpl",
+            "variables": {
+                "Entity": "Customer",
+                "basePackage": "com.bank",
+                "basePackagePath": "com/bank",
+            },
+        })
+        assert result.get("success") is True, result
+        # Path landed under src/main/java per routing rule.
+        expected = plugin._base_path / "src/main/java/com/bank/domain/Customer.java"
+        assert expected.exists(), (
+            f"File missing at expected routed path {expected}: {result}"
+        )
+
+    def test_explicit_output_path_also_routed(self, plugin, tmp_path):
+        """Routing applies to BOTH auto-derived and explicit output_path
+        — agent says WHAT, kb's routing rules say WHERE-IN-LAYOUT."""
+        self._write_routing_yaml(plugin, textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - glob: "**/*.java"
+                  prefix: "src/main/java"
+        """))
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "X.java.tpl").write_text(textwrap.dedent("""\
+            class X {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        # Agent supplies explicit output_path; routing still applies.
+        result = plugin._execute_render_template_to_file({
+            "template_name": "X.java.tpl",
+            "variables": {},
+            "output_path": "com/example/X.java",
+        })
+        assert result.get("success") is True, result
+        expected = plugin._base_path / "src/main/java/com/example/X.java"
+        assert expected.exists(), result
+
+    def test_config_root_overrides_workspace_fallback(
+        self, plugin, tmp_workspace, tmp_path
+    ):
+        """When config_root is set (sandbox + config_root pattern),
+        routing YAML resolves under config_root, NOT under workspace's
+        .jaato/."""
+        # Create a config_root location distinct from workspace
+        config_root = tmp_path / "framework_config"
+        config_root.mkdir()
+        # Write conflicting rules in both locations to verify which wins
+        workspace_yaml = tmp_workspace / ".jaato" / PATH_ROUTING_FILENAME
+        workspace_yaml.write_text(textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - { glob: "**/*.java", prefix: "WORKSPACE_LOC" }
+        """))
+        config_root_yaml = config_root / PATH_ROUTING_FILENAME
+        config_root_yaml.write_text(textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - { glob: "**/*.java", prefix: "CONFIG_ROOT_LOC" }
+        """))
+        # Set config_root — should override
+        plugin.set_config_root(str(config_root))
+        out = plugin._apply_path_routing("a/b/X.java")
+        assert out == "CONFIG_ROOT_LOC/a/b/X.java"
+
+        # Clear config_root — should fall back to workspace
+        plugin.set_config_root(None)
+        out2 = plugin._apply_path_routing("a/b/X.java")
+        assert out2 == "WORKSPACE_LOC/a/b/X.java"

@@ -40,7 +40,7 @@ import tempfile
 import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # pybars3's ``Compiler`` class holds CLASS-LEVEL mutable state
@@ -80,6 +80,14 @@ from shared.trace import trace as _trace_write
 
 # File extensions recognized as standalone template files
 TEMPLATE_FILE_EXTENSIONS = {'.tpl', '.tmpl'}
+
+# Auto-discovered path-routing config (server 0.6.40+).  When present
+# at ``<config_root>/template_routing.yaml`` (or workspace-tier
+# fallback ``<workspace>/.jaato/template_routing.yaml``), the plugin
+# applies the declared (glob, prefix) rules to every renderTemplateToFile
+# call's resolved output_path BEFORE writing.  See ``_apply_path_routing``
+# for semantics.  Absent file = no-op (current behaviour preserved).
+PATH_ROUTING_FILENAME = "template_routing.yaml"
 
 
 @dataclass
@@ -263,6 +271,15 @@ class TemplatePlugin:
         # its own content-hash dedup via ``_extracted_templates``.
         self._surfaced_template_names: Set[str] = set()
 
+        # Auto-discovered path-routing rules from
+        # ``<config_root>/template_routing.yaml`` — server 0.6.40+.
+        # ``None`` means "not yet loaded for the current
+        # workspace/config_root"; an empty list means "loaded but no
+        # rules found" (file absent or empty).  Cleared by
+        # ``set_workspace_path`` / ``set_config_root`` / ``initialize``
+        # so the next call re-loads from the new location.
+        self._path_routing_rules: Optional[List[Tuple[str, str]]] = None
+
         # Thread-local storage for ``//``-stripped-line numbers from the
         # most recent ``_parse_mustache_structure`` call on THIS thread.
         # Read by ``_execute_list_template_variables`` to surface a
@@ -322,6 +339,161 @@ class TemplatePlugin:
             return self._base_path / ".jaato" / "templates"
         return None
 
+    def _resolve_path_routing_path(self) -> Optional[Path]:
+        """Return the canonical ``template_routing.yaml`` location for
+        the current workspace / config_root, or None if neither is set.
+        Mirrors ``_compute_templates_dir``'s priority chain: prefer
+        ``<config_root>/template_routing.yaml`` when config_root is
+        set, otherwise ``<workspace>/.jaato/template_routing.yaml``.
+        """
+        if self._config_root is not None:
+            return Path(self._config_root) / PATH_ROUTING_FILENAME
+        if self._base_path is not None:
+            return self._base_path / ".jaato" / PATH_ROUTING_FILENAME
+        return None
+
+    def _load_path_routing(self) -> List[Tuple[str, str]]:
+        """Load + cache the path-routing rules from
+        ``<config_root>/template_routing.yaml`` (or the workspace-tier
+        fallback).  Returns the list of ``(glob, prefix)`` tuples in
+        declared order; empty list when the file is absent, malformed,
+        or carries no rules.
+
+        Cached on ``self._path_routing_rules``; cleared by
+        ``set_workspace_path`` / ``set_config_root`` / ``initialize``.
+
+        YAML schema (server 0.6.40+ — minimal first cut):
+
+            file_conventions:
+              output_path_routing:
+                - glob: "pom.xml"
+                  prefix: ""                 # workspace-root anchor
+                - glob: "**/*Test.java"
+                  prefix: "src/test/java"
+                - glob: "**/*.java"
+                  prefix: "src/main/java"
+                - glob: "**/*.yml"
+                  prefix: "src/main/resources"
+
+        Rule semantics handled by ``_apply_path_routing``:
+
+        - First-match-wins: rules iterated in declared order.
+        - Empty ``prefix``: match-and-no-op (useful as an explicit
+          "leave these paths as-is" entry before catch-all rules).
+        - Idempotent strip-and-prepend: when the path already starts
+          with the matched rule's prefix, the prefix is not duplicated.
+
+        Glob library: ``pathlib.PurePath.match`` (stdlib) — supports
+        ``*``/``?``/``[seq]``/``**`` per the standard semantics.  Brace
+        expansion (``{yml,yaml}``) is NOT supported — write separate
+        rules for each extension.
+
+        File auto-discovery is the convention-over-configuration
+        ergonomic; the env-var pointer is the kb-driven escape hatch
+        and ships in a follow-up if needed.  When the file is absent
+        the plugin behaves exactly as it did pre-0.6.40 — full
+        back-compat preserved.
+        """
+        if self._path_routing_rules is not None:
+            return self._path_routing_rules
+
+        path = self._resolve_path_routing_path()
+        if path is None or not path.exists():
+            self._path_routing_rules = []
+            return []
+
+        try:
+            import yaml  # imported lazily — only loaded when routing is in use
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (yaml.YAMLError, IOError, OSError) as e:
+            self._trace(f"path_routing load error from {path}: {e}")
+            self._path_routing_rules = []
+            return []
+
+        rules_raw = (
+            (data.get("file_conventions") or {}).get("output_path_routing")
+            or []
+        )
+        rules: List[Tuple[str, str]] = []
+        for rule in rules_raw:
+            if not isinstance(rule, dict):
+                continue
+            glob = rule.get("glob")
+            prefix = rule.get("prefix", "")
+            if isinstance(glob, str) and isinstance(prefix, str):
+                # Normalise: strip any trailing slash from prefix so the
+                # join logic below is uniform.
+                rules.append((glob, prefix.rstrip("/")))
+        self._trace(
+            f"path_routing loaded {len(rules)} rule(s) from {path}"
+        )
+        self._path_routing_rules = rules
+        return rules
+
+    def _apply_path_routing(self, output_path: str) -> str:
+        """Apply path-routing rules to a resolved ``output_path``.
+
+        Rule iteration is first-match-wins on
+        ``pathlib.PurePath(output_path).match(glob)``.  When matched:
+
+        - If the rule's ``prefix`` is empty, return the path unchanged
+          (the rule's role is to whitelist that path against the
+          catch-all rules below it; explicit "leave as-is").
+        - If the path already starts with the rule's prefix, return
+          the path unchanged (idempotent — strip-then-prepend is a
+          no-op).
+        - Otherwise prepend the prefix.
+
+        When NO rule matches (or the rules list is empty / file
+        absent), return the path unchanged.  This means the
+        post-0.6.40 behaviour with no ``template_routing.yaml`` is
+        identical to pre-0.6.40 — full back-compat preserved.
+
+        Strict per-rule strip semantics (option 1 of the implementation
+        questions): only the matched rule's own prefix is checked
+        for the idempotent no-op; we do NOT strip prefixes belonging
+        to other rules.  Cleaner, fewer surprises.  If a path already
+        carries a wrongly-placed prefix from another rule, that's a
+        kb-author bug to fix in the directive, not a heuristic the
+        framework should silently paper over.
+
+        Args:
+            output_path: The fully-resolved (post-auto-derive or
+                explicit) path the agent or framework computed.  May
+                be relative or absolute; rules see it verbatim.
+
+        Returns:
+            The post-routing path, ready for workspace-relative
+            resolution and the file-write that follows.
+        """
+        rules = self._load_path_routing()
+        if not rules:
+            return output_path
+
+        ppath = PurePath(output_path)
+        for glob, prefix in rules:
+            # Glob-match with a zero-depth fallback: ``**/*.yml`` in
+            # Python 3.12's PurePath.match requires AT LEAST one parent
+            # directory component, so it doesn't match top-level
+            # ``application.yml``.  Users intuitively expect ``**/*``
+            # to mean "any depth including zero" (gitignore-style).
+            # When the glob starts with ``**/`` and the strict match
+            # fails, try the same glob with ``**/`` stripped — that
+            # catches the top-level case without affecting nested
+            # paths.
+            matched = ppath.match(glob)
+            if not matched and glob.startswith("**/"):
+                matched = ppath.match(glob[3:])
+            if matched:
+                if not prefix:
+                    return output_path
+                normalised = output_path.lstrip("/")
+                if normalised.startswith(prefix + "/") or normalised == prefix:
+                    # Already prefixed — idempotent no-op.
+                    return output_path
+                return prefix + "/" + normalised
+        return output_path
+
     def set_plugin_registry(self, registry) -> None:
         """Receive the plugin registry for cross-plugin communication.
 
@@ -350,6 +522,7 @@ class TemplatePlugin:
         """
         self._base_path = Path(path)
         self._templates_dir = self._compute_templates_dir()
+        self._path_routing_rules = None  # invalidate; lazy reload on next render
         self._load_persisted_index()
         self._indexer.build_index(list(self._template_index.values()))
         self._trace(f"set_workspace_path: base_path={self._base_path}, config_root={self._config_root}, templates_dir={self._templates_dir}")
@@ -379,6 +552,7 @@ class TemplatePlugin:
         """
         self._config_root = path
         self._templates_dir = self._compute_templates_dir()
+        self._path_routing_rules = None  # invalidate; lazy reload on next render
         # Reload the index from the (potentially) new location so
         # listAvailableTemplates / renderTemplateToFile pick up the
         # right catalog without requiring a session restart.
@@ -2965,6 +3139,16 @@ Template rendering writes files to the workspace."""
                 if template_name_arg:
                     err["template_name"] = template_name_arg
                 return err
+
+        # Apply path-routing rules from .jaato/template_routing.yaml
+        # (server 0.6.40+).  No-op when the file is absent or carries
+        # no rules — full back-compat with pre-0.6.40 behaviour.
+        # Applied AFTER all validation (auto-derive substitution +
+        # empty-segment check) so the rules see the same resolved
+        # path the validators just blessed.  Also applied to explicit
+        # ``output_path`` calls — agent says WHAT, kb's routing rules
+        # say WHERE-IN-LAYOUT.
+        output_path = self._apply_path_routing(output_path)
 
         # Check if output path already exists
         out_path = Path(output_path)
