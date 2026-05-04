@@ -3652,15 +3652,41 @@ Template rendering writes files to the workspace."""
         # but not in the body.  These are "path-only" vars the agent
         # must still supply for auto-derivation to substitute correctly.
         # Re-extracting here (rather than reading from
-        # ``self._template_index``) is cheap and avoids depending on
-        # the entry being present — covers the case where listTemplateVariables
-        # runs before the walker has registered the template.
         # See server 0.6.36 — closes the symmetry gap where
         # renderTemplateToFile auto-derives output_path but the agent's
         # source-of-truth tool was reporting body vars only.
-        output_path_template = self._extract_output_path_template(
-            template_content, filename=template_name,
-        )
+        #
+        # Index-authoritative resolution (server 0.6.39+): the index
+        # entry's ``output_path_template`` field — populated by the
+        # walker at session-init OR by side-channel patches (e.g. a
+        # local override for kb-omissions) — takes precedence over
+        # re-extracting from the on-disk template content.
+        #
+        # Why: pre-0.6.39, this site re-extracted from disk regardless
+        # of what was in the index.  When a kb-author patched the
+        # index entry (say, to supply an ``output_path_template`` for a
+        # template whose upstream source lacks the ``// Output:``
+        # directive), ``renderTemplateToFile``'s auto-derive picked up
+        # the patched value (it reads the index directly) but
+        # ``listTemplateVariables`` did NOT (it re-parsed disk, found
+        # no directive, reported only body vars).  The asymmetry
+        # produced a regression class observed in kb-enablement-2.0
+        # chunk-1 v20: agent's first attempt rendered without the
+        # path-only var, hit empty-segment validation, retried with
+        # supplemented var, retry resampling drifted.
+        #
+        # Fix: index wins.  Both consumers (auto-derive + path-vars
+        # merge) now read the same authoritative source.  Falls back
+        # to disk re-extraction when the entry is absent or its
+        # ``output_path_template`` is empty — the legacy path is
+        # preserved for templates the walker hasn't yet seen.
+        template_entry = self._template_index.get(template_name)
+        if template_entry and template_entry.output_path_template:
+            output_path_template = template_entry.output_path_template
+        else:
+            output_path_template = self._extract_output_path_template(
+                template_content, filename=template_name,
+            )
         path_vars = self._extract_path_variables(output_path_template)
 
         if syntax == "jinja2":

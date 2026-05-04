@@ -3195,3 +3195,144 @@ class TestHandlebarsHelperParsing:
         assert "topLevel" in by_name
         assert by_name["topLevel"]["kind"] == "scalar"
         assert "topLevel" not in by_name["fields"]["item_keys"]
+
+
+# ==================== Index-authoritative listTemplateVariables (server 0.6.39+) ====================
+
+class TestListVariablesHonorsIndex:
+    """``listTemplateVariables`` reads the output_path_template from the
+    index entry when available, falling back to on-disk re-extraction
+    only when the entry is absent or carries an empty value.
+
+    Surfaced empirically by kb-enablement-2.0 chunk-1 v20: the kb-side
+    walker patched the index's `output_path_template` field for a
+    template whose upstream source lacks the `// Output:` directive
+    (kb-omission for UpdateRequest.java.tpl).  `renderTemplateToFile`
+    picked up the patch (it reads the index directly), but
+    `listTemplateVariables` re-extracted from disk, saw no directive,
+    didn't merge the path-only var into the variables list.  Agent's
+    first attempt rendered without the var, hit empty-segment
+    validation, retried, retry resampling drifted.
+
+    0.6.39 makes the index authoritative: both consumers read the
+    same source.  Closes the index/disk asymmetry that v20's
+    materialized-override workaround dodged but didn't actually fix.
+    """
+
+    def test_index_entry_overrides_disk_when_set(self, plugin, tmp_path):
+        """When the on-disk template has NO directive but the index
+        entry has output_path_template populated (e.g. via side-channel
+        patch), listTemplateVariables uses the index value."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        # On-disk template has NO `// Output:` directive.
+        (tpl_dir / "Patched.java.tpl").write_text(textwrap.dedent("""\
+            package {{basePackage}};
+            public class {{Name}} {}
+        """))
+        # Walker discovery would populate output_path_template="" since
+        # no directive on disk.  Simulate the side-channel patch by
+        # directly setting the field on the index entry.
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        plugin._template_index["Patched.java.tpl"].output_path_template = (
+            "{{basePackagePath}}/domain/model/{{Name}}.java"
+        )
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "Patched.java.tpl",
+        })
+        names = {v["name"] for v in result["variables"]}
+        # Body vars from disk:
+        assert "basePackage" in names
+        assert "Name" in names
+        # Path-only var from the patched index entry:
+        assert "basePackagePath" in names
+
+    def test_disk_used_when_index_entry_empty(self, plugin, tmp_path):
+        """When the index entry's output_path_template is empty AND
+        the on-disk template has a directive, fall back to disk
+        extraction.  Preserves legacy behavior for templates the
+        walker hasn't yet refreshed."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        # On-disk template HAS a directive.
+        (tpl_dir / "OnDisk.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/{{Name}}.java
+            class OnDisk {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        # Simulate a stale index entry: clear its output_path_template
+        # field even though the disk has a directive.
+        plugin._template_index["OnDisk.java.tpl"].output_path_template = ""
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "OnDisk.java.tpl",
+        })
+        names = {v["name"] for v in result["variables"]}
+        # Disk extraction picks up the path-var as fallback.
+        assert "basePackagePath" in names
+        assert "Name" in names
+
+    def test_no_entry_falls_back_to_disk(self, plugin, tmp_path):
+        """When no index entry exists at all (e.g. listTemplateVariables
+        called before the walker has run), disk extraction handles it."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "NoIndex.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{path}}/{{Name}}.java
+            class NoIndex {}
+        """))
+        # Resolution by filesystem (no index entry); test that
+        # listTemplateVariables still works via on-disk extraction.
+        # The resolver searches templates_dir, so put the file there.
+        (plugin._templates_dir / "NoIndex.java.tpl").write_text(
+            (tpl_dir / "NoIndex.java.tpl").read_text()
+        )
+        result = plugin._execute_list_template_variables({
+            "template_name": "NoIndex.java.tpl",
+        })
+        names = {v["name"] for v in result["variables"]}
+        assert "path" in names
+        assert "Name" in names
+
+    def test_v20_kb_omission_repro(self, plugin, tmp_path):
+        """Reproduction of kb-enablement-2.0 v20's regression class:
+        kb-omission patched in the index, body refs basePackage and a
+        few fields, path-only var basePackagePath only in the patched
+        index entry.  Without the index-honoring fix, listTemplateVariables
+        misses basePackagePath, agent first-attempt fails empty-segment
+        validation, retry resampling drifts.  Post-fix, basePackagePath
+        is reported, agent supplies it, render succeeds first try.
+        """
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        # Kb-omission: template has NO directive on disk.
+        (tpl_dir / "UpdateRequest.java.tpl").write_text(textwrap.dedent("""\
+            package {{basePackage}}.api;
+            public class Update{{Entity}}Request {
+            {{#fields}}
+              {{type}} {{fieldName}};
+            {{/fields}}
+            }
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        # Side-channel patches the index field.
+        plugin._template_index[
+            "UpdateRequest.java.tpl"
+        ].output_path_template = (
+            "{{basePackagePath}}/api/Update{{Entity}}Request.java"
+        )
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "UpdateRequest.java.tpl",
+        })
+        names = {v["name"] for v in result["variables"]}
+        # Agent must see basePackagePath in the variable list.
+        assert "basePackagePath" in names
+        # Body vars also present.
+        assert "basePackage" in names
+        assert "Entity" in names
+        assert "fields" in names
