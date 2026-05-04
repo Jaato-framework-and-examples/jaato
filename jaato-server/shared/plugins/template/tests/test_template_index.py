@@ -2149,3 +2149,232 @@ class TestRenderThreadSafety:
                     f"B.tpl thread saw cross-contaminated warnings: "
                     f"{warnings}"
                 )
+
+
+# ==================== Output Path Auto-Derivation (server 0.6.34+) ====================
+
+class TestOutputPathAutoDerivation:
+    """``renderTemplateToFile`` derives ``output_path`` from the template's
+    ``// Output: <path>`` directive when the agent doesn't supply one.
+
+    Surfaced by kb-enablement-2.0 chunk-1 v16: the dominant 3/5 hashes
+    came from the agent inventing simplified paths (flattened DDD
+    subpackages, normalised /config/) while the kb's ``// Output:``
+    directives declared the canonical structure.  The two outliers in
+    the 5x test were MORE kb-faithful than the dominant — i.e. the
+    "majority hash" was the most-common agent invention, not the
+    correct answer.
+
+    Eliminating the agent-invents-the-path surface eliminates this
+    drift class.
+    """
+
+    def test_extracts_output_directive_simple(self, plugin):
+        """Simple `// Output: path` line is extracted verbatim."""
+        content = textwrap.dedent("""\
+            // Output: src/foo/Bar.java
+            public class Bar {}
+        """)
+        assert plugin._extract_output_path_template(content) == (
+            "src/foo/Bar.java"
+        )
+
+    def test_extracts_output_directive_with_placeholders(self, plugin):
+        """Placeholders ``{{var}}`` in the directive are kept intact
+        — they're substituted at render time, not extraction time."""
+        content = textwrap.dedent("""\
+            // Output: {{basePackagePath}}/domain/model/{{Entity}}.java
+            package {{basePackage}}.domain.model;
+            public class {{Entity}} {}
+        """)
+        assert plugin._extract_output_path_template(content) == (
+            "{{basePackagePath}}/domain/model/{{Entity}}.java"
+        )
+
+    def test_extracts_output_directive_tolerates_whitespace(self, plugin):
+        """Variable spacing around `//` and `Output:` is fine."""
+        content = "  //  Output  :  some/path.java\n"
+        assert plugin._extract_output_path_template(content) == (
+            "some/path.java"
+        )
+
+    def test_no_directive_returns_empty_string(self, plugin):
+        """Templates without ``// Output:`` return empty string."""
+        content = textwrap.dedent("""\
+            // some other comment
+            public class X {}
+        """)
+        assert plugin._extract_output_path_template(content) == ""
+
+    def test_first_directive_wins(self, plugin):
+        """Only the first `// Output:` line is used; extras ignored."""
+        content = textwrap.dedent("""\
+            // Output: first/path.java
+            // Output: second/path.java
+            public class X {}
+        """)
+        assert plugin._extract_output_path_template(content) == (
+            "first/path.java"
+        )
+
+    def test_walker_captures_output_path_template(self, plugin, tmp_path):
+        """The standalone-template walker populates the new field."""
+        tpl_dir = tmp_path / "templates"
+        (tpl_dir / "domain").mkdir(parents=True)
+        (tpl_dir / "domain" / "Entity.java.tpl").write_text(
+            textwrap.dedent("""\
+                // Output: {{basePackagePath}}/domain/model/{{Entity}}.java
+                package {{basePackage}}.domain.model;
+                public class {{Entity}} {}
+            """)
+        )
+        entries = plugin._discover_standalone_templates(tpl_dir)
+        assert len(entries) == 1
+        assert entries[0].output_path_template == (
+            "{{basePackagePath}}/domain/model/{{Entity}}.java"
+        )
+
+    def test_render_uses_directive_when_output_path_omitted(
+        self, plugin, tmp_path
+    ):
+        """End-to-end: omit ``output_path``, framework substitutes the
+        ``// Output:`` directive with ``variables`` and writes there."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Entity.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/domain/model/{{Entity}}.java
+            package {{basePackage}}.domain.model;
+            {{#fields}}
+            private {{type}} {{name}};
+            {{/fields}}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Entity.java.tpl",
+            "variables": {
+                "basePackage": "com.bank.customer",
+                "basePackagePath": "com/bank/customer",
+                "Entity": "Customer",
+                "fields": [{"type": "String", "name": "id"}],
+            },
+            # NOTE: output_path NOT supplied — should auto-derive.
+        })
+        assert result.get("success") is True, result
+        # Path must come from the directive, with placeholders
+        # substituted.  The framework resolves relative paths against
+        # _base_path (workspace root).
+        expected = (
+            plugin._base_path
+            / "com/bank/customer/domain/model/Customer.java"
+        )
+        assert expected.exists(), (
+            f"File not found at directive-derived path "
+            f"{expected!r} — got result: {result}"
+        )
+
+    def test_render_explicit_output_path_overrides_directive(
+        self, plugin, tmp_path
+    ):
+        """Agent-supplied ``output_path`` overrides the directive — for
+        legitimate redirects (custom destinations, test fixtures)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "X.java.tpl").write_text(textwrap.dedent("""\
+            // Output: declared/path.java
+            public class X {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        override = plugin._base_path / "custom" / "Override.java"
+        result = plugin._execute_render_template_to_file({
+            "template_name": "X.java.tpl",
+            "variables": {},
+            "output_path": str(override),
+        })
+        assert result.get("success") is True, result
+        assert override.exists()
+        # The directive-declared path must NOT have been written.
+        assert not (plugin._base_path / "declared" / "path.java").exists()
+
+    def test_render_no_output_no_directive_errors(
+        self, plugin, tmp_path
+    ):
+        """When neither ``output_path`` is supplied nor the template
+        declares a directive, render fails with path_check error
+        (same severity class as shape validation)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        # No `// Output:` directive in this template.
+        (tpl_dir / "NoDir.java.tpl").write_text(textwrap.dedent("""\
+            public class NoDir {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "NoDir.java.tpl",
+            "variables": {},
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "path_check"
+        assert "Output:" in result["error"] or "output_path" in result["error"]
+
+    def test_render_inline_template_requires_output_path(self, plugin):
+        """Inline ``template`` (no template_name → no index entry → no
+        directive) must still receive ``output_path`` explicitly."""
+        result = plugin._execute_render_template_to_file({
+            "template": "public class X {}",
+            "variables": {},
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "path_check"
+
+    def test_listAvailableTemplates_surfaces_output_path_template(
+        self, plugin, tmp_path
+    ):
+        """`listAvailableTemplates` includes ``output_path_template``
+        for each entry so the agent can see the kb-declared path."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Has.tpl").write_text(
+            "// Output: declared/{{x}}.java\nbody"
+        )
+        (tpl_dir / "Lacks.tpl").write_text("just a body")
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_list_available({})
+        by_name = {t["name"]: t for t in result["templates"]}
+        assert by_name["Has.tpl"]["output_path_template"] == (
+            "declared/{{x}}.java"
+        )
+        assert by_name["Lacks.tpl"]["output_path_template"] == ""
+
+    def test_index_loader_handles_legacy_entries_without_output_path(
+        self, plugin, tmp_path
+    ):
+        """Older index.json files (pre-0.6.34) lack the new field —
+        loader must default to '' rather than crash."""
+        # Simulate a pre-0.6.34 index.json.
+        legacy_index = {
+            "templates": {
+                "Old.tpl": {
+                    "name": "Old.tpl",
+                    "source_path": str(tmp_path / "Old.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "standalone",
+                    # No output_path_template field.
+                },
+            },
+        }
+        index_path = plugin._templates_dir / "index.json"
+        index_path.write_text(json.dumps(legacy_index))
+        plugin._load_persisted_index()
+        loaded = plugin._template_index.get("Old.tpl")
+        assert loaded is not None
+        # Default to empty string — same semantics as no-directive.
+        assert loaded.output_path_template == ""

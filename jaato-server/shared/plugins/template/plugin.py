@@ -112,6 +112,17 @@ class TemplateIndexEntry:
     origin: str = "embedded"  # "embedded" or "standalone"
     tags: List[str] = field(default_factory=list)
     description: str = ""
+    # Optional ``// Output: <path-with-{{vars}}>`` directive extracted
+    # from the template's first comment lines.  Captures the canonical
+    # output location declared by the template author, with Mustache
+    # placeholders intact (e.g. ``{{basePackagePath}}/domain/model/{{Entity}}.java``).
+    # When ``renderTemplateToFile`` is called without an explicit
+    # ``output_path``, this template gets substituted with the agent's
+    # ``variables`` dict and used as the destination path — eliminating
+    # the agent-invents-the-path drift class.  Empty string means no
+    # ``// Output:`` directive was found (template doesn't declare its
+    # destination, so the agent must supply ``output_path`` explicitly).
+    output_path_template: str = ""
 
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
@@ -414,6 +425,11 @@ class TemplatePlugin:
                     origin=entry_data.get("origin", "standalone"),
                     tags=entry_data.get("tags", []),
                     description=entry_data.get("description") or entry_data.get("display_name", ""),
+                    # Default to "" when missing so older index.json files
+                    # (pre-0.6.34) load cleanly and the field is treated as
+                    # "no declared output path" — falling back to the
+                    # agent-provided ``output_path`` like before.
+                    output_path_template=entry_data.get("output_path_template", ""),
                 )
                 loaded += 1
             if loaded:
@@ -524,7 +540,15 @@ class TemplatePlugin:
                     "properties": {
                         "output_path": {
                             "type": "string",
-                            "description": "Path where rendered content will be written."
+                            "description": (
+                                "OPTIONAL — defaults to the template's declared "
+                                "// Output: directive (substituted with your `variables`). "
+                                "When using `template_name`, omit this field unless you "
+                                "specifically need to redirect the output away from the "
+                                "template's canonical location. When using inline `template` "
+                                "OR when the template has no `// Output:` directive, you must "
+                                "supply this. NEVER include unsubstituted `{` or `}` placeholders."
+                            )
                         },
                         "template_name": {
                             "type": "string",
@@ -544,7 +568,7 @@ class TemplatePlugin:
                             "description": "Allow overwriting existing file. Default is false."
                         }
                     },
-                    "required": ["output_path", "variables"]
+                    "required": ["variables"]
                 },
                 category="code",
                 discoverability="discoverable",
@@ -662,10 +686,14 @@ invent variable names - use the ones shown in the annotation.
 
 ### TEMPLATE TOOLS:
 
-**renderTemplateToFile(output_path, template_name, variables)** - PREFERRED tool for file generation
+**renderTemplateToFile(template_name, variables, output_path=optional)** - PREFERRED tool for file generation
   - template_name: Use the template **name** from the annotation (e.g., "Entity.java.tpl")
   - The system resolves the name to the actual file location via the template index
   - Use the EXACT variable names from the template annotation
+  - **output_path is OPTIONAL** when the template declares a `// Output:` directive at the top:
+    the framework substitutes `{{vars}}` in the directive with your `variables` and uses
+    that as the destination. Omit `output_path` for kb-faithful paths.
+  - Override `output_path` only when downstream tooling needs the file at a different location
   - Automatically creates parent directories - NO mkdir needed!
   - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
   - Checks if file exists (use overwrite=true to replace)
@@ -694,30 +722,45 @@ cli_based_tool: mkdir -p src/main/java/{{package}}/domain/{model,service}
 renderTemplateToFile: ...
 ```
 
-**CORRECT approach:**
+**CORRECT approach (preferred — let the template declare its path):**
 ```
-# Just call renderTemplateToFile for each file - directories are created automatically
+# Most templates declare their output path on a `// Output:` line at the top.
+# Omit output_path and the framework substitutes the directive with your variables.
 renderTemplateToFile(
-    output_path="customer-service/src/main/java/com/bank/customer/domain/model/Customer.java",
     template_name="Entity.java.tpl",
-    variables={"Entity": "Customer", "basePackage": "com.bank.customer"}
+    variables={"Entity": "Customer", "basePackage": "com.bank.customer", "basePackagePath": "com/bank/customer"}
+)
+# Resulting file lands at the template-declared path with {{vars}} substituted.
+```
+
+**Override only when needed (downstream tooling redirects):**
+```
+renderTemplateToFile(
+    template_name="Entity.java.tpl",
+    variables={"Entity": "Customer", "basePackage": "com.bank.customer"},
+    output_path="custom/redirected/path/Customer.java"
 )
 ```
 
 ### File Path Rules
 
-1. **output_path must be a CONCRETE path** - all variables must be substituted BEFORE calling the tool
-2. **NEVER include `{` or `}` in output_path** - these are for template CONTENT only, not file paths
-3. **NEVER use shell brace expansion** like `{model,service,repository}` in paths
-4. **Generate ONE file at a time** - call renderTemplateToFile once per output file
+1. **Prefer omitting output_path** — let the template's `// Output:` directive drive
+   the destination.  Use `listAvailableTemplates` to see each template's
+   `output_path_template`.
+2. **When you DO supply output_path**, all variables must be substituted BEFORE calling
+3. **NEVER include unsubstituted `{` or `}` in output_path** — those are for template
+   CONTENT only.  If you see them in your computed path, you forgot to substitute.
+4. **NEVER use shell brace expansion** like `{model,service,repository}` in paths
+5. **Generate ONE file at a time** — call renderTemplateToFile once per output file
 
-**Example - Generating multiple files:**
+**Example - Generating multiple files (preferred form):**
 ```
-# For each entity, call renderTemplateToFile with concrete paths:
-renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/model/Customer.java", ...)
-renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/model/CustomerId.java", ...)
-renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/service/CustomerDomainService.java", ...)
-renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/repository/CustomerRepository.java", ...)
+# Each template declares its own output path; just supply variables and the
+# framework places each file at the kb-author's canonical location.
+renderTemplateToFile(template_name="Entity.java.tpl", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_name="EntityId.java.tpl", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_name="DomainService.java.tpl", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_name="Repository.java.tpl", variables={"Entity": "Customer", ...})
 ```
 
 ### Template Priority Rule (PREREQUISITE FOR FILE TOOLS)
@@ -1233,15 +1276,19 @@ Template rendering writes files to the workspace."""
         for content_hash, template_path, variables in extracted:
             index_name = template_path.name
             if index_name not in self._template_index:
-                syntax = self._detect_template_syntax(
-                    template_path.read_text(encoding="utf-8") if template_path.exists() else ""
+                content = (
+                    template_path.read_text(encoding="utf-8")
+                    if template_path.exists() else ""
                 )
+                syntax = self._detect_template_syntax(content)
+                output_path_template = self._extract_output_path_template(content)
                 self._template_index[index_name] = TemplateIndexEntry(
                     name=index_name,
                     source_path=str(template_path),
                     syntax=syntax,
                     variables=variables,
                     origin="embedded",
+                    output_path_template=output_path_template,
                 )
 
         # Persist the unified index to disk
@@ -1368,6 +1415,7 @@ Template rendering writes files to the workspace."""
 
             syntax = self._detect_template_syntax(content)
             variables = self._extract_variables(content)
+            output_path_template = self._extract_output_path_template(content)
 
             entry = TemplateIndexEntry(
                 name=index_name,
@@ -1375,9 +1423,13 @@ Template rendering writes files to the workspace."""
                 syntax=syntax,
                 variables=variables,
                 origin="standalone",
+                output_path_template=output_path_template,
             )
             entries.append(entry)
-            self._trace(f"  discovered: {index_name} ({syntax}, {len(variables)} vars)")
+            self._trace(
+                f"  discovered: {index_name} ({syntax}, {len(variables)} vars, "
+                f"output={output_path_template or '<none>'})"
+            )
 
         return entries
 
@@ -1688,6 +1740,59 @@ Template rendering writes files to the workspace."""
             Content with ``@generated`` lines removed.
         """
         return _GENERATED_ANNOTATION_RE.sub('', content)
+
+    # Match ``// Output: <path>`` line.  Tolerant of leading whitespace,
+    # variable spacing around the colon, and trailing whitespace.
+    # Stops at first newline; the path itself may contain ``{{...}}``
+    # placeholders which we keep intact for substitution at render time.
+    _OUTPUT_DIRECTIVE_RE = re.compile(
+        r'^\s*//\s*Output\s*:\s*(\S.*?)\s*$', re.MULTILINE,
+    )
+
+    def _extract_output_path_template(self, content: str) -> str:
+        """Extract the ``// Output: <path>`` directive from template content.
+
+        Templates declare their canonical output location on a comment
+        line near the top, e.g.::
+
+            // Output: {{basePackagePath}}/domain/model/{{Entity}}.java
+
+        The directive is the kb-author's source of truth for where each
+        rendered file belongs.  Capturing it here lets
+        ``renderTemplateToFile`` default to the declared path when the
+        agent doesn't supply one — eliminating the agent-invents-the-
+        path drift class observed in kb-enablement-2.0 chunk-1 v16.
+
+        Returns the path string with ``{{var}}`` placeholders intact, or
+        empty string if no directive is present.  Only the FIRST
+        directive is returned (templates with multiple ``// Output:``
+        lines indicate an authoring error; we ignore the extras silently
+        rather than concatenate or list them).
+
+        Scope decisions:
+
+        - Only the ``//`` host-comment style is recognised.  Mustache's
+          native ``{{! ... }}`` comment is not matched because it gets
+          stripped by Mustache itself before the agent sees it; the
+          ``// Output:`` line on the other hand renders into the output
+          file as a literal comment unless explicitly stripped.
+        - Block comments (``/* ... */``) are not scanned: in the kb-
+          enablement-2.0 corpus the directive convention is exclusively
+          single-line ``//``.  If a future template-set adopts block
+          comment style for the directive, extend the regex then.
+        - The path may be relative or absolute; rendering resolves
+          relative paths against ``self._base_path`` already (the same
+          path resolution used when the agent supplies ``output_path``).
+
+        Args:
+            content: Template content string.
+
+        Returns:
+            The path-template string (possibly with ``{{...}}``
+            placeholders), or empty string if no directive found.
+        """
+        match = self._OUTPUT_DIRECTIVE_RE.search(content)
+        return match.group(1) if match else ""
 
     def _extract_variables(self, content: str) -> List[str]:
         """Extract variable names from template content.
@@ -2226,6 +2331,12 @@ Template rendering writes files to the workspace."""
                 "variables": entry.variables,
                 "source_path": display_path,
                 "exists": exists,
+                # Surface the template-declared canonical output path
+                # so the agent has visibility for narration/diagnostic.
+                # When non-empty, ``renderTemplateToFile`` defaults to
+                # this (substituted with the agent's ``variables``) when
+                # ``output_path`` isn't supplied — see the tool schema.
+                "output_path_template": entry.output_path_template,
             })
 
         # Sort: standalone first (they're the primary templates), then embedded
@@ -2441,6 +2552,14 @@ Template rendering writes files to the workspace."""
 
         Renders a template and writes the result to a file.
         Supports both Jinja2 and Mustache template syntax (auto-detected).
+
+        ``output_path`` is OPTIONAL when ``template_name`` is supplied
+        AND the template declares a ``// Output: <path>`` directive at
+        the top.  In that case the directive is substituted with
+        ``variables`` and used as the destination — eliminating the
+        agent-invents-the-path drift class.  When the agent does
+        supply ``output_path`` explicitly, it overrides the directive
+        (for the rare cases where downstream tooling needs to redirect).
         """
         output_path = args.get("output_path", "")
         template = args.get("template")
@@ -2448,10 +2567,8 @@ Template rendering writes files to the workspace."""
         variables = self._coerce_variables(args.get("variables"))
         overwrite = args.get("overwrite", False)
 
-        # Validation
-        if not output_path:
-            return {"error": "output_path is required"}
-
+        # Mutual-exclusion checks on template / template_name come
+        # first because they're cheaper than path resolution.
         if not template and not template_name_arg:
             return {
                 "error": "Exactly one of 'template' or 'template_name' must be provided"
@@ -2465,7 +2582,10 @@ Template rendering writes files to the workspace."""
         # Determine template source
         template_source = "inline" if template else "file"
 
-        # Load template from file if template_name provided
+        # Load template content + index entry if template_name supplied.
+        # The index entry is needed below for auto-deriving output_path
+        # from the template's ``// Output:`` directive.
+        template_entry: Optional[TemplateIndexEntry] = None
         if template_name_arg:
             resolved_path, paths_tried = self._resolve_template_path(template_name_arg)
             if resolved_path is None:
@@ -2482,6 +2602,50 @@ Template rendering writes files to the workspace."""
                     "resolved_path": str(resolved_path),
                     "template_name": template_name_arg
                 }
+            template_entry = self._template_index.get(template_name_arg)
+
+        # Auto-derive ``output_path`` when the agent didn't supply one.
+        # Resolution order:
+        # 1. Explicit ``output_path`` from the agent — used as-is (override).
+        # 2. Template's ``// Output: <path-with-{{vars}}>`` directive
+        #    captured in the index entry — substituted with ``variables``.
+        # 3. Otherwise hard-fail with a path_check validation error.
+        #
+        # Case (2) is the load-bearing change: the kb-author declares
+        # the canonical output location once on the ``// Output:`` line;
+        # the agent reads ``listAvailableTemplates`` for context but
+        # doesn't need to compute (and so cannot drift on) the path.
+        if not output_path:
+            if template_entry and template_entry.output_path_template:
+                rendered_path, render_err = self._render_template(
+                    template_entry.output_path_template, variables,
+                )
+                if render_err:
+                    return {
+                        "error": (
+                            f"Failed to substitute output_path_template "
+                            f"{template_entry.output_path_template!r}: "
+                            f"{render_err.get('error', render_err)}"
+                        ),
+                        "validation_layer": "path_check",
+                        "template_name": template_name_arg,
+                        "output_path_template": template_entry.output_path_template,
+                    }
+                output_path = rendered_path.strip()
+            else:
+                err: Dict[str, Any] = {
+                    "error": (
+                        "output_path is required when the template has no "
+                        "'// Output:' directive (or when using inline 'template'). "
+                        "Either supply output_path explicitly, or use a "
+                        "template_name pointing at a template that declares "
+                        "'// Output: <path-with-{{vars}}>' at the top."
+                    ),
+                    "validation_layer": "path_check",
+                }
+                if template_name_arg:
+                    err["template_name"] = template_name_arg
+                return err
 
         # Check if output path already exists
         out_path = Path(output_path)
