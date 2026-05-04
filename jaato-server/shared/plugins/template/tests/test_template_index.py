@@ -638,7 +638,9 @@ class TestMustacheStructuralParser:
 
     def test_section_and_inverted_section_same_name(self):
         """When a name is used as both ``{{#x}}`` and ``{{^x}}`` —
-        the section classification wins (more constrained shape).
+        the section classification wins (more constrained shape) AND
+        ``has_inverted_branch`` is set so the agent knows the else-
+        branch exists.
         """
         plugin = TemplatePlugin()
         template = "{{#items}}{{name}}{{/items}}{{^items}}empty{{/items}}"
@@ -646,6 +648,96 @@ class TestMustacheStructuralParser:
         items = next(v for v in result if v["name"] == "items")
         assert items["kind"] == "section"
         assert items["item_keys"] == ["name"]
+        assert items["has_inverted_branch"] is True
+
+    def test_triple_brace_unescaped_output(self):
+        """Mustache ``{{{x}}}`` is the unescaped-output form.  Same
+        variable as ``{{x}}`` from a structural perspective; the
+        parser must not include the inner ``{`` in the captured name.
+        """
+        plugin = TemplatePlugin()
+        template = "package {{basePackage}}; method({{{controllerSignature}}})"
+        result = plugin._parse_mustache_structure(template)
+        names = sorted(v["name"] for v in result)
+        # Critically: NOT '{controllerSignature' with a leading brace.
+        assert names == ["basePackage", "controllerSignature"]
+        assert all(v["kind"] == "scalar" for v in result)
+
+    def test_nested_section_inside_outer_iteration_is_item_key_not_top_level(self):
+        """Nested ``{{#x}}`` inside an outer iteration section is a
+        per-item field of the outer section.  It must appear in the
+        outer's ``item_keys`` AND must NOT appear as a top-level
+        section entry.
+
+        Repros the kb-enablement-2.0 RestController.java.tpl pattern
+        where ``{{#isVoid}}...{{^isVoid}}...`` inside
+        ``{{#apiEndpoints}}...{{/apiEndpoints}}`` was leaking
+        ``isVoid`` to top level.
+        """
+        plugin = TemplatePlugin()
+        template = (
+            "{{#apiEndpoints}}\n"
+            "  {{methodName}}\n"
+            "  {{#isVoid}}void{{/isVoid}}\n"
+            "  {{^isVoid}}{{returnType}}{{/isVoid}}\n"
+            "{{/apiEndpoints}}"
+        )
+        result = plugin._parse_mustache_structure(template)
+        # Top-level should be apiEndpoints ONLY — no isVoid, no
+        # methodName, no returnType.
+        top_level = sorted(v["name"] for v in result)
+        assert top_level == ["apiEndpoints"], (
+            f"top-level should be apiEndpoints only, got {top_level}"
+        )
+        # apiEndpoints' item_keys must contain isVoid (the nested
+        # section name) AND its inner refs (methodName, returnType).
+        api = result[0]
+        assert api["kind"] == "section"
+        assert "isVoid" in api["item_keys"]
+        assert "methodName" in api["item_keys"]
+        assert "returnType" in api["item_keys"]
+
+    def test_section_inner_refs_attribute_to_outermost_iteration(self):
+        """Scalar refs inside a nested boolean section attribute to
+        the OUTERMOST iteration section's item_keys, not to the
+        innermost (which is the boolean check, not the iteration).
+        """
+        plugin = TemplatePlugin()
+        # Same shape as the kb-enablement RestController template
+        # but minimal.  Inside {{#apiEndpoints}} body, references in
+        # {{#isVoid}} and {{^isVoid}} bodies should attribute to
+        # apiEndpoints.item_keys, not isVoid's.
+        template = (
+            "{{#apiEndpoints}}"
+            "{{#isVoid}}{{controllerSignature}}{{/isVoid}}"
+            "{{^isVoid}}{{returnType}} {{serviceCallArgs}}{{/isVoid}}"
+            "{{/apiEndpoints}}"
+        )
+        result = plugin._parse_mustache_structure(template)
+        top_level = sorted(v["name"] for v in result)
+        assert top_level == ["apiEndpoints"], (
+            f"inner refs leaked to top level: {top_level}"
+        )
+        api = result[0]
+        assert api["kind"] == "section"
+        # All three inner refs (regardless of the boolean section
+        # they were syntactically inside) credit to apiEndpoints.
+        for required in ("controllerSignature", "returnType", "serviceCallArgs", "isVoid"):
+            assert required in api["item_keys"], (
+                f"{required} missing from apiEndpoints.item_keys: {api['item_keys']}"
+            )
+
+    def test_section_without_inverted_has_explicit_false_flag(self):
+        """Sections without an inverted branch get
+        ``has_inverted_branch: False`` explicitly — predictable schema
+        for the agent (no missing-key surprises).
+        """
+        plugin = TemplatePlugin()
+        template = "{{#items}}{{name}}{{/items}}"
+        result = plugin._parse_mustache_structure(template)
+        items = next(v for v in result if v["name"] == "items")
+        assert items["kind"] == "section"
+        assert items["has_inverted_branch"] is False
 
     def test_top_level_scalar_not_polluted_by_section_inner(self):
         """Scalars referenced ONLY inside sections must not appear at

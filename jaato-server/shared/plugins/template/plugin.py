@@ -2453,26 +2453,49 @@ Template rendering writes files to the workspace."""
             [
               {"name": "Entity", "kind": "scalar"},
               {"name": "apiEndpoints", "kind": "section",
-               "item_keys": ["methodName", "path", "returnType"]},
+               "item_keys": ["methodName", "path", "returnType",
+                             "isVoid", ...],
+               "has_inverted_branch": false},
               {"name": "isEmpty", "kind": "inverted_section"},
             ]
 
         Kinds:
-        - ``"scalar"``: ``{{name}}`` — replaced verbatim with the value.
+        - ``"scalar"``: ``{{name}}`` or ``{{{name}}}`` — replaced
+          verbatim with the value (triple-brace == unescaped output;
+          same variable shape, normalised here so the model isn't
+          misled by escaping syntax).
         - ``"section"``: ``{{#name}}...{{/name}}`` — when ``name`` is
           a list, the body renders once per item with each item as
           context; ``item_keys`` collects the field names referenced
-          inside the body so the agent knows the inner shape required
-          for list-of-dicts use.
-        - ``"inverted_section"``: ``{{^name}}...{{/name}}`` — body
-          renders only when ``name`` is falsy/empty (no iteration);
-          inner references aren't item-keys, so we don't populate that
-          field.
+          ANYWHERE inside the iteration (incl. through nested boolean
+          sections like ``{{#item.flag}}...{{/item.flag}}``) so the
+          agent knows the full inner shape required.  When the same
+          identifier ALSO appears as ``{{^name}}`` (Mustache if/else
+          idiom), ``has_inverted_branch`` is set so the agent knows
+          there's an else-branch that fires when the value is
+          falsy/empty.
+        - ``"inverted_section"``: ``{{^name}}...{{/name}}`` —
+          standalone, body renders only when ``name`` is falsy/empty
+          (no iteration); inner references aren't item-keys.
 
-        When the same name appears as both scalar and section in the
-        same template, the section classification wins (it's the more
-        constrained shape — agents must satisfy the section contract).
+        Top-level scalars are emitted ONLY for references that occur
+        OUTSIDE any section; references inside sections become
+        item_keys of the OUTERMOST iteration section, never top-level.
+        Without this rule, deeply-nested per-item references (typical
+        ``{{#apiEndpoints}}...{{#isVoid}}...{{/isVoid}}{{^isVoid}}...
+        {{/isVoid}}...{{/apiEndpoints}}`` patterns) leaked to top
+        level, polluting the agent's variable dict.
+
+        Triple-brace ``{{{x}}}`` is normalised to ``{{x}}`` before
+        parsing — they're the same variable from a structural
+        perspective; only the render-time escaping differs.
         """
+        # Mustache triple-brace ``{{{x}}}`` is the unescaped-output
+        # form.  Structurally it's identical to ``{{x}}`` — same
+        # variable, same kind.  Normalise here so the regex below
+        # doesn't include the inner ``{`` in the captured name.
+        content = re.sub(r'\{\{\{([^}]+)\}\}\}', r'{{\1}}', content)
+
         # Match all {{...}} constructs in order so we can build a
         # section stack and attribute scalar references to their
         # enclosing sections.  Capture the optional prefix
@@ -2480,11 +2503,20 @@ Template rendering writes files to the workspace."""
         pattern = re.compile(r'\{\{([#^/!]?)([^}]+)\}\}')
 
         variables: Dict[str, Dict[str, Any]] = {}
-        # Stack of (kind, name) for currently-open sections.  Only
-        # ``section`` (not ``inverted_section``) contributes
-        # item_keys to its body's scalar references — see the
-        # docstring rationale.
+        # Stack of (kind, name) for currently-open sections.
         section_stack: List[tuple[str, str]] = []
+
+        def _outermost_iteration_section() -> Optional[str]:
+            """Return the name of the outermost ``section`` (i.e. the
+            iteration boundary), or None if not inside any section.
+            Used to attribute scalar references and nested-section
+            names to the iteration that produces them — never to the
+            inner boolean-check sections.
+            """
+            for kind, name in section_stack:
+                if kind == "section":
+                    return name
+            return None
 
         for match in pattern.finditer(content):
             prefix = match.group(1)
@@ -2496,62 +2528,99 @@ Template rendering writes files to the workspace."""
             if name in ('.', 'this'):
                 continue
 
+            # Helper: when we encounter ANY identifier inside a
+            # section (whether scalar reference or nested section
+            # marker), credit it to the OUTERMOST iteration section's
+            # item_keys.  Without this, a nested ``{{#isVoid}}`` body
+            # attributes its inner refs to ``isVoid`` instead of to
+            # ``apiEndpoints``, and the inner refs leak to top-level.
+            outer_iter = _outermost_iteration_section()
+
             if prefix == '#':
-                # Opening section.  Promote scalar → section if it
-                # was already seen as a scalar; the constrained shape
-                # wins.
-                entry = variables.setdefault(
-                    name, {"name": name, "kind": "section", "item_keys": set()},
-                )
-                if entry["kind"] == "scalar":
-                    entry["kind"] = "section"
-                    entry.setdefault("item_keys", set())
+                # Opening section.  Two cases:
+                # - At top level (no outer iteration): register as a
+                #   top-level section variable.
+                # - Nested inside an outer iteration: this section's
+                #   identifier is a per-item field of the outer
+                #   iteration (e.g. ``isVoid`` inside ``apiEndpoints``).
+                #   Credit to outer.item_keys; do NOT create a
+                #   top-level entry.  Nested-section identifiers are
+                #   provided as fields on each list-item dict, never
+                #   at the top of the variables dict.
+                if outer_iter is None or outer_iter == name:
+                    entry = variables.get(name)
+                    if entry is None:
+                        variables[name] = {
+                            "name": name, "kind": "section", "item_keys": set(),
+                        }
+                    elif entry["kind"] == "scalar":
+                        # Promote: section is more constrained.
+                        entry["kind"] = "section"
+                        entry.setdefault("item_keys", set())
+                    elif entry["kind"] == "inverted_section":
+                        # Mustache if/else with the same identifier,
+                        # encountered ^ first then # — promote to
+                        # section AND mark inverted branch exists.
+                        entry["kind"] = "section"
+                        entry.setdefault("item_keys", set())
+                        entry["has_inverted_branch"] = True
+                    # else: already a section; idempotent.
+                else:
+                    # Nested inside outer iteration: credit only as
+                    # an item-key of outer.  No top-level entry.
+                    outer_entry = variables.get(outer_iter)
+                    if outer_entry and outer_entry["kind"] == "section":
+                        outer_entry["item_keys"].add(name)
                 section_stack.append(("section", name))
             elif prefix == '^':
-                # Opening inverted section.
-                variables.setdefault(
-                    name, {"name": name, "kind": "inverted_section"},
-                )
+                # Opening inverted section.  Same nested-vs-top-level
+                # split as ``#`` — nested inverted sections credit
+                # only as item_keys of outer.
+                if outer_iter is None or outer_iter == name:
+                    entry = variables.get(name)
+                    if entry is None:
+                        variables[name] = {
+                            "name": name, "kind": "inverted_section",
+                        }
+                    elif entry["kind"] == "section":
+                        # Mustache if/else, # encountered first then
+                        # ^ — mark inverted branch alongside section.
+                        entry["has_inverted_branch"] = True
+                    # else: already inverted_section or scalar; leave.
+                else:
+                    # Nested inverted: credit only as item-key.
+                    outer_entry = variables.get(outer_iter)
+                    if outer_entry and outer_entry["kind"] == "section":
+                        outer_entry["item_keys"].add(name)
                 section_stack.append(("inverted_section", name))
             elif prefix == '/':
-                # Closing marker — pop the matching open section.  In
-                # well-formed templates the top of stack matches; in
-                # malformed templates we leave the stack alone rather
-                # than guess.
+                # Closing marker — pop the matching open section.
                 if section_stack and section_stack[-1][1] == name:
                     section_stack.pop()
             else:
-                # Scalar reference.  Two distinct cases:
-                # - Referenced OUTSIDE any section → top-level scalar
-                #   (the agent must provide the value at the top of
-                #   the variables dict).
-                # - Referenced INSIDE a ``section`` → item-key of
-                #   that section.  NOT also a top-level scalar (the
-                #   agent provides the value as a field on each list
-                #   item dict).
-                # If a name appears both inside-and-outside, it gets
-                # both: the top-level entry and the item-key entry.
+                # Scalar reference.  Three cases:
+                # - Inside any section: credit the outermost
+                #   iteration section's item_keys; do NOT add as
+                #   top-level scalar.
+                # - Outside all sections: top-level scalar.
+                # - Inside an inverted-only section (no outer
+                #   iteration): top-level scalar (the inverted
+                #   block runs in the parent context, so refs are
+                #   parent-scope variables).
                 if section_stack:
-                    outer_kind, outer_name = section_stack[-1]
-                    if outer_kind == "section" and outer_name != name:
-                        outer_entry = variables.get(outer_name)
+                    if outer_iter and outer_iter != name:
+                        outer_entry = variables.get(outer_iter)
                         if outer_entry and outer_entry["kind"] == "section":
-                            # Leftmost token of dotted paths so
-                            # ``item.foo.bar`` records ``item`` —
-                            # the implicit item field.
+                            # Leftmost token of dotted paths.
                             item_key = name.split(".")[0] if "." in name else name
                             outer_entry["item_keys"].add(item_key)
-                    elif outer_kind == "inverted_section":
-                        # References inside an inverted section are
-                        # NOT item-keys (no iteration); they're
-                        # outer-scope scalars only meaningful when
-                        # the inverted condition fires.  Treat as
-                        # top-level scalars.
+                    else:
+                        # Inside inverted-only sections: parent-scope
+                        # scalar.
                         variables.setdefault(
                             name, {"name": name, "kind": "scalar"},
                         )
                 else:
-                    # Outside any section: top-level scalar.
                     variables.setdefault(name, {"name": name, "kind": "scalar"})
 
         # Convert sets to sorted lists for stable output.
@@ -2560,6 +2629,11 @@ Template rendering writes files to the workspace."""
             entry = variables[name].copy()
             if "item_keys" in entry:
                 entry["item_keys"] = sorted(list(entry["item_keys"]))
+            # has_inverted_branch defaults to False on sections that
+            # don't have an inverted form — explicit False rather
+            # than missing key keeps the schema predictable.
+            if entry["kind"] == "section":
+                entry.setdefault("has_inverted_branch", False)
             result.append(entry)
         return result
 
