@@ -3606,3 +3606,214 @@ class TestPathRouting:
         plugin.set_config_root(None)
         out2 = plugin._apply_path_routing("a/b/X.java")
         assert out2 == "WORKSPACE_LOC/a/b/X.java"
+
+
+# ==================== Output-Directive Stripping at Render (server 0.6.41+) ====================
+
+class TestOutputDirectiveStripping:
+    """Render-time stripping of the ``// Output: <path>`` (or polyglot
+    equivalent) directive line from template content loaded from disk.
+
+    The directive is metadata declaring where the rendered file
+    belongs; leaving it in the content makes it leak into the rendered
+    file.  For Java that's harmless noise; for XML (``<?xml ?>`` must
+    be the first character) it breaks parsing.  Surfaced empirically
+    by kb-enablement-2.0 chunk-2 cascade-then-mvn-compile probe:
+    rendered ``pom.xml`` carried ``<!-- Output: pom.xml -->`` as line
+    1, Maven's XML parser rejected it.
+    """
+
+    def test_strip_java_directive_from_disk_render(self, plugin, tmp_path):
+        """End-to-end: a Java template with a ``// Output:`` first-line
+        directive renders without that line in the output file."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Entity.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/{{Entity}}.java
+            package {{basePackage}};
+            public class {{Entity}} {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Entity.java.tpl",
+            "variables": {
+                "Entity": "Customer",
+                "basePackage": "com.bank",
+                "basePackagePath": "com/bank",
+            },
+        })
+        assert result.get("success") is True, result
+        rendered = (
+            plugin._base_path / "com/bank/Customer.java"
+        ).read_text()
+        # The directive line must NOT appear in rendered content.
+        assert "Output:" not in rendered, (
+            f"Directive leaked into rendered file:\n{rendered}"
+        )
+        # Body content IS present.
+        assert "package com.bank;" in rendered
+        assert "public class Customer" in rendered
+
+    def test_strip_xml_directive_makes_pom_valid(self, plugin, tmp_path):
+        """The chunk-2 cascade-probe repro: pom.xml.tpl with
+        ``<!-- Output: pom.xml -->`` first line renders to a pom.xml
+        that starts with ``<?xml ?>`` (Maven-parseable)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "pom.xml.tpl").write_text(textwrap.dedent("""\
+            <!-- Output: pom.xml -->
+            <?xml version="1.0" encoding="UTF-8"?>
+            <project>
+              <artifactId>{{artifactId}}</artifactId>
+            </project>
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "pom.xml.tpl",
+            "variables": {"artifactId": "my-service"},
+        })
+        assert result.get("success") is True, result
+        rendered = (plugin._base_path / "pom.xml").read_text()
+        # The XML doc must start with ``<?xml`` (no preamble).
+        assert rendered.startswith("<?xml"), (
+            f"pom.xml does not start with <?xml — directive line leaked:\n"
+            f"{rendered[:120]!r}"
+        )
+        assert "Output:" not in rendered
+        assert "my-service" in rendered
+
+    def test_strip_python_hash_directive(self, plugin, tmp_path):
+        """``# Output: <path>`` directive removed from Python source."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "script.py.tpl").write_text(textwrap.dedent("""\
+            # Output: scripts/{{name}}.py
+            import sys
+
+            def main():
+                print("{{message}}")
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "script.py.tpl",
+            "variables": {"name": "hello", "message": "hi"},
+        })
+        assert result.get("success") is True, result
+        rendered = (plugin._base_path / "scripts/hello.py").read_text()
+        assert not rendered.startswith("# Output:"), (
+            f"Python directive leaked: first line = {rendered.splitlines()[0]!r}"
+        )
+        assert rendered.startswith("import sys"), (
+            f"Strip should remove directive AND immediately following blank line; "
+            f"got: {rendered[:80]!r}"
+        )
+
+    def test_strip_yaml_directive(self, plugin, tmp_path):
+        """``# Output: <path>`` removed from YAML — application.yml etc."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "application.yml.tpl").write_text(textwrap.dedent("""\
+            # Output: src/main/resources/application.yml
+            spring:
+              application:
+                name: {{appName}}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "application.yml.tpl",
+            "variables": {"appName": "demo"},
+        })
+        assert result.get("success") is True, result
+        rendered = (
+            plugin._base_path / "src/main/resources/application.yml"
+        ).read_text()
+        assert "Output:" not in rendered
+        assert rendered.startswith("spring:")
+
+    def test_strip_helper_no_directive_is_noop(self, plugin):
+        """Templates without a directive return unchanged."""
+        content = "package com.x;\npublic class Foo {}\n"
+        assert plugin._strip_output_directive(
+            content, filename="Foo.java.tpl",
+        ) == content
+
+    def test_strip_helper_first_match_only(self, plugin):
+        """Multiple ``Output:`` lines (authoring error) — only the
+        first is stripped.  Mirrors the extractor's first-match
+        behavior; second occurrence stays as a literal comment in
+        the rendered output (compiles for Java, survives as text
+        elsewhere — kb author's bug to fix)."""
+        content = (
+            "// Output: first.java\n"
+            "// Output: second.java\n"
+            "class Foo {}\n"
+        )
+        out = plugin._strip_output_directive(content, filename="Foo.java.tpl")
+        assert "first.java" not in out
+        assert "second.java" in out
+
+    def test_strip_helper_universal_fallback_for_unknown_extension(
+        self, plugin
+    ):
+        """Templates with no recognised extension (Dockerfile.tpl,
+        Makefile.tpl) — universal scan finds the directive."""
+        content = "# Output: Dockerfile\nFROM alpine\n"
+        out = plugin._strip_output_directive(
+            content, filename="Dockerfile.tpl",
+        )
+        assert "Output:" not in out
+        assert out.startswith("FROM alpine")
+
+    def test_inline_template_directive_NOT_stripped(self, plugin, tmp_path):
+        """Inline templates (passed via the ``template`` arg) skip
+        the strip — agent owns inline content shape."""
+        result = plugin._execute_render_template_to_file({
+            "template": (
+                "// Output: ignored\n"
+                "package x;\n"
+            ),
+            "variables": {},
+            "output_path": str(plugin._base_path / "out.txt"),
+        })
+        assert result.get("success") is True, result
+        rendered = (plugin._base_path / "out.txt").read_text()
+        # Directive line is still present — agent passed it inline,
+        # framework respects the inline content verbatim.
+        assert "Output:" in rendered
+
+    def test_strip_handles_directive_not_on_line_one(self, plugin):
+        """Directive on a non-first line (e.g. after a shebang) is
+        still stripped; surrounding content shape preserved."""
+        content = (
+            "#!/usr/bin/env python\n"
+            "# Output: scripts/{{name}}.py\n"
+            "import sys\n"
+        )
+        out = plugin._strip_output_directive(
+            content, filename="script.py.tpl",
+        )
+        assert "Output:" not in out
+        # Shebang preserved
+        assert out.startswith("#!/usr/bin/env python\n")
+        # Body still present, no double-blank
+        assert "import sys" in out
+
+    def test_strip_handles_block_comment_styles(self, plugin):
+        """``<!-- ... -->`` and ``/* ... */`` directives stripped
+        cleanly including their close markers."""
+        # XML-style
+        xml = "<!-- Output: pom.xml -->\n<?xml version=\"1.0\"?>\n<x/>\n"
+        out = plugin._strip_output_directive(xml, filename="pom.xml.tpl")
+        assert out.startswith("<?xml")
+        # CSS-style
+        css = "/* Output: dist/styles.css */\nbody { color: red; }\n"
+        out = plugin._strip_output_directive(css, filename="styles.css.tpl")
+        assert out.startswith("body {")

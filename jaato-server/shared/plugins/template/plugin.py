@@ -1979,6 +1979,14 @@ Template rendering writes files to the workspace."""
         stripped non-greedily from the captured path so directives like
         ``<!-- Output: pom.xml -->`` and ``/* Output: foo.css */``
         capture only ``pom.xml`` / ``foo.css``.
+
+        Match span includes the optional trailing newline (server
+        0.6.41+) so the same regex serves both extraction (uses
+        ``match.group(1)`` — newline irrelevant) and stripping (uses
+        ``regex.subn(...)`` — newline must be consumed to remove the
+        whole line cleanly).  Behavior of existing extraction
+        callers is unchanged: they read the captured group, not the
+        match span.
         """
         # Escape the prefix for regex; close-marker handling depends on
         # whether the prefix is block-style.
@@ -1989,7 +1997,7 @@ Template rendering writes files to the workspace."""
         else:
             closer = r'\s*'  # line-style: no closer to match
         return re.compile(
-            rf'^\s*{re.escape(prefix)}\s*Output\s*:\s*(\S.*?){closer}$',
+            rf'^\s*{re.escape(prefix)}\s*Output\s*:\s*(\S.*?){closer}$\n?',
             re.MULTILINE,
         )
 
@@ -2137,6 +2145,78 @@ Template rendering writes files to the workspace."""
             if match:
                 return match.group(1).strip()
         return ""
+
+    def _strip_output_directive(
+        self, content: str, filename: Optional[str] = None,
+    ) -> str:
+        """Remove the ``Output: <path>`` directive line from template
+        content — server 0.6.41+.
+
+        The directive is **metadata** (declares where the rendered
+        file belongs); when the framework reads template content from
+        disk and renders it, the directive line would otherwise leak
+        into the rendered output.  For Java that's harmless noise
+        (the line is a valid ``// Output: ...`` comment).  For XML it
+        breaks parsing — the XML spec requires ``<?xml ?>`` to be the
+        first character in the document, before any whitespace or
+        comments, and a ``<!-- Output: pom.xml -->`` preamble violates
+        that.  Other formats with strict-header rules face similar
+        problems.
+
+        Strategy mirrors ``_extract_output_path_template``:
+
+        1. **Extension-keyed dispatch** [primary]: when ``filename``
+           is supplied AND its inner extension is in
+           ``_COMMENT_PREFIX_BY_EXT``, build the directive regex for
+           that comment style and remove the first match (with its
+           trailing newline — see ``_build_directive_regex``).
+        2. **Universal multi-prefix scan** [fallback]: try each known
+           prefix in most-specific-first order; first match wins.
+
+        After successful removal, also strips a single immediately-
+        following blank line (common kb convention: directive on
+        line 1, blank line, then content).  Any remaining structure
+        is preserved.
+
+        Returns the stripped content.  When no directive is matched,
+        returns the input unchanged — full back-compat for templates
+        without a directive (e.g. kb-omissions handled via index
+        override, where the directive lives only in the index entry's
+        ``output_path_template`` field).
+
+        Used by ``_execute_render_template_to_file`` after loading
+        content from ``template_name``'s resolved source path.
+        Inline templates (passed via the ``template`` arg) skip this
+        path — the agent has full control over inline content shape.
+        """
+        # Extension-keyed dispatch
+        if filename:
+            stem = filename
+            for tpl_suffix in ('.tpl', '.tmpl'):
+                if stem.endswith(tpl_suffix):
+                    stem = stem[:-len(tpl_suffix)]
+                    break
+            inner_ext = Path(stem).suffix.lower()
+            prefix = self._COMMENT_PREFIX_BY_EXT.get(inner_ext)
+            if prefix is not None:
+                regex = self._build_directive_regex(prefix)
+                new_content, count = regex.subn('', content, count=1)
+                if count > 0:
+                    # Strip a single immediately-following blank line
+                    # if the kb's convention left one.
+                    if new_content.startswith('\n'):
+                        new_content = new_content[1:]
+                    return new_content
+
+        # Universal fallback
+        for prefix in self._UNIVERSAL_PREFIXES:
+            regex = self._build_directive_regex(prefix)
+            new_content, count = regex.subn('', content, count=1)
+            if count > 0:
+                if new_content.startswith('\n'):
+                    new_content = new_content[1:]
+                return new_content
+        return content
 
     def _extract_variables(self, content: str) -> List[str]:
         """Extract variable names from template content.
@@ -3063,6 +3143,18 @@ Template rendering writes files to the workspace."""
                     "template_name": template_name_arg
                 }
             template_entry = self._template_index.get(template_name_arg)
+            # Strip the ``// Output: ...`` (or polyglot equivalent)
+            # directive line from the loaded content — server 0.6.41+.
+            # The directive is metadata declaring where the rendered
+            # file belongs; leaving it in the content makes it leak
+            # into the rendered file.  For Java that's harmless noise;
+            # for XML (``<?xml ?>`` must be the first character) it
+            # breaks parsing.  Inline templates (passed via the
+            # ``template`` arg) skip this path — the agent owns inline
+            # content shape.  See ``_strip_output_directive`` docstring.
+            template = self._strip_output_directive(
+                template, filename=template_name_arg,
+            )
 
         # Auto-derive ``output_path`` when the agent didn't supply one.
         # Resolution order:
