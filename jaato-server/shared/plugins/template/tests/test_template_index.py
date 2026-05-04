@@ -3011,3 +3011,187 @@ class TestResolvedOutputPathValidation:
         assert (
             plugin._base_path / "com/bank/domain/model/Customer.java"
         ).exists()
+
+
+# ==================== Handlebars Helper Recognition (server 0.6.38+) ====================
+
+class TestHandlebarsHelperParsing:
+    """Mustache parser recognises Handlebars helpers
+    (``{{#if cond}}``, ``{{#unless cond}}``, ``{{#each xs}}``,
+    ``{{#with x}}``) and unwraps them to the bare argument when
+    populating ``item_keys``.  Iteration-metadata identifiers
+    (``@first``, ``@last``, ``@index``, ``@key``) are filtered.
+
+    Surfaced empirically by kb-enablement-2.0 chunk-1 v22 run 4: agent
+    literally created dict items with keys named ``\"if validation.maxLength\"``
+    (with the keyword prefix glued in) because that's what
+    listTemplateVariables reported.  Pre-fix, item_keys carried the
+    keyword-prefixed strings, the agent built shape-mismatched dicts,
+    pybars3's helper-resolution path failed silently, different runs
+    produced different rendered bytes.
+    """
+
+    def test_if_helper_unwraps_to_argument(self, plugin):
+        """``{{#if required}}`` inside ``{{#fields}}`` should add
+        ``required`` to fields' item_keys, NOT ``\"if required\"``."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+            {{#if required}} @NotNull {{/if}}
+            {{name}}
+            {{/fields}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        assert "fields" in by_name
+        item_keys = by_name["fields"]["item_keys"]
+        assert "required" in item_keys
+        assert "if required" not in item_keys
+        assert "name" in item_keys
+
+    def test_unless_helper_unwraps_to_argument(self, plugin):
+        """``{{#unless x}}`` adds ``x`` (not ``\"unless x\"``)."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+            {{name}}{{#unless last}}, {{/unless}}
+            {{/fields}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        item_keys = by_name["fields"]["item_keys"]
+        assert "last" in item_keys
+        assert "unless last" not in item_keys
+
+    def test_iteration_metadata_filtered(self, plugin):
+        """``{{#unless @last}}`` should NOT add ``@last`` to item_keys —
+        ``@last`` is engine-populated iteration metadata, never
+        user-provided."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+            {{name}}{{#unless @last}}, {{/unless}}
+            {{/fields}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        item_keys = by_name["fields"]["item_keys"]
+        assert "@last" not in item_keys
+        assert "unless @last" not in item_keys
+        assert "name" in item_keys
+
+    def test_dotted_helper_argument_takes_leftmost_token(self, plugin):
+        """``{{#if validation.maxLength}}`` adds ``validation`` to
+        item_keys (not ``\"validation.maxLength\"``, not
+        ``\"if validation.maxLength\"``)."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+            {{name}}
+            {{#if validation.maxLength}}@Size(max={{validation.maxLength}}){{/if}}
+            {{/fields}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        item_keys = by_name["fields"]["item_keys"]
+        assert "validation" in item_keys
+        assert "validation.maxLength" not in item_keys
+        assert "if validation.maxLength" not in item_keys
+
+    def test_each_helper_creates_iteration_section(self, plugin):
+        """``{{#each xs}}`` is structurally identical to ``{{#xs}}`` —
+        registers ``xs`` as a section variable."""
+        template = textwrap.dedent("""\
+            {{#each items}}
+            - {{name}}
+            {{/each}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        assert "items" in by_name
+        assert by_name["items"]["kind"] == "section"
+        assert "name" in by_name["items"]["item_keys"]
+        assert "each items" not in by_name
+
+    def test_v22_run4_repro_create_request(self, plugin):
+        """Reproduces the chunk-1 v22 run-4 outlier: parsing the
+        observed CreateRequest.java.tpl shape should yield clean
+        item_keys (fieldName, type, validation, required, last) —
+        NOT the keyword-prefixed mess pre-fix.
+        """
+        template = textwrap.dedent("""\
+            public class CreateRequest {
+            {{#fields}}
+              {{#if required}}@NotNull{{/if}}
+              {{#if validation.maxLength}}@Size(max={{validation.maxLength}}){{/if}}
+              {{#if validation.email}}@Email{{/if}}
+              {{#if validation.pattern}}@Pattern{{/if}}
+              private {{type}} {{fieldName}};{{#unless @last}},{{/unless}}
+            {{/fields}}
+            }
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        assert "fields" in by_name
+        item_keys = set(by_name["fields"]["item_keys"])
+        # All the bare context refs that should be there:
+        assert "fieldName" in item_keys
+        assert "type" in item_keys
+        assert "required" in item_keys
+        assert "validation" in item_keys  # leftmost of validation.maxLength etc.
+        # None of the keyword-prefixed leakage:
+        assert not any("if " in k or "unless " in k for k in item_keys), (
+            f"Helper-keyword leakage in item_keys: {item_keys}"
+        )
+        assert not any(k.startswith("@") for k in item_keys), (
+            f"Iteration-metadata leakage in item_keys: {item_keys}"
+        )
+
+    def test_with_helper_unwraps_to_argument(self, plugin):
+        """``{{#with profile}}`` is rare but supported — argument is
+        a context-narrowing reference, treat as scalar lookup."""
+        template = textwrap.dedent("""\
+            {{#with user}}
+            {{name}} {{email}}
+            {{/with}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        # ``user`` registered as scalar (with-narrowing); ``name`` /
+        # ``email`` are top-level since ``with`` doesn't iterate.
+        assert "user" in by_name
+        assert by_name["user"]["kind"] == "scalar"
+        assert "with user" not in by_name
+
+    def test_bare_if_section_without_argument_unaffected(self, plugin):
+        """``{{#if}}...{{/if}}`` with no argument is a Mustache section
+        named literally ``if`` — kb-author choice; we don't reinterpret
+        it as a helper.  Only invocations WITH an argument get the
+        helper unwrapping treatment."""
+        template = textwrap.dedent("""\
+            {{#if}}body{{/if}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        # Bare ``{{#if}}`` falls through to the regular section path —
+        # registers ``if`` as a section variable.
+        assert "if" in by_name
+        assert by_name["if"]["kind"] == "section"
+
+    def test_helper_close_pops_correctly(self, plugin):
+        """``{{#if x}}...{{/if}}`` close should pop cleanly without
+        leaving the section stack imbalanced (which would corrupt
+        outer-iteration tracking for subsequent tags)."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+            {{#if required}}A{{/if}}
+            {{name}}
+            {{/fields}}
+            {{topLevel}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        # ``topLevel`` after the {{/fields}} close should be a TOP-LEVEL
+        # scalar (not an item_key of fields).  If the helper close
+        # didn't pop properly, the stack would still have the helper
+        # frame, outer_iter would still resolve to fields, and
+        # topLevel would leak into fields' item_keys.
+        assert "topLevel" in by_name
+        assert by_name["topLevel"]["kind"] == "scalar"
+        assert "topLevel" not in by_name["fields"]["item_keys"]

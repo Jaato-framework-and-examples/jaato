@@ -3302,7 +3302,10 @@ Template rendering writes files to the workspace."""
 
         variables: Dict[str, Dict[str, Any]] = {}
         # Stack of (kind, name) for currently-open sections.
-        section_stack: List[tuple[str, str]] = []
+        # 3-tuple frames: (kind, name, close_marker).  See
+        # ``_outermost_iteration_section`` docstring for kinds and
+        # the helper-handling branches below for close_marker semantics.
+        section_stack: List[tuple[str, str, str]] = []
 
         def _outermost_iteration_section() -> Optional[str]:
             """Return the name of the outermost ``section`` (i.e. the
@@ -3310,10 +3313,53 @@ Template rendering writes files to the workspace."""
             Used to attribute scalar references and nested-section
             names to the iteration that produces them — never to the
             inner boolean-check sections.
+
+            Stack frames are 3-tuples ``(kind, name, close_marker)``
+            since 0.6.38; helper frames have kind=``"helper"`` and
+            are skipped here so iteration tracking ignores
+            ``{{#if x}}`` etc.  ``each``-opened section frames have
+            kind=``"section"`` (so they DO count as iteration
+            boundaries) but with close_marker=``"each"``.
             """
-            for kind, name in section_stack:
+            for frame in section_stack:
+                kind = frame[0]
+                name = frame[1]
                 if kind == "section":
                     return name
+            return None
+
+        # Handlebars helper keywords + iteration-metadata identifiers
+        # (server 0.6.38+).  pybars3 supports Handlebars helpers
+        # ({{#if cond}}, {{#unless cond}}, {{#each xs}}, {{#with x}})
+        # and iteration metadata (@first, @last, @index, @key) which
+        # the Mustache-strict regex above captures naively, leaking
+        # keyword-prefixed identifiers ("if required", "unless @last")
+        # into item_keys.  Surfaced empirically by chunk-1 v22 run 4
+        # where the agent literally created dict keys named
+        # "if validation.maxLength" because that's what
+        # listTemplateVariables reported.  Recognise the helpers here
+        # and unwrap to the bare argument; filter metadata entirely.
+        HELPER_KEYWORDS = {'if', 'unless', 'each', 'with', 'lookup'}
+        # Iteration-metadata: identifiers populated by the engine,
+        # never user-provided.  Skip whenever they appear (whether as
+        # a helper argument or a standalone ref).
+        ITERATION_METADATA = {'@first', '@last', '@index', '@key', 'this', '.'}
+
+        def _looks_like_helper(name_str: str) -> Optional[Tuple[str, str]]:
+            """If ``name_str`` is a helper invocation (e.g. ``"if x"``,
+            ``"unless validation.maxLength"``), return ``(keyword, arg)``.
+            Otherwise return None.
+
+            Matches when:
+            - The first space-delimited token is a known helper keyword.
+            - There IS a second token (no bare ``"if"`` — that would be
+              a Mustache section named "if", a kb-author choice).
+            """
+            if ' ' not in name_str:
+                return None
+            kw, _, arg = name_str.partition(' ')
+            if kw in HELPER_KEYWORDS and arg.strip():
+                return kw, arg.strip()
             return None
 
         for match in pattern.finditer(content):
@@ -3323,16 +3369,106 @@ Template rendering writes files to the workspace."""
             # Skip Mustache comments and current-context markers.
             if prefix == '!':
                 continue
-            if name in ('.', 'this'):
+            if name in ITERATION_METADATA:
+                # Plain ``{{@last}}`` etc. — engine populates these.
                 continue
 
-            # Helper: when we encounter ANY identifier inside a
-            # section (whether scalar reference or nested section
-            # marker), credit it to the OUTERMOST iteration section's
-            # item_keys.  Without this, a nested ``{{#isVoid}}`` body
-            # attributes its inner refs to ``isVoid`` instead of to
-            # ``apiEndpoints``, and the inner refs leak to top-level.
             outer_iter = _outermost_iteration_section()
+
+            # Handlebars helper detection — runs before the prefix
+            # dispatch.  Three cases by prefix:
+            #
+            # - ``#``/``^`` with a helper invocation: register the
+            #   helper's ARGUMENT as the relevant variable (item_key
+            #   when nested, top-level scalar/section when not), then
+            #   push a synthetic ``("helper", <keyword>)`` frame on
+            #   the section stack so the matching ``{{/keyword}}``
+            #   close can pop cleanly.
+            # - ``/`` of a helper keyword: pop the helper frame.
+            #   ({{/if}} doesn't match ``"if X"`` literally — without
+            #   this branch the close would silently fail and the
+            #   stack would stay imbalanced.)
+            # - No prefix with a helper-shaped name: not real (would
+            #   be ``{{if x}}`` plain interp, not valid Handlebars);
+            #   fall through to the existing scalar branch.
+            if prefix in ('#', '^'):
+                helper_match = _looks_like_helper(name)
+                if helper_match is not None:
+                    kw, arg = helper_match
+                    # Skip iteration-metadata helper arguments
+                    # (``{{#unless @last}}`` etc.).  The argument
+                    # itself is engine-populated; don't leak it as a
+                    # required item_key.
+                    if arg in ITERATION_METADATA:
+                        section_stack.append(("helper", kw, kw))
+                        continue
+                    # Leftmost token of dotted paths — same convention
+                    # as the scalar-ref branch below.
+                    arg_root = arg.split('.', 1)[0].strip()
+                    if not arg_root:
+                        section_stack.append(("helper", kw, kw))
+                        continue
+                    if kw == 'each':
+                        # ``{{#each xs}}`` is structurally an iteration
+                        # over ``xs`` — register as a section.  The
+                        # close marker is ``{{/each}}`` (not
+                        # ``{{/xs}}``) so we push a section frame whose
+                        # close-marker is the keyword, not the
+                        # argument.  Same nested-vs-top-level split as
+                        # bare ``{{#xs}}``.
+                        if outer_iter is None or outer_iter == arg_root:
+                            entry = variables.get(arg_root)
+                            if entry is None:
+                                variables[arg_root] = {
+                                    "name": arg_root, "kind": "section",
+                                    "item_keys": set(),
+                                }
+                            elif entry["kind"] == "scalar":
+                                entry["kind"] = "section"
+                                entry.setdefault("item_keys", set())
+                        else:
+                            outer_entry = variables.get(outer_iter)
+                            if outer_entry and outer_entry["kind"] == "section":
+                                outer_entry["item_keys"].add(arg_root)
+                        # Push a section frame with close-marker =
+                        # ``each`` so the matching close pops it
+                        # AND so ``_outermost_iteration_section``
+                        # treats it as an iteration (not a helper).
+                        section_stack.append(("section", arg_root, "each"))
+                    else:
+                        # ``if`` / ``unless`` / ``with`` / ``lookup``:
+                        # the argument is a context-lookup, not a new
+                        # iteration scope.  Body refs stay in the
+                        # outer context; the argument itself is a
+                        # per-context field — credit as item_key when
+                        # inside an iteration, top-level scalar
+                        # otherwise.
+                        if outer_iter and outer_iter != arg_root:
+                            outer_entry = variables.get(outer_iter)
+                            if outer_entry and outer_entry["kind"] == "section":
+                                outer_entry["item_keys"].add(arg_root)
+                        else:
+                            variables.setdefault(
+                                arg_root,
+                                {"name": arg_root, "kind": "scalar"},
+                            )
+                        # Helper frame: close-marker is the keyword.
+                        section_stack.append(("helper", kw, kw))
+                    continue
+
+            if prefix == '/' and name in HELPER_KEYWORDS:
+                # ``{{/if}}`` / ``{{/each}}`` / etc. — pop the
+                # matching helper or each-section frame.  Match by
+                # close-marker (third tuple element) since
+                # ``{{#each xs}}`` opens a section named ``xs`` but
+                # closes with ``{{/each}}``.  Bare-keyword sections
+                # (kb-author wrote ``{{#if}}`` with no argument)
+                # don't reach this branch because ``_looks_like_helper``
+                # requires a non-empty argument — those parse as
+                # regular sections named ``if``.
+                if section_stack and len(section_stack[-1]) >= 3 and section_stack[-1][2] == name:
+                    section_stack.pop()
+                continue
 
             if prefix == '#':
                 # Opening section.  Two cases:
@@ -3369,7 +3505,11 @@ Template rendering writes files to the workspace."""
                     outer_entry = variables.get(outer_iter)
                     if outer_entry and outer_entry["kind"] == "section":
                         outer_entry["item_keys"].add(name)
-                section_stack.append(("section", name))
+                # 3-tuple: close-marker = name (regular section closes
+                # with ``{{/name}}``).  Helper-section frames (pushed
+                # above for ``{{#each xs}}``) carry close-marker =
+                # ``"each"`` instead.
+                section_stack.append(("section", name, name))
             elif prefix == '^':
                 # Opening inverted section.  Same nested-vs-top-level
                 # split as ``#`` — nested inverted sections credit
@@ -3390,10 +3530,14 @@ Template rendering writes files to the workspace."""
                     outer_entry = variables.get(outer_iter)
                     if outer_entry and outer_entry["kind"] == "section":
                         outer_entry["item_keys"].add(name)
-                section_stack.append(("inverted_section", name))
+                section_stack.append(("inverted_section", name, name))
             elif prefix == '/':
                 # Closing marker — pop the matching open section.
-                if section_stack and section_stack[-1][1] == name:
+                # Match against the third-tuple close-marker so both
+                # regular sections (close-marker == name) and helper-
+                # opened sections (close-marker == helper keyword)
+                # pop cleanly.
+                if section_stack and section_stack[-1][2] == name:
                     section_stack.pop()
             else:
                 # Scalar reference.  Three cases:
