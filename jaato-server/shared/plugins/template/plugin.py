@@ -2717,6 +2717,122 @@ Template rendering writes files to the workspace."""
 
         return None
 
+    def _validate_resolved_output_path(
+        self,
+        resolved_path: str,
+        path_template: str,
+        variables: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Validate that auto-derived ``output_path`` has no malformed
+        segments — server 0.6.37+.
+
+        Catches the silent-malformed-path failure mode where one of the
+        path-template's ``{{var}}`` placeholders substituted to empty
+        string and the framework happily produced a malformed file path
+        (typical signatures: ``//`` from an empty intermediate segment,
+        ``.java`` basename from an empty stem, trailing ``/`` from a
+        missing final segment).
+
+        Surfaced empirically by kb-enablement-2.0 chunk-1 v22 run 3:
+        agent's stochastic 1:N skip judgment passed
+        ``ValueObjectName=""`` to a template whose directive was
+        ``{{basePackagePath}}/domain/model/{{ValueObjectName}}.java``
+        — resolved to ``com/example/customer/domain/model/.java``,
+        wrote a hidden dotfile, polluted the workspace.
+
+        Two complementary checks:
+
+        1. **Empty-substitution check** [primary, most informative]:
+           re-extract the variable references from
+           ``output_path_template`` and report any that mapped to empty
+           string in ``variables``.  This is the strongest signal — kb
+           authors don't write optional path placeholders.  When the
+           agent leaves a path variable empty / missing, that's the
+           agent forgetting to skip the render entirely (1:N skip
+           violation) or forgetting to supply a required variable.
+
+        2. **Structural check** [defensive belt-and-suspenders]: catches
+           malformed paths produced by other failure modes (kb-author
+           typo in the directive, multi-variable path with collapsing
+           segments, etc.).  Three patterns flagged:
+             - ``//`` anywhere in the path
+             - basename of the form ``.<ext>`` with no stem (e.g.
+               ``.java``, ``.yml``).  An ``.gitignore``-style file
+               (no extension after the dot) is allowed.
+             - trailing ``/``
+
+        Both checks return the same error envelope shape so callers
+        can present a unified failure surface to the agent.
+
+        Returns ``None`` on success, an error dict on failure.
+        """
+        # Check 1: which template variables resolved to empty?
+        path_var_names = self._extract_path_variables(path_template)
+        empty_subs = []
+        for name in path_var_names:
+            value = variables.get(name)
+            if value is None or (isinstance(value, str) and value == ""):
+                empty_subs.append(name)
+
+        if empty_subs:
+            return {
+                "error": "Output path has empty segment from missing variable",
+                "validation_layer": "path_check",
+                "validation_errors": [
+                    f"Variable {name!r} substituted to empty string in "
+                    f"output_path_template"
+                    for name in empty_subs
+                ],
+                "output_path_template": path_template,
+                "resolved_output_path": resolved_path,
+                "hint": (
+                    "If this template should not render in the current "
+                    "context (e.g. 1:N template with no items in the "
+                    "source collection), do not call renderTemplateToFile "
+                    "for it.  Otherwise supply a non-empty value for the "
+                    "named variable(s)."
+                ),
+            }
+
+        # Check 2: structural malformations not caught by check 1.
+        # Scope deliberately narrow to two unambiguously-bad patterns:
+        # ``//`` (empty intermediate segment) and trailing ``/`` (empty
+        # final segment).  We do NOT flag ``.X``-style basenames as
+        # malformed — that would false-positive on legitimate dotfile
+        # names (`.gitignore`, `.env`, `.bashrc`, `.dockerignore`...)
+        # which look syntactically identical to ``.java`` but aren't a
+        # malformation.  The empty-substitution check (Check 1 above)
+        # is the strong catch for the v22 run-3 ``.java`` case anyway;
+        # this structural pass is just defensive.
+        structural_errors: List[str] = []
+        if "//" in resolved_path:
+            structural_errors.append(
+                f"Resolved path contains empty intermediate segment "
+                f"('//'): {resolved_path!r}"
+            )
+        if resolved_path.endswith('/'):
+            structural_errors.append(
+                f"Resolved path ends with trailing '/' (empty final "
+                f"segment): {resolved_path!r}"
+            )
+
+        if structural_errors:
+            return {
+                "error": "Output path is structurally malformed",
+                "validation_layer": "path_check",
+                "validation_errors": structural_errors,
+                "output_path_template": path_template,
+                "resolved_output_path": resolved_path,
+                "hint": (
+                    "The path template likely has a typo, a placeholder "
+                    "with no variable reference, or two adjacent "
+                    "separators.  Inspect the // Output: directive in "
+                    "the template source."
+                ),
+            }
+
+        return None
+
     def _execute_render_template_to_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute renderTemplateToFile tool.
 
@@ -2787,8 +2903,24 @@ Template rendering writes files to the workspace."""
         # doesn't need to compute (and so cannot drift on) the path.
         if not output_path:
             if template_entry and template_entry.output_path_template:
+                # Pre-fill any path-template variable that's absent from
+                # ``variables`` with empty string.  This converts the
+                # render-layer ``Undefined variable`` error into an
+                # empty-segment outcome that the empty-substitution
+                # validator catches with a clean, agent-actionable
+                # error message.  Without this, missing-vs-empty would
+                # produce two different error shapes for what is
+                # semantically the same failure (the path-only var
+                # wasn't supplied).
+                path_var_names = self._extract_path_variables(
+                    template_entry.output_path_template,
+                )
+                substitution_vars = dict(variables)
+                for name in path_var_names:
+                    if name not in substitution_vars:
+                        substitution_vars[name] = ""
                 rendered_path, render_err = self._render_template(
-                    template_entry.output_path_template, variables,
+                    template_entry.output_path_template, substitution_vars,
                 )
                 if render_err:
                     return {
@@ -2802,6 +2934,23 @@ Template rendering writes files to the workspace."""
                         "output_path_template": template_entry.output_path_template,
                     }
                 output_path = rendered_path.strip()
+                # Empty-segment validation (server 0.6.37+).  Catches the
+                # silent-malformed-path failure mode where a path-template
+                # variable substituted to empty string and the framework
+                # happily wrote a malformed file (e.g. ``com/x/.java`` —
+                # hidden dotfile, empty class name, polluted workspace).
+                # Surfaced by kb-enablement-2.0 chunk-1 v22 run 3 where
+                # the agent's stochastic 1:N skip judgment passed
+                # ``ValueObjectName=""`` instead of skipping the call.
+                path_err = self._validate_resolved_output_path(
+                    output_path,
+                    template_entry.output_path_template,
+                    variables,
+                )
+                if path_err is not None:
+                    if template_name_arg:
+                        path_err["template_name"] = template_name_arg
+                    return path_err
             else:
                 err: Dict[str, Any] = {
                     "error": (

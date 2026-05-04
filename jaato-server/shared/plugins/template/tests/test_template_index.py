@@ -2764,3 +2764,250 @@ class TestListVariablesIncludesPathTemplate:
         })
         assert result.get("success") is True, result
         assert (plugin._base_path / "com/bank/customer/domain/Customer.java").exists()
+
+
+# ==================== Empty-Segment Path Validation (server 0.6.37+) ====================
+
+class TestResolvedOutputPathValidation:
+    """``renderTemplateToFile`` validates the auto-derived output_path
+    for malformed segments.  Catches the silent-malformed-path failure
+    mode where a path-template ``{{var}}`` substituted to empty
+    string and the framework wrote a malformed file.
+
+    Surfaced by kb-enablement-2.0 chunk-1 v22 run 3:
+    ``ValueObjectName=""`` substituted into directive
+    ``{{basePackagePath}}/domain/model/{{ValueObjectName}}.java``
+    yielded ``com/example/customer/domain/model/.java`` — a hidden
+    dotfile with empty stem.  The agent's stochastic 1:N skip
+    judgment shouldn't render at all in that context, but the
+    framework happily produced the malformed file pre-fix.
+    """
+
+    def test_empty_string_variable_in_path_rejected(
+        self, plugin, tmp_path
+    ):
+        """The v22 run-3 repro: ValueObjectName='' → hard-fail."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "ValueObject.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/domain/model/{{ValueObjectName}}.java
+            package {{basePackage}}.domain.model;
+            public class {{ValueObjectName}} {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "ValueObject.java.tpl",
+            "variables": {
+                "ValueObjectName": "",
+                "basePackage": "com.example.customer",
+                "basePackagePath": "com/example/customer",
+            },
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "path_check"
+        assert any(
+            "ValueObjectName" in e and "empty string" in e
+            for e in result["validation_errors"]
+        ), result
+        assert "hint" in result
+        # Critical: the hint must direct the agent to NOT call this
+        # render at all (1:N skip), not to retry with a different value.
+        assert "do not call renderTemplateToFile" in result["hint"]
+        # The malformed file must not exist on disk.
+        assert not (
+            plugin._base_path / "com/example/customer/domain/model/.java"
+        ).exists()
+
+    def test_missing_variable_in_path_rejected(self, plugin, tmp_path):
+        """Variable referenced in path-template but absent from
+        ``variables`` dict → also empty-substitution → hard-fail.
+
+        Body deliberately doesn't reference the path-only variable
+        (so body render succeeds and the empty-segment validator is
+        the first to fail, isolating the test to its target check)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "X.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/{{Name}}.java
+            class X {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        result = plugin._execute_render_template_to_file({
+            "template_name": "X.java.tpl",
+            # 'Name' missing entirely from the path-template's required vars
+            "variables": {"basePackagePath": "com/x"},
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "path_check"
+        assert any("Name" in e for e in result["validation_errors"]), result
+
+    def test_multiple_empty_variables_all_reported(
+        self, plugin, tmp_path
+    ):
+        """When more than one path variable is empty, all are
+        reported in validation_errors so the agent sees the full set."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Multi.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{root}}/{{module}}/{{Name}}.java
+            class Multi {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Multi.java.tpl",
+            "variables": {"root": "src", "module": "", "Name": ""},
+        })
+        assert "error" in result
+        errs_joined = " ".join(result["validation_errors"])
+        assert "module" in errs_joined and "Name" in errs_joined
+
+    def test_explicit_output_path_skips_validation(
+        self, plugin, tmp_path
+    ):
+        """The empty-segment check only applies to auto-derived paths.
+        When the agent supplies output_path explicitly, validation is
+        skipped (override path remains an escape hatch — caller takes
+        responsibility for the path they pass).
+
+        Body has no variable references so it renders cleanly; only
+        the path directive uses ``{{Name}}`` and ``{{basePackagePath}}``.
+        With an explicit output_path supplied, neither path var is
+        substituted (auto-derive branch is skipped) so absence of
+        ``Name`` doesn't raise either."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "X.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/{{Name}}.java
+            class X {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        # The `// Output:` directive line is body content too —
+        # pybars3 renders it as a Java comment and substitutes its
+        # placeholders.  We need the path-template's variables present
+        # so body render succeeds; what we're testing is that the
+        # explicit output_path override skips the empty-segment
+        # *validator*, not that the body skips substitution entirely.
+        # Supply non-empty values so body renders, but the explicit
+        # output_path is a different file.
+        result = plugin._execute_render_template_to_file({
+            "template_name": "X.java.tpl",
+            "variables": {"Name": "X", "basePackagePath": "foo"},
+            "output_path": str(plugin._base_path / "manual_path.java"),
+        })
+        assert result.get("success") is True, result
+        # Renders to the explicit path, not the directive-derived one.
+        assert (plugin._base_path / "manual_path.java").exists()
+        assert not (plugin._base_path / "foo/X.java").exists()
+
+    def test_no_directive_template_unaffected(self, plugin, tmp_path):
+        """Templates without a `// Output:` directive return their
+        existing path_check error ('output_path is required'), not the
+        empty-segment one — different failure class."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "NoDir.java.tpl").write_text(textwrap.dedent("""\
+            class NoDir {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        result = plugin._execute_render_template_to_file({
+            "template_name": "NoDir.java.tpl",
+            "variables": {},
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "path_check"
+        # Different error class — no validation_errors list.
+        assert "Output:" in result["error"]
+
+    def test_structural_double_slash_caught(self, plugin, tmp_path):
+        """Defensive structural check: malformed directive with literal
+        ``//`` (e.g. kb-author typo) is also caught — even if no
+        variable substituted to empty."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        # Directive has a literal ``//`` mid-path (typo: doubled separator).
+        (tpl_dir / "Bad.java.tpl").write_text(textwrap.dedent("""\
+            // Output: src//domain/{{Name}}.java
+            class Bad {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Bad.java.tpl",
+            "variables": {"Name": "Foo"},
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "path_check"
+        assert any(
+            "intermediate segment" in e or "//" in e
+            for e in result["validation_errors"]
+        ), result
+
+    def test_structural_trailing_slash_caught(self, plugin, tmp_path):
+        """Trailing slash in resolved path → structural error."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Trail.java.tpl").write_text(textwrap.dedent("""\
+            // Output: src/{{Name}}/
+            class Trail {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Trail.java.tpl",
+            "variables": {"Name": "x"},
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "path_check"
+        assert any(
+            "trailing" in e.lower() or "final segment" in e
+            for e in result["validation_errors"]
+        ), result
+
+    def test_gitignore_style_filename_allowed(self, plugin, tmp_path):
+        """``.gitignore``-style files (leading dot, no extension)
+        are valid — must not false-positive."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "ignore.tpl").write_text(textwrap.dedent("""\
+            # Output: {{module}}/.gitignore
+            *.pyc
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        result = plugin._execute_render_template_to_file({
+            "template_name": "ignore.tpl",
+            "variables": {"module": "core"},
+        })
+        assert result.get("success") is True, result
+        assert (plugin._base_path / "core/.gitignore").exists()
+
+    def test_correct_paths_pass_validation(self, plugin, tmp_path):
+        """All-correct variables → render succeeds (no false-positives
+        from the new validator)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Good.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/domain/model/{{Name}}.java
+            package {{basePackage}};
+            public class {{Name}} {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Good.java.tpl",
+            "variables": {
+                "Name": "Customer",
+                "basePackage": "com.bank",
+                "basePackagePath": "com/bank",
+            },
+        })
+        assert result.get("success") is True, result
+        assert (
+            plugin._base_path / "com/bank/domain/model/Customer.java"
+        ).exists()
