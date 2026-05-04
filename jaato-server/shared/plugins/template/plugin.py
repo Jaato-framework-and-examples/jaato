@@ -1281,7 +1281,9 @@ Template rendering writes files to the workspace."""
                     if template_path.exists() else ""
                 )
                 syntax = self._detect_template_syntax(content)
-                output_path_template = self._extract_output_path_template(content)
+                output_path_template = self._extract_output_path_template(
+                    content, filename=index_name,
+                )
                 self._template_index[index_name] = TemplateIndexEntry(
                     name=index_name,
                     source_path=str(template_path),
@@ -1415,7 +1417,12 @@ Template rendering writes files to the workspace."""
 
             syntax = self._detect_template_syntax(content)
             variables = self._extract_variables(content)
-            output_path_template = self._extract_output_path_template(content)
+            # Pass the filename so the polyglot extractor dispatches to
+            # the correct comment-prefix regex (e.g. ``//`` for Java,
+            # ``<!--`` for XML, ``#`` for YAML).  See helper docstring.
+            output_path_template = self._extract_output_path_template(
+                content, filename=filename,
+            )
 
             entry = TemplateIndexEntry(
                 name=index_name,
@@ -1741,58 +1748,164 @@ Template rendering writes files to the workspace."""
         """
         return _GENERATED_ANNOTATION_RE.sub('', content)
 
-    # Match ``// Output: <path>`` line.  Tolerant of leading whitespace,
-    # variable spacing around the colon, and trailing whitespace.
-    # Stops at first newline; the path itself may contain ``{{...}}``
-    # placeholders which we keep intact for substitution at render time.
-    _OUTPUT_DIRECTIVE_RE = re.compile(
-        r'^\s*//\s*Output\s*:\s*(\S.*?)\s*$', re.MULTILINE,
-    )
+    # Comment-prefix → host language family.  Used to pick the correct
+    # syntax for ``Output:`` directive extraction across polyglot
+    # templates.  Each entry maps the file's INNER extension (after
+    # stripping ``.tpl``/``.tmpl``) to the comment prefix.  Block-
+    # comment closers (``-->``, ``*/``) are stripped from the captured
+    # path at extraction time.
+    #
+    # Coverage decisions:
+    # - Single-line ``//``: C-family (Java, JS/TS, Go, Rust, C/C++,
+    #   Kotlin, Swift, Scala, Dart).
+    # - Block ``<!--``: XML / HTML / SVG.
+    # - Single-line ``#``: Python, Shell, YAML, Ruby, TOML,
+    #   .properties, .gitignore, Dockerfile, Makefile.
+    # - Block ``/*``: CSS / SCSS / multiline-C-style.
+    # - Single-line ``--``: SQL, Lua, Haskell, Ada.
+    # - Single-line ``%``: Erlang, LaTeX, Prolog, MATLAB.
+    #
+    # When the inner extension isn't in this map (e.g. ``Dockerfile.tpl``
+    # — no suffix at all), ``_extract_output_path_template`` falls back
+    # to a universal multi-prefix scan trying all known prefixes in
+    # most-specific-first order; first match wins.
+    _COMMENT_PREFIX_BY_EXT = {
+        # C-family (single-line //)
+        '.java': '//', '.js': '//', '.ts': '//', '.tsx': '//', '.jsx': '//',
+        '.go': '//', '.rs': '//', '.c': '//', '.cpp': '//', '.cc': '//',
+        '.h': '//', '.hpp': '//', '.kt': '//', '.kts': '//', '.swift': '//',
+        '.scala': '//', '.dart': '//', '.cs': '//', '.groovy': '//',
+        # XML-family (block <!--)
+        '.xml': '<!--', '.html': '<!--', '.htm': '<!--', '.svg': '<!--',
+        '.xhtml': '<!--', '.xsl': '<!--', '.xsd': '<!--',
+        # Hash-family (single-line #)
+        '.py': '#', '.sh': '#', '.bash': '#', '.zsh': '#', '.fish': '#',
+        '.yml': '#', '.yaml': '#', '.rb': '#', '.toml': '#',
+        '.properties': '#', '.gitignore': '#', '.env': '#',
+        '.dockerfile': '#', '.r': '#', '.pl': '#',
+        # CSS-family (block /*)
+        '.css': '/*', '.scss': '/*', '.sass': '/*', '.less': '/*',
+        # SQL-family (single-line --)
+        '.sql': '--', '.lua': '--', '.hs': '--', '.adb': '--', '.ads': '--',
+        # Latex-family (single-line %)
+        '.erl': '%', '.tex': '%', '.cls': '%', '.sty': '%', '.m': '%',
+        '.pl_prolog': '%',
+    }
 
-    def _extract_output_path_template(self, content: str) -> str:
-        """Extract the ``// Output: <path>`` directive from template content.
+    # Comment prefixes by precedence for the universal fallback scan.
+    # Order is "most specific first" so that, e.g., ``<!--`` is tried
+    # before ``-`` would be interpreted ambiguously.  We don't actually
+    # match ``-`` alone — only the full prefixes — but listing in this
+    # order keeps the regex alternation behaviour deterministic.
+    _UNIVERSAL_PREFIXES = ['<!--', '/*', '//', '--', '#', '%']
+
+    def _build_directive_regex(self, prefix: str) -> 're.Pattern[str]':
+        """Build a regex matching ``<prefix> Output: <path> [<closer>]``
+        for a specific comment prefix.  Block-comment closers are
+        stripped non-greedily from the captured path so directives like
+        ``<!-- Output: pom.xml -->`` and ``/* Output: foo.css */``
+        capture only ``pom.xml`` / ``foo.css``.
+        """
+        # Escape the prefix for regex; close-marker handling depends on
+        # whether the prefix is block-style.
+        if prefix == '<!--':
+            closer = r'\s*-->\s*'
+        elif prefix == '/*':
+            closer = r'\s*\*/\s*'
+        else:
+            closer = r'\s*'  # line-style: no closer to match
+        return re.compile(
+            rf'^\s*{re.escape(prefix)}\s*Output\s*:\s*(\S.*?){closer}$',
+            re.MULTILINE,
+        )
+
+    def _extract_output_path_template(
+        self, content: str, filename: Optional[str] = None,
+    ) -> str:
+        """Extract the ``Output:`` directive from template content.
 
         Templates declare their canonical output location on a comment
-        line near the top, e.g.::
+        line near the top — but the COMMENT PREFIX varies by host
+        language.  Java, JS, Go, Rust et al. use ``// Output: <path>``;
+        XML/HTML use ``<!-- Output: <path> -->``; Python/Shell/YAML
+        use ``# Output: <path>``; CSS uses ``/* Output: <path> */``;
+        SQL/Lua use ``-- Output: <path>``; Erlang/LaTeX use
+        ``% Output: <path>``.
 
-            // Output: {{basePackagePath}}/domain/model/{{Entity}}.java
+        Strategy (server 0.6.35+):
 
-        The directive is the kb-author's source of truth for where each
-        rendered file belongs.  Capturing it here lets
-        ``renderTemplateToFile`` default to the declared path when the
-        agent doesn't supply one — eliminating the agent-invents-the-
-        path drift class observed in kb-enablement-2.0 chunk-1 v16.
+        1. **Extension-keyed dispatch** [primary path]: when
+           ``filename`` is supplied AND its inner extension (after
+           stripping ``.tpl``/``.tmpl``) is in ``_COMMENT_PREFIX_BY_EXT``,
+           use the precise per-language regex.  Most precise; no
+           ambiguity.
 
-        Returns the path string with ``{{var}}`` placeholders intact, or
-        empty string if no directive is present.  Only the FIRST
-        directive is returned (templates with multiple ``// Output:``
-        lines indicate an authoring error; we ignore the extras silently
-        rather than concatenate or list them).
+        2. **Universal multi-prefix scan** [fallback]: when ``filename``
+           is omitted, the inner extension is empty, or the extension
+           isn't recognised, try all known prefixes in
+           most-specific-first order.  First match wins.  Handles
+           extension-less templates (``Dockerfile.tpl``,
+           ``Makefile.tpl``) and unfamiliar languages.
 
-        Scope decisions:
+        Both paths preserve ``{{var}}`` placeholders in the captured
+        path verbatim — substitution happens at render time.  Block-
+        comment closers (``-->``, ``*/``) are stripped from the
+        capture so the path is clean.
 
-        - Only the ``//`` host-comment style is recognised.  Mustache's
-          native ``{{! ... }}`` comment is not matched because it gets
-          stripped by Mustache itself before the agent sees it; the
-          ``// Output:`` line on the other hand renders into the output
-          file as a literal comment unless explicitly stripped.
-        - Block comments (``/* ... */``) are not scanned: in the kb-
-          enablement-2.0 corpus the directive convention is exclusively
-          single-line ``//``.  If a future template-set adopts block
-          comment style for the directive, extend the regex then.
-        - The path may be relative or absolute; rendering resolves
-          relative paths against ``self._base_path`` already (the same
-          path resolution used when the agent supplies ``output_path``).
+        Coverage decisions:
+
+        - Mustache's native ``{{! ... }}`` comment is not scanned: it
+          gets stripped by Mustache before render, so directives
+          authored in Mustache-comment form would be invisible at
+          runtime anyway.  Use the host-language comment style.
+        - Only the FIRST directive matched is returned.  Multiple
+          ``Output:`` lines indicate authoring error; we ignore extras.
+        - Block-comment open without close on the same line is
+          allowed (``-->`` / ``*/`` are optional in the regex).  This
+          is forgiving for badly-formatted XML/CSS templates.
 
         Args:
             content: Template content string.
+            filename: Optional template filename (e.g.
+                ``Entity.java.tpl``, ``pom.xml.tpl``,
+                ``application.yml.tpl``).  Used to dispatch to the
+                correct comment-prefix regex.  Can be ``None`` for
+                inline / extension-less templates — falls back to
+                universal scan.
 
         Returns:
             The path-template string (possibly with ``{{...}}``
             placeholders), or empty string if no directive found.
         """
-        match = self._OUTPUT_DIRECTIVE_RE.search(content)
-        return match.group(1) if match else ""
+        # Path 1: extension-keyed dispatch when filename is supplied
+        # and recognised.  Strip the outermost ``.tpl``/``.tmpl``
+        # suffix to get the file's inner extension.
+        if filename:
+            inner_ext = ""
+            stem = filename
+            for tpl_suffix in ('.tpl', '.tmpl'):
+                if stem.endswith(tpl_suffix):
+                    stem = stem[:-len(tpl_suffix)]
+                    break
+            # ``Path('pom.xml').suffix == '.xml'``; ``Path('Dockerfile').suffix == ''``
+            inner_ext = Path(stem).suffix.lower()
+            prefix = self._COMMENT_PREFIX_BY_EXT.get(inner_ext)
+            if prefix is not None:
+                regex = self._build_directive_regex(prefix)
+                match = regex.search(content)
+                return match.group(1).strip() if match else ""
+
+        # Path 2: universal fallback — try every known comment prefix
+        # in most-specific-first order.  Stop at the first match so
+        # block-comment forms aren't mis-interpreted as line-comment
+        # forms (e.g. ``<!--`` won't accidentally fall through to
+        # something looser).
+        for prefix in self._UNIVERSAL_PREFIXES:
+            regex = self._build_directive_regex(prefix)
+            match = regex.search(content)
+            if match:
+                return match.group(1).strip()
+        return ""
 
     def _extract_variables(self, content: str) -> List[str]:
         """Extract variable names from template content.

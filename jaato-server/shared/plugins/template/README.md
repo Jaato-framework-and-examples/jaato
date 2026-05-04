@@ -223,6 +223,112 @@ listAvailableTemplates()
 
 The simple syntax only supports variable substitution—no conditionals, loops, or filters.
 
+## Output-Path Directive Convention
+
+Templates managed by this plugin can declare their **canonical output
+location** on a comment line near the top of the file:
+
+```java
+// Output: {{basePackagePath}}/domain/model/{{Entity}}.java
+package {{basePackage}}.domain.model;
+public class {{Entity}} { ... }
+```
+
+When a template carries this directive, callers of
+`renderTemplateToFile` may **omit the `output_path` parameter entirely**
+— the framework substitutes the directive's `{{var}}` placeholders
+with the supplied `variables` dict and writes the rendered file to
+that location.  Override is still possible by passing an explicit
+`output_path`; the directive is the default, not a constraint.
+
+### Why this convention exists
+
+Template authors (kb owners, framework contributors) have a single
+source of truth for "where does this rendered file belong".  Forcing
+agents to re-derive that location at call time produces stochastic
+divergence across runs even when the answer is unambiguous in the
+template itself.  Capturing the directive lets agents stay focused
+on judgment-requiring work — picking the right template, supplying
+the right variables — without re-computing what the template author
+already declared.
+
+This is the input-side analogue of `listTemplateVariables`: both
+surfaces move load-bearing decisions out of agent computation and
+into framework-consumed declared metadata.
+
+### Polyglot comment-style support
+
+The directive convention is **language-agnostic**.  Each template is
+authored for a target language and uses that language's native
+comment syntax; only the `Output:` keyword is uniform.  The walker
+dispatches to the correct comment-prefix regex based on the
+template's inner extension (after stripping `.tpl` / `.tmpl`):
+
+| Comment style | Languages | Example |
+|---------------|-----------|---------|
+| `// Output: <path>` | Java, JS/TS, Go, Rust, C/C++, Kotlin, Swift, Scala, Dart, C# | `// Output: src/{{Entity}}.java` |
+| `<!-- Output: <path> -->` | XML, HTML, SVG, XSL/XSD | `<!-- Output: pom.xml -->` |
+| `# Output: <path>` | Python, Shell, YAML, Ruby, TOML, .properties, Dockerfile, R, Perl | `# Output: config/{{env}}.yml` |
+| `/* Output: <path> */` | CSS, SCSS, Sass, Less | `/* Output: dist/styles.css */` |
+| `-- Output: <path>` | SQL, Lua, Haskell, Ada | `-- Output: db/migrations/V{{version}}__init.sql` |
+| `% Output: <path>` | Erlang, LaTeX, Prolog, MATLAB | `% Output: paper.tex` |
+
+For templates whose inner extension isn't recognised — e.g.
+`Dockerfile.tpl`, `Makefile.tpl`, or any extension-less template —
+the walker falls back to a **universal multi-prefix scan** that
+tries every comment style in most-specific-first order; first match
+wins.  The block-comment closers (`-->`, `*/`) are stripped from
+the captured path automatically, so the path itself is always clean.
+
+### Authoring rules
+
+1. **Place the directive on its own line near the top** of the
+   template (typically the first line, before package/imports/etc.).
+   Only the FIRST `Output:` directive in the file is honoured;
+   additional directives are silently ignored.
+2. **Use the language's native single-line or block comment style**
+   matching the table above.  Mustache-native comments (`{{! ... }}`)
+   are NOT scanned — they get stripped by Mustache before render and
+   would be invisible at runtime.
+3. **Placeholders inside the path are intact at extraction time**
+   — `{{Entity}}`, `{{basePackagePath}}`, etc. are kept literally
+   and only substituted at render time.  Use the same variable names
+   you'd use elsewhere in the template body.
+4. **Paths can be relative or absolute**.  Relative paths resolve
+   against the workspace root (the same resolution applied when an
+   agent supplies `output_path` explicitly).
+
+### Surfaced via `listAvailableTemplates`
+
+The directive value is captured into `TemplateIndexEntry.output_path_template`
+during walker discovery and surfaced verbatim in
+`listAvailableTemplates` responses, e.g.::
+
+```json
+{
+  "templates": [
+    {
+      "name": "Entity.java.tpl",
+      "syntax": "mustache",
+      "variables": ["Entity", "basePackage", "basePackagePath", ...],
+      "output_path_template": "{{basePackagePath}}/domain/model/{{Entity}}.java",
+      ...
+    }
+  ]
+}
+```
+
+Callers can use this for narration ("rendering Customer.java to
+domain/model/Customer.java") without recomputing the path.
+
+### When the directive is missing
+
+Templates without an `Output:` directive — or callers using inline
+`template` content rather than `template_name` — must supply
+`output_path` explicitly.  Calling `renderTemplateToFile` without
+either fails fast with `validation_layer=path_check` (same severity
+class as variable-shape validation).
+
 ## Enrichment Priority
 
 The template plugin participates in three enrichment surfaces:

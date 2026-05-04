@@ -2378,3 +2378,182 @@ class TestOutputPathAutoDerivation:
         assert loaded is not None
         # Default to empty string — same semantics as no-directive.
         assert loaded.output_path_template == ""
+
+
+# ==================== Polyglot Output Directive (server 0.6.35+) ====================
+
+class TestPolyglotOutputDirective:
+    """``_extract_output_path_template`` recognises the ``Output:``
+    directive in EVERY major comment style, dispatched by the
+    template's inner extension (after stripping ``.tpl``/``.tmpl``).
+
+    Surfaced by kb-enablement-2.0 mod-015's ``pom.xml.tpl``: declared
+    ``<!-- Output: pom.xml -->`` (XML comment style).  Pre-0.6.35
+    extractor only matched ``//`` so the directive was invisible,
+    forcing the agent to invent ``output_path`` for every non-Java
+    template.  As soon as later kb modules ship Python / YAML / SQL /
+    properties templates, the same gap would propagate.
+    """
+
+    @pytest.mark.parametrize("filename, comment_line, expected", [
+        # C-family (// Output:)
+        ("Entity.java.tpl", "// Output: src/{{Entity}}.java",
+         "src/{{Entity}}.java"),
+        ("server.go.tpl", "// Output: cmd/server/main.go",
+         "cmd/server/main.go"),
+        ("lib.rs.tpl", "// Output: src/lib.rs", "src/lib.rs"),
+        ("App.tsx.tpl", "// Output: src/App.tsx", "src/App.tsx"),
+        ("Service.kt.tpl", "// Output: src/{{name}}.kt",
+         "src/{{name}}.kt"),
+        # XML-family (<!-- Output: -->)
+        ("pom.xml.tpl", "<!-- Output: pom.xml -->", "pom.xml"),
+        ("index.html.tpl", "<!-- Output: public/index.html -->",
+         "public/index.html"),
+        ("logo.svg.tpl", "<!-- Output: assets/logo.svg -->",
+         "assets/logo.svg"),
+        # Hash-family (# Output:)
+        ("script.py.tpl", "# Output: scripts/{{name}}.py",
+         "scripts/{{name}}.py"),
+        ("setup.sh.tpl", "# Output: bin/setup.sh", "bin/setup.sh"),
+        ("config.yml.tpl", "# Output: config/{{env}}.yml",
+         "config/{{env}}.yml"),
+        ("application.yaml.tpl", "# Output: src/main/resources/application.yaml",
+         "src/main/resources/application.yaml"),
+        ("rakefile.rb.tpl", "# Output: Rakefile", "Rakefile"),
+        ("Cargo.toml.tpl", "# Output: Cargo.toml", "Cargo.toml"),
+        ("app.properties.tpl", "# Output: app.properties",
+         "app.properties"),
+        # CSS-family (/* Output: */)
+        ("styles.css.tpl", "/* Output: dist/styles.css */",
+         "dist/styles.css"),
+        ("theme.scss.tpl", "/* Output: src/theme.scss */",
+         "src/theme.scss"),
+        # SQL-family (-- Output:)
+        ("migration.sql.tpl",
+         "-- Output: db/migrations/V{{version}}__{{name}}.sql",
+         "db/migrations/V{{version}}__{{name}}.sql"),
+        ("util.lua.tpl", "-- Output: lua/{{module}}.lua",
+         "lua/{{module}}.lua"),
+        # Latex/Erlang-family (% Output:)
+        ("paper.tex.tpl", "% Output: paper.tex", "paper.tex"),
+        ("server.erl.tpl", "% Output: src/{{name}}.erl",
+         "src/{{name}}.erl"),
+    ])
+    def test_extract_directive_per_language(
+        self, plugin, filename, comment_line, expected
+    ):
+        """Each comment style is recognised when the filename's inner
+        extension dispatches to the right regex."""
+        content = comment_line + "\n<body>\n"
+        assert plugin._extract_output_path_template(
+            content, filename=filename,
+        ) == expected
+
+    def test_block_comment_closer_stripped(self, plugin):
+        """``-->`` and ``*/`` close markers are stripped from capture
+        — the path itself is clean."""
+        # XML close marker
+        content = "<!-- Output:   pom.xml   -->\n<project/>"
+        assert plugin._extract_output_path_template(
+            content, filename="pom.xml.tpl",
+        ) == "pom.xml"
+        # CSS close marker
+        content = "/* Output:   dist/styles.css   */\nbody{}"
+        assert plugin._extract_output_path_template(
+            content, filename="styles.css.tpl",
+        ) == "dist/styles.css"
+
+    def test_universal_fallback_for_extension_less_template(self, plugin):
+        """Templates without a recognised extension (``Dockerfile.tpl``,
+        ``Makefile.tpl``) fall back to the universal multi-prefix
+        scan — first match across all known comment styles wins."""
+        # Dockerfile uses # for comments
+        content = "# Output: Dockerfile\nFROM alpine\n"
+        assert plugin._extract_output_path_template(
+            content, filename="Dockerfile.tpl",
+        ) == "Dockerfile"
+        # Makefile also uses #
+        content = "# Output: Makefile\nall:\n\techo hi\n"
+        assert plugin._extract_output_path_template(
+            content, filename="Makefile.tpl",
+        ) == "Makefile"
+
+    def test_universal_fallback_when_filename_omitted(self, plugin):
+        """Calling without ``filename`` triggers the universal scan
+        path — both line- and block-comment forms recognised."""
+        # Block comment, no filename hint
+        content = "<!-- Output: out.xml -->\n<x/>"
+        assert plugin._extract_output_path_template(content) == "out.xml"
+        # Line comment, no filename hint
+        content = "# Output: out.py\nprint('hi')"
+        assert plugin._extract_output_path_template(content) == "out.py"
+
+    def test_no_directive_returns_empty_for_any_language(self, plugin):
+        """Templates that don't declare an Output directive return ""
+        regardless of language."""
+        for filename in [
+            "Entity.java.tpl", "pom.xml.tpl", "config.yml.tpl",
+            "styles.css.tpl", "migration.sql.tpl", "server.erl.tpl",
+        ]:
+            content = "body without directive\n"
+            assert plugin._extract_output_path_template(
+                content, filename=filename,
+            ) == ""
+
+    def test_walker_captures_xml_directive(self, plugin, tmp_path):
+        """Standalone-discovery walker now reads XML-comment directives
+        for ``.xml.tpl`` files (regression for kb-enablement-2.0
+        ``pom.xml.tpl``)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "pom.xml.tpl").write_text(textwrap.dedent("""\
+            <!-- Output: pom.xml -->
+            <project>
+              <artifactId>{{artifactId}}</artifactId>
+            </project>
+        """))
+        entries = plugin._discover_standalone_templates(tpl_dir)
+        assert len(entries) == 1
+        assert entries[0].output_path_template == "pom.xml"
+
+    def test_walker_captures_yaml_directive(self, plugin, tmp_path):
+        """Walker reads ``# Output:`` for ``.yml.tpl`` templates."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "application.yml.tpl").write_text(textwrap.dedent("""\
+            # Output: src/main/resources/application-{{env}}.yml
+            spring:
+              application:
+                name: {{appName}}
+        """))
+        entries = plugin._discover_standalone_templates(tpl_dir)
+        assert len(entries) == 1
+        assert entries[0].output_path_template == (
+            "src/main/resources/application-{{env}}.yml"
+        )
+
+    def test_render_xml_template_auto_derives_output(self, plugin, tmp_path):
+        """End-to-end: pom.xml.tpl with ``<!-- Output: pom.xml -->``
+        renders to ``pom.xml`` without the agent supplying output_path."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "pom.xml.tpl").write_text(textwrap.dedent("""\
+            <!-- Output: pom.xml -->
+            <project>
+              <artifactId>{{artifactId}}</artifactId>
+            </project>
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_render_template_to_file({
+            "template_name": "pom.xml.tpl",
+            "variables": {"artifactId": "customer-service"},
+            # No output_path — must auto-derive.
+        })
+        assert result.get("success") is True, result
+        expected = plugin._base_path / "pom.xml"
+        assert expected.exists(), (
+            f"File not at directive-derived path {expected!r}: {result}"
+        )
+        assert "customer-service" in expected.read_text()
