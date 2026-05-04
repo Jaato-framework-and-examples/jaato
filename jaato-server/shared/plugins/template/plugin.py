@@ -1819,6 +1819,63 @@ Template rendering writes files to the workspace."""
             re.MULTILINE,
         )
 
+    # Match every ``{{...}}`` reference in a path string.  Captures
+    # the inner content; used to enumerate path-only variables that
+    # must be supplied to ``renderTemplateToFile`` for auto-derivation
+    # to succeed.  The path syntax is much simpler than full Mustache
+    # — sections (``{{#}}``) and inverted sections (``{{^}}``) don't
+    # appear in paths, so we don't need the full structural parser.
+    # Triple-brace ``{{{x}}}`` is structurally identical to ``{{x}}``;
+    # we match either form.
+    _PATH_REFERENCE_RE = re.compile(r'\{\{\{?\s*([^{}]+?)\s*\}?\}\}')
+
+    def _extract_path_variables(self, path_template: str) -> List[str]:
+        """Enumerate variable names referenced in an output-path template.
+
+        The output_path_template stored on each TemplateIndexEntry
+        (extracted from the ``// Output:`` directive) may carry
+        ``{{var}}`` placeholders that must be substituted at render
+        time — e.g. ``{{basePackagePath}}/domain/model/{{Entity}}.java``.
+        For ``listTemplateVariables`` to give the agent a complete
+        variable list, those path-only vars need to be enumerated and
+        merged with the body-parsed vars.
+
+        Path syntax rules (much simpler than full Mustache):
+        - Only plain interpolation (``{{name}}`` / ``{{{name}}}``).
+        - No sections, inverted sections, or comments.
+        - Dotted paths (``{{module.name}}``) treated the same way as
+          the body parser: only the LEFTMOST token is reported (the
+          actual variable; the rest is field navigation).
+        - Triple-brace is structurally identical — same variable, just
+          the unescaped-output form (irrelevant for path use).
+
+        Returns a sorted, de-duplicated list of variable names.
+        Empty list when the path is plain text or is itself empty.
+
+        Args:
+            path_template: The path-template string (may be empty).
+
+        Returns:
+            Sorted unique list of variable names referenced.
+        """
+        if not path_template:
+            return []
+        seen: Set[str] = set()
+        for match in self._PATH_REFERENCE_RE.finditer(path_template):
+            raw = match.group(1).strip()
+            # Drop anything that looks like a section/comment/closing
+            # marker — these aren't valid in paths but we defend
+            # against malformed directives anyway.
+            if raw and raw[0] in '#^/!':
+                continue
+            # Leftmost token of a dotted path; matches body-parser
+            # convention so a var used in both body and path resolves
+            # to the same name.
+            name = raw.split('.', 1)[0].strip()
+            if name:
+                seen.add(name)
+        return sorted(seen)
+
     def _extract_output_path_template(
         self, content: str, filename: Optional[str] = None,
     ) -> str:
@@ -3245,6 +3302,24 @@ Template rendering writes files to the workspace."""
         ``pybars3`` render error, and self-correct on retry — with
         the retry path producing different content across runs.
 
+        Variable list scope (server 0.6.36+): the returned ``variables``
+        list is the union of (a) variables referenced in the template
+        body and (b) variables referenced in the template's
+        ``// Output: <path>`` directive.  Without this merge, agents
+        called ``renderTemplateToFile`` with body-only variables, the
+        framework's auto-derivation of output_path failed on
+        unsubstituted ``{{path-only-var}}`` placeholders, and the
+        retry path resampled the variables dict — different runs
+        handled the supplementation differently, contributing
+        stochastic divergence even when generation_context provided
+        the missing values.
+
+        Body-precedence on name-collision: a variable used in BOTH
+        body and path keeps the body-parsed kind (which carries
+        item_keys for sections, has_inverted_branch flags, etc.).
+        Path-only vars get ``kind=scalar`` since path interpolation
+        is always scalar substitution (no sections in paths).
+
         Args:
             args: Tool arguments containing 'template_name'.
 
@@ -3280,6 +3355,21 @@ Template rendering writes files to the workspace."""
         # Detect template syntax
         syntax = self._detect_template_syntax(template_content)
 
+        # Variables used in the output_path_template directive (if any)
+        # but not in the body.  These are "path-only" vars the agent
+        # must still supply for auto-derivation to substitute correctly.
+        # Re-extracting here (rather than reading from
+        # ``self._template_index``) is cheap and avoids depending on
+        # the entry being present — covers the case where listTemplateVariables
+        # runs before the walker has registered the template.
+        # See server 0.6.36 — closes the symmetry gap where
+        # renderTemplateToFile auto-derives output_path but the agent's
+        # source-of-truth tool was reporting body vars only.
+        output_path_template = self._extract_output_path_template(
+            template_content, filename=template_name,
+        )
+        path_vars = self._extract_path_variables(output_path_template)
+
         if syntax == "jinja2":
             # Use Jinja2's AST parser for accurate variable extraction
             try:
@@ -3300,14 +3390,25 @@ Template rendering writes files to the workspace."""
                 # follow-up; for now mark all as "scalar" — agents
                 # using Jinja2 templates today have less determinism
                 # surface anyway.
+                merged: Dict[str, Dict[str, Any]] = {
+                    v: {"name": v, "kind": "scalar"}
+                    for v in sorted(variables)
+                }
+                # Path-only vars: kind=scalar (path interpolation is
+                # always scalar substitution; no sections in paths).
+                # Body-precedence: vars appearing in both keep the
+                # body-parsed kind, which is already scalar in the
+                # Jinja2 path so the precedence is moot here but the
+                # logic mirrors the Mustache branch for symmetry.
+                for v in path_vars:
+                    if v not in merged:
+                        merged[v] = {"name": v, "kind": "scalar"}
+                final_list = [merged[k] for k in sorted(merged.keys())]
                 return {
-                    "variables": [
-                        {"name": v, "kind": "scalar"}
-                        for v in sorted(variables)
-                    ],
+                    "variables": final_list,
                     "syntax": "jinja2",
                     "template_name": template_name,
-                    "count": len(variables),
+                    "count": len(final_list),
                 }
             except Exception as e:
                 return {
@@ -3324,6 +3425,17 @@ Template rendering writes files to the workspace."""
             # ``_parse_mustache_structure`` docstring for the full
             # rules.
             structured = self._parse_mustache_structure(template_content)
+            # Merge path-only vars (kind=scalar) into the structured
+            # body-vars list.  Body-precedence on name-collision: a
+            # var used in both body and path keeps the body-parsed
+            # kind (which carries item_keys for sections, etc.).
+            existing_names = {v["name"] for v in structured}
+            for path_var in path_vars:
+                if path_var not in existing_names:
+                    structured.append({"name": path_var, "kind": "scalar"})
+            # Re-sort for stable output regardless of where each var
+            # came from.
+            structured.sort(key=lambda v: v["name"])
             result = {
                 "variables": structured,
                 "syntax": "mustache",

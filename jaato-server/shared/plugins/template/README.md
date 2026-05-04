@@ -298,6 +298,49 @@ the captured path automatically, so the path itself is always clean.
    against the workspace root (the same resolution applied when an
    agent supplies `output_path` explicitly).
 
+### Variables in the directive count toward `listTemplateVariables`
+
+When the directive contains `{{var}}` placeholders, those variables
+must be supplied to `renderTemplateToFile` for auto-derivation to
+substitute correctly.  As of server 0.6.36+, `listTemplateVariables`
+returns the **union** of variables from the template body AND the
+directive — so the agent's source-of-truth tool reports the complete
+set required to render successfully.
+
+Example.  For
+
+```java
+// Output: {{basePackagePath}}/domain/model/{{Entity}}.java
+package {{basePackage}}.domain.model;
+
+public class {{Entity}} {
+{{#fields}}
+  private {{type}} {{name}};
+{{/fields}}
+}
+```
+
+`listTemplateVariables` returns:
+
+```json
+{
+  "variables": [
+    {"name": "Entity", "kind": "scalar"},
+    {"name": "basePackage", "kind": "scalar"},
+    {"name": "basePackagePath", "kind": "scalar"},
+    {"name": "fields", "kind": "section",
+     "item_keys": ["name", "type"], "has_inverted_branch": false}
+  ],
+  "syntax": "mustache",
+  "count": 4
+}
+```
+
+`Entity` and `basePackage` come from the body; `basePackagePath` is
+path-only; `fields` is a body section with item_keys.  Variables
+appearing in both body and directive keep their body-parsed kind
+(body precedence) — only path-only vars get `kind: "scalar"`.
+
 ### Surfaced via `listAvailableTemplates`
 
 The directive value is captured into `TemplateIndexEntry.output_path_template`

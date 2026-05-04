@@ -2557,3 +2557,210 @@ class TestPolyglotOutputDirective:
             f"File not at directive-derived path {expected!r}: {result}"
         )
         assert "customer-service" in expected.read_text()
+
+
+# ==================== listTemplateVariables Path-Variable Merge (server 0.6.36+) ====================
+
+class TestListVariablesIncludesPathTemplate:
+    """``listTemplateVariables`` merges variables from the template
+    BODY and the ``// Output:`` directive into one list — surfaces
+    the complete set the agent must supply for ``renderTemplateToFile``
+    to succeed.
+
+    Closes the symmetry gap from 0.6.34 where output_path auto-derivation
+    needed ``{{basePackagePath}}`` etc. but the agent's source-of-truth
+    tool reported only body vars.  Pre-0.6.36, ~6 mod-015 templates
+    triggered substitution-error retries every run with stochastic
+    supplementation.
+    """
+
+    def test_path_variables_helper_simple(self, plugin):
+        """Helper extracts plain ``{{name}}`` references from a path."""
+        path = "{{basePackagePath}}/domain/model/{{Entity}}.java"
+        assert plugin._extract_path_variables(path) == [
+            "Entity", "basePackagePath",
+        ]
+
+    def test_path_variables_helper_dedup(self, plugin):
+        """Repeated references collapse to a single entry."""
+        path = "{{x}}/{{x}}/{{y}}"
+        assert plugin._extract_path_variables(path) == ["x", "y"]
+
+    def test_path_variables_helper_dotted_path_leftmost(self, plugin):
+        """Dotted refs (``{{a.b}}``) report only the leftmost token,
+        matching body-parser convention."""
+        path = "{{module.subdir}}/{{Entity}}.java"
+        assert plugin._extract_path_variables(path) == ["Entity", "module"]
+
+    def test_path_variables_helper_triple_brace(self, plugin):
+        """Triple-brace ``{{{x}}}`` is the same variable as ``{{x}}``."""
+        path = "{{{Entity}}}/{{path}}"
+        assert plugin._extract_path_variables(path) == ["Entity", "path"]
+
+    def test_path_variables_helper_empty(self, plugin):
+        """Empty/plain paths yield empty lists."""
+        assert plugin._extract_path_variables("") == []
+        assert plugin._extract_path_variables("static/path.java") == []
+
+    def test_path_variables_helper_skips_section_markers(self, plugin):
+        """Defensive: malformed paths with section markers don't leak
+        the marker keyword as a variable name."""
+        # Sections shouldn't appear in paths but be defensive.
+        path = "{{#bad}}{{Entity}}.java"
+        assert plugin._extract_path_variables(path) == ["Entity"]
+
+    def test_listTemplateVariables_merges_body_and_path_mustache(
+        self, plugin, tmp_path
+    ):
+        """End-to-end: Mustache template's listTemplateVariables
+        response includes path-only vars merged with body vars."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Entity.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/domain/model/{{Entity}}.java
+            package {{basePackage}}.domain.model;
+            {{#fields}}
+            private {{type}} {{name}};
+            {{/fields}}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "Entity.java.tpl",
+        })
+        var_names = {v["name"] for v in result["variables"]}
+        # Body vars present
+        assert "Entity" in var_names
+        assert "basePackage" in var_names
+        assert "fields" in var_names
+        # Path-only var present (would have been missing pre-0.6.36)
+        assert "basePackagePath" in var_names
+
+    def test_listTemplateVariables_body_precedence_on_collision(
+        self, plugin, tmp_path
+    ):
+        """Variable used in BOTH body and path keeps body-parsed kind
+        (which may carry item_keys / has_inverted_branch metadata)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Entity.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/{{Entity}}.java
+            package {{basePackage}};
+            public class {{Entity}} { /* uses Entity scalar */ }
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "Entity.java.tpl",
+        })
+        by_name = {v["name"]: v for v in result["variables"]}
+        # Entity is in both body and path; body-parsed kind wins.
+        assert by_name["Entity"]["kind"] == "scalar"
+        # basePackagePath is path-only; gets kind=scalar.
+        assert by_name["basePackagePath"]["kind"] == "scalar"
+
+    def test_listTemplateVariables_no_directive_returns_body_only(
+        self, plugin, tmp_path
+    ):
+        """Templates without an `Output:` directive return body vars
+        unchanged — no spurious path-only entries."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Plain.java.tpl").write_text(textwrap.dedent("""\
+            package {{pkg}};
+            public class {{Name}} {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "Plain.java.tpl",
+        })
+        names = {v["name"] for v in result["variables"]}
+        assert names == {"pkg", "Name"}
+
+    def test_listTemplateVariables_xml_template_with_path_var(
+        self, plugin, tmp_path
+    ):
+        """Polyglot path: XML-style directive's path var also merged."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "config.xml.tpl").write_text(textwrap.dedent("""\
+            <!-- Output: config/{{env}}/app.xml -->
+            <app>
+              <name>{{appName}}</name>
+            </app>
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "config.xml.tpl",
+        })
+        names = {v["name"] for v in result["variables"]}
+        # Body var
+        assert "appName" in names
+        # Path-only var picked up despite XML comment style
+        assert "env" in names
+
+    def test_listTemplateVariables_count_reflects_merged_total(
+        self, plugin, tmp_path
+    ):
+        """The ``count`` field equals the merged variable count."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "X.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{outDir}}/{{Name}}.java
+            package {{pkg}};
+            public class {{Name}} {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        result = plugin._execute_list_template_variables({
+            "template_name": "X.java.tpl",
+        })
+        # Body: pkg, Name.  Path: outDir, Name (Name dedups).  Merged: 3.
+        assert result["count"] == 3
+        names = {v["name"] for v in result["variables"]}
+        assert names == {"pkg", "Name", "outDir"}
+
+    def test_render_succeeds_with_merged_variable_list(
+        self, plugin, tmp_path
+    ):
+        """End-to-end: agent calls listTemplateVariables, gets merged
+        list including path-only vars, supplies all of them, render
+        succeeds first try (no substitution-error retry)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Entity.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/domain/{{Entity}}.java
+            package {{basePackage}}.domain;
+            public class {{Entity}} {}
+        """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+
+        # Step 1: listTemplateVariables to get the complete variable set.
+        list_result = plugin._execute_list_template_variables({
+            "template_name": "Entity.java.tpl",
+        })
+        required_names = {v["name"] for v in list_result["variables"]}
+        # Includes both body and path vars.
+        assert "basePackagePath" in required_names
+        assert "Entity" in required_names
+
+        # Step 2: agent supplies ALL variables and renders.
+        # No output_path → auto-derive from directive.
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Entity.java.tpl",
+            "variables": {
+                "Entity": "Customer",
+                "basePackage": "com.bank.customer",
+                "basePackagePath": "com/bank/customer",
+            },
+        })
+        assert result.get("success") is True, result
+        assert (plugin._base_path / "com/bank/customer/domain/Customer.java").exists()
