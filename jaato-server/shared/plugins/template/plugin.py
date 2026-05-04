@@ -131,6 +131,34 @@ class TemplateIndexEntry:
     # ``// Output:`` directive was found (template doesn't declare its
     # destination, so the agent must supply ``output_path`` explicitly).
     output_path_template: str = ""
+    # Optional variant axis for templates that represent one option of
+    # a multi-option choice the agent's caller selected upstream
+    # (server 0.6.42+).  Two fields:
+    #
+    # - ``variant_key``: the kb-declared concept name for the axis
+    #   (e.g. ``"http_client"``) — stack-neutral, comes from the kb's
+    #   ``variants:`` declaration in MODULE.md.  When empty (most
+    #   templates), the template participates in no variant filtering.
+    # - ``variant``: the option name FOR THIS template within that axis
+    #   (e.g. ``"restclient"``, ``"feign"``, ``"resttemplate"``).  When
+    #   empty, the template doesn't represent a specific option (or
+    #   the kb-side walker hasn't populated this yet).
+    #
+    # Together they let consumers filter templates: render this
+    # template only when ``selected_variants[variant_key] == variant``.
+    # Without the filter, multi-option axes (e.g. three HTTP-client
+    # implementations all targeting the same target file) cause
+    # last-write-wins or stochastic skip behaviour.  Each consumer
+    # populates these from its own metadata source — the framework
+    # just plumbs them through to listAvailableTemplates.
+    #
+    # The walker also opportunistically extracts ``variant`` from a
+    # ``// Variant: <option>`` header in the template body using the
+    # same polyglot comment-style infrastructure as ``// Output:``.
+    # When both signals are present, the kb-side authoritative
+    # mapping (passed in via index.json) wins.
+    variant_key: str = ""
+    variant: str = ""
 
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
@@ -604,6 +632,11 @@ class TemplatePlugin:
                     # "no declared output path" — falling back to the
                     # agent-provided ``output_path`` like before.
                     output_path_template=entry_data.get("output_path_template", ""),
+                    # Variant axis (server 0.6.42+).  Both default to ""
+                    # so older index.json files load cleanly with no
+                    # variant filtering applied.
+                    variant_key=entry_data.get("variant_key", ""),
+                    variant=entry_data.get("variant", ""),
                 )
                 loaded += 1
             if loaded:
@@ -1458,6 +1491,7 @@ Template rendering writes files to the workspace."""
                 output_path_template = self._extract_output_path_template(
                     content, filename=index_name,
                 )
+                variant = self._extract_variant(content, filename=index_name)
                 self._template_index[index_name] = TemplateIndexEntry(
                     name=index_name,
                     source_path=str(template_path),
@@ -1465,6 +1499,10 @@ Template rendering writes files to the workspace."""
                     variables=variables,
                     origin="embedded",
                     output_path_template=output_path_template,
+                    variant=variant,
+                    # variant_key stays "" — embedded templates carry
+                    # no axis-mapping context (kb-side walker is the
+                    # authoritative source for variant_key).
                 )
 
         # Persist the unified index to disk
@@ -1597,6 +1635,18 @@ Template rendering writes files to the workspace."""
             output_path_template = self._extract_output_path_template(
                 content, filename=filename,
             )
+            # ``// Variant: <option>`` header — server 0.6.42+.  The
+            # walker reads the option name from the template body as
+            # one signal; the kb-side walker (running before the
+            # framework's discovery) MAY also write the
+            # ``variant_key`` + ``variant`` mapping into the
+            # persisted index.json from MODULE.md's ``variants:``
+            # block, in which case the index loader takes precedence
+            # via ``_load_persisted_index``.  Here we only have the
+            # body-side signal so ``variant_key`` is unset; consumers
+            # filtering by axis still need the kb-side mapping for
+            # full correctness.
+            variant = self._extract_variant(content, filename=filename)
 
             entry = TemplateIndexEntry(
                 name=index_name,
@@ -1605,11 +1655,13 @@ Template rendering writes files to the workspace."""
                 variables=variables,
                 origin="standalone",
                 output_path_template=output_path_template,
+                variant=variant,
             )
             entries.append(entry)
             self._trace(
                 f"  discovered: {index_name} ({syntax}, {len(variables)} vars, "
-                f"output={output_path_template or '<none>'})"
+                f"output={output_path_template or '<none>'}, "
+                f"variant={variant or '<none>'})"
             )
 
         return entries
@@ -1973,12 +2025,20 @@ Template rendering writes files to the workspace."""
     # order keeps the regex alternation behaviour deterministic.
     _UNIVERSAL_PREFIXES = ['<!--', '/*', '//', '--', '#', '%']
 
-    def _build_directive_regex(self, prefix: str) -> 're.Pattern[str]':
-        """Build a regex matching ``<prefix> Output: <path> [<closer>]``
+    def _build_directive_regex(
+        self, prefix: str, keyword: str = "Output",
+    ) -> 're.Pattern[str]':
+        """Build a regex matching ``<prefix> <keyword>: <value> [<closer>]``
         for a specific comment prefix.  Block-comment closers are
-        stripped non-greedily from the captured path so directives like
-        ``<!-- Output: pom.xml -->`` and ``/* Output: foo.css */``
+        stripped non-greedily from the captured value so directives
+        like ``<!-- Output: pom.xml -->`` and ``/* Output: foo.css */``
         capture only ``pom.xml`` / ``foo.css``.
+
+        ``keyword`` defaults to ``"Output"`` to preserve existing
+        behaviour for the path-template extractor.  Server 0.6.42+
+        also uses this with ``keyword="Variant"`` for the variant-
+        axis extractor; future per-template directives (``// X: <val>``)
+        can reuse the same machinery by passing a different keyword.
 
         Match span includes the optional trailing newline (server
         0.6.41+) so the same regex serves both extraction (uses
@@ -1997,7 +2057,7 @@ Template rendering writes files to the workspace."""
         else:
             closer = r'\s*'  # line-style: no closer to match
         return re.compile(
-            rf'^\s*{re.escape(prefix)}\s*Output\s*:\s*(\S.*?){closer}$\n?',
+            rf'^\s*{re.escape(prefix)}\s*{re.escape(keyword)}\s*:\s*(\S.*?){closer}$\n?',
             re.MULTILINE,
         )
 
@@ -2141,6 +2201,67 @@ Template rendering writes files to the workspace."""
         # something looser).
         for prefix in self._UNIVERSAL_PREFIXES:
             regex = self._build_directive_regex(prefix)
+            match = regex.search(content)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def _extract_variant(
+        self, content: str, filename: Optional[str] = None,
+    ) -> str:
+        """Extract the ``Variant: <option>`` directive from template
+        content — server 0.6.42+.
+
+        Templates representing one option of a multi-option axis can
+        declare which option they are with a comment header, e.g.::
+
+            // Variant: restclient
+            package {{basePackage}}.client;
+            ...
+
+        Mirrors ``_extract_output_path_template``'s polyglot dispatch
+        (extension-keyed primary, universal multi-prefix fallback);
+        captures only the option name (e.g. ``"restclient"``).  Use
+        case: kb declares the axis-to-template mapping in MODULE.md
+        (e.g. ``variants.http_client.options.restclient.templates``);
+        the per-template header redundantly declares which option
+        each template implements.  When the kb's authoritative
+        mapping populates the index entry's ``variant`` field, the
+        header is redundant; when only the header is present (e.g.
+        kb-omission, agent-authored templates), the header is the
+        sole source.
+
+        Returns the option string (whitespace-stripped) or empty
+        string when no header is present.
+
+        Args:
+            content: Template content string.
+            filename: Optional template filename — drives extension-keyed
+                comment-style dispatch.  When omitted, falls back to
+                the universal multi-prefix scan.
+
+        Returns:
+            The variant option name, or ``""`` when no Variant directive
+            was found.
+        """
+        # Extension-keyed dispatch
+        if filename:
+            stem = filename
+            for tpl_suffix in ('.tpl', '.tmpl'):
+                if stem.endswith(tpl_suffix):
+                    stem = stem[:-len(tpl_suffix)]
+                    break
+            inner_ext = Path(stem).suffix.lower()
+            prefix = self._COMMENT_PREFIX_BY_EXT.get(inner_ext)
+            if prefix is not None:
+                regex = self._build_directive_regex(prefix, keyword="Variant")
+                match = regex.search(content)
+                if match:
+                    return match.group(1).strip()
+
+        # Universal fallback
+        for prefix in self._UNIVERSAL_PREFIXES:
+            regex = self._build_directive_regex(prefix, keyword="Variant")
             match = regex.search(content)
             if match:
                 return match.group(1).strip()
@@ -2761,6 +2882,16 @@ Template rendering writes files to the workspace."""
                 # this (substituted with the agent's ``variables``) when
                 # ``output_path`` isn't supplied — see the tool schema.
                 "output_path_template": entry.output_path_template,
+                # Variant axis (server 0.6.42+).  ``variant_key`` is the
+                # kb-declared concept name (e.g. ``"http_client"`` —
+                # stack-neutral); ``variant`` is the option THIS
+                # template represents within that axis (e.g.
+                # ``"restclient"``, ``"feign"``).  Both empty for
+                # templates outside any variant axis.  Consumers can
+                # filter: render template only when
+                # ``selected_variants[variant_key] == variant``.
+                "variant_key": entry.variant_key,
+                "variant": entry.variant,
             })
 
         # Sort: standalone first (they're the primary templates), then embedded

@@ -3817,3 +3817,217 @@ class TestOutputDirectiveStripping:
         css = "/* Output: dist/styles.css */\nbody { color: red; }\n"
         out = plugin._strip_output_directive(css, filename="styles.css.tpl")
         assert out.startswith("body {")
+
+
+# ==================== Variant Axis Fields (server 0.6.42+) ====================
+
+class TestVariantAxisFields:
+    """``TemplateIndexEntry`` carries ``variant_key`` + ``variant`` for
+    templates representing one option of a multi-option axis the
+    consumer pre-selected upstream.  Mirrors the 0.6.34
+    ``output_path_template`` plumbing exactly.
+
+    Surfaced empirically by kb-enablement-2.0 chunk-3 mod-017
+    (persistence-systemapi): three HTTP-client implementation
+    templates (restclient/feign/resttemplate) all targeting the same
+    target file.  Without variant filtering the agent rendered all
+    three (last-write-wins) or skipped stochastically — 5x produced
+    3 distinct hashes + file-count drift.
+
+    The framework's job: plumb the two strings through the index +
+    walker + listAvailableTemplates surface.  Per-stack semantics
+    (which axes exist, which option is the default, etc.) live in
+    the kb's MODULE.md ``variants:`` block; the kb-side walker
+    populates ``variant_key`` from there.  The framework
+    opportunistically extracts ``variant`` from a ``// Variant: <option>``
+    header in template content as a secondary signal.
+    """
+
+    def test_variant_extractor_simple_java(self, plugin):
+        """``// Variant: <option>`` header captured."""
+        content = textwrap.dedent("""\
+            // Variant: restclient
+            package com.example.client;
+            public class FooClient {}
+        """)
+        assert plugin._extract_variant(
+            content, filename="restclient.java.tpl",
+        ) == "restclient"
+
+    def test_variant_extractor_xml_block_comment(self, plugin):
+        """``<!-- Variant: ... -->`` with block-comment closer
+        stripped from the captured option."""
+        content = textwrap.dedent("""\
+            <!-- Variant: maven-bom -->
+            <dependencyManagement>
+              <dependencies>{{deps}}</dependencies>
+            </dependencyManagement>
+        """)
+        assert plugin._extract_variant(
+            content, filename="bom.xml.tpl",
+        ) == "maven-bom"
+
+    def test_variant_extractor_python_hash(self, plugin):
+        """``# Variant: <option>`` for hash-style comment languages."""
+        content = "# Variant: requests\nimport requests\n"
+        assert plugin._extract_variant(
+            content, filename="client.py.tpl",
+        ) == "requests"
+
+    def test_variant_extractor_no_directive_returns_empty(self, plugin):
+        """Templates without a Variant header return empty string."""
+        content = "package com.x;\nclass Foo {}\n"
+        assert plugin._extract_variant(
+            content, filename="Foo.java.tpl",
+        ) == ""
+
+    def test_variant_extractor_universal_fallback(self, plugin):
+        """Templates without a recognised extension fall back to the
+        universal multi-prefix scan."""
+        content = "# Variant: alpine\nFROM alpine:3.18\n"
+        assert plugin._extract_variant(
+            content, filename="Dockerfile.tpl",
+        ) == "alpine"
+
+    def test_walker_populates_variant_from_header(self, plugin, tmp_path):
+        """Standalone-discovery walker captures ``variant`` from the
+        on-disk header.  ``variant_key`` stays empty (kb-side walker
+        owns the axis-mapping)."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "restclient.java.tpl").write_text(textwrap.dedent("""\
+            // Variant: restclient
+            package {{basePackage}}.client;
+            public class FooClient {}
+        """))
+        entries = plugin._discover_standalone_templates(tpl_dir)
+        assert len(entries) == 1
+        assert entries[0].variant == "restclient"
+        # No axis-mapping context from disk alone.
+        assert entries[0].variant_key == ""
+
+    def test_index_loader_reads_kb_authoritative_mapping(
+        self, plugin, tmp_path
+    ):
+        """Index loader populates ``variant_key`` + ``variant`` from
+        index.json — that's where the kb's authoritative axis-mapping
+        lives.  Header extraction is the secondary signal; index
+        wins."""
+        # Simulate an index.json populated by the kb-side walker that
+        # mapped MODULE.md's variants block onto each template.
+        legacy_index = {
+            "templates": {
+                "restclient.java.tpl": {
+                    "name": "restclient.java.tpl",
+                    "source_path": str(tmp_path / "restclient.java.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "standalone",
+                    "variant_key": "http_client",
+                    "variant": "restclient",
+                },
+            },
+        }
+        index_path = plugin._templates_dir / "index.json"
+        index_path.write_text(json.dumps(legacy_index))
+        plugin._load_persisted_index()
+        loaded = plugin._template_index.get("restclient.java.tpl")
+        assert loaded is not None
+        assert loaded.variant_key == "http_client"
+        assert loaded.variant == "restclient"
+
+    def test_index_loader_legacy_entries_default_empty(
+        self, plugin, tmp_path
+    ):
+        """Older index.json files (pre-0.6.42) without variant_key /
+        variant fields load with empty-string defaults — no
+        filtering applied, behaviour unchanged."""
+        legacy_index = {
+            "templates": {
+                "Old.tpl": {
+                    "name": "Old.tpl",
+                    "source_path": str(tmp_path / "Old.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "standalone",
+                    # No variant_key / variant fields.
+                },
+            },
+        }
+        index_path = plugin._templates_dir / "index.json"
+        index_path.write_text(json.dumps(legacy_index))
+        plugin._load_persisted_index()
+        loaded = plugin._template_index["Old.tpl"]
+        assert loaded.variant_key == ""
+        assert loaded.variant == ""
+
+    def test_listAvailableTemplates_surfaces_variant_fields(
+        self, plugin, tmp_path
+    ):
+        """`listAvailableTemplates` includes ``variant_key`` + ``variant``
+        for every entry so consumers can filter by axis."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "restclient.java.tpl").write_text(
+            "// Variant: restclient\npackage x;\nclass C {}\n"
+        )
+        (tpl_dir / "Plain.java.tpl").write_text(
+            "package x;\nclass Plain {}\n"
+        )
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        # Manually add the kb-authoritative axis mapping (simulating
+        # the kb-side walker's contribution).
+        plugin._template_index["restclient.java.tpl"].variant_key = "http_client"
+
+        result = plugin._execute_list_available({})
+        by_name = {t["name"]: t for t in result["templates"]}
+        # Variant template
+        assert by_name["restclient.java.tpl"]["variant_key"] == "http_client"
+        assert by_name["restclient.java.tpl"]["variant"] == "restclient"
+        # Plain template
+        assert by_name["Plain.java.tpl"]["variant_key"] == ""
+        assert by_name["Plain.java.tpl"]["variant"] == ""
+
+    def test_mod_017_three_client_options_repro(self, plugin, tmp_path):
+        """Reproduces chunk-3 v1 mod-017 scenario: three HTTP-client
+        templates each declaring their option.  ``listAvailableTemplates``
+        surfaces them with distinct ``variant`` values; consumer can
+        then filter by ``selected_variants[variant_key]``."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        for option in ("restclient", "feign", "resttemplate"):
+            (tpl_dir / f"{option}.java.tpl").write_text(textwrap.dedent(f"""\
+                // Variant: {option}
+                package com.example.client;
+                public class FooClient {{}}
+            """))
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        # Kb-side walker would set variant_key="http_client" on all three.
+        for option in ("restclient", "feign", "resttemplate"):
+            plugin._template_index[f"{option}.java.tpl"].variant_key = (
+                "http_client"
+            )
+
+        result = plugin._execute_list_available({})
+        # All three surface distinct variant values under the same axis.
+        variant_axis = {
+            t["variant"]
+            for t in result["templates"]
+            if t["variant_key"] == "http_client"
+        }
+        assert variant_axis == {"restclient", "feign", "resttemplate"}
+
+    def test_extractor_returns_first_variant_only(self, plugin):
+        """Multiple Variant headers (authoring error) — only the
+        first is captured.  Mirrors the Output extractor's
+        first-match-only behavior."""
+        content = (
+            "// Variant: first\n"
+            "// Variant: second\n"
+            "class Foo {}\n"
+        )
+        assert plugin._extract_variant(
+            content, filename="Foo.java.tpl",
+        ) == "first"
