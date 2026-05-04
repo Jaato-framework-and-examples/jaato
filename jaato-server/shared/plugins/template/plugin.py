@@ -2445,6 +2445,61 @@ Template rendering writes files to the workspace."""
             "warnings": warnings,
         }
 
+    def _strip_host_comment_lines(self, content: str) -> tuple[str, List[int]]:
+        """Strip lines whose first non-whitespace chars are ``//``.
+
+        Code-generation templates target host languages (Java, C/C++,
+        JavaScript, Go, Rust, etc.) whose single-line comment marker
+        is ``//``.  Conventional code-gen template authoring places a
+        documentation metadata block at the top of each file using
+        host-language comment syntax::
+
+            // Template: Customer.java.tpl
+            // Module: mod-code-015-hexagonal-base-java-spring
+            // REQUIRED VARIABLES: {{Entity}} {{basePackage}} {{fieldName}}
+            // PURPOSE: Domain entity for {{Entity}} aggregate.
+
+        References inside these lines are documentation for human
+        readers, not live Mustache references — they describe the
+        template's contract.  Without stripping, the parser sees
+        ``{{fieldName}}`` etc. OUTSIDE any section and reports them
+        as top-level scalars — even when the template body uses them
+        ONLY inside ``{{#fields}}...{{/fields}}`` (item-keys, not
+        top-level).  Net effect: false top-level scalars cause agents
+        to look up names that don't exist in their context, emit
+        warnings, and produce per-run content drift.
+
+        Scope decisions:
+        - ``//`` (C-family single-line) IS stripped — the dominant
+          comment style in code-gen templates.
+        - ``/* ... */`` (block comments) are NOT stripped — they
+          often carry legitimate Javadoc-with-live-refs like
+          ``@param {{paramName}}`` that's meant to render.
+        - ``#`` (Python/Shell/YAML/Markdown line comments) are NOT
+          stripped — risk of over-stripping Markdown headers etc.
+          If a template-set targeting Python emerges and needs ``#``
+          handling, add it then with explicit consideration for
+          Markdown / shebang edge cases.
+        - Tenants needing parser-directive docs in non-stripped
+          comment styles can use Mustache's native ``{{! ... }}``
+          which the parser correctly ignores.
+
+        Returns the cleaned content AND the 1-indexed line numbers
+        that were stripped, so the tool can surface a warning.
+        """
+        lines = content.splitlines(keepends=True)
+        stripped_line_numbers: List[int] = []
+        result: List[str] = []
+        for idx, line in enumerate(lines, start=1):
+            if line.lstrip().startswith('//'):
+                # Replace with bare newline (preserve line structure
+                # for any line-number-based diagnostics later).
+                result.append('\n' if line.endswith('\n') else '')
+                stripped_line_numbers.append(idx)
+            else:
+                result.append(line)
+        return ''.join(result), stripped_line_numbers
+
     def _parse_mustache_structure(self, content: str) -> List[Dict[str, Any]]:
         """Walk a Mustache template, classify each variable by kind.
 
@@ -2490,6 +2545,15 @@ Template rendering writes files to the workspace."""
         parsing — they're the same variable from a structural
         perspective; only the render-time escaping differs.
         """
+        # Strip ``//`` host-language comment lines first.  References
+        # inside such lines are documentation, not live Mustache
+        # references — see ``_strip_host_comment_lines`` docstring.
+        # Stash stripped line numbers so the tool can surface a
+        # ``warnings`` field naming the lines that were skipped.
+        content, self._last_stripped_comment_lines = (
+            self._strip_host_comment_lines(content)
+        )
+
         # Mustache triple-brace ``{{{x}}}`` is the unescaped-output
         # form.  Structurally it's identical to ``{{x}}`` — same
         # variable, same kind.  Normalise here so the regex below
@@ -2732,12 +2796,32 @@ Template rendering writes files to the workspace."""
             # ``_parse_mustache_structure`` docstring for the full
             # rules.
             structured = self._parse_mustache_structure(template_content)
-            return {
+            result = {
                 "variables": structured,
                 "syntax": "mustache",
                 "template_name": template_name,
                 "count": len(structured),
             }
+            # Surface ``//`` host-comment lines that were stripped.
+            # Per the standard completion-payload-schema convention
+            # (see docs/design/completion-payload-schema-conventions.md),
+            # warnings is the advisory escape hatch.
+            stripped = getattr(self, "_last_stripped_comment_lines", []) or []
+            if stripped:
+                result["warnings"] = [
+                    (
+                        f"Skipped {len(stripped)} line(s) starting with '//' "
+                        f"from variable extraction (host-language comment "
+                        f"lines: {stripped}). References inside these lines "
+                        f"were treated as documentation, not live Mustache "
+                        f"references. If any contain genuinely-live refs that "
+                        f"need to render, rewrite them outside the comment "
+                        f"line OR use Mustache's native comment syntax "
+                        f"`{{{{! ... }}}}` for documentation that the parser "
+                        f"correctly ignores."
+                    )
+                ]
+            return result
 
         else:
             return {

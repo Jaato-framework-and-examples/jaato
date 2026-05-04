@@ -727,6 +727,104 @@ class TestMustacheStructuralParser:
                 f"{required} missing from apiEndpoints.item_keys: {api['item_keys']}"
             )
 
+    def test_strips_java_style_comment_lines(self):
+        """``//``-prefixed lines (Java/C/C++/JS host-language comments)
+        are stripped before structural extraction.  Refs inside such
+        lines are documentation, not live Mustache references.
+
+        Surfaced by kb-enablement-2.0 templates whose 7-line metadata
+        header (`// Template:`, `// REQUIRED VARIABLES: {{Entity}} ...`)
+        was leaking comment-line refs to top-level scalars.
+        """
+        plugin = TemplatePlugin()
+        template = (
+            "// REQUIRED VARIABLES: {{Entity}} {{fieldName}} {{type}}\n"
+            "package com.example.{{basePackage}};\n"
+            "\n"
+            "public class {{Entity}} {\n"
+            "{{#fields}}\n"
+            "  {{type}} {{fieldName}};\n"
+            "{{/fields}}\n"
+            "}\n"
+        )
+        result = plugin._parse_mustache_structure(template)
+        top_level = sorted(v["name"] for v in result)
+        # fieldName, type appear ONLY in stripped comment line + inside
+        # {{#fields}} body — should be item_keys of fields, NOT top-level.
+        assert "fieldName" not in top_level, (
+            f"fieldName leaked from comment line to top level: {top_level}"
+        )
+        assert "type" not in top_level
+        assert top_level == ["Entity", "basePackage", "fields"]
+        fields = next(v for v in result if v["name"] == "fields")
+        assert fields["kind"] == "section"
+        assert "fieldName" in fields["item_keys"]
+        assert "type" in fields["item_keys"]
+
+    def test_strip_does_not_eat_block_comments(self):
+        """Block comments (``/* ... */``) often carry live Javadoc-
+        with-Mustache refs (``@param {{x}}``).  Only single-line
+        ``//`` is stripped; ``/* ... */`` is preserved so refs inside
+        Javadoc continue to be live.
+        """
+        plugin = TemplatePlugin()
+        template = (
+            "/**\n"
+            " * Generated entity for {{Entity}} domain.\n"
+            " * @param {{paramName}} the value\n"
+            " */\n"
+            "class {{Entity}} {}\n"
+        )
+        result = plugin._parse_mustache_structure(template)
+        top_level = sorted(v["name"] for v in result)
+        # Both Entity and paramName end up as top-level scalars.
+        # Javadoc references are live.
+        assert "Entity" in top_level
+        assert "paramName" in top_level
+
+    def test_strip_does_not_eat_python_hash(self):
+        """Python ``#`` (and Markdown ``#`` headers) are NOT stripped
+        — risk of over-stripping.  Tenants targeting Python with
+        parser-directive docs should use ``{{! ... }}`` instead.
+        """
+        plugin = TemplatePlugin()
+        template = "# comment with {{liveRef}}\nplain {{Entity}}\n"
+        result = plugin._parse_mustache_structure(template)
+        top_level = sorted(v["name"] for v in result)
+        assert "liveRef" in top_level
+        assert "Entity" in top_level
+
+    def test_execute_includes_warnings_for_stripped_lines(self, plugin, tmp_path):
+        """When the parser strips ``//`` comment lines, the tool's
+        return includes a ``warnings`` field per the standard
+        completion-payload-schema convention (advisory escape hatch).
+        """
+        templates_dir = tmp_path / "templates"
+        templates_dir.mkdir()
+        tpl_path = templates_dir / "test.java.tpl"
+        # Include a {{#section}} marker so syntax-detection picks
+        # mustache (Jinja2 has no equivalent dotless-prefix
+        # syntax) — only the mustache path runs the //-strip.
+        tpl_path.write_text(
+            "// REQUIRED VARIABLES: {{x}} {{y}}\n"
+            "package com.example;\n"
+            "{{#fields}}{{name}}{{/fields}}\n"
+            "class {{Entity}} {}\n"
+        )
+        plugin._template_index["test.java.tpl"] = TemplateIndexEntry(
+            name="test.java.tpl",
+            source_path=str(tpl_path),
+            origin="standalone",
+            syntax="mustache",
+            variables=[],
+        )
+        result = plugin._execute_list_template_variables({
+            "template_name": "test.java.tpl",
+        })
+        assert "warnings" in result, f"expected warnings, got {result}"
+        assert "1 line(s) starting with '//'" in result["warnings"][0]
+        assert "{{! ... }}" in result["warnings"][0]
+
     def test_section_without_inverted_has_explicit_false_flag(self):
         """Sections without an inverted branch get
         ``has_inverted_branch: False`` explicitly — predictable schema
