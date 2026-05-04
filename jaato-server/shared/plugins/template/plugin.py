@@ -2197,6 +2197,178 @@ Template rendering writes files to the workspace."""
             },
         }
 
+    def _validate_render_inputs_against_structure(
+        self, template_content: str, variables: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Validate the agent's ``variables`` dict against the template's
+        structural metadata (kind + item_keys) — server 0.6.31+.
+
+        Why this exists: Mustache silently renders garbage on shape
+        mismatches.  If a variable declared ``kind=section`` is passed
+        as a string, Mustache treats the string as truthy and renders
+        the section body ONCE with the string as context — ``{{innerKey}}``
+        lookups inside resolve to empty, file lands on disk with one
+        blob instead of N repeated blocks.  No error returned.  The
+        agent's retry loop never fires because the tool call appeared
+        to succeed.
+
+        This validator hard-fails before render when:
+
+        - ``kind=scalar`` and value is not str / int / float / bool / None
+          (catches dict / list passed for a flat scalar).
+        - ``kind=section`` body references inner fields (non-empty
+          ``item_keys``) AND the value is a bare ``str`` / ``int`` /
+          ``float`` (the silent-garbage failure mode — Mustache renders
+          body once with the scalar as context, inner-field lookups
+          all resolve to empty).
+        - ``kind=section`` value is a list AND any list item is not
+          a dict (catches list-of-strings instead of list-of-dicts).
+
+        What this validator does NOT enforce — and why.
+
+        - Per-item ``item_keys`` coverage.  The parser currently
+          flattens dotted-path references (``{{validation.required}}``
+          becomes the literal key ``"validation.required"``) and
+          treats nested inverted-section identifiers
+          (``{{^last}}...{{/last}}`` inside ``{{#fields}}``) as
+          required item_keys when they're actually optional (the
+          inverted block fires when the field is absent).  Both
+          would produce false-positive hard-fails.  The framework
+          accepts the silent-tolerance trade-off here: Mustache
+          itself silently renders sections with missing inner fields
+          as empty for those refs, so the failure mode is "less
+          output than expected" rather than "wrong output" — much
+          easier to spot in code review than the silent-garbage
+          mode the validator does catch.  Item_keys remain available
+          via ``listTemplateVariables`` for the agent's reference,
+          they're just not enforced at render time.
+        - Boolean / None passed for a section.  Mustache treats
+          ``True`` / non-empty values as "render body once with
+          current context" — the conditional idiom.  Allowed.
+
+        Returns ``None`` on success, an error dict on failure.  Only
+        validates Mustache templates; Jinja2 path is skipped (its
+        kind detection is a follow-up).
+        """
+        # Only Mustache has rich structural info; Jinja2 path is skipped.
+        if self._detect_template_syntax(template_content) != "mustache":
+            return None
+
+        if not isinstance(variables, dict):
+            # Type-check the top-level: variables MUST be a dict.
+            # Stricter than Mustache itself (which would silently treat
+            # non-dict as no-context); makes the failure mode visible.
+            return {
+                "error": (
+                    f"variables must be a dict, got "
+                    f"{type(variables).__name__} — pass a JSON object "
+                    f"with one key per template variable"
+                ),
+                "validation_layer": "shape_check",
+            }
+
+        structured = self._parse_mustache_structure(template_content)
+        errors: List[str] = []
+
+        for var in structured:
+            name = var["name"]
+            kind = var["kind"]
+
+            if name not in variables:
+                # Missing top-level variable — Mustache renders missing
+                # as empty string for scalars and empty list for
+                # sections.  Skip validation for absent variables; only
+                # validate ones the agent actually provided (so the
+                # check is opt-in via providing the variable).
+                continue
+
+            actual = variables[name]
+
+            if kind == "scalar":
+                if actual is not None and not isinstance(
+                    actual, (str, int, float, bool)
+                ):
+                    errors.append(
+                        f"variable {name!r} declared kind=scalar but "
+                        f"received {type(actual).__name__} — expected "
+                        f"str / int / float / bool / None"
+                    )
+            elif kind == "section":
+                # Mustache treats section markers polymorphically:
+                #   - list           → iterate body once per item
+                #   - bool / None    → render body 0/1 times (the
+                #                      conditional idiom)
+                #   - dict           → render body once with dict as context
+                #   - str / number   → renders body once with the value
+                #                      as current context (silent-garbage
+                #                      mode when body references inner fields)
+                #
+                # Validation focuses on the silent-garbage modes:
+                #   1. list of non-dicts — body assumes per-item field
+                #      access, items aren't dicts, every reference
+                #      resolves empty.
+                #   2. bare str / int / float passed for a section
+                #      with inner-field references (non-empty item_keys)
+                #      — body wants ``{{innerKey}}`` but context is
+                #      a scalar, all lookups empty.
+                #
+                # bool / None / dict are all allowed (valid Mustache
+                # idioms).  Item_keys coverage is NOT enforced — see
+                # method docstring for rationale.
+                item_keys = var.get("item_keys") or []
+                if isinstance(actual, list):
+                    # Inspect up to first 5 items.  Sectioned inputs
+                    # in code-gen are typically uniform shape, so
+                    # checking the first few catches systemic shape
+                    # errors without expensive iteration.
+                    for i, item in enumerate(actual[:5]):
+                        if not isinstance(item, dict):
+                            errors.append(
+                                f"variable {name!r} kind=section "
+                                f"item[{i}] is {type(item).__name__}, "
+                                f"expected dict (each list item must "
+                                f"be a dict carrying the section's "
+                                f"per-item fields)"
+                            )
+                elif isinstance(actual, (bool, dict)) or actual is None:
+                    # bool / None — boolean-conditional idiom.
+                    # dict — single-context render idiom.
+                    # All valid Mustache; let render decide.
+                    pass
+                elif item_keys:
+                    # str / int / float passed for a section whose
+                    # body references inner fields — silent garbage.
+                    errors.append(
+                        f"variable {name!r} declared kind=section "
+                        f"with body referencing inner fields "
+                        f"({item_keys}) but received "
+                        f"{type(actual).__name__} — expected list "
+                        f"of dicts"
+                    )
+                # else: bare scalar passed for a body with no
+                # inner-field references — Mustache renders body
+                # once with scalar as context, no garbage.  Allow.
+            elif kind == "inverted_section":
+                # Any value works (truthy/falsy distinction handled by
+                # Mustache at render time).  No type check needed.
+                pass
+
+        if errors:
+            return {
+                "error": "Variable shape validation failed",
+                "validation_layer": "shape_check",
+                "validation_errors": errors,
+                "hint": (
+                    "Call listTemplateVariables for this template to see "
+                    "each variable's expected kind (scalar / section / "
+                    "inverted_section).  Sections expecting iteration "
+                    "must receive list-of-dicts; scalars must receive "
+                    "str/int/float/bool/None."
+                ),
+            }
+
+        return None
+
     def _execute_render_template_to_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute renderTemplateToFile tool.
 
@@ -2259,6 +2431,18 @@ Template rendering writes files to the workspace."""
                 "error": f"Output file already exists: {output_path}. Set overwrite=true to replace.",
                 "output_path": str(out_path)
             }
+
+        # Validate variables shape against template structure (Mustache only).
+        # Catches the silent-garbage failure mode where a section
+        # variable is passed as a string or scalar — Mustache renders
+        # one bogus block instead of the intended N-item iteration.
+        shape_error = self._validate_render_inputs_against_structure(
+            template, variables
+        )
+        if shape_error is not None:
+            if template_name_arg:
+                shape_error["template_name"] = template_name_arg
+            return shape_error
 
         # Detect syntax and render using appropriate engine
         syntax = self._detect_template_syntax(template)

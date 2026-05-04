@@ -1731,3 +1731,206 @@ class TestSpringBootPlaceholderCollision:
         assert "orders:" in content
         assert "${ORDERS_API_URL:http://localhost:8081}" in content
         assert "connectTimeout: 5000" in content
+
+
+# ==================== Render Shape Validation (server 0.6.31+) ====================
+
+class TestRenderShapeValidation:
+    """``renderTemplateToFile`` validates ``variables`` shape against the
+    template's structural metadata (kind + item_keys) and HARD-FAILS
+    before render on mismatches.
+
+    Without this guard, Mustache silently renders garbage when a section
+    variable is passed as a string or scalar — the file lands on disk
+    with one bogus block instead of N repeated blocks, no error returned.
+    The agent's retry path never fires.
+
+    Fixes the slice-3 chunk-1 ``run-2`` non-determinism source where
+    the agent occasionally passes a JSON string for a section variable.
+    """
+
+    def test_section_passed_as_string_rejected(self, plugin):
+        """Section variable passed as JSON string → hard fail."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+            private {{type}} {{name}};
+            {{/fields}}
+        """)
+        output_file = plugin._base_path / "out" / "Bad.java"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {
+                "fields": '[{"type": "String", "name": "id"}]',
+            },
+            "output_path": str(output_file),
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "shape_check"
+        assert any(
+            "fields" in e and "kind=section" in e and "str" in e
+            for e in result["validation_errors"]
+        ), result
+        # Output file must not be created when validation fails.
+        assert not output_file.exists()
+
+    def test_section_passed_as_int_rejected(self, plugin):
+        """Section variable passed as raw int (with body referencing
+        inner fields) → hard fail.  ``True`` and ``None`` are allowed
+        — they're the boolean-conditional idiom.  Plain integers and
+        strings are NOT, when item_keys is non-empty."""
+        template = "{{#items}}- {{value}}\n{{/items}}"
+        output_file = plugin._base_path / "out" / "items.txt"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {"items": 42},
+            "output_path": str(output_file),
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "shape_check"
+        assert "validation_errors" in result
+        assert not output_file.exists()
+
+    def test_section_list_of_strings_rejected(self, plugin):
+        """Section value is a list but items are strings, not dicts
+        — ``{{innerKey}}`` lookups would all resolve empty."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+            private {{type}} {{name}};
+            {{/fields}}
+        """)
+        output_file = plugin._base_path / "out" / "los.java"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {
+                # list of strings instead of list of dicts.
+                "fields": ["id", "email"],
+            },
+            "output_path": str(output_file),
+        })
+        assert "error" in result
+        assert result.get("validation_layer") == "shape_check"
+        assert any(
+            "expected dict" in e for e in result["validation_errors"]
+        ), result
+        assert not output_file.exists()
+
+    def test_boolean_conditional_idiom_allowed(self, plugin):
+        """``{{#flag}}...{{/flag}}`` with ``flag=True`` is the canonical
+        Mustache conditional — must be allowed even if body references
+        inner fields (Mustache renders body in parent context)."""
+        template = textwrap.dedent("""\
+            {{#feign}}
+            feign:
+              client:
+                config:
+                  default:
+                    connectTimeout: 5000
+            {{/feign}}
+        """)
+        output_file = plugin._base_path / "out" / "flag.yml"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {"feign": True},
+            "output_path": str(output_file),
+        })
+        # Body has no inner-field refs, so this just renders the
+        # plain text inside the section.
+        assert result.get("success") is True, result
+
+    def test_correct_shape_passes(self, plugin):
+        """All-correct variables render without validation error."""
+        template = textwrap.dedent("""\
+            class {{Entity}} {
+            {{#fields}}
+                private {{type}} {{name}};
+            {{/fields}}
+            }
+        """)
+        output_file = plugin._base_path / "out" / "Good.java"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {
+                "Entity": "Customer",
+                "fields": [
+                    {"type": "String", "name": "id"},
+                    {"type": "String", "name": "email"},
+                ],
+            },
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, result
+        content = output_file.read_text()
+        assert "class Customer" in content
+        assert "private String id;" in content
+        assert "private String email;" in content
+
+    def test_inverted_section_accepts_any_value(self, plugin):
+        """Inverted sections (``{{^x}}``) — no kind type-check applied;
+        Mustache itself decides truthy/falsy at render time."""
+        template = "{{^isEmpty}}has items{{/isEmpty}}\n"
+        output_file = plugin._base_path / "out" / "inv.txt"
+        # Pass any value — list, scalar, None — none should trigger
+        # the shape validator for kind=inverted_section.
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {"isEmpty": [1, 2, 3]},
+            "output_path": str(output_file),
+            "overwrite": True,
+        })
+        assert result.get("success") is True, result
+
+    def test_missing_top_level_variable_skipped_by_validator(self, plugin):
+        """Variables NOT provided are skipped by the SHAPE validator
+        (the absent-variable check is a separate layer inside
+        ``_render_template``).  This test isolates the validator: when
+        a key is absent, the shape check returns ``None`` and the error
+        — if any — comes from the render layer, not from this layer.
+        """
+        template = "Hello {{name}}, age {{age}}"
+        result = plugin._validate_render_inputs_against_structure(
+            template, {"name": "Alice"}
+        )
+        # Validator must NOT object to absent 'age'; that's the
+        # render layer's concern.
+        assert result is None
+
+    def test_jinja2_path_skipped(self, plugin):
+        """Jinja2 templates skip shape validation (the validator is
+        Mustache-only; Jinja2 kind detection is a follow-up)."""
+        template = "Hello {{ name }}, {{ greeting }}"
+        output_file = plugin._base_path / "out" / "j.txt"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {"name": "Alice", "greeting": "hi"},
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, result
+
+    def test_validation_error_carries_hint(self, plugin):
+        """Validation error response includes a ``hint`` pointing at
+        ``listTemplateVariables`` so the agent knows how to recover."""
+        template = "{{#items}}{{x}}{{/items}}"
+        result = plugin._execute_render_template_to_file({
+            "template": template,
+            "variables": {"items": "not-a-list"},
+            "output_path": str(plugin._base_path / "out" / "h.txt"),
+        })
+        assert "error" in result
+        assert "hint" in result
+        assert "listTemplateVariables" in result["hint"]
+
+    def test_variables_not_a_dict_rejected(self, plugin):
+        """Top-level ``variables`` that isn't a dict → hard fail.
+
+        Uses a Mustache template with section markers so the syntax
+        detector picks ``mustache`` (the validator is a no-op on
+        Jinja2 / plain templates).  ``_coerce_variables`` turns
+        non-dicts into ``{}`` upstream, so this exercises the
+        defence-in-depth guard for direct callers of the validator.
+        """
+        template = "{{#fields}}{{name}}{{/fields}}"
+        result = plugin._validate_render_inputs_against_structure(
+            template, ["not-a-dict"]  # type: ignore[arg-type]
+        )
+        assert result is not None
+        assert result.get("validation_layer") == "shape_check"
