@@ -2934,6 +2934,15 @@ Template rendering writes files to the workspace."""
           ``item_keys``) AND the value is a list whose items are not
           dicts — body needs ``{{innerKey}}`` lookups, items can't
           satisfy them.
+        - ``kind=section`` value is a list of dicts AND any item
+          dict is missing a key declared as ``required: True`` in
+          item_keys (server 0.6.43+).  Required = source ∈ {scalar,
+          section} per the parser's source taxonomy.  Catches the
+          chunk-3 v3 jsonField drift where the agent reconstructed
+          field items dropping the JSON-property name; Mustache
+          would render ``@JsonProperty("")`` silently → semantically
+          broken Java; validator now hard-fails with a clean
+          actionable error naming the missing key.
 
         Notably allowed (valid Mustache idioms):
 
@@ -2945,28 +2954,31 @@ Template rendering writes files to the workspace."""
           forced agents into ``[{"_": s}, {"_": s}]`` workarounds
           and caused MORE variance than the original validator
           eliminated.
-
-        What this validator does NOT enforce — and why.
-
-        - Per-item ``item_keys`` coverage.  The parser currently
-          flattens dotted-path references (``{{validation.required}}``
-          becomes the literal key ``"validation.required"``) and
-          treats nested inverted-section identifiers
-          (``{{^last}}...{{/last}}`` inside ``{{#fields}}``) as
-          required item_keys when they're actually optional (the
-          inverted block fires when the field is absent).  Both
-          would produce false-positive hard-fails.  The framework
-          accepts the silent-tolerance trade-off here: Mustache
-          itself silently renders sections with missing inner fields
-          as empty for those refs, so the failure mode is "less
-          output than expected" rather than "wrong output" — much
-          easier to spot in code review than the silent-garbage
-          mode the validator does catch.  Item_keys remain available
-          via ``listTemplateVariables`` for the agent's reference,
-          they're just not enforced at render time.
+        - Item dict missing an ``inverted`` source key (e.g. ``last``
+          from ``{{^last}}, {{/last}}``).  Mustache idiom: absence
+          IS the trigger condition; the validator must not treat it
+          as missing.  Source ``inverted`` = required: False per
+          the parser.
+        - Item dict missing a ``dotted`` source key (e.g. head of
+          ``{{a.b.c}}``).  Mustache silently descends; missing nested
+          renders empty without erroring.  Source ``dotted`` =
+          required: False.
+        - Item dict missing a ``helper`` source key (argument of
+          ``{{#if X}}`` / ``{{#unless X}}`` / ``{{#with X}}``).
+          Conditionals fire only when the value resolves; absent
+          means body doesn't render — the Mustache contract.  Source
+          ``helper`` = required: False.
         - Boolean / None passed for a section.  Mustache treats
           ``True`` / non-empty values as "render body once with
           current context" — the conditional idiom.  Allowed.
+
+        Per-item required-key coverage (server 0.6.43+) closes the
+        gap the original 0.6.31 docstring deferred: the parser now
+        tags each item_key with ``required`` derived from its
+        ``source``, so the false-positive concern (treating dotted
+        and inverted keys as required) is structurally resolved.
+        Only ``scalar`` and ``section`` sources flag missing keys
+        as errors.
 
         Returns ``None`` on success, an error dict on failure.  Only
         validates Mustache templates; Jinja2 path is skipped (its
@@ -3038,6 +3050,30 @@ Template rendering writes files to the workspace."""
                 # idioms).  Item_keys coverage is NOT enforced — see
                 # method docstring for rationale.
                 item_keys = var.get("item_keys") or []
+                # Compute the required-key subset from item_keys'
+                # per-key metadata (server 0.6.43+).  Required = source
+                # in {scalar, section}; inverted/dotted/helper sources
+                # are optional Mustache idioms whose absence is part
+                # of the contract.  The list comprehension is cheap
+                # (~5 items typical) and tolerates both old-style
+                # flat strings and new-style dict shapes for forward-
+                # compat with index.json files written by tooling
+                # that hasn't migrated yet.
+                required_names: List[str] = []
+                all_names: List[str] = []
+                for k in item_keys:
+                    if isinstance(k, dict):
+                        all_names.append(k.get("name", ""))
+                        if k.get("required"):
+                            required_names.append(k["name"])
+                    else:
+                        # Legacy flat-string entry — treat as required
+                        # by default (the conservative choice for
+                        # tooling that hasn't migrated to the richer
+                        # shape yet).
+                        all_names.append(str(k))
+                        required_names.append(str(k))
+
                 if isinstance(actual, list):
                     # When item_keys is empty the body has no
                     # inner-field references — either the body is
@@ -3061,7 +3097,33 @@ Template rendering writes files to the workspace."""
                                     f"expected dict (each list item "
                                     f"must be a dict carrying the "
                                     f"section's per-item fields: "
-                                    f"{item_keys})"
+                                    f"{all_names})"
+                                )
+                                continue
+                            # Per-item required-key coverage check
+                            # (server 0.6.43+).  Catches the chunk-3
+                            # v3 drift class: agent reconstructs items
+                            # dropping a key declared with source =
+                            # scalar/section in the parser's view.
+                            # Mustache would render empty for the
+                            # missing key (silent corruption); we
+                            # surface it loudly with a clean hint.
+                            missing = [
+                                k for k in required_names
+                                if k not in item
+                            ]
+                            if missing:
+                                got = sorted(item.keys())
+                                errors.append(
+                                    f"variable {name!r} kind=section "
+                                    f"item[{i}] missing required keys "
+                                    f"{missing}.  Required item_keys "
+                                    f"(source = scalar / section): "
+                                    f"{required_names}.  Got: {got}.  "
+                                    f"Mustache would render empty for "
+                                    f"missing keys (silent corruption); "
+                                    f"provide all required keys or the "
+                                    f"call must fail loudly."
                                 )
                 elif isinstance(actual, (bool, dict)) or actual is None:
                     # bool / None — boolean-conditional idiom.
@@ -3644,16 +3706,46 @@ Template rendering writes files to the workspace."""
     def _parse_mustache_structure(self, content: str) -> List[Dict[str, Any]]:
         """Walk a Mustache template, classify each variable by kind.
 
-        Returns a list of variable descriptors:
+        Returns a list of variable descriptors.  Item_keys for sections
+        carry per-key metadata (server 0.6.43+, breaking change from
+        the prior ``List[str]`` shape):
 
             [
               {"name": "Entity", "kind": "scalar"},
               {"name": "apiEndpoints", "kind": "section",
-               "item_keys": ["methodName", "path", "returnType",
-                             "isVoid", ...],
+               "item_keys": [
+                 {"name": "methodName", "required": True,  "source": "scalar"},
+                 {"name": "path",       "required": True,  "source": "scalar"},
+                 {"name": "returnType", "required": True,  "source": "scalar"},
+                 {"name": "isVoid",     "required": False, "source": "inverted"},
+                 ...
+               ],
                "has_inverted_branch": false},
               {"name": "isEmpty", "kind": "inverted_section"},
             ]
+
+        Source taxonomy on item_keys:
+
+        - ``"scalar"``: plain ``{{key}}`` reference inside a section
+          body.  Required: True.  Missing → Mustache silently renders
+          empty for that interpolation; with the validator hard-failing
+          we surface the corruption at the call boundary.
+        - ``"section"``: nested ``{{#key}}...{{/key}}`` or
+          ``{{#each key}}`` inside a section body.  Required: True.
+          The kb-author authored an iteration that needs to fire.
+        - ``"inverted"``: nested ``{{^key}}...{{/key}}`` inside a
+          section body.  Required: False.  The Mustache idiom is
+          "render the inverted body when the key is absent/falsy" —
+          the absence itself is the trigger condition.
+        - ``"dotted"``: head of a dotted-path reference
+          (``{{a.b.c}}`` → head ``a``).  Required: False.  Mustache
+          silently descends into nested dicts; a missing intermediate
+          renders empty without erroring.
+        - ``"helper"``: argument of a Handlebars conditional helper
+          (``{{#if X}}``, ``{{#unless X}}``, ``{{#with X}}``).
+          Required: False.  Conditionals fire only when the value
+          resolves; absent argument means body doesn't render —
+          that's the Mustache contract for these helpers.
 
         Kinds:
         - ``"scalar"``: ``{{name}}`` or ``{{{name}}}`` — replaced
@@ -3751,6 +3843,29 @@ Template rendering writes files to the workspace."""
         # never user-provided.  Skip whenever they appear (whether as
         # a helper argument or a standalone ref).
         ITERATION_METADATA = {'@first', '@last', '@index', '@key', 'this', '.'}
+        # Required-vs-optional source classes (server 0.6.43+).
+        # ``scalar`` and ``section`` declare the kb-author's intent
+        # that the per-item dict carries that field; missing → silent
+        # empty render → the validator's hard-fail surface.
+        # ``inverted``, ``dotted``, ``helper`` are Mustache idioms
+        # whose absence is part of the contract — never enforced.
+        REQUIRED_SOURCES = {"scalar", "section"}
+
+        def _add_item_key(item_keys: dict, name: str, source: str) -> None:
+            """Insert ``(name → source)`` into a section's item_keys
+            dict.  When the key already exists from a different
+            reference, prefer the stricter source (required ones win
+            over optional ones).  This handles cases like a body
+            using BOTH ``{{#X}}some{{/X}}`` and ``{{X}}`` for the
+            same key — the scalar/section win sets ``required: True``
+            in the final view."""
+            existing = item_keys.get(name)
+            if existing is None:
+                item_keys[name] = source
+                return
+            # Existing wins unless incoming is stricter.
+            if source in REQUIRED_SOURCES and existing not in REQUIRED_SOURCES:
+                item_keys[name] = source
 
         def _looks_like_helper(name_str: str) -> Optional[Tuple[str, str]]:
             """If ``name_str`` is a helper invocation (e.g. ``"if x"``,
@@ -3828,15 +3943,21 @@ Template rendering writes files to the workspace."""
                             if entry is None:
                                 variables[arg_root] = {
                                     "name": arg_root, "kind": "section",
-                                    "item_keys": set(),
+                                    "item_keys": {},
                                 }
                             elif entry["kind"] == "scalar":
                                 entry["kind"] = "section"
-                                entry.setdefault("item_keys", set())
+                                entry.setdefault("item_keys", {})
                         else:
                             outer_entry = variables.get(outer_iter)
                             if outer_entry and outer_entry["kind"] == "section":
-                                outer_entry["item_keys"].add(arg_root)
+                                # ``{{#each X}}`` nested inside outer
+                                # iteration: X is itself a sub-section
+                                # (kb-author authored a nested loop).
+                                # Source = "section" — required.
+                                _add_item_key(
+                                    outer_entry["item_keys"], arg_root, "section",
+                                )
                         # Push a section frame with close-marker =
                         # ``each`` so the matching close pops it
                         # AND so ``_outermost_iteration_section``
@@ -3853,7 +3974,15 @@ Template rendering writes files to the workspace."""
                         if outer_iter and outer_iter != arg_root:
                             outer_entry = variables.get(outer_iter)
                             if outer_entry and outer_entry["kind"] == "section":
-                                outer_entry["item_keys"].add(arg_root)
+                                # ``{{#if X}}`` / ``{{#unless X}}`` /
+                                # ``{{#with X}}`` argument inside outer
+                                # iteration.  Source = "helper" —
+                                # optional (Mustache contract: missing
+                                # arg means body doesn't render, no
+                                # error).
+                                _add_item_key(
+                                    outer_entry["item_keys"], arg_root, "helper",
+                                )
                         else:
                             variables.setdefault(
                                 arg_root,
@@ -3892,18 +4021,18 @@ Template rendering writes files to the workspace."""
                     entry = variables.get(name)
                     if entry is None:
                         variables[name] = {
-                            "name": name, "kind": "section", "item_keys": set(),
+                            "name": name, "kind": "section", "item_keys": {},
                         }
                     elif entry["kind"] == "scalar":
                         # Promote: section is more constrained.
                         entry["kind"] = "section"
-                        entry.setdefault("item_keys", set())
+                        entry.setdefault("item_keys", {})
                     elif entry["kind"] == "inverted_section":
                         # Mustache if/else with the same identifier,
                         # encountered ^ first then # — promote to
                         # section AND mark inverted branch exists.
                         entry["kind"] = "section"
-                        entry.setdefault("item_keys", set())
+                        entry.setdefault("item_keys", {})
                         entry["has_inverted_branch"] = True
                     # else: already a section; idempotent.
                 else:
@@ -3911,7 +4040,29 @@ Template rendering writes files to the workspace."""
                     # an item-key of outer.  No top-level entry.
                     outer_entry = variables.get(outer_iter)
                     if outer_entry and outer_entry["kind"] == "section":
-                        outer_entry["item_keys"].add(name)
+                        # Dotted section markers (``{{#validation.required}}``)
+                        # take the leftmost token + source="dotted",
+                        # required: False — Mustache silently descends
+                        # into nested context, missing nested renders
+                        # empty without erroring.  Without the dotted
+                        # split, the parser would record the literal
+                        # ``validation.required`` as required: True
+                        # and the per-item validator would flag items
+                        # carrying ``{validation: {required: ...}}``
+                        # as "missing required key validation.required"
+                        # — a false positive (server 0.6.43+).
+                        if "." in name:
+                            head_key = name.split(".", 1)[0]
+                            _add_item_key(
+                                outer_entry["item_keys"], head_key, "dotted",
+                            )
+                        else:
+                            # ``{{#X}}`` plain section: source = "section",
+                            # required: True (kb-author authored a
+                            # nested loop or conditional).
+                            _add_item_key(
+                                outer_entry["item_keys"], name, "section",
+                            )
                 # 3-tuple: close-marker = name (regular section closes
                 # with ``{{/name}}``).  Helper-section frames (pushed
                 # above for ``{{#each xs}}``) carry close-marker =
@@ -3936,7 +4087,26 @@ Template rendering writes files to the workspace."""
                     # Nested inverted: credit only as item-key.
                     outer_entry = variables.get(outer_iter)
                     if outer_entry and outer_entry["kind"] == "section":
-                        outer_entry["item_keys"].add(name)
+                        # Dotted inverted markers
+                        # (``{{^validation.required}}``) take the
+                        # leftmost token + source="dotted" (which is
+                        # already optional, same as inverted, but keep
+                        # the dotted source so the lookup-semantics
+                        # stay accurate in listTemplateVariables
+                        # introspection).
+                        if "." in name:
+                            head_key = name.split(".", 1)[0]
+                            _add_item_key(
+                                outer_entry["item_keys"], head_key, "dotted",
+                            )
+                        else:
+                            # ``{{^X}}`` plain inverted: source =
+                            # "inverted", required: False (Mustache
+                            # idiom — body fires when X is absent/
+                            # falsy).
+                            _add_item_key(
+                                outer_entry["item_keys"], name, "inverted",
+                            )
                 section_stack.append(("inverted_section", name, name))
             elif prefix == '/':
                 # Closing marker — pop the matching open section.
@@ -3960,9 +4130,28 @@ Template rendering writes files to the workspace."""
                     if outer_iter and outer_iter != name:
                         outer_entry = variables.get(outer_iter)
                         if outer_entry and outer_entry["kind"] == "section":
-                            # Leftmost token of dotted paths.
-                            item_key = name.split(".")[0] if "." in name else name
-                            outer_entry["item_keys"].add(item_key)
+                            # Source classification:
+                            # - Plain ``{{X}}`` with no dot → scalar,
+                            #   required: True.  This is the dominant
+                            #   case the per-item validator catches
+                            #   when the agent omits the key from
+                            #   item dicts.
+                            # - Dotted ``{{a.b.c}}`` → leftmost token
+                            #   ``a`` is what gets credited.  Mustache
+                            #   silently descends; missing nested
+                            #   renders empty without error → source =
+                            #   "dotted", required: False.
+                            if "." in name:
+                                item_key = name.split(".")[0]
+                                _add_item_key(
+                                    outer_entry["item_keys"],
+                                    item_key, "dotted",
+                                )
+                            else:
+                                _add_item_key(
+                                    outer_entry["item_keys"],
+                                    name, "scalar",
+                                )
                     else:
                         # Inside inverted-only sections: parent-scope
                         # scalar.
@@ -3972,12 +4161,24 @@ Template rendering writes files to the workspace."""
                 else:
                     variables.setdefault(name, {"name": name, "kind": "scalar"})
 
-        # Convert sets to sorted lists for stable output.
+        # Convert internal item_keys dict (name → source) into the
+        # sorted list-of-dicts shape callers see.  Server 0.6.43+
+        # surfaces required + source per item_key (breaking change
+        # from the prior List[str] shape — pre-1.0 surface, no
+        # back-compat shim).
         result = []
         for name in sorted(variables.keys()):
             entry = variables[name].copy()
             if "item_keys" in entry:
-                entry["item_keys"] = sorted(list(entry["item_keys"]))
+                raw = entry["item_keys"]  # dict[name → source]
+                entry["item_keys"] = [
+                    {
+                        "name": item_name,
+                        "source": source,
+                        "required": source in REQUIRED_SOURCES,
+                    }
+                    for item_name, source in sorted(raw.items())
+                ]
             # has_inverted_branch defaults to False on sections that
             # don't have an inverted form — explicit False rather
             # than missing key keeps the schema predictable.
