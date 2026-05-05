@@ -243,13 +243,25 @@ token counts, and API errors. No `user_id`, no `tenant_id`, no
 OTel spans (`docs/jaato_opentelemetry.md`) carry `session_id`,
 `agent_type`, `turn_index`. No principal/tenant attributes.
 
-### 1.8 Reactor (premium) is workspace-scoped
+### 1.8 Reactor (premium) is workspace-scoped — schema unverified
 
 `reactor-tenant-guide.md` describes the reactor as workspace-scoped
-automation. Rules in `reactors.json` have no principal field; an
-agent handoff triggered by user A's completion event will run with
-the daemon's privileges, not user A's, and could spawn an agent that
-other users see.
+automation, premium-only and out-of-tree from this OSS repo. The
+guide's schema examples don't show a principal field in rule
+definitions, but I could not verify the actual rule loader against
+source — the reactor implementation isn't in this repo. Treat the
+"rules lack a principal field" claim as **inferred from the public
+guide, not verified against the implementation**. If a maintainer
+with access to jaato-premium can confirm or correct, that should
+land before any tenancy proposal touches reactor.
+
+What is verifiable from this repo: the SessionManager exposes a
+`_broadcast_callback` that the daemon wires to "HandoffGate
+transitions from jaato-premium" (`session_manager.py:171-174`), and
+this broadcast path is daemon-wide rather than principal-filtered.
+If the reactor uses this path to drive cross-session handoffs, it
+inherits whatever (lack of) identity gating the broadcast layer
+has.
 
 ### 1.9 What's already designed but not built
 
@@ -257,10 +269,21 @@ other users see.
 |-----|--------|------------------------|
 | `jaato_permission_system.md` | Yes (rule engine, evaluators) | Yes — needs principal-aware EvalContext |
 | `permission-evaluators.md` | Yes (callable evaluators) | Yes — natural place for capability checks |
-| `apparmor-setup.md` | Yes (one daemon profile) | Partially — needs per-session profiles |
-| `websocket-workspace-isolation.md` | Yes | Adjacent — it isolates *workspaces*, not principals |
+| `apparmor-setup.md` | Yes (per-session profiles, see §1.5) | Yes — needs principal-binding |
+| `websocket-workspace-isolation.md` | Yes — per-client provisioning + AppArmor | Closer to multi-tenant than the rest of the framework; treats the WS "client" as a soft tenant boundary already |
 | `compare-rbac-profiles-frameworks.md` | N/A (comparison) | Acknowledges the gap |
-| `reactor-tenant-guide.md` | Yes (workspace tenancy) | No — terminology will need migration |
+| `reactor-tenant-guide.md` | Yes (workspace tenancy, premium) | Schema unverified from this repo; terminology will need migration |
+
+**Important observation about `websocket-workspace-isolation.md`.** Its
+goal #2 is "Per-client isolation — one client cannot access another's
+workspace, enforced at the kernel level via AppArmor." Combined with
+the per-session AppArmor confinement in §1.5, the WS deployment shape
+is materially closer to multi-tenant than IPC: each WS client gets
+its own server-provisioned workspace, its own session, its own
+runtime, and its own kernel-enforced filesystem jail. The remaining
+gaps for true multi-tenancy on WS are smaller than the rest of this
+document's framing implied — primarily identity (§3) and the
+daemon-shared `~/.jaato/` reads in the AppArmor template (§6.2).
 
 **Summary:** the data plumbing for identity (`set_client_user`,
 `created_by`, `user_id` field on connections) is in place but
@@ -455,14 +478,18 @@ from "per-session jail" to "per-tenant jail":
    kernel level, not the application level.
 
 3. **Scrub subprocess environments.**
-   Today, MCP server subprocesses, `cli`, and `interactive_shell`
-   inherit the daemon's full env (the AppArmor profile then restricts
-   their filesystem reach, but env is unaffected). Build an env
-   allowlist computed from the principal's capabilities and the
+   Verified: `cli/plugin.py:618` does `env = os.environ.copy()` and
+   `mcp_context_manager.py:60` does `env={**os.environ, **(self.env or
+   {})}`. `interactive_shell` uses `pexpect.spawn` whose default is
+   to inherit the parent process env (no explicit scrubbing visible
+   in `interactive_shell/session.py`). So MCP and CLI subprocesses
+   demonstrably inherit the daemon's full env; `interactive_shell`
+   does so by `pexpect`'s default. The AppArmor profile then
+   restricts their filesystem reach, but env is unaffected. Build an
+   env allowlist computed from the principal's capabilities and the
    resolved provider config; export only that to the subprocess.
-   This closes the "API key for tenant A reachable in
-   `os.environ` of tenant B's MCP subprocess" leak that AppArmor
-   doesn't cover.
+   This closes the "API key for tenant A reachable in `os.environ`
+   of tenant B's MCP subprocess" leak that AppArmor doesn't cover.
 
 4. **Namespace isolation for what AppArmor doesn't cover.**
    AppArmor is filesystem-only. Per-session PID, network, and IPC
@@ -620,3 +647,92 @@ For commercial framing: Phase 1-3 in OSS gives jaato a credible
 actually need). Phase 4 plus the Reactor and an OIDC `AuthProvider`
 implementation is the natural shape of a commercial multi-tenant
 hosting product, reusing the same primitives end-to-end.
+
+---
+
+## Appendix A — Verification Status
+
+This document went through two correction passes after the initial
+draft asserted that AppArmor was daemon-scope (it's per-session) and
+that all sessions in a daemon shared one runtime (each session has
+its own). Those errors are fixed; this appendix records what every
+remaining claim was checked against, so a reader can audit the audit.
+
+**Verified directly against source (file:line cited inline above).**
+
+- WS bearer auth stores SHA-256 digest, compares with
+  `hmac.compare_digest` — `websocket.py:412-416`
+- `set_client_user` plumbing exists at WS, IPC, event sink — and is
+  never called from production code (grep confirmed only test files
+  reference it)
+- `created_by` flows from `event_sink.get_client_user(client_id)`
+  into `Session.created_by` — `command_router.py:313,1046`,
+  `session_manager.py:87,106,1237,2868`
+- `EvalContext` lacks `user_id`/`tenant_id`/`roles` fields —
+  `evaluator.py:113-121`
+- `permission/README.md` aspirationally references `user_id` (lines
+  805, 844, 859, 871) but the `EvalContext` dataclass does not have
+  the field
+- `TokenLedger` events are dicts of `stage` / `total_tokens` /
+  `prompt_tokens` / `output_tokens` / errors with no principal field
+   — `token_accounting.py:35-199`
+- `permissions.example.json` models tools, patterns, channel — no
+  role concept (whole file inspected)
+- `cli` subprocesses inherit daemon env — `cli/plugin.py:618`
+- MCP subprocesses inherit daemon env — `mcp_context_manager.py:60`
+- `attach_session()` checks session existence only, no
+  principal/ACL — `session_manager.py:1522-1567`
+- Telemetry plugin has no `tenant_id`/`user_id`/`principal`
+  attribute calls — grep confirmed
+- `InstructionTokenCache` is content-addressed by `(provider_name,
+  sha256(text)[:16])` and so leak-safe —
+  `instruction_token_cache.py:35-40`
+- `_workspace_monitors` is a `Dict[session_id, WorkspaceMonitor]` —
+  `session_manager.py:177,554,571,...`
+- Each daemon session gets a fresh `JaatoServer` →
+  `JaatoClient` → `JaatoRuntime` —
+  `session_manager.py:1179`, `core.py:1283`, `jaato_client.py:385`
+- AppArmor `provision_profile(session_id, workspace_path, ...)`,
+  thread-level `apparmor_confine`, fork+exec inheritance,
+  `ReferenceAuthorizer` — `apparmor.py:604,1164,1271`,
+  `ai_tool_runner.py:1025-1051`, `subprocess_runner.py:14,193`
+- Per-session `RuntimeLimits` cgroup integration —
+  `shared/runtime_limits.py:55-94`
+- `~/.jaato/` reads granted by AppArmor template versions 4, 6, 7 —
+  `apparmor.py:84-100`
+- WS workspace isolation design: per-client provisioning,
+  AppArmor-enforced — `docs/design/websocket-workspace-isolation.md`
+  (read directly)
+
+**Inferred or partial.**
+
+- `interactive_shell` env inheritance — inferred from `pexpect.spawn`'s
+  default behaviour; no explicit scrub or explicit env passthrough
+  found in `interactive_shell/session.py`. If a maintainer can
+  confirm the spawn path, the assertion in §6.3 should be tightened
+  or relaxed.
+- Reactor rule schema lacking a principal field — **inferred from
+  `reactor-tenant-guide.md`'s public schema, not verified against
+  source**, because the reactor lives in jaato-premium and is not in
+  this repo. The `_broadcast_callback` jaato-premium uses
+  (`session_manager.py:171-174`) is in-tree and is not
+  principal-filtered, but that's the bridge layer, not the rule
+  loader.
+
+**Out of scope of this audit.**
+
+- macOS/Windows sandbox equivalents (`sandbox-exec`, AppContainer,
+  job objects). The AppArmor surface is Linux-only.
+- Premium plugin code (subagent extensions, MCP servers shipped
+  outside the OSS repo).
+- Network-level tenancy (TLS termination, mTLS to upstream MCP, etc.)
+  — orthogonal to the in-process model discussed here.
+
+**Method.** Each "verified" claim was checked by reading the cited
+file:line directly (Read or `sed`/`grep` on `/home/user/jaato`).
+"Inferred" claims rely on documented behaviour of an external library
+or a doc whose source I can't inspect. If you find an inaccuracy,
+please file an issue or amend this appendix — the failure mode that
+got the first draft wrong was confidently citing files without
+verifying conclusions, and the fix is structural (this appendix), not
+just textual.
