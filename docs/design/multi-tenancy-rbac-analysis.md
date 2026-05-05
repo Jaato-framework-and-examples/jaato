@@ -94,39 +94,135 @@ inherit each other's prior approvals.
 `permissions.example.json` models tools and patterns; there are no
 roles.
 
-### 1.4 The runtime is shared across all sessions
+### 1.4 The runtime is per-session, not daemon-shared
 
-`JaatoRuntime` (`shared/jaato_runtime.py:199-485`) is the shared
-environment:
+The first version of this document got this wrong. Reading the code
+carefully:
 
-- One `ProviderConfig` (one set of credentials)
-- One `TokenLedger`
-- One `PluginRegistry`
-- One `PermissionPlugin`
-- One `MCPClientManager` with its set of subprocess MCP servers
+- `SessionManager._sessions: Dict[str, Session]`
+  (`session_manager.py:159`)
+- Each `Session` holds its own `server: JaatoServer`
+  (`session_manager.py:91-95`); `SessionManager.create_session()`
+  constructs a fresh `JaatoServer` per session
+  (`session_manager.py:1179`)
+- Each `JaatoServer` constructs its own `JaatoClient`
+  (`core.py:1283`), which constructs its own `JaatoRuntime`
+  (`jaato_client.py:385`)
+- `JaatoRuntime.__init__` initialises its own `_provider_configs`,
+  `_ledger`, `_registry`, `_permission_plugin`, etc.
+  (`jaato_runtime.py:255-269`)
 
-Every session — main agent and subagents — references the same
-runtime. The runtime is a **convenience** boundary, not a security
-boundary.
+The `JaatoRuntime` docstring "Sessions share the runtime's resources
+(registry, permissions, ledger)" (`jaato_runtime.py:884-886`) refers
+to **subagents within a single user session sharing the parent
+session's runtime** — which is the only context where one
+`JaatoRuntime` backs multiple `JaatoSession`s. A daemon serving N
+user sessions has N independent runtimes.
 
-Concretely this means: if user A's session and user B's session run on
-the same daemon, they share Anthropic API credits, share MCP server
-processes (which inherit the daemon's full env), share the permission
-policy, and share the audit ledger.
+So the multi-tenant story for in-memory state is much better than my
+audit suggested:
 
-### 1.5 Workspace boundaries are advisory
+| Resource | Actual scope today |
+|----------|---------------------|
+| `ProviderConfig` (creds) | per-session (each session has its own) |
+| `TokenLedger` | per-session |
+| `PluginRegistry` *instance* | per-session |
+| `PermissionPlugin` *instance* | per-session (whitelists / suspensions don't bleed across sessions) |
+| MCP server fleet | per-session |
+| Subagents | share their parent session's runtime (privilege inheritance is intentional) |
 
-`set_workspace_path()` exists on `cli`, `file_edit`,
-`filesystem_query`, `interactive_shell`, etc. It is set globally on
-the plugin instance and read by tool implementations to default cwd.
+What **is** daemon-shared:
 
-It is **not** a jail. The `cli` plugin runs commands via
-`subprocess`; nothing prevents a model-issued `cd /` or a path
-traversal in `file_edit`. The MCP plugin spawns servers as
-subprocesses inheriting the daemon's full environment and UID. The
-existing AppArmor support (`docs/apparmor-setup.md`) provides
-kernel-enforced confinement at the daemon level — but it is one
-profile, not per-session, so it cannot distinguish user A from user B.
+- `SessionManager` itself: the `_sessions` index,
+  `_client_to_session` mapping, `_client_config` per-client config,
+  `_workspace_monitors` index (`session_manager.py:159-177`)
+- `_instruction_token_cache: InstructionTokenCache`
+  (`session_manager.py:181`) — content-addressed and so leak-safe
+- `_session_hooks` registered by daemon extensions
+  (`session_manager.py:185`)
+- The `_broadcast_callback` for daemon-wide events (HandoffGate from
+  jaato-premium, `session_manager.py:174`)
+- The OS process: UID/GID, environment, network namespace, filesystem
+  view
+- On-disk state: `~/.jaato/` user-tier (OAuth tokens, ws.token,
+  service credentials, profiles), workspace `.jaato/`,
+  `LEDGER_PATH` if shared between sessions
+
+The corrected framing: the *application-level* objects that hold
+secrets and policy are already per-session. The remaining sharing is
+at the **process and filesystem** layer, which is exactly what
+sandboxing has to address — and partially does (next subsection).
+
+### 1.5 Workspace isolation is kernel-enforced, per-session
+
+The first version of this document also got this wrong. There is a
+full `AppArmorManager` (`server/apparmor.py:47-1262`) that already
+implements per-session kernel-level workspace confinement:
+
+- **Per-session profile.** `provision_profile(session_id,
+  workspace_path, config_root, env_file)` renders a profile from a
+  versioned template (`apparmor.py:604-703`) and loads it via
+  `apparmor_parser -r`. Profile name: `jaato-ws-{session_id}`
+  (`apparmor.py:13,1055`). Each session gets its own kernel-enforced
+  view of the filesystem keyed by its workspace path.
+- **Thread-level confinement on every tool call.** `apparmor_confine
+  (profile_name)` is a context manager that writes
+  `changeprofile <name>` to `/proc/self/task/<tid>/attr/current`
+  (`apparmor.py:1164-1245`). The `ToolExecutor` wraps every tool
+  invocation in this context (`ai_tool_runner.py:185-196,1025-1051`).
+  This means **in-process** file I/O — `readFile`, `glob_files`,
+  `file_edit` — is confined under the same profile that subprocess
+  CLI commands get; not just shelled-out work.
+- **Subprocess inheritance.** Subprocesses (`cli`,
+  `interactive_shell`, MCP servers) inherit the parent thread's
+  AppArmor profile via fork+exec (`subprocess_runner.py:14,193`).
+- **Cross-thread cleanup.** `apparmor_confine` defensively writes
+  `changeprofile unconfined` on entry to recover from a prior
+  session's stuck-confinement state — necessary because asyncio
+  thread-pool workers are reused across sessions
+  (`apparmor.py:1173-1190`).
+- **Dynamic per-session reference grants.**
+  `add_reference_fragment(session_id, ref_id, path)` writes a fragment
+  into a per-session `.refs.d/` directory included by the profile via
+  `include if exists`, so the references plugin can grant readonly
+  access to specific paths without rewriting the base profile
+  (`apparmor.py:887-1031`). The handle a session uses for this is the
+  per-session `ReferenceAuthorizer` (`apparmor.py:1271-1298`,
+  `jaato_session.py:315-1273`).
+- **Activation.** WS deployments confine automatically when AppArmor
+  is available; IPC opt-in via `IPCClient(apparmor=True)` (default
+  `False`); see `docs/apparmor-setup.md`.
+- **Companion resource caps.** `RuntimeLimits`
+  (`shared/runtime_limits.py:55-94`) is a per-session profile field
+  that maps to cgroup v2 (`memory.max`, `pids.max`, `cpu.weight`) plus
+  application-enforced `tool_timeout_seconds` and
+  `max_output_bytes`. Provisioned by `server/cgroups.py`. This handles
+  the "noisy neighbour / DoS" axis that AppArmor doesn't cover.
+
+So workspace boundaries are **not advisory** under WS deployments
+(and IPC with the apparmor flag set): they are kernel-enforced, per
+session, and apply both to subprocesses and to the daemon's own
+threads while executing tools. Sibling-session paths are denied by
+default-deny in the profile (`tests/test_apparmor.py:92` — sibling
+workspaces denied test).
+
+The remaining gaps are not "no jail" but "the jail is bound to a
+session, not to a principal" — which becomes important once
+identity is plumbed through (see §3-§4). Concrete leftover surface:
+
+- `~/.jaato/` user-tier files are readable from every confined
+  session (template versions 4, 6, 7 explicitly grant `~/.jaato/`
+  reads — `apparmor.py:84-100`). Cross-principal credential isolation
+  must happen *above* AppArmor, in the credential store.
+- AppArmor is Linux-only and requires `apparmor_parser` plus
+  privileges; non-Linux deployments fall back to no kernel jail
+  (`apparmor.py:528-602`).
+- Standalone `JaatoClient` usage (no daemon) does not provision
+  profiles.
+- IPC's `apparmor=True` is opt-in, so a default IPC client gets no
+  kernel confinement; `cli`, `file_edit`, etc. then revert to
+  workspace-cwd defaults that are advisory in the sense the original
+  audit claimed — but only for that deployment shape.
 
 ### 1.6 Credentials live next to the code
 
@@ -182,23 +278,31 @@ Three deployment shapes are coherent. Pick one, or layer them:
 isolation in app code).**
 Cheap. Adequate for a single organization where roles matter but
 operators trust their tools. Bug-prevention, not malice-prevention.
+Roughly: the missing identity / authz / audit work in §3-§7.
 
 **Tier B — Hardened multi-tenancy (single daemon, OS-level sandboxing
 per session).**
-Per-session AppArmor profile, namespace-isolated FS, dropped
-capabilities, scrubbed subprocess env. The workspace path becomes a
-real jail. Acceptable for shared SaaS where tenants are mutually
-distrustful but blast radius can be capped at "one buggy agent."
+Per-session AppArmor profile + per-session cgroup. **Mostly already
+present** — see §1.5. What's missing for full Tier B: tying the
+profile and cgroup to a *principal*, not just a session id; scrubbing
+subprocess environments so daemon env vars don't reach MCP servers
+of a different tenant; namespacing for non-filesystem resources
+AppArmor doesn't cover (PIDs, network, IPC); per-tenant credential
+store keeping `~/.jaato/` reads from leaking across principals.
 
 **Tier C — Tenant-per-process.**
 The daemon becomes a thin control plane that spawns a worker process
 per tenant, with its own OS user (setuid, `systemd-run --uid`), its
 own runtime, its own MCP fleet. Strongest isolation, highest
-operational cost.
+operational cost. The reason to want this anyway despite Tier B's
+existence: AppArmor confines filesystem access but not the daemon's
+in-process memory, so a tenant-aware bug in jaato itself (or a
+malicious in-process plugin) bypasses Tier B.
 
 The proposal below is layered: Tier A first because it forces the
 data model that both B and C need; B as the recommended production
-target; C as an optional deployment.
+target (most of the OS-level pieces exist; remaining work is
+principal-binding); C as an optional deployment.
 
 ---
 
@@ -292,56 +396,97 @@ may ask," the rule engine says "you may ask *this way*."
 
 ---
 
-## 5. Resource Scoping — What Moves Out of the Runtime
+## 5. Resource Scoping — What's Already Per-Session vs. What Needs Principal/Tenant Scope
 
-Today's `JaatoRuntime` is daemon-global. The proposal is one
-`JaatoRuntime` **per tenant**, lazily created on first use, with the
-control-plane `JaatoServer` holding the dict.
+The first version of this section assumed the runtime was
+daemon-shared. It isn't (§1.4). Here's the corrected current state
+plus what changes for tenancy:
 
-| Resource | Today | Proposed scope |
-|----------|-------|----------------|
-| `ProviderConfig` | daemon | tenant (each tenant brings their own credentials) |
-| `TokenLedger` | daemon | tenant (and tagged with `user_id` per event) |
-| `PluginRegistry` | daemon | daemon for *code*, per-session for *instances* |
-| `PermissionPlugin` instance | session | session (unchanged), but capability layer above is tenant-scoped |
-| MCP server fleet | daemon | tenant (started lazily per tenant) |
-| Workspace path | session | user-jailed; sharing requires a `workspace.read` capability |
-| Sessions | daemon list | tenant-scoped list; cross-tenant `session.attach` requires `:any` |
-| `~/.jaato/ws.token` | daemon | replaced — the `AuthProvider` owns credentials |
-| Provider OAuth tokens | daemon-global | per-tenant credential store |
-| Reactor `reactors.json` | workspace | tenant; rules tagged with the principal whose event fires them |
+| Resource | Actual scope today | Tenancy change |
+|----------|---------------------|-----------------|
+| `ProviderConfig` (creds) | per-session | tag with `tenant_id`; resolve `${VAR}` against tenant credential namespace, not daemon env |
+| `TokenLedger` | per-session | per-session (unchanged) but each event tagged with `(tenant_id, user_id)`; aggregate quota check at tenant scope |
+| `PluginRegistry` instance | per-session | per-session (unchanged) |
+| `PermissionPlugin` instance | per-session | per-session (unchanged); capability layer above (§4) is tenant-scoped |
+| MCP server fleet | per-session subprocesses | per-session (unchanged) but env scrubbed before exec; only the calling principal's secrets reach the subprocess |
+| AppArmor profile | per-session (`jaato-ws-{session_id}`) | per-session; profile *generator* takes the principal's `workspace.read|write` capabilities as input |
+| cgroup `RuntimeLimits` | per-session | per-session; profile carries tenant default limits; per-user override allowed |
+| Workspace path | per-session | per-user-jailed via principal's capabilities; sharing requires `workspace.read` |
+| Sessions list | daemon-wide via `SessionManager` | filtered to caller's tenant unless `session.list:any` capability held |
+| `~/.jaato/ws.token` | daemon-global | replaced — `AuthProvider` owns credentials |
+| `~/.jaato/services/` (read by every confined session) | daemon-global filesystem | per-tenant subdir; AppArmor template parameterised by tenant id |
+| Provider OAuth tokens | daemon-global keyrings/files | per-principal credential store |
+| Reactor `reactors.json` | workspace | per-tenant rule set; rules tagged with the principal whose event fires them |
+| `_instruction_token_cache` | daemon-shared | unchanged (content-addressed, leak-safe) |
+| `_session_hooks` | daemon-shared | unchanged (extension code; runs daemon-side) |
 
-Sessions still keyed by UUID, but now `(tenant_id, session_id)` is
-the global identity. Listing sessions returns only the caller's
-tenant's sessions unless they hold `session.list:any`.
+The tagline is: most of the in-memory isolation already holds at the
+session boundary. Tenancy work is mostly (a) attaching a principal
+identity to every per-session resource, (b) gating cross-session
+operations (attach/list/handoff) by capability, and (c) replacing the
+daemon-global slices of `~/.jaato/` with per-tenant subdirs that the
+AppArmor template renders into the profile.
 
 ---
 
-## 6. Workspace Boundary Enforcement (Tier B)
+## 6. Workspace Boundary Enforcement — Hardening What's Already There
 
-Tier A treats `JAATO_WORKSPACE_ROOT` as an enforced invariant inside
-file-touching plugins (path validation in `file_edit`, `cli`,
-`filesystem_query`, `interactive_shell`). This catches bugs but not
-malice — `cli` can still execute `cat /etc/passwd`.
+Most of this is already built (§1.5). The remaining work to take it
+from "per-session jail" to "per-tenant jail":
 
-Tier B requires kernel-enforced jails. The cleanest path here is to
-extend the existing AppArmor work:
+1. **Principal-aware profile generation.**
+   `AppArmorManager.provision_profile(session_id, workspace_path,
+   config_root, env_file)` (`apparmor.py:604`) takes a session id and
+   workspace; it should also take the principal's
+   `workspace.read|write` capability set so the rendered template
+   reflects per-principal grants instead of "everything under the
+   workspace path." The template's `{config_root_rules}` and
+   per-session `.refs.d/` mechanisms already prove parameterisation
+   works; this is more of the same.
 
-- Generate a **per-session** AppArmor profile from the principal's
-  capabilities and their `workspace.read|write` globs
-- `cli` and `interactive_shell` execute under that profile
-  (`aa-exec -p`)
-- MCP server subprocesses inherit a **scrubbed** environment:
-  only the tenant's credentials, only the tenant's
-  `JAATO_WORKSPACE_ROOT`, only the resolved tool config — never the
-  daemon's full env
+2. **Scrub `~/.jaato/` user-tier reads.**
+   Template versions 4, 6, 7 grant reads to `~/.jaato/services/`,
+   `~/.jaato/`, and similar so confined sessions can find profiles
+   and credentials (`apparmor.py:84-100`). For multi-tenant, the
+   user-tier path needs a per-tenant subdir
+   (`~/.jaato/tenants/<tenant_id>/`) and the template should render
+   only that subdir into the profile. Cross-tenant reads of
+   `services/`, `ws.token`, OAuth caches must be denied at the
+   kernel level, not the application level.
 
-For non-Linux deployments, `bubblewrap` and `firejail` are the usual
-fallbacks; on macOS, `sandbox-exec` profiles play the same role.
+3. **Scrub subprocess environments.**
+   Today, MCP server subprocesses, `cli`, and `interactive_shell`
+   inherit the daemon's full env (the AppArmor profile then restricts
+   their filesystem reach, but env is unaffected). Build an env
+   allowlist computed from the principal's capabilities and the
+   resolved provider config; export only that to the subprocess.
+   This closes the "API key for tenant A reachable in
+   `os.environ` of tenant B's MCP subprocess" leak that AppArmor
+   doesn't cover.
 
-`docs/websocket-workspace-isolation.md` covers an adjacent piece (per-WS
-workspace isolation); the per-session sandboxing builds on it but is
-strictly stronger.
+4. **Namespace isolation for what AppArmor doesn't cover.**
+   AppArmor is filesystem-only. Per-session PID, network, and IPC
+   namespaces (Linux: `unshare`/`clone`) plus seccomp filters would
+   close the residual surface. This is genuinely new work; cgroups
+   already exist (`server/cgroups.py`) so adding namespacing on top
+   of the same cgroup is incremental.
+
+5. **Non-Linux fallback.**
+   `apparmor.is_available()` returns False on non-Linux
+   (`apparmor.py:528-602`). For macOS, `sandbox-exec` is the closest
+   fit; for Windows, AppContainer / job objects. Without these, Tier
+   B is Linux-only and the documentation should say so.
+
+6. **Standalone-client and IPC-default deployments.**
+   Standalone `JaatoClient` (no daemon) and IPC clients with the
+   default `apparmor=False` get no kernel jail. The original
+   "advisory" warning in §1.5 *does* apply to these shapes; ship a
+   prominent warning when running multi-tenant without confinement
+   active.
+
+`docs/apparmor-setup.md` and
+`docs/websocket-workspace-isolation.md` are the existing references
+this work extends.
 
 ---
 
@@ -399,15 +544,21 @@ just Phase 1 is a defensible release.
   explicit `workspace.read:<path>` grant
 - Audit log fully populated; quotas enforced
 
-**Phase 4 — Hardened (Tier B/C).**
-- Per-session AppArmor profile generation
-- CLI/interactive-shell sandbox wrappers
-- Optional per-tenant worker process model (Tier C deployment)
+**Phase 4 — Hardening (lifting what exists to Tier B).**
+- Principal-aware AppArmor profile generation (extend
+  `provision_profile` to take a principal's capability set, §6.1)
+- Per-tenant slicing of `~/.jaato/` so cross-tenant reads are denied
+  at the kernel level, not the app level (§6.2)
+- Subprocess env scrubbing for MCP / `cli` / `interactive_shell`
+  (§6.3)
+- Optional namespacing on top of existing cgroups (§6.4)
 - Reactor handoffs become tenant-scoped; cross-tenant requires the
   capability
+- Optional per-tenant worker process model (Tier C deployment)
 
 Each phase ships independently. Phases 1-3 cover Tier A; Phase 4
-moves to Tier B (and optionally C).
+takes the existing per-session AppArmor + cgroup work the rest of
+the way to per-tenant Tier B (and optionally C).
 
 ---
 
