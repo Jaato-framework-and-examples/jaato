@@ -3876,33 +3876,129 @@ Template rendering writes files to the workspace."""
         # (``#`` / ``^`` / ``/`` / ``!``) and the name.
         pattern = re.compile(r'\{\{([#^/!]?)([^}]+)\}\}')
 
+        # Pre-scan: identify sections that have BOTH ``{{#name}}`` and
+        # ``{{^name}}`` companions (server 0.6.46+).  These are
+        # "boolean-like" — the Mustache if/else idiom — and their body
+        # refs should attribute to the OUTER iteration, not to the
+        # boolean's own scope.  Without this distinction the kb-author's
+        # ``{{#apiEndpoints}}{{#isVoid}}{{controllerSignature}}{{/isVoid}}{{^isVoid}}...``
+        # pattern would mis-attribute ``controllerSignature`` to
+        # ``isVoid.item_keys`` (treating isVoid as an iteration over
+        # mappings) when in reality isVoid is a boolean field on each
+        # apiEndpoint and ``controllerSignature`` is at the apiEndpoint
+        # level via Mustache's outer-context fallback.
+        #
+        # Pure-iteration sections (``{{#statusMappings}}...{{/statusMappings}}``
+        # with no companion ``{{^statusMappings}}``) keep the new
+        # nested-scope semantics — their body refs land in the
+        # iteration's own item_keys, with ``inherited_from_outer_scope``
+        # marking refs that shadow outer-scope variables.
+        _pre_scan_pattern = re.compile(r'\{\{([#^])([^}]+)\}\}')
+        _positive_section_names: set = set()
+        _inverted_section_names: set = set()
+        for _m in _pre_scan_pattern.finditer(content):
+            _pre = _m.group(1)
+            _nm = _m.group(2).strip()
+            # Skip helpers — they're not real sections.
+            if ' ' in _nm:
+                _kw = _nm.split(' ', 1)[0]
+                if _kw in {'if', 'unless', 'each', 'with', 'lookup'}:
+                    continue
+            if _pre == '#':
+                _positive_section_names.add(_nm)
+            else:
+                _inverted_section_names.add(_nm)
+        boolean_like_names: set = _positive_section_names & _inverted_section_names
+
         variables: Dict[str, Dict[str, Any]] = {}
-        # Stack of (kind, name) for currently-open sections.
-        # 3-tuple frames: (kind, name, close_marker).  See
-        # ``_outermost_iteration_section`` docstring for kinds and
-        # the helper-handling branches below for close_marker semantics.
-        section_stack: List[tuple[str, str, str]] = []
+        # Stack of frames for currently-open sections (server 0.6.46+).
+        # Each frame is a dict carrying its OWN item_keys accumulator,
+        # so nested iterations no longer flatten their inner refs into
+        # the outermost iteration's item_keys.  Replaces the old
+        # 3-tuple frame shape; ``_innermost_iteration_frame()`` returns
+        # the innermost section frame (the iteration that owns
+        # currently-encountered refs).
+        #
+        # Frame shape:
+        #   {
+        #     "kind":          "section" | "inverted_section" | "helper",
+        #     "name":          str,
+        #     "close_marker":  str,
+        #     "item_keys":     Dict[str, Dict[str, Any]],
+        #         # name -> {"source": str, ["inherited_from_outer_scope": True]}
+        #   }
+        #
+        # Only ``section`` frames accumulate item_keys; helper and
+        # inverted-section frames keep an empty dict for shape
+        # consistency but refs inside them are credited to the
+        # innermost ENCLOSING section frame instead.
+        section_stack: List[Dict[str, Any]] = []
 
-        def _outermost_iteration_section() -> Optional[str]:
-            """Return the name of the outermost ``section`` (i.e. the
-            iteration boundary), or None if not inside any section.
-            Used to attribute scalar references and nested-section
-            names to the iteration that produces them — never to the
-            inner boolean-check sections.
+        def _innermost_iteration_frame() -> Optional[Dict[str, Any]]:
+            """Return the innermost ``section`` frame that owns
+            currently-encountered refs, or None.
 
-            Stack frames are 3-tuples ``(kind, name, close_marker)``
-            since 0.6.38; helper frames have kind=``"helper"`` and
-            are skipped here so iteration tracking ignores
-            ``{{#if x}}`` etc.  ``each``-opened section frames have
-            kind=``"section"`` (so they DO count as iteration
-            boundaries) but with close_marker=``"each"``.
+            Walks the stack from top down; helper and inverted_section
+            frames are transparent.  Boolean-like (has both ``#``+``^``
+            companions) section frames are ALSO transparent — but
+            ONLY when there is a non-boolean iteration above them.
+            A top-level boolean-like section keeps its own scope
+            (refs DO land in its item_keys), since there is no
+            enclosing iteration for refs to flow through to.
+
+            Server 0.6.46+: this heuristic preserves the legacy
+            attribution for the
+            ``{{#flag}}body{{/flag}}{{^flag}}else{{/flag}}`` idiom
+            (Mustache if/else over a boolean field) while letting
+            pure-iteration sections accumulate their own item_keys.
+            """
+            iteration_frames = [
+                f for f in section_stack if f["kind"] == "section"
+            ]
+            if not iteration_frames:
+                return None
+            # First non-boolean iteration found walking from innermost
+            # outward — that's where refs accumulate.
+            for frame in reversed(iteration_frames):
+                if frame["name"] not in boolean_like_names:
+                    return frame
+            # All iteration frames on the stack are boolean-like:
+            # there's no outer iteration to flow to, so refs stay
+            # with the innermost.
+            return iteration_frames[-1]
+
+        def _structural_innermost_section_frame() -> Optional[Dict[str, Any]]:
+            """Return the innermost ``section`` frame WITHOUT the
+            boolean-skipping rule.  Used by the close-marker matcher
+            when popping frames — the literal stack top is what closes,
+            regardless of boolean-like classification.  Server 0.6.46+.
+            """
+            for frame in reversed(section_stack):
+                if frame["kind"] == "section":
+                    return frame
+            return None
+
+        def _name_in_outer_iteration(name: str, inner_frame: Dict[str, Any]) -> bool:
+            """True if ``name`` already exists in any iteration frame
+            OUTSIDE ``inner_frame`` (i.e. an enclosing section's
+            item_keys).  Used to set the ``inherited_from_outer_scope``
+            flag when an inner-iteration ref shadows an outer one.
+
+            The flag is the load-bearing signal that closes the
+            scope-walking variance class:  pybars3's outer-scope
+            lookup is engine-inconsistent across nested-iteration
+            boundaries, so the agent (or framework) needs to know
+            which inner refs are actually shadowing outer-scope
+            variables.  Without the signal, ``{{StatusEnum}}``
+            inside ``{{#statusMappings}}`` silently renders empty
+            when the inner mapping dict doesn't carry it.
             """
             for frame in section_stack:
-                kind = frame[0]
-                name = frame[1]
-                if kind == "section":
-                    return name
-            return None
+                if frame is inner_frame:
+                    return False
+                if frame["kind"] == "section" and name in frame["item_keys"]:
+                    return True
+            return False
 
         # Handlebars helper keywords + iteration-metadata identifiers
         # (server 0.6.38+).  pybars3 supports Handlebars helpers
@@ -3928,21 +4024,159 @@ Template rendering writes files to the workspace."""
         # whose absence is part of the contract — never enforced.
         REQUIRED_SOURCES = {"scalar", "section"}
 
-        def _add_item_key(item_keys: dict, name: str, source: str) -> None:
-            """Insert ``(name → source)`` into a section's item_keys
-            dict.  When the key already exists from a different
-            reference, prefer the stricter source (required ones win
-            over optional ones).  This handles cases like a body
-            using BOTH ``{{#X}}some{{/X}}`` and ``{{X}}`` for the
-            same key — the scalar/section win sets ``required: True``
-            in the final view."""
-            existing = item_keys.get(name)
+        def _add_item_key_to_frame(
+            frame: Dict[str, Any], name: str, source: str
+        ) -> None:
+            """Insert ``(name → {source, inherited?})`` into a section
+            frame's item_keys dict (server 0.6.46+; replaces the older
+            ``_add_item_key`` which operated on a flat dict).
+
+            Stricter-source-wins rule preserved from 0.6.43+: if the
+            key already exists with a less-required source, an
+            incoming stricter source upgrades it.  Handles bodies
+            that reference the same key both as ``{{X}}`` (scalar,
+            required) and ``{{#X}}{{/X}}`` (section, required) —
+            the second mention doesn't downgrade.
+
+            The ``inherited_from_outer_scope`` flag is computed at
+            insertion time by ``_name_in_outer_iteration``.  Once set
+            on a key, it sticks even if a later same-name reference
+            in the same scope wouldn't trigger the check (the flag
+            is "this name is also in an outer scope" — once true,
+            always true within this frame).
+            """
+            inherited = _name_in_outer_iteration(name, frame)
+            existing = frame["item_keys"].get(name)
             if existing is None:
-                item_keys[name] = source
+                entry: Dict[str, Any] = {"source": source}
+                if inherited:
+                    entry["inherited_from_outer_scope"] = True
+                frame["item_keys"][name] = entry
                 return
             # Existing wins unless incoming is stricter.
-            if source in REQUIRED_SOURCES and existing not in REQUIRED_SOURCES:
-                item_keys[name] = source
+            if source in REQUIRED_SOURCES and existing["source"] not in REQUIRED_SOURCES:
+                existing["source"] = source
+            if inherited and not existing.get("inherited_from_outer_scope"):
+                existing["inherited_from_outer_scope"] = True
+
+        def _make_frame(kind: str, name: str, close_marker: str) -> Dict[str, Any]:
+            """Construct a fresh stack frame (server 0.6.46+)."""
+            return {
+                "kind": kind,
+                "name": name,
+                "close_marker": close_marker,
+                "item_keys": {},
+            }
+
+        def _build_item_keys_list(
+            item_keys_dict: Dict[str, Dict[str, Any]],
+        ) -> List[Dict[str, Any]]:
+            """Convert a frame's internal item_keys accumulator into the
+            sorted list-of-dicts shape callers see (server 0.6.46+).
+
+            Computes ``helper_siblings`` (mutual-exclusivity intent —
+            server 0.6.44+) and surfaces the inheritance flag and any
+            attached nested item_keys (for sub-sections).
+            """
+            helper_names = sorted([
+                n for n, e in item_keys_dict.items() if e["source"] == "helper"
+            ])
+            out: List[Dict[str, Any]] = []
+            for n in sorted(item_keys_dict.keys()):
+                e = item_keys_dict[n]
+                item_entry: Dict[str, Any] = {
+                    "name": n,
+                    "source": e["source"],
+                    "required": e["source"] in REQUIRED_SOURCES,
+                }
+                if e.get("inherited_from_outer_scope"):
+                    item_entry["inherited_from_outer_scope"] = True
+                if e["source"] == "helper":
+                    item_entry["helper_siblings"] = [
+                        other for other in helper_names if other != n
+                    ]
+                # Sub-section's nested item_keys (attached when the
+                # sub-section closed via ``_attach_closed_section``).
+                if "nested_item_keys" in e:
+                    item_entry["item_keys"] = e["nested_item_keys"]
+                    item_entry["has_inverted_branch"] = e.get(
+                        "nested_has_inverted_branch", False,
+                    )
+                out.append(item_entry)
+            return out
+
+        def _merge_item_keys_lists(
+            existing: List[Dict[str, Any]],
+            incoming: List[Dict[str, Any]],
+        ) -> List[Dict[str, Any]]:
+            """Merge two item_keys lists by name (server 0.6.46+).
+
+            Used when a section opens-and-closes more than once in a
+            template; the accumulators are per-frame, so each closing
+            attaches its own list and the second close must merge into
+            the first.  Stricter-source-wins; inheritance flags
+            sticky-OR; nested item_keys recursively merged.
+            """
+            by_name = {e["name"]: dict(e) for e in existing}
+            for entry in incoming:
+                if entry["name"] not in by_name:
+                    by_name[entry["name"]] = dict(entry)
+                    continue
+                cur = by_name[entry["name"]]
+                if (entry["source"] in REQUIRED_SOURCES
+                        and cur["source"] not in REQUIRED_SOURCES):
+                    cur["source"] = entry["source"]
+                    cur["required"] = True
+                if entry.get("inherited_from_outer_scope") \
+                        and not cur.get("inherited_from_outer_scope"):
+                    cur["inherited_from_outer_scope"] = True
+                if "item_keys" in entry:
+                    if "item_keys" in cur:
+                        cur["item_keys"] = _merge_item_keys_lists(
+                            cur["item_keys"], entry["item_keys"],
+                        )
+                    else:
+                        cur["item_keys"] = entry["item_keys"]
+            return sorted(by_name.values(), key=lambda e: e["name"])
+
+        def _attach_closed_section(closed_frame: Dict[str, Any]) -> None:
+            """Take a just-closed section frame's accumulated item_keys,
+            build the list shape, and attach it either to the parent
+            iteration's item_keys[name] entry (nested case) or to the
+            top-level variables[name].item_keys (top-level case).
+
+            Server 0.6.46+: this is what makes nested-iteration
+            item_keys flow recursively into the outer structure.
+            Multi-occurrence (same section name opened twice) merges
+            via ``_merge_item_keys_lists``.
+            """
+            section_name = closed_frame["name"]
+            nested_list = _build_item_keys_list(closed_frame["item_keys"])
+            parent_inner = _innermost_iteration_frame()
+            if parent_inner is None:
+                # Top-level section closing.
+                top_entry = variables.get(section_name)
+                if top_entry is None or top_entry["kind"] != "section":
+                    return
+                if "item_keys" in top_entry:
+                    top_entry["item_keys"] = _merge_item_keys_lists(
+                        top_entry["item_keys"], nested_list,
+                    )
+                else:
+                    top_entry["item_keys"] = nested_list
+            else:
+                # Nested section closing: attach to parent's item_keys[name].
+                outer_entry = parent_inner["item_keys"].get(section_name)
+                if outer_entry is None:
+                    # Defensive — would mean we never recorded the
+                    # opening (e.g. dotted-name path).  Skip silently.
+                    return
+                if "nested_item_keys" in outer_entry:
+                    outer_entry["nested_item_keys"] = _merge_item_keys_lists(
+                        outer_entry["nested_item_keys"], nested_list,
+                    )
+                else:
+                    outer_entry["nested_item_keys"] = nested_list
 
         def _looks_like_helper(name_str: str) -> Optional[Tuple[str, str]]:
             """If ``name_str`` is a helper invocation (e.g. ``"if x"``,
@@ -3972,7 +4206,7 @@ Template rendering writes files to the workspace."""
                 # Plain ``{{@last}}`` etc. — engine populates these.
                 continue
 
-            outer_iter = _outermost_iteration_section()
+            inner = _innermost_iteration_frame()
 
             # Handlebars helper detection — runs before the prefix
             # dispatch.  Three cases by prefix:
@@ -3980,311 +4214,169 @@ Template rendering writes files to the workspace."""
             # - ``#``/``^`` with a helper invocation: register the
             #   helper's ARGUMENT as the relevant variable (item_key
             #   when nested, top-level scalar/section when not), then
-            #   push a synthetic ``("helper", <keyword>)`` frame on
-            #   the section stack so the matching ``{{/keyword}}``
-            #   close can pop cleanly.
+            #   push a synthetic ``helper`` frame on the section
+            #   stack so the matching ``{{/keyword}}`` close can pop
+            #   cleanly.
             # - ``/`` of a helper keyword: pop the helper frame.
-            #   ({{/if}} doesn't match ``"if X"`` literally — without
-            #   this branch the close would silently fail and the
-            #   stack would stay imbalanced.)
             # - No prefix with a helper-shaped name: not real (would
             #   be ``{{if x}}`` plain interp, not valid Handlebars);
             #   fall through to the existing scalar branch.
             if prefix in ('#', '^'):
                 helper_match = _looks_like_helper(name)
                 if helper_match is not None:
-                    # Flip per-call flag so callers (walker /
-                    # listAvailableTemplates) can populate
-                    # ``template_evaluation_kind = "helpers"`` on
-                    # the index entry.  Server 0.6.44+.
                     self._tls.last_evaluation_kind = "helpers"
                     kw, arg = helper_match
-                    # Skip iteration-metadata helper arguments
-                    # (``{{#unless @last}}`` etc.).  The argument
-                    # itself is engine-populated; don't leak it as a
-                    # required item_key.
                     if arg in ITERATION_METADATA:
-                        section_stack.append(("helper", kw, kw))
+                        section_stack.append(_make_frame("helper", kw, kw))
                         continue
-                    # Leftmost token of dotted paths — same convention
-                    # as the scalar-ref branch below.
                     arg_root = arg.split('.', 1)[0].strip()
                     if not arg_root:
-                        section_stack.append(("helper", kw, kw))
+                        section_stack.append(_make_frame("helper", kw, kw))
                         continue
                     if kw == 'each':
                         # ``{{#each xs}}`` is structurally an iteration
-                        # over ``xs`` — register as a section.  The
-                        # close marker is ``{{/each}}`` (not
-                        # ``{{/xs}}``) so we push a section frame whose
-                        # close-marker is the keyword, not the
-                        # argument.  Same nested-vs-top-level split as
-                        # bare ``{{#xs}}``.
-                        if outer_iter is None or outer_iter == arg_root:
+                        # over ``xs``.  Register at the appropriate
+                        # scope (top-level or innermost iteration), then
+                        # push a section frame whose close-marker is
+                        # ``each`` (matching ``{{/each}}``) so the
+                        # iteration is treated as a real iteration
+                        # boundary by ``_innermost_iteration_frame``.
+                        if inner is None:
                             entry = variables.get(arg_root)
                             if entry is None:
                                 variables[arg_root] = {
                                     "name": arg_root, "kind": "section",
-                                    "item_keys": {},
                                 }
                             elif entry["kind"] == "scalar":
                                 entry["kind"] = "section"
-                                entry.setdefault("item_keys", {})
                         else:
-                            outer_entry = variables.get(outer_iter)
-                            if outer_entry and outer_entry["kind"] == "section":
-                                # ``{{#each X}}`` nested inside outer
-                                # iteration: X is itself a sub-section
-                                # (kb-author authored a nested loop).
-                                # Source = "section" — required.
-                                _add_item_key(
-                                    outer_entry["item_keys"], arg_root, "section",
-                                )
-                        # Push a section frame with close-marker =
-                        # ``each`` so the matching close pops it
-                        # AND so ``_outermost_iteration_section``
-                        # treats it as an iteration (not a helper).
-                        section_stack.append(("section", arg_root, "each"))
+                            _add_item_key_to_frame(inner, arg_root, "section")
+                        section_stack.append(
+                            _make_frame("section", arg_root, "each"),
+                        )
                     else:
                         # ``if`` / ``unless`` / ``with`` / ``lookup``:
-                        # the argument is a context-lookup, not a new
-                        # iteration scope.  Body refs stay in the
-                        # outer context; the argument itself is a
+                        # argument is a context-lookup, not a new
+                        # iteration scope.  Argument itself is a
                         # per-context field — credit as item_key when
-                        # inside an iteration, top-level scalar
-                        # otherwise.
-                        if outer_iter and outer_iter != arg_root:
-                            outer_entry = variables.get(outer_iter)
-                            if outer_entry and outer_entry["kind"] == "section":
-                                # ``{{#if X}}`` / ``{{#unless X}}`` /
-                                # ``{{#with X}}`` argument inside outer
-                                # iteration.  Source = "helper" —
-                                # optional (Mustache contract: missing
-                                # arg means body doesn't render, no
-                                # error).
-                                _add_item_key(
-                                    outer_entry["item_keys"], arg_root, "helper",
-                                )
+                        # inside iteration, top-level scalar otherwise.
+                        if inner is not None:
+                            _add_item_key_to_frame(inner, arg_root, "helper")
                         else:
                             variables.setdefault(
                                 arg_root,
                                 {"name": arg_root, "kind": "scalar"},
                             )
-                        # Helper frame: close-marker is the keyword.
-                        section_stack.append(("helper", kw, kw))
+                        section_stack.append(_make_frame("helper", kw, kw))
                     continue
 
             if prefix == '/' and name in HELPER_KEYWORDS:
                 # ``{{/if}}`` / ``{{/each}}`` / etc. — pop the
-                # matching helper or each-section frame.  Match by
-                # close-marker (third tuple element) since
-                # ``{{#each xs}}`` opens a section named ``xs`` but
-                # closes with ``{{/each}}``.  Bare-keyword sections
-                # (kb-author wrote ``{{#if}}`` with no argument)
-                # don't reach this branch because ``_looks_like_helper``
-                # requires a non-empty argument — those parse as
-                # regular sections named ``if``.
-                if section_stack and len(section_stack[-1]) >= 3 and section_stack[-1][2] == name:
-                    section_stack.pop()
+                # matching helper or each-section frame by close-marker.
+                # Each-section closing also flushes its accumulated
+                # item_keys to the parent via ``_attach_closed_section``.
+                if section_stack and section_stack[-1]["close_marker"] == name:
+                    popped = section_stack.pop()
+                    if popped["kind"] == "section":
+                        _attach_closed_section(popped)
                 continue
 
             if prefix == '#':
-                # Opening section.  Two cases:
-                # - At top level (no outer iteration): register as a
+                # Opening plain section.  Two cases:
+                # - No enclosing iteration (``inner is None``) OR the
+                #   section's name matches the immediate enclosing
+                #   iteration (idempotent re-entry): register as a
                 #   top-level section variable.
-                # - Nested inside an outer iteration: this section's
-                #   identifier is a per-item field of the outer
-                #   iteration (e.g. ``isVoid`` inside ``apiEndpoints``).
-                #   Credit to outer.item_keys; do NOT create a
-                #   top-level entry.  Nested-section identifiers are
-                #   provided as fields on each list-item dict, never
-                #   at the top of the variables dict.
-                if outer_iter is None or outer_iter == name:
+                # - Nested inside an enclosing iteration: register the
+                #   section's identifier in the enclosing iteration's
+                #   item_keys (source: "section") and push a frame
+                #   that will accumulate THIS section's own item_keys.
+                if inner is None or inner["name"] == name:
                     entry = variables.get(name)
                     if entry is None:
-                        variables[name] = {
-                            "name": name, "kind": "section", "item_keys": {},
-                        }
+                        variables[name] = {"name": name, "kind": "section"}
                     elif entry["kind"] == "scalar":
-                        # Promote: section is more constrained.
                         entry["kind"] = "section"
-                        entry.setdefault("item_keys", {})
                     elif entry["kind"] == "inverted_section":
                         # Mustache if/else with the same identifier,
                         # encountered ^ first then # — promote to
                         # section AND mark inverted branch exists.
                         entry["kind"] = "section"
-                        entry.setdefault("item_keys", {})
                         entry["has_inverted_branch"] = True
-                    # else: already a section; idempotent.
                 else:
-                    # Nested inside outer iteration: credit only as
-                    # an item-key of outer.  No top-level entry.
-                    outer_entry = variables.get(outer_iter)
-                    if outer_entry and outer_entry["kind"] == "section":
-                        # Dotted section markers (``{{#validation.required}}``)
-                        # take the leftmost token + source="dotted",
-                        # required: False — Mustache silently descends
-                        # into nested context, missing nested renders
-                        # empty without erroring.  Without the dotted
-                        # split, the parser would record the literal
-                        # ``validation.required`` as required: True
-                        # and the per-item validator would flag items
-                        # carrying ``{validation: {required: ...}}``
-                        # as "missing required key validation.required"
-                        # — a false positive (server 0.6.43+).
-                        if "." in name:
-                            head_key = name.split(".", 1)[0]
-                            _add_item_key(
-                                outer_entry["item_keys"], head_key, "dotted",
-                            )
-                        else:
-                            # ``{{#X}}`` plain section: source = "section",
-                            # required: True (kb-author authored a
-                            # nested loop or conditional).
-                            _add_item_key(
-                                outer_entry["item_keys"], name, "section",
-                            )
-                # 3-tuple: close-marker = name (regular section closes
-                # with ``{{/name}}``).  Helper-section frames (pushed
-                # above for ``{{#each xs}}``) carry close-marker =
-                # ``"each"`` instead.
-                section_stack.append(("section", name, name))
+                    # Nested inside enclosing iteration.
+                    if "." in name:
+                        head_key = name.split(".", 1)[0]
+                        _add_item_key_to_frame(inner, head_key, "dotted")
+                    else:
+                        _add_item_key_to_frame(inner, name, "section")
+                section_stack.append(_make_frame("section", name, name))
             elif prefix == '^':
-                # Opening inverted section.  Same nested-vs-top-level
-                # split as ``#`` — nested inverted sections credit
-                # only as item_keys of outer.
-                if outer_iter is None or outer_iter == name:
+                # Opening inverted section.  Inverted sections do NOT
+                # push an iteration scope (their body runs in the
+                # parent context when the value is falsy/empty), so
+                # their frame's item_keys stay empty and refs flow
+                # through to the enclosing iteration above.
+                if inner is None or inner["name"] == name:
                     entry = variables.get(name)
                     if entry is None:
                         variables[name] = {
                             "name": name, "kind": "inverted_section",
                         }
                     elif entry["kind"] == "section":
-                        # Mustache if/else, # encountered first then
-                        # ^ — mark inverted branch alongside section.
                         entry["has_inverted_branch"] = True
                     # else: already inverted_section or scalar; leave.
                 else:
-                    # Nested inverted: credit only as item-key.
-                    outer_entry = variables.get(outer_iter)
-                    if outer_entry and outer_entry["kind"] == "section":
-                        # Dotted inverted markers
-                        # (``{{^validation.required}}``) take the
-                        # leftmost token + source="dotted" (which is
-                        # already optional, same as inverted, but keep
-                        # the dotted source so the lookup-semantics
-                        # stay accurate in listTemplateVariables
-                        # introspection).
-                        if "." in name:
-                            head_key = name.split(".", 1)[0]
-                            _add_item_key(
-                                outer_entry["item_keys"], head_key, "dotted",
-                            )
-                        else:
-                            # ``{{^X}}`` plain inverted: source =
-                            # "inverted", required: False (Mustache
-                            # idiom — body fires when X is absent/
-                            # falsy).
-                            _add_item_key(
-                                outer_entry["item_keys"], name, "inverted",
-                            )
-                section_stack.append(("inverted_section", name, name))
+                    if "." in name:
+                        head_key = name.split(".", 1)[0]
+                        _add_item_key_to_frame(inner, head_key, "dotted")
+                    else:
+                        _add_item_key_to_frame(inner, name, "inverted")
+                section_stack.append(
+                    _make_frame("inverted_section", name, name),
+                )
             elif prefix == '/':
-                # Closing marker — pop the matching open section.
-                # Match against the third-tuple close-marker so both
-                # regular sections (close-marker == name) and helper-
-                # opened sections (close-marker == helper keyword)
-                # pop cleanly.
-                if section_stack and section_stack[-1][2] == name:
-                    section_stack.pop()
+                # Closing marker — pop matching frame by close_marker.
+                # Section frames flush their item_keys to parent via
+                # ``_attach_closed_section`` on close (server 0.6.46+).
+                if section_stack and section_stack[-1]["close_marker"] == name:
+                    popped = section_stack.pop()
+                    if popped["kind"] == "section":
+                        _attach_closed_section(popped)
             else:
                 # Scalar reference.  Three cases:
-                # - Inside any section: credit the outermost
-                #   iteration section's item_keys; do NOT add as
-                #   top-level scalar.
-                # - Outside all sections: top-level scalar.
-                # - Inside an inverted-only section (no outer
-                #   iteration): top-level scalar (the inverted
-                #   block runs in the parent context, so refs are
-                #   parent-scope variables).
-                if section_stack:
-                    if outer_iter and outer_iter != name:
-                        outer_entry = variables.get(outer_iter)
-                        if outer_entry and outer_entry["kind"] == "section":
-                            # Source classification:
-                            # - Plain ``{{X}}`` with no dot → scalar,
-                            #   required: True.  This is the dominant
-                            #   case the per-item validator catches
-                            #   when the agent omits the key from
-                            #   item dicts.
-                            # - Dotted ``{{a.b.c}}`` → leftmost token
-                            #   ``a`` is what gets credited.  Mustache
-                            #   silently descends; missing nested
-                            #   renders empty without error → source =
-                            #   "dotted", required: False.
-                            if "." in name:
-                                item_key = name.split(".")[0]
-                                _add_item_key(
-                                    outer_entry["item_keys"],
-                                    item_key, "dotted",
-                                )
-                            else:
-                                _add_item_key(
-                                    outer_entry["item_keys"],
-                                    name, "scalar",
-                                )
+                # - Inside an iteration: credit innermost iteration's
+                #   item_keys (with inheritance flag if same name
+                #   exists in any outer iteration).
+                # - Inside helper/inverted frames but no iteration:
+                #   top-level scalar (parent context).
+                # - Outside all frames: top-level scalar.
+                if inner is not None:
+                    if "." in name:
+                        item_key = name.split(".")[0]
+                        _add_item_key_to_frame(inner, item_key, "dotted")
                     else:
-                        # Inside inverted-only sections: parent-scope
-                        # scalar.
-                        variables.setdefault(
-                            name, {"name": name, "kind": "scalar"},
-                        )
+                        _add_item_key_to_frame(inner, name, "scalar")
                 else:
                     variables.setdefault(name, {"name": name, "kind": "scalar"})
 
-        # Convert internal item_keys dict (name → source) into the
-        # sorted list-of-dicts shape callers see.  Server 0.6.43+
-        # surfaces required + source per item_key (breaking change
-        # from the prior List[str] shape — pre-1.0 surface, no
-        # back-compat shim).
+        # Defensive: if a malformed template left frames open at EOF
+        # (missing close tag), flush them so partial structure still
+        # surfaces in the result.
+        while section_stack:
+            popped = section_stack.pop()
+            if popped["kind"] == "section":
+                _attach_closed_section(popped)
+
+        # Top-level result list.  Section frames have already attached
+        # their own item_keys lists via ``_attach_closed_section``;
+        # here we just normalise has_inverted_branch and assemble
+        # the sorted output.
         result = []
-        for name in sorted(variables.keys()):
-            entry = variables[name].copy()
-            if "item_keys" in entry:
-                raw = entry["item_keys"]  # dict[name → source]
-                # Pre-compute the helper-source names in this section's
-                # item_keys so each helper entry can carry its
-                # mutual-exclusivity siblings (server 0.6.44+).
-                # Mutual-exclusivity is the kb-author's INTENT
-                # (encoded by writing N sibling helpers in one section
-                # body, e.g. ``{{#if isString}}/{{#if isEnum}}/...``);
-                # the parser surfaces the structure, the agent decides
-                # which sibling resolves true per item.
-                helper_names_in_section = sorted([
-                    item_name for item_name, source in raw.items()
-                    if source == "helper"
-                ])
-                entry["item_keys"] = []
-                for item_name, source in sorted(raw.items()):
-                    item_entry: Dict[str, Any] = {
-                        "name": item_name,
-                        "source": source,
-                        "required": source in REQUIRED_SOURCES,
-                    }
-                    if source == "helper":
-                        # Siblings = other helpers in the same scope,
-                        # excluding self.  Empty list when the helper
-                        # is solo (no mutual-exclusivity intent).
-                        item_entry["helper_siblings"] = [
-                            other for other in helper_names_in_section
-                            if other != item_name
-                        ]
-                    entry["item_keys"].append(item_entry)
-            # has_inverted_branch defaults to False on sections that
-            # don't have an inverted form — explicit False rather
-            # than missing key keeps the schema predictable.
+        for var_name in sorted(variables.keys()):
+            entry = variables[var_name].copy()
             if entry["kind"] == "section":
+                entry.setdefault("item_keys", [])
                 entry.setdefault("has_inverted_branch", False)
             result.append(entry)
         return result

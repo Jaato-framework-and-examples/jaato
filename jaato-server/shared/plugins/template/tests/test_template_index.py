@@ -736,6 +736,150 @@ class TestMustacheStructuralParser:
                 f"{required} missing from apiEndpoints.item_keys: {api_names}"
             )
 
+    def test_nested_iteration_owns_its_item_keys_not_outer(self):
+        """Server 0.6.46+: a TRUE nested iteration (no
+        ``{{^name}}`` companion → not boolean-like) accumulates its
+        own item_keys instead of flattening into the outer
+        iteration's.  Mirrors the SystemApiMapper.java.tpl pattern
+        from kb-enablement-2.0 chunk-3 cascade probe v18 where
+        ``{{#statusEnum}}{{#statusMappings}}{{code}}{{value}}{{/statusMappings}}{{/statusEnum}}``
+        previously reported ``code`` and ``value`` as keys of
+        ``statusEnum`` (wrong — they're keys of statusMappings's
+        per-mapping dict).
+        """
+        plugin = TemplatePlugin()
+        template = (
+            "{{#statusEnum}}\n"
+            "private {{StatusEnum}} to{{StatusEnum}}(String code) {\n"
+            "  return switch (code) {\n"
+            "    {{#statusMappings}}\n"
+            "    case \"{{code}}\" -> {{StatusEnum}}.{{value}};\n"
+            "    {{/statusMappings}}\n"
+            "  };\n"
+            "}\n"
+            "{{/statusEnum}}\n"
+        )
+        result = plugin._parse_mustache_structure(template)
+        # Top-level: statusEnum only.
+        top = sorted(v["name"] for v in result)
+        assert top == ["statusEnum"], f"unexpected top-level: {top}"
+        outer = result[0]
+        outer_names = _names(outer["item_keys"])
+        # statusEnum.item_keys: scalar StatusEnum + section statusMappings.
+        # ``code`` and ``value`` MUST NOT be here (they belong to the
+        # nested iteration's scope).
+        assert "StatusEnum" in outer_names
+        assert "statusMappings" in outer_names
+        assert "code" not in outer_names, (
+            f"code leaked to outer (statusEnum.item_keys): {outer_names}"
+        )
+        assert "value" not in outer_names, (
+            f"value leaked to outer: {outer_names}"
+        )
+        # Nested iteration: statusMappings.item_keys carries code, value
+        # AND StatusEnum (with inherited_from_outer_scope flag).
+        sm = next(k for k in outer["item_keys"] if k["name"] == "statusMappings")
+        assert sm["source"] == "section"
+        nested_names = _names(sm["item_keys"])
+        assert "code" in nested_names
+        assert "value" in nested_names
+        assert "StatusEnum" in nested_names
+
+    def test_inherited_from_outer_scope_flag(self):
+        """Server 0.6.46+: when an inner-iteration ref shares its
+        name with an outer-iteration ref, the inner entry carries
+        ``inherited_from_outer_scope: True``.  This is the load-
+        bearing signal for the agent (or framework) to handle the
+        engine-inconsistent outer-scope walking — the kb-template
+        author expected pybars3 to find ``StatusEnum`` in the outer
+        scope from inside ``{{#statusMappings}}``, but pybars3's
+        outer-context fallback is unreliable across iteration
+        boundaries.  The flag tells consumers to flatten outer-
+        scope keys into each inner item.
+        """
+        plugin = TemplatePlugin()
+        template = (
+            "{{#outer}}\n"
+            "{{shared}}\n"
+            "{{#inner}}\n"
+            "{{shared}} {{innerOnly}}\n"
+            "{{/inner}}\n"
+            "{{/outer}}\n"
+        )
+        result = plugin._parse_mustache_structure(template)
+        outer = next(v for v in result if v["name"] == "outer")
+        inner_entry = next(
+            k for k in outer["item_keys"] if k["name"] == "inner"
+        )
+        nested = inner_entry["item_keys"]
+        shared_in_inner = next(k for k in nested if k["name"] == "shared")
+        assert shared_in_inner.get("inherited_from_outer_scope") is True, (
+            f"shared inside inner should carry inherited_from_outer_scope: "
+            f"{shared_in_inner}"
+        )
+        # innerOnly does NOT exist in outer's item_keys → flag absent.
+        inner_only = next(k for k in nested if k["name"] == "innerOnly")
+        assert "inherited_from_outer_scope" not in inner_only, (
+            f"innerOnly is not in outer scope; flag should be absent: "
+            f"{inner_only}"
+        )
+
+    def test_boolean_section_idiom_keeps_legacy_attribution(self):
+        """Server 0.6.46+ boolean-skip heuristic: when ``{{#name}}``
+        AND ``{{^name}}`` both appear (Mustache if/else idiom),
+        body refs flow through to the OUTER iteration — preserving
+        the kb-enablement RestController.java.tpl pattern where
+        ``{{#isVoid}}{{controllerSignature}}{{/isVoid}}`` puts
+        ``controllerSignature`` at the apiEndpoint level (boolean
+        flag, not nested mapping).
+        """
+        plugin = TemplatePlugin()
+        template = (
+            "{{#apiEndpoints}}"
+            "{{#isVoid}}{{controllerSignature}}{{/isVoid}}"
+            "{{^isVoid}}{{returnType}} {{serviceCallArgs}}{{/isVoid}}"
+            "{{/apiEndpoints}}"
+        )
+        result = plugin._parse_mustache_structure(template)
+        api = result[0]
+        api_names = _names(api["item_keys"])
+        # Boolean idiom: refs inside {{#isVoid}} flow to apiEndpoints.
+        for required in (
+            "controllerSignature", "returnType", "serviceCallArgs", "isVoid",
+        ):
+            assert required in api_names, (
+                f"{required} missing from apiEndpoints (boolean-skip should "
+                f"preserve legacy attribution): {api_names}"
+            )
+        # isVoid entry: section source, but its nested item_keys
+        # should be empty (refs flowed to outer, not inner).
+        is_void = next(k for k in api["item_keys"] if k["name"] == "isVoid")
+        assert is_void["source"] == "section"
+        # Nested item_keys may or may not be present — but if present,
+        # it must be empty (no refs landed in the boolean's scope).
+        nested = is_void.get("item_keys", [])
+        assert nested == [], (
+            f"boolean section should have empty nested item_keys: {nested}"
+        )
+
+    def test_top_level_boolean_section_keeps_own_scope(self):
+        """Edge case: when the boolean-like section IS the outermost
+        iteration (no outer to flow to), refs stay in its own
+        item_keys.  Preserves
+        ``{{#items}}{{name}}{{/items}}{{^items}}empty{{/items}}``
+        with name landing in items.item_keys.
+        """
+        plugin = TemplatePlugin()
+        template = (
+            "{{#items}}{{name}}{{/items}}{{^items}}empty{{/items}}"
+        )
+        result = plugin._parse_mustache_structure(template)
+        items = next(v for v in result if v["name"] == "items")
+        assert items["kind"] == "section"
+        assert "name" in _names(items["item_keys"]), (
+            f"top-level boolean keeps own scope: {items['item_keys']}"
+        )
+
     def test_strips_java_style_comment_lines(self):
         """``//``-prefixed lines (Java/C/C++/JS host-language comments)
         are stripped before structural extraction.  Refs inside such
