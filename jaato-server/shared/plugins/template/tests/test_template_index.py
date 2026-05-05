@@ -4251,3 +4251,257 @@ class TestPerItemRequiredKeyCoverage:
             {"fields": [{"type": "String", "fieldName": "id"}]},
         )
         assert result is None  # well-formed; no fallback triggered
+
+
+# ==================== Template Evaluation Kind + Helper Siblings (server 0.6.44+) ====================
+
+class TestTemplateEvaluationKindAndHelperSiblings:
+    """Two parser-side additions completing the helpers case for the
+    structural-info-surface family:
+
+    - ``template_evaluation_kind`` on TemplateIndexEntry / surfaced via
+      listAvailableTemplates: ``"substitution"`` (default) when the
+      template is pure variable substitution; ``"helpers"`` when any
+      Handlebars conditional (``{{#if}}`` / ``{{#unless}}`` /
+      ``{{#with}}``) is present.  Lets agents fast-path
+      substitution-only templates.
+
+    - ``helper_siblings`` on per-key entries with source="helper" in
+      item_keys: lists the OTHER helper-source siblings in the same
+      scope.  Surfaces the kb-author's mutual-exclusivity intent
+      (e.g. mod-017's mapper has ``isString/isEnum/isDate/isOther``
+      sibling helpers in one section body — exactly one true per
+      item per author intent).
+
+    Both are pure parser-derivable metadata; neither encodes
+    semantics about which sibling SHOULD be true.  Agent decides
+    per-item from field type / context.
+    """
+
+    def test_evaluation_kind_substitution_for_pure_substitution(
+        self, plugin
+    ):
+        """Templates without helpers get kind="substitution"."""
+        template = textwrap.dedent("""\
+            package {{basePackage}};
+            public class {{Entity}} {
+            {{#fields}}
+                private {{type}} {{name}};
+            {{/fields}}
+            }
+        """)
+        plugin._parse_mustache_structure(template)
+        kind = getattr(plugin._tls, "last_evaluation_kind", "substitution")
+        assert kind == "substitution"
+
+    def test_evaluation_kind_helpers_for_if_inside_section(self, plugin):
+        """Templates with ``{{#if}}`` (per-item helper) get
+        kind="helpers"."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+                {{#if required}}@NotNull{{/if}} {{type}} {{name}};
+            {{/fields}}
+        """)
+        plugin._parse_mustache_structure(template)
+        kind = getattr(plugin._tls, "last_evaluation_kind", "substitution")
+        assert kind == "helpers"
+
+    def test_evaluation_kind_helpers_for_top_level_if(self, plugin):
+        """Top-level ``{{#if}}`` also flips kind to "helpers" — the
+        flag fires regardless of nesting depth."""
+        template = textwrap.dedent("""\
+            {{#if production}}prod-config{{/if}}
+            {{#if staging}}staging-config{{/if}}
+        """)
+        plugin._parse_mustache_structure(template)
+        kind = getattr(plugin._tls, "last_evaluation_kind", "substitution")
+        assert kind == "helpers"
+
+    def test_evaluation_kind_helpers_for_unless(self, plugin):
+        """``{{#unless}}`` also fires the helpers flag."""
+        template = "{{#unless empty}}has data: {{count}}{{/unless}}"
+        plugin._parse_mustache_structure(template)
+        kind = getattr(plugin._tls, "last_evaluation_kind", "substitution")
+        assert kind == "helpers"
+
+    def test_evaluation_kind_helpers_for_with(self, plugin):
+        """``{{#with}}`` also fires the helpers flag."""
+        template = "{{#with user}}{{name}} {{email}}{{/with}}"
+        plugin._parse_mustache_structure(template)
+        kind = getattr(plugin._tls, "last_evaluation_kind", "substitution")
+        assert kind == "helpers"
+
+    def test_helper_siblings_mod17_mapper_case(self, plugin):
+        """Reproduces mod-017's SystemApiMapper.java.tpl shape: four
+        sibling helpers (isString / isEnum / isDate / isOther) in one
+        section body, each gets the other three as helper_siblings."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+                {{#if isString}}toProperCase(response.{{fieldName}}()){{/if}}
+                {{#if isEnum}}to{{EnumType}}(response.{{fieldName}}()){{/if}}
+                {{#if isDate}}parseDate(response.{{fieldName}}()){{/if}}
+                {{#if isOther}}response.{{fieldName}}(){{/if}}
+            {{/fields}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        item_keys_by_name = {
+            k["name"]: k for k in by_name["fields"]["item_keys"]
+        }
+        # All 4 helpers present
+        for h in ("isString", "isEnum", "isDate", "isOther"):
+            assert h in item_keys_by_name
+            assert item_keys_by_name[h]["source"] == "helper"
+            assert item_keys_by_name[h]["required"] is False
+            assert "helper_siblings" in item_keys_by_name[h]
+            siblings = item_keys_by_name[h]["helper_siblings"]
+            # Self excluded; other three present (sorted).
+            others = sorted(["isString", "isEnum", "isDate", "isOther"])
+            others.remove(h)
+            assert siblings == others
+
+    def test_helper_siblings_solo_helper_empty(self, plugin):
+        """A helper with no other-helper siblings in the same scope
+        gets helper_siblings=[]."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+                {{#if required}}@NotNull{{/if}} {{type}} {{name}};
+            {{/fields}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        item_keys_by_name = {
+            k["name"]: k for k in by_name["fields"]["item_keys"]
+        }
+        assert item_keys_by_name["required"]["source"] == "helper"
+        assert item_keys_by_name["required"]["helper_siblings"] == []
+
+    def test_helper_siblings_only_on_helper_entries(self, plugin):
+        """Non-helper entries do NOT carry helper_siblings — keeps
+        the response shape minimal for the common substitution case."""
+        template = textwrap.dedent("""\
+            {{#fields}}
+                {{#if required}}@NotNull{{/if}} {{type}} {{name}};
+            {{/fields}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        for k in by_name["fields"]["item_keys"]:
+            if k["source"] == "helper":
+                assert "helper_siblings" in k
+            else:
+                assert "helper_siblings" not in k
+
+    def test_helper_siblings_scoped_per_section(self, plugin):
+        """Helpers in DIFFERENT section bodies are NOT siblings of
+        each other (scope is per section, not template-wide)."""
+        template = textwrap.dedent("""\
+            {{#requestFields}}
+                {{#if isString}}strBody{{/if}}
+            {{/requestFields}}
+            {{#responseFields}}
+                {{#if isEnum}}enumBody{{/if}}
+            {{/responseFields}}
+        """)
+        result = plugin._parse_mustache_structure(template)
+        by_name = {v["name"]: v for v in result}
+        # isString in requestFields scope; isEnum in responseFields scope.
+        # Neither is a sibling of the other.
+        req_keys = {k["name"]: k for k in by_name["requestFields"]["item_keys"]}
+        resp_keys = {k["name"]: k for k in by_name["responseFields"]["item_keys"]}
+        assert req_keys["isString"]["helper_siblings"] == []
+        assert resp_keys["isEnum"]["helper_siblings"] == []
+
+    def test_walker_populates_evaluation_kind(self, plugin, tmp_path):
+        """``_discover_standalone_templates`` reads the parser's
+        post-parse flag and writes it to TemplateIndexEntry."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        # Pure substitution template
+        (tpl_dir / "Entity.java.tpl").write_text(textwrap.dedent("""\
+            package {{basePackage}};
+            public class {{Entity}} {}
+        """))
+        # Helpers template
+        (tpl_dir / "Mapper.java.tpl").write_text(textwrap.dedent("""\
+            {{#fields}}
+                {{#if isString}}str({{name}}){{/if}}
+            {{/fields}}
+        """))
+        entries = {
+            e.name: e
+            for e in plugin._discover_standalone_templates(tpl_dir)
+        }
+        assert entries["Entity.java.tpl"].template_evaluation_kind == (
+            "substitution"
+        )
+        assert entries["Mapper.java.tpl"].template_evaluation_kind == (
+            "helpers"
+        )
+
+    def test_listAvailableTemplates_surfaces_evaluation_kind(
+        self, plugin, tmp_path
+    ):
+        """`listAvailableTemplates` response includes
+        ``template_evaluation_kind`` per entry."""
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Plain.java.tpl").write_text("class Plain {}")
+        (tpl_dir / "Helper.java.tpl").write_text(
+            "{{#if x}}body{{/if}}"
+        )
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        result = plugin._execute_list_available({})
+        by_name = {t["name"]: t for t in result["templates"]}
+        assert by_name["Plain.java.tpl"]["template_evaluation_kind"] == (
+            "substitution"
+        )
+        assert by_name["Helper.java.tpl"]["template_evaluation_kind"] == (
+            "helpers"
+        )
+
+    def test_index_loader_reads_evaluation_kind(self, plugin, tmp_path):
+        """Index loader respects ``template_evaluation_kind`` from
+        index.json (kb-side tooling can pre-populate)."""
+        legacy_index = {
+            "templates": {
+                "Mapper.java.tpl": {
+                    "name": "Mapper.java.tpl",
+                    "source_path": str(tmp_path / "Mapper.java.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "standalone",
+                    "template_evaluation_kind": "helpers",
+                },
+            },
+        }
+        index_path = plugin._templates_dir / "index.json"
+        index_path.write_text(json.dumps(legacy_index))
+        plugin._load_persisted_index()
+        loaded = plugin._template_index["Mapper.java.tpl"]
+        assert loaded.template_evaluation_kind == "helpers"
+
+    def test_index_loader_default_substitution_for_legacy_entries(
+        self, plugin, tmp_path
+    ):
+        """Older index.json files (pre-0.6.44) without the field
+        load with default "substitution" — no false-positive helpers
+        tag."""
+        legacy_index = {
+            "templates": {
+                "Old.tpl": {
+                    "name": "Old.tpl",
+                    "source_path": str(tmp_path / "Old.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "standalone",
+                    # No template_evaluation_kind field.
+                },
+            },
+        }
+        index_path = plugin._templates_dir / "index.json"
+        index_path.write_text(json.dumps(legacy_index))
+        plugin._load_persisted_index()
+        loaded = plugin._template_index["Old.tpl"]
+        assert loaded.template_evaluation_kind == "substitution"

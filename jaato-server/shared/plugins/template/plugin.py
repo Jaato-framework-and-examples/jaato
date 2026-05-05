@@ -159,6 +159,27 @@ class TemplateIndexEntry:
     # mapping (passed in via index.json) wins.
     variant_key: str = ""
     variant: str = ""
+    # Coarse evaluation-kind classification for the template
+    # (server 0.6.44+).  Two values:
+    #
+    # - ``"substitution"`` (default): template is pure variable
+    #   substitution — no Handlebars conditional helpers
+    #   (``{{#if X}}``, ``{{#unless X}}``, ``{{#with X}}``).  The
+    #   agent's job is straight echo-the-values into renderTemplateToFile.
+    #   Most code-gen templates fit this shape (Entity, Repository,
+    #   Request/Response DTOs).
+    # - ``"helpers"``: template uses Handlebars conditional helpers
+    #   anywhere (top-level OR inside section bodies).  The agent
+    #   may need to evaluate per-item branch logic — e.g. mod-017's
+    #   SystemApiMapper.java.tpl with ``{{#if isString}}...{{/if}} /
+    #   {{#if isEnum}}...{{/if}}`` mutually-exclusive sibling helpers.
+    #
+    # Lets agents fast-path pure-substitution templates without
+    # enumerating item_keys to detect helper presence.  Computed
+    # at parse time from the parser's ``_seen_helper_invocation``
+    # flag — fires whenever ``_looks_like_helper`` matches anywhere
+    # in the template body.
+    template_evaluation_kind: str = "substitution"
 
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
@@ -637,6 +658,15 @@ class TemplatePlugin:
                     # variant filtering applied.
                     variant_key=entry_data.get("variant_key", ""),
                     variant=entry_data.get("variant", ""),
+                    # Server 0.6.44+: default "substitution" preserves
+                    # back-compat for older index.json files (no
+                    # false-positive helpers tag).  Tooling that
+                    # writes the index can populate this from a
+                    # fresh _parse_mustache_structure run on the
+                    # template body.
+                    template_evaluation_kind=entry_data.get(
+                        "template_evaluation_kind", "substitution",
+                    ),
                 )
                 loaded += 1
             if loaded:
@@ -1492,6 +1522,17 @@ Template rendering writes files to the workspace."""
                     content, filename=index_name,
                 )
                 variant = self._extract_variant(content, filename=index_name)
+                # Compute template_evaluation_kind via a parser pass
+                # — the parser sets self._tls.last_evaluation_kind as
+                # a side-effect, which we read back below (server
+                # 0.6.44+).
+                if syntax == "mustache" and content:
+                    self._parse_mustache_structure(content)
+                    eval_kind = getattr(
+                        self._tls, "last_evaluation_kind", "substitution",
+                    )
+                else:
+                    eval_kind = "substitution"
                 self._template_index[index_name] = TemplateIndexEntry(
                     name=index_name,
                     source_path=str(template_path),
@@ -1503,6 +1544,7 @@ Template rendering writes files to the workspace."""
                     # variant_key stays "" — embedded templates carry
                     # no axis-mapping context (kb-side walker is the
                     # authoritative source for variant_key).
+                    template_evaluation_kind=eval_kind,
                 )
 
         # Persist the unified index to disk
@@ -1647,6 +1689,20 @@ Template rendering writes files to the workspace."""
             # filtering by axis still need the kb-side mapping for
             # full correctness.
             variant = self._extract_variant(content, filename=filename)
+            # Compute template_evaluation_kind via a parser pass
+            # — server 0.6.44+.  The parser sets
+            # self._tls.last_evaluation_kind as a side-effect when it
+            # encounters helper invocations; we read it back here.
+            # Skipped for non-Mustache syntaxes (Jinja2 has its own
+            # AST-based variable extraction; helper-kind classification
+            # is a future addition there if demand surfaces).
+            if syntax == "mustache":
+                self._parse_mustache_structure(content)
+                eval_kind = getattr(
+                    self._tls, "last_evaluation_kind", "substitution",
+                )
+            else:
+                eval_kind = "substitution"
 
             entry = TemplateIndexEntry(
                 name=index_name,
@@ -1656,12 +1712,14 @@ Template rendering writes files to the workspace."""
                 origin="standalone",
                 output_path_template=output_path_template,
                 variant=variant,
+                template_evaluation_kind=eval_kind,
             )
             entries.append(entry)
             self._trace(
                 f"  discovered: {index_name} ({syntax}, {len(variables)} vars, "
                 f"output={output_path_template or '<none>'}, "
-                f"variant={variant or '<none>'})"
+                f"variant={variant or '<none>'}, "
+                f"eval_kind={eval_kind})"
             )
 
         return entries
@@ -2892,6 +2950,16 @@ Template rendering writes files to the workspace."""
                 # ``selected_variants[variant_key] == variant``.
                 "variant_key": entry.variant_key,
                 "variant": entry.variant,
+                # Coarse evaluation-kind classification (server 0.6.44+).
+                # ``"substitution"`` (default) — pure variable
+                # substitution, no Handlebars conditional helpers.
+                # ``"helpers"`` — template uses ``{{#if X}}`` /
+                # ``{{#unless X}}`` / ``{{#with X}}`` somewhere; agent
+                # may need per-item branch resolution (e.g. mod-017's
+                # SystemApiMapper.java.tpl).  Lets agents fast-path
+                # substitution-only templates without enumerating
+                # item_keys to detect helper presence.
+                "template_evaluation_kind": entry.template_evaluation_kind,
             })
 
         # Sort: standalone first (they're the primary templates), then embedded
@@ -3786,6 +3854,15 @@ Template rendering writes files to the workspace."""
         # docstring at __init__ for the race rationale.
         content, stripped = self._strip_host_comment_lines(content)
         self._tls.last_stripped_comment_lines = stripped
+        # Reset the per-call helper-invocation flag (server 0.6.44+).
+        # Set to "helpers" the first time _looks_like_helper matches
+        # anywhere in the template body — top-level OR nested.  Walker
+        # / listAvailableTemplates read this after the parse completes
+        # to populate ``template_evaluation_kind`` on the index entry.
+        # Pure-substitution templates (no helpers) keep the
+        # "substitution" default; templates with any helper bump to
+        # "helpers".
+        self._tls.last_evaluation_kind = "substitution"
 
         # Mustache triple-brace ``{{{x}}}`` is the unescaped-output
         # form.  Structurally it's identical to ``{{x}}`` — same
@@ -3916,6 +3993,11 @@ Template rendering writes files to the workspace."""
             if prefix in ('#', '^'):
                 helper_match = _looks_like_helper(name)
                 if helper_match is not None:
+                    # Flip per-call flag so callers (walker /
+                    # listAvailableTemplates) can populate
+                    # ``template_evaluation_kind = "helpers"`` on
+                    # the index entry.  Server 0.6.44+.
+                    self._tls.last_evaluation_kind = "helpers"
                     kw, arg = helper_match
                     # Skip iteration-metadata helper arguments
                     # (``{{#unless @last}}`` etc.).  The argument
@@ -4171,14 +4253,34 @@ Template rendering writes files to the workspace."""
             entry = variables[name].copy()
             if "item_keys" in entry:
                 raw = entry["item_keys"]  # dict[name → source]
-                entry["item_keys"] = [
-                    {
+                # Pre-compute the helper-source names in this section's
+                # item_keys so each helper entry can carry its
+                # mutual-exclusivity siblings (server 0.6.44+).
+                # Mutual-exclusivity is the kb-author's INTENT
+                # (encoded by writing N sibling helpers in one section
+                # body, e.g. ``{{#if isString}}/{{#if isEnum}}/...``);
+                # the parser surfaces the structure, the agent decides
+                # which sibling resolves true per item.
+                helper_names_in_section = sorted([
+                    item_name for item_name, source in raw.items()
+                    if source == "helper"
+                ])
+                entry["item_keys"] = []
+                for item_name, source in sorted(raw.items()):
+                    item_entry: Dict[str, Any] = {
                         "name": item_name,
                         "source": source,
                         "required": source in REQUIRED_SOURCES,
                     }
-                    for item_name, source in sorted(raw.items())
-                ]
+                    if source == "helper":
+                        # Siblings = other helpers in the same scope,
+                        # excluding self.  Empty list when the helper
+                        # is solo (no mutual-exclusivity intent).
+                        item_entry["helper_siblings"] = [
+                            other for other in helper_names_in_section
+                            if other != item_name
+                        ]
+                    entry["item_keys"].append(item_entry)
             # has_inverted_branch defaults to False on sections that
             # don't have an inverted form — explicit False rather
             # than missing key keeps the schema predictable.
