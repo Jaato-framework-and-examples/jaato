@@ -64,8 +64,8 @@ load-bearing.
 
 For a worked example see ``feedback_completion_schema_warnings_field``
 in the project memory and the
-``docs/design/completion-payload-schema-conventions.md`` design
-document.
+``docs/design/payload-schema-conventions.md`` design document
+(unified spawn-side + completion-side guide).
 """
 
 import logging

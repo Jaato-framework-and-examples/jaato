@@ -4473,7 +4473,7 @@ Template rendering writes files to the workspace."""
             }
             # Surface ``//`` host-comment lines that were stripped.
             # Per the standard completion-payload-schema convention
-            # (see docs/design/completion-payload-schema-conventions.md),
+            # (see docs/design/payload-schema-conventions.md §3.2),
             # warnings is the advisory escape hatch.
             # Read from thread-local set by ``_parse_mustache_structure``
             # earlier in this same thread.  Default to ``[]`` when the

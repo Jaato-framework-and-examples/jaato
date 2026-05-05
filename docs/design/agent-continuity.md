@@ -230,7 +230,7 @@ If a caller invokes a continuity-aware agent without supplying
 `continuity_scope`, the placeholder may render literally — the
 prompt would contain the string `{{continuity_scope}}` as plain text.
 
-Three graceful-degradation options, in preference order:
+Four graceful-degradation options, in preference order:
 
 1. **Caller discipline**: pick non-continuity agents when continuity
    isn't desired. The simplest contract; documented expectation.
@@ -240,9 +240,30 @@ Three graceful-degradation options, in preference order:
 3. **Template-engine fallback syntax**: `{{continuity_scope|default:""}}`
    if the template engine supports it. **Verify the engine before
    relying on this.**
+4. **Hard schema enforcement** via the profile's `spawn_payload_schema`:
+   list `continuity_scope` as a required property, and the framework
+   rejects spawns that omit it before the session is created. Trades
+   silent literal-rendering for loud validation failure at the spawn
+   boundary. See
+   [`payload-schema-conventions.md` §6.1](./payload-schema-conventions.md)
+   for the spawn-side contract and the strictness trade-offs.
 
 For the first continuity-aware agent shipped, option 1 is the
-zero-risk default; promote to 2 or 3 if usage patterns warrant.
+zero-risk default; promote to 2 or 3 if usage patterns warrant;
+promote to 4 when the profile already declares a
+`spawn_payload_schema` and you want continuity-scope omission to
+fail loudly at the caller.
+
+### Interaction with strict spawn schemas
+
+If a continuity-aware profile **also** declares a
+`spawn_payload_schema` with `additionalProperties: false`, the
+schema MUST list `continuity_scope` as an (optional or required)
+property, otherwise spawning with the param will reject as an
+extra-key violation. Authors choosing strict-shape enforcement on
+spawn schemas absorb the framework-level params explicitly. See
+[`payload-schema-conventions.md` §6](./payload-schema-conventions.md)
+for the full discussion.
 
 ### Agent cooperation on storage
 
@@ -355,12 +376,12 @@ To adopt auto-curation in your own tenant:
 
 The framework provides the rails; the advisor's persona is yours.
 
-## Cross-reference: typed completion payloads
+## Cross-reference: typed payload schemas
 
 When an agent declares a `completion_payload_schema` in its profile
-(see `docs/design/completion-payload-schema-conventions.md`), it
-emits structured data via `signal_completion(payload=...)` instead of
-free-form text.
+(see [`payload-schema-conventions.md`](./payload-schema-conventions.md)),
+it emits structured data via `signal_completion(payload=...)` instead
+of free-form text.
 
 For continuity, this means the **next session in the same scope can
 consume the typed fields directly** via memory hint retrieval, rather
