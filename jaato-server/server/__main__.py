@@ -477,6 +477,7 @@ class JaatoDaemon:
         if self._ipc_server:
             self._ipc_server._on_session_request = self._command_router.handle_request
             self._ipc_server._on_command_list_request = self._command_router.get_command_list
+            self._ipc_server._on_client_disconnect = self._command_router.handle_client_disconnect
         if self._ws_server:
             self._ws_server.set_command_router(self._command_router)
 

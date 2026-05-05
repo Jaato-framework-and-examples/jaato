@@ -1090,9 +1090,11 @@ class JaatoWSServer:
             async with self._lock:
                 if client_id in self._clients:
                     del self._clients[client_id]
-            # Detach from session (prevents stale client_ids in attached_clients)
-            if self._command_router and self._command_router._session_manager:
-                self._command_router._session_manager.detach_client(client_id)
+            # Detach from session via the transport-agnostic helper
+            # (prevents stale client_ids in attached_clients and the
+            # downstream inotify leak through workspace_monitor).
+            if self._command_router:
+                self._command_router.handle_client_disconnect(client_id)
             # Clean up per-client state
             if self._workspace_manager:
                 self._workspace_manager.remove_client(client_id)

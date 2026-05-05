@@ -194,6 +194,7 @@ class JaatoIPCServer:
         socket_mode: int = 0o666,
         on_session_request: Optional[Callable[[str, str, Event], None]] = None,
         on_command_list_request: Optional[Callable[[], list]] = None,
+        on_client_disconnect: Optional[Callable[[str], None]] = None,
     ):
         """Initialize the IPC server.
 
@@ -206,11 +207,20 @@ class JaatoIPCServer:
                 Called with (client_id, session_id, event).
             on_command_list_request: Callback to get list of available commands.
                 Returns list of {name, description} dicts.
+            on_client_disconnect: Callback fired when an IPC client
+                connection terminates (clean disconnect or error).
+                Called with ``(client_id,)``.  Wired to
+                ``CommandRouter.handle_client_disconnect`` so that
+                ``SessionManager`` detaches the client from its session
+                — without this, ``session.attached_clients`` retains
+                stale ids forever and per-session resources (workspace
+                monitor inotify handles) leak.
         """
         self.socket_path = socket_path or _get_default_ipc_path()
         self.socket_mode = socket_mode
         self._on_session_request = on_session_request
         self._on_command_list_request = on_command_list_request
+        self._on_client_disconnect = on_client_disconnect
 
         # Server state
         self._server: Optional[asyncio.Server] = None
@@ -456,6 +466,19 @@ class JaatoIPCServer:
                     del self._clients[client_id]
                 if client_id in self._event_queues:
                     del self._event_queues[client_id]
+            # Detach from session via the transport-agnostic helper
+            # (CommandRouter.handle_client_disconnect → SessionManager.detach_client).
+            # Without this, session.attached_clients retains the dead
+            # client_id, _maybe_unload_session blocks forever, and the
+            # session's workspace_monitor never releases its inotify
+            # handle — leading to Errno 24 on long-lived daemons.
+            if self._on_client_disconnect:
+                try:
+                    self._on_client_disconnect(client_id)
+                except Exception as exc:
+                    logger.error(
+                        f"on_client_disconnect failed for {client_id}: {exc}"
+                    )
 
             try:
                 writer.close()

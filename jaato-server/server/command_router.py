@@ -65,6 +65,23 @@ class CommandRouter:
         # Pending post-auth setup requests: client_id -> {request_id, provider_name}
         self._pending_post_auth: dict = {}
 
+    def handle_client_disconnect(self, client_id: str) -> None:
+        """Notify the router that a transport client has disconnected.
+
+        Detaches ``client_id`` from any session it was attached to.
+        ``SessionManager.detach_client`` also calls
+        ``_maybe_unload_session`` which releases per-session resources
+        (workspace monitor inotify handle, etc.) once no other clients
+        are attached.
+
+        Called by transport servers (IPC, WS) from their disconnect
+        handlers.  Per-transport cleanup (e.g. WS
+        ``workspace_manager.remove_client`` /
+        ``event_sink_adapter.remove_client``) stays in the transport
+        server — only the session-detachment step is transport-agnostic.
+        """
+        self._session_manager.detach_client(client_id)
+
     def handle_request(
         self,
         client_id: str,
