@@ -517,6 +517,15 @@ class JaatoDaemon:
         for ext in self._extensions:
             await ext.start()
 
+        # Periodic health checks (server 0.6.54+) — currently inotify
+        # pressure.  Cheap proc/self/fd scan every 5 minutes; warns
+        # operators before the kernel limit is hit and sessions start
+        # failing with Errno 24.  Linux-only; check is a silent no-op
+        # on other platforms.
+        health_task = asyncio.create_task(self._run_health_checks())
+        health_task.add_done_callback(_on_task_done)
+        tasks.append(health_task)
+
         logger.info("Jaato server started")
 
         # Wait for shutdown
@@ -537,6 +546,38 @@ class JaatoDaemon:
         self._remove_pid()
         # Note: Don't remove config on normal stop - needed for restart
         logger.info("Jaato server stopped")
+
+    async def _run_health_checks(self) -> None:
+        """Periodic health-check loop (server 0.6.54+).
+
+        Runs ``check_inotify_pressure()`` every 5 minutes; logs a
+        WARNING when usage crosses 80% of the kernel limit so
+        operators see EAGAIN-class failures coming before
+        ``inotify_init1()`` returns ``EMFILE`` and sessions fail to
+        spawn.  The check is a silent no-op on non-Linux platforms.
+
+        Cancellable via ``self._shutdown_event``: ``wait_for`` with
+        the 300s timeout returns immediately on shutdown signal,
+        otherwise raises ``TimeoutError`` (i.e. interval elapsed)
+        and the loop runs the check.
+        """
+        from .health_check import check_inotify_pressure
+
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(), timeout=300.0,
+                )
+                return  # shutdown signaled
+            except asyncio.TimeoutError:
+                pass  # interval elapsed; run the check
+            try:
+                msg = check_inotify_pressure()
+            except Exception:
+                logger.exception("Health check failed; continuing")
+                continue
+            if msg:
+                logger.warning("Health: %s", msg)
 
     async def stop(self) -> None:
         """Signal shutdown."""
