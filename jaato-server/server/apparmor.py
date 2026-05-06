@@ -163,7 +163,48 @@ class AppArmorManager:
     #       writes to other paths under .jaato (e.g. arbitrary
     #       ``.jaato/state/...``) still hit the deny.  AppArmor's
     #       more-specific-wins rule does the carve-out resolution.
-    _TEMPLATE_VERSION = 12
+    #  13 — Two structural changes after v12 was empirically shown
+    #       broken (cascade v17 / 7:3 reproducer, 2026-05-06):
+    #
+    #       (a) Broad ``audit deny .jaato/** w,l,k`` REPLACED with
+    #           narrow per-subpath denies on user-authored config
+    #           only (agents/, profiles/, prompts/, scripts/,
+    #           services/<name>/, reactors.json, completion_schemas/,
+    #           spawn_schemas/, instructions/, references/).  AppArmor
+    #           empirically does NOT let more-specific allow override
+    #           less-specific deny — the v12 carve-outs failed to
+    #           lift the deny on ``.jaato/sessions/`` etc., causing
+    #           confined-reactor session-journal saves to EACCES.
+    #           Tenant-runtime subpaths (sessions/, logs/, cache/,
+    #           vision/, services/_discovered/, memory/, todos/,
+    #           waypoints.json, *_auth.json) are no longer under any
+    #           deny — they fall through to the broad workspace rwkl
+    #           and writes succeed regardless of confinement context.
+    #
+    #       (b) NEW ``profile tool_hat`` sub-profile added inside the
+    #           per-session profile.  Tool execution
+    #           (``ToolExecutor.execute``) enters the sub-profile via
+    #           ``change_profile -> jaato-ws-{session_id}//tool_hat``
+    #           and exits back to base on tool finish.  The sub-profile
+    #           ADDS read-denies on user-authored config subpaths so
+    #           LLM-driven file-read tools (cat via cli, file_edit's
+    #           readFile, filesystem_query) cannot inspect agents/,
+    #           profiles/, prompts/, schemas/, instructions/,
+    #           reactors.json, scripts/.  Information-isolation
+    #           between agents in a cascade.  Reactors and session-
+    #           init stay in base (need reads to load agent persona,
+    #           profile JSON, schemas).
+    #
+    #       Empirically verified: scripts/verify_apparmor_hat.sh,
+    #       19/19 assertions pass on AppArmor 4.0.1.
+    #
+    #       AppArmor sub-profile semantics: hat/sub-profile rules
+    #       REPLACE base profile rules (no inheritance).  The
+    #       sub-profile must redeclare every allow + deny it wants
+    #       to honor.  This template duplicates the base body inside
+    #       ``profile tool_hat { ... }`` and appends the
+    #       hat-specific read-denies.
+    _TEMPLATE_VERSION = 13
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -176,45 +217,45 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   #include <abstractions/nameservice>
   #include <abstractions/python>
 
-  # ---- workspace: read-write (with .jaato carve-out) ----
+  # ---- workspace: read-write with narrow integrity write-denies ----
   # Sessions and session-scoped reactors can read/write/link anywhere
-  # in the workspace EXCEPT the user-authored config tier of
-  # ``.jaato/`` (reactors.json source-of-truth, agents, prompts,
-  # profiles, schemas, scripts, services definitions).  Framework-
-  # owned subtrees (sessions/, logs/, cache/, vision/, services/_discovered/,
-  # waypoints.json, *_auth.json) ARE writable so the daemon's own
-  # infrastructure works regardless of which thread (confined or
-  # unconfined) initiated the write — session journaling, per-session
-  # log handlers, formatter caches, and auth-token persistence all
-  # incidentally run on confined threads when triggered from inside
-  # tool callbacks.
+  # in the workspace, INCLUDING tenant-runtime ``.jaato/`` subpaths
+  # (sessions/, logs/, cache/, vision/, services/_discovered/, memory/,
+  # todos/, waypoints.json, *_auth.json) — those are tenant-owned
+  # state and need to be writable from confined threads (reactor-
+  # spawned session journaling, per-session log handlers, etc.).
   #
-  # Server 0.6.53+ (template v12): scopes the deny rule with
-  # framework-subtree carve-outs.  Pre-0.6.53 the broad deny blocked
-  # framework writes (cascade v9 finding from 7:3, 2026-05-06):
-  #   ERROR server.session_manager: Failed to save session ...:
-  #     [Errno 13] Permission denied: <ws>/.jaato/sessions/...json.tmp
+  # Server 0.6.55+ (template v13): broad ``.jaato/** w`` deny replaced
+  # with narrow per-subpath denies on user-authored config ONLY
+  # (agents, profiles, prompts, scripts, schemas, services definitions,
+  # reactors.json, instructions, references).  Pre-0.6.55 the broad
+  # deny was empirically shown to win over more-specific allows on
+  # AppArmor 4.0 — the carve-out approach didn't work as designed.
+  # Narrow per-subpath denies avoid the deny-vs-allow specificity
+  # conflict entirely: tenant-runtime subpaths are not under any deny,
+  # only the explicitly-named user-authored config subpaths are.
   #
-  # AppArmor rule resolution: more-specific paths override less-specific
-  # ones.  The ``audit deny .jaato/**`` covers the broad case; the
-  # more-specific ``allow .jaato/<framework_subtree>/** rwkl`` rules
-  # win where they apply.  ``audit deny`` makes denials visible in
-  # ``dmesg | grep apparmor`` so policy violations are diagnosable.
+  # ``audit deny`` makes denials visible in ``dmesg | grep apparmor``
+  # so policy violations are diagnosable.  Each rule combines
+  # ``w,l,k`` permissions because:
+  # - ``w`` (write): primary integrity protection
+  # - ``l`` (link/hardlink): a confined writer could otherwise hardlink
+  #   the file into a writable path and write through the alias,
+  #   bypassing the write deny
+  # - ``k`` (file lock): otherwise a confined process could grab a
+  #   lock that blocks daemon-side reads of the same file
   {workspace_path}/   rw,
   {workspace_path}/** rwkl,
-  # Broad deny — anything under .jaato is policy-protected by default.
-  audit deny {workspace_path}/.jaato/**  w,
-  audit deny {workspace_path}/.jaato/**  l,
-  audit deny {workspace_path}/.jaato/**  k,
-  # Framework-owned subtrees — daemon infrastructure writes here.
-  # More-specific allows override the less-specific deny above.
-  {workspace_path}/.jaato/sessions/**             rwkl,
-  {workspace_path}/.jaato/logs/**                 rwkl,
-  {workspace_path}/.jaato/cache/**                rwkl,
-  {workspace_path}/.jaato/vision/**               rwkl,
-  {workspace_path}/.jaato/services/_discovered/** rwkl,
-  {workspace_path}/.jaato/waypoints.json          rwkl,
-  {workspace_path}/.jaato/*_auth.json             rwkl,
+  audit deny {workspace_path}/.jaato/agents/**             wlk,
+  audit deny {workspace_path}/.jaato/profiles/**           wlk,
+  audit deny {workspace_path}/.jaato/prompts/**            wlk,
+  audit deny {workspace_path}/.jaato/scripts/**            wlk,
+  audit deny {workspace_path}/.jaato/services/*/           wlk,
+  audit deny {workspace_path}/.jaato/reactors.json         wlk,
+  audit deny {workspace_path}/.jaato/completion_schemas/** wlk,
+  audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
+  audit deny {workspace_path}/.jaato/instructions/**       wlk,
+  audit deny {workspace_path}/.jaato/references/**         wlk,
 
   # ---- shared read-only resources ----
   {venv_path}/           r,
@@ -444,6 +485,27 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # corrupt the rendered profile (when the name resolves) or raise
   # KeyError (when it does not).
 {extension_fragments_inline}
+
+  # ---- tool_hat sub-profile (server 0.6.55+, template v13) ----
+  # Tool execution context.  ``ToolExecutor.execute`` enters this
+  # sub-profile via ``change_profile -> jaato-ws-{session_id}//tool_hat``
+  # before invoking a plugin, and exits back to the parent profile
+  # on tool finish.  AppArmor sub-profiles do NOT inherit base rules
+  # (verified empirically against AppArmor 4.0.1) — every allow and
+  # deny the sub-profile honors must be redeclared.
+  #
+  # The sub-profile mirrors the base body exactly + ADDS read-denies
+  # on user-authored config so LLM-driven file reads can't inspect
+  # other agents' personas, profile JSON, prompts, schemas, scripts,
+  # instructions, or reactors.json.  Information-isolation between
+  # agents in a cascade.
+  #
+  # Reactors and session-init stay in BASE (not in tool_hat) because
+  # they need read access to the same paths to load agent personas,
+  # validate completion payloads, etc.  ``apparmor_confine`` for
+  # tool execution uses the sub-profile name; for everything else
+  # (prefetch, reactor dispatch) uses the base profile name.
+{tool_hat_subprofile}
 }}
 '''
 
@@ -1217,6 +1279,22 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             if chunks:
                 extension_fragments_inline = "\n\n".join(chunks)
 
+        # Build the tool_hat sub-profile body (server 0.6.55+).
+        # AppArmor sub-profiles do NOT inherit base rules — every allow
+        # and deny must be redeclared.  We mirror the base body
+        # verbatim and append the hat-specific read-denies on
+        # user-authored config.  Indentation is 4 spaces (vs 2 for
+        # base body) so the rendered profile is visually nested.
+        tool_hat_subprofile = self._build_tool_hat_subprofile(
+            workspace_path=workspace_path,
+            premium_rules=premium_rules,
+            config_root_rules=config_root_rules,
+            env_file_rule=env_file_rule,
+            refs_include_glob=f"{self._refs_dir(session_id)}/*",
+            extension_fragments_inline=extension_fragments_inline,
+            session_id=session_id,
+        )
+
         return self.PROFILE_TEMPLATE.format(
             template_version=self._TEMPLATE_VERSION,
             session_id=session_id,
@@ -1228,7 +1306,152 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
             env_file_rule=env_file_rule,
             refs_include_glob=f"{self._refs_dir(session_id)}/*",
             extension_fragments_inline=extension_fragments_inline,
+            tool_hat_subprofile=tool_hat_subprofile,
         )
+
+    def _build_tool_hat_subprofile(
+        self,
+        workspace_path: str,
+        premium_rules: str,
+        config_root_rules: str,
+        env_file_rule: str,
+        refs_include_glob: str,
+        extension_fragments_inline: str,
+        session_id: str,
+    ) -> str:
+        """Build the ``profile tool_hat { ... }`` sub-profile body
+        (server 0.6.55+).
+
+        The sub-profile mirrors the base profile's rule set verbatim
+        (sub-profiles don't inherit) and ADDS read-denies on user-
+        authored config subpaths.  ``ToolExecutor.execute`` enters the
+        sub-profile via ``change_profile -> jaato-ws-{session_id}//tool_hat``
+        before invoking each plugin.
+        """
+        # Re-indent extension_fragments_inline from 2-space to 4-space
+        # so it nests correctly inside the sub-profile block.
+        nested_extension_fragments = "\n".join(
+            f"  {line}" if line.strip() else line
+            for line in extension_fragments_inline.splitlines()
+        )
+        return f"""  profile tool_hat {{
+    #include <abstractions/base>
+    #include <abstractions/nameservice>
+    #include <abstractions/python>
+
+    # ---- workspace + integrity write-denies (mirrors base) ----
+    {workspace_path}/   rw,
+    {workspace_path}/** rwkl,
+    audit deny {workspace_path}/.jaato/agents/**             wlk,
+    audit deny {workspace_path}/.jaato/profiles/**           wlk,
+    audit deny {workspace_path}/.jaato/prompts/**            wlk,
+    audit deny {workspace_path}/.jaato/scripts/**            wlk,
+    audit deny {workspace_path}/.jaato/services/*/           wlk,
+    audit deny {workspace_path}/.jaato/reactors.json         wlk,
+    audit deny {workspace_path}/.jaato/completion_schemas/** wlk,
+    audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
+    audit deny {workspace_path}/.jaato/instructions/**       wlk,
+    audit deny {workspace_path}/.jaato/references/**         wlk,
+
+    # ---- tool_hat-specific read-denies on user-authored config ----
+    # The whole point of the sub-profile: tool execution can't read
+    # other agents' personas, profile JSON, prompts, schemas,
+    # instructions, scripts, or reactors.json.  Information-isolation
+    # between agents in a cascade.  Framework loading (which needs
+    # these reads) happens in the BASE profile, not in the hat.
+    audit deny {workspace_path}/.jaato/agents/**             r,
+    audit deny {workspace_path}/.jaato/profiles/**           r,
+    audit deny {workspace_path}/.jaato/prompts/**            r,
+    audit deny {workspace_path}/.jaato/scripts/**            r,
+    audit deny {workspace_path}/.jaato/completion_schemas/** r,
+    audit deny {workspace_path}/.jaato/spawn_schemas/**      r,
+    audit deny {workspace_path}/.jaato/instructions/**       r,
+    audit deny {workspace_path}/.jaato/reactors.json         r,
+
+    # ---- shared read-only resources (mirrors base) ----
+    {self._venv_path}/           r,
+    {self._venv_path}/**         r,
+    {self._venv_path}/bin/*      ix,
+    {self._source_root}/         r,
+    {self._source_root}/**       r,
+    {premium_rules}
+    {config_root_rules}
+
+    # ---- user-global jaato config (mirrors base) ----
+    @{{HOME}}/.jaato/agents/         r,
+    @{{HOME}}/.jaato/agents/**       r,
+    @{{HOME}}/.jaato/profiles/       r,
+    @{{HOME}}/.jaato/profiles/**     r,
+    @{{HOME}}/.jaato/prompts/        r,
+    @{{HOME}}/.jaato/prompts/**      r,
+    @{{HOME}}/.jaato/skills/         r,
+    @{{HOME}}/.jaato/skills/**       r,
+    @{{HOME}}/.jaato/themes/         r,
+    @{{HOME}}/.jaato/themes/**       r,
+    @{{HOME}}/.jaato/services/       r,
+    @{{HOME}}/.jaato/services/**     r,
+    @{{HOME}}/.jaato/references/     r,
+    @{{HOME}}/.jaato/references/**   r,
+    @{{HOME}}/.jaato/keybindings.json r,
+    @{{HOME}}/.jaato/theme.json       r,
+    @{{HOME}}/.jaato/gc.json          r,
+    {env_file_rule}
+    @{{HOME}}/.jaato/memories/       rw,
+    @{{HOME}}/.jaato/memories/**     rw,
+    @{{HOME}}/.jaato/memories.jsonl  rw,
+    @{{HOME}}/.claude/skills/        r,
+    @{{HOME}}/.claude/skills/**      r,
+    @{{HOME}}/.claude/commands/      r,
+    @{{HOME}}/.claude/commands/**    r,
+    @{{HOME}}/.cache/huggingface/    rw,
+    @{{HOME}}/.cache/huggingface/**  rwk,
+    @{{HOME}}/.cache/torch/          rw,
+    @{{HOME}}/.cache/torch/**        rwk,
+
+    # ---- temp files (mirrors base) ----
+    /tmp/jaato-{session_id}-** rw,
+    /tmp/jaato-{session_id}/   rw,
+    /tmp/jaato-{session_id}/** rw,
+
+    # ---- basic system access (mirrors base) ----
+    /usr/bin/**          ix,
+    /usr/local/bin/**    ix,
+    /bin/**              ix,
+    /usr/lib/**          rm,
+    /lib/**              rm,
+    /etc/ld.so.cache     r,
+    /etc/passwd          r,
+    /etc/nsswitch.conf   r,
+    /proc/self/**        r,
+    /dev/null            rw,
+    /dev/urandom         r,
+    /dev/pts/*           rw,
+
+    # ---- network (mirrors base) ----
+    network inet  stream,
+    network inet6 stream,
+    network inet  dgram,
+    network inet6 dgram,
+    deny network raw,
+
+    # ---- denied capabilities (mirrors base) ----
+    deny ptrace,
+    deny mount,
+    deny capability sys_admin,
+    deny capability net_admin,
+    deny capability sys_ptrace,
+
+    # ---- profile transitions (mirrors base, needed to exit hat) ----
+    change_profile -> unconfined,
+    /proc/self/attr/current      w,
+    /proc/self/task/*/attr/current w,
+
+    # ---- per-session reference fragments (mirrors base) ----
+    include if exists "{refs_include_glob}"
+
+    # ---- extension fragments (mirrors base, re-indented) ----
+{nested_extension_fragments}
+  }}"""
 
     def _refs_dir(self, session_id: str) -> Path:
         """Per-session AppArmor reference-fragment directory.
@@ -1342,6 +1565,14 @@ def make_confine_context(profile_name: str) -> Callable[[], ContextManager]:
     through the ``server → shared`` boundary so that ``ToolExecutor``
     can confine tools without importing ``server.apparmor``.
 
+    Used for BASE-profile entry (prefetch / dynamic-instructions
+    expansion, reactor dispatch, session lifecycle work that needs
+    full read access to ``.jaato/agents/``, ``.jaato/profiles/``,
+    ``.jaato/scripts/``, etc.).  For tool execution (LLM-driven
+    dispatch through ToolExecutor) use ``make_tool_confine_context``
+    instead — that enters the sub-profile that ADDS read-denies on
+    user-authored config.
+
     Args:
         profile_name: The AppArmor profile name to confine to.
 
@@ -1351,6 +1582,34 @@ def make_confine_context(profile_name: str) -> Callable[[], ContextManager]:
     def _confine():
         return apparmor_confine(profile_name)
     return _confine
+
+
+def make_tool_confine_context(
+    session_profile_name: str,
+) -> Callable[[], ContextManager]:
+    """Create a callable that enters the per-session ``tool_hat``
+    sub-profile (server 0.6.55+, template v13+).
+
+    Tool execution context.  ``ToolExecutor.execute`` calls this
+    factory once per tool call to wrap the plugin's executor in
+    ``apparmor_confine("jaato-ws-X//tool_hat")``.  The sub-profile
+    REPLACES the parent's rules (AppArmor sub-profiles don't
+    inherit) and adds read-denies on user-authored config —
+    information-isolation between agents in a cascade.
+
+    On exit, the existing apparmor_confine machinery writes
+    ``changeprofile unconfined`` to the thread's attr/current,
+    same as for base-profile exit.
+
+    Args:
+        session_profile_name: The session's BASE profile name (e.g.
+            ``"jaato-ws-20260506_135835"``).  The sub-profile name
+            ``"//tool_hat"`` is appended automatically.
+
+    Returns:
+        A zero-argument callable that returns a context manager.
+    """
+    return make_confine_context(f"{session_profile_name}//tool_hat")
 
 
 # ------------------------------------------------------------------

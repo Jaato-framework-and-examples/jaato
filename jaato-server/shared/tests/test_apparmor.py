@@ -146,95 +146,158 @@ class TestRenderProfile:
         assert "@{HOME}/.jaato/services/" in profile
         assert "@{HOME}/.jaato/services/**" in profile
 
-    def test_workspace_dotjaato_writes_denied(self, manager):
-        """Server 0.6.52+ (template v11): the workspace ``.jaato/``
-        subtree is carved out of the rwkl write rule.  Sessions and
-        session-scoped reactors can write everywhere in the workspace
-        EXCEPT ``.jaato/``, which is reserved for daemon-only state
-        (reactors.json source-of-truth, agents, prompts, profiles,
-        schemas, scripts, services definitions, logs).  Verify the
-        deny rules are present.
+    def test_workspace_dotjaato_narrow_writes_denied(self, manager):
+        """Server 0.6.55+ (template v13): broad ``.jaato/** w,l,k`` deny
+        replaced with narrow per-subpath denies on user-authored config
+        only.  Tenant-runtime subpaths (sessions/, logs/, cache/, etc.)
+        are NOT denied — they fall through to the broad workspace rwkl.
 
-        ``audit deny`` (vs plain ``deny``) makes the kernel log the
-        denied write attempts to dmesg — operators get a diagnostic
-        breadcrumb instead of a silent EACCES.
+        Pre-v13 (v12) the broad deny was empirically shown to win over
+        more-specific allow carve-outs on AppArmor 4.0 — the carve-out
+        approach didn't work as designed.  v13 sidesteps the deny-vs-
+        allow specificity conflict by only denying paths we genuinely
+        want denied.
+
+        Combined ``wlk`` permission flags: w = write integrity, l =
+        link bypass via hardlink, k = lock blocking daemon reads.
         """
         profile = manager._render_profile("s1", "/workspace")
-        # Workspace rw stays open for the rest of the tree
+        # Workspace rw stays open
         assert "/workspace/   rw" in profile
         assert "/workspace/** rwkl" in profile
-        # .jaato carve-out via audit deny
-        assert "audit deny /workspace/.jaato/**  w" in profile
-        # Link + lock variants also denied — a confined writer could
-        # otherwise hardlink its way into .jaato or grab a lock that
-        # blocks the daemon's own writes.
-        assert "audit deny /workspace/.jaato/**  l" in profile
-        assert "audit deny /workspace/.jaato/**  k" in profile
+        # Narrow user-authored config denies (each gets w,l,k combined):
+        assert "audit deny /workspace/.jaato/agents/**" in profile
+        assert "audit deny /workspace/.jaato/profiles/**" in profile
+        assert "audit deny /workspace/.jaato/prompts/**" in profile
+        assert "audit deny /workspace/.jaato/scripts/**" in profile
+        assert "audit deny /workspace/.jaato/services/*/" in profile
+        assert "audit deny /workspace/.jaato/reactors.json" in profile
+        assert "audit deny /workspace/.jaato/completion_schemas/**" in profile
+        assert "audit deny /workspace/.jaato/spawn_schemas/**" in profile
+        assert "audit deny /workspace/.jaato/instructions/**" in profile
+        assert "audit deny /workspace/.jaato/references/**" in profile
+        # NO broad deny anymore — that's what was breaking carve-outs.
+        assert "audit deny /workspace/.jaato/**  w" not in profile
 
-    def test_workspace_dotjaato_reads_allowed(self, manager):
-        """Read access to ``<workspace>/.jaato/`` MUST stay open —
-        agents need to read profiles, prompts, schemas, agent .md
-        files, etc. that live under the workspace's ``.jaato/`` tier.
-        The deny rule from server 0.6.52+ is write-only (w/l/k); reads
-        flow through the surrounding ``rwkl`` allow rule.
+    def test_workspace_dotjaato_reads_allowed_in_base(self, manager):
+        """In the BASE profile (not the tool_hat sub-profile),
+        read access to ``<workspace>/.jaato/`` stays open — agents,
+        reactors, and session-init need to read profiles, prompts,
+        schemas, agent .md files, etc.
+
+        The user-authored config write-denies are write-only (w,l,k);
+        reads flow through the surrounding ``rwkl`` allow rule.  The
+        sub-profile is what adds read-denies (verified separately).
         """
         profile = manager._render_profile("s1", "/workspace")
-        # No deny on read access
-        assert "audit deny /workspace/.jaato/**  r" not in profile
-        # The rwkl rule itself includes read implicitly (r is part of rwkl).
-        assert "/workspace/** rwkl" in profile
+        # Find the BASE profile body (everything before the tool_hat sub-profile).
+        base_body = profile.split("profile tool_hat")[0]
+        # Base must NOT deny reads on user-authored config — reactor
+        # dispatch, prefetch, and session-init all need them.
+        assert "audit deny /workspace/.jaato/agents/**             r" not in base_body
+        assert "audit deny /workspace/.jaato/profiles/**           r" not in base_body
+        # Reads flow through workspace rwkl.
+        assert "/workspace/** rwkl" in base_body
 
-    def test_template_v11_version_bump(self, manager):
-        """The deny-rule change MUST bump the template version so
-        ``apparmor_parser`` recompiles from source instead of reusing
-        a stale cached binary that still grants .jaato writes.
+    def test_template_version_bumped_to_13(self, manager):
+        """v13 template ships the narrow per-subpath denies + tool_hat
+        sub-profile.  apparmor_parser recompiles from source on version
+        bump rather than reusing a stale v12 cached binary.
         """
-        assert manager._TEMPLATE_VERSION >= 11
+        assert manager._TEMPLATE_VERSION >= 13
         profile = manager._render_profile("s1", "/workspace")
         assert (
             f"jaato-apparmor-template-version: {manager._TEMPLATE_VERSION}"
             in profile
         )
 
-    def test_framework_subtrees_carved_out_of_dotjaato_deny(self, manager):
-        """Server 0.6.53+ (template v12): the broad deny on
-        ``.jaato/** w`` would block the daemon's OWN writes to
-        ``.jaato/sessions/`` (session journals) and ``.jaato/logs/``
-        (per-session log handlers) when triggered from a confined
-        thread (log call inside a tool, save_session called from a
-        callback chain originating in a confined context).
+    def test_tenant_runtime_paths_are_writable(self, manager):
+        """Tenant-runtime subpaths under ``.jaato/`` (sessions/, logs/,
+        cache/, vision/, services/_discovered/, memory/, todos/,
+        waypoints.json, *_auth.json) are NOT under any deny rule in
+        v13.  They flow through the broad workspace rwkl and writes
+        succeed regardless of confinement context.
 
-        v12 adds more-specific allow rules for framework-owned
-        subtrees so daemon infrastructure writes succeed regardless
-        of which thread initiated them.  AppArmor's
-        more-specific-wins rule lets the allow override the deny.
+        This is the key correctness property that pre-v13 broke:
+        confined reactor-spawned session-journal saves at
+        ``.jaato/sessions/<id>.json.tmp`` were EACCES because the
+        broad v12 deny dominated the carve-out allow.
         """
         profile = manager._render_profile("s1", "/workspace")
-        # Each framework subtree must have an explicit allow.
-        assert "/workspace/.jaato/sessions/**" in profile
-        assert "/workspace/.jaato/logs/**" in profile
-        assert "/workspace/.jaato/cache/**" in profile
-        assert "/workspace/.jaato/vision/**" in profile
-        assert "/workspace/.jaato/services/_discovered/**" in profile
-        assert "/workspace/.jaato/waypoints.json" in profile
-        # Auth-token files (per gitignore pattern *_auth.json):
-        assert "/workspace/.jaato/*_auth.json" in profile
-        # The broad deny is still present for everything else.
-        assert "audit deny /workspace/.jaato/**  w" in profile
+        # No deny for tenant-runtime paths.
+        for tenant_path in (
+            "/workspace/.jaato/sessions/",
+            "/workspace/.jaato/logs/",
+            "/workspace/.jaato/cache/",
+            "/workspace/.jaato/vision/",
+            "/workspace/.jaato/services/_discovered/",
+            "/workspace/.jaato/memory/",
+            "/workspace/.jaato/todos/",
+            "/workspace/.jaato/waypoints.json",
+        ):
+            assert f"audit deny {tenant_path}" not in profile, (
+                f"tenant-runtime path {tenant_path} must NOT be under deny"
+            )
 
-    def test_session_state_paths_remain_denied(self, manager):
-        """The carve-outs (sessions/ logs/ cache/ vision/) are intentionally
-        narrow: arbitrary session-content writes under .jaato (e.g.
-        the old handoff_test ``.jaato/state/handoff/`` path that R5
-        migrated off) MUST still hit the deny.  No accidental allow-rule
-        widening — verify by NOT finding an allow for non-framework subpaths.
+    def test_tool_hat_subprofile_present(self, manager):
+        """v13 introduces the ``profile tool_hat { ... }`` sub-profile.
+        Tool execution enters it via ``change_profile -> jaato-ws-X//tool_hat``;
+        prefetch / reactor dispatch / session-init stay in BASE.
         """
         profile = manager._render_profile("s1", "/workspace")
-        # No allow for arbitrary state subpaths.
-        assert "/workspace/.jaato/state/" not in profile
-        assert "/workspace/.jaato/handoff/" not in profile
-        # No allow for arbitrary subdirectories.
-        assert "/workspace/.jaato/extensions/" not in profile
+        assert "profile tool_hat" in profile
+        # Sub-profile redeclares workspace allow (sub-profiles don't
+        # inherit base rules).
+        tool_hat_body = profile.split("profile tool_hat")[1]
+        assert "/workspace/   rw," in tool_hat_body
+        assert "/workspace/** rwkl," in tool_hat_body
+
+    def test_tool_hat_adds_read_denies_on_user_authored_config(self, manager):
+        """The whole point of the sub-profile: tool execution can't
+        read other agents' personas, profile JSON, prompts, schemas,
+        instructions, scripts, or reactors.json.  Information-isolation
+        between agents in a cascade.
+
+        Each user-authored config subpath gets an explicit ``r`` deny
+        in the sub-profile body (in addition to the integrity wlk
+        denies that mirror base).
+        """
+        import re
+        profile = manager._render_profile("s1", "/workspace")
+        tool_hat_body = profile.split("profile tool_hat")[1]
+        for path in (
+            "/workspace/.jaato/agents/**",
+            "/workspace/.jaato/profiles/**",
+            "/workspace/.jaato/prompts/**",
+            "/workspace/.jaato/scripts/**",
+            "/workspace/.jaato/completion_schemas/**",
+            "/workspace/.jaato/spawn_schemas/**",
+            "/workspace/.jaato/instructions/**",
+            "/workspace/.jaato/reactors.json",
+        ):
+            # Match ``audit deny <path>  ... r,`` with arbitrary
+            # whitespace before the permission flag.
+            pattern = (
+                r"audit\s+deny\s+"
+                + re.escape(path)
+                + r"\s+r,"
+            )
+            assert re.search(pattern, tool_hat_body), (
+                f"hat must deny reads on user-authored config: {path}"
+            )
+
+    def test_make_tool_confine_context_yields_subprofile_path(self):
+        """The tool-confinement factory produces a callable that
+        confines to the per-session sub-profile (``parent//tool_hat``).
+        """
+        from server.apparmor import make_tool_confine_context
+        factory = make_tool_confine_context("jaato-ws-test_session")
+        assert callable(factory)
+        # Calling it returns a context manager (the actual confinement
+        # write would be ``changeprofile jaato-ws-test_session//tool_hat``).
+        ctx = factory()
+        assert hasattr(ctx, "__enter__")
+        assert hasattr(ctx, "__exit__")
 
 
 class TestMakeConfineContext:

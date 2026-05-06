@@ -666,9 +666,13 @@ class JaatoWSServer:
                 sess.sandbox_mode = "soft"
                 return
 
-            confine_context = ws_server.get_apparmor_confinement(session_id)
-            if confine_context:
-                server.set_apparmor_confinement(confine_context)
+            # Server 0.6.55+: tool execution uses the tool_hat
+            # sub-profile (info-isolation read-denies on user-authored
+            # config); prefetch / reactor dispatch / session-init
+            # continue to use the BASE profile (full read access).
+            tool_confine_context = ws_server.get_apparmor_tool_confinement(session_id)
+            if tool_confine_context:
+                server.set_apparmor_confinement(tool_confine_context)
                 # Hand over the per-session reference authorizer so the
                 # references plugin can mutate the kernel profile when
                 # selectReferences grants new readonly paths.
@@ -2131,10 +2135,19 @@ class JaatoWSServer:
         self,
         session_id: str,
     ) -> Optional[Callable]:
-        """Get the AppArmor thread-level confinement context for a session.
+        """Get the AppArmor BASE-profile confinement context for a session.
+
+        Used for prefetch (configure-time dynamic-instructions
+        expansion) and reactor dispatch — both need read access to
+        user-authored config in ``.jaato/`` to load agent personas,
+        validate completion payloads, etc.
+
+        Tool execution uses :meth:`get_apparmor_tool_confinement`
+        instead (server 0.6.55+) — that enters the sub-profile with
+        added read-denies on user-authored config.
 
         Returns a zero-argument callable suitable for passing to
-        ``JaatoServer.set_apparmor_confinement()``, or ``None`` if
+        ``JaatoServer.set_pre_init_confine_context()``, or ``None`` if
         AppArmor is not available.
 
         Args:
@@ -2148,6 +2161,34 @@ class JaatoWSServer:
         from .apparmor import make_confine_context
         profile_name = self._apparmor.get_profile_name(session_id)
         return make_confine_context(profile_name)
+
+    def get_apparmor_tool_confinement(
+        self,
+        session_id: str,
+    ) -> Optional[Callable]:
+        """Get the AppArmor tool-execution confinement context
+        (server 0.6.55+, template v13+).
+
+        Returns a zero-argument callable that enters the per-session
+        ``tool_hat`` sub-profile.  Used by
+        ``JaatoServer.set_apparmor_confinement()`` to wrap each tool
+        call in ``ToolExecutor.execute`` so LLM-driven file reads
+        can't see user-authored config (other agents' personas,
+        profile JSON, schemas, scripts, instructions, reactors.json).
+
+        Returns ``None`` if AppArmor is not available.
+
+        Args:
+            session_id: Session identifier.
+
+        Returns:
+            Tool-confinement context factory, or ``None``.
+        """
+        if not self._apparmor or not self._apparmor.is_available():
+            return None
+        from .apparmor import make_tool_confine_context
+        profile_name = self._apparmor.get_profile_name(session_id)
+        return make_tool_confine_context(profile_name)
 
     def get_reference_authorizer(self, session_id: str):
         """Get the AppArmor reference-fragment authorizer for a session.
@@ -2275,10 +2316,12 @@ class JaatoWSServer:
         # Apply AppArmor confinement to CLI and interactive shell plugins.
         # (In daemon mode this is handled by the session hook registered in
         # set_command_router; this branch covers standalone WS server mode.)
+        # Server 0.6.55+: tool execution uses the tool_hat sub-profile
+        # (info-isolation on user-authored config reads).
         if provisioned_ws:
-            confine_context = self.get_apparmor_confinement(session_id)
-            if confine_context:
-                server.set_apparmor_confinement(confine_context)
+            tool_confine_context = self.get_apparmor_tool_confinement(session_id)
+            if tool_confine_context:
+                server.set_apparmor_confinement(tool_confine_context)
                 logger.info(
                     "AppArmor confinement applied to session %s",
                     session_id,
