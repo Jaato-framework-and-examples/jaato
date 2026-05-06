@@ -187,13 +187,41 @@ its pool and emits `TaskCompletedEvent(ok: false, error: cancelled)`.
 
 ### 4.2 Plugin tier classification
 
-Definitions:
-- **Daemon-tier:** state lives in the daemon, no FS writes that need
-  per-workspace confinement, shared cleanly across sessions OR provider-bound.
-- **Runner-tier:** per-session, performs FS reads/writes and/or spawns
-  subprocesses that need workspace confinement.
-- **Straddling:** state in daemon, execution in runner — needs an explicit
-  RPC stub split.
+**Criteria, in priority order:**
+
+1. **Hard daemon constraints — the plugin or one of its operations
+   *cannot* run in a confined runner.** Two categories qualify:
+   - **Privileged operations.** The current per-session profile uses
+     `/usr/bin/** ix,` (inherit-exec). Under `ix`, AppArmor strips
+     setuid on the exec'd child, so the runner cannot effectively
+     elevate via `sudo` even though the daemon's sudoers rule covers
+     the same UID. Anything that needs root (`sudo apparmor_parser
+     -r`, ulimit-style tunables, etc.) has to run in the daemon.
+   - **Independent trust boundary.** Even when `Ux` could be added to
+     allow runner-side sudo, the existing sudoers rule covers
+     `apparmor_parser` with arbitrary args — a model-driven runner
+     could load arbitrary profiles or unload sibling sessions'
+     profiles. Validation belongs in a process the model doesn't
+     drive directly.
+   Plus the obvious daemon-bound state: provider OAuth tokens that
+   span sessions, the EventBus the reactor framework subscribes to,
+   the daemon's IPC/WS transports.
+2. **Cross-session in-memory sharing as an *optimization*.** Embedding
+   models, prompt caches, semantic indexes — loading per-runner is
+   wasteful but not incorrect. Daemon placement here is a soft call
+   driven by RAM cost; "move to runner" is always available if the
+   topology cost outweighs the optimization.
+3. **Everything else → runner.** Per-session FS state in the workspace,
+   subprocess spawn that should inherit AppArmor, anything per-session
+   that doesn't trip criterion 1 or 2.
+
+**Tiers:**
+- **Daemon-tier** — criterion 1 or 2 applies; never instantiated in
+  the runner.
+- **Runner-tier** — criterion 3; never instantiated in the daemon.
+- **Straddling** — the plugin's *invocation* is runner-tier but one
+  specific operation is hard-daemon (criterion 1). The split is
+  bounded to that single RPC, not the whole plugin.
 
 | Plugin                | Tier      | Rationale |
 |-----------------------|-----------|-----------|
@@ -221,11 +249,11 @@ Definitions:
 | `clarification`       | Runner    | Inline UX, but tool-local. |
 | `environment`         | Runner    | Reads env, writes scratch files. |
 | `prompt_library`      | Runner    | Reads `~/.claude/skills/` and `.jaato/prompts/`. |
-| `references`          | **Straddle** | The plugin lives in the runner (its `selectReferences` tool runs there), but its kernel grants — `add_reference_fragment` — must happen in the daemon (it writes to `/etc/apparmor.d/jaato/.refs.d/` and triggers `apparmor_parser -r`, both root-side). The runner emits an `apparmor.add_fragment` RPC to the daemon. |
-| `memory`              | **Straddle** | Cross-session knowledge at `~/.jaato/memories/`. The plugin lives in the daemon (the file has to be writable by every session). The runner gets RPC stubs for `memory.propose` / `memory.search`. |
-| `permission`          | **Straddle** | Rules/state in daemon (whitelist, blacklist, evaluators, suspension state). The runner's tool executor delegates `check_permission` to the daemon via RPC (see §4.5). |
-| `reliability`         | **Straddle** | Per-tool failure tracking has no FS state, but lives in the daemon to span sessions. RPC stub from runner. |
-| `artifact_tracker`    | **Straddle** | Subscribes to file-writer tool results; lives daemon-side as an enrichment plugin. The runner forwards `tool.completed` events; the daemon enriches. |
+| `references`          | **Straddle** | Whole plugin runs in the runner (catalog read from `~/.jaato/references/` and `.jaato/references/`, `selectReferences` tool, embedding/semantic match). Single daemon-only RPC: `apparmor.add_fragment` writes to `/etc/apparmor.d/jaato/<sid>.refs.d/` and runs `sudo apparmor_parser -r`. Daemon-side because criterion 1 applies — `ix` strips setuid so the confined runner can't effectively call sudo, and validation of fragment paths (`_validate_path_for_fragment`) belongs outside model-driven code. |
+| `memory`              | Runner    | `~/.jaato/memories/` is rw under every session's profile (template line 334), so the runner writes `memories/raw/<id>.json` and `curated.jsonl` directly via tempfile-rename — same concurrency story as today. Embedding-cache sharing (criterion 2) is a soft argument for daemon, but per-runner load cost is acceptable for the simpler topology. Revisit if measured RAM cost is a problem. |
+| `permission`          | **Straddle** | Rules/state in daemon (whitelist, blacklist, evaluators, suspension, channels) — daemon owns the UI relay path and the rules outlive any single runner. The runner's tool executor delegates `check_permission` to the daemon via RPC (see §4.5). |
+| `reliability`         | Runner    | Per-session failure tracking. Daemon placement was a soft call for cross-session adaptive trust; in practice reliability state is most useful within a single agent session. Move to daemon later if cross-session trust becomes a real feature. |
+| `artifact_tracker`    | Runner    | Enriches file-writer tool results in-process. Runs alongside the tools it observes; result enrichment happens before the result crosses the RPC boundary. Daemon placement would force a full-result round-trip just to annotate. |
 | `cache`, `cache_*`    | Daemon    | Cache state lives in the daemon (provider-side prompt caching). |
 | `gc`, `gc_*`          | Daemon    | GC operates on the session's history, which is a daemon concept (history lives in `JaatoSession`). |
 | `streaming`           | Daemon    | Per-session streaming infrastructure tied to provider responses. |
@@ -241,27 +269,26 @@ Definitions:
 
 **Don't-fit-cleanly flags:**
 
-- `references` and `memory` both straddle the boundary because their *state*
-  is shared but their *invocation* is per-session. The straddle is unavoidable;
-  the design accommodates it by making the kernel-mutation calls (fragment
-  writes for references, file writes for memory) explicit RPCs.
-- `permission` is the obvious straddle — UI lives in the client (relayed
-  through the daemon), rules live in the daemon, but the *call site* is in
-  the runner's tool executor. §4.5 has the full plan.
-- `subagent` is runner-tier in the *parent*, but spawning a subagent creates
-  a new session, which spawns a new runner (or shares the parent's — see
-  §4.3).
-- `artifact_tracker` and the LSP-diagnostics enrichment that `TRAIT_FILE_WRITER`
-  triggers are listed as straddling because the plugin lives in the daemon
-  but its inputs (tool results) come from the runner. In practice this is
-  fine — the runner just emits the tool result on RPC, and the daemon
-  enriches before pushing to the model. No new code path.
-- `web_fetch` and `web_search` could theoretically live daemon-side (they
-  have no FS state). Putting them in the runner anyway because (a) the
-  per-session cgroup applies to outbound network bandwidth via cgroup
-  controllers, (b) the artifact_tracker enrichment expects the results to
-  come from the same dispatch site as cli's, and (c) it's one fewer
-  daemon-side dependency.
+- `references` is the only true straddle: a single daemon-only RPC
+  (the kernel-grant write) wrapped around an otherwise runner-tier
+  plugin. The straddle is unavoidable because criterion 1 applies to
+  `sudo apparmor_parser` (see §4.7).
+- `permission` is the second straddle by design: UI relay + rule
+  storage are daemon-side because they outlive runners and depend on
+  channels that are daemon-owned. The *call site* is runner-side. §4.5
+  has the full plan.
+- `subagent` is runner-tier in the *parent*, but spawning a subagent
+  creates a new session, which shares the parent's runner by default
+  (see §4.3).
+- `web_fetch` and `web_search` have no FS state. They sit in the runner
+  because (a) the per-session cgroup applies to outbound network
+  bandwidth via cgroup controllers, (b) `artifact_tracker` (also
+  runner-tier) expects results from the same dispatch site as `cli`'s,
+  (c) it keeps the daemon's dependency surface narrower.
+- Soft daemon picks (criterion 2) that may move later: `cache_*` (provider
+  prompt-cache state — sharing across sessions is the optimization),
+  `gc_*` (history lives daemon-side today; if `JaatoSession` history
+  fully moves to the runner, GC follows). None block Phase 5.
 
 ### 4.3 Subagent semantics
 
@@ -452,11 +479,24 @@ profile name in env; the runner self-confines via `aa_change_profile`. No
   that the **whole runner process** is in `jaato-ws-{session_id}` from the
   moment it starts, not just specific worker threads in a shared daemon.
 - Reference fragments (per-`selectReferences` grants under
-  `jaato-ws-{session_id}.refs.d/`) are still loaded by the daemon. Runner
-  emits `apparmor.add_fragment` RPC; daemon writes the file + reloads.
-  The kernel sees the new rule; the runner picks it up on its next file
-  open (no runner restart needed — that's the whole point of `include if
-  exists` in the existing template).
+  `jaato-ws-{session_id}.refs.d/`) are loaded by the daemon. Runner
+  emits `apparmor.add_fragment` RPC; daemon writes the file and runs
+  `sudo apparmor_parser -r`. The runner picks up the new rule on its
+  next file open via the existing `include if exists` directive — no
+  runner restart needed. **Why not the runner directly:** the runner
+  is AppArmor-confined and the per-session profile uses `/usr/bin/**
+  ix,`. Under `ix` the kernel strips setuid on exec, so even though
+  the daemon's sudoers rule covers the runner's UID, the runner's
+  `sudo` invocation cannot elevate to root. Switching to `Ux` for
+  `/usr/bin/sudo` would let sudo run **unconfined** (with anything it
+  invokes also unconfined) — exactly the escape vector the per-session
+  profile exists to close. Independently, the existing sudoers entry
+  permits `apparmor_parser` with arbitrary args; an LLM-driven runner
+  with sudo access could load attacker-controlled profiles or unload
+  sibling sessions' profiles, and `_validate_path_for_fragment` would
+  no longer be a meaningful gate. Keeping the kernel-mutation step
+  daemon-side preserves both the `ix` confinement and the validation
+  trust boundary.
 - Why not parametric profile + change_profile at runtime: the daemon
   already supports per-workspace profiles via the same mechanism we'd
   reuse parametrically. The cost of the per-session profile load is
