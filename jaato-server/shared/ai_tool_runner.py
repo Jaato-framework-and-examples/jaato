@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from shared.safe_pool import SafeThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -529,9 +530,16 @@ class ToolExecutor:
         return self._tool_output_callback
 
     def _get_auto_background_pool(self) -> ThreadPoolExecutor:
-        """Get or create the thread pool for auto-background execution."""
+        """Get or create the thread pool for auto-background execution.
+
+        Server 0.6.47+: uses :class:`SafeThreadPoolExecutor` so every
+        submitted task starts with the registered AppArmor pre-task
+        hook (defensive ``changeprofile unconfined``).  Closes the
+        residual gap where workers stuck in a prior session's profile
+        would EACCES on non-tool work scheduled here.
+        """
         if self._auto_background_pool is None:
-            self._auto_background_pool = ThreadPoolExecutor(
+            self._auto_background_pool = SafeThreadPoolExecutor(
                 max_workers=self._auto_background_pool_size
             )
         return self._auto_background_pool

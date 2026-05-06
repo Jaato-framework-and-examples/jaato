@@ -30,6 +30,7 @@ can confine tools without importing ``server.apparmor``.
 
 import asyncio
 import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import platform
@@ -717,6 +718,14 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         Runs ``apparmor_parser -R`` to unload the profile, then deletes
         the profile file.
 
+        Server 0.6.47+: BEFORE running ``apparmor_parser -R``, sweeps
+        every registered ``ApparmorSafeThreadPoolExecutor`` to dispatch
+        a defensive ``changeprofile unconfined`` to every worker thread.
+        This ensures no worker is left flagged-as-confined to a profile
+        that's about to disappear (which would surface as a phantom-
+        profile evaluation in the kernel — opaque EACCES on the
+        worker's next operation).
+
         Args:
             session_id: Session whose profile should be removed.
 
@@ -731,6 +740,28 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
         if not profile_path.exists():
             return True  # Already gone
+
+        # Pre-removal sweep: reset every thread-pool worker so no
+        # worker is left holding the profile-name flag once
+        # apparmor_parser -R removes the profile.  Belt-and-braces
+        # for any worker whose tool-exit restoration failed.
+        try:
+            from shared.safe_pool import sweep_registered_executors
+            n_reset = sweep_registered_executors()
+            if n_reset > 0:
+                logger.debug(
+                    "AppArmor: pre-teardown sweep dispatched %d worker resets "
+                    "before removing profile %s",
+                    n_reset, profile_name,
+                )
+        except Exception as exc:
+            # Sweep is defense-in-depth; failure here must not block
+            # the actual teardown.
+            logger.warning(
+                "AppArmor: pre-teardown sweep failed for %s: %s — "
+                "continuing with apparmor_parser -R",
+                profile_name, exc,
+            )
 
         try:
             subprocess.run(
@@ -1262,6 +1293,90 @@ def make_confine_context(profile_name: str) -> Callable[[], ContextManager]:
     def _confine():
         return apparmor_confine(profile_name)
     return _confine
+
+
+# ------------------------------------------------------------------
+# Thread-pool safe-submit wrapper (server 0.6.47+)
+# ------------------------------------------------------------------
+#
+# ``apparmor_confine()`` writes ``changeprofile unconfined`` defensively
+# on entry and again on exit, but those writes only fire on tasks that
+# go through ``apparmor_confine`` itself (tool execution path).  A
+# significant amount of work runs on the SAME thread-pool workers
+# WITHOUT going through ``apparmor_confine``: enrichment plugins,
+# event-bus broadcasts, workspace-monitor callbacks, log I/O,
+# ``loop.run_in_executor`` calls in IPC handlers, etc.
+#
+# If a tool's exit-restoration write to ``/proc/self/task/<tid>/attr/current``
+# fails (kernel transient, profile removed mid-tool, signal interruption),
+# the worker is stuck in the session profile.  Subsequent non-tool work
+# on that worker hits EACCES.  Eventually a new tool DOES run on it and
+# the defensive entry-reset recovers — but the non-tool work in between
+# fails.
+#
+# The fix wraps ``ThreadPoolExecutor.submit()`` so EVERY task starts
+# with a defensive ``changeprofile unconfined``, regardless of whether
+# the task is a confined tool or unconfined housekeeping.  Cost: one
+# 27-byte syscall per submit.  Coverage: complete for the wrapped
+# executor.
+#
+# Long-lived shared pools that should use this subclass:
+#   - ``ToolExecutor._auto_background_pool``  (auto-background tools)
+#   - ``SubagentPlugin._executor``            (subagent submission)
+#   - ``BackgroundCapable._bg_executor``      (per-plugin background)
+#   - ``asyncio`` default executor            (run_in_executor calls)
+#
+# Ephemeral ``with ThreadPoolExecutor(...)`` pools (parallel tool
+# execution, registry shutdown, web_search timeouts) close their
+# workers at scope exit so cross-session leak isn't a concern, but
+# wrapping them is still cheap insurance — workers spawned inside an
+# apparmor_confine context inherit the parent's profile, so the first
+# task on each worker can hit a stuck state otherwise.
+#
+# Pools are auto-registered on construction in
+# ``_REGISTERED_EXECUTORS`` (a WeakSet so dropped pools don't leak),
+# and ``sweep_registered_executors()`` dispatches a defensive reset to
+# every worker in every registered pool.  ``AppArmorManager.teardown_profile()``
+# calls the sweep before invoking ``apparmor_parser -R`` so no worker
+# is left flagged-as-confined to a profile that's about to disappear
+# (which would surface as a phantom-profile evaluation in the kernel).
+
+
+def _thread_unconfine_safe() -> None:
+    """Best-effort defensive reset of the calling thread's AppArmor
+    profile to unconfined (server 0.6.47+).
+
+    Writes ``changeprofile unconfined`` to ``/proc/self/task/<tid>/attr/current``.
+    Silent on failure: if the thread is already unconfined the write is
+    a no-op; if the thread is genuinely stuck and the kernel rejects
+    the write, the next operation will surface the issue with its own
+    EACCES.  Never raises — this helper is only ever called as a
+    cheap pre-emptive cleanup before unrelated work runs.
+    """
+    try:
+        with open(_get_thread_attr_path(), "w") as f:
+            f.write("changeprofile unconfined")
+    except (OSError, PermissionError):
+        pass  # not on Linux, AppArmor unavailable, or already unconfined.
+
+
+# Register ``_thread_unconfine_safe`` as a pre-task hook on every
+# ``shared.safe_pool.SafeThreadPoolExecutor`` so that EVERY task
+# submitted to a registered pool starts with a defensive reset of
+# the worker's AppArmor profile.  The pool infrastructure lives in
+# ``shared/`` (so shared-layer modules can use it without violating
+# the shared→server layering rule); the apparmor-specific reset
+# function lives here and registers itself when this module is first
+# imported (i.e. when AppArmor is first wired into the daemon).
+try:
+    from shared.safe_pool import register_pre_task_hook as _register_pre_task_hook
+    _register_pre_task_hook(_thread_unconfine_safe)
+except ImportError:
+    # safe_pool unavailable (very early bootstrap or test setup).
+    # The hook never fires; behaviour falls back to plain
+    # apparmor_confine semantics with the entry-side defensive reset
+    # but without per-task coverage.
+    pass
 
 
 # ------------------------------------------------------------------

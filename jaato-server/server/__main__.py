@@ -368,6 +368,23 @@ class JaatoDaemon:
         from server.event_sink import CompositeEventSink
         from server.command_router import CommandRouter
 
+        # Replace the asyncio default executor with a SafeThreadPoolExecutor
+        # (server 0.6.47+) so ``loop.run_in_executor()`` calls (notably
+        # the IPC connection-handling fallback at server/ipc.py:650)
+        # also benefit from the AppArmor defensive-reset pre-task hook.
+        # Importing ``server.apparmor`` first registers the hook globally
+        # before the executor starts pulling tasks; ``SafeThreadPoolExecutor``
+        # picks up the registered hook list at submit time.
+        from shared.safe_pool import SafeThreadPoolExecutor
+        try:
+            import server.apparmor  # noqa: F401 — side-effect: registers hook
+        except ImportError:
+            pass
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(SafeThreadPoolExecutor(
+            max_workers=8, thread_name_prefix="asyncio-default-safe",
+        ))
+
         # Write PID and config files early so that clients checking
         # _check_server_running() see this daemon before initialization
         # completes (avoids race where TUI auto-starts a second server).

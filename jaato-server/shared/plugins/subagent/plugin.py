@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from shared.safe_pool import SafeThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
@@ -120,8 +121,13 @@ class SubagentPlugin:
         self._sessions_lock = threading.Lock()  # Protect session registry access
         # Parent session reference for output forwarding and cancellation propagation
         self._parent_session: Optional[Any] = None  # JaatoSession reference
-        # Thread pool for async subagent execution
-        self._executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="subagent")
+        # Thread pool for async subagent execution.
+        # SafeThreadPoolExecutor (server 0.6.47+) runs the AppArmor
+        # defensive-reset pre-task hook on every submission so subagent
+        # workers don't carry a prior session's stuck-confinement state
+        # into a fresh subagent session — particularly important since
+        # subagent sessions create their own AppArmor profile.
+        self._executor: ThreadPoolExecutor = SafeThreadPoolExecutor(max_workers=4, thread_name_prefix="subagent")
         # Retry callback for subagent sessions (propagated from parent)
         self._retry_callback: Optional['RetryCallback'] = None
         # Plan reporter for subagent TodoPlugins (propagated from parent)
