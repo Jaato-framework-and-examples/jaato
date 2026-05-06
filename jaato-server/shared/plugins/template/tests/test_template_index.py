@@ -4141,6 +4141,88 @@ class TestVariantAxisFields:
         assert by_name["Plain.java.tpl"]["variant_key"] == ""
         assert by_name["Plain.java.tpl"]["variant"] == ""
 
+    def test_index_loader_reads_skip_when_flags(self, plugin, tmp_path):
+        """Server 0.6.56+: index loader populates ``skip_when_flags``
+        from index.json — kb-side walker authors it from MODULE.md's
+        ``subscribes_to_flags:`` block (DEC-035 pub/sub).  Plugin
+        treats opaque; consumer-side codegen agent honors via filter
+        rule.
+        """
+        kb_index = {
+            "templates": {
+                "Response.java.tpl": {
+                    "name": "Response.java.tpl",
+                    "source_path": str(tmp_path / "Response.java.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "standalone",
+                    "skip_when_flags": {"hateoas": True},
+                },
+            },
+        }
+        index_path = plugin._templates_dir / "index.json"
+        index_path.write_text(json.dumps(kb_index))
+        plugin._load_persisted_index()
+        loaded = plugin._template_index.get("Response.java.tpl")
+        assert loaded is not None
+        assert loaded.skip_when_flags == {"hateoas": True}
+
+    def test_index_loader_legacy_entries_default_empty_skip_when_flags(
+        self, plugin, tmp_path,
+    ):
+        """Pre-0.6.56 index.json files (no skip_when_flags field) load
+        with the empty-dict default — no flag-driven skipping applied,
+        behaviour unchanged for older indexes."""
+        legacy_index = {
+            "templates": {
+                "Old.tpl": {
+                    "name": "Old.tpl",
+                    "source_path": str(tmp_path / "Old.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "standalone",
+                    # No skip_when_flags field.
+                },
+            },
+        }
+        index_path = plugin._templates_dir / "index.json"
+        index_path.write_text(json.dumps(legacy_index))
+        plugin._load_persisted_index()
+        loaded = plugin._template_index["Old.tpl"]
+        assert loaded.skip_when_flags == {}
+
+    def test_listAvailableTemplates_surfaces_skip_when_flags(
+        self, plugin, tmp_path,
+    ):
+        """``listAvailableTemplates`` includes ``skip_when_flags`` for
+        every entry so the codegen agent can apply its filter rule
+        without inspecting the index file directly.  Empty dict for
+        templates that don't subscribe to any flag.
+        """
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Response.java.tpl").write_text(
+            "package x;\nclass Response {}\n"
+        )
+        (tpl_dir / "Plain.java.tpl").write_text(
+            "package x;\nclass Plain {}\n"
+        )
+        for entry in plugin._discover_standalone_templates(tpl_dir):
+            plugin._template_index[entry.name] = entry
+        # Simulate kb-side walker setting the skip rule.
+        plugin._template_index["Response.java.tpl"].skip_when_flags = {
+            "hateoas": True,
+        }
+
+        result = plugin._execute_list_available({})
+        by_name = {t["name"]: t for t in result["templates"]}
+        # Subscriber template carries the rule.
+        assert by_name["Response.java.tpl"]["skip_when_flags"] == {
+            "hateoas": True,
+        }
+        # Plain template gets the empty-dict default.
+        assert by_name["Plain.java.tpl"]["skip_when_flags"] == {}
+
     def test_mod_017_three_client_options_repro(self, plugin, tmp_path):
         """Reproduces chunk-3 v1 mod-017 scenario: three HTTP-client
         templates each declaring their option.  ``listAvailableTemplates``

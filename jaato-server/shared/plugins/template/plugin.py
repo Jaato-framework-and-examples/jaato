@@ -159,6 +159,40 @@ class TemplateIndexEntry:
     # mapping (passed in via index.json) wins.
     variant_key: str = ""
     variant: str = ""
+    # Optional config-flag-driven skip rules for templates that
+    # subscribe to OTHER modules' boolean flags (server 0.6.56+).
+    # Maps flag name → expected flag value: when the consumer's
+    # ``generation_context.config_flags[flag] == expected``, the
+    # template is skipped at render selection time.
+    #
+    # Asymmetric counterpart to ``variant_key``/``variant``:
+    #
+    # - ``variant_key`` is symmetric (one wins per axis; all options
+    #   declare which axis they're on; cross-module agreement on the
+    #   axis name is required).
+    # - ``skip_when_flags`` is asymmetric (a subscriber template
+    #   declares its own skip rule against a publisher's flag; the
+    #   publisher's templates declare nothing).  Useful for
+    #   pub/sub mutual-exclusion patterns where modules don't share
+    #   axis vocabularies (e.g. mod-015's ``Response.java.tpl``
+    #   subscribes to mod-019's ``hateoas`` flag and steps aside
+    #   when ``hateoas == true``, so mod-019's
+    #   ``Response-hateoas.java.tpl`` renders alone).
+    #
+    # Empty dict (the default) means the template participates in no
+    # flag-driven skipping.  Plugin treats the field as opaque
+    # metadata and plumbs it through to ``listAvailableTemplates``;
+    # the consumer-side codegen agent persona honors it via the
+    # filter rule:
+    #
+    #   any (flag, skip_when) in template.skip_when_flags where
+    #     generation_context.config_flags[flag] == skip_when
+    #   → SKIP
+    #
+    # Authoritative source is the kb-side ``subscribes_to_flags:``
+    # block in MODULE.md (DEC-035 pub/sub).  The kb walker extracts
+    # it and writes per-template entries into ``index.json``.
+    skip_when_flags: Dict[str, bool] = field(default_factory=dict)
     # Coarse evaluation-kind classification for the template
     # (server 0.6.44+).  Two values:
     #
@@ -658,6 +692,10 @@ class TemplatePlugin:
                     # variant filtering applied.
                     variant_key=entry_data.get("variant_key", ""),
                     variant=entry_data.get("variant", ""),
+                    # Server 0.6.56+: empty dict default so older
+                    # index.json files load cleanly with no flag-driven
+                    # skip rules applied.
+                    skip_when_flags=entry_data.get("skip_when_flags", {}),
                     # Server 0.6.44+: default "substitution" preserves
                     # back-compat for older index.json files (no
                     # false-positive helpers tag).  Tooling that
@@ -2950,6 +2988,13 @@ Template rendering writes files to the workspace."""
                 # ``selected_variants[variant_key] == variant``.
                 "variant_key": entry.variant_key,
                 "variant": entry.variant,
+                # Config-flag-driven skip rules (server 0.6.56+).  Maps
+                # flag name → expected flag value; the consumer's
+                # codegen agent skips this template at render selection
+                # time when ``generation_context.config_flags[flag] ==
+                # expected``.  Empty dict = no flag-driven skipping.
+                # See DEC-035 pub/sub authoring on the kb side.
+                "skip_when_flags": entry.skip_when_flags,
                 # Coarse evaluation-kind classification (server 0.6.44+).
                 # ``"substitution"`` (default) — pure variable
                 # substitution, no Handlebars conditional helpers.
