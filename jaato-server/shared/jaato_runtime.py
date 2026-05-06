@@ -274,6 +274,16 @@ class JaatoRuntime:
         self._system_instructions: Optional[str] = None
         self._auto_approved_tools: List[str] = []
 
+        # AppArmor confine-context factory (server 0.6.50+).  Set by
+        # ``JaatoServer`` from the WS pre-initialize hook so sessions
+        # created on this runtime can wrap their dynamic-instructions
+        # expansion (and any other configure-time work) in
+        # ``apparmor_confine(profile)``.  ``None`` means no confinement
+        # applies (IPC sessions, AppArmor unavailable).  See
+        # ``shared/safe_pool.py`` for the per-thread reset and
+        # ``server/apparmor.py`` for the context manager itself.
+        self._confine_context_factory: Optional[Callable] = None
+
         # Formatter pipeline (optional, for collecting formatter instructions)
         self._formatter_pipeline: Optional[Any] = None
 
@@ -517,6 +527,30 @@ class JaatoRuntime:
                      a get_system_instructions() method).
         """
         self._formatter_pipeline = pipeline
+
+    def set_confine_context_factory(
+        self, factory: Optional[Callable],
+    ) -> None:
+        """Set the AppArmor confine-context factory (server 0.6.50+).
+
+        Called by ``JaatoServer`` from the WS pre-initialize hook so
+        sessions created on this runtime can wrap their dynamic-
+        instructions expansion (and any other configure-time work) in
+        ``apparmor_confine(profile)``.  The factory is a zero-argument
+        callable returning a context manager — same shape as
+        :func:`server.apparmor.make_confine_context`.
+
+        Sessions read this in ``create_session`` and propagate it onto
+        the new ``JaatoSession`` via :meth:`JaatoSession.set_confine_context_factory`
+        so ``configure()`` can use it.
+
+        Setting to ``None`` clears the factory (no confinement applies).
+
+        Args:
+            factory: Zero-arg callable returning a context manager, or
+                ``None``.
+        """
+        self._confine_context_factory = factory
 
     @property
     def deferred_tools_enabled(self) -> bool:
@@ -937,6 +971,12 @@ class JaatoRuntime:
         # Create session with runtime reference and optional provider override
         t0 = time.perf_counter()
         session = JaatoSession(self, model, provider_name=provider_name)
+        # Propagate the AppArmor confine-context factory so the session's
+        # configure() can wrap dynamic-instructions expansion in the
+        # session's confinement (server 0.6.50+).  None means no
+        # confinement applies.
+        if self._confine_context_factory is not None:
+            session.set_confine_context_factory(self._confine_context_factory)
         session_create_ms = (time.perf_counter() - t0) * 1000
 
         # Configure session tools

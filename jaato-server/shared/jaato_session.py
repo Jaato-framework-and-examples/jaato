@@ -220,6 +220,14 @@ class JaatoSession:
         # operates against a different workspace than the runtime's
         # default (e.g. a worktree snapshot for fork-replay).
         self._workspace_path: Optional[str] = None
+        # AppArmor confine-context factory (server 0.6.50+).  Set by
+        # ``JaatoRuntime.create_session`` from
+        # ``runtime._confine_context_factory``.  When set, ``configure()``
+        # wraps dynamic-instructions expansion in the returned context
+        # manager so prefetch scripts run inside the session's
+        # confinement (closes the policy-write-leak on ``.jaato`` for
+        # prefetch).  ``None`` = no confinement applies.
+        self._confine_context_factory: Optional[Callable] = None
         # Profile-declared JSON Schema for signal_completion's payload parameter.
         # Either an inline dict or a string path resolved via
         # .jaato/completion_schemas/. ``LifecycleTools`` consults this field at
@@ -574,6 +582,29 @@ class JaatoSession:
             width: Terminal width in columns.
         """
         self._terminal_width = width
+
+    def set_confine_context_factory(
+        self, factory: Optional[Callable],
+    ) -> None:
+        """Set the AppArmor confine-context factory (server 0.6.50+).
+
+        ``configure()`` wraps the dynamic-instructions expansion
+        (``{{!py:...}}`` / ``{{!py?:...}}``) in the returned context
+        manager so prefetch scripts run inside the session's
+        AppArmor profile.  Closes the gap where prefetch ran
+        unconfined and could write to ``.jaato`` regardless of the
+        deny rules in the profile (R2 of the option-2-phased sandbox
+        refactor).
+
+        Set by :meth:`JaatoRuntime.create_session` from the runtime's
+        own confine-context factory.  ``None`` clears (no confinement
+        applies).
+
+        Args:
+            factory: Zero-arg callable returning a context manager,
+                or ``None``.
+        """
+        self._confine_context_factory = factory
 
     def set_presentation_context(self, ctx: 'PresentationContext') -> None:
         """Set the presentation context describing client display capabilities.
@@ -1668,9 +1699,23 @@ class JaatoSession:
                 build_render_context,
             )
             ctx = build_render_context(self, agent_params=self._agent_params)
-            self._system_instruction = expand_py_placeholders(
-                self._system_instruction, ctx,
-            )
+            # Server 0.6.50+: when an AppArmor confine-context factory
+            # is set, wrap the dynamic-instructions expansion in the
+            # session's confinement so prefetch scripts and any
+            # ``{{!py:...}}`` callables run with the same kernel-level
+            # filesystem isolation as tools.  Closes the gap where
+            # prefetch could write to ``.jaato`` regardless of the
+            # deny rules in the profile.  Without a factory (IPC, no
+            # AppArmor), the expansion runs as before.
+            if self._confine_context_factory is not None:
+                with self._confine_context_factory():
+                    self._system_instruction = expand_py_placeholders(
+                        self._system_instruction, ctx,
+                    )
+            else:
+                self._system_instruction = expand_py_placeholders(
+                    self._system_instruction, ctx,
+                )
 
         # Store user commands
         if self._runtime.registry:

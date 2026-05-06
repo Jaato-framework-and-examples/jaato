@@ -308,6 +308,14 @@ class JaatoServer:
         self.todo_plugin: Optional[TodoPlugin] = None
         self.ledger = TokenLedger()
 
+        # AppArmor pre-init confine-context factory (server 0.6.50+).
+        # Stashed by ``set_pre_init_confine_context`` from the WS
+        # pre-initialize hook; propagated onto :class:`JaatoRuntime`
+        # during ``initialize()`` so sessions created on this runtime
+        # can wrap their dynamic-instructions expansion in the
+        # session's confinement.  None = no confinement applies.
+        self._pre_init_confine_context_factory: Optional[Callable] = None
+
         # Pricing table — loaded lazily on first use; populates
         # UsageBreakdown.cost_usd on emitted Context/Turn events when
         # the active model is known to the table.  Empty when no
@@ -509,6 +517,46 @@ class JaatoServer:
         session = self._jaato.get_session()
         if session and session._executor:
             session._executor.set_apparmor_context(confine_context)
+
+    def set_pre_init_confine_context(
+        self,
+        confine_context_factory: Optional[Callable],
+    ) -> None:
+        """Stash an AppArmor confine-context factory BEFORE
+        ``initialize()`` runs (server 0.6.50+).
+
+        Called from the WS pre-initialize hook so that ``configure()``
+        — which expands ``{{!py:...}}`` placeholders during
+        ``initialize()`` — can wrap the expansion in the session's
+        confinement.  Without this, prefetch scripts ran unconfined
+        and could bypass deny rules in the AppArmor profile (notably
+        ``deny .jaato/** w`` once R3 lands).
+
+        The factory is propagated onto :class:`JaatoRuntime` during
+        connect, then onto each :class:`JaatoSession` created on that
+        runtime.  Subagent sessions inherit it automatically.
+
+        Distinct from :meth:`set_apparmor_confinement` (post-init):
+        - Pre-init: stash factory for configure-time work.
+        - Post-init: wire factory onto the executor for tool calls.
+
+        Both refer to the same factory in normal WS flow — the
+        pre-init hook calls this; the post-init hook calls
+        ``set_apparmor_confinement`` with the same factory.
+
+        Args:
+            confine_context_factory: Zero-arg callable returning a
+                context manager, or ``None`` to clear.
+        """
+        self._pre_init_confine_context_factory = confine_context_factory
+        # If runtime exists already (rare — pre-init hook usually fires
+        # before connect()), propagate immediately.  Otherwise the
+        # factory is read from self._pre_init_confine_context_factory
+        # during initialize() right before configure_tools.
+        if self._jaato is not None:
+            runtime = self._jaato.get_runtime()
+            if runtime is not None:
+                runtime.set_confine_context_factory(confine_context_factory)
 
     def set_runtime_limits(
         self,
@@ -1290,6 +1338,20 @@ class JaatoServer:
                                 )
                             with _s2.sub("client_connect"):
                                 self._jaato.connect(project_id, location, model_name)
+                            # Propagate the pre-init AppArmor confine-context
+                            # factory onto the runtime now that it exists.
+                            # Server 0.6.50+; sessions created on this
+                            # runtime read it during configure() to wrap
+                            # dynamic-instructions expansion.
+                            if (
+                                self._pre_init_confine_context_factory
+                                is not None
+                            ):
+                                runtime = self._jaato.get_runtime()
+                                if runtime is not None:
+                                    runtime.set_confine_context_factory(
+                                        self._pre_init_confine_context_factory,
+                                    )
                 except Exception as e:
                     _connect_error = e
 

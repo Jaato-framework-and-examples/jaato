@@ -522,6 +522,13 @@ class JaatoWSServer:
             (server 0.6.49+).  Failure here is non-fatal — the post-init
             hook downgrades the session to ``soft`` mode if the profile
             wasn't loaded.
+
+            Server 0.6.50+: ALSO stashes the confine-context factory on
+            the server so ``configure()``'s dynamic-instructions
+            expansion wraps prefetch scripts in
+            ``apparmor_confine(profile)``.  The factory is propagated
+            onto the runtime once ``initialize()`` constructs it
+            (see ``core.py`` step 2).
             """
             if not workspace_path:
                 return
@@ -544,6 +551,12 @@ class JaatoWSServer:
                     "session %s — post-init hook will downgrade to soft mode",
                     session_id,
                 )
+                return
+            # Profile loaded successfully — stash the confine-context
+            # factory so configure() wraps prefetch in it (server 0.6.50+).
+            confine_context = ws_server.get_apparmor_confinement(session_id)
+            if confine_context is not None:
+                server.set_pre_init_confine_context(confine_context)
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
             sess = sm.get_session(session_id)
