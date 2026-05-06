@@ -151,7 +151,19 @@ class AppArmorManager:
     #       other workspace path.  Server 0.6.52+; coordinates with
     #       0.6.49 (profile-load before configure), 0.6.50 (prefetch
     #       runs confined), 0.6.51 (diagnostic logging on abort).
-    _TEMPLATE_VERSION = 11
+    #  12 — Framework-subtree carve-outs added to the .jaato deny.
+    #       Pre-v12, the broad deny blocked the daemon's OWN writes
+    #       to .jaato/sessions/ (session journals) and .jaato/logs/
+    #       (per-session log handlers) when triggered from a confined
+    #       thread (e.g. log call inside a tool callback).  v12 adds
+    #       more-specific allow rules for sessions/, logs/, cache/,
+    #       vision/, services/_discovered/, waypoints.json, and
+    #       *_auth.json so framework infrastructure writes succeed
+    #       regardless of which thread initiated them.  Session-content
+    #       writes to other paths under .jaato (e.g. arbitrary
+    #       ``.jaato/state/...``) still hit the deny.  AppArmor's
+    #       more-specific-wins rule does the carve-out resolution.
+    _TEMPLATE_VERSION = 12
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -166,20 +178,43 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
   # ---- workspace: read-write (with .jaato carve-out) ----
   # Sessions and session-scoped reactors can read/write/link anywhere
-  # in the workspace EXCEPT the ``.jaato/`` subtree, which is reserved
-  # for daemon-only state (reactors.json source-of-truth, agents,
-  # prompts, profiles, schemas, scripts, services definitions, logs).
-  # The ``audit deny`` form makes denials visible in ``dmesg | grep
-  # apparmor`` so violations are diagnosable; without ``audit``, the
-  # deny is silent and operators can't tell why a write failed.
-  # Server 0.6.52+ (template v11); enforces the framework's stated
-  # write policy that confined session work belongs in the workspace
-  # but not under ``.jaato``.
+  # in the workspace EXCEPT the user-authored config tier of
+  # ``.jaato/`` (reactors.json source-of-truth, agents, prompts,
+  # profiles, schemas, scripts, services definitions).  Framework-
+  # owned subtrees (sessions/, logs/, cache/, vision/, services/_discovered/,
+  # waypoints.json, *_auth.json) ARE writable so the daemon's own
+  # infrastructure works regardless of which thread (confined or
+  # unconfined) initiated the write — session journaling, per-session
+  # log handlers, formatter caches, and auth-token persistence all
+  # incidentally run on confined threads when triggered from inside
+  # tool callbacks.
+  #
+  # Server 0.6.53+ (template v12): scopes the deny rule with
+  # framework-subtree carve-outs.  Pre-0.6.53 the broad deny blocked
+  # framework writes (cascade v9 finding from 7:3, 2026-05-06):
+  #   ERROR server.session_manager: Failed to save session ...:
+  #     [Errno 13] Permission denied: <ws>/.jaato/sessions/...json.tmp
+  #
+  # AppArmor rule resolution: more-specific paths override less-specific
+  # ones.  The ``audit deny .jaato/**`` covers the broad case; the
+  # more-specific ``allow .jaato/<framework_subtree>/** rwkl`` rules
+  # win where they apply.  ``audit deny`` makes denials visible in
+  # ``dmesg | grep apparmor`` so policy violations are diagnosable.
   {workspace_path}/   rw,
   {workspace_path}/** rwkl,
+  # Broad deny — anything under .jaato is policy-protected by default.
   audit deny {workspace_path}/.jaato/**  w,
   audit deny {workspace_path}/.jaato/**  l,
   audit deny {workspace_path}/.jaato/**  k,
+  # Framework-owned subtrees — daemon infrastructure writes here.
+  # More-specific allows override the less-specific deny above.
+  {workspace_path}/.jaato/sessions/**             rwkl,
+  {workspace_path}/.jaato/logs/**                 rwkl,
+  {workspace_path}/.jaato/cache/**                rwkl,
+  {workspace_path}/.jaato/vision/**               rwkl,
+  {workspace_path}/.jaato/services/_discovered/** rwkl,
+  {workspace_path}/.jaato/waypoints.json          rwkl,
+  {workspace_path}/.jaato/*_auth.json             rwkl,
 
   # ---- shared read-only resources ----
   {venv_path}/           r,

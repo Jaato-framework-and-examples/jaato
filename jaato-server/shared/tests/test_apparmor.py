@@ -191,10 +191,50 @@ class TestRenderProfile:
         """
         assert manager._TEMPLATE_VERSION >= 11
         profile = manager._render_profile("s1", "/workspace")
-        assert "jaato-apparmor-template-version: 11" in profile or (
+        assert (
             f"jaato-apparmor-template-version: {manager._TEMPLATE_VERSION}"
             in profile
         )
+
+    def test_framework_subtrees_carved_out_of_dotjaato_deny(self, manager):
+        """Server 0.6.53+ (template v12): the broad deny on
+        ``.jaato/** w`` would block the daemon's OWN writes to
+        ``.jaato/sessions/`` (session journals) and ``.jaato/logs/``
+        (per-session log handlers) when triggered from a confined
+        thread (log call inside a tool, save_session called from a
+        callback chain originating in a confined context).
+
+        v12 adds more-specific allow rules for framework-owned
+        subtrees so daemon infrastructure writes succeed regardless
+        of which thread initiated them.  AppArmor's
+        more-specific-wins rule lets the allow override the deny.
+        """
+        profile = manager._render_profile("s1", "/workspace")
+        # Each framework subtree must have an explicit allow.
+        assert "/workspace/.jaato/sessions/**" in profile
+        assert "/workspace/.jaato/logs/**" in profile
+        assert "/workspace/.jaato/cache/**" in profile
+        assert "/workspace/.jaato/vision/**" in profile
+        assert "/workspace/.jaato/services/_discovered/**" in profile
+        assert "/workspace/.jaato/waypoints.json" in profile
+        # Auth-token files (per gitignore pattern *_auth.json):
+        assert "/workspace/.jaato/*_auth.json" in profile
+        # The broad deny is still present for everything else.
+        assert "audit deny /workspace/.jaato/**  w" in profile
+
+    def test_session_state_paths_remain_denied(self, manager):
+        """The carve-outs (sessions/ logs/ cache/ vision/) are intentionally
+        narrow: arbitrary session-content writes under .jaato (e.g.
+        the old handoff_test ``.jaato/state/handoff/`` path that R5
+        migrated off) MUST still hit the deny.  No accidental allow-rule
+        widening — verify by NOT finding an allow for non-framework subpaths.
+        """
+        profile = manager._render_profile("s1", "/workspace")
+        # No allow for arbitrary state subpaths.
+        assert "/workspace/.jaato/state/" not in profile
+        assert "/workspace/.jaato/handoff/" not in profile
+        # No allow for arbitrary subdirectories.
+        assert "/workspace/.jaato/extensions/" not in profile
 
 
 class TestMakeConfineContext:
