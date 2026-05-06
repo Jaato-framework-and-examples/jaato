@@ -1457,6 +1457,28 @@ class SessionManager:
             config_root=config_root,
         )
         if not session_id:
+            # Server 0.6.50.1+: log at WARNING so reactor callers
+            # (``ctx.create_session`` → ``create_headless_session``) get
+            # a diagnostic trail when their headless spawn silently
+            # fails.  ErrorEvents fired during create_session go to the
+            # ``_HEADLESS_CLIENT_ID`` synthetic client which the
+            # transport drops — without this log line, the reactor
+            # caller sees only an empty session_id with no clue why
+            # (cascade v8 finding from 7:3, 2026-05-06: a buggy
+            # prefetch raised DynamicInstructionsError, the underlying
+            # core.py:initialize correctly aborted, but the empty
+            # session_id propagated up to the reactor handler without
+            # any visible log entry).  The headless caller still has
+            # to handle ``""`` as failure, but at least now there's a
+            # log breadcrumb explaining WHY.
+            logger.warning(
+                "create_headless_session: session creation returned "
+                "empty (profile=%s, agent=%s, workspace=%s).  Check "
+                "earlier ERROR logs in this turn for the underlying "
+                "cause (typically: prefetch failed, auth missing, "
+                "provider connect failed).",
+                profile_name, agent_name, workspace_path,
+            )
             return ""
 
         if initial_history:

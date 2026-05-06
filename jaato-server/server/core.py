@@ -1655,6 +1655,23 @@ class JaatoServer:
                         # instead of a session-that-started-but-is-empty.
                         # Server 0.6.48+; load-bearing for byte-identicality
                         # determinism (per 7:3's cascade probe v6 finding).
+                        #
+                        # Server 0.6.50.1+: ALSO log at ERROR level.  Without
+                        # this, headless-spawned sessions (reactor
+                        # ``ctx.create_session`` → ``create_headless_session``)
+                        # silently lose the failure: ErrorEvent goes to the
+                        # ``_HEADLESS_CLIENT_ID`` synthetic client which the
+                        # transport layer drops, leaving the reactor caller
+                        # with an empty session_id and no diagnostic in
+                        # the daemon log.  The logger.error guarantees a
+                        # log trail regardless of which client receives the
+                        # event (cascade v8 finding from 7:3, 2026-05-06).
+                        logger.error(
+                            "Session creation aborted: prefetch %s failed "
+                            "(%s).  Add `?` modifier to placeholder for "
+                            "best-effort semantics, or fix the script.",
+                            exc.script_ref, exc.reason,
+                        )
                         self._emit_init_progress(
                             "Configuring tools", "error", 5, total_steps,
                             f"prefetch failed: {exc.script_ref}: {exc.reason}",
