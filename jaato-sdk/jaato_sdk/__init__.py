@@ -22,6 +22,10 @@ from jaato_sdk.events import (
 )
 from jaato_sdk.constants import PRERENDERED_LINE_PREFIX
 from jaato_sdk.helpers import compute_cache_hit_percent
+from jaato_sdk.templates import (
+    HELPER_KEYWORDS,
+    classify_template_evaluation_kind,
+)
 from jaato_sdk.trace import (
     trace,
     provider_trace,
@@ -47,6 +51,9 @@ __all__ = [
     "PRERENDERED_LINE_PREFIX",
     # Helpers
     "compute_cache_hit_percent",
+    # Template walker helpers (server 0.6.58+)
+    "HELPER_KEYWORDS",
+    "classify_template_evaluation_kind",
     # Trace
     "trace",
     "provider_trace",

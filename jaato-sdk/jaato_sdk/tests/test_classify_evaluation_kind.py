@@ -1,10 +1,11 @@
-"""Tests for the public ``classify_template_evaluation_kind`` helper.
+"""Tests for ``jaato_sdk.templates.classify_template_evaluation_kind``.
 
-Server 0.6.58+ exposes a module-level classifier so external walkers
-(kb-enablement-2.0, future tenants) can populate
-``TemplateIndexEntry.template_evaluation_kind`` without mirroring
-the internal parser's HELPER_KEYWORDS set locally — guaranteeing
-walker-vs-framework agreement on the same content byte-for-byte.
+The SDK owns the classifier so external walkers (kb-enablement-2.0,
+future tenants) can populate ``TemplateIndexEntry.template_evaluation_kind``
+without mirroring the framework's internal HELPER_KEYWORDS set
+locally.  The server's template plugin imports the same function,
+so walker output and framework discovery agree byte-for-byte by
+construction (single function, no second copy).
 
 Empirical motivation: 7:3's build_descriptor cascade (2026-05-06)
 rendered ``new CustomerSystemApiRequest( , , , , )`` because their
@@ -20,7 +21,7 @@ These tests pin the public helper's contract so walkers can rely
 on it as a single source of truth.
 """
 
-from ..plugin import (
+from jaato_sdk.templates import (
     HELPER_KEYWORDS,
     classify_template_evaluation_kind,
 )
@@ -188,46 +189,18 @@ class TestHelperKeywordsSourceOfTruth:
         assert isinstance(HELPER_KEYWORDS, frozenset)
 
 
-class TestClassifierMatchesInternalParser:
-    """The public helper's output must match the internal parser's
-    classification on the same content.  This is the load-bearing
-    guarantee — walkers using the helper get the SAME answer the
-    framework's discovery path would produce.
+class TestPackageRootImport:
+    """Pin the package-root import path so it doesn't silently regress.
+
+    Walkers should be able to ``from jaato_sdk import
+    classify_template_evaluation_kind`` without reaching into
+    submodules.  ``jaato_sdk/__init__.py`` re-exports the helper.
     """
 
-    def _internal_parser_kind(self, plugin, content: str) -> str:
-        plugin._parse_mustache_structure(content)
-        return getattr(plugin._tls, "last_evaluation_kind", "substitution")
+    def test_classifier_importable_from_package_root(self):
+        from jaato_sdk import classify_template_evaluation_kind as cls
+        assert cls is classify_template_evaluation_kind
 
-    def test_agreement_on_helpers_template(self):
-        from ..plugin import TemplatePlugin
-        plugin = TemplatePlugin()
-        content = "{{#if x}}A{{/if}}{{#unless @last}}, {{/unless}}"
-        assert (
-            classify_template_evaluation_kind(content)
-            == self._internal_parser_kind(plugin, content)
-            == "helpers"
-        )
-
-    def test_agreement_on_plain_substitution(self):
-        from ..plugin import TemplatePlugin
-        plugin = TemplatePlugin()
-        content = "{{name}} works at {{company}}."
-        assert (
-            classify_template_evaluation_kind(content)
-            == self._internal_parser_kind(plugin, content)
-            == "substitution"
-        )
-
-    def test_agreement_on_section_named_after_helper(self):
-        """Bare ``{{#if}}`` without argument is a section named "if",
-        not a helper.  Both paths must agree it's substitution.
-        """
-        from ..plugin import TemplatePlugin
-        plugin = TemplatePlugin()
-        content = "{{#if}}A{{/if}}"  # Mustache section, no helper arg
-        assert (
-            classify_template_evaluation_kind(content)
-            == self._internal_parser_kind(plugin, content)
-            == "substitution"
-        )
+    def test_helper_keywords_importable_from_package_root(self):
+        from jaato_sdk import HELPER_KEYWORDS as kw
+        assert kw is HELPER_KEYWORDS
