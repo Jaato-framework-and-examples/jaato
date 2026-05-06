@@ -486,13 +486,64 @@ class JaatoWSServer:
         """
         self._command_router = router
 
-        # Register a session hook that applies AppArmor wrappers to
-        # provisioned WS sessions and records the sandbox_mode.
+        # AppArmor session wiring runs in TWO phases (server 0.6.49+):
+        #
+        # 1. Pre-initialize hook (``_apparmor_pre_init_hook``):
+        #    - Runs BEFORE ``server.initialize()`` so the profile is
+        #      already loaded by the time ``configure()`` runs prefetch
+        #      scripts.  Closes the gap where prefetch ran unconfined.
+        #    - Does ONLY profile provisioning — needs ``workspace_path``
+        #      (passed directly to the hook), nothing from the
+        #      initialized server.
+        #
+        # 2. Post-initialize hook (``_apparmor_session_hook``):
+        #    - Runs AFTER ``server.initialize()`` succeeds.
+        #    - Applies confinement to the executor (depends on
+        #      ``server._jaato`` being constructed), wires reference
+        #      authorizer, sets cgroup runtime limits.
+        #    - Skips profile provisioning since the pre-init hook
+        #      already loaded it (idempotent ``apparmor_parser -r``
+        #      would also work but the skip avoids the redundant
+        #      subprocess call).
+        #
         # Note: self._apparmor is initialized lazily in start(), which
         # runs after set_command_router(), so we check it at hook
         # execution time rather than registration time.
         ws_server = self
         sm = router._session_manager
+
+        def _apparmor_pre_init_hook(
+            server: JaatoServer,
+            session_id: str,
+            workspace_path: Optional[str],
+        ) -> None:
+            """Provision the AppArmor profile BEFORE ``server.initialize()``
+            so prefetch scripts run inside the session's confinement
+            (server 0.6.49+).  Failure here is non-fatal — the post-init
+            hook downgrades the session to ``soft`` mode if the profile
+            wasn't loaded.
+            """
+            if not workspace_path:
+                return
+            apparmor = ws_server._apparmor
+            if not apparmor or not apparmor.is_available():
+                return
+            try:
+                ws_workspace_root = os.path.realpath(ws_server._workspace_root)
+                sess_workspace = os.path.realpath(workspace_path)
+            except OSError:
+                return
+            if not (
+                sess_workspace == ws_workspace_root
+                or sess_workspace.startswith(ws_workspace_root + os.sep)
+            ):
+                return  # IPC or user-CWD session — not WS-provisioned
+            if not apparmor.provision_profile(session_id, workspace_path):
+                logger.warning(
+                    "AppArmor pre-init: provision_profile failed for "
+                    "session %s — post-init hook will downgrade to soft mode",
+                    session_id,
+                )
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
             sess = sm.get_session(session_id)
@@ -591,11 +642,13 @@ class JaatoWSServer:
                     sess.sandbox_mode = "soft"
                 return
 
-            # Provision the AppArmor profile using the session manager's
-            # session ID (e.g. 20260403_205126), NOT the workspace UUID
-            # (ws_abc123).  This ensures /tmp/jaato-{session_id}-** in
-            # the profile matches what get_environment() returns to the
-            # agent.
+            # Profile provisioning happens in the pre-initialize hook
+            # (server 0.6.49+) so prefetch runs confined.  Re-run here
+            # for resilience: if the pre-init hook failed (e.g.
+            # AppArmor unavailable at that point), this catches it
+            # and downgrades cleanly to soft mode.  ``apparmor_parser -r``
+            # is idempotent so the redundant call is safe when both
+            # phases succeed.
             if not apparmor.provision_profile(session_id, sess.workspace_path):
                 sess.sandbox_mode = "soft"
                 return
@@ -622,6 +675,12 @@ class JaatoWSServer:
             else:
                 sess.sandbox_mode = "soft"
 
+        # Register both hooks.  The pre-init hook runs before
+        # ``server.initialize()`` so prefetch scripts (and any other
+        # configure-time work) execute with the AppArmor profile already
+        # loaded.  The post-init hook runs after ``initialize()`` to
+        # wire confinement onto the now-constructed executor.
+        sm.add_pre_initialize_hook(_apparmor_pre_init_hook)
         sm.add_session_hook(_apparmor_session_hook)
 
     def set_client_user(self, client_id: str, user_id: str) -> None:

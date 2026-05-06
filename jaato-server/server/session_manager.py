@@ -183,6 +183,11 @@ class SessionManager:
         # Session hooks — callbacks invoked after each session is initialized.
         # Registered by daemon extensions via ``add_session_hook()``.
         self._session_hooks: List[Callable] = []
+        # Registered by transports via ``add_pre_initialize_hook()``.
+        # Fire BEFORE ``server.initialize()`` so kernel-level provisioning
+        # (AppArmor profile, cgroup) is in place before prefetch scripts
+        # run (server 0.6.49+).
+        self._pre_initialize_hooks: List[Callable] = []
 
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
 
@@ -419,6 +424,43 @@ class SessionManager:
         """
         self._session_hooks.append(hook)
 
+    def add_pre_initialize_hook(self, hook: Callable) -> None:
+        """Register a callback invoked BEFORE ``server.initialize()`` runs
+        (server 0.6.49+).
+
+        The hook is called with three arguments:
+
+        1. ``server`` — the just-constructed ``JaatoServer`` instance.
+           Plugin registry NOT YET populated; provider NOT YET connected.
+           Hook can stash the reference but must not call methods that
+           depend on init state.
+        2. ``session_id`` — the unique session identifier string.
+        3. ``workspace_path`` — the session's workspace dir (or ``None``).
+
+        Pre-initialize hooks exist so transports (notably the WS server's
+        AppArmor wiring) can provision per-session kernel resources
+        BEFORE ``server.initialize()`` runs the agent's
+        ``configure()`` — including dynamic-instructions expansion and
+        any prefetch scripts.  Without this hook, the AppArmor profile
+        would not exist yet at prefetch time, leaving prefetch scripts
+        unconfined and able to write to ``.jaato`` (or anywhere else
+        the unconfined daemon can reach) before the deny rules apply.
+
+        Distinct from ``add_session_hook`` which fires AFTER ``initialize()``
+        completes (used for set_apparmor_confinement, cgroup attach
+        callback, sandbox wiring — anything that depends on the
+        executor existing).
+
+        Hooks are called in registration order.  Exceptions are logged
+        and subsequent hooks still run.
+
+        Args:
+            hook: A callable with signature
+                ``(server: JaatoServer, session_id: str,
+                workspace_path: Optional[str]) -> None``.
+        """
+        self._pre_initialize_hooks.append(hook)
+
     def _run_session_hooks(self, server: JaatoServer, session_id: str) -> None:
         """Invoke all registered session hooks for a newly set-up session.
 
@@ -431,6 +473,32 @@ class SessionManager:
                 hook(server, session_id)
             except Exception as exc:
                 logger.warning("Session hook failed: %s", exc, exc_info=True)
+
+    def _run_pre_initialize_hooks(
+        self,
+        server: JaatoServer,
+        session_id: str,
+        workspace_path: Optional[str],
+    ) -> None:
+        """Invoke pre-initialize hooks (server 0.6.49+).
+
+        Called before ``server.initialize()`` so that transport-level
+        kernel-resource provisioning (AppArmor profile, cgroup) can
+        happen before the agent's configure() runs prefetch scripts.
+
+        Args:
+            server: The JaatoServer instance (constructed but not
+                initialized).
+            session_id: The session identifier.
+            workspace_path: Session's workspace dir, or None.
+        """
+        for hook in self._pre_initialize_hooks:
+            try:
+                hook(server, session_id, workspace_path)
+            except Exception as exc:
+                logger.warning(
+                    "Pre-initialize hook failed: %s", exc, exc_info=True,
+                )
 
     def set_event_callback(
         self,
@@ -1197,6 +1265,13 @@ class SessionManager:
         if config_root:
             server.config_root = config_root
 
+        # Pre-initialize hooks fire BEFORE initialize() runs configure()
+        # / dynamic-instructions / prefetch scripts (server 0.6.49+).
+        # This gives transports a window to provision kernel resources
+        # (AppArmor profile, cgroup) so prefetch can run inside the
+        # session's confinement instead of unconfined.
+        self._run_pre_initialize_hooks(server, session_id, workspace_path)
+
         # Initialize the server (events go directly to requesting client).
         # On failure, core.py already emits a detailed ConfigurationError —
         # no need for a redundant SessionError here.
@@ -1689,6 +1764,14 @@ class SessionManager:
             instruction_token_cache=self._instruction_token_cache,
         )
         logger.debug(f"_load_session: JaatoServer created, calling initialize()...")
+
+        # Pre-initialize hooks fire BEFORE initialize() so transports
+        # can provision per-session kernel resources (AppArmor profile,
+        # cgroup) before configure() runs prefetch scripts.  Server
+        # 0.6.49+; mirror of the same call site in create_session.
+        self._run_pre_initialize_hooks(
+            server, session_id, state.workspace_path,
+        )
 
         try:
             init_result = server.initialize()
