@@ -146,6 +146,56 @@ class TestRenderProfile:
         assert "@{HOME}/.jaato/services/" in profile
         assert "@{HOME}/.jaato/services/**" in profile
 
+    def test_workspace_dotjaato_writes_denied(self, manager):
+        """Server 0.6.52+ (template v11): the workspace ``.jaato/``
+        subtree is carved out of the rwkl write rule.  Sessions and
+        session-scoped reactors can write everywhere in the workspace
+        EXCEPT ``.jaato/``, which is reserved for daemon-only state
+        (reactors.json source-of-truth, agents, prompts, profiles,
+        schemas, scripts, services definitions, logs).  Verify the
+        deny rules are present.
+
+        ``audit deny`` (vs plain ``deny``) makes the kernel log the
+        denied write attempts to dmesg — operators get a diagnostic
+        breadcrumb instead of a silent EACCES.
+        """
+        profile = manager._render_profile("s1", "/workspace")
+        # Workspace rw stays open for the rest of the tree
+        assert "/workspace/   rw" in profile
+        assert "/workspace/** rwkl" in profile
+        # .jaato carve-out via audit deny
+        assert "audit deny /workspace/.jaato/**  w" in profile
+        # Link + lock variants also denied — a confined writer could
+        # otherwise hardlink its way into .jaato or grab a lock that
+        # blocks the daemon's own writes.
+        assert "audit deny /workspace/.jaato/**  l" in profile
+        assert "audit deny /workspace/.jaato/**  k" in profile
+
+    def test_workspace_dotjaato_reads_allowed(self, manager):
+        """Read access to ``<workspace>/.jaato/`` MUST stay open —
+        agents need to read profiles, prompts, schemas, agent .md
+        files, etc. that live under the workspace's ``.jaato/`` tier.
+        The deny rule from server 0.6.52+ is write-only (w/l/k); reads
+        flow through the surrounding ``rwkl`` allow rule.
+        """
+        profile = manager._render_profile("s1", "/workspace")
+        # No deny on read access
+        assert "audit deny /workspace/.jaato/**  r" not in profile
+        # The rwkl rule itself includes read implicitly (r is part of rwkl).
+        assert "/workspace/** rwkl" in profile
+
+    def test_template_v11_version_bump(self, manager):
+        """The deny-rule change MUST bump the template version so
+        ``apparmor_parser`` recompiles from source instead of reusing
+        a stale cached binary that still grants .jaato writes.
+        """
+        assert manager._TEMPLATE_VERSION >= 11
+        profile = manager._render_profile("s1", "/workspace")
+        assert "jaato-apparmor-template-version: 11" in profile or (
+            f"jaato-apparmor-template-version: {manager._TEMPLATE_VERSION}"
+            in profile
+        )
+
 
 class TestMakeConfineContext:
     def test_returns_callable(self):

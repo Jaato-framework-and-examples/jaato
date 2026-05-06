@@ -141,7 +141,17 @@ class AppArmorManager:
     #       and stray fragment content escaping into the comment
     #       body) and tripped the AppArmor lexer with
     #       ``unexpected character: '`'`` errors at load time.
-    _TEMPLATE_VERSION = 10
+    #  11 — ``.jaato/`` carve-out from workspace rw rule.  Three
+    #       ``audit deny`` rules block w/l/k under
+    #       ``{workspace_path}/.jaato/**`` while the surrounding
+    #       ``{workspace_path}/** rwkl`` keeps the rest of the
+    #       workspace fully writable.  Closes the framework write-
+    #       policy gap where confined sessions and reactors could
+    #       write to ``.jaato`` (daemon-tier state) just like any
+    #       other workspace path.  Server 0.6.52+; coordinates with
+    #       0.6.49 (profile-load before configure), 0.6.50 (prefetch
+    #       runs confined), 0.6.51 (diagnostic logging on abort).
+    _TEMPLATE_VERSION = 11
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -154,9 +164,22 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   #include <abstractions/nameservice>
   #include <abstractions/python>
 
-  # ---- workspace: read-write ----
+  # ---- workspace: read-write (with .jaato carve-out) ----
+  # Sessions and session-scoped reactors can read/write/link anywhere
+  # in the workspace EXCEPT the ``.jaato/`` subtree, which is reserved
+  # for daemon-only state (reactors.json source-of-truth, agents,
+  # prompts, profiles, schemas, scripts, services definitions, logs).
+  # The ``audit deny`` form makes denials visible in ``dmesg | grep
+  # apparmor`` so violations are diagnosable; without ``audit``, the
+  # deny is silent and operators can't tell why a write failed.
+  # Server 0.6.52+ (template v11); enforces the framework's stated
+  # write policy that confined session work belongs in the workspace
+  # but not under ``.jaato``.
   {workspace_path}/   rw,
   {workspace_path}/** rwkl,
+  audit deny {workspace_path}/.jaato/**  w,
+  audit deny {workspace_path}/.jaato/**  l,
+  audit deny {workspace_path}/.jaato/**  k,
 
   # ---- shared read-only resources ----
   {venv_path}/           r,
