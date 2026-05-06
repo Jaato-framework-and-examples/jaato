@@ -128,6 +128,63 @@ debugging "which channel deadlocked the session" gets harder as the channel
 count grows; multiplexing onto one channel with a request-id keeps the wire
 trace linear.
 
+#### 4.1.1 Streaming and cancellation
+
+The protocol distinguishes three result-delivery shapes:
+
+- **Single-shot (most tools).** `tool.execute` returns one terminating
+  `kind: "response"` envelope with the final `(ok, result)`. No interim
+  frames.
+- **Streamed display, single-shot data (cli, web_fetch, MCP progress).**
+  The tool emits `on_output` chunks while running. Each chunk lands as
+  `{kind: "stream", id: <call_id>, channel: "display", source, text, mode}`.
+  These are forwarded to the session's `on_output` callback for user
+  display **only** — they are not part of the structured result.
+  The terminating `kind: "response"` envelope carries the final
+  `(ok, result)`. Plugin authors must not smuggle structured data through
+  the chunk channel; if the model needs it, it goes in `result`.
+
+  MCP `notifications/progress` from a long-running `tools/call` map to
+  the same `kind: "stream"` shape — the `mcp` plugin's progress handler
+  forwards them through `on_output`, which the runner already turns
+  into stream frames.
+- **Deferred result (auto-backgrounded tools).** When a tool exceeds the
+  `BackgroundCapable` plugin's threshold, the runner sends a non-final
+  `kind: "response"` envelope carrying `{ok: true, result: {kind:
+  "background_handle", task_id, ...}}` and the model gets the handle on
+  this turn. The runner continues executing in its background thread
+  pool. When the task completes, the runner emits `{kind: "event", event:
+  TaskCompletedEvent(task_id, ok, result, …)}` on the daemon's event
+  channel. The daemon's `background` plugin (daemon-tier in §4.2)
+  consumes the event, updates task status, and re-injects the completion
+  into the session's history via the existing `_task_done_callback`
+  pipeline. The original `tool.execute` RPC is fully closed once the
+  handle is returned — there is no half-open call sitting on the socket
+  for hours.
+
+  Symmetric for `interactive_shell`: each `shell_*` tool call is its own
+  bounded RPC. The session-id-keyed PTY state lives in the runner; long
+  reads use the chunk channel, never a half-open response.
+
+**Cancellation across the boundary.** Today's `CancelToken` is set on
+thread-local in the runner's `ToolExecutor.execute`. With RPC, the
+daemon's stop path (`session.request_stop` → `client.stop()`) sends a
+`{kind: "cancel", id: <call_id>}` frame for every in-flight call. The
+runner's RPC dispatcher trips the corresponding `CancelToken`; the tool
+detects it via `get_current_cancel_token()` (already the supported
+plugin contract) and either returns early or raises `CancelledException`.
+Whichever it does, the runner emits a terminating envelope with `ok:
+false, error.type: "CancelledException"`. The daemon translates that to
+`FinishReason.CANCELLED` exactly as today.
+
+Cancellation while a tool is in the **chunk-streaming** shape: the cancel
+frame is processed in-band on the same socket; chunks already in flight
+land at the daemon and are forwarded to `on_output` (the user sees them);
+the terminating envelope arrives with the cancelled error. Cancellation
+of an already-**deferred** task: daemon sends `{kind: "request",
+method: "background.cancel", task_id}`; the runner cancels the task in
+its pool and emits `TaskCompletedEvent(ok: false, error: cancelled)`.
+
 ### 4.2 Plugin tier classification
 
 Definitions:
