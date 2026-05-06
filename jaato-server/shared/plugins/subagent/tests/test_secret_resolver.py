@@ -175,6 +175,52 @@ class TestResolveSecretURI:
         assert _resolve_secret_uri("awssm://prod/key") == "resolved:awssm:prod/key:None"
         assert _resolve_secret_uri("gcpsm://proj/secret#field") == "resolved:gcpsm:proj/secret:field"
 
+    # -- Server 0.6.57+: skip-conditions ------------------------------------
+
+    def test_skip_unresolved_variable_substitution(self):
+        """${VAR} placeholders short-circuit before regex match.
+
+        Empirical regression — handoff_test cascade in 7:4 emitted
+        ``http://127.0.0.1:${ANTIFRAUDE_PORT}`` before the env-file
+        substitution layer resolved the placeholder.  The secret-URI
+        regex matched the ``http://`` prefix and routed the literal
+        through the (empty) resolver registry, returning the unsubstituted
+        URL with the ``${VAR}`` still embedded.  Skip cleanly when a
+        ``${`` is present.
+        """
+        # No resolvers — but skip happens before resolver lookup anyway.
+        assert _resolve_secret_uri("http://localhost:${PORT}") == "http://localhost:${PORT}"
+        assert _resolve_secret_uri("vault://${ENV}/secret") == "vault://${ENV}/secret"
+        assert _resolve_secret_uri("${WHOLE_URL}") == "${WHOLE_URL}"
+
+    def test_skip_network_schemes(self):
+        """Standard network schemes are literal URLs, not secret references.
+
+        Even with a (non-existent) ``http`` resolver, the dispatch must
+        skip — these schemes carry HTTP traffic, not credentials.
+        """
+        from .. import config as config_module
+        # Even pretend there were an http resolver — should still skip.
+        config_module._resolvers = {"http": FakeMultiSchemeResolver()}
+
+        assert _resolve_secret_uri("http://example.com/path") == "http://example.com/path"
+        assert _resolve_secret_uri("https://example.com/path") == "https://example.com/path"
+        assert _resolve_secret_uri("ws://localhost:8080/socket") == "ws://localhost:8080/socket"
+        assert _resolve_secret_uri("wss://example.com/socket") == "wss://example.com/socket"
+        assert _resolve_secret_uri("ftp://files.example.com/data") == "ftp://files.example.com/data"
+        assert _resolve_secret_uri("ftps://files.example.com/data") == "ftps://files.example.com/data"
+
+    def test_secret_schemes_still_resolve_with_resolver(self):
+        """The skip is targeted — non-network schemes (vault, awssm, etc.) still dispatch."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+
+        # Vault still works
+        assert (
+            _resolve_secret_uri("vault://secret/myapp#db_password")
+            == "s3cret_from_vault"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Integration with _expand_string and expand_variables

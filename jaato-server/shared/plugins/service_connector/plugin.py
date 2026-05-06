@@ -339,11 +339,20 @@ class ServiceConnectorPlugin:
                         },
                         "method": {
                             "type": "string",
-                            "description": "HTTP method (GET, POST, PUT, DELETE, PATCH)"
+                            "description": "HTTP method (GET, POST, PUT, DELETE, PATCH).  Optional when ``endpoint`` is provided — auto-resolved from the endpoint YAML."
                         },
                         "path": {
                             "type": "string",
-                            "description": "Endpoint path (when using service)"
+                            "description": "Endpoint path (when using service).  Mutually exclusive with ``endpoint``: pass either the literal URL path here OR the endpoint YAML's basename in ``endpoint``."
+                        },
+                        "endpoint": {
+                            "type": "string",
+                            "description": (
+                                "Endpoint identifier — the YAML filename (without .yaml suffix) under "
+                                "<config_root>/services/<service>/.  When provided, the framework reads "
+                                "method + path from the YAML; agent doesn't need to know the URL "
+                                "structure.  Server 0.6.57+.  Mutually exclusive with ``path``."
+                            )
                         },
                         "query": {
                             "type": "object",
@@ -1712,6 +1721,11 @@ class ServiceConnectorPlugin:
         url = args.get("url", "").strip()
         method = args.get("method", "").upper()
         path = args.get("path", "").strip()
+        # Server 0.6.57+: endpoint identifier (YAML basename).  When
+        # present, framework auto-resolves method + path from the
+        # endpoint YAML.  Mutually exclusive with ``path`` — passing
+        # both is rejected to keep the resolution path unambiguous.
+        endpoint_id = args.get("endpoint", "").strip()
         query = args.get("query")
         headers = args.get("headers")
         body = args.get("body")
@@ -1729,7 +1743,23 @@ class ServiceConnectorPlugin:
             f"{f', save_to={save_to}' if save_to else ''}"
         )
 
-        if not method:
+        # Server 0.6.57+: ``endpoint`` and ``path`` are mutually exclusive.
+        # Passing both creates ambiguity over which one drives URL
+        # resolution.  Reject loudly so the agent is forced to pick.
+        if endpoint_id and path:
+            return {
+                "error": (
+                    "``endpoint`` and ``path`` are mutually exclusive — "
+                    "pass either the endpoint YAML basename in ``endpoint`` "
+                    "OR the literal URL path in ``path``, not both."
+                )
+            }
+
+        # Method becomes optional when ``endpoint`` is provided — the
+        # endpoint YAML's ``method:`` field is authoritative.  When
+        # neither endpoint nor method is supplied, fall through to the
+        # existing "method is required" check.
+        if not method and not endpoint_id:
             return {"error": "method is required"}
         if not url and not service_name:
             return {"error": "Either url or service is required"}
@@ -1750,7 +1780,28 @@ class ServiceConnectorPlugin:
         if service_name:
             if self._schema_store:
                 service_config = self._schema_store.load_service_config(service_name)
-                if service_config and path:
+                if service_config and endpoint_id:
+                    # Server 0.6.57+: endpoint-by-name lookup.  Match
+                    # the YAML basename against ``list_endpoint_schemas``
+                    # tuples.  The schema's ``path`` and ``method``
+                    # become the request's path and method (the latter
+                    # only when the agent didn't pass ``method``).
+                    for ep_name, schema in self._schema_store.list_endpoint_schemas(service_name):
+                        if ep_name == endpoint_id:
+                            endpoint_schema = schema
+                            path = schema.path
+                            if not method:
+                                method = schema.method.upper()
+                            break
+                    if endpoint_schema is None:
+                        return {
+                            "error": (
+                                f"Endpoint '{endpoint_id}' not found in service "
+                                f"'{service_name}' — list_endpoint_schemas() "
+                                f"returned no YAML with that basename."
+                            )
+                        }
+                if service_config and path and endpoint_schema is None:
                     endpoint_schema = self._schema_store.find_endpoint(
                         service_name, method, path
                     )
@@ -1763,7 +1814,27 @@ class ServiceConnectorPlugin:
                 discovered = self._get_service(service_name)
                 if discovered:
                     service_config = discovered.config
-                    if path:
+                    if endpoint_id:
+                        # Server 0.6.57+: discovered services may carry
+                        # named endpoints too.  Match by ``ep.name`` if
+                        # the schema exposes it; otherwise fall through
+                        # to path-match below.
+                        for ep in discovered.endpoints:
+                            ep_basename = getattr(ep, "name", None)
+                            if ep_basename == endpoint_id:
+                                endpoint_schema = ep
+                                path = ep.path
+                                if not method:
+                                    method = ep.method.upper()
+                                break
+                        if endpoint_schema is None:
+                            return {
+                                "error": (
+                                    f"Endpoint '{endpoint_id}' not found in "
+                                    f"discovered service '{service_name}'."
+                                )
+                            }
+                    if path and endpoint_schema is None:
                         for ep in discovered.endpoints:
                             if ep.method == method and ep.path == path:
                                 endpoint_schema = ep
@@ -1771,6 +1842,17 @@ class ServiceConnectorPlugin:
 
             if not service_config:
                 return {"error": f"Service not found: {service_name}"}
+
+            # Server 0.6.57+: re-validate that we now have a method.
+            # The earlier check let endpoint_id slip through without
+            # method; if no schema resolved a method, we still need it.
+            if not method:
+                return {
+                    "error": (
+                        "method is required (and could not be inferred from "
+                        f"endpoint='{endpoint_id}')"
+                    )
+                }
 
         # Determine SSL verification: skip if insecure or service is trusted
         verify_ssl = True

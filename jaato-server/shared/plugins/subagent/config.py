@@ -35,6 +35,20 @@ _SECRET_URI_RE = re.compile(
 )
 
 
+# Standard network protocol schemes that are NEVER secret-resolver
+# indirections — they're literal URLs awaiting plain HTTP/WS/FTP
+# resolution.  Pre-server-0.6.57 ``_resolve_secret_uri`` matched these
+# against the URI regex, fired a "no resolver registered" warning, and
+# returned the literal URI unchanged.  Cosmetically noisy AND, when the
+# URI contained an unresolved ``${VAR}`` substitution (e.g. handoff_test's
+# ``http://127.0.0.1:${ANTIFRAUDE_PORT}``), prevented the env-file env-var
+# expansion from running at the right point in the chain because the
+# secret-URI machinery short-circuited to "literal URL".  Network-scheme
+# values now bypass secret-URI resolution entirely; standard env-var
+# expansion downstream handles ``${VAR}``.
+_NETWORK_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp", "ftps"})
+
+
 @runtime_checkable
 class SecretResolver(Protocol):
     """Protocol for secret backend resolvers.
@@ -159,16 +173,41 @@ def _resolve_secret_uri(value: str) -> str:
 
     Returns the original string unchanged if:
     - It doesn't match the URI pattern.
+    - The scheme is a standard network protocol (http/https/ws/wss/ftp/ftps) —
+      these are literal URLs, not secret-resolver indirections (server
+      0.6.57+).
+    - The value contains ``${VAR}`` substitution markers — they're
+      pending env-var expansion, not secret URIs (server 0.6.57+).
     - No resolver is registered for the scheme.
 
     Raises:
         SecretResolutionError: Propagated from the resolver on failure.
     """
+    # Server 0.6.57+: skip values with unresolved ``${VAR}`` substitutions.
+    # The env-file expansion runs downstream (``expand_variables`` in
+    # http_client + general os.environ), so a literal-with-pending-var
+    # passes through here unchanged and gets resolved at the right
+    # point.  Pre-0.6.57 the secret-URI machinery returned the literal
+    # ``http://127.0.0.1:${ANTIFRAUDE_PORT}`` as-is, blocking downstream
+    # expansion and breaking handoff_test cascade post daemon-restart.
+    if "${" in value:
+        return value
+
     m = _SECRET_URI_RE.match(value)
     if not m:
         return value
 
     scheme = m.group('scheme')
+
+    # Server 0.6.57+: standard network schemes are literal URLs.
+    # ``https://search.maven.org`` matched the URI regex pre-0.6.57,
+    # fired a "no resolver registered" warning that was just noise,
+    # and the literal URL was returned unchanged anyway.  Skip the
+    # whole code path now — these schemes never have a resolver
+    # because they aren't secret-resolver indirections.
+    if scheme in _NETWORK_SCHEMES:
+        return value
+
     resolvers = _discover_secret_resolvers()
     resolver = resolvers.get(scheme)
     if resolver is None:
