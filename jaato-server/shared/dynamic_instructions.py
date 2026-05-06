@@ -51,11 +51,57 @@ from .script_loader import resolve_script_path, load_script_symbol
 logger = logging.getLogger(__name__)
 
 
-# ``{{!py:path/to/script.py optional space-separated args}}``
+# ``{{!py[?]:path/to/script.py optional space-separated args}}``
 # Path is everything up to the first whitespace; args are the rest of
 # the placeholder body up to the closing braces.  Newlines inside the
 # placeholder are not supported (kept on one line).
-_PY_PLACEHOLDER = re.compile(r"\{\{!py:([^\s}]+)(?:\s+([^}]*))?\}\}")
+#
+# The optional ``?`` modifier (server 0.6.48+) marks the placeholder
+# as best-effort: any failure (script-not-found, load-error, render
+# raise, sentinel-string return, non-string return) is swallowed and
+# substituted with the error sentinel string in the prompt — same as
+# pre-0.6.48 behaviour.  Without ``?`` the framework now ABORTS session
+# creation on any of those error paths, propagating a structured
+# ErrorEvent to the client.  Default-strict matches the load-bearing
+# nature of most prefetches; opt-in best-effort for genuinely optional
+# scripts (memory snapshot, ledger usage, ambient reference data).
+_PY_PLACEHOLDER = re.compile(r"\{\{!py(\?)?:([^\s}]+)(?:\s+([^}]*))?\}\}")
+
+
+class DynamicInstructionsError(Exception):
+    """Raised when a non-optional ``{{!py:...}}`` placeholder fails to
+    render (server 0.6.48+).
+
+    Carries the failing placeholder's script reference and the
+    underlying error message so callers can surface a structured
+    ``ErrorEvent`` to the client.  Without this, the prior swallow-
+    and-substitute behaviour produced agents running with a hollow
+    prompt that fabricated outputs at T=0 (false byte-identicality
+    diagnosed by 7:3 in the kb-enablement-2.0 cascade probe v6).
+
+    Optional placeholders (``{{!py?:script.py}}``) DO NOT raise; their
+    error sentinel is substituted into the prompt as before, since
+    those scripts opted in to best-effort semantics.
+    """
+
+    def __init__(self, script_ref: str, reason: str) -> None:
+        super().__init__(f"dynamic-instructions abort: {script_ref}: {reason}")
+        self.script_ref = script_ref
+        self.reason = reason
+
+
+# Sentinel-prefix list (server 0.6.48+).  When a script's render returns
+# a string starting with any of these prefixes, the framework treats it
+# as a deliberate failure signal — the convention 7:3 surfaced for
+# returning ``[prefetch error: ...]`` from inside render().  Plus the
+# framework's own emitted-on-error sentinels (kept for compatibility
+# with scripts that catch their own errors and rebuild the same shape).
+_FAILURE_SENTINEL_PREFIXES = (
+    "[prefetch error:",
+    "[script error:",
+    "[script not found:",
+    "[script load error:",
+)
 
 
 @dataclass
@@ -137,13 +183,32 @@ def expand_py_placeholders(content: str, context: RenderContext) -> str:
         Returns the original content unchanged when no placeholders
         match (early-out via substring check).
     """
-    if "{{!py:" not in content:
+    # Early-out fast path.  Match the strict ``{{!py:`` form OR the
+    # optional ``{{!py?:`` form (server 0.6.48+).  Either prefix
+    # warrants the regex pass below.
+    if "{{!py:" not in content and "{{!py?:" not in content:
         return content
 
     def _replace(match: re.Match) -> str:
-        script_ref = match.group(1).strip()
-        args_str = match.group(2) or ""
+        # Group 1: optional `?` (best-effort marker, server 0.6.48+).
+        # Group 2: script_ref.  Group 3: optional args.
+        is_optional = match.group(1) == "?"
+        script_ref = match.group(2).strip()
+        args_str = match.group(3) or ""
         args: List[str] = args_str.split() if args_str else []
+
+        def _fail(reason: str, sentinel: str) -> str:
+            """Either raise (default strict) or return sentinel (optional).
+
+            When ``is_optional`` is True the placeholder is best-effort:
+            log + substitute the sentinel into the prompt (pre-0.6.48
+            behaviour).  Otherwise raise ``DynamicInstructionsError`` so
+            the session-creation path can convert it to a structured
+            ErrorEvent and abort cleanly — preventing silent fabrication.
+            """
+            if is_optional:
+                return sentinel
+            raise DynamicInstructionsError(script_ref, reason)
 
         path = resolve_script_path(
             script_ref,
@@ -156,13 +221,21 @@ def expand_py_placeholders(content: str, context: RenderContext) -> str:
                 "(workspace=%s, config_root=%s)",
                 script_ref, context.workspace_path, context.config_root,
             )
-            return f"[script not found: {script_ref}]"
+            return _fail(
+                f"script not found (workspace={context.workspace_path}, "
+                f"config_root={context.config_root})",
+                f"[script not found: {script_ref}]",
+            )
 
         fn = load_script_symbol(
             path, symbol="render", module_prefix="_jaato_dynprompt",
         )
         if fn is None:
-            return f"[script load error: {script_ref}]"
+            return _fail(
+                f"script load failed (path={path}, render symbol missing "
+                f"or import error)",
+                f"[script load error: {script_ref}]",
+            )
 
         try:
             result = fn(context, args)
@@ -170,10 +243,36 @@ def expand_py_placeholders(content: str, context: RenderContext) -> str:
             logger.exception(
                 "dynamic-instructions: render failed for %s", script_ref,
             )
-            return f"[script error: {script_ref}: {exc}]"
+            return _fail(
+                f"render raised {type(exc).__name__}: {exc}",
+                f"[script error: {script_ref}: {exc}]",
+            )
 
+        # Coerce non-string returns.  Pre-0.6.48 silently called str(result);
+        # server 0.6.48+ treats it as a contract violation by default and
+        # raises (optional placeholders preserve the legacy coerce).
         if not isinstance(result, str):
-            result = str(result)
+            return _fail(
+                f"render returned non-string ({type(result).__name__})",
+                str(result),
+            )
+
+        # Sentinel-string detection (server 0.6.48+).  Convention from
+        # 7:3's q-message: scripts deliberately signal failure by
+        # returning a string starting with ``[prefetch error: ...]``.
+        # Also catches the framework's own emitted-on-error sentinels
+        # (kept for compatibility with scripts that catch their own
+        # errors and rebuild the same shape).  Optional placeholders
+        # let the sentinel through; default-strict raises.
+        if result.startswith(_FAILURE_SENTINEL_PREFIXES):
+            # Strip the leading bracket-tag so the abort reason is just
+            # the script's own error message, not the framework's
+            # wrapping — keeps the ErrorEvent message readable.
+            return _fail(
+                f"render returned failure sentinel: {result.strip()}",
+                result,
+            )
+
         return result
 
     return _PY_PLACEHOLDER.sub(_replace, content)

@@ -43,6 +43,7 @@ from shared import (
     TodoPlugin,
     active_cert_bundle,
 )
+from shared.dynamic_instructions import DynamicInstructionsError
 from shared.instruction_token_cache import InstructionTokenCache
 from shared.message_queue import SourceType
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
@@ -1577,11 +1578,37 @@ class JaatoServer:
                     "JAATO_SKIP_MODEL_TEST", "true"
                 ).lower() in ("1", "true", "yes")
                 with _s5.sub("configure_tools_call"):
-                    self._jaato.configure_tools(
-                        self.registry, self.permission_plugin, self.ledger,
-                        session_kwargs=session_kwargs,
-                        skip_model_test=_skip_test,
-                    )
+                    try:
+                        self._jaato.configure_tools(
+                            self.registry, self.permission_plugin, self.ledger,
+                            session_kwargs=session_kwargs,
+                            skip_model_test=_skip_test,
+                        )
+                    except DynamicInstructionsError as exc:
+                        # A non-optional ``{{!py:...}}`` placeholder failed
+                        # to render — the agent would run with a hollow
+                        # prompt and fabricate.  Abort session creation
+                        # cleanly with a structured error event so the
+                        # client sees the failing placeholder + reason
+                        # instead of a session-that-started-but-is-empty.
+                        # Server 0.6.48+; load-bearing for byte-identicality
+                        # determinism (per 7:3's cascade probe v6 finding).
+                        self._emit_init_progress(
+                            "Configuring tools", "error", 5, total_steps,
+                            f"prefetch failed: {exc.script_ref}: {exc.reason}",
+                        )
+                        self.emit(ErrorEvent(
+                            error=(
+                                f"Prefetch failed: {exc.script_ref} — "
+                                f"{exc.reason}.  Mark the placeholder as "
+                                f"{{{{!py?:{exc.script_ref}}}}} (note the "
+                                f"`?`) to opt into best-effort semantics, "
+                                f"or fix the script."
+                            ),
+                            error_type="DynamicInstructionsError",
+                            recoverable=False,
+                        ))
+                        return False
 
                 # Wire formatter pipeline into runtime so output formatters can
                 # contribute system instructions (e.g., mermaid rendering hints)

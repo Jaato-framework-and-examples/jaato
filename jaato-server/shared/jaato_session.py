@@ -1659,7 +1659,10 @@ class JaatoSession:
         # their output as content already present in its prompt.
         # See ``shared/dynamic_instructions.py`` and
         # ``project_backlog_dynamic_instructions`` (2026-04-30 addendum).
-        if self._system_instruction and "{{!py:" in self._system_instruction:
+        if self._system_instruction and (
+            "{{!py:" in self._system_instruction
+            or "{{!py?:" in self._system_instruction
+        ):
             from .dynamic_instructions import (
                 expand_py_placeholders,
                 build_render_context,
