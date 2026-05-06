@@ -41,7 +41,7 @@ import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path, PurePath
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 # pybars3's ``Compiler`` class holds CLASS-LEVEL mutable state
 # (``_handlebars``, ``_builder``, ``_compiler`` defined at class scope
@@ -233,6 +233,69 @@ MUSTACHE_CURRENT_ITEM_PATTERN = re.compile(r'\{\{\s*\.\s*\}\}')  # {{.}} or {{ .
 
 # Jinja2 specific patterns (distinguish from Mustache)
 JINJA2_FILTER_PATTERN = re.compile(r'\{\{.*\|.*\}\}')  # {{ var | filter }}
+
+# Handlebars helper keywords recognised by the parser.  Hoisted to
+# module level (server 0.6.58+) so the public
+# ``classify_template_evaluation_kind`` helper and the internal
+# ``_parse_mustache_structure`` parser share a single source of truth.
+# Walkers that emit index.json entries (e.g. kb-enablement-2.0) call
+# the public helper instead of mirroring this set; when a new helper
+# class lands here, every walker picks it up on server upgrade
+# without code changes.
+HELPER_KEYWORDS: FrozenSet[str] = frozenset({
+    'if', 'unless', 'each', 'with', 'lookup',
+})
+
+# Pattern for the public classifier — matches ``{{#KW ARG}}`` and
+# ``{{^KW ARG}}`` shapes where KW is one of HELPER_KEYWORDS and ARG
+# is a non-empty token.  Mirrors the inner detection logic of
+# ``_parse_mustache_structure`` (see _looks_like_helper there) so
+# the two paths agree byte-for-byte on the same content.
+_HELPER_INVOCATION_RE = re.compile(
+    r'\{\{\s*[#^]\s*(' + '|'.join(sorted(HELPER_KEYWORDS)) + r')\s+\S'
+)
+
+
+def classify_template_evaluation_kind(content: str) -> str:
+    """Classify a template's evaluation kind from its raw content.
+
+    Public helper for external walkers that emit ``TemplateIndexEntry``
+    JSON directly (e.g. kb-enablement-2.0's
+    ``.jaato/scripts/generate_kb_artifacts.py``) and therefore bypass
+    the framework's discoverer-side parser pass.  Without this helper,
+    the framework's ``_load_persisted_index`` defaults the field to
+    ``"substitution"`` whenever it's missing — silently
+    mis-classifying templates that genuinely use Handlebars helpers.
+
+    Returns:
+        ``"helpers"`` when the template contains any
+        ``{{#KW ARG}}`` / ``{{^KW ARG}}`` invocation where KW is in
+        :data:`HELPER_KEYWORDS` (``if``, ``unless``, ``each``,
+        ``with``, ``lookup``) and ARG is a non-empty token; else
+        ``"substitution"``.
+
+    Mirrors the byte-for-byte logic of the framework's internal
+    ``_parse_mustache_structure`` parser pass (see ``_looks_like_helper``
+    there).  Keep this in sync with the parser if HELPER_KEYWORDS
+    expands.
+
+    Server 0.6.58+.
+    """
+    if not content:
+        return "substitution"
+    # Cheap mustache-syntax check first — non-mustache (jinja2, plain
+    # text) templates can't carry Handlebars helpers by definition.
+    has_mustache = (
+        MUSTACHE_SECTION_PATTERN.search(content)
+        or MUSTACHE_END_SECTION_PATTERN.search(content)
+        or MUSTACHE_INVERTED_PATTERN.search(content)
+        or MUSTACHE_CURRENT_ITEM_PATTERN.search(content)
+    )
+    if not has_mustache:
+        return "substitution"
+    if _HELPER_INVOCATION_RE.search(content):
+        return "helpers"
+    return "substitution"
 
 # Spring Boot property placeholder collision protection.
 #
@@ -4056,7 +4119,14 @@ Template rendering writes files to the workspace."""
         # "if validation.maxLength" because that's what
         # listTemplateVariables reported.  Recognise the helpers here
         # and unwrap to the bare argument; filter metadata entirely.
-        HELPER_KEYWORDS = {'if', 'unless', 'each', 'with', 'lookup'}
+        # Server 0.6.58+: HELPER_KEYWORDS is now defined at module
+        # level so the public ``classify_template_evaluation_kind``
+        # helper and this internal parser share a single source of
+        # truth.  Local rebind kept for in-function readability.
+        # See module docstring + the ``classify_…`` helper above.
+        # (Note: the public helper currently does not surface
+        # ``ITERATION_METADATA`` — engine-populated context vars are
+        # an internal-parser concern.)
         # Iteration-metadata: identifiers populated by the engine,
         # never user-provided.  Skip whenever they appear (whether as
         # a helper argument or a standalone ref).
