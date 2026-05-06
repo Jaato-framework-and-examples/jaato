@@ -80,6 +80,7 @@ class WaypointPlugin:
         self._backup_manager: Optional["BackupManager"] = None
         self._plugin_registry = None
         self._storage_path: Optional[Path] = None
+        self._workspace_path: Optional[Path] = None
         self._session_id: Optional[str] = None
         self._initialized = False
 
@@ -143,6 +144,43 @@ class WaypointPlugin:
         """
         self._plugin_registry = registry
         registry.register_category("coordination", "Task tracking, TODO, DELEGATE work, SUBAGENTS, PARALLEL execution")
+
+    def set_workspace_path(self, path: str) -> None:
+        """Receive the workspace_path broadcast from PluginRegistry.
+
+        Mirrors the memory plugin's pattern (``shared/plugins/memory/plugin.py:155``).
+        ``WaypointManager`` defaults its storage_path to
+        ``Path(".jaato/...").resolve()`` which resolves against process
+        CWD — fragile under AppArmor confinement when CWD diverges from
+        workspace_root.  Capturing the workspace path here lets the
+        manager (lazily created in ``_ensure_manager``) resolve a
+        relative storage_path against the workspace instead.
+
+        When the manager is already created (storage_path was supplied
+        explicitly via config and lazy creation already fired), the
+        workspace update is recorded but the manager's storage_path is
+        not retroactively rewritten.  That's the pattern memory follows
+        too — explicit absolute paths are honored verbatim.
+
+        Args:
+            path: Workspace root path broadcast by ``PluginRegistry``
+                after ``initialize``.
+        """
+        if path:
+            self._workspace_path = Path(path)
+            self._trace(f"set_workspace_path: workspace_path={self._workspace_path}")
+            # If manager hasn't been created yet AND no explicit storage_path
+            # was supplied, prefix the default template with the workspace
+            # so lazy manager creation lands the file under the sandbox.
+            if self._manager is None and self._storage_path is None:
+                if self._session_id:
+                    self._storage_path = (
+                        self._workspace_path
+                        / ".jaato" / "sessions" / self._session_id / "waypoints.json"
+                    )
+                else:
+                    self._storage_path = self._workspace_path / ".jaato" / "waypoints.json"
+                self._trace(f"set_workspace_path: defaulted storage_path={self._storage_path}")
 
     def _ensure_manager(self) -> bool:
         """Ensure the manager is created, lazily initializing if needed.

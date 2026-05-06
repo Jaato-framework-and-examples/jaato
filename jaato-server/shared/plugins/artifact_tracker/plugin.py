@@ -192,6 +192,60 @@ class ArtifactTrackerPlugin:
         self._initialized = True
         self._trace(f"initialize: storage_path={self._storage_path}, workspace_root={self._workspace_root}")
 
+    def set_workspace_path(self, path: str) -> None:
+        """Update workspace_root from the registry's broadcast.
+
+        Mirrors the memory plugin's pattern (``shared/plugins/memory/plugin.py:155``).
+        Without this hook, ``self._storage_path`` (default
+        ``.jaato/.artifact_tracker.json``) is resolved by ``open()`` against
+        process CWD instead of workspace_root.  When CWD diverges from
+        workspace (daemon started elsewhere, or session sandboxed under a
+        different cwd), the file lands outside the AppArmor-permitted
+        sandbox and writes fail with EACCES.
+
+        Resolving via ``_workspace_root`` (set here from the broadcast or
+        in ``initialize`` from config) is the contract every other
+        runtime-state plugin honours.
+
+        Args:
+            path: Workspace root path broadcast by ``PluginRegistry``
+                after ``initialize``.  When non-empty, replaces any
+                workspace_root seeded from config.
+        """
+        if path:
+            self._workspace_root = os.path.realpath(os.path.abspath(path))
+            self._trace(f"set_workspace_path: workspace_root={self._workspace_root}")
+
+    def _resolve_storage_path(self) -> Optional[str]:
+        """Resolve ``self._storage_path`` to an absolute filesystem path.
+
+        Returns the absolute path that ``_load_state`` / ``_save_state`` /
+        ``_clear_state_file`` should operate on.  Resolution order:
+
+        1. ``self._storage_path`` already absolute → returned verbatim.
+        2. ``self._workspace_root`` set → joined with the relative
+           template (the path lands under the workspace's
+           AppArmor-permitted sandbox subtree).
+        3. Neither absolute nor workspace_root set → fall back to
+           ``os.path.abspath`` (process CWD).  Logs a TRACE warning so
+           the fallback is diagnosable; under AppArmor confinement this
+           is the path that fails with EACCES.
+        """
+        if not self._storage_path:
+            return None
+        if os.path.isabs(self._storage_path):
+            return self._storage_path
+        if self._workspace_root:
+            return os.path.normpath(
+                os.path.join(self._workspace_root, self._storage_path)
+            )
+        self._trace(
+            "_resolve_storage_path: WARNING — no workspace_root, falling "
+            f"back to CWD for relative path '{self._storage_path}' "
+            "(AppArmor-confined sessions will likely fail to write here)"
+        )
+        return os.path.abspath(self._storage_path)
+
     def shutdown(self) -> None:
         """Shutdown the plugin and save state."""
         self._trace("shutdown")
@@ -243,24 +297,25 @@ class ArtifactTrackerPlugin:
         clean artifact registry, preventing stale artifacts from leaking across
         sessions on the same workspace.
         """
-        if not self._storage_path:
+        storage_path = self._resolve_storage_path()
+        if not storage_path:
             return
 
         try:
-            storage_path = os.path.abspath(self._storage_path)
             if os.path.exists(storage_path):
                 os.remove(storage_path)
                 self._trace(f"_clear_state_file: removed stale state file {storage_path}")
         except OSError as e:
-            self._trace(f"_clear_state_file: failed to remove {self._storage_path}: {e}")
+            self._trace(f"_clear_state_file: failed to remove {storage_path}: {e}")
 
     def _load_state(self) -> None:
         """Load state from storage file."""
-        if not self._storage_path or not os.path.exists(self._storage_path):
+        storage_path = self._resolve_storage_path()
+        if not storage_path or not os.path.exists(storage_path):
             return
 
         try:
-            with open(self._storage_path, 'r') as f:
+            with open(storage_path, 'r') as f:
                 data = json.load(f)
                 self._registry = ArtifactRegistry.from_dict(data)
         except (json.JSONDecodeError, IOError) as e:
@@ -269,15 +324,15 @@ class ArtifactTrackerPlugin:
 
     def _save_state(self) -> None:
         """Save state to storage file."""
-        if not self._storage_path or not self._registry:
+        if not self._registry:
+            return
+        storage_path = self._resolve_storage_path()
+        if not storage_path:
             return
 
         try:
-            # Ensure parent directory exists
-            storage_path = os.path.abspath(self._storage_path)
             os.makedirs(os.path.dirname(storage_path), exist_ok=True)
-
-            with open(self._storage_path, 'w') as f:
+            with open(storage_path, 'w') as f:
                 json.dump(self._registry.to_dict(), f, indent=2)
         except IOError as e:
             print(f"Warning: Failed to save artifact tracker state: {e}")
