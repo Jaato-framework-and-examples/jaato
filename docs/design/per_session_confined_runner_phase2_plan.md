@@ -63,8 +63,16 @@ Files touched:
 - `server/apparmor.py` lines 1688–1696: delete the module-load
   registration of `_thread_unconfine_safe` as a SafeThreadPool pre-task
   hook. The helper itself stays for any third-party reuse.
-- `shared/safe_pool.py`: keep the file. The class is harmless without
-  registered hooks; deleting it would touch unrelated callers.
+- `shared/safe_pool.py`: keep the file (verified by grep — three
+  production callers consume `SafeThreadPoolExecutor` independent of
+  the apparmor hook): `shared/ai_tool_runner.py:_auto_background_pool`,
+  `server/__main__.py:loop.set_default_executor`, and
+  `shared/plugins/subagent/plugin.py`. The class is general-purpose
+  ThreadPoolExecutor; the apparmor hook used to REGISTER a pre-task
+  callback on it via `apparmor.py:1688-1696`. After 2.1 deletes that
+  registration, the class is unchanged and harmless for the other
+  three call sites. Phase 6 cleanup may revisit if the
+  pre-task-callback machinery becomes vestigial.
 
 What stays for Phase 6 cleanup:
 - `apparmor.apparmor_confine`, `make_confine_context`,
@@ -188,7 +196,7 @@ thread):
 |----------|-----------|
 | Single-shot success | `cli_based_tool(command="echo hi")` → envelope `ok=true, result.stdout="hi\n"`. |
 | Streaming chunks in order | `for i in 1 2 3; do echo $i; sleep 0.05; done`: assert `on_output` called ≥3 times with `"1"`, `"2"`, `"3"` in order. |
-| stderr/stdout interleaving | command emits to both; assert separate `on_output` invocations with distinct `source` (mirrors today's `(source, text, mode)` callback). |
+| stderr/stdout interleaving | command emits to both; assert separate `on_output` invocations with distinct `source` AND per-source ordering (within each source, chunks arrive in command-order). **Do NOT assert cross-source ordering** — line-buffered reads on stdout/stderr can interleave at line boundaries; in-line interleaving is filesystem- and OS-dependent. The contract is "source distinguishes the streams; chunks within a stream stay ordered." |
 | Mid-stream cancellation | `sleep 30 && echo done`; trip `CancelToken` 100ms after spawn. Envelope `ok=false, error.type="CancelledException"`; subprocess exited within 3s; no `done` chunk. |
 | Subprocess SIGTERM on parent shutdown | spawn `sleep 30`, send SIGTERM to the runner. Subprocess receives SIGTERM (verify via `proc.poll()` within 7s — §8.4 budget). Requires runner-side signal handler to propagate. |
 | Output truncation | command exceeds `max_output_chars`; envelope `warnings` carries `output-truncated`, `result.truncated=true`. |
@@ -210,6 +218,33 @@ elsewhere rather than failing confusingly. The Phase 2 done-criterion
 "green in CI" in the prompt is read as "green on the user-hosted
 runner that exercises the apparmor mark."
 
+**Profile-fixture spec.** `_provision_workspace(ws, profile="cli_test")`
+writes a minimum YAML profile that exercises the runner-side `cli`
+plugin. Shape:
+
+```yaml
+# .jaato/profiles/cli_test.yaml
+name: cli_test
+provider: anthropic                    # any provider with a deterministic test fixture
+model: claude-sonnet-4-6
+plugins:
+  - signal_completion(preload)         # standard completion shape
+  - cli                                # the runner-tier plugin under test
+gc:
+  type: budget
+  threshold_percent: 80.0
+plugin_configs:
+  permission:
+    policy:
+      defaultPolicy: allow             # autonomous-only test run
+      blacklist:
+        tools: []
+```
+
+No agent persona file is needed for the integration test — the
+session sends a literal trigger message and `cli` execution is what
+exercises the runner.
+
 **Pseudo-code:**
 
 ```python
@@ -217,8 +252,8 @@ runner that exercises the apparmor mark."
 @pytest.mark.skipif(not _apparmor_available(), reason="AppArmor not available")
 def test_two_workspaces_one_daemon_no_bounce(tmp_path):
     ws_a, ws_b = tmp_path / "ws_a", tmp_path / "ws_b"
-    _provision_workspace(ws_a, profile="cli_test")  # writes .jaato/profiles/cli_test.json
-    _provision_workspace(ws_b, profile="cli_test")
+    _provision_workspace(ws_a, profile="cli_test")  # writes .jaato/profiles/cli_test.yaml
+    _provision_workspace(ws_b, profile="cli_test")  # YAML, not JSON — modern jaato profile format
 
     sock = tmp_path / "jaato.sock"
     daemon = _start_daemon(sock)
@@ -259,10 +294,14 @@ Sister tests in same dir:
 ## 5. Open clarifications
 
 **5.1 Runner stdout/stderr.** §4.1 says fd 3 is the socketpair; fd 1
-and fd 2 are unspecified. Default I'd take: redirect to per-runner log
-file under `~/.jaato/logs/runner-<session_id>.log` via `os.dup2`
-before `execvpe`. Matches `JAATO_SESSION_LOG_DIR`; gives operators a
-`tail -f` target. 10MB cap, rotation deferred.
+and fd 2 are unspecified. Redirect to a per-session log file under
+`<workspace>/.jaato/logs/runner-<session_id>.log` via `os.dup2`
+before `execvpe`. **Per-session, NOT under `~/.jaato/logs/`** (that's
+daemon-scoped); the runner is per-session so its log follows the
+per-session convention used elsewhere (`JAATO_SESSION_LOG_DIR`). The
+AppArmor profile already grants `rwkl` on the workspace subtree so
+the redirect lands correctly post-confinement. 10MB cap, rotation
+deferred to Phase 5+.
 
 **5.2 RunnerReadyEvent timeout.** §4.6 doesn't specify. Hard-code
 10s for Phase 2 (covers cold-start apparmor-cache miss); on timeout
@@ -277,10 +316,15 @@ runner-tier list expands; Phase 2 doesn't need it.
 **5.4 Daemon-side cli stub: where does `runner_rpc` come from?**
 Phase 2 keeps the daemon-side cli plugin instantiated (so the model
 sees `cli_based_tool` in tool schemas), with `_execute` rewritten as
-the RPC forwarder. `JaatoServer` injects `runner_rpc` into the plugin
-at configure time — same lifecycle slot today's
-`set_apparmor_context` occupies. Phase 3 may invert (runner instantiates
-the plugin, daemon holds only the schema). Worth confirming.
+the RPC forwarder. **Injection mechanism: registry-attribute pattern**
+(matching how plugins discover `BackupManager` from `file_edit` today).
+`JaatoServer` sets `registry.runner_rpc = <RunnerRPCClient>` after
+`RunnerSpawner.spawn` returns; the cli plugin's
+`set_plugin_registry(registry)` hook (already in the plugin protocol)
+captures the reference. No new plugin-protocol method to add; no new
+config key in `plugin_configs.cli` to plumb. Phase 3 may invert
+(runner instantiates the plugin, daemon holds only the schema), at
+which point the daemon-side stub disappears entirely.
 
 ## 6. Risk register
 
@@ -322,16 +366,54 @@ enforce `max_output_chars` IN the runner's streaming reader before
 emitting chunks (the truncation already exists in the synchronous
 path; mirror it in the streaming path).
 
-**6.7 SIGTERM mid-frame-write.** Daemon shutdown SIGTERM arrives
-mid-frame; daemon-side reader sees a partial frame. Mitigation: treat
-EOF-mid-frame as benign (single warning, not protocol-error) on the
-daemon side.
+**6.7 EOF mid-frame (bidirectional).** Two symmetric cases:
+(a) daemon-side reader gets EOF mid-frame because the runner crashed
+or got SIGKILL'd mid-write; (b) runner-side reader gets EOF mid-frame
+because the daemon went down. Both are benign — the OTHER end is gone,
+no protocol-error to report, just close cleanly. Mitigation: BOTH
+readers treat partial-frame EOF as a single info-level log + clean
+close (NOT protocol-error). Runner-side: triggers normal shutdown
+path (clean teardown of any open `interactive_shell` PTYs etc.).
+Daemon-side: triggers `SessionFailedEvent` per §4.6 if confidence
+that the runner died (vs. graceful shutdown sequence).
 
 **6.8 CI cap — RESOLVED.** §2.6 needs CAP_MAC_ADMIN + CAP_SYSLOG.
 Per operator direction, the regression test runs on a user-hosted
 server with those capabilities, not standard GitHub-Actions CI. The
 test still ships with the `apparmor` mark + skipif gate so it skips
 cleanly on capability-less runners.
+
+## 7. Reviewer-flagged clarifications (added during review)
+
+**7.1 AppArmorManager interaction with thread-confinement removal.**
+2.1 removes per-thread confinement but keeps profile loading via
+`AppArmorManager`. Pre-implementation check: confirm the
+`AppArmorManager` state machine doesn't internally track
+"thread X is confined to profile P" — if it does, that bookkeeping
+needs to go too (or the check needs documentation explaining why
+it's still correct without thread-confinement). Likely no-op
+(profile loading is a kernel-level operation independent of which
+thread will eventually use the profile), but worth a 5-minute
+audit before code commits.
+
+**7.2 Estimated test/prod LOC split.** Of the ~1500 lines added,
+estimate is roughly:
+- ~600 production code (runner package + RunnerSpawner + framing
+  module + cli stub edits + session_manager wiring).
+- ~900 tests (unit tests in `server/runner/tests/`, framing tests
+  in `shared/tests/`, integration tests in
+  `tests/integration/`).
+This skew is intentional — the §4.1.1 streaming/cancellation
+contract has many surfaces worth pinning, and the integration test
+covers the §8.2 acceptance gate (the load-bearing 7:3 reproducer).
+
+**7.3 Lazy vs eager runner-side plugin import.** Phase 2's
+`tool_executor.py` init imports `cli_runner` eagerly (~100ms cold
+cost). For Phase 2's single-tool surface (cli + echo) this is fine
+— amortized against the apparmor profile load and fork+exec, the
+eager import is invisible. Phase 3 will need to revisit when the
+runner-tier plugin set expands to ~10 plugins (~1s eager-import
+risk). Defer the lazy-import-via-entry-points machinery until then.
 
 ---
 
