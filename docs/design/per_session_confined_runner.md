@@ -490,6 +490,29 @@ isn't justified by any cross-session shared state.
   the profile before `server.initialize()`; we hook in here). Spawn creates
   the socketpair, forks, exec's `python -m server.runner` with workspace
   context in env. The fork inherits no Python state — clean cold start.
+
+  **Daemon apparmor-state constraint (load-bearing for multitenancy).**
+  The fork-then-exec inherits the daemon's apparmor profile. The runner's
+  bootstrap step 3 (`aa_change_profile` to its session's profile) requires
+  that the inherited profile permits the transition to ANY session
+  profile, not just to unconfined. Two daemon postures satisfy this:
+  (a) **unconfined** — transitions to any profile are permitted by default
+  (this is the Phase 5 default and the simplest correct posture);
+  (b) **confined to a daemon-side profile that carries
+  `change_profile -> jaato-ws-*` for every loaded per-session profile**
+  — Phase 6's "much narrower daemon profile" (§4.7) MUST include this
+  transition rule or fork-spawn-and-confine breaks for every session
+  after the first.
+
+  **What MUST NOT happen:** the daemon thread that fork-spawns the
+  runner MUST NOT be confined to a per-session profile (today's
+  `_register_ipc_apparmor_hook` behavior). Today's per-session
+  profile template only grants `change_profile -> unconfined,` — a
+  fork-inherited per-session profile cannot transition to a DIFFERENT
+  per-session profile, so the runner's self-confine fails in bootstrap
+  step 3 and `os._exit(2)`s. The design's multitenancy claim depends
+  on the daemon NEVER confining its own threads to per-session profiles
+  after Phase 2 lands. See §7 for the explicit Phase 2 task list.
 - **Bootstrap:** the runner entry point does, in order:
     1. Read profile name from `JAATO_RUNNER_PROFILE` env.
     2. Call `aa_change_profile(profile_name)` via `ctypes` against
@@ -821,7 +844,37 @@ deliverable. Phase 2 (runner skeleton + RPC) is the next checkpoint;
 no implementation should start until this design is reviewed and
 approved.
 
-Existing code anchors that Phase 2 will touch:
+### Phase 2 critical-path tasks (load-bearing for multitenancy)
+
+These three changes MUST land together in Phase 2 — landing the runner
+spawn machinery without removing the daemon-thread confinement is
+**worse than today**: the runner subprocess is created but its
+self-confine step fails (per the §4.6 fork-inherits-apparmor-state
+constraint), every session after the first dies with `os._exit(2)`,
+and the multitenancy promise is silently broken. Order matters:
+
+1. **Remove daemon-thread per-session confinement.** Delete the
+   `apparmor_confine` enter/exit calls in
+   `_register_ipc_apparmor_hook` and the
+   `SafeThreadPoolExecutor` pre-task hook. The daemon's threads stop
+   being confined to per-session profiles. From this moment forward
+   the daemon process is unconfined (Phase 5 default; Phase 6 may
+   re-confine it to a daemon-only profile per §4.7).
+2. **Add `RunnerSpawner` wired into `SessionManager.create_session`.**
+   The relocation §7's anchor table promises. The spawn happens in
+   the daemon's now-unconfined process; fork inherits unconfined; the
+   runner self-confines via `aa_change_profile`.
+3. **Validate the regression-test gate.** Two-cascade
+   integration-test (`tests/integration/test_multitenant_apparmor.py`,
+   §8.2 acceptance criterion) must pass before Phase 2 is marked
+   done. Specifically: 7:3's `Permission denied:
+   kb-enablement-2.0/.jaato/profiles` regression case is green.
+
+The §7 anchor entry "_register_ipc_apparmor_hook gets relocated"
+is shorthand for tasks 1 + 2 above. They are not optional. Do not
+land 2 without 1.
+
+### Existing code anchors that Phase 2 will touch:
 
 - `jaato-server/server/__main__.py:_register_ipc_apparmor_hook` (lines
   656–835) — the daemon-side AppArmor hook gets relocated to spawn a
