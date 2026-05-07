@@ -315,6 +315,11 @@ class RunnerRPCClient:
         except Exception:  # noqa: BLE001
             logger.exception("RunnerRPCClient: read loop crashed")
         finally:
+            # Mark the channel closed so subsequent ``call()`` attempts
+            # raise RunnerCallError up front instead of writing to a
+            # dead transport (which would surface as ConnectionResetError
+            # at a confusing layer).
+            self._closed = True
             for fid, fut in list(self._in_flight.items()):
                 if not fut.done():
                     fut.set_exception(
