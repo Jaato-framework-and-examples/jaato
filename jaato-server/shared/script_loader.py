@@ -114,6 +114,14 @@ def _refresh_stale_helpers() -> None:
     OLD mtime so the next call retries — a corrupt-edit shouldn't stop
     the framework from re-attempting the reload after the operator
     fixes the syntax.
+
+    **Lock scope.** The tracker lock is held for the entire
+    stat-and-reload loop. Helpers with heavy reload-time side-effects
+    (long-running import-time setup, network calls, large file reads
+    at module top level) could bottleneck concurrent
+    ``load_script_symbol`` calls.  Helper authors should keep
+    import-time work cheap; reactor handlers expect the per-load
+    overhead to stay in the microseconds-to-milliseconds range.
     """
     with _tracked_helpers_lock:
         # Snapshot keys to avoid mutating-while-iterating; per-key
@@ -182,6 +190,17 @@ def _track_new_helpers(
     transitively imported. Filter to those whose source lives under
     ``scripts_root`` (skip stdlib, 3rd-party, framework modules), then
     record each (path, mtime) pair so the next load can detect edits.
+
+    **Partial-import corner case.** Only fires after a SUCCESSFUL
+    ``exec_module``.  If the handler's import sequence partially
+    completes — e.g. ``import _helper_a; import _helper_b`` raises in
+    B's top-level code — A IS in ``sys.modules`` but doesn't get
+    tracked here because the surrounding ``load_script_symbol`` call
+    returns ``None`` before reaching this function.  Future edits to
+    A won't trigger reload until the next time a handler successfully
+    completes loading and re-imports A.  Not a regression vs the
+    pre-0.6.60 behavior; tracker state is correct-but-incomplete for
+    that helper until the next clean handler load.
     """
     with _tracked_helpers_lock:
         for name in new_module_names:
