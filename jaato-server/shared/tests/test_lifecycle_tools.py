@@ -227,3 +227,131 @@ class TestHookAbsence:
         lt = LifecycleTools(NoHooks())
         result = lt._execute_signal_completion({"summary": "hi"})
         assert result["error"] == "No UI hooks available"
+
+
+# ---------------------------------------------------------------------------
+# Interactive-root filter (server 0.6.61+)
+#
+# A root session connected via an interactive client (TUI, web, chat)
+# does NOT see signal_completion in its tool surface.  Sessions need to
+# stay alive across user turns; signal_completion would terminate them.
+# Subagents (any client) and headless API root sessions still see it.
+# ---------------------------------------------------------------------------
+
+from jaato_sdk.events import ClientType, PresentationContext
+
+
+def _make_pctx(client_type: ClientType) -> PresentationContext:
+    """Minimum-viable PresentationContext fixture for filter tests."""
+    return PresentationContext(client_type=client_type)
+
+
+class StubInteractiveSession(StubSession):
+    """StubSession + parent + presentation_context for the filter tests."""
+
+    def __init__(
+        self,
+        schema=None,
+        parent: object = None,
+        client_type: ClientType = ClientType.API,
+    ) -> None:
+        super().__init__(schema=schema)
+        self._parent_session = parent
+        self._presentation_context = _make_pctx(client_type)
+
+
+class TestInteractiveRootFilter:
+    """``signal_completion`` exposure depends on (root-vs-subagent, client_type)."""
+
+    def test_terminal_root_hides_signal_completion(self):
+        """TUI session at the top level — tool is HIDDEN."""
+        lt = LifecycleTools(StubInteractiveSession(client_type=ClientType.TERMINAL))
+        schemas = lt.get_tool_schemas()
+        assert all(s.name != "signal_completion" for s in schemas), (
+            f"Interactive root should not see signal_completion; got "
+            f"{[s.name for s in schemas]}"
+        )
+
+    def test_web_root_hides_signal_completion(self):
+        """WS browser session at the top level — tool is HIDDEN."""
+        lt = LifecycleTools(StubInteractiveSession(client_type=ClientType.WEB))
+        assert all(
+            s.name != "signal_completion" for s in lt.get_tool_schemas()
+        )
+
+    def test_chat_root_hides_signal_completion(self):
+        """Chat platform session at the top level — tool is HIDDEN."""
+        lt = LifecycleTools(StubInteractiveSession(client_type=ClientType.CHAT))
+        assert all(
+            s.name != "signal_completion" for s in lt.get_tool_schemas()
+        )
+
+    def test_api_root_keeps_signal_completion(self):
+        """Headless API client at the top level — tool is EXPOSED.
+
+        Cascade entry points (handoff_test, kb-enablement-2.0
+        orchestrators) connect as API clients and rely on
+        signal_completion to drive the typed-payload completion contract.
+        """
+        lt = LifecycleTools(StubInteractiveSession(client_type=ClientType.API))
+        names = [s.name for s in lt.get_tool_schemas()]
+        assert "signal_completion" in names
+
+    def test_subagent_keeps_signal_completion_even_in_terminal(self):
+        """Subagent of any client_type — tool is EXPOSED.
+
+        Subagents need to terminate cleanly to bubble their typed
+        payloads up to the parent.  The parent's interactive client_type
+        doesn't transitively hide signal_completion from the children.
+        """
+        parent = object()  # sentinel non-None parent session
+        lt = LifecycleTools(StubInteractiveSession(
+            parent=parent,
+            client_type=ClientType.TERMINAL,
+        ))
+        names = [s.name for s in lt.get_tool_schemas()]
+        assert "signal_completion" in names
+
+    def test_no_presentation_context_keeps_signal_completion(self):
+        """Defensive default: missing presentation_context → expose tool.
+
+        Unknown client_type is treated as cascade-friendly (the
+        load-bearing case where signal_completion's contract is
+        established).  Better to leave the tool than to silently break
+        cascades when the presentation context wasn't wired through.
+        """
+        # Plain StubSession has no _presentation_context attribute.
+        lt = LifecycleTools(StubSession())
+        names = [s.name for s in lt.get_tool_schemas()]
+        assert "signal_completion" in names
+
+    def test_typed_payload_schema_still_filtered_when_interactive_root(self):
+        """The filter applies BEFORE the schema-shape decision.
+
+        A profile that declares completion_payload_schema AND is loaded
+        in an interactive root still hides signal_completion — the
+        filter doesn't care about the payload shape, only about the
+        client/session combo.
+        """
+        lt = LifecycleTools(StubInteractiveSession(
+            schema=SAMPLE_SCHEMA,
+            client_type=ClientType.TERMINAL,
+        ))
+        assert all(
+            s.name != "signal_completion" for s in lt.get_tool_schemas()
+        )
+
+    def test_enter_tier_unaffected_by_filter(self):
+        """The filter only hides signal_completion; enter_tier stays.
+
+        Future tier-mode sessions must still see enter_tier even when
+        running in interactive root (the per-turn model switching is a
+        cost optimization, not a completion contract).
+        """
+        # Tier mode requires _tier_config — set on the session.
+        session = StubInteractiveSession(client_type=ClientType.TERMINAL)
+        session._tier_config = object()  # sentinel non-None
+        lt = LifecycleTools(session)
+        names = [s.name for s in lt.get_tool_schemas()]
+        assert "signal_completion" not in names
+        assert "enter_tier" in names

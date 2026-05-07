@@ -120,42 +120,58 @@ class LifecycleTools:
         legacy shape (``summary: str``).  When one is declared, embeds
         the resolved JSON Schema as the ``payload`` parameter so
         providers enforce it at sampling time.
-        """
-        if self._payload_schema is None:
-            parameters = {
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": (
-                            "Brief summary of what was accomplished."
-                        ),
-                    },
-                },
-                "required": ["summary"],
-            }
-        else:
-            parameters = {
-                "type": "object",
-                "properties": {
-                    "payload": self._payload_schema,
-                },
-                "required": ["payload"],
-            }
 
-        schemas: List[ToolSchema] = [
-            ToolSchema(
-                name="signal_completion",
-                description=(
-                    "Signal that you have finished all your work and have "
-                    "nothing left to do.  This triggers downstream agents "
-                    "(e.g. memory curator) and allows the session to be "
-                    "cleaned up.  Call this as your very last action."
-                ),
-                parameters=parameters,
-                discoverability="core",
-            ),
-        ]
+        **Interactive-root filter (server 0.6.61+).**  Sessions that are
+        BOTH a root session (no parent_session) AND connected via an
+        interactive client (``client_type ∈ {terminal, web, chat}``)
+        DO NOT see ``signal_completion`` in their tool surface.  The
+        rationale: interactive clients expect the session to remain
+        available for further turns until the user disconnects;
+        ``signal_completion`` is a terminal-tool that ends the session,
+        which is the wrong contract for that workload.  Subagents (any
+        client) and headless API clients (``client_type=api``) are
+        unaffected — they continue to see the tool because cascade /
+        completion-payload contracts depend on it.  See
+        :meth:`_should_hide_signal_completion` for the precise gate.
+        """
+        schemas: List[ToolSchema] = []
+
+        if not self._should_hide_signal_completion():
+            if self._payload_schema is None:
+                parameters = {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": (
+                                "Brief summary of what was accomplished."
+                            ),
+                        },
+                    },
+                    "required": ["summary"],
+                }
+            else:
+                parameters = {
+                    "type": "object",
+                    "properties": {
+                        "payload": self._payload_schema,
+                    },
+                    "required": ["payload"],
+                }
+
+            schemas.append(
+                ToolSchema(
+                    name="signal_completion",
+                    description=(
+                        "Signal that you have finished all your work and have "
+                        "nothing left to do.  This triggers downstream agents "
+                        "(e.g. memory curator) and allows the session to be "
+                        "cleaned up.  Call this as your very last action."
+                    ),
+                    parameters=parameters,
+                    discoverability="core",
+                )
+            )
 
         # Per-turn model-tier switching.  Only registered when the
         # session has tier mode active — single-model sessions don't
@@ -166,6 +182,40 @@ class LifecycleTools:
             schemas.append(self._enter_tier_schema())
 
         return schemas
+
+    def _should_hide_signal_completion(self) -> bool:
+        """Whether the interactive-root filter applies to this session.
+
+        Returns True iff the session is BOTH:
+
+        - **Root** — no ``_parent_session`` set.  Subagents always see
+          ``signal_completion`` because they need to terminate cleanly
+          to bubble their typed payloads up to the parent regardless
+          of the parent's client type.
+        - **Connected via an interactive client** —
+          ``presentation_context.client_type ∈ {TERMINAL, WEB, CHAT}``.
+          Headless API clients (``client_type=API``) keep the tool
+          because cascade entry-points and one-shot orchestrators rely
+          on it.
+
+        Returns False — i.e. ``signal_completion`` IS exposed — when
+        either condition fails OR when ``presentation_context`` is
+        absent (defensive default; an unknown client_type is treated
+        as the cascade-friendly path).
+        """
+        if getattr(self._session, '_parent_session', None) is not None:
+            return False
+        pctx = getattr(self._session, '_presentation_context', None)
+        if pctx is None:
+            return False
+        # Local import to avoid a circular dependency with jaato_sdk
+        # at module load time (this module is imported during
+        # JaatoSession.configure which itself runs before the SDK
+        # event types are guaranteed loaded in some test paths).
+        from jaato_sdk.events import ClientType
+        return pctx.client_type in (
+            ClientType.TERMINAL, ClientType.WEB, ClientType.CHAT,
+        )
 
     def _enter_tier_schema(self) -> ToolSchema:
         """Build the ``enter_tier`` tool schema.
