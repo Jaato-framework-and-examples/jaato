@@ -2589,6 +2589,21 @@ class PTDisplay:
             buffer.toggle_tools_expanded()
             self._app.invalidate()
 
+        @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
+        def handle_toggle_budget(event):
+            """Handle Ctrl+B - toggle budget consumption panel.
+
+            Mirrors the toggle_plan / toggle_workspace / toggle_tools
+            pattern — the panel exists and renders correctly, but the
+            keybinding to show/hide it had been omitted from the kb
+            registration; without this @kb.add the configured
+            ``toggle_budget`` key is dead.  Restores the C+B-opens-budget
+            shortcut documented at budget_panel.py:41 and surfaced via
+            the budget-data hint at pt_display.py:1048-1049.
+            """
+            self._budget_panel.toggle()
+            self._app.invalidate()
+
         @kb.add(*keys.get_key_args("tool_output_popup_tab"), filter=not_in_search_mode)
         def handle_tool_output_popup_tab(event):
             """Handle Ctrl+O - cycle between running tools in output popup."""
