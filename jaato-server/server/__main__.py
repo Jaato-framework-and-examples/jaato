@@ -368,22 +368,13 @@ class JaatoDaemon:
         from server.event_sink import CompositeEventSink
         from server.command_router import CommandRouter
 
-        # Replace the asyncio default executor with a SafeThreadPoolExecutor
-        # (server 0.6.47+) so ``loop.run_in_executor()`` calls (notably
-        # the IPC connection-handling fallback at server/ipc.py:650)
-        # also benefit from the AppArmor defensive-reset pre-task hook.
-        # Importing ``server.apparmor`` first registers the hook globally
-        # before the executor starts pulling tasks; ``SafeThreadPoolExecutor``
-        # picks up the registered hook list at submit time.
-        from shared.safe_pool import SafeThreadPoolExecutor
-        try:
-            import server.apparmor  # noqa: F401 — side-effect: registers hook
-        except ImportError:
-            pass
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(SafeThreadPoolExecutor(
-            max_workers=8, thread_name_prefix="asyncio-default-safe",
-        ))
+        # Phase 2 (confined runner): the daemon never confines its own
+        # threads to per-session AppArmor profiles — confinement happens
+        # in the per-session runner subprocess (see server/runner/).
+        # The previous SafeThreadPoolExecutor + per-task defensive-reset
+        # hook was load-bearing only because daemon threads ran tools
+        # under apparmor_confine; after Phase 2 the daemon is unconfined
+        # and the asyncio default executor is fine.
 
         # Write PID and config files early so that clients checking
         # _check_server_running() see this daemon before initialization
@@ -820,15 +811,18 @@ class JaatoDaemon:
                 )
                 return
 
-            from server.apparmor import make_confine_context
-            confine_context = make_confine_context(
-                apparmor.get_profile_name(session_id)
-            )
-            server.set_apparmor_confinement(confine_context)
+            # Phase 2 (confined runner): the kernel-level profile is
+            # provisioned above (apparmor.provision_profile) but the
+            # daemon's own threads stay unconfined.  Per-session
+            # confinement is applied by the runner subprocess, which
+            # self-confines via aa_change_profile against this
+            # already-loaded profile.  See docs/design/per_session_confined_runner.md
+            # §4.6 (daemon apparmor-state constraint).
             sess.sandbox_mode = "apparmor"
             _notify(
-                f"confinement applied (workspace={sess.workspace_path}, "
-                f"config_root={config_root or '(none)'})",
+                f"profile provisioned (workspace={sess.workspace_path}, "
+                f"config_root={config_root or '(none)'}); runner will "
+                "self-confine on spawn",
                 style="info",
             )
 

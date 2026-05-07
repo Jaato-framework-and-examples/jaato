@@ -1677,23 +1677,20 @@ def _thread_unconfine_safe() -> None:
         pass  # not on Linux, AppArmor unavailable, or already unconfined.
 
 
-# Register ``_thread_unconfine_safe`` as a pre-task hook on every
-# ``shared.safe_pool.SafeThreadPoolExecutor`` so that EVERY task
-# submitted to a registered pool starts with a defensive reset of
-# the worker's AppArmor profile.  The pool infrastructure lives in
-# ``shared/`` (so shared-layer modules can use it without violating
-# the shared→server layering rule); the apparmor-specific reset
-# function lives here and registers itself when this module is first
-# imported (i.e. when AppArmor is first wired into the daemon).
-try:
-    from shared.safe_pool import register_pre_task_hook as _register_pre_task_hook
-    _register_pre_task_hook(_thread_unconfine_safe)
-except ImportError:
-    # safe_pool unavailable (very early bootstrap or test setup).
-    # The hook never fires; behaviour falls back to plain
-    # apparmor_confine semantics with the entry-side defensive reset
-    # but without per-task coverage.
-    pass
+# Phase 2 (confined runner): the daemon never confines its own
+# threads to a per-session AppArmor profile, so the pre-task
+# defensive-reset hook is no longer needed.  The
+# ``_thread_unconfine_safe`` helper above is kept for any
+# third-party reuse and ``SafeThreadPoolExecutor`` is unchanged
+# from the perspective of its remaining callers (auto-background
+# pool, subagent pool) — they get a plain ThreadPoolExecutor
+# subclass with an empty pre-task hook list.
+#
+# ``AppArmorManager._teardown_profile_impl`` still calls
+# ``sweep_registered_executors()`` defensively; with no hooks
+# registered, the sweep dispatches no-op tasks — wasted work,
+# not a correctness issue.  Phase 6 cleanup deletes the sweep
+# call along with the rest of the thread-confinement machinery.
 
 
 # ------------------------------------------------------------------
