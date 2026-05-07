@@ -249,7 +249,7 @@ its pool and emits `TaskCompletedEvent(ok: false, error: cancelled)`.
 | `clarification`       | Runner    | Inline UX, but tool-local. |
 | `environment`         | Runner    | Reads env, writes scratch files. |
 | `prompt_library`      | Runner    | Reads `~/.claude/skills/` and `.jaato/prompts/`. |
-| `references`          | **Straddle** | Whole plugin runs in the runner (catalog read from `~/.jaato/references/` and `.jaato/references/`, `selectReferences` tool, embedding/semantic match). Single daemon-only RPC: `apparmor.add_fragment` writes to `/etc/apparmor.d/jaato/<sid>.refs.d/` and runs `sudo apparmor_parser -r`. Daemon-side because criterion 1 applies — `ix` strips setuid so the confined runner can't effectively call sudo, and validation of fragment paths (`_validate_path_for_fragment`) belongs outside model-driven code. |
+| `references`          | Runner    | Per-tenant catalog (read from `~/.jaato/references/` and `.jaato/references/`), per-tenant embeddings, per-tenant index, `selectReferences` tool, semantic match — all runner-local. There is no cross-tenant references state to share daemon-side. The plugin uses the daemon's `apparmor.add_fragment` RPC to grant kernel-level read access to external paths (e.g., a kb submodule outside the workspace) when `selectReferences` admits a new path; that RPC is a **generic privileged-op primitive**, not the daemon-side half of the references plugin (see §4.7 + the "Straddle" definition below). |
 | `memory`              | Runner    | `~/.jaato/memories/` is rw under every session's profile (template line 334), so the runner writes `memories/raw/<id>.json` and `curated.jsonl` directly via tempfile-rename — same concurrency story as today. Embedding-cache sharing (criterion 2) is a soft argument for daemon, but per-runner load cost is acceptable for the simpler topology. Revisit if measured RAM cost is a problem. |
 | `permission`          | **Straddle** | Rules/state in daemon (whitelist, blacklist, evaluators, suspension, channels) — daemon owns the UI relay path and the rules outlive any single runner. The runner's tool executor delegates `check_permission` to the daemon via RPC (see §4.5). |
 | `reliability`         | Runner    | Per-session failure tracking. Daemon placement was a soft call for cross-session adaptive trust; in practice reliability state is most useful within a single agent session. Move to daemon later if cross-session trust becomes a real feature. |
@@ -266,16 +266,29 @@ its pool and emits `TaskCompletedEvent(ok: false, error: cancelled)`.
 | `reactor` (jaato-premium) | Daemon | Lives outside this repo. Subscribes to the daemon's EventBus. Out of scope for this design (it's already daemon-tier). |
 | `background`          | Daemon    | Auto-background pool for long-running tools. The execution still runs in the runner, but the supervision (timeout escalation, status events) lives daemon-side. The runner posts `tool.background_promoted` and the daemon takes over status. |
 
+**Straddle — definition.** A plugin is a straddle ONLY when its own
+state or its own plugin-specific logic genuinely lives in BOTH
+processes. A runner-tier plugin that consumes a generic daemon-tier
+RPC primitive (apparmor fragment grant, telemetry span emission,
+permission check, etc.) is not a straddle — those primitives are
+daemon capabilities the runner uses, not plugin-specific
+daemon-resident components.
+
 **Don't-fit-cleanly flags:**
 
-- `references` is the only true straddle: a single daemon-only RPC
-  (the kernel-grant write) wrapped around an otherwise runner-tier
-  plugin. The straddle is unavoidable because criterion 1 applies to
-  `sudo apparmor_parser` (see §4.7).
-- `permission` is the second straddle by design: UI relay + rule
-  storage are daemon-side because they outlive runners and depend on
-  channels that are daemon-owned. The *call site* is runner-side. §4.5
-  has the full plan.
+- `permission` is the only real straddle. The plugin's STATE — rules
+  (whitelist, blacklist, evaluators), channels, UI relay, suspension
+  tracking — lives daemon-side because it outlives any single runner
+  and depends on channels that are daemon-owned. The check call site
+  lives runner-side. §4.5 has the full plan.
+- `references` is runner-tier. Per-tenant catalog, embeddings, and
+  index are all runner-local; nothing references-specific lives
+  daemon-side. The plugin uses the generic `apparmor.add_fragment`
+  daemon RPC when `selectReferences` widens the runner's profile —
+  that's privileged-op delegation, not a split plugin. The privileged
+  op stays daemon-side because criterion 1 applies (`ix` strips
+  setuid, and `_validate_path_for_fragment` belongs outside
+  model-driven code; see §4.7).
 - `subagent` is runner-tier in the *parent*, but spawning a subagent
   creates a new session, which shares the parent's runner by default
   (see §4.3).
