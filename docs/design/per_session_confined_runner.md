@@ -62,32 +62,62 @@ different design that defers the actual problem.
 │                                                         │
 │  • IPC + WS transports                                  │
 │  • SessionManager, JaatoServer per session              │
-│  • Daemon-tier plugins: model_provider/*, references,   │
-│    memory, telemetry, cache_*, anthropic_auth, etc.     │
-│  • Permission rules + UI relay                          │
+│  • Daemon-tier plugins: model_provider/*,               │
+│    cache_*, gc_*, telemetry, *_auth, formatters         │
 │  • EventBus + reactor framework hooks                   │
-│  • RunnerSpawner: forks one runner per session          │
+│  • UI-relay primitive (operator prompts)                │
+│  • Apparmor fragment-grant primitive (sudo)             │
+│  • RunnerSpawner: forks one runner per top-level session│
 └──────────────┬──────────────────────────────────────────┘
                │ Unix socketpair, length-prefixed JSON
                │ (frame format mirrors server/ipc.py)
                ▼
 ┌─────────────────────────────────────────────────────────┐
-│  jaato runner subprocess (one per session)              │
+│  jaato runner subprocess (one per top-level session,    │
+│  hosts that session's subagents in-process by default)  │
 │                                                         │
 │  • aa_change_profile("jaato-ws-{session_id}") at start  │
 │  • Refuses to proceed if confinement fails              │
 │  • Runner-tier plugins: cli, file_edit,                 │
 │    interactive_shell, filesystem_query, todo, lsp,      │
-│    template, service_connector, mcp, webhook            │
-│  • Local ToolExecutor; daemon-tier calls go back over   │
-│    RPC (permission, memory writes, …)                   │
+│    template, service_connector, mcp, webhook,           │
+│    permission, references, memory, subagent, …         │
+│  • Hosts: parent JaatoSession + N subagent JaatoSessions│
+│    (subagents share parent's runner by default; §4.3)   │
+│  • Local ToolExecutor + permission policy + state       │
+│    (state keyed by session_id within the runner)        │
+│  • Daemon RPC primitives: client.prompt_operator (UI),  │
+│    apparmor.add_fragment (kernel grants), telemetry,    │
+│    provider.complete (model calls)                      │
 │  • Tool subprocesses inherit per-session profile        │
 └─────────────────────────────────────────────────────────┘
 ```
 
-One process per session. One AppArmor profile per session. Cross-workspace
-isolation is enforced by the kernel because the runner that touches workspace
-files is itself confined to that workspace's profile.
+**One runner per top-level session.** A "top-level session" is one
+created from outside the runner — by an IPC/WS client's `session.new`
+request, or by a daemon-tier reactor's `ctx.create_session`. Subagents
+spawned from WITHIN a top-level session's runner share that runner by
+default (see §4.3 — opt-in `isolated: true` for per-subagent runners
+when defense-in-depth matters more than spawn cost). So a runner
+hosts **one parent JaatoSession and zero or more subagent
+JaatoSessions**, all sharing the same AppArmor profile and the same
+workspace.
+
+**One AppArmor profile per top-level session** — same lifetime.
+Profile name `jaato-ws-{top_level_session_id}`; subagent session_ids
+don't appear in any profile name because they don't get their own
+profile. Cross-workspace isolation is enforced by the kernel because
+the runner that touches workspace files is confined to that
+workspace's profile, regardless of how many JaatoSessions are nested
+inside it.
+
+**Two unrelated top-level sessions in the same workspace get two
+runners.** Different session_ids → different profile names → two
+profile loads → two `RunnerSpawner.spawn` calls → two runner
+processes. Functionally equivalent profiles but separate processes.
+This is wasteful (~30 MB RSS per runner + cold-start cost) but
+correct; profile-name reuse / pooling is a Phase 6+ optimization
+not addressed in v1.
 
 ## 4. Load-bearing decisions
 
@@ -384,9 +414,12 @@ reactor, broadcast).
 ### 4.5 Permission flow
 
 **Decision:** the entire permission plugin lives in the runner. Each
-session belongs to one runner; the runner manages permissions for its
-session locally. Policy + state + decision logic + suspension tracking
-+ evaluators all run runner-side. The ONLY thing that crosses the
+top-level session belongs to one runner; the runner manages
+permissions for ALL JaatoSessions it hosts (parent + any subagents
+sharing the runner per §4.3 default). Policy + state + decision logic
++ suspension tracking + evaluators all run runner-side, with state
+keyed by session_id within the runner so parent and subagent
+permission state stay distinct. The ONLY thing that crosses the
 boundary is the ASK-the-operator path — and that uses a generic
 **daemon-side UI-relay primitive** (`client.prompt_operator(prompt) →
 response`), not a permission-plugin-specific component. Same shape as
@@ -397,13 +430,16 @@ can do (talk to its connected clients).
 **Why permission is runner-tier, not straddle.**
 
 - Rules (whitelist, blacklist, evaluators, per-arg patterns) come from
-  the session's profile config (`plugin_configs.permission.policy`).
-  Per-profile = per-session = available in the runner at init. No
-  cross-session sharing.
+  each session's profile config (`plugin_configs.permission.policy`).
+  Per-profile = per-session-instance = available in the runner at
+  init time for the parent session, and at subagent-spawn time for
+  any subagent the runner hosts. The runner keeps a per-session-id
+  policy view because parent + subagents may have different profiles.
 - Per-session state (turn_suspended, idle_suspended,
   session_whitelist additions, modified_args edits) is by definition
-  scoped to a single session. Where the session lives, the state
-  lives — runner.
+  scoped to a single JaatoSession. Where the JaatoSession lives, the
+  state lives — runner. Multiple JaatoSessions in one runner means
+  the runner's permission state is keyed by session_id.
 - Evaluators are runner-local logic (Python predicates; nothing
   daemon-side to call back to).
 - The session-level `_trusted_bridge_context` (notebook plugin's
@@ -490,6 +526,17 @@ isn't justified by any cross-session shared state.
   the profile before `server.initialize()`; we hook in here). Spawn creates
   the socketpair, forks, exec's `python -m server.runner` with workspace
   context in env. The fork inherits no Python state — clean cold start.
+
+  **Spawn fires per TOP-LEVEL session only.** Subagent JaatoSessions
+  spawned from within a runner do NOT trigger another `RunnerSpawner.spawn`
+  by default — they share the parent runner per §4.3, no fork, no apparmor
+  profile load, no second confinement transition. The fork-spawn-and-confine
+  constraint described below applies once per top-level session create.
+  When `isolated: true` is set on a subagent (§4.3 opt-in), the subagent
+  DOES trigger a fresh `RunnerSpawner.spawn` from the daemon, and the same
+  daemon-apparmor-state constraint applies — daemon must be unconfined
+  (or in a profile that grants `change_profile -> jaato-ws-*`) at the
+  fork moment, exactly as for top-level session create.
 
   **Daemon apparmor-state constraint (load-bearing for multitenancy).**
   The fork-then-exec inherits the daemon's apparmor profile. The runner's
