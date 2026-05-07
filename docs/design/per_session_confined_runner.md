@@ -219,9 +219,32 @@ its pool and emits `TaskCompletedEvent(ok: false, error: cancelled)`.
 - **Daemon-tier** — criterion 1 or 2 applies; never instantiated in
   the runner.
 - **Runner-tier** — criterion 3; never instantiated in the daemon.
-- **Straddling** — the plugin's *invocation* is runner-tier but one
-  specific operation is hard-daemon (criterion 1). The split is
-  bounded to that single RPC, not the whole plugin.
+
+**No "straddle" tier.** Earlier drafts of this design classified
+`references` and `permission` as straddles ("plugin invocation
+runner-side, one specific operation daemon-side"). On review the
+straddle framing was force-fit: in both cases the plugin itself is
+fully runner-tier, and what crosses the boundary is a **generic
+daemon-tier RPC primitive** the runner consumes:
+
+- `apparmor.add_fragment` — privileged op (sudo + `apparmor_parser`,
+  blocked by `ix` setuid-strip and trust-boundary on the LLM-driven
+  runner). Used by `references` when `selectReferences` widens the
+  runner's profile.
+- `client.prompt_operator` — UI relay (the daemon owns the client
+  connection). Used by `permission` for ASK decisions, and reusable by
+  any future plugin needing operator interaction.
+
+Both primitives are daemon capabilities the runner consumes, not
+plugin-specific daemon-resident components. The plugin tier is
+determined by where the plugin's own state and own logic lives;
+generic-primitive consumption doesn't move the tier.
+
+If a future plugin emerges whose own state genuinely lives in BOTH
+processes (e.g. a plugin maintaining a cross-runner shared mutable
+cache that's neither read-mostly nor session-scoped), the straddle
+tier can be re-introduced. For v1 the table has Daemon-tier and
+Runner-tier only.
 
 | Plugin                | Tier      | Rationale |
 |-----------------------|-----------|-----------|
@@ -251,7 +274,7 @@ its pool and emits `TaskCompletedEvent(ok: false, error: cancelled)`.
 | `prompt_library`      | Runner    | Reads `~/.claude/skills/` and `.jaato/prompts/`. |
 | `references`          | Runner    | Per-tenant catalog (read from `~/.jaato/references/` and `.jaato/references/`), per-tenant embeddings, per-tenant index, `selectReferences` tool, semantic match — all runner-local. There is no cross-tenant references state to share daemon-side. The plugin uses the daemon's `apparmor.add_fragment` RPC to grant kernel-level read access to external paths (e.g., a kb submodule outside the workspace) when `selectReferences` admits a new path; that RPC is a **generic privileged-op primitive**, not the daemon-side half of the references plugin (see §4.7 + the "Straddle" definition below). |
 | `memory`              | Runner    | `~/.jaato/memories/` is rw under every session's profile (template line 334), so the runner writes `memories/raw/<id>.json` and `curated.jsonl` directly via tempfile-rename — same concurrency story as today. Embedding-cache sharing (criterion 2) is a soft argument for daemon, but per-runner load cost is acceptable for the simpler topology. Revisit if measured RAM cost is a problem. |
-| `permission`          | **Straddle** | Rules/state in daemon (whitelist, blacklist, evaluators, suspension, channels) — daemon owns the UI relay path and the rules outlive any single runner. The runner's tool executor delegates `check_permission` to the daemon via RPC (see §4.5). |
+| `permission`          | Runner    | Per-session policy (whitelist / blacklist / per-arg patterns / evaluators), per-session state (turn_suspended, idle_suspended, session_whitelist, trusted_bridge_context), all runner-local. The plugin uses the daemon's `client.prompt_operator` RPC primitive when an ASK decision needs operator interaction — that's a generic daemon capability (the daemon owns the client connection), not the daemon-side half of a split plugin. See §4.5. |
 | `reliability`         | Runner    | Per-session failure tracking. Daemon placement was a soft call for cross-session adaptive trust; in practice reliability state is most useful within a single agent session. Move to daemon later if cross-session trust becomes a real feature. |
 | `artifact_tracker`    | Runner    | Enriches file-writer tool results in-process. Runs alongside the tools it observes; result enrichment happens before the result crosses the RPC boundary. Daemon placement would force a full-result round-trip just to annotate. |
 | `cache`, `cache_*`    | Daemon    | Cache state lives in the daemon (provider-side prompt caching). |
@@ -266,29 +289,18 @@ its pool and emits `TaskCompletedEvent(ok: false, error: cancelled)`.
 | `reactor` (jaato-premium) | Daemon | Lives outside this repo. Subscribes to the daemon's EventBus. Out of scope for this design (it's already daemon-tier). |
 | `background`          | Daemon    | Auto-background pool for long-running tools. The execution still runs in the runner, but the supervision (timeout escalation, status events) lives daemon-side. The runner posts `tool.background_promoted` and the daemon takes over status. |
 
-**Straddle — definition.** A plugin is a straddle ONLY when its own
-state or its own plugin-specific logic genuinely lives in BOTH
-processes. A runner-tier plugin that consumes a generic daemon-tier
-RPC primitive (apparmor fragment grant, telemetry span emission,
-permission check, etc.) is not a straddle — those primitives are
-daemon capabilities the runner uses, not plugin-specific
-daemon-resident components.
-
 **Don't-fit-cleanly flags:**
 
-- `permission` is the only real straddle. The plugin's STATE — rules
-  (whitelist, blacklist, evaluators), channels, UI relay, suspension
-  tracking — lives daemon-side because it outlives any single runner
-  and depends on channels that are daemon-owned. The check call site
-  lives runner-side. §4.5 has the full plan.
-- `references` is runner-tier. Per-tenant catalog, embeddings, and
-  index are all runner-local; nothing references-specific lives
-  daemon-side. The plugin uses the generic `apparmor.add_fragment`
-  daemon RPC when `selectReferences` widens the runner's profile —
-  that's privileged-op delegation, not a split plugin. The privileged
-  op stays daemon-side because criterion 1 applies (`ix` strips
-  setuid, and `_validate_path_for_fragment` belongs outside
-  model-driven code; see §4.7).
+- `references` and `permission` were re-classified runner-tier during
+  review (initial drafts had both as straddles). Both consume a generic
+  daemon-tier RPC primitive — `apparmor.add_fragment` and
+  `client.prompt_operator` respectively — but neither plugin's own
+  state lives in both processes. See the "No straddle tier" framing
+  in the Tiers section above. The privileged-op surfaces themselves
+  (apparmor fragment loading, client UI relay) STAY daemon-side
+  because criterion 1 applies (`ix` strips setuid for sudo;
+  `_validate_path_for_fragment` belongs outside model-driven code;
+  the daemon owns the client connection).
 - `subagent` is runner-tier in the *parent*, but spawning a subagent
   creates a new session, which shares the parent's runner by default
   (see §4.3).
@@ -371,74 +383,102 @@ reactor, broadcast).
 
 ### 4.5 Permission flow
 
-**Decision:** check stays in the runner's `ToolExecutor.execute`, but
-`check_permission` becomes an RPC into the daemon. The daemon runs the policy
-+ channel + UI relay. The runner caches the result for the session's lifetime
-when the decision is `whitelist`, `session_whitelist`, `evaluator_session_whitelist`,
-`allow_all`, `turn_suspension`, or `idle_suspension` — i.e. anything that
-doesn't depend on per-call args (or where the policy explicitly carries a
-"this is sticky" hint).
+**Decision:** the entire permission plugin lives in the runner. Each
+session belongs to one runner; the runner manages permissions for its
+session locally. Policy + state + decision logic + suspension tracking
++ evaluators all run runner-side. The ONLY thing that crosses the
+boundary is the ASK-the-operator path — and that uses a generic
+**daemon-side UI-relay primitive** (`client.prompt_operator(prompt) →
+response`), not a permission-plugin-specific component. Same shape as
+references' use of `apparmor.add_fragment` (§4.7): a runner-tier plugin
+consuming a daemon-tier capability for the one thing only the daemon
+can do (talk to its connected clients).
+
+**Why permission is runner-tier, not straddle.**
+
+- Rules (whitelist, blacklist, evaluators, per-arg patterns) come from
+  the session's profile config (`plugin_configs.permission.policy`).
+  Per-profile = per-session = available in the runner at init. No
+  cross-session sharing.
+- Per-session state (turn_suspended, idle_suspended,
+  session_whitelist additions, modified_args edits) is by definition
+  scoped to a single session. Where the session lives, the state
+  lives — runner.
+- Evaluators are runner-local logic (Python predicates; nothing
+  daemon-side to call back to).
+- The session-level `_trusted_bridge_context` (notebook plugin's
+  nested tool calls) was already thread-local in the runner.
+- The previous "daemon owns the rules" framing was incorrect: today's
+  daemon-side plugin instance held rules for the SESSION it was bound
+  to, not cross-session rules. Per-session rules naturally migrate to
+  the runner with the session itself.
 
 Detailed flow:
 
 ```
 runner.ToolExecutor.execute(name, args)
-  └─ runner.permission_cache.lookup(name)
-       └─ hit (e.g. whitelist) → allow, no RPC, proceed
-       └─ miss → RPC permission.check(name, args, context) → daemon
-              └─ daemon.PermissionPlugin.check_permission()
-                  └─ static rule hit: returns immediately
-                  └─ ASK_CHANNEL: emits PermissionRequestedEvent on the bus,
-                     waits on channel for response (the existing flow), then
-                     replies on the RPC
-              ← runner receives (allowed, perm_info)
-       └─ if perm_info.method ∈ STICKY_METHODS:
-              cache it (see "cache key" below)
+  └─ runner.PermissionPlugin.check_permission(name, args, context)
+       ├─ static rule (whitelist / blacklist / per-arg pattern):
+       │     return immediately, fully local
+       ├─ evaluator (callable): run runner-local, return result
+       ├─ ASK (no static rule, no cached decision):
+       │     RPC client.prompt_operator(prompt_payload) → daemon
+       │       └─ daemon relays to the connected client (TUI / WS /
+       │          IPC) via the existing PermissionRequestChannel
+       │       └─ awaits response via PermissionResponseChannel
+       │       └─ returns the response over the RPC
+       │     runner records the response in its local permission state
+       │     (session_whitelist, turn_suspended, etc.)
+       │     return decision
        └─ proceed or return Permission denied
 ```
 
-**Cache key semantics.** Tool name alone is NOT sufficient. Per-tool
-argument-pattern whitelists (the `arguments.<tool>.<arg>: [glob, ...]`
-shape verified at `permission/plugin.py:375-385`) are arg-dependent:
-`call_service` with `service: maven_central` may be allowed while
-`service: malicious_service` is denied. Caching by tool name alone would
-allow the second call after the first.
+**Latency profile.**
 
-The runner's permission cache MUST be keyed by `(tool_name,
-arg-fingerprint)` whenever the policy that resolved the call has any
-per-arg rule that could apply. Two valid implementations:
+- Static-rule decisions (whitelist hit, blacklist hit, per-arg pattern
+  match): zero RPC, zero round-trip. Pure runner-local. This is the
+  dominant case for production cascades — operator pre-configures
+  policy, every tool call resolves locally.
+- Evaluator decisions: zero RPC, runner-local Python predicate.
+- ASK decisions (operator interaction needed): one RPC for the
+  prompt-relay round-trip plus the human-bound wait. The ~1 ms RPC
+  overhead is invisible against the human wait.
 
-1. **Fingerprint always.** Compute a stable hash of (tool_name, sorted
-   args), use as cache key. ~5–10 µs overhead per cache lookup; safe.
-2. **Daemon flags arg-dependent decisions.** The daemon's reply carries
-   `arg_dependent: true` when any per-arg rule was evaluated; runner caches
-   only when `arg_dependent: false`. Avoids hashing on every lookup at
-   the cost of the daemon knowing more about its own policy.
+**No permission cache needed.** The previous design's cache existed
+because every check was crossing a boundary; here the boundary
+disappears for static rules. ASK decisions update local state
+directly (e.g. `session_whitelist.add(tool_name)` after an "always
+allow" answer); subsequent calls hit the static path locally.
 
-Default to (1) for the simpler invariant: cache lookups always
-fingerprint, no daemon-side classification needed. For evaluator /
-allow_with_comment / dynamic-context decisions, skip caching entirely
-(both methods imply the answer may change).
+**Cross-session policy mutation (rare, contested in §6).** Operator
+commands like `/permissions whitelist <tool>` today mutate the
+daemon-side plugin's rules. Two paths under the new design:
+- **Per-session, RPC-broadcast-on-change:** operator command targets
+  one session at a time; daemon RPCs `permission.add_rule(rule)` to
+  that session's runner.
+- **Cross-session, persistent operator-level config:** future feature
+  where "always allow X for me" survives across sessions. Would
+  introduce a small daemon-side operator-policy store the runner
+  queries at init OR on rule miss. NOT in v1 scope; flagged in §6.8
+  for explicit consideration if this feature lands.
 
+For v1: per-session policy only, mutations route via RPC to the
+target session's runner, no daemon-side rule store.
 
-- The latency hit per uncached interactive permission is a single round-trip
-  on a Unix socket plus the existing channel wait. Round-trip is ≤ 1 ms;
-  channel wait is human-bound, so the additional ~1 ms is invisible.
-- Cached permission (whitelist, allow_all, turn_suspension): zero RPC,
-  zero round-trip.
-- Cache invalidation: the runner subscribes to permission-change events
-  (rule added/removed, suspension cleared). When the daemon clears
-  `_turn_suspended` at turn end, it sends `permission.invalidate()` to the
-  runner; the runner clears its cache.
-- `trusted_bridge_context` (notebook plugin's nested tool calls) stays
-  thread-local in the runner — no RPC needed; the runner already knows
-  it's in a trusted context.
-- Edited args (the `was_edited` / `modified_args` path): the daemon's reply
-  carries `modified_args` over the wire when present. Runner uses them.
+**Subagent permission inheritance** (`ParentBridgedChannel`):
+subagents share the parent's runner by default (§4.3), so the parent's
+permission state IS the subagent's permission state — no inheritance
+mechanism needed. For isolated-runner subagents (opt-in §4.3),
+inheritance becomes a runner→runner concern: the isolated runner
+forwards ASK decisions to the parent runner's UI-relay path (parent
+runner's `client.prompt_operator` round-trip). Out of v1 scope —
+revisit when isolated subagents land.
 
-Subagent permission inheritance (`ParentBridgedChannel`) needs no special
-handling: it's a daemon-side construct, and the runner's RPC just sees the
-final allow/deny.
+**Rejected alternative — keep policy daemon-side, RPC every check.**
+The original draft. Forfeits local-resolution of the dominant case,
+introduces cache complexity (the keying / invalidation burden the prior
+revision wrestled with), and creates a cross-process coupling that
+isn't justified by any cross-session shared state.
 
 ### 4.6 Runner lifecycle
 
@@ -684,13 +724,14 @@ some readers may prefer "isolate by default, opt out for cost." The right
 default depends on the kind of workloads we expect to be the common case.
 For the cascade workloads in `handoff_test`, share-by-default is much faster.
 
-**6.2 Permission cache invalidation breadth.** The cache plan above is
-"cache anything the policy says is sticky." A more conservative plan is
-"cache nothing; pay one round-trip per tool call." For the common case
-(model emits 5–10 tool calls per turn, most of them whitelist hits via
-permission), the savings are ~5–10 ms per turn — not nothing, but not huge.
-**Contested:** is the cache worth the invalidation complexity? A safer
-"cache nothing" v1 lets us defer the invalidation contract to v2.
+**6.2 Permission flow shape — RESOLVED.** Earlier drafts placed the
+permission plugin as a daemon-side or straddle component with a
+cache + invalidation contract on the runner. Review reframed
+permission as fully runner-tier (per-session policy + per-session
+state, all runner-local; only the ASK-the-operator path uses a
+generic daemon UI-relay primitive). No cache needed; static rules
+resolve locally. See §4.5. This contested item resolved during
+review; retained for traceability.
 
 **6.3 Daemon profile in Phase 6.** Whether the daemon also gets confined to
 its own profile (limiting what it can read across workspaces) is an extra
@@ -756,6 +797,22 @@ on the same daemon? Three resolutions, none decided in this design:
 Lean toward the third resolution — operator-configured daemon profile
 is a deployment decision, not a per-session ask. Decide explicitly in
 Phase 6.
+
+**6.8 Cross-session permission policy.** v1 ships per-session
+permission only — every rule, every suspension, every operator
+decision is scoped to one session's runner. If the future feature
+"always allow X for me across all my sessions" emerges (an obvious
+operator UX win for repeated tools), the cleanest landing is a small
+daemon-side **operator-policy store** the runner queries on rule miss
+(daemon-tier state genuinely shared across runners; would re-introduce
+permission as a real straddle by the strict definition). The
+alternative — broadcast operator-level rule changes to every active
+runner via RPC — works for a few sessions but doesn't scale to N
+runners and creates a tricky add-rule-to-existing-runner race.
+**Contested:** if cross-session operator policy lands, which shape
+wins? Defer until the feature has a real driver (today the per-session
+profile config is enough for batch / determinism / one-off cascades).
+Surface here so future readers see the deliberate punt.
 
 ## 7. Phased plan recap
 
