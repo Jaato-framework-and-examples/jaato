@@ -819,10 +819,42 @@ class JaatoDaemon:
             # already-loaded profile.  See docs/design/per_session_confined_runner.md
             # §4.6 (daemon apparmor-state constraint).
             sess.sandbox_mode = "apparmor"
+
+            # Spawn the per-session runner subprocess.  The cli plugin
+            # stub (and Phase 3's runner-tier plugins) will route
+            # tool.execute calls to this runner via
+            # ``registry.runner_rpc`` (the registry-attribute pattern
+            # picked in plan §5.4).
+            try:
+                _spawn_session_runner(
+                    server=server,
+                    session_id=session_id,
+                    workspace_path=sess.workspace_path,
+                    profile_name=apparmor.get_profile_name(session_id),
+                    daemon_loop=daemon_loop,
+                    notify=_notify,
+                )
+            except Exception as exc:  # noqa: BLE001 — boundary
+                # If the runner fails to spawn, downgrade to soft mode
+                # rather than killing the session — Phase 3 will make
+                # this strict (apparmor=on requires runner=on), but
+                # Phase 2 keeps the fallback path so a host-level
+                # apparmor mishap doesn't break IPC sessions outright.
+                sess.sandbox_mode = "soft"
+                _notify(
+                    f"runner spawn failed ({type(exc).__name__}: {exc}) "
+                    "— falling back to in-process tool execution; "
+                    "session is NOT kernel-confined",
+                    style="warning",
+                )
+                logger.exception(
+                    "runner spawn failed for session %s", session_id,
+                )
+                return
+
             _notify(
                 f"profile provisioned (workspace={sess.workspace_path}, "
-                f"config_root={config_root or '(none)'}); runner will "
-                "self-confine on spawn",
+                f"config_root={config_root or '(none)'}); runner spawned",
                 style="info",
             )
 
@@ -994,6 +1026,79 @@ class JaatoDaemon:
                 logger.warning(f"Failed to load daemon plugin '{name}': {exc}")
 
 
+
+
+def _spawn_session_runner(
+    *,
+    server,
+    session_id: str,
+    workspace_path: str,
+    profile_name: str,
+    daemon_loop,
+) -> None:
+    """Spawn the per-session runner subprocess and wire its RPC handle
+    onto the JaatoServer.
+
+    Called from the IPC AppArmor session hook AFTER
+    ``apparmor.provision_profile`` returns successfully.  The runner
+    self-confines via ``aa_change_profile`` against the just-loaded
+    profile (see :mod:`server.runner.bootstrap`).
+
+    Args:
+        server: The session's ``JaatoServer`` instance.
+        session_id: Session identifier (passed via env to the runner).
+        workspace_path: Session workspace; used both as the runner's
+            cwd and as the prefix for the per-session log file path
+            (plan §5.1).
+        profile_name: AppArmor profile name (already loaded in the
+            kernel).
+        daemon_loop: The daemon's main asyncio loop — needed to run
+            ``RunnerRPCClient.start()`` since it's async.
+
+    Raises on any failure.  The caller (the session hook) catches
+    and downgrades to ``sandbox_mode = "soft"`` per the §4.6 fallback
+    contract.
+    """
+    import asyncio
+    import os
+
+    from server.runner_spawner import RunnerSpawner
+    from server.runner_rpc import RunnerRPCClient
+
+    if daemon_loop is None:
+        raise RuntimeError(
+            "_spawn_session_runner: daemon loop unavailable; cannot "
+            "start RunnerRPCClient"
+        )
+
+    spawner = RunnerSpawner()
+
+    log_path: Optional[str] = None
+    if workspace_path:
+        log_dir = os.path.join(workspace_path, ".jaato", "logs")
+        log_path = os.path.join(log_dir, f"runner-{session_id}.log")
+
+    spawned = spawner.spawn(
+        profile_name=profile_name,
+        session_id=session_id,
+        workspace_path=workspace_path,
+        log_path=log_path,
+    )
+
+    rpc = RunnerRPCClient(
+        spawned.parent_socket,
+        runner_pid=spawned.pid,
+        loop=daemon_loop,
+    )
+
+    fut = asyncio.run_coroutine_threadsafe(rpc.start(), daemon_loop)
+    fut.result(timeout=10.0)
+
+    server.set_runner_rpc(rpc, spawned)
+    logger.info(
+        "runner spawned for session %s: pid=%d profile=%s log=%s",
+        session_id, spawned.pid, profile_name, log_path or "(inherited)",
+    )
 
 
 def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:

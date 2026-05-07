@@ -16,7 +16,11 @@ import pathlib
 import queue
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover — types only
+    from server.runner_rpc import RunnerRPCClient
+    from server.runner_spawner import SpawnedRunner
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +318,25 @@ class JaatoServer:
         # during ``initialize()`` so sessions created on this runtime
         # can wrap their dynamic-instructions expansion in the
         # session's confinement.  None = no confinement applies.
+        #
+        # Phase 2 (confined runner): no caller installs this any more
+        # — the daemon-side per-thread confinement was removed in
+        # task 2.1, and Phase 3 will absorb the prefetch confinement
+        # into the runner.  The slot stays in place for any in-tree
+        # consumer still reading it; Phase 6 cleanup deletes both.
         self._pre_init_confine_context_factory: Optional[Callable] = None
+
+        # Phase 2 confined runner: per-session RPC client to the
+        # spawned runner subprocess (see server.runner_spawner +
+        # server.runner_rpc).  Set by ``SessionManager.create_session``
+        # after ``RunnerSpawner.spawn`` returns and BEFORE
+        # ``initialize()`` runs, so plugins discovering the registry
+        # via ``set_plugin_registry`` see ``registry.runner_rpc`` at
+        # configure time.  ``None`` for sessions that don't get a
+        # runner (Phase 2: only apparmor-enabled sessions spawn one;
+        # Phase 3 makes it always-runner).
+        self._runner_rpc: Optional["RunnerRPCClient"] = None
+        self._spawned_runner: Optional["SpawnedRunner"] = None
 
         # Pricing table — loaded lazily on first use; populates
         # UsageBreakdown.cost_usd on emitted Context/Turn events when
@@ -3791,6 +3813,46 @@ class JaatoServer:
             return []
 
     # =========================================================================
+    # Confined runner (Phase 2 §4.6)
+    # =========================================================================
+
+    def set_runner_rpc(
+        self,
+        rpc_client: Optional["RunnerRPCClient"],
+        spawned: Optional["SpawnedRunner"],
+    ) -> None:
+        """Stash the daemon-side RPC handle for the per-session runner.
+
+        Called by :class:`SessionManager` after
+        :meth:`RunnerSpawner.spawn` returns and BEFORE this server's
+        :meth:`initialize` runs.  The cli plugin's daemon-side stub
+        reads ``registry.runner_rpc`` at configure time (the
+        registry-attribute injection pattern picked in plan §5.4),
+        so the registry must already carry the reference when the
+        plugin's ``set_plugin_registry`` hook fires.
+
+        Args:
+            rpc_client: The :class:`RunnerRPCClient` started against
+                the runner's parent socket.  ``None`` means this
+                session runs without a runner (Phase 2 falls back to
+                in-process execution for non-apparmor sessions).
+            spawned: The :class:`SpawnedRunner` handle (pid + socket).
+                Stored for ``shutdown()`` so we can reap the runner
+                if it doesn't exit cleanly on socket close.
+        """
+        self._runner_rpc = rpc_client
+        self._spawned_runner = spawned
+        # Plumb onto the registry so plugins can consume via the
+        # registry-attribute pattern (§5.4 of the Phase 2 plan).
+        if self.registry is not None and rpc_client is not None:
+            setattr(self.registry, "runner_rpc", rpc_client)
+
+    @property
+    def runner_rpc(self) -> Optional["RunnerRPCClient"]:
+        """Read accessor for the runner RPC handle."""
+        return self._runner_rpc
+
+    # =========================================================================
     # Cleanup
     # =========================================================================
 
@@ -3800,6 +3862,31 @@ class JaatoServer:
             self.registry.unexpose_all()
         if self.permission_plugin:
             self.permission_plugin.shutdown()
+        # Tear down the runner subprocess if one was spawned.  The
+        # close ladder (parent EOF → wait → SIGTERM → SIGKILL) lives
+        # inside ``RunnerRPCClient.close``; we run it on the daemon's
+        # main loop via run_coroutine_threadsafe so this synchronous
+        # ``shutdown`` doesn't block.
+        rpc = self._runner_rpc
+        spawned = self._spawned_runner
+        self._runner_rpc = None
+        self._spawned_runner = None
+        if rpc is not None:
+            try:
+                import asyncio
+                loop = getattr(rpc, "_loop", None)
+                if loop is None or not loop.is_running():
+                    return
+                fut = asyncio.run_coroutine_threadsafe(rpc.close(), loop)
+                # Bound the wait so a stuck runner doesn't wedge
+                # session shutdown — close() escalates to SIGKILL
+                # internally within ~7s.
+                fut.result(timeout=10.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "JaatoServer.shutdown: runner-rpc close failed: %s",
+                    exc, exc_info=True,
+                )
 
     def _trace(self, msg: str) -> None:
         """Write trace message for debugging (goes to daemon log)."""
