@@ -14,6 +14,7 @@ import asyncio
 import pytest
 
 from jaato_sdk import IPCClient, EventType
+from jaato_sdk.events import ClientType
 from jaato_sdk.events import (
     AgentCompletedEvent,
     AgentOutputEvent,
@@ -40,7 +41,7 @@ def _perm() -> PermissionRequestedEvent:
 
 def _client() -> IPCClient:
     """Fresh client without connecting (we drive ``_dispatch`` directly)."""
-    return IPCClient(socket_path="/tmp/_unused_subscribe_test.sock", auto_start=False)
+    return IPCClient(socket_path="/tmp/_unused_subscribe_test.sock", client_type=ClientType.API, auto_start=False)
 
 
 @pytest.mark.asyncio

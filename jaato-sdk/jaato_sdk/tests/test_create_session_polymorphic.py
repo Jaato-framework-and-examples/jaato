@@ -16,6 +16,7 @@ import asyncio
 import pytest
 
 from jaato_sdk import IPCClient
+from jaato_sdk.events import ClientType
 from jaato_sdk.events import CommandRequest
 
 
@@ -25,7 +26,7 @@ def _make_client_capture():
     ``captured_events`` accumulates every event ``_send_event`` is called
     with, letting tests assert on the exact ``CommandRequest`` shape.
     """
-    client = IPCClient(socket_path="/tmp/_unused_create_session.sock", auto_start=False)
+    client = IPCClient(socket_path="/tmp/_unused_create_session.sock", client_type=ClientType.API, auto_start=False)
     captured = []
 
     async def fake_send_event(event):

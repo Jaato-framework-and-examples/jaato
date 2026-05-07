@@ -17,6 +17,7 @@ from typing import List
 import pytest
 
 from jaato_sdk.client.ipc import IPCClient
+from jaato_sdk.events import ClientType
 from jaato_sdk.events import (
     Event,
     InjectPromptRequest,
@@ -35,7 +36,7 @@ from jaato_sdk.events import (
 @pytest.fixture
 def client_capture():
     """Build an IPCClient and capture every event passed to _send_event."""
-    client = IPCClient()
+    client = IPCClient(client_type=ClientType.API)
     captured: List[Event] = []
 
     async def fake_send(event):

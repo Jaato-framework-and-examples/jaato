@@ -48,6 +48,7 @@ from jaato_sdk.client._handler_registry import (
 )
 from jaato_sdk.client.config import RecoveryConfig
 from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, IPCClient, IncompatibleServerError
+from jaato_sdk.events import ClientType
 from jaato_sdk.events import (
     ConnectedEvent,
     ErrorEvent,
@@ -153,6 +154,8 @@ class IPCRecoveryClient:
     def __init__(
         self,
         socket_path: str = DEFAULT_SOCKET_PATH,
+        *,
+        client_type: ClientType,
         config: Optional[RecoveryConfig] = None,
         auto_start: bool = True,
         env_file: str = ".env",
@@ -171,11 +174,16 @@ class IPCRecoveryClient:
             workspace_path: Workspace path for loading project-level config.
             on_status_change: Callback invoked on connection status changes.
                 Receives a ConnectionStatus object.
+            client_type: **Required.** Forwarded to the inner IPCClient —
+                see ``IPCClient.__init__`` for semantics.  Pass
+                ``ClientType.TERMINAL`` for the TUI, ``API`` for
+                headless / batch / cascade harnesses.
             min_protocol_version: Override the inner IPCClient's
                 ``MIN_PROTOCOL_VERSION``. Forwarded verbatim — see
                 ``IPCClient.__init__`` for semantics.
         """
         self._socket_path = socket_path
+        self._client_type = client_type
         self._auto_start = auto_start
         self._env_file = env_file
         self._workspace_path = workspace_path
@@ -294,6 +302,7 @@ class IPCRecoveryClient:
         try:
             self._client = IPCClient(
                 socket_path=self._socket_path,
+                client_type=self._client_type,
                 auto_start=self._auto_start,
                 env_file=self._env_file,
                 workspace_path=str(self._workspace_path) if self._workspace_path else None,
@@ -1083,6 +1092,7 @@ class IPCRecoveryClient:
         # Create new client
         self._client = IPCClient(
             socket_path=self._socket_path,
+            client_type=self._client_type,
             auto_start=False,  # Don't auto-start during reconnection
             env_file=self._env_file,
             workspace_path=str(self._workspace_path) if self._workspace_path else None,

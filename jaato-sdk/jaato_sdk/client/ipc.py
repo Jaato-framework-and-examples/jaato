@@ -224,6 +224,8 @@ class IPCClient:
     def __init__(
         self,
         socket_path: str = DEFAULT_SOCKET_PATH,
+        *,
+        client_type: ClientType,
         auto_start: bool = True,
         env_file: str = ".env",
         workspace_path: Optional[str] = None,
@@ -273,6 +275,21 @@ class IPCClient:
                 so the caller can surface it in the event loop and
                 the user knows whether kernel confinement is really
                 active.  See ``docs/apparmor-setup.md``.
+            client_type: **Required.** Identifies the kind of client for
+                server-side presentation / lifecycle filters.  Pass
+                ``ClientType.TERMINAL`` for interactive TUI clients,
+                ``WEB`` / ``CHAT`` for chat-shaped UIs, ``API`` for
+                headless orchestrators / test harnesses / cascade
+                entry-points.  No default — caller must declare intent
+                explicitly so the server can apply the correct
+                interactive-root filter (server 0.6.61+ strips
+                ``signal_completion`` for ``TERMINAL``/``WEB``/``CHAT``
+                root sessions to prevent premature termination in
+                interactive contexts; ``API`` keeps it for cascade
+                completion).  Reactor-spawned headless sessions
+                (server 0.6.67+) automatically default to ``API`` —
+                this requirement only applies to clients connecting
+                via IPC / WS.
             min_protocol_version: Override the class-level
                 ``MIN_PROTOCOL_VERSION`` for this connection.  Use only
                 for development against unreleased daemons; production
@@ -285,6 +302,7 @@ class IPCClient:
         self.workspace_path = workspace_path
         self.config_root = config_root
         self.apparmor = apparmor
+        self.client_type = client_type
         self._min_protocol_version: str = (
             min_protocol_version or self.MIN_PROTOCOL_VERSION
         )
@@ -751,7 +769,7 @@ class IPCClient:
         # (e.g. avoid wide tables on narrow terminals).
         presentation = PresentationContext(
             content_width=content_width,
-            client_type=ClientType.TERMINAL,
+            client_type=self.client_type,
         )
 
         # Get client's working directory (for finding config files like .lsp.json)

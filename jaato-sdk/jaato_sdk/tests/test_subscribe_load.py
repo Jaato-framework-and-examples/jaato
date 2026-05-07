@@ -18,6 +18,7 @@ import time
 import pytest
 
 from jaato_sdk import IPCClient, EventType
+from jaato_sdk.events import ClientType
 from jaato_sdk.events import AgentOutputEvent
 
 
@@ -29,7 +30,7 @@ N_HANDLERS = 100
 
 
 def _client() -> IPCClient:
-    return IPCClient(socket_path="/tmp/_unused_load.sock", auto_start=False)
+    return IPCClient(socket_path="/tmp/_unused_load.sock", client_type=ClientType.API, auto_start=False)
 
 
 def _output(i: int) -> AgentOutputEvent:
