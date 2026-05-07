@@ -262,7 +262,6 @@ its pool and emits `TaskCompletedEvent(ok: false, error: cancelled)`.
 | `*_auth` (anthropic, antigravity, github, nim, openrouter, zhipuai) | Daemon | `SESSION_INDEPENDENT = True`; these run before sessions exist. They never had any business in a runner. |
 | `introspection`       | Runner    | Lists tools currently exposed to the model — the model lives "in" the runner from the tool dispatch POV, so the runner is the right place for the introspection commands. |
 | `thinking`            | Runner    | Provider-backed thinking blocks; the tool surfaces them through the runner so chained tool calls are visible together. |
-| `clarification`       | Runner    | (already listed) |
 | `code_block_formatter`, `code_validation_formatter`, `diff_formatter`, `inline_markdown_formatter`, `mermaid_formatter`, `notebook_output_formatter`, `table_formatter`, `enrichment_formatter`, `formatter_pipeline`, `hidden_content_filter` | Daemon | Pure enrichment over tool results / model output. They post-process strings; no FS work; running them daemon-side avoids serializing big tool results across the boundary just to be reformatted and serialized again. |
 | `reactor` (jaato-premium) | Daemon | Lives outside this repo. Subscribes to the daemon's EventBus. Out of scope for this design (it's already daemon-tier). |
 | `background`          | Daemon    | Auto-background pool for long-running tools. The execution still runs in the runner, but the supervision (timeout escalation, status events) lives daemon-side. The runner posts `tool.background_promoted` and the daemon takes over status. |
@@ -381,10 +380,33 @@ runner.ToolExecutor.execute(name, args)
                      replies on the RPC
               ← runner receives (allowed, perm_info)
        └─ if perm_info.method ∈ STICKY_METHODS:
-              cache it (key = tool name; for evaluator/allow_with_comment,
-              don't cache — args may matter)
+              cache it (see "cache key" below)
        └─ proceed or return Permission denied
 ```
+
+**Cache key semantics.** Tool name alone is NOT sufficient. Per-tool
+argument-pattern whitelists (the `arguments.<tool>.<arg>: [glob, ...]`
+shape verified at `permission/plugin.py:375-385`) are arg-dependent:
+`call_service` with `service: maven_central` may be allowed while
+`service: malicious_service` is denied. Caching by tool name alone would
+allow the second call after the first.
+
+The runner's permission cache MUST be keyed by `(tool_name,
+arg-fingerprint)` whenever the policy that resolved the call has any
+per-arg rule that could apply. Two valid implementations:
+
+1. **Fingerprint always.** Compute a stable hash of (tool_name, sorted
+   args), use as cache key. ~5–10 µs overhead per cache lookup; safe.
+2. **Daemon flags arg-dependent decisions.** The daemon's reply carries
+   `arg_dependent: true` when any per-arg rule was evaluated; runner caches
+   only when `arg_dependent: false`. Avoids hashing on every lookup at
+   the cost of the daemon knowing more about its own policy.
+
+Default to (1) for the simpler invariant: cache lookups always
+fingerprint, no daemon-side classification needed. For evaluator /
+allow_with_comment / dynamic-context decisions, skip caching entirely
+(both methods imply the answer may change).
+
 
 - The latency hit per uncached interactive permission is a single round-trip
   on a Unix socket plus the existing channel wait. Round-trip is ≤ 1 ms;
@@ -433,6 +455,18 @@ final allow/deny.
       tool output, close interactive_shell sessions cleanly, terminate MCP
       servers).
     - Wait up to 5 s for runner to exit. SIGTERM. Wait 2 s. SIGKILL.
+    - **Atomic-write requirement for runner-tier persistence.** SIGTERM
+      arriving mid-write to a runner-tier state file (waypoints.json,
+      todos.md, .artifact_tracker.json, etc.) is a real failure mode.
+      Every runner-tier plugin that persists state MUST use the
+      `tempfile + os.replace` atomic-write pattern (waypoint already does;
+      memory's curated layer does; **artifact_tracker's `_save_state`
+      currently does NOT** — flag for fix as a Phase 3 audit task). The
+      audit also covers todo, file_session (tested via session_manager
+      pre-resolution), and any runner-tier plugin that lands during
+      Phase 3 migration. A signal-handler that sets a "shutting down"
+      flag the plugins check before starting a write is NOT sufficient —
+      the SIGTERM-after-write-began window is what atomic-write closes.
 - **Death — idle:** runner has no idle timer. Idle handling stays
   daemon-side (where session idle is already tracked); on long idle the
   daemon issues `runner.shutdown`. Reasoning: keeping the runner alive
@@ -540,6 +574,17 @@ profile name in env; the runner self-confines via `aa_change_profile`. No
   `{"error": ..., "traceback": ...}`; we preserve that information in
   the typed envelope so the model still sees the same diagnostic on
   permission errors / executor exceptions.
+
+  **Cross-tenant info-leak caveat.** Python tracebacks contain absolute
+  filesystem paths (workspace_root in module imports, source-line file
+  references). Under multitenant deployment a stale traceback in
+  daemon-side logs OR in an event forwarded to a different operator
+  could expose another tenant's workspace path. The runner SHOULD
+  path-sanitize tracebacks before crossing the RPC boundary —
+  redact absolute paths matching `/<workspace_root>/...` to
+  `<WORKSPACE>/...`, and absolute paths matching `~/.jaato/...` to
+  `<HOME>/.jaato/...`. Phase 3 task; the sanitization is a single
+  regex pass over the joined traceback text.
 - `warnings`: aligned with the codebase-wide payload-schema convention
   (`docs/design/payload-schema-conventions.md`) of "every contract has
   `warnings[]`". The runner injects warnings for: timeout-near-cap,
@@ -599,6 +644,17 @@ daemon process. This is **not** the "legacy_mode" — it's a platform
 compatibility layer for a platform that has no equivalent of AppArmor.
 Multitenancy on Windows remains unsupported. A startup WARN log
 makes this visible to operators.
+
+**macOS handling explicitly:** macOS has no AppArmor; the equivalent
+primitive is `sandbox-exec` (deprecated but still functional) or the
+SIP / endpoint-security framework (more complex, requires entitlements).
+For v1, macOS gets the same in-process compatibility runner as Windows:
+same RPC interface, runs in the daemon process, multitenancy
+unsupported, startup WARN log. A future v2 design could add
+sandbox-exec-backed per-session confinement; out of scope for this
+document. The Phase 6 cross-platform compatibility runner is shared
+between Windows and macOS — same code path, same multitenancy-disabled
+posture.
 
 ## 6. Open / contested items
 
@@ -661,6 +717,33 @@ and the new runner re-spawns them. This is correct behavior (the MCP
 protocol expects a fresh client session) but is observable as latency.
 Worth flagging in the docs but not a blocker.
 
+**6.7 Per-client `apparmor` flag vs. process-level daemon profile.** §4.7
+notes that "the daemon itself: we need a new (much narrower) daemon
+profile" and is "opt-in via the same `ClientConfigRequest.apparmor` flag
+that exists today." This punts a real contradiction to Phase 6: today's
+`apparmor` flag is **per-client** (each `ClientConfigRequest` carries
+its own value); a daemon profile is **process-level** (one daemon, one
+loaded profile, applies to every connected client). What does it mean
+for client-A to set `apparmor: True` and client-B to set `apparmor: False`
+on the same daemon? Three resolutions, none decided in this design:
+
+- **Per-client wins for runners; daemon profile is daemon-level only.**
+  The flag scopes only what gets enforced on the runner's profile; the
+  daemon-side profile is set once at daemon startup via a daemon-level
+  config knob, independent of any client.
+- **Strictest-client wins for daemon.** Daemon loads its own profile
+  whenever ANY connected client requests apparmor; profile stays loaded
+  until ALL clients disconnect. Adds connection-tracking state and
+  reload-on-last-disconnect logic.
+- **Daemon profile is operator-configured, not client-driven.** The
+  per-client `apparmor` flag controls only the runner; daemon profile
+  is `--daemon-apparmor` at startup. Cleanest separation; matches the
+  way other daemon-level flags work today.
+
+Lean toward the third resolution — operator-configured daemon profile
+is a deployment decision, not a per-session ask. Decide explicitly in
+Phase 6.
+
 ## 7. Phased plan recap
 
 The brief already lays out Phases 1–6. This document is Phase 1's
@@ -700,3 +783,66 @@ needed because the whole runner process is confined), the
 confined daemon-side), and the
 `set_apparmor_context` / `_apparmor_context` plumbing in
 `shared/ai_tool_runner.py`.
+
+## 8. Success criteria (Phase 5 acceptance gate)
+
+Phase 5 validates multi-tenant correctness end-to-end. The design ships
+when ALL of the following hold; until then Phases 2–4 are not "done."
+
+**8.1 Functional correctness.**
+
+- Two cascades from two different workspaces, started concurrently
+  against a single daemon, both run end-to-end with no permission-deny
+  errors at IPC handshake or tool execution.
+- Daemon restart is NOT required to switch workspaces. A client
+  connecting from workspace-B after workspace-A's session is in flight
+  succeeds without daemon bounce.
+- handoff_test cascade `--case stp_approval` produces byte-identical
+  output to the pre-runner baseline (modulo legitimate timestamps).
+  Same for kb-enablement-2.0's smoke cascade.
+
+**8.2 Cross-workspace isolation.**
+
+- Integration test (`tests/integration/test_multitenant_apparmor.py`)
+  confirms a tool call in session-A workspace cannot write to OR read
+  sensitive paths in workspace-B's tree. Verified via:
+    - attempted-write-fails (positive assertion: write returns EACCES)
+    - AppArmor audit log entries (`dmesg | grep apparmor` shows the
+      kernel-level deny for the cross-workspace path).
+- 7:3's original failure (`Permission denied:
+  kb-enablement-2.0/.jaato/profiles` during cross-workspace IPC
+  handshake) reproduces as a regression test that's now green.
+
+**8.3 Performance budget.**
+
+- **Tool-call RPC overhead ≤ 5 ms p50** for in-memory tools (todo
+  list, file_edit metadata operations, introspection). Measured via
+  the existing `_telemetry` field in the result envelope.
+- **End-to-end cascade wall-time regression ≤ 10%** vs. the pre-runner
+  baseline on handoff_test stp_approval and kb-enablement-2.0 smoke.
+- **Runner spawn latency ≤ 200 ms p99**. Measured on a cold runner
+  (no apparmor-cache hit) and a warm runner (cache hit) separately.
+
+**8.4 Operational soundness.**
+
+- Runner crash → daemon emits `SessionFailedEvent` within 100 ms of
+  socket EOF.
+- Daemon restart → all runners receive `runner.shutdown`; SIGTERM
+  ladder completes within 7 s for a session with one open
+  `interactive_shell` PTY.
+- Apparmor-unavailable platform (macOS, Windows, Linux without
+  apparmor module) → daemon starts with WARN log, multi-tenancy
+  flagged-unsupported, single-tenant cascade still works in-process.
+
+**8.5 Backwards compatibility.**
+
+- Existing test suite passes (no functional regressions visible to
+  clients). Specifically: jaato-server's full pytest suite, jaato-sdk's
+  full pytest suite, handoff_test orchestrator integration tests,
+  kb-enablement-2.0 cascade smoke.
+- `_telemetry` removal from agent-visible tool results: zero downstream
+  consumers reading `tool_result["_telemetry"]` — verified via grep
+  across all consumer repos before merge.
+
+If 8.1–8.5 hold, the design ships. If any criterion fails, surface as
+a Phase-N regression and address before promoting to "done."
