@@ -200,11 +200,15 @@ Location: `jaato-server/tests/integration/test_phase2_multitenant_apparmor.py`
 (new directory; existing tests live next to source, but integration tests
 need a daemon subprocess + apparmor and benefit from segregation).
 
-**Infrastructure prerequisite (CI question):** `apparmor_parser` requires
-CAP_MAC_ADMIN. Reuse the existing `_apparmor_available()` gate from
-`shared/tests/test_apparmor.py`. **CI must gain a privileged job** to run
-the `apparmor` mark, OR the integration test ships skipped-in-CI with a
-manual-verification note. First option preferred per "2.6 IS THE GATE".
+**Infrastructure prerequisite:** `apparmor_parser` requires CAP_MAC_ADMIN
+and the dmesg audit assertion requires CAP_SYSLOG. Per operator
+direction, this regression test runs on a **user-hosted server** with
+the necessary capabilities (not in standard CI). The test still ships
+with `@pytest.mark.apparmor` + `_apparmor_available()` skipif gate
+(reused from `shared/tests/test_apparmor.py`) so it skips cleanly
+elsewhere rather than failing confusingly. The Phase 2 done-criterion
+"green in CI" in the prompt is read as "green on the user-hosted
+runner that exercises the apparmor mark."
 
 **Pseudo-code:**
 
@@ -323,10 +327,11 @@ mid-frame; daemon-side reader sees a partial frame. Mitigation: treat
 EOF-mid-frame as benign (single warning, not protocol-error) on the
 daemon side.
 
-**6.8 CI cap.** §2.6 needs CAP_MAC_ADMIN; CI doesn't run privileged
-today. **Decision needed before merge:** privileged CI job for the
-`apparmor` mark, or shipped-skipped-in-CI with manual-verification
-note. First preferred per "2.6 IS THE GATE".
+**6.8 CI cap — RESOLVED.** §2.6 needs CAP_MAC_ADMIN + CAP_SYSLOG.
+Per operator direction, the regression test runs on a user-hosted
+server with those capabilities, not standard GitHub-Actions CI. The
+test still ships with the `apparmor` mark + skipif gate so it skips
+cleanly on capability-less runners.
 
 ---
 
