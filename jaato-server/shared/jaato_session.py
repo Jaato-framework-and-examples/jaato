@@ -620,6 +620,49 @@ class JaatoSession:
         from jaato_sdk.plugins.model_provider.types import PresentationContext  # noqa: F811
         self._presentation_context = ctx
         self._terminal_width = ctx.content_width
+        # Server 0.6.62+: re-apply the lifecycle-tools interactive-root
+        # filter now that ``_presentation_context`` is known.  At
+        # configure() time the context wasn't yet set (it arrives via
+        # ``_apply_client_config_to_server`` AFTER configure runs), so
+        # the filter defaulted to "expose" — leaking
+        # ``signal_completion`` into the tool surface for what we now
+        # know is an interactive root session.  This call removes it
+        # post-hoc when the filter says so; for non-interactive
+        # contexts (api root, subagent), the call is a no-op.
+        self._reapply_lifecycle_tool_filter()
+
+    def _reapply_lifecycle_tool_filter(self) -> None:
+        """Re-apply the LifecycleTools interactive-root filter post-config.
+
+        Server 0.6.62+: ``configure()`` registers signal_completion + its
+        executor + auto-approval whitelist BEFORE
+        ``_apply_client_config_to_server`` runs, which means
+        ``_presentation_context`` is not yet known at registration time
+        and the filter's "expose by default when unknown" path lets
+        signal_completion through.  After ``set_presentation_context``
+        sets the context, we re-run the filter and remove
+        signal_completion from each surface (schema, executor,
+        permission whitelist) when the filter now says it should be
+        hidden.
+
+        No-op when the filter says signal_completion should remain
+        exposed (api-client root sessions, subagents).
+        """
+        if self._lifecycle_tools is None:
+            return
+        if not self._lifecycle_tools._should_hide_signal_completion():
+            return
+        # Filter wants signal_completion hidden — strip it from the
+        # two surfaces that determine accessibility:
+        #   (1) self._tools (the model's visible tool schema list)
+        #   (2) self._executor._map (the dispatch table)
+        # Permission whitelist isn't actively pruned — the tool not
+        # being in the schema or executor is sufficient; a stale
+        # whitelist entry for a tool that doesn't exist anywhere is
+        # harmless.
+        self._tools = [t for t in self._tools if t.name != "signal_completion"]
+        if "signal_completion" in getattr(self._executor, '_map', {}):
+            del self._executor._map["signal_completion"]
 
     def _get_trace_prefix(self) -> str:
         """Get the trace prefix including agent context."""
