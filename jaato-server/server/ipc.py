@@ -30,13 +30,20 @@ import asyncio
 import json
 import logging
 import os
-import struct
 import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
+
+from shared.framing import (
+    HEADER_SIZE,
+    MAX_MESSAGE_SIZE,
+    FrameTooLargeError,
+    read_frame,
+    write_frame,
+)
 
 
 # Windows named pipe prefix (\\.\pipe\)
@@ -102,9 +109,11 @@ def _get_server_version() -> str:
     return pkg_version("jaato-server")
 
 
-# Message framing: 4-byte length prefix (big-endian) + JSON payload
-HEADER_SIZE = 4
-MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max
+# Message framing constants are imported from shared.framing — see
+# that module for the wire format (4-byte big-endian length prefix +
+# UTF-8 payload).  Re-exported here as ``HEADER_SIZE`` /
+# ``MAX_MESSAGE_SIZE`` for any in-tree caller still importing them
+# from server.ipc.
 
 
 @dataclass
@@ -491,41 +500,25 @@ class JaatoIPCServer:
     async def _read_message(self, reader: asyncio.StreamReader) -> Optional[str]:
         """Read a length-prefixed message from the stream.
 
-        Returns:
-            The message string, or None if connection closed.
+        Thin wrapper around :func:`shared.framing.read_frame` —
+        delegates the wire format so the runner-RPC channel can share
+        the same framing.  Returns ``None`` on clean EOF or peer
+        reset; oversize-frame errors propagate as
+        :class:`shared.framing.FrameTooLargeError`.
         """
-        try:
-            # Read length header - use readexactly for reliable framed reading
-            header = await reader.readexactly(HEADER_SIZE)
-
-            length = struct.unpack(">I", header)[0]
-            if length > MAX_MESSAGE_SIZE:
-                raise ValueError(f"Message too large: {length} bytes")
-
-            # Read payload
-            payload = await reader.readexactly(length)
-            return payload.decode("utf-8")
-
-        except asyncio.IncompleteReadError:
-            # Connection closed before complete message was read
-            return None
-        except ConnectionResetError:
-            # Connection was reset by peer
-            return None
+        return await read_frame(reader)
 
     async def _write_message(
         self,
         writer: asyncio.StreamWriter,
         message: str,
     ) -> None:
-        """Write a length-prefixed message to the stream."""
-        payload = message.encode("utf-8")
-        header = struct.pack(">I", len(payload))
-        logger.debug(f"_write_message: writing {len(payload)} bytes")
-        writer.write(header + payload)
-        logger.debug("_write_message: calling drain()")
-        await writer.drain()
-        logger.debug("_write_message: drain() completed")
+        """Write a length-prefixed message to the stream.
+
+        Thin wrapper around :func:`shared.framing.write_frame` —
+        same wire format as the daemon-runner RPC.
+        """
+        await write_frame(writer, message)
 
     def register_message_handler(
         self,
