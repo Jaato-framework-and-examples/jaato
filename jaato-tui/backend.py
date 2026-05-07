@@ -399,10 +399,14 @@ class IPCBackend(Backend):
         if self._use_recovery:
             # Import here to avoid circular imports
             from jaato_sdk.client.recovery import IPCRecoveryClient
+            from jaato_sdk.events import ClientType
 
-            # Create recovery client wrapping the raw client's socket path
+            # Create recovery client wrapping the raw client's socket path.
+            # Forward the raw client's client_type so the recovery client
+            # presents the same identity to the server.
             self._recovery_client = IPCRecoveryClient(
                 socket_path=self._raw_client.socket_path,
+                client_type=self._raw_client.client_type,
                 auto_start=self._raw_client.auto_start,
                 env_file=self._raw_client.env_file,
                 workspace_path=self._workspace_path,

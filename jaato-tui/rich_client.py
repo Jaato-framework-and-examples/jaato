@@ -973,8 +973,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # is forwarded to the inner IPCClient; the SDK runs the compat
     # check during connect handshake and raises IncompatibleServerError
     # on mismatch — no external check needed.
+    from jaato_sdk.events import ClientType
     client: IPCRecoveryClient = IPCRecoveryClient(
         socket_path=socket_path,
+        client_type=ClientType.TERMINAL,
         config=recovery_config,
         auto_start=auto_start,
         env_file=env_file,

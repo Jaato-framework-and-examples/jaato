@@ -47,8 +47,10 @@ async def run_command_mode(
     )
     from client_commands import parse_user_input, CommandAction
 
+    from jaato_sdk.events import ClientType
     client = IPCRecoveryClient(
         socket_path=socket_path,
+        client_type=ClientType.TERMINAL,
         auto_start=auto_start,
         env_file=env_file,
     )

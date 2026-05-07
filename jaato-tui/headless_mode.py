@@ -106,9 +106,15 @@ async def run_headless_mode(
     renderer = HeadlessFileRenderer(workspace=workspace, flush_immediately=True)
     renderer.start()
 
-    # Create IPC client with recovery support
+    # Create IPC client with recovery support.  ``--headless`` mode is
+    # for non-TTY automation (CI, scripting, batch runs); declare
+    # ClientType.API so the server's interactive-root filter does NOT
+    # strip ``signal_completion`` — headless agents need it to terminate
+    # cleanly.
+    from jaato_sdk.events import ClientType
     client = IPCRecoveryClient(
         socket_path=socket_path,
+        client_type=ClientType.API,
         auto_start=auto_start,
         env_file=env_file,
         workspace_path=workspace,
