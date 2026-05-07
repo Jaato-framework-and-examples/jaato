@@ -1553,16 +1553,33 @@ class JaatoSession:
             from .lifecycle_tools import LifecycleTools
             self._lifecycle_tools = LifecycleTools(self)
             existing_names = {s.name for s in self._tools}
+            exposed_lifecycle_names = set()
             for schema in self._lifecycle_tools.get_tool_schemas():
                 if schema.name not in existing_names:
                     self._tools.append(schema)
+                exposed_lifecycle_names.add(schema.name)
+            # Server 0.6.61+: only register executors for lifecycle
+            # tools that survived the schema filter.  Without this
+            # gate, ``signal_completion`` would still be callable
+            # even when filtered from the tool surface (interactive
+            # root sessions): providers don't strictly enforce schema
+            # membership, so a model emitting the call from cached
+            # knowledge would still hit the executor and terminate
+            # the session — the exact failure the schema filter was
+            # supposed to close.  See LifecycleTools.get_tool_schemas
+            # for the filter rationale.
             for name, fn in self._lifecycle_tools.get_executors().items():
-                self._executor.register(name, fn)
-            # Auto-approve so no permission prompt
+                if name in exposed_lifecycle_names:
+                    self._executor.register(name, fn)
+            # Auto-approve so no permission prompt — same gating: only
+            # whitelist lifecycle tools that are actually exposed.
             if self._runtime.permission_plugin:
-                self._runtime.permission_plugin.add_whitelist_tools(
-                    self._lifecycle_tools.get_auto_approved_tools()
-                )
+                approved = [
+                    t for t in self._lifecycle_tools.get_auto_approved_tools()
+                    if t in exposed_lifecycle_names
+                ]
+                if approved:
+                    self._runtime.permission_plugin.add_whitelist_tools(approved)
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:

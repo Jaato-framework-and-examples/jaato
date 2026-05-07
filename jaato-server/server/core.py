@@ -3304,14 +3304,35 @@ class JaatoServer:
                 # ignoring the reminder eventually halts naturally.
                 # Mirrors the subagent-side guard in
                 # ``shared.plugins.subagent.plugin._run_subagent_async``.
+                #
+                # Server 0.6.61+: skip the nudge when ``signal_completion``
+                # isn't in the session's tool surface (interactive root
+                # sessions filter it out per LifecycleTools).  Without
+                # this check the nudge text instructs the model to call
+                # a tool it can't see in its schema — providers don't
+                # strictly enforce schema membership, so the model
+                # would dutifully emit the call from cached knowledge,
+                # and the executor (still registered) would terminate
+                # the session.  Skipping the nudge entirely when the
+                # tool was filtered preserves the user's expected
+                # contract: TUI / web / chat sessions stay alive across
+                # turns until the user disconnects.
                 MAX_COMPLETION_NUDGES = 2
                 jaato_session = (
                     server._jaato.get_session()
                     if server._jaato is not None else None
                 )
+                signal_completion_in_surface = (
+                    jaato_session is not None
+                    and any(
+                        getattr(t, 'name', None) == 'signal_completion'
+                        for t in getattr(jaato_session, '_tools', []) or []
+                    )
+                )
                 if (
                     status == "done"
                     and jaato_session is not None
+                    and signal_completion_in_surface
                     and not getattr(jaato_session, '_signal_completion_called', False)
                     and getattr(jaato_session, '_completion_nudges_fired', 0) < MAX_COMPLETION_NUDGES
                 ):
