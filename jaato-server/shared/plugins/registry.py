@@ -1322,7 +1322,7 @@ class PluginRegistry:
         """Get ToolSchemas from exposed plugins and core tools, excluding disabled.
 
         This is what should be sent to the model - only enabled tools.
-        For plugins implementing StreamingCapable, auto-generates :stream
+        For plugins implementing StreamingCapable, auto-generates -stream
         variants for tools that support streaming.
 
         Returns:
@@ -1337,7 +1337,7 @@ class PluginRegistry:
                 enabled_schemas = [s for s in plugin_schemas if s.name not in self._disabled_tools]
                 schemas.extend(enabled_schemas)
 
-                # Auto-generate :stream variants for streaming-capable plugins
+                # Auto-generate -stream variants for streaming-capable plugins
                 if isinstance(plugin, StreamingCapable):
                     for schema in enabled_schemas:
                         if plugin.supports_streaming(schema.name):
@@ -1355,19 +1355,23 @@ class PluginRegistry:
         return schemas
 
     def _create_streaming_schema(self, base_schema: ToolSchema) -> ToolSchema:
-        """Create a :stream variant of a tool schema.
+        """Create a -stream variant of a tool schema.
 
         The streaming variant has the same parameters but different behavior -
         it returns immediately with initial chunks and continues streaming
         in the background.
 
-        Inherits category and discoverability from the base schema.
+        Inherits category and discoverability from the base schema.  The
+        suffix is ``-stream`` (server 0.6.65+) — was ``:stream`` previously,
+        but the colon failed strict upstream tool-name regexes
+        (Anthropic / Bedrock / OpenAI all enforce ``^[a-zA-Z0-9_-]{1,128}$``).
+        Hyphen is universally regex-safe.
 
         Args:
             base_schema: The base tool schema to create a streaming variant for.
 
         Returns:
-            A new ToolSchema for the :stream variant.
+            A new ToolSchema for the -stream variant.
         """
         streaming_description = (
             f"{base_schema.description} "
@@ -1376,7 +1380,7 @@ class PluginRegistry:
             f"Call dismiss_stream(stream_id) when you have enough results.)"
         )
         return ToolSchema(
-            name=f"{base_schema.name}:stream",
+            name=f"{base_schema.name}-stream",
             description=streaming_description,
             parameters=base_schema.parameters,
             category=base_schema.category,
@@ -1390,7 +1394,7 @@ class PluginRegistry:
         with discoverability='core'. Other tools can be discovered via
         introspection (list_tools, get_tool_schemas).
 
-        For plugins implementing StreamingCapable, auto-generates :stream
+        For plugins implementing StreamingCapable, auto-generates -stream
         variants for core tools that support streaming.
 
         Returns:
@@ -1409,7 +1413,7 @@ class PluginRegistry:
                 ]
                 schemas.extend(core_schemas)
 
-                # Auto-generate :stream variants for streaming-capable plugins (core tools)
+                # Auto-generate -stream variants for streaming-capable plugins (core tools)
                 if isinstance(plugin, StreamingCapable):
                     for schema in core_schemas:
                         if plugin.supports_streaming(schema.name):
@@ -1465,24 +1469,24 @@ class PluginRegistry:
         """Check if a tool name is a streaming variant.
 
         Args:
-            tool_name: Tool name to check (e.g., "grep_content:stream").
+            tool_name: Tool name to check (e.g., "grep_content-stream").
 
         Returns:
-            True if this is a :stream variant.
+            True if this is a -stream variant.
         """
-        return tool_name.endswith(":stream")
+        return tool_name.endswith("-stream")
 
     def get_base_tool_name(self, tool_name: str) -> str:
         """Get the base tool name from a streaming variant.
 
         Args:
-            tool_name: Tool name (e.g., "grep_content:stream").
+            tool_name: Tool name (e.g., "grep_content-stream").
 
         Returns:
             Base tool name (e.g., "grep_content").
         """
         if self.is_streaming_tool(tool_name):
-            return tool_name[:-7]  # Remove ":stream" suffix
+            return tool_name[:-7]  # Remove "-stream" suffix
         return tool_name
 
     def get_streaming_plugin(self, tool_name: str) -> Optional[StreamingCapable]:

@@ -552,9 +552,20 @@ class OpenRouterProvider:
         """
         self._model_name = model
 
-        if skip_model_test or self._context_length_override:
+        # Honour an explicit context_length override (env var or
+        # framework_overrides.context_length) — user knows their value.
+        if self._context_length_override:
             return
 
+        # Catalog lookup is a public, cacheable HTTP GET (``GET /api/v1/models``)
+        # totally orthogonal to ``skip_model_test`` — that flag is for
+        # *real-completion* model validation, not metadata fetch.  Always
+        # do this lookup so the per-model context window is set
+        # correctly even on fast-bootstrap paths where skip_model_test=True.
+        # Pre-server-0.6.66 the lookup was gated by ``skip_model_test``,
+        # which meant every fast-bootstrap session used the
+        # 32 K ``DEFAULT_CONTEXT_LENGTH`` — budget calculations against
+        # 200 K-window models reported >100% on tiny prompts.
         catalog_length = self._lookup_context_length(model)
         if catalog_length:
             self._context_length = catalog_length

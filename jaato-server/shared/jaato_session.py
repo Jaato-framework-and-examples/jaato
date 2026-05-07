@@ -5005,7 +5005,7 @@ NOTES
         """Execute a streaming tool via the StreamManager.
 
         Args:
-            fc: The function call (with :stream suffix).
+            fc: The function call (with -stream suffix).
             on_output: Optional callback for UI updates.
 
         Returns:
@@ -5122,7 +5122,7 @@ NOTES
             call_id=fc.id or "",
             plugin_type=plugin_type,
         ) as tool_span:
-            # Check if this is a streaming tool (name ends with :stream)
+            # Check if this is a streaming tool (name ends with -stream)
             # Set tool input
             tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
             tool_span.set_attribute("input.mime_type", "application/json")
@@ -5393,7 +5393,7 @@ NOTES
                 tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
                 tool_span.set_attribute("input.mime_type", "application/json")
 
-                # Check if this is a streaming tool (name ends with :stream)
+                # Check if this is a streaming tool (name ends with -stream)
                 if self._is_streaming_tool(name):
                     # Route to streaming execution
                     executor_result = self._execute_streaming_tool(fc, None)

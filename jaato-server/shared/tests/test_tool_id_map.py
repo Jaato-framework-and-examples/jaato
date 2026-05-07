@@ -30,27 +30,35 @@ class TestNameToId:
         assert result.startswith("t_")
 
 
-class TestNameToIdSuffix:
+class TestStreamingVariant:
+    """Server 0.6.65+: streaming variants use ``-stream`` suffix.
 
-    def test_stream_suffix_preserves_base_hash(self):
+    Each variant gets its own independent hash (no shared base prefix),
+    so the model-facing ID is uniformly ``t_<hash>`` and conforms to
+    every strict upstream tool-name regex (Anthropic / Bedrock / OpenAI
+    all enforce ``^[a-zA-Z0-9_-]{1,128}$``).
+    """
+
+    def test_stream_variant_gets_own_id(self):
         base_id = name_to_id("grep_content")
-        stream_id = name_to_id("grep_content:stream")
-        assert stream_id == f"{base_id}:stream"
+        stream_id = name_to_id("grep_content-stream")
+        # Different hashes — they're different inputs.
+        assert base_id != stream_id
 
-    def test_stream_suffix_roundtrip(self):
-        stream_id = name_to_id("grep_content:stream")
-        assert id_to_name(stream_id) == "grep_content:stream"
+    def test_stream_variant_id_is_regex_safe(self):
+        stream_id = name_to_id("grep_content-stream")
+        # Anthropic / Bedrock pattern: ^[a-zA-Z0-9_-]{1,128}$
+        import re
+        assert re.match(r"^[a-zA-Z0-9_-]{1,128}$", stream_id)
 
-    def test_base_still_resolves_after_suffix_registration(self):
-        base_id = name_to_id("some_tool")
-        name_to_id("some_tool:stream")
-        assert id_to_name(base_id) == "some_tool"
+    def test_stream_variant_roundtrip(self):
+        stream_id = name_to_id("grep_content-stream")
+        assert id_to_name(stream_id) == "grep_content-stream"
 
-    def test_suffix_id_length(self):
-        stream_id = name_to_id("readFile:stream")
-        # "t_" + 8 hex + ":stream" = 17
-        assert stream_id.startswith("t_")
-        assert stream_id.endswith(":stream")
+    def test_id_length_is_uniform(self):
+        # Both base and -stream variant IDs are ``t_`` + 8 hex chars = 10.
+        assert len(name_to_id("readFile")) == 10
+        assert len(name_to_id("readFile-stream")) == 10
 
 
 class TestIdToName:
@@ -72,14 +80,10 @@ class TestIdToName:
             tool_id = name_to_id(name)
             assert id_to_name(tool_id) == name
 
-    def test_suffix_resolves_even_without_explicit_registration(self):
-        """Model appends :stream to a base ID it knows — should still resolve."""
-        base_id = name_to_id("find_files")
-        # Simulate model appending :stream to the base hash ID
-        assert id_to_name(f"{base_id}:stream") == "find_files:stream"
-
-    def test_unknown_suffix_id_returns_input(self):
-        assert id_to_name("t_nonexistent:stream") == "t_nonexistent:stream"
+    def test_unregistered_id_returns_input(self):
+        # The model occasionally hallucinates IDs; these must round-trip
+        # to themselves so downstream code can detect "unknown tool".
+        assert id_to_name("t_deadbeef") == "t_deadbeef"
 
 
 class TestStability:

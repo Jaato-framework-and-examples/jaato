@@ -821,6 +821,24 @@ class SessionManager:
             ctx = PresentationContext.from_dict(config['presentation'])
             server.set_presentation_context(ctx)
             logger.debug(f"Applied presentation context to server for client {client_id}")
+        elif client_id == self._HEADLESS_CLIENT_ID:
+            # Reactor / extension-spawned headless sessions never send a
+            # ClientConfigRequest, so without this branch their server's
+            # presentation_context stays None.  Pre-server-0.6.67 that
+            # was effectively API-equivalent (the lifecycle filter
+            # exposes signal_completion when pctx is None), but default
+            # to ClientType.API explicitly so the contract is declarative
+            # and any future client_type-dependent code (telemetry,
+            # rendering hints, plugin-level routing) can rely on a
+            # known value rather than treating None as "unknown".
+            from jaato_sdk.events import ClientType
+            from jaato_sdk.plugins.model_provider.types import PresentationContext
+            server.set_presentation_context(PresentationContext(
+                client_type=ClientType.API,
+            ))
+            logger.debug(
+                "Applied default API presentation context to headless server"
+            )
         if 'working_dir' in config:
             server.workspace_path = config['working_dir']
             logger.debug(f"Applied working_dir={config['working_dir']} to server for client {client_id}")

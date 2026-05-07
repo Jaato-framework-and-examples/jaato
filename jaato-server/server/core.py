@@ -1260,15 +1260,24 @@ class JaatoServer:
         # This keeps each session's configuration isolated from other sessions.
         with _timer.stage("load_config") as _s1:
             from dotenv import dotenv_values
+            from shared.plugins.subagent.config import expand_variables
             with _s1.sub("dotenv_values"):
                 raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
-            # Filter out None values and store as session env
-            self._session_env = {k: v for k, v in raw_session_env.items() if v is not None}
+            # Filter out None values to a plain dict for expansion.
+            raw_filtered = {k: v for k, v in raw_session_env.items() if v is not None}
+            # Run .env values through expand_variables — same expansion
+            # the profile env: block gets below.  ${VAR} cross-references
+            # within .env resolve against sibling entries; secret URIs
+            # (pass://, vault://, awssm://, sops://, keyring://) resolve
+            # via the registered SecretResolver.  Mirrors the profile.env
+            # handling at the next block, closing the asymmetry where
+            # workspace credentials in .env couldn't use pass:// while
+            # the same key in profile env: could.
+            self._session_env = expand_variables(raw_filtered, context=raw_filtered)
 
             # Apply profile environment variables (higher precedence than .env file).
             # Values support ${VAR} expansion and secret URI resolution.
             if self._profile and self._profile.env:
-                from shared.plugins.subagent.config import expand_variables
                 expanded_env = expand_variables(self._profile.env)
                 self._session_env.update(expanded_env)
 
