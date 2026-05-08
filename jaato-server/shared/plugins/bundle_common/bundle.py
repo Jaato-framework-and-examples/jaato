@@ -53,6 +53,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
+
     Any,
     Dict,
     Iterable,
@@ -331,6 +332,7 @@ def resolve_bundle_roots(
     # broadcast — and therefore can't read the override from
     # ``self._config_root`` — still pick it up on first discovery.
     import os as _os
+    from shared.session_context import get_config_root
     effective_config_root = config_root or get_config_root()
 
     roots: List[Tuple[Path, str]] = []
