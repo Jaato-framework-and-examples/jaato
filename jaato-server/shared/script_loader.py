@@ -165,8 +165,17 @@ def _module_with_file(file_path: str) -> Optional[object]:
     fires at script-load frequency (cascades, permission evaluations),
     not at hot-path frequency. Avoids relying on a separate
     file-path → name index that could go stale.
+
+    Server 0.6.69+: snapshots ``sys.modules.values()`` via ``list(...)``
+    before iterating.  ``importlib.reload(...)`` mutates ``sys.modules``,
+    and a concurrent ``_refresh_stale_helpers`` call (e.g. from another
+    session's reactor) could trigger a reload while THIS function is
+    mid-scan — raising ``RuntimeError: dictionary changed size during
+    iteration``.  The tracker lock above protects ``_tracked_helpers``
+    but not ``sys.modules`` (which has no public lock).  Snapshotting
+    here is cheap and race-safe.
     """
-    for mod in sys.modules.values():
+    for mod in list(sys.modules.values()):
         mod_file = getattr(mod, "__file__", None)
         if not mod_file:
             continue
