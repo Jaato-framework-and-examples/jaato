@@ -32,9 +32,15 @@ def _make_client_capture():
     async def fake_send_event(event):
         captured.append(event)
 
+    async def fake_await_session_info():
+        # Short-circuit the post-send wait so the test asserts only on
+        # the CommandRequest shape.  In SDK 0.13.0+ create_session
+        # always calls _await_session_info; mocking it returns control
+        # to the test immediately.
+        return None
+
     client._send_event = fake_send_event
-    # No active event consumer → create_session won't try to read responses.
-    client._events_active = True
+    client._await_session_info = fake_await_session_info
     return client, captured
 
 

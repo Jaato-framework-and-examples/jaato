@@ -320,17 +320,25 @@ class IPCClient:
         # for snapshot/unsubscribe semantics.
         self._registry = _HandlerRegistry()
 
-        # Buffer for events consumed during request-response operations
-        # (e.g. create_session reads events until SessionInfoEvent; any
-        # other events received in the meantime are buffered here so that
-        # events() can yield them later without data loss).
+        # Drain task + per-consumer subscriber queues (SDK 0.13.0+).
+        # Replaces the previous "single-reader + _events_active gate"
+        # design.  A background drain task reads every event from the
+        # socket exactly once and fans it out to:
+        #
+        #   * each active subscriber queue (one per ``events()``
+        #     iterator and per ``_await_session_info()`` call), and
+        #   * ``_buffered_events`` when no subscribers exist (so a
+        #     later ``events()`` call can replay events that flowed
+        #     while no consumer was attached).
+        #
+        # This removes the deferred-aclose race that ``_events_active``
+        # could not avoid: consumers no longer read the socket
+        # directly, so back-to-back ``create_session`` / ``events()``
+        # patterns are race-free.  See ``_drain_loop``,
+        # ``_subscribe_events``, ``_unsubscribe_events``.
+        self._drain_task: Optional[asyncio.Task] = None
+        self._event_subscribers: list[asyncio.Queue] = []
         self._buffered_events: list[Event] = []
-
-        # True while events() is actively iterating.  When set,
-        # create_session() must NOT read from the socket (concurrent
-        # readers on a StreamReader is a RuntimeError).  It falls back
-        # to fire-and-forget and lets events() pick up the response.
-        self._events_active: bool = False
 
     def _get_pipe_path(self) -> str:
         """Get the full Windows named pipe path."""
@@ -700,6 +708,17 @@ class IPCClient:
                     ))
                     # Send client config with env overrides
                     await self._send_client_config()
+
+                    # Start the drain task — single reader for the
+                    # connection's lifetime.  After this point, no other
+                    # code path should call ``_read_message`` directly
+                    # on this client (the drain task owns it).  Consumers
+                    # use ``events()`` / ``_await_session_info()`` which
+                    # subscribe queues to the drain loop's fan-out.
+                    self._drain_task = asyncio.create_task(
+                        self._drain_loop(),
+                        name=f"ipc-drain-{id(self)}",
+                    )
                     return True
         except IncompatibleServerError:
             raise
@@ -712,6 +731,20 @@ class IPCClient:
     async def disconnect(self) -> None:
         """Disconnect from the server."""
         self._connected = False
+
+        # Stop the drain task BEFORE closing the writer.  Cancelling
+        # the task interrupts its in-flight ``_read_message`` await;
+        # the task's finally block then puts a sentinel into every
+        # subscriber queue so consumers exit cleanly.
+        if self._drain_task is not None:
+            self._drain_task.cancel()
+            try:
+                await self._drain_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug(f"_drain_task ended with: {exc}")
+            self._drain_task = None
 
         if self._writer:
             try:
@@ -726,6 +759,117 @@ class IPCClient:
         self._client_id = None
         self._server_version = None
         self._server_protocol_version = None
+
+    # ============================================================
+    # Drain task — single reader, fan-out to subscriber queues
+    # ============================================================
+
+    async def _drain_loop(self) -> None:
+        """Read events from the socket and fan out to subscribers.
+
+        Single reader for the lifetime of the connection.  Started by
+        ``connect()`` after the handshake completes; stopped by
+        ``disconnect()`` (cancelled) or naturally on connection close.
+
+        Each event flows to every active subscriber queue (one per
+        ``events()`` iterator and per ``_await_session_info()`` call).
+        When no subscribers exist, the event is appended to
+        ``_buffered_events`` so a later ``events()`` call can replay
+        it — preserving the prior behaviour where events emitted
+        during ``create_session`` were visible to a subsequent
+        ``async for ev in events()``.
+
+        On exit (cancellation or read failure), every active subscriber
+        queue gets a ``None`` sentinel so consumers wake from
+        ``q.get()`` and exit their loop.
+        """
+        try:
+            while self._connected:
+                try:
+                    message = await self._read_message()
+                except asyncio.IncompleteReadError:
+                    logger.debug("_drain_loop: incomplete read, connection lost")
+                    break
+                except ConnectionResetError:
+                    logger.debug("_drain_loop: connection reset by peer")
+                    break
+
+                if message is None:
+                    # Clean close from server side
+                    logger.debug("_drain_loop: connection closed")
+                    self._connected = False
+                    break
+
+                try:
+                    event = deserialize_event(message)
+                except Exception as exc:
+                    logger.error(f"_drain_loop: deserialize failed: {exc}")
+                    continue
+
+                # Auto-update session_id on SessionInfoEvent.  Done here
+                # in the single reader so both ``events()`` consumers and
+                # ``_await_session_info()`` see the same value.
+                if isinstance(event, SessionInfoEvent) and event.session_id:
+                    self._session_id = event.session_id
+
+                # Handler-based dispatch (subscribe()/unsubscribe()).
+                self._dispatch(event)
+
+                # Iterator-based fan-out.  Snapshot the subscribers list
+                # so a concurrent unsubscribe doesn't break the loop;
+                # ``put_nowait`` is sync and won't block.
+                if self._event_subscribers:
+                    for q in list(self._event_subscribers):
+                        try:
+                            q.put_nowait(event)
+                        except asyncio.QueueFull:
+                            logger.warning(
+                                "_drain_loop: subscriber queue full; "
+                                "dropping %s",
+                                type(event).__name__,
+                            )
+                else:
+                    # No active subscriber — buffer for replay on the
+                    # next ``events()`` / ``_await_session_info()`` call.
+                    self._buffered_events.append(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"_drain_loop: unexpected error: {exc}", exc_info=True)
+        finally:
+            # Wake any active consumers so they observe disconnection.
+            for q in list(self._event_subscribers):
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    pass
+
+    def _subscribe_events(self) -> asyncio.Queue:
+        """Subscribe a fresh queue to the drain loop's fan-out.
+
+        Drains any pending ``_buffered_events`` into the queue first so
+        the consumer sees events emitted before subscription (typically
+        from a recent ``create_session`` whose response events flowed
+        before ``events()`` was called).
+
+        Returns:
+            A queue that receives events; ``None`` is the disconnect
+            sentinel.  Callers must call ``_unsubscribe_events`` (e.g.
+            in a ``finally`` block) when done.
+        """
+        q: asyncio.Queue = asyncio.Queue()
+        for ev in self._buffered_events:
+            q.put_nowait(ev)
+        self._buffered_events.clear()
+        self._event_subscribers.append(q)
+        return q
+
+    def _unsubscribe_events(self, q: asyncio.Queue) -> None:
+        """Remove a previously-subscribed queue.  Idempotent."""
+        try:
+            self._event_subscribers.remove(q)
+        except ValueError:
+            pass
 
     async def _send_client_config(self) -> None:
         """Send client configuration to the server.
@@ -1152,14 +1296,12 @@ class IPCClient:
             payload=payload,
         ))
 
-        # If events() is already consuming the socket, we must not read
-        # here — the SessionInfoEvent will be picked up by events().
-        if self._events_active:
-            return None
-
-        # No active event consumer — read events until we receive a
-        # SessionInfoEvent (success) or an ErrorEvent / timeout (failure).
-        # Intermediate events are buffered for events() to yield later.
+        # Wait for the daemon's SessionInfoEvent via the drain loop.
+        # SDK 0.13.0+: no more ``_events_active`` gate — the drain task
+        # delivers events to every subscriber concurrently, so a
+        # back-to-back ``events() → create_session`` pattern works
+        # race-free even if the previous events() iterator's aclose()
+        # hasn't fully completed yet.
         try:
             return await asyncio.wait_for(
                 self._await_session_info(), timeout=timeout
@@ -1169,38 +1311,57 @@ class IPCClient:
             return None
 
     async def _await_session_info(self) -> Optional[str]:
-        """Read events until a SessionInfoEvent arrives.
+        """Subscribe to the drain loop and wait for SessionInfoEvent.
 
-        Buffers any non-target events in ``_buffered_events`` so they
-        can be replayed by ``events()`` later.
+        Filters the subscriber queue for ``SessionInfoEvent`` (success)
+        or non-recoverable ``ErrorEvent`` (failure).  When this method
+        is the only subscriber active, non-target events seen along the
+        way are saved to ``_buffered_events`` so a subsequent
+        ``events()`` call can replay them — preserving the
+        pre-0.13.0 behaviour where ``events()`` after ``create_session``
+        could yield init-progress / system-message events emitted
+        during session creation.  When ``events()`` is concurrently
+        subscribed, those events are already being yielded directly to
+        the consumer's iterator and are NOT re-buffered (avoiding
+        duplicates).
 
         Returns:
-            The session ID from the SessionInfoEvent, or None on error.
+            The session ID from the SessionInfoEvent, or None on
+            recoverable error / disconnect / timeout.
         """
-        while self._connected:
-            message = await self._read_message()
-            if message is None:
-                self._connected = False
-                return None
+        q = self._subscribe_events()
+        # Events to re-buffer for a future events() call, but only when
+        # this subscription is solo (no concurrent events() iterator).
+        incidental: list[Event] = []
+        try:
+            while True:
+                event = await q.get()
+                if event is None:
+                    # drain loop signalled disconnection
+                    if len(self._event_subscribers) == 1 and incidental:
+                        self._buffered_events.extend(incidental)
+                    return None
 
-            event = deserialize_event(message)
+                solo = len(self._event_subscribers) == 1
 
-            if isinstance(event, SessionInfoEvent) and event.session_id:
-                self._session_id = event.session_id
-                # Buffer the SessionInfoEvent itself too — downstream
-                # consumers (e.g. IPCRecoveryClient) may need it.
-                self._buffered_events.append(event)
-                return event.session_id
+                if isinstance(event, SessionInfoEvent) and event.session_id:
+                    self._session_id = event.session_id
+                    if solo:
+                        incidental.append(event)
+                        self._buffered_events.extend(incidental)
+                    return event.session_id
 
-            if isinstance(event, ErrorEvent) and not event.recoverable:
-                self._buffered_events.append(event)
-                return None
+                if isinstance(event, ErrorEvent) and not event.recoverable:
+                    if solo:
+                        incidental.append(event)
+                        self._buffered_events.extend(incidental)
+                    return None
 
-            # Any other event (init progress, system messages, …) —
-            # buffer it so events() can yield it later.
-            self._buffered_events.append(event)
-
-        return None
+                # Non-target event — track for re-buffer when solo.
+                if solo:
+                    incidental.append(event)
+        finally:
+            self._unsubscribe_events(q)
 
     async def attach_session(self, session_id: str) -> bool:
         """Attach to an existing session.
@@ -1629,78 +1790,38 @@ class IPCClient:
     async def events(self) -> AsyncIterator[Event]:
         """Async iterator for receiving events.
 
-        Yields events from the server until the connection is closed or
-        an error occurs. When the connection is lost, the iterator exits
-        cleanly (stops yielding) rather than raising an exception.
+        SDK 0.13.0+: subscribes a queue to the connection's drain task
+        and yields events as they arrive.  Buffered events (those that
+        flowed before any consumer subscribed — typically during
+        ``create_session``) are replayed first.
 
-        Any events buffered by request-response methods (e.g.
-        ``create_session``) are yielded first before reading from the
-        socket.
+        Multiple iterators can be active concurrently: each gets its
+        own subscriber queue and the drain task fans events out to all
+        of them.  Re-entrant ``create_session`` / ``events()``
+        sequences no longer race on a shared ``_events_active`` flag —
+        the drain task is the single reader regardless of how many
+        consumers are listening.
 
-        Connection loss can be detected by:
-        1. The iterator stopping (connection closed cleanly)
-        2. Receiving an ErrorEvent (error during read)
+        When the connection is lost (drain task ends), every
+        subscriber queue receives a ``None`` sentinel and this
+        iterator exits cleanly without raising.
 
         Yields:
             Events from the server.
         """
-        logger.debug("events(): starting event loop")
-        self._events_active = True
-
+        logger.debug("events(): subscribing")
+        q = self._subscribe_events()
         try:
-            # Drain events that were buffered during request-response
-            # operations (e.g. create_session consuming init-progress events).
-            while self._buffered_events:
-                event = self._buffered_events.pop(0)
-                logger.debug(f"events(): yielding buffered {type(event).__name__}")
-                self._dispatch(event)
+            while True:
+                event = await q.get()
+                if event is None:
+                    # drain loop signalled disconnection
+                    logger.debug("events(): drain loop ended; iterator exiting")
+                    break
                 yield event
-
-            while self._connected:
-                try:
-                    message = await self._read_message()
-                    if message is None:
-                        # Connection closed cleanly (server shutdown, network loss)
-                        logger.debug("events(): connection closed (received None)")
-                        self._connected = False
-                        break
-
-                    event = deserialize_event(message)
-                    logger.debug(f"events(): received {type(event).__name__}")
-
-                    # Auto-update session_id when receiving SessionInfoEvent
-                    if isinstance(event, SessionInfoEvent) and event.session_id:
-                        self._session_id = event.session_id
-                        logger.debug(f"events(): session_id updated to {event.session_id}")
-
-                    self._dispatch(event)
-
-                    yield event
-
-                except asyncio.IncompleteReadError:
-                    # Connection lost mid-message
-                    logger.debug("events(): incomplete read, connection lost")
-                    self._connected = False
-                    break
-
-                except ConnectionResetError:
-                    # Connection reset by peer
-                    logger.debug("events(): connection reset by peer")
-                    self._connected = False
-                    break
-
-                except asyncio.CancelledError:
-                    logger.debug("events(): cancelled")
-                    raise
-
-                except Exception as e:
-                    logger.error(f"events(): error: {e}")
-                    yield ErrorEvent(
-                        error=str(e),
-                        error_type=type(e).__name__,
-                    )
         finally:
-            self._events_active = False
+            self._unsubscribe_events(q)
+            logger.debug("events(): unsubscribed")
 
     async def drain_events(self) -> None:
         """Drive the event loop, dispatching to subscribed handlers.
