@@ -215,9 +215,12 @@ already render today):
 2. Runner-side `rpc_client.prompt_operator(payload)` sends the RPC.
 3. Daemon-side `prompt_operator` handler emits a
    `PermissionRequestedEvent` (carrying a fresh request-id) on
-   `JaatoServer` and awaits the matching `PermissionResponseRequest`
-   on the daemon's existing `PermissionResponseChannel`-style
-   future-keyed-by-request-id pattern.
+   `JaatoServer` and awaits the matching `PermissionResponseRequest`,
+   using a request-id-keyed futures dict — analogous to the
+   in-process channel-future correlation pattern in
+   `permission/plugin.py:_get_channel()` →
+   `wait_for_response()`.  No new class is needed; the futures dict
+   lives in the handler.
 4. Connected client (TUI / WS / IPC) receives the event, surfaces
    the prompt, sends back `PermissionResponseRequest`.
 5. Daemon-side handler resolves the future, returns the
@@ -312,9 +315,25 @@ Files touched:
   `runner.session.bootstrap_session(envelope)`.
 
 The daemon side still instantiates `JaatoSession` in-process at
-this point; the runner-side host coexists with it under a feature
-flag (`JAATO_RUNNER_HOSTS_SESSION=true`) for the duration of the
-3.3b → 3.3c window.
+this point; the runner-side host coexists with it under a build-
+internal flag `JAATO_RUNNER_HOSTS_SESSION=true` for the duration
+of the §3.3b → §3.3c review window.
+
+**This is NOT a feature flag in the parent §5 sense** (per
+peer-review N4).  Parent design §5 forbids feature-flagging the
+daemon-vs-runner posture and only allows `JAATO_RUNNER_DISABLE`
+(documented as not-supported).  `JAATO_RUNNER_HOSTS_SESSION` is a
+**transitional review-aid flag**: its lifetime is bounded to the
+single PR that ships §3.3b + §3.3c — both commits land in the
+same PR; §3.3c removes the flag in its diff; the flag is never
+observable to operators on a released server version.  The flag
+exists only to keep §3.3b individually reviewable as its own
+commit (so reviewers can read the runner-side host code without
+the daemon-shell rewrite mixed in), then collapses with §3.3c.
+
+If review consensus prefers, §3.3b can land as a no-op coexisting
+with the daemon-side instance (Option (a) in peer-review N4),
+removing the flag entirely; both ship in the same PR either way.
 
 Tests: `runner/tests/test_runner_session_host.py` — bootstrap
 from envelope succeeds; `JaatoSession.configure()` runs with the
@@ -445,6 +464,18 @@ session's profile (read `/proc/<child>/attr/current` from the
 runner; assert it matches the session profile name).  The runtime-
 limits test extends to verify the limits are actually enforced
 (spawn a subprocess that exceeds memory_max_mb; assert SIGKILL).
+
+**Reuse the existing cgroup-availability gate** (per peer-review
+N5): `shared/tests/test_runtime_limits_e2e.py` already provides
+`_find_writable_cgroup_parent()` (line 312) +
+`_can_migrate_to(parent)` (line 354) helpers, used as a
+`pytest.mark.skipif` guard at four call sites.  §3.5's runtime-
+limits assertion MUST gate behind the same skipif:
+`@pytest.mark.skipif(not _can_migrate_to(_find_writable_cgroup_parent()), ...)`.
+Without cgroup v2 enabled the kernel limit doesn't fire and the
+test silently passes; the existing gate is the load-bearing
+defense.  Import the helpers from the test module rather than
+duplicating them.
 
 ### 3.6 — Plugin migration wave 3: outbound HTTP plugins
 
@@ -633,7 +664,7 @@ runner-spawn wiring that Phase 2 only added to
 
 | Path | Phase 3 wiring |
 |---|---|
-| `SessionManager._load_session_impl` (disk-restore) | Re-spawn a runner for sessions loaded from disk that had AppArmor opt-in.  Profile name is preserved on the Session record (`Session.sandbox_mode`, set in Phase 2).  Per peer-review M5: the restored session is **explicitly auto-suspended** until a client reattaches (default behavior, not implicit).  The Session record gains a `restored_pending_attach: bool` flag set true on disk-restore; while set, `check_permission` short-circuits to "deny — session pending reattach" for any tool that would trigger an ASK; static-rule permits still pass through.  When a client attaches, the daemon emits `SessionRestoredEvent(session_id, pending_tool_call_count: int)` and the client surfaces a "this session was restored — review pending tool calls?" prompt; the operator's reattach response clears the flag.  This avoids the silent-stall failure mode an operator-restart-and-walk-away would otherwise create. |
+| `SessionManager._load_session_impl` (disk-restore) | Re-spawn a runner for sessions loaded from disk that had AppArmor opt-in.  Profile name is preserved on the Session record (`Session.sandbox_mode`, set in Phase 2).  Per peer-review M5 + N1: the restored session is **defer-and-flush**, not deny.  The Session record gains a `restored_pending_attach: bool` flag set true on disk-restore; while set, `check_permission` ASK paths **hold the tool call** (the runner's permission state queues the prompt + sets the call as pending) rather than denying.  Static-rule permits still pass through.  When a client attaches, the daemon emits `SessionRestoredEvent(session_id, pending_tool_call_count: int)` and the client surfaces a "this session was restored — review pending tool calls?" prompt; the operator drains the queue (each held ASK relays through the now-attached `client.prompt_operator` channel as if it had just landed) and the flag clears.  Defer-and-flush preserves the model's tool-call flow across restart; it requires the runner-side permission plugin to maintain a `pending_asks` queue (per-session, drained on flag clear).  This is the canonical disk-restore behavior and matches §6.4's risk-register mitigation. |
 | `SessionManager.run_ephemeral_session` | Ephemeral sessions are subagent fan-out; per §4.3 default they share the parent's runner.  Phase 3 adds the parent-runner reference to the ephemeral path so they actually share rather than spawn fresh.  Isolated-runner ephemeral subagents follow §3.11. |
 | `JaatoWSServer` standalone bootstrap | The WS server has its own pre-init apparmor hook (`websocket.py:_apparmor_pre_init_hook`).  Phase 3 converts it from the legacy 3-arg signature to the 4-arg form (matching the IPC hook from Phase 2's §2.3 fix).  Runner spawn wires alongside. |
 
@@ -672,11 +703,22 @@ Tests: existing Phase 2 tests still pass; one new test verifies
 the IPC `session.new` path spawns a runner without going through
 `_run_pre_initialize_hooks`.
 
-This task is independent of the bulk plugin migration; can land
-early or late.  Listed late in the plan because the pre-init
-hook is the safer state to ship migrations against (any plugin
-issue surfaces in the existing pre-init path, not in a new code
-path).
+**Ordering vs §5.6 unified bootstrap** (per peer-review N3): if
+§5.6 lands first (Option B — `_bootstrap_session(envelope)` helper
+unifies the four bootstrap paths), §3.13's relocation target
+becomes that helper, NOT `_handle_session_new` directly.  The IPC
+handler then just calls `_bootstrap_session(envelope)` with the
+session.new payload pre-converted into envelope shape.  Required
+ordering: **§5.6 lands BEFORE §3.13**.  If §5.6's diff-shape
+evidence reverses to Option A (per §5.6's preserved fallback),
+§3.13 lands inline as originally written.  Recommend the plan
+author commit to landing §5.6 first to preserve a single
+relocation target.
+
+This task is otherwise independent of the bulk plugin migration;
+listed late in the plan because the pre-init hook is the safer
+state to ship migrations against (any plugin issue surfaces in
+the existing pre-init path, not in a new code path).
 
 ### 3.14 — Atomic-write contract enforcement (per-plugin, ongoing)
 
@@ -775,8 +817,19 @@ One commit, small.  Could land any time after §3.3.
 6. The Phase 2 acceptance gate
    (`test_phase2_multitenant_apparmor.py`) is still green.
 
-Combined runtime budget: ~3 minutes on the test host (heavier
-than Phase 2's gate since it spans every runner-tier plugin).
+Combined runtime budget: ~3 minutes on the test host **assuming
+4 pytest-xdist workers** (per peer-review N7).  Sequential
+breakdown: ~20 plugins × ~5s each ≈ 100s per worker; with 4
+workers ≈ 25s on the parametrized acceptance gate, plus
+~30s each for tests #2-#6 = ~150s.  CI host config: the
+user-hosted server runs `pytest -n 4` by default; reduce to
+`-n 1` only for the targeted apparmor-mark suite where
+parallelism interferes with profile-load races.  Same
+parallelism assumption applies to §3.14's parametrized
+SIGTERM-mid-write gate.
+
+Heavier than Phase 2's gate since it spans every runner-tier
+plugin.
 
 **Per-task tests** are listed in each §3.x task above.
 
@@ -965,12 +1018,11 @@ diff-shape is the deciding evidence.
 discovery (§3.3 plugin_loader.py) must match the daemon's tier
 classification table (parent §4.2).  If the runner loads a plugin
 the daemon also instantiates, there are two instances and the
-session has a split state.  Mitigation: a single source-of-truth
-annotation on each plugin (`PLUGIN_TIER = "daemon" | "runner"`)
-that the loader checks; daemon's `PluginRegistry.discover` filters
-to daemon-tier, runner's `plugin_loader` filters to runner-tier;
-unit test that asserts the two filters partition the set with no
-overlap.
+session has a split state.  **Mitigation:** §3.3.5 ships the
+`PLUGIN_TIER` annotation + tier-filtered discovery + the
+partition-no-overlap unit test (per peer-review N6, this risk's
+mitigation IS a Phase 3 task; this entry tracks the risk for
+posterity, not as open work).
 
 **6.2 RPC fan-out overhead.** With N runner-tier plugins each
 potentially making runner→daemon RPCs (telemetry, permission ASK,
@@ -1147,5 +1199,72 @@ Minor fixes:
 - **Mn6**: PR-size estimate deferred until §3.3a/b/c lands; prior
   "3500-4500 / 2500" numbers withdrawn pending the JaatoSession
   move shape.
+
+**v3 (2026-05-08)** — addresses peer-review of v2 (commit
+fd7af7ab).  Tightening only; no critical issues.
+
+- **N1**: §3.12 disk-restore behavior reconciled with §6.4 risk
+  register — defer-and-flush, NOT deny.  The restored runner
+  queues ASKs in a `pending_asks` queue; flag clears and queue
+  drains on client reattach.
+- **N2**: §3.2.1 reworded to remove the phantom
+  `PermissionResponseChannel` class reference; calls out the
+  in-process channel-future correlation pattern at
+  `permission/plugin.py:_get_channel()` → `wait_for_response()`
+  as the analogue.
+- **N3**: §3.13 documents required ordering vs §5.6: §5.6's
+  unified `_bootstrap_session(envelope)` helper lands BEFORE
+  §3.13, so §3.13's relocation target is the helper, not
+  `_handle_session_new` directly.  Falls back to inline if
+  §5.6 reverses to Option A.
+- **N4**: §3.3b's `JAATO_RUNNER_HOSTS_SESSION` flag explicitly
+  framed as a transitional review-aid bounded to a single PR,
+  NOT a feature flag in parent §5's sense.  Option (a) of
+  dropping the flag entirely also documented as acceptable.
+- **N5**: §3.5 cgroup-attach test references the existing
+  `_can_migrate_to(_find_writable_cgroup_parent())` skipif
+  helpers from `shared/tests/test_runtime_limits_e2e.py`
+  (lines 312 + 354).  Reuse, don't reinvent.
+- **N6**: §6.1 risk register entry reframed to point at §3.3.5
+  as the mitigation (was duplicating the task description as
+  if it were open work).
+- **N7**: §4 acceptance gate budget specifies `pytest -n 4`
+  (4 pytest-xdist workers) as the parallelism assumption;
+  same for §3.14's gate.
+
+**v2 (2026-05-08)** — addresses peer-review of v1 (commit
+94a3a807).  Critical fixes:
+
+- **C1**: §3.13 file path corrected from
+  `server/ipc.py:_handle_session_new` to
+  `server/command_router.py:_handle_session_new` (verified at
+  line 247).  `server/ipc.py` retains framing + connection
+  management only; per-command handlers moved out in Phase 2's
+  command-router refactor.
+- **C2**: §2.2 documents the `runner_rpc.py` →
+  `runner_rpc_client.py` rename + the new
+  `runner_rpc_server.py` sibling.  Phase 2's existing classes
+  (`RunnerRPCClient` daemon-side, `RunnerRPC` runner-side) keep
+  their names; the rename is module-level only to make the
+  three-surface relationship legible.
+- **C3**: §3.2.1 + §3.7 corrected — `Channel` lives on the
+  permission plugin (`_get_channel()` at
+  `permission/plugin.py:90`), not on `SessionManager`.  Channel
+  moves with the plugin into the runner.  Daemon-side
+  `prompt_operator` handler is an event-relay surface using
+  `PermissionRequestedEvent` / `PermissionResponseRequest`, NOT
+  a channel.
+- **C4**: §3.2.2 method name corrected to
+  `add_reference_fragment` (at `apparmor.py:1038`); the RPC
+  method-name aligns; no rename needed.
+- **C5**: New §3.3.5 task adds `PLUGIN_TIER` annotation alongside
+  the existing `PLUGIN_KIND` constant (verified at
+  `cli/__init__.py:10`, `file_edit/__init__.py:18`); updates
+  `PluginRegistry.discover` to filter by tier; partition-no-overlap
+  unit test fails the build if a new plugin lands without the
+  annotation.
+
+Moderate fixes (M1-M7) and minor fixes (Mn1-Mn6) per the v2
+table; consult v2 commit `fd7af7ab` for the full ledger.
 
 **v1 (2026-05-08)** — initial draft, commit 94a3a807.
