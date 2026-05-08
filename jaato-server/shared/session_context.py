@@ -47,7 +47,7 @@ Usage in session wiring (already handled by JaatoSession)::
 import contextvars
 import os
 from contextvars import ContextVar, Token
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING, TypeVar
+from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
     from .jaato_session import JaatoSession
@@ -219,16 +219,51 @@ def get_config_root(default: Optional[str] = None) -> Optional[str]:
 T = TypeVar("T")
 
 
+_ISOLATED_ENV_VARS: Tuple[str, ...] = (
+    "JAATO_WORKSPACE_ROOT",
+    "JAATO_CONFIG_ROOT",
+)
+
+
 def run_in_fresh_session_context(
     fn: Callable[..., T], *args: Any, **kwargs: Any,
 ) -> T:
-    """Run ``fn(*args, **kwargs)`` in a fresh ``contextvars.Context``.
+    """Run ``fn(*args, **kwargs)`` in a fresh ``contextvars.Context``
+    AND with the workspace/config-root ``os.environ`` keys temporarily
+    cleared.
 
     Used by every session-bootstrap entry point (``create_session``,
     ``_load_session``, ``run_ephemeral_session``, the standalone WS
     server's bootstrap) so each session starts from a known-clean
-    ContextVar state — see this module's "Session-bootstrap isolation"
-    block above for the full rationale.
+    state — see this module's "Session-bootstrap isolation" block
+    above for the full rationale.
+
+    **Why os.environ also gets cleared (server 0.6.72+).**
+
+    ``contextvars.Context.run()`` isolates ContextVars but NOT
+    ``os.environ`` (process-global).  ``get_workspace_root()`` /
+    ``get_config_root()`` fall through to ``os.environ`` when the
+    ContextVar is unset.  Inside a fresh Context, the ContextVar IS
+    unset (default), so the fallback hits ``os.environ`` — which on a
+    long-lived daemon may carry residue from a prior session's
+    ``_in_workspace()`` mutation that didn't fully reset (race-y under
+    concurrent tasks; see 0.6.68's documentation of the original
+    cross-client leak).
+
+    Empirically: v50 cascade for workspace A ran cleanly post-0.6.71,
+    but a subsequent harness session-create for workspace B saw
+    ``os.environ['JAATO_WORKSPACE_ROOT']=A`` leaked from cascade
+    work — fresh ContextVar fell through to that leaked env var,
+    profile discovery scanned A's ``.jaato/profiles/`` instead of
+    B's, bootstrap stalled.  Restarting the daemon cleared it.
+
+    Now we proactively isolate both layers: fresh Context (for
+    jaato-side ContextVar readers) AND ``os.environ`` save-and-clear
+    (for jaato-side fallback readers + third-party code that reads
+    ``os.environ`` directly).  The save/restore is balanced via a
+    try/finally so concurrent calls don't corrupt each other's
+    ``os.environ`` state — at most one bootstrap runs at a time per
+    OS thread, so there's no race within the helper itself.
 
     Notes:
         ``Context.run()`` is synchronous.  All current callers are
@@ -236,8 +271,20 @@ def run_in_fresh_session_context(
         later, wrap each call site in
         ``loop.run_in_executor(None, lambda: run_in_fresh_session_context(...))``.
 
-        The fresh context isolates ContextVars but NOT ``os.environ``.
-        Bootstraps that mutate ``os.environ`` (e.g. ``_in_workspace``)
-        rely on their own try/finally to restore.
+        The ``os.environ`` clear is scoped to the workspace/config-root
+        keys (``_ISOLATED_ENV_VARS``).  Other env vars (e.g. provider
+        API keys) stay untouched — they're set at daemon startup or
+        by per-session ``.env`` loading inside the bootstrap, both of
+        which compose correctly with the isolation.
     """
-    return contextvars.Context().run(fn, *args, **kwargs)
+    saved: Dict[str, Optional[str]] = {
+        key: os.environ.pop(key, None) for key in _ISOLATED_ENV_VARS
+    }
+    try:
+        return contextvars.Context().run(fn, *args, **kwargs)
+    finally:
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
