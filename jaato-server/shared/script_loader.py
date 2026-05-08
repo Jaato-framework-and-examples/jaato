@@ -59,14 +59,34 @@ from typing import Callable, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
-# Per-process helper-tracking state.  Maps absolute ``__file__`` path of
-# a helper module → recorded mtime at the last load_script_symbol call
-# that observed it.  Threading lock guards compound check-then-write
-# sequences across concurrent script loads (multiple sessions / runners
-# sharing the daemon).  Single-thread reads are safe without the lock
-# (CPython dict-ops are atomic for individual operations) but the
+# Per-process helper-tracking state.  Two parallel dicts under the same
+# lock:
+#
+# * ``_tracked_helpers``    — resolved file path → recorded mtime at the
+#                             last ``load_script_symbol`` call that
+#                             observed it.
+# * ``_tracked_helper_names`` — resolved file path → module name in
+#                              ``sys.modules`` (server 0.6.70+).
+#
+# Threading lock guards compound check-then-write sequences across
+# concurrent script loads (multiple sessions / runners sharing the
+# daemon).  Single-thread reads are safe without the lock (CPython
+# dict-ops are atomic for individual operations) but the
 # stat-and-reload sequence wants a consistent snapshot.
+#
+# **Why we keep the module name (server 0.6.70+).**
+#
+# Pre-0.6.70, ``_refresh_stale_helpers`` rediscovered the module from
+# ``sys.modules`` by linear scanning every entry and calling
+# ``Path(__file__).resolve()`` for each — O(tracked × sys.modules ×
+# realpath_syscalls) per ``load_script_symbol`` invocation.  In a
+# daemon with hundreds of imported modules this turned the reactor's
+# script-load step into a multi-second-to-multi-minute hot path,
+# manifesting as cascade-handler dispatch lag (v47 + v48 evidence).
+# Storing the module name at track-time eliminates the scan: lookup is
+# now ``sys.modules.get(name)`` — O(1) per tracked helper.
 _tracked_helpers: Dict[str, float] = {}
+_tracked_helper_names: Dict[str, str] = {}
 _tracked_helpers_lock = threading.Lock()
 
 
@@ -122,19 +142,35 @@ def _refresh_stale_helpers() -> None:
     ``load_script_symbol`` calls.  Helper authors should keep
     import-time work cheap; reactor handlers expect the per-load
     overhead to stay in the microseconds-to-milliseconds range.
+
+    **Lookup cost (server 0.6.70+).** Module rediscovery is O(1) per
+    tracked helper via the ``_tracked_helper_names`` index, populated
+    at track-time by ``_track_new_helpers``.  The pre-0.6.70 linear
+    scan over ``sys.modules`` calling ``Path(__file__).resolve()`` per
+    entry is gone — it was the dominant cost in cascade-heavy
+    deployments and surfaced as multi-minute reactor-handler dispatch
+    lag (v47/v48 investigation, 2026-05-08).
     """
     with _tracked_helpers_lock:
         # Snapshot keys to avoid mutating-while-iterating; per-key
-        # operations below mutate the shared dict.
+        # operations below mutate the shared dicts.
         for file_path, recorded_mtime in list(_tracked_helpers.items()):
-            module = _module_with_file(file_path)
+            module_name = _tracked_helper_names.get(file_path)
+            module = sys.modules.get(module_name) if module_name else None
             if module is None:
+                # Helper either was never tracked with a name (impossible
+                # post-0.6.70, but defensive) or was evicted from
+                # ``sys.modules`` by some external mechanism.  Drop the
+                # entry from both dicts.
                 _tracked_helpers.pop(file_path, None)
+                _tracked_helper_names.pop(file_path, None)
                 continue
             try:
                 current_mtime = os.path.getmtime(file_path)
             except OSError:
+                # Source file deleted; drop tracking.
                 _tracked_helpers.pop(file_path, None)
+                _tracked_helper_names.pop(file_path, None)
                 continue
             if current_mtime <= recorded_mtime:
                 continue
@@ -152,40 +188,6 @@ def _refresh_stale_helpers() -> None:
                 "Reloaded helper %s (mtime %s -> %s)",
                 file_path, recorded_mtime, current_mtime,
             )
-
-
-def _module_with_file(file_path: str) -> Optional[object]:
-    """Find a module in sys.modules whose ``__file__`` matches ``file_path``.
-
-    Compares against the resolved form of each module's ``__file__`` so
-    the lookup is consistent with the tracker's resolved-path keys
-    (``_track_new_helpers`` normalizes via ``Path.resolve()`` on store).
-
-    Linear scan over sys.modules — tolerable because the call site
-    fires at script-load frequency (cascades, permission evaluations),
-    not at hot-path frequency. Avoids relying on a separate
-    file-path → name index that could go stale.
-
-    Server 0.6.69+: snapshots ``sys.modules.values()`` via ``list(...)``
-    before iterating.  ``importlib.reload(...)`` mutates ``sys.modules``,
-    and a concurrent ``_refresh_stale_helpers`` call (e.g. from another
-    session's reactor) could trigger a reload while THIS function is
-    mid-scan — raising ``RuntimeError: dictionary changed size during
-    iteration``.  The tracker lock above protects ``_tracked_helpers``
-    but not ``sys.modules`` (which has no public lock).  Snapshotting
-    here is cheap and race-safe.
-    """
-    for mod in list(sys.modules.values()):
-        mod_file = getattr(mod, "__file__", None)
-        if not mod_file:
-            continue
-        try:
-            if str(Path(mod_file).resolve()) == file_path:
-                return mod
-        except OSError:
-            # Module's source file deleted between import and now.
-            continue
-    return None
 
 
 def _track_new_helpers(
@@ -229,6 +231,11 @@ def _track_new_helpers(
                 _tracked_helpers[resolved] = os.path.getmtime(resolved)
             except OSError:
                 continue
+            # Server 0.6.70+: store the module name alongside the mtime so
+            # ``_refresh_stale_helpers`` can resolve back to the module via
+            # ``sys.modules.get(name)`` instead of scanning every entry
+            # of sys.modules calling ``Path.resolve()``.
+            _tracked_helper_names[resolved] = name
 
 
 def resolve_script_path(
