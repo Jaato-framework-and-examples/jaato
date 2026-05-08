@@ -2294,18 +2294,31 @@ class JaatoWSServer:
                 if provisioned_env.exists():
                     env_file = provisioned_env
 
-        # Create JaatoServer
-        server = JaatoServer(
-            env_file=str(env_file),
-            on_event=self._on_server_event,
-            workspace_path=provisioned_ws.path if provisioned_ws else workspace_info.path,
+        # Server 0.6.71+: bootstrap (JaatoServer construction +
+        # initialize) runs in a fresh ContextVar context so this
+        # session is isolated from any values inherited from the
+        # caller's asyncio task.  See
+        # ``shared.session_context.run_in_fresh_session_context``.
+        from shared.session_context import run_in_fresh_session_context
+
+        ws_path = provisioned_ws.path if provisioned_ws else workspace_info.path
+
+        def _bootstrap_and_initialize() -> "tuple[Optional[JaatoServer], bool]":
+            srv = JaatoServer(
+                env_file=str(env_file),
+                on_event=self._on_server_event,
+                workspace_path=ws_path,
+            )
+            return srv, srv.initialize()
+
+        # The whole bootstrap runs in an executor thread (initialize
+        # is blocking); the executor's worker uses our fresh-context
+        # wrapper internally so ContextVar inheritance from the parent
+        # async task can't leak.
+        server, success = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: run_in_fresh_session_context(_bootstrap_and_initialize),
         )
-
-        # Initialize in executor (blocking call)
-        def _init():
-            return server.initialize()
-
-        success = await asyncio.get_event_loop().run_in_executor(None, _init)
 
         if not success:
             await self._send_error(client_id, "Failed to initialize server")

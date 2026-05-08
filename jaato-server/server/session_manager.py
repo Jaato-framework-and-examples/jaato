@@ -963,7 +963,29 @@ class SessionManager:
     # Session Lifecycle
     # =========================================================================
 
-    def create_session(
+    def create_session(self, *args: Any, **kwargs: Any) -> str:
+        """Create a new session and attach the client (server 0.6.71+ entry).
+
+        Runs :meth:`_create_session_impl` via
+        :func:`shared.session_context.run_in_fresh_session_context` so
+        the bootstrap is ISOLATED from any ContextVar values inherited
+        from the caller's task.  See the helper's module docstring for
+        the full rationale (long-lived-daemon ContextVar leak class
+        documented in
+        ``project_backlog_workspace_root_contextvar_leak_long_lived_daemon.md``).
+
+        Args:
+            (forwarded verbatim to :meth:`_create_session_impl`)
+
+        Returns:
+            The new session ID, or empty string on failure.
+        """
+        from shared.session_context import run_in_fresh_session_context
+        return run_in_fresh_session_context(
+            self._create_session_impl, *args, **kwargs,
+        )
+
+    def _create_session_impl(
         self,
         client_id: str,
         session_name: Optional[str] = None,
@@ -980,7 +1002,10 @@ class SessionManager:
         inline_profile_data: Optional[Dict[str, Any]] = None,
         config_root: Optional[str] = None,
     ) -> str:
-        """Create a new session and attach the client.
+        """Implementation of session creation, called via ``Context().run()``.
+
+        See :meth:`create_session` for the isolation rationale and the
+        public docstring.
 
         Args:
             client_id: The requesting client.
@@ -1742,7 +1767,28 @@ class SessionManager:
         client_id: Optional[str] = None,
         workspace_path: Optional[str] = None,
     ) -> Optional[Session]:
-        """Load a session from disk.
+        """Load a session from disk (server 0.6.71+ entry).
+
+        Wraps :meth:`_load_session_impl` in a fresh ContextVar context
+        via :func:`shared.session_context.run_in_fresh_session_context`
+        so the bootstrap is isolated from any ContextVar values
+        inherited from the caller's task.  See the helper's docstring
+        for the rationale.
+        """
+        from shared.session_context import run_in_fresh_session_context
+        return run_in_fresh_session_context(
+            self._load_session_impl, session_id, client_id, workspace_path,
+        )
+
+    def _load_session_impl(
+        self,
+        session_id: str,
+        client_id: Optional[str] = None,
+        workspace_path: Optional[str] = None,
+    ) -> Optional[Session]:
+        """Implementation of session loading, called via fresh-context wrap.
+
+        See :meth:`_load_session` for the isolation rationale.
 
         Args:
             session_id: The session ID to load.
@@ -3826,7 +3872,21 @@ class SessionManager:
     # Ephemeral sessions (Phase 3 — remote subagent delegation)
     # ------------------------------------------------------------------
 
-    def run_ephemeral_session(
+    def run_ephemeral_session(self, *args: Any, **kwargs: Any) -> str:
+        """Run an ephemeral session for a remote subagent (server 0.6.71+ entry).
+
+        Wraps :meth:`_run_ephemeral_session_impl` in a fresh ContextVar
+        context via :func:`shared.session_context.run_in_fresh_session_context`
+        so the bootstrap is isolated from any ContextVar values
+        inherited from the caller's task.  See the helper's docstring
+        for the rationale.
+        """
+        from shared.session_context import run_in_fresh_session_context
+        return run_in_fresh_session_context(
+            self._run_ephemeral_session_impl, *args, **kwargs,
+        )
+
+    def _run_ephemeral_session_impl(
         self,
         profile_json: str,
         inline_config_json: str,
@@ -3835,7 +3895,9 @@ class SessionManager:
         on_output: Any,
         workspace_path: Optional[str] = None,
     ) -> str:
-        """Create and run an ephemeral session for a remote subagent request.
+        """Implementation of ephemeral session run, called via fresh-context wrap.
+
+        See :meth:`run_ephemeral_session` for the isolation rationale.
 
         This is a blocking call intended to be run from a background thread
         (via ``asyncio.to_thread``).  The session is not persisted to disk

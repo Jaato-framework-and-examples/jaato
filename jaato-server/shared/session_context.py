@@ -44,9 +44,10 @@ Usage in session wiring (already handled by JaatoSession)::
     set_current_session(self)  # before tool execution
 """
 
+import contextvars
 import os
 from contextvars import ContextVar, Token
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
     from .jaato_session import JaatoSession
@@ -187,3 +188,56 @@ def get_config_root(default: Optional[str] = None) -> Optional[str]:
     if value is not None:
         return value
     return os.environ.get('JAATO_CONFIG_ROOT', default)
+
+
+# ── Session-bootstrap isolation (server 0.6.71+) ────────────────────────
+#
+# The 0.6.68 fix established per-task ContextVar storage for
+# ``_workspace_root`` / ``_config_root`` / ``_session_env`` /
+# ``_current_session`` — race-free across CONCURRENT overlapping
+# sessions.  But ContextVars are INHERITED by spawned tasks: a new
+# asyncio task / sync function called from within an existing task
+# starts with the parent's ContextVar values.  On a long-lived daemon
+# that previously ran (e.g.) cascade work for workspace A, the parent
+# task's ContextVars carry A's values.  A subsequent session-bootstrap
+# for workspace B then starts with ``_workspace_root=A`` — leaking A's
+# profile path into B's plugin initialisation.
+#
+# The fix: wrap every session-bootstrap entry point in
+# ``contextvars.Context().run(...)`` — an empty Context where every
+# ContextVar starts at its declared default.  Inside the fresh context,
+# the session's own ``_in_workspace()`` sets the correct values cleanly,
+# and they cannot bleed back to the parent task because ``Context.run()``
+# snapshots-and-discards the inner mutations.  Each session-bootstrap
+# starts from a known-clean state regardless of the daemon's task
+# history.
+#
+# Bootstrap state that must SURVIVE the isolation lives on instance
+# attributes (e.g. ``SessionManager._sessions``) — not in ContextVars
+# — so the isolation is transparent to the rest of the daemon.
+
+T = TypeVar("T")
+
+
+def run_in_fresh_session_context(
+    fn: Callable[..., T], *args: Any, **kwargs: Any,
+) -> T:
+    """Run ``fn(*args, **kwargs)`` in a fresh ``contextvars.Context``.
+
+    Used by every session-bootstrap entry point (``create_session``,
+    ``_load_session``, ``run_ephemeral_session``, the standalone WS
+    server's bootstrap) so each session starts from a known-clean
+    ContextVar state — see this module's "Session-bootstrap isolation"
+    block above for the full rationale.
+
+    Notes:
+        ``Context.run()`` is synchronous.  All current callers are
+        sync; if an async session-bootstrap entry point is added
+        later, wrap each call site in
+        ``loop.run_in_executor(None, lambda: run_in_fresh_session_context(...))``.
+
+        The fresh context isolates ContextVars but NOT ``os.environ``.
+        Bootstraps that mutate ``os.environ`` (e.g. ``_in_workspace``)
+        rely on their own try/finally to restore.
+    """
+    return contextvars.Context().run(fn, *args, **kwargs)
