@@ -428,7 +428,7 @@ class SessionManager:
         """Register a callback invoked BEFORE ``server.initialize()`` runs
         (server 0.6.49+).
 
-        The hook is called with three arguments:
+        The hook is called with four arguments:
 
         1. ``server`` — the just-constructed ``JaatoServer`` instance.
            Plugin registry NOT YET populated; provider NOT YET connected.
@@ -436,6 +436,13 @@ class SessionManager:
            depend on init state.
         2. ``session_id`` — the unique session identifier string.
         3. ``workspace_path`` — the session's workspace dir (or ``None``).
+        4. ``client_id`` — the requesting client's id, or ``None`` for
+           non-client-driven session creation paths (currently
+           ``_load_session_impl``).  Phase 2 task 2.3 added this so the
+           IPC AppArmor pre-init hook can look up the creator's
+           ``ClientConfigRequest.apparmor`` opt-in (the lookup via
+           ``_client_to_session`` doesn't work pre-init because that
+           mapping isn't populated yet).
 
         Pre-initialize hooks exist so transports (notably the WS server's
         AppArmor wiring) can provision per-session kernel resources
@@ -457,7 +464,13 @@ class SessionManager:
         Args:
             hook: A callable with signature
                 ``(server: JaatoServer, session_id: str,
-                workspace_path: Optional[str]) -> None``.
+                workspace_path: Optional[str],
+                client_id: Optional[str]) -> None``.
+
+        Backwards-compat: hooks accepting only the first three args
+        (the pre-Phase-2 signature) are still called with positional
+        args 1-3; the ``client_id`` is dropped via ``inspect.signature``
+        introspection inside :meth:`_run_pre_initialize_hooks`.
         """
         self._pre_initialize_hooks.append(hook)
 
@@ -479,6 +492,7 @@ class SessionManager:
         server: JaatoServer,
         session_id: str,
         workspace_path: Optional[str],
+        client_id: Optional[str] = None,
     ) -> None:
         """Invoke pre-initialize hooks (server 0.6.49+).
 
@@ -491,10 +505,37 @@ class SessionManager:
                 initialized).
             session_id: The session identifier.
             workspace_path: Session's workspace dir, or None.
+            client_id: The requesting client id (or ``None`` for
+                non-client-driven paths like ``_load_session_impl``).
+                Phase 2 task 2.3+ extends the hook signature with this
+                parameter so the IPC AppArmor pre-init hook can look up
+                the creator's apparmor opt-in.
+
+        Backwards-compat: hooks declared with the legacy 3-arg
+        signature (server, session_id, workspace_path) keep working —
+        we introspect the callable's parameter count and drop
+        ``client_id`` for old-style hooks.
         """
+        import inspect
         for hook in self._pre_initialize_hooks:
             try:
-                hook(server, session_id, workspace_path)
+                # Count positional params on the hook (ignoring *args/**kwargs).
+                # 4 = new-style; 3 = legacy.
+                try:
+                    sig = inspect.signature(hook)
+                    n_positional = sum(
+                        1 for p in sig.parameters.values()
+                        if p.kind in (
+                            inspect.Parameter.POSITIONAL_ONLY,
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    n_positional = 4  # assume new-style on introspection failure
+                if n_positional >= 4:
+                    hook(server, session_id, workspace_path, client_id)
+                else:
+                    hook(server, session_id, workspace_path)
             except Exception as exc:
                 logger.warning(
                     "Pre-initialize hook failed: %s", exc, exc_info=True,
@@ -1313,7 +1354,16 @@ class SessionManager:
         # This gives transports a window to provision kernel resources
         # (AppArmor profile, cgroup) so prefetch can run inside the
         # session's confinement instead of unconfined.
-        self._run_pre_initialize_hooks(server, session_id, workspace_path)
+        #
+        # Phase 2 task 2.3 (post-rebase): the IPC AppArmor pre-init
+        # hook in server/__main__.py also spawns the per-session
+        # runner subprocess here, so plugins discovered during
+        # ``initialize()`` see ``registry.runner_rpc`` set at configure
+        # time.  ``client_id`` is forwarded so the hook can read the
+        # creator's ``ClientConfigRequest.apparmor`` opt-in.
+        self._run_pre_initialize_hooks(
+            server, session_id, workspace_path, client_id,
+        )
 
         # Initialize the server (events go directly to requesting client).
         # On failure, core.py already emits a detailed ConfigurationError —
@@ -1341,7 +1391,12 @@ class SessionManager:
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
 
-        # Create session object
+        # Create session object.  The ``sandbox_mode`` may have been
+        # planned by a pre-initialize hook (Phase 2 task 2.3:
+        # the IPC apparmor hook stashes it on
+        # ``server._planned_sandbox_mode``); read it back here so the
+        # Session record reflects the kernel-level confinement state.
+        planned_sandbox = getattr(server, "_planned_sandbox_mode", None)
         session = Session(
             session_id=session_id,
             name=name,
@@ -1353,6 +1408,7 @@ class SessionManager:
             config_root=config_root,
             provisioned=provisioned,
             created_by=created_by,
+            sandbox_mode=planned_sandbox,
         )
 
         # Register callback for when auth completes (if it was pending)

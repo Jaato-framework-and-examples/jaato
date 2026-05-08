@@ -692,7 +692,33 @@ class JaatoDaemon:
         except RuntimeError:
             daemon_loop = None
 
-        def _ipc_apparmor_session_hook(server, session_id: str) -> None:
+        def _ipc_apparmor_pre_init_hook(
+            server,
+            session_id: str,
+            workspace_path: Optional[str],
+            client_id: Optional[str],
+        ) -> None:
+            """Pre-init hook: provision AppArmor profile + spawn runner.
+
+            Phase 2 task 2.3 (post-rebase): converted from a session
+            hook to a pre-init hook so the runner is up and
+            ``registry.runner_rpc`` is wired BEFORE
+            ``server.initialize()`` runs.  Plugins that read
+            ``runner_rpc`` from the registry at configure-time
+            (``set_plugin_registry``) now find it set; Phase 2 cli
+            still reads lazily at execute-time, but Phase 3 plugins
+            may rely on the configure-time hand-off.
+
+            Stashes the planned sandbox_mode on the JaatoServer (via
+            ``server._planned_sandbox_mode``); ``_create_session_impl``
+            reads it back when building the ``Session`` object.
+
+            Skipped for sessions without ``client_id`` (the
+            ``_load_session`` disk-restore path) — Phase 2 explicitly
+            defers ``_load_session_impl``, ``run_ephemeral_session``,
+            and the standalone WS bootstrap to Phase 3 (per the
+            review feedback on the §2.3 wiring scope).
+            """
             from jaato_sdk.events import SystemMessageEvent
 
             sm = self._session_manager
@@ -702,16 +728,18 @@ class JaatoDaemon:
             def _notify(message: str, style: str) -> None:
                 """Surface an apparmor-status line to the client terminal.
 
-                Hooks log to the daemon's /tmp/jaato.log, which the
-                IPC client can't see.  A SystemMessageEvent rides the
-                normal event stream so the orchestrator (or any other
-                IPC client) can print it next to its own output and
-                the user knows whether kernel confinement is actually
-                in effect for this run.
+                Hook fires pre-init, BEFORE the session id is mapped
+                to a client (``_client_to_session``) and BEFORE the
+                Session record exists in ``_sessions``, so we route
+                via ``_emit_to_client(client_id, ...)`` directly.
+                Falls through to the daemon log when no client_id is
+                available (non-IPC bootstrap paths).
                 """
                 logger.info("[apparmor] %s", message)
+                if client_id is None:
+                    return
                 try:
-                    sm._emit_to_session(session_id, SystemMessageEvent(
+                    sm._emit_to_client(client_id, SystemMessageEvent(
                         message=f"[apparmor] {message}",
                         style=style,
                     ))
@@ -722,28 +750,17 @@ class JaatoDaemon:
                         session_id, exc_info=True,
                     )
 
-            # Find the client_id that created this session.  When
-            # multiple clients attach (mid-session attach via
-            # session.connect), we still want the CREATOR's opt-in to
-            # decide confinement — that's the one whose
-            # ClientConfigRequest set apparmor.  The reverse lookup
-            # below picks the first client mapped to this session,
-            # which at hook-fire time is the creator (the mapping is
-            # set in create_session before _run_session_hooks).
-            creating_client = None
-            for cid, sid in sm._client_to_session.items():
-                if sid == session_id:
-                    creating_client = cid
-                    break
-            if creating_client is None:
+            # Phase 2 scope: only IPC apparmor opt-in triggers spawn.
+            # Non-client-driven bootstrap paths (loaded-from-disk,
+            # ephemeral, standalone WS) → Phase 3.
+            if client_id is None:
                 return
 
-            client_config = sm._client_config.get(creating_client, {})
+            client_config = sm._client_config.get(client_id, {})
             if not client_config.get("apparmor"):
                 return
 
-            sess = sm.get_session(session_id)
-            if not sess or not sess.workspace_path:
+            if not workspace_path:
                 _notify(
                     "requested but session has no workspace_path — "
                     "running unconfined",
@@ -759,7 +776,7 @@ class JaatoDaemon:
                 if ws_root:
                     try:
                         ws_root_real = os.path.realpath(ws_root)
-                        sess_real = os.path.realpath(sess.workspace_path)
+                        sess_real = os.path.realpath(workspace_path)
                         if (
                             sess_real == ws_root_real
                             or sess_real.startswith(ws_root_real + os.sep)
@@ -780,13 +797,13 @@ class JaatoDaemon:
                 # AppArmorManager dispatch confined-worker mutations
                 # back onto the unconfined main loop.
                 apparmor_holder[0] = AppArmorManager(
-                    workspace_root=sess.workspace_path,
+                    workspace_root=workspace_path,
                     loop=daemon_loop,
                 )
 
             apparmor = apparmor_holder[0]
             if not apparmor.is_available():
-                sess.sandbox_mode = "soft"
+                server._planned_sandbox_mode = "soft"
                 _notify(
                     "requested but AppArmor is unavailable on this "
                     "host (non-Linux, kernel module not loaded, or "
@@ -799,11 +816,11 @@ class JaatoDaemon:
             env_file = client_config.get("env_file")
             if not apparmor.provision_profile(
                 session_id,
-                sess.workspace_path,
+                workspace_path,
                 config_root=config_root,
                 env_file=env_file,
             ):
-                sess.sandbox_mode = "soft"
+                server._planned_sandbox_mode = "soft"
                 _notify(
                     "profile provisioning failed (see daemon log) — "
                     "running unconfined",
@@ -818,7 +835,7 @@ class JaatoDaemon:
             # self-confines via aa_change_profile against this
             # already-loaded profile.  See docs/design/per_session_confined_runner.md
             # §4.6 (daemon apparmor-state constraint).
-            sess.sandbox_mode = "apparmor"
+            server._planned_sandbox_mode = "apparmor"
 
             # Spawn the per-session runner subprocess.  The cli plugin
             # stub (and Phase 3's runner-tier plugins) will route
@@ -829,10 +846,9 @@ class JaatoDaemon:
                 _spawn_session_runner(
                     server=server,
                     session_id=session_id,
-                    workspace_path=sess.workspace_path,
+                    workspace_path=workspace_path,
                     profile_name=apparmor.get_profile_name(session_id),
                     daemon_loop=daemon_loop,
-                    notify=_notify,
                 )
             except Exception as exc:  # noqa: BLE001 — boundary
                 # If the runner fails to spawn, downgrade to soft mode
@@ -840,7 +856,7 @@ class JaatoDaemon:
                 # this strict (apparmor=on requires runner=on), but
                 # Phase 2 keeps the fallback path so a host-level
                 # apparmor mishap doesn't break IPC sessions outright.
-                sess.sandbox_mode = "soft"
+                server._planned_sandbox_mode = "soft"
                 _notify(
                     f"runner spawn failed ({type(exc).__name__}: {exc}) "
                     "— falling back to in-process tool execution; "
@@ -853,12 +869,12 @@ class JaatoDaemon:
                 return
 
             _notify(
-                f"profile provisioned (workspace={sess.workspace_path}, "
+                f"profile provisioned (workspace={workspace_path}, "
                 f"config_root={config_root or '(none)'}); runner spawned",
                 style="info",
             )
 
-        self._session_manager.add_session_hook(_ipc_apparmor_session_hook)
+        self._session_manager.add_pre_initialize_hook(_ipc_apparmor_pre_init_hook)
 
     # ------------------------------------------------------------------
     # Daemon Extensions (entry-point-based lifecycle objects)

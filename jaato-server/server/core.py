@@ -328,15 +328,28 @@ class JaatoServer:
 
         # Phase 2 confined runner: per-session RPC client to the
         # spawned runner subprocess (see server.runner_spawner +
-        # server.runner_rpc).  Set by ``SessionManager.create_session``
-        # after ``RunnerSpawner.spawn`` returns and BEFORE
+        # server.runner_rpc).  Set by the IPC apparmor pre-init hook
+        # AFTER ``RunnerSpawner.spawn`` returns and BEFORE
         # ``initialize()`` runs, so plugins discovering the registry
         # via ``set_plugin_registry`` see ``registry.runner_rpc`` at
         # configure time.  ``None`` for sessions that don't get a
-        # runner (Phase 2: only apparmor-enabled sessions spawn one;
-        # Phase 3 makes it always-runner).
+        # runner (Phase 2: only apparmor-enabled IPC sessions spawn
+        # one; Phase 3 makes it always-runner across all four session
+        # bootstrap paths — see plan §"Non-IPC bootstrap path
+        # deferral").
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
+
+        # Sandbox-mode planned by a pre-initialize hook.  The Session
+        # record (which carries ``sandbox_mode``) is constructed by
+        # SessionManager AFTER ``initialize()`` returns; pre-init hooks
+        # can't set ``Session.sandbox_mode`` directly because the
+        # record doesn't exist yet.  Hook stashes the planned value
+        # here; ``_create_session_impl`` reads it back when building
+        # the Session.  ``None`` means "no plan; default Session
+        # behavior".  Used by the IPC apparmor pre-init hook in
+        # ``server/__main__.py`` (Phase 2 task 2.3 post-rebase).
+        self._planned_sandbox_mode: Optional[str] = None
 
         # Pricing table — loaded lazily on first use; populates
         # UsageBreakdown.cost_usd on emitted Context/Turn events when
