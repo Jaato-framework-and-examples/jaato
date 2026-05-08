@@ -552,11 +552,12 @@ class JaatoWSServer:
                     session_id,
                 )
                 return
-            # Profile loaded successfully — stash the confine-context
-            # factory so configure() wraps prefetch in it (server 0.6.50+).
-            confine_context = ws_server.get_apparmor_confinement(session_id)
-            if confine_context is not None:
-                server.set_pre_init_confine_context(confine_context)
+            # Phase 2 (confined runner): profile is loaded in the
+            # kernel above; the daemon does NOT install a confine-
+            # context onto its own threads.  configure() / prefetch
+            # run unconfined daemon-side; per-session tool execution
+            # runs in the runner subprocess, which self-confines.
+            # See docs/design/per_session_confined_runner.md §4.6.
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
             sess = sm.get_session(session_id)
@@ -666,31 +667,34 @@ class JaatoWSServer:
                 sess.sandbox_mode = "soft"
                 return
 
-            # Server 0.6.55+: tool execution uses the tool_hat
-            # sub-profile (info-isolation read-denies on user-authored
-            # config); prefetch / reactor dispatch / session-init
-            # continue to use the BASE profile (full read access).
-            tool_confine_context = ws_server.get_apparmor_tool_confinement(session_id)
-            if tool_confine_context:
-                server.set_apparmor_confinement(tool_confine_context)
-                # Hand over the per-session reference authorizer so the
-                # references plugin can mutate the kernel profile when
-                # selectReferences grants new readonly paths.
-                authorizer = ws_server.get_reference_authorizer(session_id)
-                if authorizer is not None:
-                    server.set_reference_authorizer(authorizer)
-                sess.sandbox_mode = "apparmor"
-                # Record mapping so the workspace reaper can teardown
-                # the profile by workspace ID.
-                import os
-                workspace_id = os.path.basename(sess.workspace_path)
-                ws_server._workspace_to_session_id[workspace_id] = session_id
-                logger.info(
-                    "AppArmor confinement applied to session %s (workspace %s)",
-                    session_id, workspace_id,
-                )
-            else:
-                sess.sandbox_mode = "soft"
+            # Phase 2 (confined runner): kernel-level profile is loaded
+            # but the daemon does NOT confine its own threads.  Tool
+            # execution runs in the per-session runner subprocess
+            # (see server/runner/), which self-confines via
+            # aa_change_profile against this profile.  The
+            # ``tool_hat`` sub-profile transition stays in the runner-
+            # side ToolExecutor (Phase 3).
+            #
+            # Hand over the per-session reference authorizer so the
+            # references plugin can mutate the kernel profile when
+            # selectReferences grants new readonly paths.  This is a
+            # daemon-tier RPC primitive (the runner consumes it via
+            # apparmor.add_fragment in Phase 3); the daemon-side
+            # state-keeping is unchanged in Phase 2.
+            authorizer = ws_server.get_reference_authorizer(session_id)
+            if authorizer is not None:
+                server.set_reference_authorizer(authorizer)
+            sess.sandbox_mode = "apparmor"
+            # Record mapping so the workspace reaper can teardown
+            # the profile by workspace ID.
+            import os
+            workspace_id = os.path.basename(sess.workspace_path)
+            ws_server._workspace_to_session_id[workspace_id] = session_id
+            logger.info(
+                "AppArmor profile provisioned for session %s (workspace %s); "
+                "runner will self-confine on spawn",
+                session_id, workspace_id,
+            )
 
         # Register both hooks.  The pre-init hook runs before
         # ``server.initialize()`` so prefetch scripts (and any other
@@ -2326,19 +2330,11 @@ class JaatoWSServer:
 
         self._jaato_server = server
 
-        # Apply AppArmor confinement to CLI and interactive shell plugins.
-        # (In daemon mode this is handled by the session hook registered in
-        # set_command_router; this branch covers standalone WS server mode.)
-        # Server 0.6.55+: tool execution uses the tool_hat sub-profile
-        # (info-isolation on user-authored config reads).
-        if provisioned_ws:
-            tool_confine_context = self.get_apparmor_tool_confinement(session_id)
-            if tool_confine_context:
-                server.set_apparmor_confinement(tool_confine_context)
-                logger.info(
-                    "AppArmor confinement applied to session %s",
-                    session_id,
-                )
+        # Phase 2 (confined runner): standalone WS-server mode no
+        # longer installs daemon-thread confinement.  The kernel-level
+        # profile is provisioned during session creation; the runner
+        # subprocess self-confines on spawn.  See
+        # docs/design/per_session_confined_runner.md §4.6.
 
         await self._send_to_client(
             client_id,

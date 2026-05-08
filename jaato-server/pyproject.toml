@@ -164,3 +164,13 @@ cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["shared*", "server*", "jaato*"]
+
+[tool.pytest.ini_options]
+# Register custom marks so pytest doesn't warn on use.  ``apparmor``
+# gates the §2.6 multitenant integration test on hosts with
+# CAP_MAC_ADMIN + CAP_SYSLOG; see
+# docs/design/per_session_confined_runner_phase2_plan.md §6.8.
+markers = [
+    "apparmor: requires AppArmor (CAP_MAC_ADMIN) — runs on user-hosted server",
+]
+asyncio_mode = "auto"

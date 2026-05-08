@@ -119,3 +119,88 @@ def test_pre_init_hook_receives_workspace_path_directly(sm):
     sm.add_pre_initialize_hook(hook)
     sm._run_pre_initialize_hooks(object(), "sess-4", "/tmp/some/ws")
     assert captured == ["/tmp/some/ws"]
+
+
+# ----------------------------------------------------------------------
+# Phase 2 task 2.3 (post-rebase): client_id parameter
+# ----------------------------------------------------------------------
+
+
+def test_pre_init_hook_receives_client_id(sm):
+    """4-arg hooks see the requesting client_id.
+
+    Phase 2 task 2.3 needs this so the IPC AppArmor pre-init hook can
+    look up ``ClientConfigRequest.apparmor`` from
+    ``_client_config[client_id]``.  ``_client_to_session`` isn't
+    populated yet at pre-init, so the hook MUST receive client_id as
+    a parameter.
+    """
+    captured: List[Any] = []
+
+    def hook(server, session_id, workspace_path, client_id):
+        captured.append(client_id)
+
+    sm.add_pre_initialize_hook(hook)
+    sm._run_pre_initialize_hooks(
+        object(), "sess-5", "/tmp/ws", client_id="client-A",
+    )
+    assert captured == ["client-A"]
+
+
+def test_pre_init_hook_legacy_3arg_still_works(sm):
+    """Hooks with the legacy 3-arg signature keep working — the
+    SessionManager introspects the callable's parameter count and
+    drops client_id when calling old-style hooks.
+
+    Backwards-compat is required because the WS server's apparmor
+    pre-init hook (``server/websocket.py:_apparmor_pre_init_hook``)
+    still uses the 3-arg signature; converting it to 4-arg is
+    Phase 3 work alongside the WS-side runner spawn.
+    """
+    captured: List[tuple] = []
+
+    def legacy_hook(server, session_id, workspace_path):
+        captured.append((server, session_id, workspace_path))
+
+    sm.add_pre_initialize_hook(legacy_hook)
+    sm._run_pre_initialize_hooks(
+        "S", "sess-6", "/tmp/ws", client_id="ignored-by-legacy",
+    )
+    # Legacy hook called with 3 args; client_id silently dropped.
+    assert captured == [("S", "sess-6", "/tmp/ws")]
+
+
+def test_pre_init_hooks_legacy_and_new_compose(sm):
+    """Mix: legacy 3-arg + new 4-arg hooks both run cleanly."""
+    seen_legacy: List[Any] = []
+    seen_new: List[Any] = []
+
+    def legacy(server, session_id, workspace_path):
+        seen_legacy.append(workspace_path)
+
+    def new(server, session_id, workspace_path, client_id):
+        seen_new.append((workspace_path, client_id))
+
+    sm.add_pre_initialize_hook(legacy)
+    sm.add_pre_initialize_hook(new)
+    sm._run_pre_initialize_hooks(
+        object(), "sess-7", "/tmp/ws", client_id="C",
+    )
+    assert seen_legacy == ["/tmp/ws"]
+    assert seen_new == [("/tmp/ws", "C")]
+
+
+def test_pre_init_hook_client_id_default_none(sm):
+    """Calling ``_run_pre_initialize_hooks`` without ``client_id``
+    (e.g. ``_load_session_impl`` doesn't have a client) passes
+    ``None`` to 4-arg hooks — they must handle the non-IPC case.
+    """
+    captured: List[Any] = []
+
+    def hook(server, session_id, workspace_path, client_id):
+        captured.append(client_id)
+
+    sm.add_pre_initialize_hook(hook)
+    # No client_id keyword — the disk-restore path doesn't pass one.
+    sm._run_pre_initialize_hooks(object(), "sess-8", "/tmp/ws")
+    assert captured == [None]
