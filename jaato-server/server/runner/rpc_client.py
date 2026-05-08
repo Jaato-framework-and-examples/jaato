@@ -112,3 +112,68 @@ class RunnerRPCClient:
                 f"{type(env.result).__name__}; expected dict"
             )
         return PromptResponse.from_dict(env.result)
+
+    # --------------------- add_reference_fragment ----------------------
+
+    def add_reference_fragment(
+        self,
+        ref_id: str,
+        path: str,
+        *,
+        session_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Ask the daemon to load a reference-fragment into the
+        running session's AppArmor profile.
+
+        Phase 3 §3.2.2.  The runner-side references plugin's
+        ``selectReferences`` admit path calls this when an external
+        path is selected.
+
+        Args:
+            ref_id: Stable identifier for the reference (used as the
+                fragment filename suffix).
+            path: Absolute path to grant readonly access to.  Must
+                pass the daemon's
+                ``_validate_path_for_fragment`` (no relative paths,
+                no AppArmor glob metacharacters, no newlines).
+            session_id: Optional echo of the session id for sanity-
+                check on the daemon side.  Authoritative session id
+                is the handler-bound one; mismatches here surface
+                as a ``ValueError`` from the daemon.
+            timeout: Optional wall-clock cap.  ``apparmor_parser -r``
+                takes 10-30s on slow hosts; 60s is a reasonable
+                default.
+
+        Returns:
+            ``{"ok": True}`` on success, or
+            ``{"ok": False, "error": "<reason>"}`` on validation or
+            kernel failure.  Domain failures (validation reject,
+            ``add_reference_fragment`` returning False) flow as
+            ``ok=False`` dicts; transport / handler crashes raise
+            :class:`RunnerRPCError`.
+
+        Raises:
+            RunnerRPCError: transport-level failure or handler crash.
+        """
+        args: Dict[str, Any] = {"ref_id": ref_id, "path": path}
+        if session_id is not None:
+            args["session_id"] = session_id
+        env = self._rpc.outgoing_call(
+            "apparmor.add_reference_fragment",
+            args,
+            timeout=timeout,
+        )
+        if not env.ok or env.error is not None:
+            err_type = env.error.type if env.error else "UnknownError"
+            err_msg = env.error.message if env.error else "no error message"
+            raise RunnerRPCError(
+                f"apparmor.add_reference_fragment failed: "
+                f"{err_type}: {err_msg}"
+            )
+        if not isinstance(env.result, dict):
+            raise RunnerRPCError(
+                f"apparmor.add_reference_fragment: unexpected result "
+                f"type {type(env.result).__name__}; expected dict"
+            )
+        return dict(env.result)
