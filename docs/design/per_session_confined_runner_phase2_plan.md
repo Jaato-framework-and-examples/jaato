@@ -63,16 +63,32 @@ Files touched:
 - `server/apparmor.py` lines 1688–1696: delete the module-load
   registration of `_thread_unconfine_safe` as a SafeThreadPool pre-task
   hook. The helper itself stays for any third-party reuse.
-- `shared/safe_pool.py`: keep the file (verified by grep — three
+- `shared/safe_pool.py`: keep the file (verified by grep — **four**
   production callers consume `SafeThreadPoolExecutor` independent of
-  the apparmor hook): `shared/ai_tool_runner.py:_auto_background_pool`,
-  `server/__main__.py:loop.set_default_executor`, and
-  `shared/plugins/subagent/plugin.py`. The class is general-purpose
-  ThreadPoolExecutor; the apparmor hook used to REGISTER a pre-task
-  callback on it via `apparmor.py:1688-1696`. After 2.1 deletes that
-  registration, the class is unchanged and harmless for the other
-  three call sites. Phase 6 cleanup may revisit if the
-  pre-task-callback machinery becomes vestigial.
+  the apparmor hook):
+  1. `shared/ai_tool_runner.py:_auto_background_pool` (this repo).
+  2. `server/__main__.py:loop.set_default_executor` (this repo).
+  3. `shared/plugins/subagent/plugin.py` (this repo).
+  4. `jaato-premium/jaato_premium/reactors/engine.py:52` (premium
+     0.1.184, added 2026-05-07 — reactor dispatch pool).
+
+  The class is general-purpose `ThreadPoolExecutor`; the apparmor
+  hook used to REGISTER a pre-task callback on it via
+  `apparmor.py:1688-1696`. After 2.1 deletes that registration,
+  the class becomes a plain `ThreadPoolExecutor` subclass with an
+  empty pre-task hook list — fine for the four call sites above,
+  none of which depend on the apparmor-recovery semantics.
+
+  **Premium hint:** the comment in
+  `jaato-premium/jaato_premium/reactors/engine.py:52-65` references
+  the now-removed apparmor pre-task hook. Post-Phase-2 the comment
+  becomes misleading and should be updated to "we use
+  SafeThreadPoolExecutor for the conventional class lineage; no
+  apparmor-recovery semantics after Phase 2." This is a premium-
+  side follow-up, not a blocker for Phase 2.
+
+  Phase 6 cleanup may revisit if the pre-task-callback machinery
+  itself becomes vestigial.
 
 What stays for Phase 6 cleanup:
 - `apparmor.apparmor_confine`, `make_confine_context`,
@@ -185,6 +201,60 @@ Files touched:
 5. Daemon → `FinishReason.CANCELLED` (existing path).
 
 ### 2.6 — Integration test (acceptance gate). See §4 below.
+
+### Non-IPC bootstrap path deferral
+
+Phase 2 wires runner spawn for ONE of the four session-bootstrap
+entry points. The other three are explicitly deferred to Phase 3:
+
+| Bootstrap path | Phase 2? | Reason |
+|---|---|---|
+| `SessionManager._create_session_impl` (IPC `session.new`) | YES | Plan §2.3 — the load-bearing IPC client opt-in path. |
+| `SessionManager._load_session_impl` (disk-restore) | NO — Phase 3 | No client_id at restore time; restoring a session that was previously confined needs design work for "do we re-spawn a runner for a session loaded from disk?" The honest answer is "yes once the runner-tier list expands beyond cli", which makes it Phase 3 alongside the bulk plugin migration. |
+| `SessionManager.run_ephemeral_session` (remote subagent) | NO — Phase 3 | Ephemeral sessions are subagent fan-out; per §4.3 default they share the parent's runner. Phase 2 doesn't have a parent-runner reference to pass into the ephemeral path. |
+| `JaatoWSServer` standalone bootstrap | NO — Phase 3 | The WS server has its own pre-init apparmor hook (`websocket.py:_apparmor_pre_init_hook`); Phase 2 only removes the daemon-thread confinement there (§2.1). The WS-side runner spawn lands when WS migrates off in-process tool execution, expected alongside the bulk plugin migration. |
+
+The IPC apparmor pre-init hook (post-rebase: a 4-arg hook installed
+via `add_pre_initialize_hook`) returns early when `client_id is None`
+(the disk-restore path passes None) — so loaded-from-disk and
+ephemeral sessions transparently fall through to the in-process
+tool execution path, same behavior as Phase 1 / pre-rebase main.
+This keeps Phase 2 from regressing those paths while their full
+runner integration is being designed.
+
+For Phase 3 the wiring will move from "IPC apparmor hook" to a
+generic SessionManager-level "spawn runner for this session"
+helper that all four bootstrap paths call — the §2.3 plumbing
+(JaatoServer slots, RunnerSpawner, RunnerRPCClient, registry-
+attribute injection) is already in place to support that.
+
+### Post-rebase §2.3 wiring shift
+
+The original §2.3 implementation lived inside the IPC apparmor
+SESSION hook (post-init), not in `_create_session_impl` between
+the pre-init hooks and `server.initialize()` as the plan said.
+Reviewer caught this; post-rebase fix moves the IPC hook from
+`add_session_hook` → `add_pre_initialize_hook` so:
+
+- The runner is spawned BEFORE `initialize()` runs.
+- `registry.runner_rpc` is populated by the time plugins'
+  `set_plugin_registry` hooks fire during configure.
+- Phase 3 plugins that need configure-time access to the runner
+  RPC handle work without the lazy-execute-time dance the cli
+  stub currently uses.
+
+Two new fields on `JaatoServer` plumb the pre-init hand-off:
+- `_runner_rpc` / `_spawned_runner` (already added in §2.3).
+- `_planned_sandbox_mode` (new): the pre-init hook can't write
+  `Session.sandbox_mode` directly because `Session` is built
+  AFTER `initialize()` returns. Hook stashes the planned value;
+  `_create_session_impl` reads it back when constructing the
+  Session record.
+
+`_run_pre_initialize_hooks` gains an optional `client_id` parameter
+with backwards-compat for the WS pre-init hook's legacy 3-arg
+signature (introspected via `inspect.signature`). Phase 3 converts
+the WS hook to 4-arg alongside its runner-spawn migration.
 
 ## 3. Test scenarios for 2.5 (cli) — §4.1.1 contract
 
@@ -415,8 +485,49 @@ eager import is invisible. Phase 3 will need to revisit when the
 runner-tier plugin set expands to ~10 plugins (~1s eager-import
 risk). Defer the lazy-import-via-entry-points machinery until then.
 
+## 8. Post-rebase review fixes (added 2026-05-07)
+
+A second review against rebased main surfaced four items, all
+addressed before merge:
+
+**8.1 Rebase against main.** The branch had diverged 12 commits
+behind main (server 0.6.59 → 0.6.71, sdk 0.12.0 → 0.13.0).
+Rebased cleanly — Phase 2's surfaces don't overlap with
+0.6.60-0.6.71's edits (script_loader, signal_completion gating,
+secret URIs, ContextVars, sys.modules snapshot, helper-name index,
+fresh-context wrapper).
+
+**8.2 §2.3 wiring incompleteness.** The original §2.3 commit added
+`runner_spawner.py` / `runner_rpc.py` / the `JaatoServer` slots
+but DID NOT edit `session_manager.py` — the spawn lived in the
+IPC apparmor SESSION hook (post-init).  Post-rebase fix moves the
+hook to PRE-INIT (see "Post-rebase §2.3 wiring shift" above).
+Critically: the call site is `_create_session_impl`, not the
+public `create_session` wrapper, because 0.6.71 split the two
+(public wrapper runs the impl inside a fresh `contextvars.Context`).
+
+**8.3 §2.1 audit list.** Original audit listed three SafeThreadPoolExecutor
+callers; jaato-premium 0.1.184 added a fourth (reactor engine).
+Plan §2.1 above now lists all four.  The premium-side comment
+referencing the now-removed apparmor pre-task hook is flagged
+for a follow-up update post-merge.
+
+**8.4 Non-IPC bootstrap path scope.** Phase 2 now explicitly defers
+`_load_session_impl`, `run_ephemeral_session`, and the standalone
+WS bootstrap to Phase 3 (see "Non-IPC bootstrap path deferral"
+above). Loaded-from-disk and ephemeral sessions transparently
+fall through to the in-process tool execution path (the IPC hook
+returns early when `client_id is None`); WS-provisioned sessions
+keep their existing apparmor pre-init hook (legacy 3-arg
+signature, runner spawn lands in Phase 3 alongside WS-side
+plugin migration).
+
+**8.5 Memory follow-up.** `project_backlog_apparmor_restore_unconfined_eperm.md`
+becomes moot once Phase 2 lands — the EPERM error class is
+unreachable when no daemon thread is confined. Post-merge update.
+
 ---
 
-End of plan. Awaiting review before code commits begin. Estimated PR
-size after all six tasks: ~1500 lines added, ~200 removed (most
-removals are 2.1's daemon-thread confinement deletions).
+End of plan. Code commits + post-rebase review fixes landed.
+Estimated PR size after all six tasks + rebase fixes: ~1700
+lines added, ~210 removed.
