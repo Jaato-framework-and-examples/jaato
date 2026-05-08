@@ -7,6 +7,7 @@ protocol for programmatic access to Claude's agentic capabilities.
 import json
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import signal
 import subprocess
 import threading
@@ -583,7 +584,7 @@ class ClaudeCLIProvider:
             return resolved
 
         # Priority 2: JAATO_WORKSPACE_ROOT environment variable
-        workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+        workspace = get_workspace_root()
         if workspace:
             resolved = os.path.realpath(os.path.abspath(workspace))
             logger.debug(f"Using JAATO_WORKSPACE_ROOT: {resolved}")

@@ -16,6 +16,7 @@ Reference: https://github.com/NoeFabris/opencode-antigravity-auth
 
 import json
 import os
+from shared.session_context import get_workspace_root, get_config_root
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -189,7 +190,7 @@ class AntigravityProvider:
         # This ensures token resolution can find workspace-specific OAuth tokens
         # even when JAATO_WORKSPACE_ROOT env var isn't set (e.g., subagent spawning)
         workspace_path = config.extra.get('workspace_path')
-        if workspace_path and not os.environ.get('JAATO_WORKSPACE_ROOT'):
+        if workspace_path and not get_workspace_root():
             os.environ['JAATO_WORKSPACE_ROOT'] = workspace_path
 
         # Load account manager

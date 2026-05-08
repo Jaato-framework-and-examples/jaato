@@ -18,6 +18,7 @@ Storage follows the jaato convention used by the other auth plugins:
 import json
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,7 +66,7 @@ def _get_token_storage_path(
     """
     workspace = (
         workspace_path
-        or os.environ.get("JAATO_WORKSPACE_ROOT")
+        or get_workspace_root()
         or os.getcwd()
     )
     project_path = Path(workspace) / ".jaato" / "openrouter_auth.json"

@@ -5,6 +5,7 @@ This module handles loading todo.json files and validating their structure.
 
 import json
 import os
+from shared.session_context import get_workspace_root, get_config_root
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -164,7 +165,7 @@ def load_config(
 
     if path is None:
         # Try default locations
-        cwd = Path(base_path) if base_path else Path(os.environ.get('JAATO_WORKSPACE_ROOT') or Path.cwd())
+        cwd = Path(base_path) if base_path else Path(get_workspace_root() or Path.cwd())
         default_paths = [
             cwd / "todo.json",
             cwd / ".todo.json",

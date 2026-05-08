@@ -234,13 +234,20 @@ def list_provider_models(
         # → ["glm-4.5", "glm-4.7", "glm-5", "glm-5.1", ...]
     """
     import os
+    from shared.session_context import set_workspace_root, reset_workspace_root
 
     providers = discover_providers()
     if provider_name not in providers:
         return []
 
+    # Server 0.6.68+: prefer the per-task ContextVar over os.environ
+    # mutation.  The os.environ writes are kept for third-party libs
+    # that read it directly, but jaato-side reads now go through
+    # ``get_workspace_root()`` which honors the ContextVar first.
+    ws_token = None
     old_ws = os.environ.get("JAATO_WORKSPACE_ROOT")
     if workspace_path:
+        ws_token = set_workspace_root(workspace_path)
         os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
     try:
         provider = providers[provider_name]()
@@ -253,6 +260,8 @@ def list_provider_models(
                 os.environ["JAATO_WORKSPACE_ROOT"] = old_ws
             else:
                 os.environ.pop("JAATO_WORKSPACE_ROOT", None)
+            if ws_token is not None:
+                reset_workspace_root(ws_token)
 
 
 __all__ = [

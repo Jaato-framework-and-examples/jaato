@@ -2131,7 +2131,8 @@ class SubagentPlugin:
         if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
         if workspace_path is None:
-            workspace_path = os.environ.get("JAATO_WORKSPACE_ROOT")
+            from shared.session_context import get_workspace_root
+            workspace_path = get_workspace_root()
         parent_cwd = workspace_path or os.getcwd()
 
         # Resolve the profile or create inline
@@ -2256,7 +2257,7 @@ class SubagentPlugin:
                     parent_cwd
                     or (self._runtime.registry.get_workspace_path()
                         if self._runtime and self._runtime.registry else None)
-                    or os.environ.get('JAATO_WORKSPACE_ROOT')
+                    or get_workspace_root()
                 )
                 resolved_schema = resolve_spawn_schema(
                     profile.spawn_payload_schema,
@@ -2349,7 +2350,7 @@ class SubagentPlugin:
             "SubagentPlugin.spawn_subagent: workspace resolution: "
             f"self._workspace_path={self._workspace_path}, "
             f"registry={self._runtime.registry.get_workspace_path() if self._runtime and self._runtime.registry else None}, "
-            f"env={os.environ.get('JAATO_WORKSPACE_ROOT')}, "
+            f"env={get_workspace_root()}, "
             f"cwd={os.getcwd()}, "
             f"result={parent_cwd}"
         )

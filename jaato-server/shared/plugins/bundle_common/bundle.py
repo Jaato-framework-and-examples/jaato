@@ -331,7 +331,7 @@ def resolve_bundle_roots(
     # broadcast — and therefore can't read the override from
     # ``self._config_root`` — still pick it up on first discovery.
     import os as _os
-    effective_config_root = config_root or _os.environ.get('JAATO_CONFIG_ROOT')
+    effective_config_root = config_root or get_config_root()
 
     roots: List[Tuple[Path, str]] = []
     if effective_config_root:

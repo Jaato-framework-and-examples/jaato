@@ -11,6 +11,7 @@ import http.server
 import json
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import secrets
 import threading
 import time
@@ -485,8 +486,8 @@ def _get_token_storage_path(
     """
     # Use explicit workspace path if set (thread-safe for subagents)
     # Falls back to CWD for main agent
-    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    effective_config_root = config_root or os.environ.get("JAATO_CONFIG_ROOT")
+    workspace = workspace_path or get_workspace_root() or os.getcwd()
+    effective_config_root = config_root or get_config_root()
     if effective_config_root:
         project_path = Path(effective_config_root).expanduser().resolve() / "anthropic_oauth.json"
     else:
@@ -664,8 +665,8 @@ def _get_pending_auth_path(for_write: bool = False) -> Path:
        ``<workspace>/.jaato/anthropic_pending_auth.json``.
     2. Home tier — ``~/.jaato/anthropic_pending_auth.json``.
     """
-    workspace = os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    effective_config_root = os.environ.get("JAATO_CONFIG_ROOT")
+    workspace = get_workspace_root() or os.getcwd()
+    effective_config_root = get_config_root()
     if effective_config_root:
         project_path = Path(effective_config_root).expanduser().resolve() / "anthropic_pending_auth.json"
     else:

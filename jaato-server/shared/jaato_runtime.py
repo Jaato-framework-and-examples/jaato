@@ -161,7 +161,8 @@ def _get_sandbox_guidance() -> Optional[str]:
     Returns sandbox awareness instructions if a workspace root is set,
     informing the model about path restrictions.
     """
-    workspace = os.environ.get('JAATO_WORKSPACE_ROOT') or os.environ.get('workspaceRoot')
+    from shared.session_context import get_workspace_root
+    workspace = get_workspace_root() or os.environ.get('workspaceRoot')
     if not workspace:
         return None
 

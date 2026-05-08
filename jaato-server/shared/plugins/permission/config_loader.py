@@ -5,6 +5,7 @@ This module handles loading permissions.json files and validating their structur
 
 import json
 import os
+from shared.session_context import get_workspace_root, get_config_root
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -209,7 +210,7 @@ def load_config(
 
     if path is None:
         # Try default locations (follows .jaato/ convention used by other plugins)
-        cwd = Path(base_path) if base_path else Path(os.environ.get('JAATO_WORKSPACE_ROOT') or Path.cwd())
+        cwd = Path(base_path) if base_path else Path(get_workspace_root() or Path.cwd())
         default_paths = [
             cwd / ".jaato" / "permissions.json",
             Path.home() / ".jaato" / "permissions.json",

@@ -6,6 +6,7 @@ integrated permission approval (showing diffs) and automatic backups.
 
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import shutil
 import tempfile
 import traceback
@@ -52,7 +53,7 @@ def _detect_workspace_root() -> Optional[str]:
     Returns:
         Absolute path to workspace root, or None if not configured.
     """
-    workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+    workspace = get_workspace_root()
     if workspace:
         return os.path.realpath(os.path.abspath(workspace))
     workspace = os.environ.get('workspaceRoot')

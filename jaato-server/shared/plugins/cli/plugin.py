@@ -1,6 +1,7 @@
 """CLI tool plugin for executing local shell commands."""
 
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import re
 import shutil
 import shlex
@@ -149,7 +150,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
             Resolved absolute path to workspace root, or None if not found.
         """
         # Priority 1: JAATO_WORKSPACE_ROOT
-        workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+        workspace = get_workspace_root()
         if workspace:
             resolved = os.path.realpath(os.path.abspath(workspace))
             self._trace(f"_detect_workspace_root: using JAATO_WORKSPACE_ROOT={resolved}")

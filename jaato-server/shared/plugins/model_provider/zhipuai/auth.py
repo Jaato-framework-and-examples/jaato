@@ -17,6 +17,7 @@ Storage follows jaato convention:
 import json
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,8 +84,8 @@ def _get_token_storage_path(
         Path to credentials storage file.
     """
     # Use explicit workspace path if set (thread-safe for subagents)
-    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    effective_config_root = config_root or os.environ.get("JAATO_CONFIG_ROOT")
+    workspace = workspace_path or get_workspace_root() or os.getcwd()
+    effective_config_root = config_root or get_config_root()
     if effective_config_root:
         project_path = Path(effective_config_root).expanduser().resolve() / "zhipuai_auth.json"
     else:

@@ -45,7 +45,7 @@ Usage in session wiring (already handled by JaatoSession)::
 """
 
 import os
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from typing import Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -54,6 +54,17 @@ if TYPE_CHECKING:
 _current_session: ContextVar['JaatoSession'] = ContextVar('current_session')
 _session_env: ContextVar[Optional[Dict[str, str]]] = ContextVar(
     'session_env', default=None,
+)
+# Per-task workspace identity (server 0.6.68+).  Replaces the previous
+# ``_in_workspace()`` os.environ mutation pattern, which clobbered values
+# across concurrent overlapping sessions.  ContextVar is asyncio-task /
+# thread-local — every concurrent session sees its own value
+# regardless of timing of context-manager enter/exit.
+_workspace_root: ContextVar[Optional[str]] = ContextVar(
+    'workspace_root', default=None,
+)
+_config_root: ContextVar[Optional[str]] = ContextVar(
+    'config_root', default=None,
 )
 
 
@@ -109,3 +120,70 @@ def get_session_env(key: str, default: Optional[str] = None) -> Optional[str]:
     if env is not None and key in env:
         return env[key]
     return os.environ.get(key, default)
+
+
+# ── Per-task workspace identity (server 0.6.68+) ────────────────────────
+#
+# Use these helpers (NOT ``os.environ.get('JAATO_WORKSPACE_ROOT')``) for
+# any session-time read of the active workspace / config-root.  The
+# helpers fall back to ``os.environ`` so callers that run outside a
+# session context (daemon startup, tests, CLI) still work.
+#
+# Pre-0.6.68 the active workspace was carried in ``os.environ`` —
+# process-global state — and concurrent overlapping sessions clobbered
+# each other.  Now ``JaatoServer._in_workspace()`` sets a per-task
+# ``ContextVar`` instead, race-free across asyncio tasks and threads.
+
+
+def set_workspace_root(value: Optional[str]) -> Token:
+    """Set the per-task workspace root.  Returns a token for ``reset_workspace_root``."""
+    return _workspace_root.set(value)
+
+
+def reset_workspace_root(token: Token) -> None:
+    """Reset the per-task workspace root to its previous value."""
+    _workspace_root.reset(token)
+
+
+def get_workspace_root(default: Optional[str] = None) -> Optional[str]:
+    """Read the active workspace root.
+
+    Lookup order:
+
+    1. Per-task ``ContextVar`` (set by ``JaatoServer._in_workspace()``).
+       Race-free across concurrent sessions.
+    2. ``os.environ['JAATO_WORKSPACE_ROOT']`` for daemon-wide /
+       startup-time / pre-session-context callers.
+    3. ``default``.
+    """
+    value = _workspace_root.get()
+    if value is not None:
+        return value
+    return os.environ.get('JAATO_WORKSPACE_ROOT', default)
+
+
+def set_config_root(value: Optional[str]) -> Token:
+    """Set the per-task config root.  Returns a token for ``reset_config_root``."""
+    return _config_root.set(value)
+
+
+def reset_config_root(token: Token) -> None:
+    """Reset the per-task config root to its previous value."""
+    _config_root.reset(token)
+
+
+def get_config_root(default: Optional[str] = None) -> Optional[str]:
+    """Read the active config root.
+
+    Lookup order:
+
+    1. Per-task ``ContextVar`` (set by ``JaatoServer._in_workspace()``).
+       Race-free across concurrent sessions.
+    2. ``os.environ['JAATO_CONFIG_ROOT']`` for daemon-wide /
+       startup-time / pre-session-context callers.
+    3. ``default``.
+    """
+    value = _config_root.get()
+    if value is not None:
+        return value
+    return os.environ.get('JAATO_CONFIG_ROOT', default)

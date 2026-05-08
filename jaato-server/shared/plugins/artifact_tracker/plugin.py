@@ -18,6 +18,7 @@ from a previous session from leaking into the new one.
 
 import json
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -69,7 +70,7 @@ def _detect_workspace_root() -> Optional[str]:
         Resolved absolute path to workspace root, or None if not found.
     """
     # Priority 1: JAATO_WORKSPACE_ROOT
-    workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+    workspace = get_workspace_root()
     if workspace:
         return os.path.realpath(os.path.abspath(workspace))
 

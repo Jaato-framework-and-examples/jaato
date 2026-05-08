@@ -320,7 +320,9 @@ def expand_variables(
 
     # Add default context variables
     # Use workspace_root_override if provided, otherwise auto-detect
-    effective_cwd = workspace_root_override or os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
+    # via the per-task ContextVar (race-free) → os.environ fallback.
+    from shared.session_context import get_workspace_root
+    effective_cwd = workspace_root_override or get_workspace_root() or os.getcwd()
     default_context = {
         'cwd': effective_cwd,
         'workspaceRoot': _find_workspace_root(workspace_root_override),
@@ -417,7 +419,8 @@ def _resolve_workspace_path(path: str) -> str:
     """
     p = Path(path)
     if not p.is_absolute():
-        workspace = os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
+        from shared.session_context import get_workspace_root
+        workspace = get_workspace_root() or os.getcwd()
         p = Path(workspace) / p
     return str(p.resolve())
 
@@ -443,8 +446,10 @@ def _find_workspace_root(override: Optional[str] = None) -> str:
     if override:
         return _resolve_workspace_path(override)
 
-    # Priority 2: JAATO_WORKSPACE_ROOT environment variable
-    env_root = os.environ.get('JAATO_WORKSPACE_ROOT')
+    # Priority 2: per-task workspace root (ContextVar, race-free) →
+    # JAATO_WORKSPACE_ROOT env var fallback for daemon-startup callers.
+    from shared.session_context import get_workspace_root
+    env_root = get_workspace_root()
     if env_root:
         return _resolve_workspace_path(env_root)
 
@@ -1421,17 +1426,23 @@ def discover_profiles(
     Returns:
         ProfileDiscoveryResult with discovered profiles and any parse errors.
     """
+    # Server 0.6.68+: read workspace_root / config_root via the per-task
+    # ``ContextVar`` first (race-free across concurrent sessions); fall
+    # back to ``os.environ`` for daemon-startup callers.  Pre-0.6.68
+    # this read directly from ``os.environ``, which clobbered across
+    # concurrent overlapping sessions and made the daemon's profile
+    # discovery for client A read client B's workspace.
+    from shared.session_context import get_config_root, get_workspace_root
     if base_path is None:
-        base_path = os.environ.get('JAATO_WORKSPACE_ROOT') or os.getcwd()
+        base_path = get_workspace_root() or os.getcwd()
 
     # When no explicit ``config_root`` is provided, fall back to the
-    # ``JAATO_CONFIG_ROOT`` env var.  ``JaatoServer._in_workspace``
-    # exports it for the duration of session-bound work, so plugins
-    # whose ``initialize()`` runs inside that context — including the
-    # subagent plugin's first call here — pick up the override even
-    # though the registry's ``set_config_root`` broadcast hasn't fired
-    # yet (broadcasts run AFTER plugin init).
-    effective_config_root = config_root or os.environ.get('JAATO_CONFIG_ROOT')
+    # session-scoped value set by ``JaatoServer._in_workspace`` —
+    # plugins whose ``initialize()`` runs inside that context (including
+    # the subagent plugin's first call here) pick up the per-session
+    # override even though the registry's ``set_config_root`` broadcast
+    # hasn't fired yet (broadcasts run AFTER plugin init).
+    effective_config_root = config_root or get_config_root()
 
     profiles: Dict[str, SubagentProfile] = {}
     errors: Dict[str, str] = {}

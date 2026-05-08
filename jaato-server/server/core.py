@@ -638,23 +638,46 @@ class JaatoServer:
 
     @contextlib.contextmanager
     def _in_workspace(self):
-        """Context manager to set workspace environment for the current scope.
+        """Context manager to set workspace identity for the current scope.
 
-        Sets JAATO_WORKSPACE_ROOT env var for plugins that read it during init.
-        Also sets JAATO_CONFIG_ROOT when a session-level override is in
-        effect, so auth-credential resolvers (which today key off
-        ``JAATO_WORKSPACE_ROOT`` to find ``<workspace>/.jaato/<provider>_auth.json``)
-        can route to the explicit config-root path instead.
+        Server 0.6.68+: sets ``shared.session_context._workspace_root``
+        and ``_config_root`` ContextVars — per-asyncio-task storage that
+        is race-free across concurrent sessions.  Pre-0.6.68 this used
+        ``os.environ`` mutation, which is process-global and clobbered
+        across overlapping sessions (jaato_session_manager_cross_client_workspace_leak).
 
-        Does NOT call os.chdir() — that is process-global and not thread-safe,
-        which corrupts cwd for concurrent sessions in daemon mode.
-        All workspace-dependent code uses explicit absolute paths (cwd= in
-        subprocess calls, set_workspace_path() on plugins, etc.).
+        ``os.environ`` is still mutated here as a compat fallback for
+        third-party code (provider SDKs, user scripts under
+        ``.jaato/scripts/``) that may read ``JAATO_WORKSPACE_ROOT``
+        directly.  Jaato-side code should use
+        ``shared.session_context.get_workspace_root()`` /
+        ``get_config_root()`` instead — those read the ContextVar first
+        and fall back to ``os.environ`` for daemon-startup callers.
+
+        Does NOT call ``os.chdir()`` — that is process-global and not
+        thread-safe.  All workspace-dependent jaato code uses explicit
+        absolute paths.
         """
         if not self._workspace_path:
             yield
             return
 
+        from shared.session_context import (
+            set_workspace_root, reset_workspace_root,
+            set_config_root, reset_config_root,
+        )
+
+        # Per-task ContextVar (race-free, asyncio-aware) — the canonical
+        # source of truth for jaato-side reads.
+        ws_token = set_workspace_root(self._workspace_path)
+        cr_token = (
+            set_config_root(self._config_root) if self._config_root else None
+        )
+
+        # Process-global os.environ — kept for third-party / user-script
+        # readers that import ``os`` directly.  The race against
+        # concurrent sessions still exists for these readers, but
+        # jaato-side code is now race-free via the ContextVar.
         original_workspace_env = os.environ.get("JAATO_WORKSPACE_ROOT")
         original_config_root_env = os.environ.get("JAATO_CONFIG_ROOT")
         try:
@@ -671,6 +694,9 @@ class JaatoServer:
                 os.environ["JAATO_CONFIG_ROOT"] = original_config_root_env
             elif "JAATO_CONFIG_ROOT" in os.environ:
                 del os.environ["JAATO_CONFIG_ROOT"]
+            reset_workspace_root(ws_token)
+            if cr_token is not None:
+                reset_config_root(cr_token)
 
     @contextlib.contextmanager
     def _with_session_env(self):

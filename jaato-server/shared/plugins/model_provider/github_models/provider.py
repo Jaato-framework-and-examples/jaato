@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -325,7 +326,7 @@ class GitHubModelsProvider:
         # This ensures token resolution can find workspace-specific OAuth tokens
         # even when JAATO_WORKSPACE_ROOT env var isn't set (e.g., subagent spawning)
         workspace_path = config.extra.get('workspace_path')
-        if workspace_path and not os.environ.get('JAATO_WORKSPACE_ROOT'):
+        if workspace_path and not get_workspace_root():
             os.environ['JAATO_WORKSPACE_ROOT'] = workspace_path
             self._trace(f"[INIT] Set JAATO_WORKSPACE_ROOT from config.extra: {workspace_path}")
 

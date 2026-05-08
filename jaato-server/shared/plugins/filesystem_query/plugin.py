@@ -13,6 +13,7 @@ Both tools return structured JSON output and support:
 import asyncio
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import re
 import stat
 from datetime import datetime
@@ -65,7 +66,7 @@ def _detect_workspace_root() -> Optional[str]:
     Returns:
         Absolute path to workspace root, or None if not configured.
     """
-    workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+    workspace = get_workspace_root()
     if workspace:
         return os.path.realpath(os.path.abspath(workspace))
     workspace = os.environ.get('workspaceRoot')
