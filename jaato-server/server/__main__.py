@@ -1079,7 +1079,7 @@ def _spawn_session_runner(
     import os
 
     from server.runner_spawner import RunnerSpawner
-    from server.runner_rpc import RunnerRPCClient
+    from server.runner_rpc_client import RunnerRPCClient
 
     if daemon_loop is None:
         raise RuntimeError(

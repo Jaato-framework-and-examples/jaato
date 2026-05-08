@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — types only
-    from server.runner_rpc import RunnerRPCClient
+    from server.runner_rpc_client import RunnerRPCClient
     from server.runner_spawner import SpawnedRunner
 
 logger = logging.getLogger(__name__)
@@ -328,7 +328,7 @@ class JaatoServer:
 
         # Phase 2 confined runner: per-session RPC client to the
         # spawned runner subprocess (see server.runner_spawner +
-        # server.runner_rpc).  Set by the IPC apparmor pre-init hook
+        # server.runner_rpc_client).  Set by the IPC apparmor pre-init hook
         # AFTER ``RunnerSpawner.spawn`` returns and BEFORE
         # ``initialize()`` runs, so plugins discovering the registry
         # via ``set_plugin_registry`` see ``registry.runner_rpc`` at

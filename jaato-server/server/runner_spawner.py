@@ -53,7 +53,7 @@ class SpawnedRunner:
     """Daemon-side handle for a spawned runner subprocess.
 
     Owned by the session's :class:`server.core.JaatoServer`; closed
-    via :meth:`server.runner_rpc.RunnerRPCClient.close` at session
+    via :meth:`server.runner_rpc_client.RunnerRPCClient.close` at session
     end (which closes the parent socket end, waits for the runner
     to exit, then SIGTERM/SIGKILL escalates per §4.6 "Death — daemon
     shutdown").

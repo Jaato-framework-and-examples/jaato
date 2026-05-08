@@ -194,7 +194,7 @@ def test_stub_surfaces_rpc_transport_error_as_tool_error(
     """If the RPC call itself raises (e.g. peer dead), translate to a
     legacy error-dict so the model gets a clean message rather than
     an opaque traceback."""
-    from server.runner_rpc import RunnerCallError
+    from server.runner_rpc_client import RunnerCallError
 
     plugin, rpc = cli_plugin_with_fake_rpc
     rpc.next_raise = RunnerCallError("runner RPC closed before response arrived")
