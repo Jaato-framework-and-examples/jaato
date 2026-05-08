@@ -52,6 +52,7 @@ import logging
 import socket
 import threading
 import traceback
+import concurrent.futures as _concurrent_futures
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol
@@ -211,6 +212,23 @@ class RunnerRPC:
         self._active_calls: Dict[int, _ActiveCall] = {}
         self._active_lock = threading.Lock()
         self._closed = False
+
+        # Phase 3 §3.2: runner → daemon outgoing-call bookkeeping.
+        # ``_outgoing_calls`` is keyed by request-id and holds a
+        # ``concurrent.futures.Future`` (NOT asyncio.Future — the
+        # runner side is synchronous, so callers block on
+        # ``fut.result(timeout)``).  ``_next_outgoing_id`` is a
+        # counter for outgoing-from-runner request IDs.
+        #
+        # ID-space note: the runner's outgoing-call IDs and the
+        # daemon's incoming-call IDs share the wire but are scoped
+        # by direction in the dispatcher — incoming ``response``
+        # frames are always for outgoing-from-runner calls (the
+        # daemon never sends ``response`` for its own request),
+        # so look-up against ``_outgoing_calls`` is unambiguous.
+        self._outgoing_calls: Dict[int, "_concurrent_futures.Future"] = {}
+        self._outgoing_lock = threading.Lock()
+        self._next_outgoing_id = 1
 
     # --------------------------- write paths ---------------------------
 
@@ -425,6 +443,28 @@ class RunnerRPC:
                         )
                         continue
                     self._handle_cancel(frame)
+                elif kind == KIND_RESPONSE:
+                    # Phase 3 §3.2: response to an outgoing-from-runner
+                    # call (e.g. ``client.prompt_operator``).  Look up
+                    # the matching future and resolve.
+                    try:
+                        env = ResponseEnvelope.from_dict(payload)
+                    except (KeyError, ValueError) as exc:
+                        logger.error(
+                            "runner RPC: malformed response frame: %s", exc,
+                        )
+                        continue
+                    fut: Optional["_concurrent_futures.Future"]
+                    with self._outgoing_lock:
+                        fut = self._outgoing_calls.pop(env.id, None)
+                    if fut is None:
+                        logger.debug(
+                            "runner RPC: response for unknown outgoing id=%d "
+                            "— already cancelled?", env.id,
+                        )
+                        continue
+                    if not fut.done():
+                        fut.set_result(env)
                 else:
                     logger.warning(
                         "runner RPC: ignoring unknown frame kind=%r", kind,
@@ -444,11 +484,98 @@ class RunnerRPC:
                 self._sock.shutdown(socket.SHUT_WR)
             except OSError:
                 pass
+            # Fail any outgoing calls awaiting daemon responses
+            # (Phase 3 §3.2).  The daemon is gone or the loop hit
+            # an unrecoverable error; callers blocked in
+            # ``outgoing_call(...).result(timeout=...)`` need to
+            # see a clear failure rather than wait out their timeout.
+            with self._outgoing_lock:
+                for fut in self._outgoing_calls.values():
+                    if not fut.done():
+                        fut.set_exception(
+                            RuntimeError(
+                                "runner RPC channel closed before response"
+                            )
+                        )
+                self._outgoing_calls.clear()
             self._pool.shutdown(wait=False, cancel_futures=True)
+
+    # ---------------------- runner → daemon outgoing -------------------
+
+    def outgoing_call(
+        self,
+        method: str,
+        args: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[float] = None,
+    ) -> ResponseEnvelope:
+        """Send an outgoing request to the daemon; block until response.
+
+        Phase 3 §3.2.  Used by runner-side plugins that need a
+        daemon-tier capability — concretely:
+
+        - ``client.prompt_operator`` from the permission plugin's
+          ASK path (§3.2.1).
+        - ``apparmor.add_reference_fragment`` from references'
+          ``selectReferences`` admit path (§3.2.2).
+        - ``telemetry.publish`` from the telemetry adapter (§3.15).
+
+        Synchronous because the runner side runs plugin code in
+        worker threads (not asyncio); callers block on
+        ``Future.result(timeout)``.
+
+        Args:
+            method: Daemon-side handler name (e.g.
+                ``"client.prompt_operator"``).
+            args: Args dict passed to the handler.
+            timeout: Wall-clock cap; ``None`` means wait
+                indefinitely.  Callers SHOULD set a finite
+                timeout in production to avoid wedging on a
+                half-dead daemon.
+
+        Returns:
+            The :class:`ResponseEnvelope` parsed from the daemon's
+            response.  Caller inspects ``ok`` / ``result`` /
+            ``error`` per the typed-envelope contract (§4.8).
+
+        Raises:
+            RuntimeError: when the channel is closed.
+            concurrent.futures.TimeoutError: when *timeout* fires
+                before the response arrives.
+        """
+        if self._closed:
+            raise RuntimeError("runner RPC channel is closed")
+
+        with self._outgoing_lock:
+            request_id = self._next_outgoing_id
+            self._next_outgoing_id += 1
+
+        fut: "_concurrent_futures.Future" = _concurrent_futures.Future()
+        with self._outgoing_lock:
+            self._outgoing_calls[request_id] = fut
+
+        env = RequestEnvelope(id=request_id, method=method, args=args or {})
+        self._write(env.to_dict())
+
+        try:
+            return fut.result(timeout=timeout)
+        finally:
+            with self._outgoing_lock:
+                self._outgoing_calls.pop(request_id, None)
 
     def shutdown(self) -> None:
         """Initiate shutdown from outside the serve loop."""
         self._closed = True
+        # Fail any in-flight outgoing calls with a clean error.
+        with self._outgoing_lock:
+            for fut in self._outgoing_calls.values():
+                if not fut.done():
+                    fut.set_exception(
+                        RuntimeError(
+                            "runner RPC channel closed before response"
+                        )
+                    )
+            self._outgoing_calls.clear()
         try:
             self._sock.shutdown(socket.SHUT_RDWR)
         except OSError:

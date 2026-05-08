@@ -56,6 +56,7 @@ from shared.framing import (
 
 from server.runner.envelope import (
     KIND_EVENT,
+    KIND_REQUEST,
     KIND_RESPONSE,
     KIND_STREAM,
     CancelFrame,
@@ -96,7 +97,22 @@ class RunnerRPCClient:
         *,
         runner_pid: int,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        rpc_server: Optional["RunnerRPCServer"] = None,
     ) -> None:
+        """Construct the client.
+
+        Args:
+            sock: The parent end of the runner socketpair.
+            runner_pid: Spawned runner PID — for waitpid + signal
+                escalation in ``close``.
+            loop: Optional event-loop override (defaults to current).
+            rpc_server: Optional :class:`RunnerRPCServer` for handling
+                runner → daemon RPCs (Phase 3 §3.2).  When ``None``,
+                incoming ``request`` frames from the runner are
+                rejected with an ``UnknownMethod`` error response.
+                Phase 2 callers passing no server keep working —
+                the runner only originated requests in Phase 3+.
+        """
         self._raw_sock = sock
         self._runner_pid = runner_pid
         self._loop = loop or asyncio.get_event_loop()
@@ -112,6 +128,17 @@ class RunnerRPCClient:
         self._in_flight: Dict[int, "asyncio.Future[ResponseEnvelope]"] = {}
         # Per-call streaming callback — looked up on every stream frame.
         self._stream_cbs: Dict[int, OnOutputCb] = {}
+
+        # Phase 3 §3.2: handler registry for runner → daemon RPCs.
+        # Lazy-init to an empty server so callers that don't use the
+        # incoming direction don't have to construct one explicitly.
+        if rpc_server is None:
+            from server.runner_rpc_server import RunnerRPCServer
+            rpc_server = RunnerRPCServer()
+        self._rpc_server: "RunnerRPCServer" = rpc_server
+        # Tasks dispatching incoming request frames; tracked so we
+        # can cancel on close().
+        self._dispatch_tasks: Dict[int, asyncio.Task] = {}
 
     @property
     def runner_pid(self) -> int:
@@ -172,6 +199,16 @@ class RunnerRPCClient:
                 await self._read_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+        # Cancel any in-flight runner → daemon dispatch tasks
+        # (Phase 3 §3.2).  A handler awaiting operator interaction
+        # gets a clean cancellation; the runner sees its outgoing
+        # request fail when the read loop catches the channel-closed
+        # state on the next read attempt.
+        for task in list(self._dispatch_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._dispatch_tasks.clear()
 
         # Fail any still-pending callers with a clean error.
         for fut in list(self._in_flight.values()):
@@ -298,6 +335,27 @@ class RunnerRPCClient:
                                 "RunnerRPCClient: on_output for id=%d raised",
                                 sf.id,
                             )
+                elif kind == KIND_REQUEST:
+                    # Phase 3 §3.2: runner → daemon RPC.  Dispatch in
+                    # a child task so a slow handler (e.g. a
+                    # ``client.prompt_operator`` waiting on operator
+                    # input) doesn't block the read loop.
+                    try:
+                        env = RequestEnvelope.from_dict(payload)
+                    except (KeyError, ValueError) as exc:
+                        logger.error(
+                            "RunnerRPCClient: bad runner request frame: %s",
+                            exc,
+                        )
+                        continue
+                    task = self._loop.create_task(
+                        self._handle_runner_request(env),
+                        name=f"runner-rpc-dispatch-{env.id}",
+                    )
+                    self._dispatch_tasks[env.id] = task
+                    task.add_done_callback(
+                        lambda t, fid=env.id: self._dispatch_tasks.pop(fid, None)
+                    )
                 elif kind == KIND_EVENT:
                     # Phase 3 wires this into the daemon's EventBus
                     # per §4.4.  For Phase 2 we drop them with a
@@ -329,6 +387,58 @@ class RunnerRPCClient:
                     )
             self._in_flight.clear()
             self._stream_cbs.clear()
+
+    # --------------------- runner → daemon dispatch --------------------
+
+    def register_handler(
+        self,
+        method: str,
+        handler: Callable[[Dict[str, Any]], "Awaitable[Any]"],
+    ) -> None:
+        """Bind *method* to *handler* on the underlying RunnerRPCServer.
+
+        Convenience wrapper that forwards to ``self._rpc_server.register``.
+        Handlers register via the client because the client owns the
+        socket; the server is just the dispatch table.
+        """
+        self._rpc_server.register(method, handler)
+
+    @property
+    def rpc_server(self) -> "RunnerRPCServer":
+        """Read accessor for the underlying handler registry.
+
+        Useful for callers that want to register many handlers in
+        one place (e.g. a session-init flow registering all of
+        ``client.prompt_operator``, ``apparmor.add_reference_fragment``,
+        ``telemetry.publish``).
+        """
+        return self._rpc_server
+
+    async def _handle_runner_request(self, env: RequestEnvelope) -> None:
+        """Dispatch one runner → daemon request and write the response.
+
+        Runs in a child task spawned by the read loop so handlers
+        that await I/O don't block subsequent frames.  Any exception
+        in the handler is caught by :meth:`RunnerRPCServer.dispatch`
+        and serialized into the response envelope's ``error`` field;
+        the only thing that can fail HERE is the response-write
+        itself, which we handle by logging + giving up (the runner
+        will see the read-loop's EOF on the next attempt).
+        """
+        response = await self._rpc_server.dispatch(env)
+        if self._closed or self._writer is None:
+            logger.debug(
+                "RunnerRPCClient: skipping response for id=%d — channel closed",
+                env.id,
+            )
+            return
+        try:
+            await write_frame(self._writer, json.dumps(response.to_dict()))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "RunnerRPCClient: failed to write response for id=%d: %s",
+                env.id, exc,
+            )
 
     # ----------------------------- call --------------------------------
 
