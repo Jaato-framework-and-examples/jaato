@@ -703,13 +703,25 @@ each entry point's inputs.
 
 **Partition test.** A new `tests/test_bootstrap_partition.py`
 asserts that **every** call site that constructs a session goes
-through `_bootstrap_session(envelope)`.  Implementation: AST scan
-of `server/session_manager.py` for any non-bootstrap-helper code
-path that constructs `JaatoServer` / `JaatoRuntime` /
-`JaatoSession` directly.  Match-list expected: just
-`_bootstrap_session` itself.  Anything else fails the test —
-catches the v1→v2 cycle's "no commit actually edited X" class
-of bug structurally.
+through `_bootstrap_session(envelope)`.  Implementation: AST
+scan of `server/**.py` + `shared/**.py` for any non-bootstrap-
+helper code path that constructs `JaatoServer` / `JaatoRuntime` /
+`JaatoSession` directly.  An explicit **allow-list of
+construction-permitted modules** (`server/session_manager.py`
+hosting `_bootstrap_session`, plus test fixture modules under
+`*/tests/`) defines the legitimate construction sites; anything
+else fails the test — catches the v1→v2 cycle's "no commit
+actually edited X" class of bug structurally.
+
+The broader scan (per peer-review μ1) covers future bootstrap
+entry points landing outside `session_manager.py` — daemon
+extensions that create sessions directly, new transports, etc.
+A contributor adding a new construction site has two options:
+(a) route the new path through `_bootstrap_session(envelope)`
+(preferred — the helper is the single source of truth), or
+(b) add the new module to the allow-list with a comment
+explaining why direct construction is justified (rare;
+expected only for test fixtures).
 
 Tests:
 - `tests/test_bootstrap_helper.py` — round-trip the four envelope
@@ -771,6 +783,17 @@ Files touched:
   there with its legacy 3-arg form per Phase 2 §8.4 deferral; any
   third-party pre-init hooks also continue using this surface).
   Only the IPC hook stops registering.
+- `server/core.py:JaatoServer._planned_sandbox_mode` — **removed
+  in this commit** (per peer-review μ2).  The Phase 2 plumbing
+  used this slot as a transitional channel from the IPC apparmor
+  pre-init hook to `_create_session_impl`'s Session-record
+  construction.  Once §3.12.0 + §3.13 land, the apparmor opt-in
+  lookup lives inside `_bootstrap_session` and writes directly
+  to the `BootstrapEnvelope.sandbox_mode` field; the
+  `_planned_sandbox_mode` slot has no remaining consumers.
+  Removing it in §3.13's diff (rather than deferring to Phase 6
+  cleanup) keeps the cleanup arc tight — the slot exists only
+  to bridge the pre-init-hook era and disappears with that era.
 
 Tests: existing Phase 2 tests still pass; one new test verifies
 the IPC `session.new` path spawns a runner without going through
@@ -1272,6 +1295,27 @@ Minor fixes:
 - **Mn6**: PR-size estimate deferred until §3.3a/b/c lands; prior
   "3500-4500 / 2500" numbers withdrawn pending the JaatoSession
   move shape.
+
+**v5 (2026-05-08)** — addresses peer-review of v4 (commit
+17ddfd1c).  Two micro-items folded in; reviewer marked v4
+implementation-ready.
+
+- **μ1**: §3.12.0's AST partition test broadened from
+  `server/session_manager.py` to `server/**.py` + `shared/**.py`
+  with explicit allow-list of construction-permitted modules.
+  Catches future bootstrap entry points landing outside
+  `session_manager.py` (daemon extensions creating sessions
+  directly, new transports, etc.).  Contributor instructions
+  documented for the two legitimate options when adding a new
+  construction site.
+- **μ2**: §3.13's "files touched" gains an explicit
+  `_planned_sandbox_mode` removal bullet.  The slot was a
+  transitional channel from Phase 2's IPC apparmor pre-init
+  hook to `_create_session_impl`; once §3.12.0 + §3.13 land,
+  apparmor opt-in lookup lives inside `_bootstrap_session` and
+  writes directly to `BootstrapEnvelope.sandbox_mode` — the
+  slot has no consumers and gets removed in §3.13's diff
+  rather than deferring to Phase 6 cleanup.
 
 **v4 (2026-05-08)** — addresses peer-review of v3 (commit
 7c46c03d).  Single structural gap closed.
