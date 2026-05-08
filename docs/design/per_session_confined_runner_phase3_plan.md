@@ -656,11 +656,84 @@ between parent and subagent in the shared-runner case;
 assert the runner's permission/memory/telemetry registries return
 to baseline (no growth in entry count).
 
-### 3.12 — Three deferred bootstrap paths
+### 3.12.0 — Bootstrap helper unification (prerequisite to §3.12 + §3.13)
+
+Per peer-review N3a.  §5.6's Option B (recommended) requires a
+concrete `SessionManager._bootstrap_session(envelope)` helper that
+all four bootstrap paths funnel through.  v3's N3 fix established
+the ordering rule ("§5.6 lands BEFORE §3.13") but left the helper
+itself as a §5 decision without a §3 task that builds it — the
+same shape the v1→v2 cycle closed for `PLUGIN_TIER` (decision in
+§6.1, no §3 task → fixed by adding §3.3.5).
+
+This task closes the gap.
+
+Files touched:
+- New `shared/session_envelope.py` — `BootstrapEnvelope` dataclass
+  carrying every field the four bootstrap paths need to differ on:
+  `session_id`, `workspace_path`, `client_id` (Optional — None for
+  disk-restore + ephemeral), `parent_runner_handle` (Optional —
+  set only on ephemeral subagent fan-out per §4.3 default share),
+  `sandbox_mode` (the planned-sandbox-mode value the IPC apparmor
+  pre-init hook stashes in Phase 2's `_planned_sandbox_mode`),
+  `restore_state` (Optional — populated only on disk-restore),
+  `client_config` (the per-path config payload).  Reuses the
+  existing `SessionInitEnvelope` from §3.3a as the JaatoSession-
+  level payload; `BootstrapEnvelope` is the SessionManager-level
+  envelope above it.
+- `server/session_manager.py:_bootstrap_session(envelope)` — new
+  method.  Body: AppArmor pre-init opt-in lookup; runner spawn (or
+  parent-runner share for ephemeral); `JaatoServer` construction;
+  `_run_pre_initialize_hooks` (legacy 3-arg + 4-arg both still
+  supported per Phase 2 §8.2's `inspect.signature` introspection);
+  `server.initialize()`; `Session` record construction with
+  `planned_sandbox_mode` read-back.
+- `server/session_manager.py:_create_session_impl` — migrate to
+  build a `BootstrapEnvelope` from its inputs and call
+  `_bootstrap_session(envelope)`.  No behavior change for the IPC
+  path; this commit is byte-identical at the IPC boundary.
+- The other three call sites (`_load_session_impl`,
+  `run_ephemeral_session`, WS standalone) DO NOT migrate yet —
+  §3.12 lands their migrations in subsequent commits.
+
+The helper signature is the focal point of §5.6's Option B.  Its
+shape is committed by this task; subsequent §3.12 commits flesh
+out the path-specific construction of `BootstrapEnvelope` from
+each entry point's inputs.
+
+**Partition test.** A new `tests/test_bootstrap_partition.py`
+asserts that **every** call site that constructs a session goes
+through `_bootstrap_session(envelope)`.  Implementation: AST scan
+of `server/session_manager.py` for any non-bootstrap-helper code
+path that constructs `JaatoServer` / `JaatoRuntime` /
+`JaatoSession` directly.  Match-list expected: just
+`_bootstrap_session` itself.  Anything else fails the test —
+catches the v1→v2 cycle's "no commit actually edited X" class
+of bug structurally.
+
+Tests:
+- `tests/test_bootstrap_helper.py` — round-trip the four envelope
+  shapes (IPC, disk-restore stub, ephemeral stub, WS stub); each
+  yields a valid Session record; the IPC shape is byte-identical
+  to pre-§3.12.0 behavior.
+- `tests/test_bootstrap_partition.py` — the AST gate above.
+
+One commit.  Lands BEFORE §3.12 and §3.13.  Ordering:
+**§3.12.0 → §3.12 → §3.13**.
+
+If §5.6 evidence reverses to Option A during implementation
+(path-specific bits turn out larger than shared bits), §3.12.0
+ships as a no-op skeleton and the four call sites stay
+inline; the partition test then permits the four call sites
+explicitly.
+
+### 3.12 — Three deferred bootstrap paths (depends on §3.12.0)
 
 Closes Phase 2 plan §8.4's deferral list.  All three need the
 runner-spawn wiring that Phase 2 only added to
-`_create_session_impl`.
+`_create_session_impl`.  Per §3.12.0, each path migrates to call
+`_bootstrap_session(envelope)` with a path-specific
+`BootstrapEnvelope` shape.
 
 | Path | Phase 3 wiring |
 |---|---|
@@ -1199,6 +1272,18 @@ Minor fixes:
 - **Mn6**: PR-size estimate deferred until §3.3a/b/c lands; prior
   "3500-4500 / 2500" numbers withdrawn pending the JaatoSession
   move shape.
+
+**v4 (2026-05-08)** — addresses peer-review of v3 (commit
+7c46c03d).  Single structural gap closed.
+
+- **N3a**: New §3.12.0 "Bootstrap helper unification" task added
+  as prerequisite to §3.12 + §3.13.  Builds
+  `SessionManager._bootstrap_session(envelope)` + the
+  `BootstrapEnvelope` dataclass + an AST-based partition test
+  that asserts every session-construction path funnels through
+  the helper.  Closes the v3 structural gap where §5.6's Option B
+  was a §5 decision without a §3 task that built the helper.
+  Ordering: **§3.12.0 → §3.12 → §3.13**.
 
 **v3 (2026-05-08)** — addresses peer-review of v2 (commit
 fd7af7ab).  Tightening only; no critical issues.
