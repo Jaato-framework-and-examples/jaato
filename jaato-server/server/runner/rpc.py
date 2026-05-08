@@ -185,9 +185,24 @@ class RunnerRPC:
         execute_fn: ExecuteFn,
         *,
         max_workers: int = 8,
+        workspace_root: Optional[str] = None,
     ) -> None:
+        """Construct the dispatcher.
+
+        Args:
+            sock: The inherited socketpair fd (typically fd 3).
+            execute_fn: Tool-execution callable.
+            max_workers: Concurrent tool-call cap.
+            workspace_root: Per-session workspace root, for traceback
+                sanitization (Phase 3 §3.1).  When set, captured
+                tracebacks have ``<workspace_root>/...`` paths
+                redacted to ``<WORKSPACE>/...`` before crossing the
+                RPC boundary.  ``None`` skips workspace-pass; the
+                home-jaato pass still runs.
+        """
         self._sock = sock
         self._execute_fn = execute_fn
+        self._workspace_root = workspace_root
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="runner-rpc",
@@ -291,9 +306,15 @@ class RunnerRPC:
                 logger.exception(
                     "runner RPC: executor for method=%r raised", env.method,
                 )
+                # Phase 3 §3.1: redact tenant + operator absolute paths
+                # before the traceback crosses the RPC boundary.  The
+                # daemon-side log + any forwarded events are
+                # potentially cross-tenant visibility surfaces.
+                from .sanitize import sanitize_traceback
+                tb = sanitize_traceback(tb, self._workspace_root)
                 err = ErrorPayload(
                     type=type(exc).__name__,
-                    message=str(exc),
+                    message=sanitize_traceback(str(exc), self._workspace_root),
                     traceback=tb,
                 )
                 self._emit_response(env.id, ok=False, result=None, error=err)

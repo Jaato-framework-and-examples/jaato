@@ -187,7 +187,10 @@ def main() -> None:
         **({"max_output_chars": max_output_chars} if max_output_chars is not None else {}),
         **({"tool_timeout_seconds": tool_timeout_seconds} if tool_timeout_seconds is not None else {}),
     )
-    rpc = RunnerRPC(sock, executor.execute)
+    # workspace_root is forwarded for §3.1 traceback sanitization —
+    # captured tracebacks have tenant-specific paths redacted to
+    # ``<WORKSPACE>/...`` before crossing the RPC boundary.
+    rpc = RunnerRPC(sock, executor.execute, workspace_root=workspace_root)
 
     log.info("runner ready; serving RPC on fd 3")
     try:
