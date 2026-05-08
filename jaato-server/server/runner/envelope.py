@@ -278,3 +278,18 @@ class CancelFrame:
                 f"CancelFrame.from_dict: kind != 'cancel' (got {d.get('kind')!r})"
             )
         return cls(id=int(d["id"]))
+
+
+# ----------------------------------------------------------------------
+# Session-bootstrap envelope re-export (Phase 3 §3.3a)
+# ----------------------------------------------------------------------
+#
+# Defined in ``shared/session_envelope.py`` so both daemon and runner
+# import from a single canonical path; re-exported here so the
+# runner's import surface stays consolidated under
+# ``server.runner.envelope`` (callers don't need to know whether a
+# given envelope type is RPC-wire or session-bootstrap).
+from shared.session_envelope import (  # noqa: E402 — re-export at end
+    SESSION_ENVELOPE_VERSION,
+    SessionInitEnvelope,
+)
