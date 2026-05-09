@@ -650,3 +650,231 @@ class RunnerRPCClient:
         return future.result(
             timeout=(timeout + 5.0 if timeout is not None else None),
         )
+
+    # ------------------------------------------------------------------
+    # Phase 3 §3.3c precursor — named-method wrappers
+    # ------------------------------------------------------------------
+    #
+    # Each of these wraps a runner-side handler with a typed Python
+    # API.  All return the raw result dict the runner produces; the
+    # daemon-side caller branches on its keys (``ready``, ``value``,
+    # ``cancelled``, etc.).  Errors from the runner side surface as
+    # :class:`RunnerCallError` (transport / handler crash) or as
+    # error-shaped result dicts (``{"error": ..., "stage": ...}``)
+    # for the per-handler defensive cases.
+
+    async def session_health_check(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        """Probe the runner-side session host's status.
+
+        Returns ``{"has_host": bool, "ready": bool,
+        "session_id": str, "tool_count": int}``.  Always succeeds
+        at the protocol level (the handler never returns ok=False
+        for missing host — the dict's ``has_host`` field carries
+        that signal).
+        """
+        return await self._call_named(
+            "session.health_check", {}, timeout=timeout,
+        )
+
+    def session_health_check_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_health_check(timeout=timeout), timeout=timeout,
+        )
+
+    async def session_get_state(
+        self,
+        key: str,
+        default: Any = None,
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> Any:
+        """Read a single session-state key from the runner.
+
+        Returns the raw value (whatever the runner-side
+        ``JaatoSession.get_session_state(key, default)`` returns —
+        possibly None, primitive, or container).
+        """
+        result = await self._call_named(
+            "session.get_session_state",
+            {"key": key, "default": default},
+            timeout=timeout,
+        )
+        return result.get("value")
+
+    def session_get_state_threadsafe(
+        self, key: str, default: Any = None,
+        *, timeout: Optional[float] = 5.0,
+    ) -> Any:
+        return self._run_threadsafe(
+            self.session_get_state(key, default, timeout=timeout),
+            timeout=timeout,
+        )
+
+    async def session_set_state(
+        self,
+        key: str,
+        value: Any,
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Write a single session-state key on the runner.
+
+        ``value`` must be JSON-serialisable per the JaatoSession
+        contract; non-serialisable values raise
+        :class:`RunnerCallError` with the runner's
+        ``stage="validate"`` error.
+        """
+        await self._call_named(
+            "session.set_session_state",
+            {"key": key, "value": value},
+            timeout=timeout,
+        )
+
+    def session_set_state_threadsafe(
+        self, key: str, value: Any,
+        *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_set_state(key, value, timeout=timeout),
+            timeout=timeout,
+        )
+
+    async def session_is_running(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> bool:
+        result = await self._call_named(
+            "session.is_running", {}, timeout=timeout,
+        )
+        return bool(result.get("running", False))
+
+    def session_is_running_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> bool:
+        return self._run_threadsafe(
+            self.session_is_running(timeout=timeout), timeout=timeout,
+        )
+
+    async def session_request_stop(
+        self,
+        reason: str = "",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> bool:
+        """Signal cancellation to the runner-side in-flight message.
+
+        Returns True if a cancellation was actually issued (matches
+        :meth:`JaatoSession.request_stop`'s contract); False if no
+        message was running.
+        """
+        result = await self._call_named(
+            "session.request_stop", {"reason": reason},
+            timeout=timeout,
+        )
+        return bool(result.get("cancelled", False))
+
+    def session_request_stop_threadsafe(
+        self, reason: str = "",
+        *, timeout: Optional[float] = 5.0,
+    ) -> bool:
+        return self._run_threadsafe(
+            self.session_request_stop(reason, timeout=timeout),
+            timeout=timeout,
+        )
+
+    async def session_get_history(
+        self,
+        *,
+        raw: bool = False,
+        timeout: Optional[float] = 30.0,
+    ) -> list:
+        """Read the runner-side conversation history.
+
+        Returns a list of message dicts (each as serialized by
+        :meth:`Message.to_dict`).  When ``raw=True``, returns the
+        un-transformed view (premium pseudonymization consumers).
+        Default 30s timeout because large histories may take time
+        to serialize over the wire.
+        """
+        result = await self._call_named(
+            "session.get_history", {"raw": raw}, timeout=timeout,
+        )
+        return list(result.get("history", []))
+
+    def session_get_history_threadsafe(
+        self, *, raw: bool = False, timeout: Optional[float] = 30.0,
+    ) -> list:
+        return self._run_threadsafe(
+            self.session_get_history(raw=raw, timeout=timeout),
+            timeout=timeout,
+        )
+
+    async def session_get_context_usage(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        """Read context-window usage stats from the runner."""
+        result = await self._call_named(
+            "session.get_context_usage", {}, timeout=timeout,
+        )
+        return dict(result.get("usage", {}))
+
+    def session_get_context_usage_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_get_context_usage(timeout=timeout),
+            timeout=timeout,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _call_named(
+        self,
+        method: str,
+        args: Dict[str, Any],
+        *,
+        timeout: Optional[float],
+    ) -> Dict[str, Any]:
+        """Common dispatch: call *method* with *args*; raise on
+        protocol failure; return the raw result dict.
+
+        Used by the named-method wrappers above so each one is a
+        2-line pass-through to ``call(method, args)`` with the
+        same error handling shape (mirrors the
+        ``bootstrap_session`` template).
+        """
+        coro = self.call(method, args)
+        if timeout is not None:
+            response = await asyncio.wait_for(coro, timeout)
+        else:
+            response = await coro
+        if not response.ok or response.error is not None:
+            err_type = response.error.type if response.error else "UnknownError"
+            err_msg = response.error.message if response.error else "no error message"
+            raise RunnerCallError(
+                f"{method} failed: {err_type}: {err_msg}"
+            )
+        if not isinstance(response.result, dict):
+            raise RunnerCallError(
+                f"{method}: unexpected result type "
+                f"{type(response.result).__name__}; expected dict"
+            )
+        return response.result
+
+    def _run_threadsafe(
+        self,
+        coro: Any,
+        *,
+        timeout: Optional[float],
+    ) -> Any:
+        """Synchronous wrapper for the named-method coroutines from
+        worker threads.  Mirrors ``bootstrap_session_threadsafe``."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(
+            timeout=(timeout + 5.0 if timeout is not None else None),
+        )
