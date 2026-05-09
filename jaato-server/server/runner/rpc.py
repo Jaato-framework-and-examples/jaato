@@ -487,6 +487,17 @@ class RunnerRPC:
             # the seat-flip lands.
             return self._handle_session_get_context_usage()
 
+        if env.method == "session.shutdown":
+            # Phase 3 §3.3c precursor: graceful runner-side session
+            # teardown.  Calls the bootstrapped JaatoSession's
+            # ``close_session`` (firing on_session_end hooks) and
+            # drops the host reference.  Daemon-side
+            # ``JaatoServer.shutdown`` will call this BEFORE
+            # closing the RPC transport so plugins get a clean
+            # teardown signal rather than being abruptly killed by
+            # the runner-process exit.
+            return self._handle_session_shutdown()
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -891,6 +902,63 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"usage": dict(usage)}
+
+    def _handle_session_shutdown(self) -> "tuple[bool, Any]":
+        """Graceful runner-side session teardown.
+
+        Phase 3 §3.3c precursor.  Drops the bootstrapped
+        :class:`RunnerSessionHost` (calling its session's
+        ``close_session()`` if available so on_session_end hooks
+        fire) and clears the dispatcher's ``_session_host``
+        reference.  The runner process itself stays alive — the
+        daemon's runner-RPC close ladder owns process termination.
+        This handler is just the session-level lifecycle bookend
+        that mirrors the bootstrap-then-shutdown cycle.
+
+        Returns:
+            ``(True, {"shutdown_session_id": str})`` on success.
+            ``"shutdown_session_id"`` is the id of the session that
+            was torn down, or empty string when no session was
+            bootstrapped (no-op).
+
+            ``(False, {"error": ..., "stage": ...})`` when
+            ``close_session`` raised.
+
+        Idempotent: re-calling after teardown returns success
+        with empty session_id (mirrors the no-host case).
+        """
+        with self._session_lock:
+            host = self._session_host
+            self._session_host = None  # drop ref BEFORE close so
+                                        # parallel handlers see the
+                                        # post-shutdown state
+
+        if host is None:
+            return True, {"shutdown_session_id": ""}
+
+        session_id = host.session_id
+        session = host.session
+        if session is not None:
+            close = getattr(session, "close_session", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:  # noqa: BLE001 — boundary
+                    logger.warning(
+                        "session.shutdown: close_session for %s "
+                        "raised %s — host already dropped, "
+                        "surfacing error to daemon",
+                        session_id, exc, exc_info=True,
+                    )
+                    return False, {
+                        "error": (
+                            f"session.shutdown: close_session raised "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        "stage": "close",
+                    }
+
+        return True, {"shutdown_session_id": session_id}
 
     def _handle_session_request_stop(
         self, args: Dict[str, Any],

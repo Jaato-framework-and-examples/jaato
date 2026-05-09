@@ -829,6 +829,38 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_shutdown(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> str:
+        """Graceful runner-side session teardown.
+
+        Tells the runner to call ``close_session`` on the
+        bootstrapped JaatoSession (firing on_session_end hooks)
+        and drop the host reference.  The runner process itself
+        stays alive — the daemon's ``RunnerRPCClient.close``
+        ladder owns process termination.
+
+        Returns the id of the session that was torn down, or
+        empty string when no session was bootstrapped (no-op).
+
+        Default 10s timeout — close_session may invoke plugin
+        shutdown hooks that take time (file flushes, network
+        connections, etc.).  Daemon callers wanting fail-fast
+        cleanup pass timeout=2.0 explicitly.
+        """
+        result = await self._call_named(
+            "session.shutdown", {}, timeout=timeout,
+        )
+        return str(result.get("shutdown_session_id", ""))
+
+    def session_shutdown_threadsafe(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> str:
+        return self._run_threadsafe(
+            self.session_shutdown(timeout=timeout),
+            timeout=timeout,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
