@@ -285,11 +285,33 @@ class RunnerRPC:
         result: Any,
         error: Optional[ErrorPayload] = None,
     ) -> None:
+        # Phase 3 §3.15: lift ``_telemetry`` off the result dict (if
+        # present) and move it to ``envelope.telemetry`` — the
+        # canonical wire location for tool-call telemetry.
+        #
+        # Plugins keep writing ``_telemetry`` into the result they
+        # return (in-process API unchanged); the runner-side
+        # dispatcher strips it on serialization so the wire form has
+        # ``result`` clean of telemetry side-channels.  The daemon-
+        # side ``_forward_via_runner`` is symmetric: it re-injects
+        # ``envelope.telemetry`` back into ``result["_telemetry"]``
+        # for transitional compatibility with consumers that still
+        # read from the result dict (jaato_session.py's OTel
+        # forwarder).  Post-seat-flip cleanup will retire the
+        # re-injection once consumers read ``envelope.telemetry``
+        # directly.
+        telemetry: Dict[str, Any] = {}
+        if isinstance(result, dict) and "_telemetry" in result:
+            lifted = result.pop("_telemetry")
+            if isinstance(lifted, dict):
+                telemetry = dict(lifted)
+
         env = ResponseEnvelope(
             id=request_id,
             ok=ok,
             result=result,
             error=error,
+            telemetry=telemetry,
         )
         self._write(env.to_dict())
 

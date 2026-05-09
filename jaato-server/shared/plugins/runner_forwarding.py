@@ -212,13 +212,13 @@ def _forward_via_runner(
 
     # ok=True with structured result → unchanged.
     if envelope.ok and isinstance(envelope.result, dict):
-        return envelope.result
+        return _reinject_envelope_telemetry(envelope.result, envelope.telemetry)
 
     # Domain failure with structured result → unchanged so the model
     # sees the same shape (e.g. ``{"error": "executable not found",
     # "hint": "..."}``).
     if isinstance(envelope.result, dict):
-        return envelope.result
+        return _reinject_envelope_telemetry(envelope.result, envelope.telemetry)
 
     # Domain failure without a result dict → synthesise one from the
     # error payload.
@@ -226,3 +226,39 @@ def _forward_via_runner(
         return {"error": envelope.error.message}
 
     return {"error": f"{tool_name}: empty response from runner"}
+
+
+def _reinject_envelope_telemetry(
+    result: Dict[str, Any],
+    telemetry: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Phase 3 §3.15: merge ``envelope.telemetry`` into
+    ``result["_telemetry"]`` for transitional backward-compat.
+
+    The runner-side ``_emit_response`` lifts ``_telemetry`` off the
+    result dict and into ``envelope.telemetry`` — the canonical wire
+    location.  Existing daemon-side consumers (jaato_session.py's
+    OTel forwarder, plugin tests) still read ``result["_telemetry"]``,
+    so the daemon-side forwarder reinjects on the way back.
+
+    Once consumers migrate to read ``envelope.telemetry`` directly
+    (post-seat-flip cleanup), this helper retires.
+
+    Args:
+        result: The structured result dict from the runner.
+        telemetry: The lifted telemetry dict from envelope.telemetry.
+
+    Returns:
+        The result dict with ``_telemetry`` populated from
+        *telemetry* (merged with any pre-existing ``_telemetry``
+        key, though after the §3.15 lift that's a no-op for runner-
+        produced results).
+    """
+    if not telemetry:
+        return result
+    existing = result.get("_telemetry")
+    if isinstance(existing, dict):
+        existing.update(telemetry)
+    else:
+        result["_telemetry"] = dict(telemetry)
+    return result

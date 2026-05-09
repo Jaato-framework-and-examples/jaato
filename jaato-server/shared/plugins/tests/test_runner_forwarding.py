@@ -319,3 +319,89 @@ def test_module_level_forward_handles_ok_response() -> None:
     )
     result = _forward_via_runner(rpc, "test_tool", {"k": "v"})
     assert result == {"sentinel": "module-level"}
+
+
+# ----------------------------------------------------------------------
+# Phase 3 §3.15 — envelope.telemetry reinjection on the daemon side
+#
+# The runner-side _emit_response lifts ``_telemetry`` off the result
+# dict onto ``envelope.telemetry``.  ``_forward_via_runner`` reinjects
+# it on the way back so the daemon-side OTel forwarder
+# (jaato_session.py:5215+) sees the legacy ``result["_telemetry"]``
+# shape unchanged.  These tests pin both ends of the wire contract:
+# the daemon never sees an envelope where ``telemetry`` and
+# ``result["_telemetry"]`` are both populated, and the reinjection
+# preserves all keys.
+# ----------------------------------------------------------------------
+
+
+def test_envelope_telemetry_reinjected_into_result() -> None:
+    """When the runner sends back an envelope with ``telemetry``
+    populated and a result dict WITHOUT a ``_telemetry`` key (the
+    canonical post-§3.15 wire form), the daemon-side forwarder
+    reinjects telemetry as ``result["_telemetry"]``."""
+    rpc = _StubRPC()
+    rpc.next_response = ResponseEnvelope(
+        id=1, ok=True,
+        result={"stdout": "ok\n", "returncode": 0},
+        telemetry={
+            "jaato.cli.command": "echo ok",
+            "jaato.cli.returncode": 0,
+        },
+    )
+    result = _forward_via_runner(rpc, "cli_based_tool", {"command": "echo ok"})
+    assert result["stdout"] == "ok\n"
+    assert result["returncode"] == 0
+    # Reinjected from envelope.telemetry.
+    assert result["_telemetry"] == {
+        "jaato.cli.command": "echo ok",
+        "jaato.cli.returncode": 0,
+    }
+
+
+def test_empty_envelope_telemetry_does_not_inject_key() -> None:
+    """If ``envelope.telemetry`` is empty (the common case for
+    plugins that don't emit telemetry), no ``_telemetry`` key is
+    added to the result — keeps the result dict clean for the
+    model."""
+    rpc = _StubRPC()
+    rpc.next_response = ResponseEnvelope(
+        id=1, ok=True,
+        result={"value": 42},
+        telemetry={},
+    )
+    result = _forward_via_runner(rpc, "some_tool", {})
+    assert result == {"value": 42}
+    assert "_telemetry" not in result
+
+
+def test_envelope_telemetry_merges_with_existing_result_telemetry() -> None:
+    """Defensive: if a runner-side path didn't go through the
+    canonical lift and left ``_telemetry`` on the result dict,
+    reinjection MERGES rather than overwrites.  Envelope keys
+    take precedence on conflict (they're the lifted authoritative
+    source)."""
+    rpc = _StubRPC()
+    rpc.next_response = ResponseEnvelope(
+        id=1, ok=True,
+        result={"stdout": "x", "_telemetry": {"a": 1, "b": 2}},
+        telemetry={"b": 99, "c": 3},
+    )
+    result = _forward_via_runner(rpc, "some_tool", {})
+    assert result["_telemetry"] == {"a": 1, "b": 99, "c": 3}
+
+
+def test_envelope_telemetry_reinjected_on_domain_failure() -> None:
+    """Domain-failure responses (ok=False with a result dict) also
+    carry telemetry — e.g. cgroup deltas accumulated before the
+    failure.  Reinjection still applies."""
+    rpc = _StubRPC()
+    rpc.next_response = ResponseEnvelope(
+        id=1, ok=False,
+        result={"error": "exec not found"},
+        error=ErrorPayload(type="ToolError", message="exec not found"),
+        telemetry={"jaato.cli.command": "missing_cmd"},
+    )
+    result = _forward_via_runner(rpc, "cli_based_tool", {"command": "missing_cmd"})
+    assert "exec not found" in result["error"]
+    assert result["_telemetry"] == {"jaato.cli.command": "missing_cmd"}
