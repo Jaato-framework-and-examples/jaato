@@ -1,6 +1,7 @@
-"""Session-init envelope for the daemon → runner handshake.
+"""Session-init envelope for the daemon → runner handshake +
+SessionManager-level bootstrap envelope.
 
-Phase 3 §3.3a.
+Phase 3 §3.3a + §3.12.0.
 
 When the daemon spawns a runner subprocess (Phase 2 task 2.3) and
 the runner reports ready (``RunnerReadyEvent``), the daemon sends a
@@ -9,7 +10,15 @@ runner's ``runner.session.bootstrap_session(envelope)`` (§3.3b)
 constructs a live :class:`JaatoSession`, runs ``configure()``, and
 hosts the session for the duration of the runner's lifetime.
 
-This module defines ONLY the schema.  The serialization
+The :class:`BootstrapEnvelope` (Phase 3 §3.12.0) is the
+SessionManager-level envelope above the JaatoSession-level
+``SessionInitEnvelope``.  It aggregates every input the per-session
+``SessionManager._bootstrap_session`` helper needs across the four
+session-creation paths (IPC, disk-restore, ephemeral subagent
+fan-out, WS standalone) into a single typed payload, replacing the
+ad-hoc kwarg-bag previously inlined in each call site.
+
+This module defines ONLY the schemas.  The serialization
 (``to_dict`` / ``from_dict``) is plain JSON-friendly — wraps primitive
 types + dicts + lists.  Anything richer (callable references, file
 descriptors, etc.) is NOT permitted in the envelope; all session
@@ -21,12 +30,17 @@ runner reads the version on receipt and refuses to bootstrap if the
 daemon advertises a higher version than the runner supports — this
 catches mid-deploy version skew (operator restarted the daemon to
 0.6.X but a long-running runner is still 0.6.X-1).
+
+:class:`BootstrapEnvelope` is daemon-internal — it never crosses the
+RPC wire — so it doesn't carry a ``schema_version`` and may hold
+non-JSON-serializable fields (Callable references, plugin instances,
+profile objects).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 # Bumped per schema change.  Runners refuse a higher-version
@@ -186,3 +200,86 @@ class SessionInitEnvelope:
             config_root=d.get("config_root"),
             env_overrides=dict(d.get("env_overrides") or {}),
         )
+
+
+# ----------------------------------------------------------------------
+# §3.12.0 — SessionManager-level bootstrap envelope
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class BootstrapEnvelope:
+    """SessionManager-level bootstrap envelope (Phase 3 §3.12.0).
+
+    Aggregates every input the per-session
+    :meth:`SessionManager._bootstrap_session` helper needs across
+    the four session-creation paths (IPC, disk-restore, ephemeral
+    subagent fan-out, WS standalone) into a single typed payload.
+
+    Fields are grouped by purpose:
+
+    1. **Identity** — ``session_id``, ``workspace_path``, ``name``,
+       ``description``.
+    2. **Path discriminators** (per the §3.12.0 spec):
+
+       - ``client_id`` — ``None`` for disk-restore + ephemeral.
+       - ``parent_runner_handle`` — set only on ephemeral subagent
+         fan-out per §4.3 default share; else ``None``.
+       - ``sandbox_mode`` — the planned-sandbox-mode value the IPC
+         apparmor pre-init hook stashed into Phase 2's
+         ``_planned_sandbox_mode``.  Pre-resolved by the caller (the
+         IPC path's pre-init hook runs to completion before the
+         envelope is built); ``None`` for paths without an apparmor
+         opt-in.
+       - ``restore_state`` — populated only on disk-restore.
+
+    3. **JaatoServer construction** — ``env_file``, ``profile``,
+       ``agent_name``, ``system_instruction_override``,
+       ``env_overrides``, ``suppress_base_instructions``,
+       ``config_root``, ``instruction_token_cache``.
+    4. **Session record** — ``provisioned``, ``created_by``,
+       ``timestamp``.
+    5. **Bootstrap-time event sink** — ``on_event_during_init`` for
+       error reporting BEFORE the client is attached to the
+       session.
+
+    Daemon-internal only — never crosses the RPC wire.  Holds
+    non-JSON-serializable fields (Callable references, profile
+    objects, plugin instances) and therefore exposes no
+    ``to_dict`` / ``from_dict`` serializer.
+
+    Subsequent §3.12 commits extend this dataclass with path-
+    specific fields as the disk-restore / ephemeral / WS-standalone
+    migrations land.  New fields default to ``None`` / empty so the
+    existing IPC migration stays byte-identical.
+    """
+
+    # -- Identity ---------------------------------------------------------
+    session_id: str
+    workspace_path: Optional[str]
+    name: str
+    description: Optional[str] = None
+
+    # -- Path discriminators ---------------------------------------------
+    client_id: Optional[str] = None
+    parent_runner_handle: Optional[Any] = None
+    sandbox_mode: Optional[str] = None
+    restore_state: Optional[Dict[str, Any]] = None
+
+    # -- JaatoServer construction ----------------------------------------
+    env_file: Optional[str] = None
+    profile: Optional[Any] = None
+    agent_name: str = "main"
+    system_instruction_override: Optional[str] = None
+    suppress_base_instructions: bool = False
+    env_overrides: Dict[str, str] = field(default_factory=dict)
+    config_root: Optional[str] = None
+    instruction_token_cache: Optional[Any] = None
+
+    # -- Session record --------------------------------------------------
+    provisioned: bool = False
+    created_by: Optional[str] = None
+    timestamp: Optional[Any] = None
+
+    # -- Bootstrap-time event sink ---------------------------------------
+    on_event_during_init: Optional[Callable[[Any], None]] = None

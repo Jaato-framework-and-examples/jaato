@@ -41,6 +41,7 @@ from shared.plugins.session import (
 )
 
 from shared.instruction_token_cache import InstructionTokenCache
+from shared.session_envelope import BootstrapEnvelope
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from jaato_sdk.events import (
@@ -486,6 +487,135 @@ class SessionManager:
                 hook(server, session_id)
             except Exception as exc:
                 logger.warning("Session hook failed: %s", exc, exc_info=True)
+
+    def _bootstrap_session(
+        self,
+        envelope: 'BootstrapEnvelope',
+    ) -> Tuple[Optional[JaatoServer], Optional['Session']]:
+        """Construct + initialize a session from a BootstrapEnvelope.
+
+        Phase 3 §3.12.0.  This is the single helper every
+        session-creation path funnels through, replacing the
+        ad-hoc kwarg-bag previously inlined in each call site
+        (``_create_session_impl``, ``_load_session_impl``,
+        ``run_ephemeral_session``, ``JaatoWSServer`` standalone).
+
+        Body matches the §3.12.0 spec:
+
+        1. Construct ``JaatoServer`` from the envelope's
+           construction fields.
+        2. Push ``config_root`` onto the server BEFORE
+           ``_run_pre_initialize_hooks`` so plugins discovered
+           during ``initialize`` see the override.
+        3. Run pre-initialize hooks (legacy 3-arg + 4-arg both
+           still supported via :meth:`_run_pre_initialize_hooks`'s
+           ``inspect.signature`` introspection).
+        4. ``server.initialize()`` — return ``(None, None)`` on
+           failure (the underlying error already emitted to the
+           client).
+        5. Build the :class:`Session` record with the
+           ``planned_sandbox_mode`` read back from the server
+           (Phase 2's pre-init hook stashes the apparmor opt-in
+           value on ``server._planned_sandbox_mode``).
+
+        The helper does NOT do:
+
+        - Spawn-payload validation — that's profile-resolution
+          time, before the envelope is built.
+        - Session storage / event-callback rewiring / TODO
+          configuration / client-config application — those are
+          post-bootstrap concerns the caller handles after this
+          returns.
+        - Auth-complete callback registration — caller-specific.
+
+        Args:
+            envelope: The bootstrap payload aggregating every
+                input the JaatoServer construction +
+                Session-record path needs.
+
+        Returns:
+            ``(JaatoServer, Session)`` on success;
+            ``(None, None)`` if ``server.initialize()`` failed
+            (error already reported via the in-init event sink).
+
+        Phase 3 §3.12.0 only migrates the IPC path.  The other
+        three paths (disk-restore, ephemeral, WS-standalone) keep
+        their inline construction until §3.12 lands their
+        per-path migrations.  An AST partition test
+        (``test_bootstrap_partition.py``) tracks the remaining
+        non-helper construction sites with an explicit allow-list
+        so a contributor adding a NEW path is forced to either
+        funnel through this helper or extend the allow-list.
+        """
+        server = JaatoServer(
+            env_file=envelope.env_file,
+            provider=None,  # Let env_file determine provider
+            on_event=envelope.on_event_during_init,
+            workspace_path=envelope.workspace_path,
+            session_id=envelope.session_id,
+            env_overrides=envelope.env_overrides,
+            instruction_token_cache=envelope.instruction_token_cache,
+            profile=envelope.profile,
+            system_instruction_override=envelope.system_instruction_override,
+            suppress_base_instructions=envelope.suppress_base_instructions,
+            agent_name=envelope.agent_name,
+        )
+
+        # Push config_root BEFORE initialize so plugins discovered
+        # during init see the override on their first
+        # set_config_root notification.
+        if envelope.config_root:
+            server.config_root = envelope.config_root
+
+        # Pre-initialize hooks fire BEFORE initialize() — gives
+        # transports a window to provision kernel resources
+        # (AppArmor profile, cgroup) so prefetch can run inside
+        # the session's confinement instead of unconfined.  Phase 2
+        # task 2.3+: the IPC AppArmor pre-init hook ALSO spawns
+        # the per-session runner subprocess here, so plugins
+        # discovered during initialize() see ``registry.runner_rpc``
+        # set at configure time.
+        self._run_pre_initialize_hooks(
+            server,
+            envelope.session_id,
+            envelope.workspace_path,
+            envelope.client_id,
+        )
+
+        # Initialize.  On failure, core.py already emits a
+        # ConfigurationError event via the in-init sink — no need
+        # for a redundant SessionError here.
+        if not server.initialize():
+            return None, None
+
+        # Read back planned_sandbox_mode the IPC apparmor pre-init
+        # hook stashed (Phase 2 task 2.3).  If the envelope already
+        # carries a sandbox_mode (e.g., disk-restore path passes
+        # the previously-saved value in), prefer the envelope's —
+        # it's the authoritative source of pre-restart state.
+        planned_sandbox = envelope.sandbox_mode
+        if planned_sandbox is None:
+            planned_sandbox = getattr(server, "_planned_sandbox_mode", None)
+
+        session = Session(
+            session_id=envelope.session_id,
+            name=envelope.name,
+            server=server,
+            created_at=(
+                envelope.timestamp.isoformat()
+                if envelope.timestamp is not None
+                else datetime.now(timezone.utc).isoformat()
+            ),
+            description=envelope.description,
+            is_dirty=True,  # New session needs saving
+            workspace_path=envelope.workspace_path,
+            config_root=envelope.config_root,
+            provisioned=envelope.provisioned,
+            created_by=envelope.created_by,
+            sandbox_mode=planned_sandbox,
+        )
+
+        return server, session
 
     def _run_pre_initialize_hooks(
         self,
@@ -1328,47 +1458,37 @@ class SessionManager:
             profile and getattr(profile, "suppress_base_instructions", False)
         )
 
-        server = JaatoServer(
-            env_file=session_env_file,
-            provider=None,  # Let env_file determine provider
-            # During init, emit directly to requesting client (not yet attached to session)
-            on_event=lambda e: self._emit_to_client(client_id, e),
-            workspace_path=workspace_path,
+        # Phase 3 §3.12.0: route the construction +
+        # pre-init-hooks + initialize + Session-record assembly
+        # through the unified _bootstrap_session helper.  All four
+        # session-creation paths (IPC, disk-restore, ephemeral, WS)
+        # will eventually funnel through here; §3.12.0 ships only
+        # the IPC migration as the focal commit.
+        envelope = BootstrapEnvelope(
             session_id=session_id,
-            env_overrides=env_overrides,
-            instruction_token_cache=self._instruction_token_cache,
+            workspace_path=workspace_path,
+            name=name,
+            description=None,
+            client_id=client_id,
+            env_file=session_env_file,
             profile=profile,
+            agent_name=agent_name,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=effective_suppress_base,
-            agent_name=agent_name,
+            env_overrides=env_overrides,
+            config_root=config_root,
+            instruction_token_cache=self._instruction_token_cache,
+            provisioned=provisioned,
+            created_by=created_by,
+            timestamp=timestamp,
+            # During init, emit directly to requesting client (not
+            # yet attached to session).
+            on_event_during_init=lambda e: self._emit_to_client(client_id, e),
         )
-
-        # Push the resolved config_root onto the JaatoServer BEFORE
-        # ``initialize`` so plugins discovered during init see the
-        # override on their first ``set_config_root`` notification.
-        if config_root:
-            server.config_root = config_root
-
-        # Pre-initialize hooks fire BEFORE initialize() runs configure()
-        # / dynamic-instructions / prefetch scripts (server 0.6.49+).
-        # This gives transports a window to provision kernel resources
-        # (AppArmor profile, cgroup) so prefetch can run inside the
-        # session's confinement instead of unconfined.
-        #
-        # Phase 2 task 2.3 (post-rebase): the IPC AppArmor pre-init
-        # hook in server/__main__.py also spawns the per-session
-        # runner subprocess here, so plugins discovered during
-        # ``initialize()`` see ``registry.runner_rpc`` set at configure
-        # time.  ``client_id`` is forwarded so the hook can read the
-        # creator's ``ClientConfigRequest.apparmor`` opt-in.
-        self._run_pre_initialize_hooks(
-            server, session_id, workspace_path, client_id,
-        )
-
-        # Initialize the server (events go directly to requesting client).
-        # On failure, core.py already emits a detailed ConfigurationError —
-        # no need for a redundant SessionError here.
-        if not server.initialize():
+        server, session = self._bootstrap_session(envelope)
+        if server is None or session is None:
+            # server.initialize() failed; core.py already emitted a
+            # detailed ConfigurationError to the in-init sink.
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
@@ -1390,26 +1510,6 @@ class SessionManager:
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
-
-        # Create session object.  The ``sandbox_mode`` may have been
-        # planned by a pre-initialize hook (Phase 2 task 2.3:
-        # the IPC apparmor hook stashes it on
-        # ``server._planned_sandbox_mode``); read it back here so the
-        # Session record reflects the kernel-level confinement state.
-        planned_sandbox = getattr(server, "_planned_sandbox_mode", None)
-        session = Session(
-            session_id=session_id,
-            name=name,
-            server=server,
-            created_at=timestamp.isoformat(),
-            description=None,
-            is_dirty=True,  # New session needs saving
-            workspace_path=workspace_path,
-            config_root=config_root,
-            provisioned=provisioned,
-            created_by=created_by,
-            sandbox_mode=planned_sandbox,
-        )
 
         # Register callback for when auth completes (if it was pending)
         def on_auth_complete():

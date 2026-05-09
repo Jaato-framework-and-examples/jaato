@@ -290,3 +290,118 @@ def test_decode_default_provider_and_model_empty_strings() -> None:
     e = SessionInitEnvelope.from_dict(d)
     assert e.provider_name == ""
     assert e.model_name == ""
+
+
+# ----------------------------------------------------------------------
+# Phase 3 §3.12.0 — BootstrapEnvelope (SessionManager-level)
+# ----------------------------------------------------------------------
+
+
+from shared.session_envelope import BootstrapEnvelope
+
+
+def test_bootstrap_envelope_minimal_construction() -> None:
+    """Required fields are session_id + workspace_path + name; the
+    rest default."""
+    env = BootstrapEnvelope(
+        session_id="s-1",
+        workspace_path="/tmp/ws",
+        name="my-session",
+    )
+    assert env.session_id == "s-1"
+    assert env.workspace_path == "/tmp/ws"
+    assert env.name == "my-session"
+    # Path discriminators all default to None.
+    assert env.client_id is None
+    assert env.parent_runner_handle is None
+    assert env.sandbox_mode is None
+    assert env.restore_state is None
+    # Construction fields default sensibly.
+    assert env.env_file is None
+    assert env.profile is None
+    assert env.agent_name == "main"
+    assert env.system_instruction_override is None
+    assert env.suppress_base_instructions is False
+    assert env.env_overrides == {}
+    assert env.config_root is None
+    assert env.instruction_token_cache is None
+    # Session record fields.
+    assert env.provisioned is False
+    assert env.created_by is None
+    assert env.timestamp is None
+    # Bootstrap-time event sink.
+    assert env.on_event_during_init is None
+
+
+def test_bootstrap_envelope_default_dicts_are_independent() -> None:
+    """Default-factory dicts must not be shared across instances."""
+    env_a = BootstrapEnvelope(
+        session_id="a", workspace_path=None, name="A",
+    )
+    env_b = BootstrapEnvelope(
+        session_id="b", workspace_path=None, name="B",
+    )
+    env_a.env_overrides["X"] = "1"
+    assert env_b.env_overrides == {}
+
+
+def test_bootstrap_envelope_carries_path_discriminators() -> None:
+    """The four path discriminators per the §3.12.0 spec accept the
+    expected types: client_id (str), parent_runner_handle (any),
+    sandbox_mode (str), restore_state (dict)."""
+    parent_handle = object()  # opaque handle; daemon-internal only
+    env = BootstrapEnvelope(
+        session_id="s-2",
+        workspace_path="/tmp/ws",
+        name="ephemeral-spawn",
+        client_id=None,
+        parent_runner_handle=parent_handle,
+        sandbox_mode="apparmor",
+        restore_state={"some": "saved-state"},
+    )
+    assert env.client_id is None
+    assert env.parent_runner_handle is parent_handle
+    assert env.sandbox_mode == "apparmor"
+    assert env.restore_state == {"some": "saved-state"}
+
+
+def test_bootstrap_envelope_holds_callable_event_sink() -> None:
+    """``on_event_during_init`` is a daemon-internal Callable; the
+    envelope must accept it without complaint (no JSON-shape
+    constraint since BootstrapEnvelope doesn't cross the wire)."""
+    received = []
+
+    def _sink(e):
+        received.append(e)
+
+    env = BootstrapEnvelope(
+        session_id="s-3",
+        workspace_path=None,
+        name="test",
+        on_event_during_init=_sink,
+    )
+    env.on_event_during_init("hello")
+    assert received == ["hello"]
+
+
+def test_bootstrap_envelope_independent_from_session_init_envelope() -> None:
+    """BootstrapEnvelope is daemon-internal; SessionInitEnvelope
+    (re-exported from runner) is the wire form.  They share no
+    state and serve different layers."""
+    bootstrap = BootstrapEnvelope(
+        session_id="s-4",
+        workspace_path=None,
+        name="iso",
+    )
+    init = SessionInitEnvelope(
+        session_id="s-4",
+        workspace_path=None,
+        profile_name=None,
+        provider_name="x",
+        model_name="y",
+    )
+    # Both classes coexist; the bootstrap envelope's fields don't
+    # overlap with the init envelope's (the init envelope is
+    # JaatoSession-level, the bootstrap is SessionManager-level).
+    assert not hasattr(init, "client_id")
+    assert not hasattr(bootstrap, "schema_version")
