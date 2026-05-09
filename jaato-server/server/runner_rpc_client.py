@@ -1176,6 +1176,52 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_restore_turn_accounting(
+        self,
+        turns: "List[Dict[str, Any]]",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Replace the runner-side session's per-turn token-usage /
+        timing list from a SessionState snapshot.
+
+        Phase 3 §7c step 6.6.1.2.  Replaces the pre-§7c daemon-
+        side private-attr write at
+        ``server/session_manager.py:2558-2559``.  Wraps the
+        public method ``JaatoSession.restore_turn_accounting``
+        added in §7c step 6.6.1.0.
+
+        Wire shape: ``{"turns": [<dict>, ...]}`` — turn entries
+        are already JSON-native dicts in the persistence
+        serializer (no special encode needed; same wire-shape-
+        reuse rationale as 6.6.1.1's `set_initial_history` and
+        the existing `get_turn_accounting` round-trip).
+
+        Args:
+            turns: List of per-turn dicts from a
+                :class:`SessionState` snapshot.  Each entry
+                contains token counts (``prompt_tokens``,
+                ``output_tokens``, ``total_tokens``, ...) and
+                timing fields.  Caller owns the list; the wire
+                serializer copies it.
+        """
+        await self._call_named(
+            "session.restore_turn_accounting",
+            {"turns": list(turns)},
+            timeout=timeout,
+        )
+
+    def session_restore_turn_accounting_threadsafe(
+        self,
+        turns: "List[Dict[str, Any]]",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_restore_turn_accounting(turns, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,

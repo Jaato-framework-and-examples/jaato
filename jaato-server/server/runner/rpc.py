@@ -611,6 +611,19 @@ class RunnerRPC:
             # persistence already uses.
             return self._handle_session_set_initial_history(env.args)
 
+        if env.method == "session.restore_turn_accounting":
+            # Phase 3 §7c step 6.6.1.2: replace the runner-side
+            # session's per-turn token-usage / timing list from a
+            # SessionState snapshot.  Replaces the daemon-side
+            # private-attr write at session_manager.py:2558-2559
+            # (now public ``JaatoSession.restore_turn_accounting``
+            # since §7c step 6.6.1.0).  args = ``{"turns":
+            # [<dict>, ...]}`` — turns are already JSON-native
+            # dicts in the persistence serializer (no special
+            # wrapper needed; per the same wire-shape-reuse
+            # rationale as 6.6.1.1).
+            return self._handle_session_restore_turn_accounting(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1375,6 +1388,94 @@ class RunnerRPC:
             return False, {
                 "error": (
                     f"session.set_initial_history: set_initial_history raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
+            }
+        return True, {"ok": True}
+
+    def _handle_session_restore_turn_accounting(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Replace the runner-side session's per-turn token-usage /
+        timing list from a SessionState snapshot.
+
+        Phase 3 §7c step 6.6.1.2.  Replaces the pre-§7c daemon-
+        side private-attr write at
+        ``server/session_manager.py:2558-2559``:
+
+            jaato_session._turn_accounting = list(state.turn_accounting)
+
+        Now wraps the public method
+        :meth:`JaatoSession.restore_turn_accounting` added in
+        §7c step 6.6.1.0 (commit 13ce5939).
+
+        Wire shape: ``{"turns": [<dict>, ...]}`` — turn entries
+        are already JSON-native dicts in the persistence
+        serializer (see
+        ``shared/plugins/session/serializer.py:215`` which stores
+        them verbatim under the ``turn_accounting`` key).  No
+        special encode/decode needed.
+
+        Defensive contract:
+
+          - ``turns`` must be a list (missing key or non-list
+            → ``stage="decode"``).
+          - Each element should be a dict; we don't validate
+            element schema (turn-accounting entry shape evolves
+            with provider integrations) but reject non-dict
+            elements at the boundary to surface wire-corruption
+            issues cleanly.
+          - The session-side method takes a copy via ``list(turns)``
+            so caller-side mutation can't propagate; the handler
+            doesn't need to copy again.
+
+        Args: ``{"turns": List[Dict[str, Any]]}``.
+        Returns: ``{"ok": True}`` on success.
+        """
+        turns = args.get("turns")
+        if turns is None:
+            return False, {
+                "error": (
+                    "session.restore_turn_accounting: 'turns' key required"
+                ),
+                "stage": "decode",
+            }
+        if not isinstance(turns, list):
+            return False, {
+                "error": (
+                    f"session.restore_turn_accounting: 'turns' must be a "
+                    f"list; got {type(turns).__name__}"
+                ),
+                "stage": "decode",
+            }
+        for i, entry in enumerate(turns):
+            if not isinstance(entry, dict):
+                return False, {
+                    "error": (
+                        f"session.restore_turn_accounting: 'turns[{i}]' "
+                        f"must be a dict; got {type(entry).__name__}"
+                    ),
+                    "stage": "decode",
+                }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        setter = getattr(session, "restore_turn_accounting", None)
+        if not callable(setter):
+            return False, {
+                "error": (
+                    "session.restore_turn_accounting: session has no "
+                    "restore_turn_accounting method (rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            setter(turns)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.restore_turn_accounting: setter raised "
                     f"{type(exc).__name__}: {exc}"
                 ),
                 "stage": "set",
