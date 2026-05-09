@@ -631,10 +631,60 @@ Decomposed into 4 sub-commits + 1 standalone pre-6.6 commit
 | Sub-commit | Scope | Estimated tests |
 |---|---|---|
 | **§7c step 6.5** (standalone, pre-6.6) | 4 CLEAN introspection migrations: `model_name` / `provider_name` (lines 1747-1748) + `verify_auth` ×2 (1806, 4234).  Read directly from `self._runtime` instead of `self._jaato.X`. | Existing tests cover; minimal new tests. |
-| **§7c step 6.6.1** | Add 3 new runner-RPC handlers (each §7b.2-scale: handler + daemon-side wrapper + unit + e2e tests) consumed by the external `get_session()` migration in 6.6.3: `session.set_initial_history`, `session.restore_turn_accounting`, `session.restore_conversation_budget`.  Prerequisites for 6.6.3. | ~30-40 new tests across 3 handlers. |
+| **§7c step 6.6.1** | Add 3 new runner-RPC handlers consumed by the external `get_session()` migration in 6.6.3: `session.set_initial_history`, `session.restore_turn_accounting`, `session.restore_conversation_budget`.  **Sub-decomposed per the missing-method finding below.**  Prerequisites for 6.6.3. | See sub-table. |
+| **§7c step 6.6.1.0** | **JaatoSession public-method additions + session_manager private-attr-write migration.**  Two of the proposed RPC handlers don't have underlying public methods — daemon `session_manager.py` reaches into private state (`_turn_accounting` direct assignment + `instruction_budget.restore_conversation_from_snapshot` via the private accessor).  Add public methods on JaatoSession (`restore_turn_accounting(turns)` + `restore_conversation_budget(snapshot)`), migrate session_manager to use them.  Same encapsulation discipline as §7c step 3a (private `_agent_id` reach → `set_agent_identity` public method) + §7c step 3b (private `_tools` read → `get_tool_schemas` public method). | ~6-8 new unit tests on JaatoSession's two new methods. |
+| **§7c step 6.6.1.1** | Add `session.set_initial_history` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.set_initial_history` already exists (line 8252).  Per 6.1 trio cadence. | ~12-15 new tests. |
+| **§7c step 6.6.1.2** | Add `session.restore_turn_accounting` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_turn_accounting` added in 6.6.1.0.  Per 6.1 trio cadence. | ~12-15 new tests. |
+| **§7c step 6.6.1.3** | Add `session.restore_conversation_budget` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_conversation_budget` added in 6.6.1.0.  Per 6.1 trio cadence. | ~12-15 new tests. |
 | **§7c step 6.6.2** | Architectural callbacks rewire (the original §7c step 6.2.5 work, now folded in).  4 sites: 1969 / 1985 / 3374 / 4264.  Gates on runner-side event-bus access plumbing — may itself fan out. | New tests for each callback path. |
 | **§7c step 6.6.3** | External consumer migrations: 8 `get_session()` callers in `session_manager.py` + `websocket.py` + `core.py`.  Migrate each to its target per the external-consumer table above (1 delete, 4 reuse-existing-RPC, 3 use-new-RPCs from 6.6.1).  Also drops the public `JaatoServer.get_session()` method. | Per-consumer unit/integration tests. |
 | **§7c step 6.6.4** | Atomic seat-flip moment.  Removes `self._jaato` field; absorbs the 6 WIRING deletions (per 6.4 audit); migrates the 9 transitively-load-bearing sites; migrates the 4 DEFER-§7c read sites; refactors the 2 construction sites; collapses the ~15 truthiness checks; deletes the public `JaatoServer.get_session()` method (consumers migrated in 6.6.3).  Mechanical diff dominated by the absorbed-scope items. | Existing test suite proves runner-only path; net test delta likely negative due to write-both-specific test churn. |
+
+#### Missing-method finding (§7c step 6.6.1 prerequisite check)
+
+Per the §7b.3 audit lesson + the §7c step 6.4 audit lesson —
+"verify that proposed RPC handlers have actual underlying
+methods before committing to their existence in a plan" — the
+3 proposed RPC handlers in step 6.6.1 were spot-checked against
+JaatoSession's public surface.  Findings:
+
+| Proposed RPC | Underlying method | Status |
+|---|---|---|
+| `session.set_initial_history` | `JaatoSession.set_initial_history(messages: List[Message])` | ✅ **EXISTS** (jaato_session.py:8252).  Public.  RPC handler can be built directly. |
+| `session.restore_turn_accounting` | `JaatoSession.restore_turn_accounting(turns)` | ❌ **MISSING.**  Daemon's `session_manager.py:2558-2559` does direct private-attr write: `jaato_session._turn_accounting = list(state.turn_accounting)`.  No public method on JaatoSession. |
+| `session.restore_conversation_budget` | `JaatoSession.restore_conversation_budget(snapshot)` | ❌ **MISSING.**  Daemon's `session_manager.py:2592-2593` reaches `jaato_session.instruction_budget.restore_conversation_from_snapshot(state.budget_state)` — the underlying `restore_conversation_from_snapshot` exists on `InstructionBudget` (instruction_budget.py:401), but no public wrapper exists on JaatoSession. |
+
+**Implication:** step 6.6.1 cannot ship as 3 RPC-handler
+commits in sequence.  The 2 missing public methods must land
+first, otherwise the RPC handlers would either:
+
+  - Reach into private state from the runner side (an
+    encapsulation violation that would fail the same audit
+    discipline that produced §7c step 3a / 3b's public-method
+    additions), OR
+
+  - Ship a parallel-daemon-side path with its own private-attr
+    write while the RPC handler does the same on the runner
+    side (duplicate-implementation risk that exactly mirrors
+    the §7b.3 withdrawal's "duplicates existing infrastructure"
+    failure mode — except inverted, with no existing
+    infrastructure to duplicate).
+
+**Resolution:** sub-decompose 6.6.1 into 4 commits per the
+sub-decomposition table above:
+
+  - 6.6.1.0  encapsulation-cleanup commit (analogous to step
+             3a + 3b): add public methods, migrate the daemon
+             session_manager call sites to use them.
+  - 6.6.1.1  `session.set_initial_history` RPC (no
+             prerequisite needed; method already exists).
+  - 6.6.1.2  `session.restore_turn_accounting` RPC (gated on
+             6.6.1.0).
+  - 6.6.1.3  `session.restore_conversation_budget` RPC (gated
+             on 6.6.1.0).
+
+Total: 4 commits for what was originally 1.  Worker tally for
+this finding: 4 audits, 4 silent-regression catches.
 
 #### What this audit decides:
 
@@ -654,7 +704,8 @@ Decomposed into 4 sub-commits + 1 standalone pre-6.6 commit
 
   - **3 new runner-RPC handlers must land first** (step 6.6.1)
     before the external consumer migrations in 6.6.3 can
-    proceed.  This is the prerequisite chain.
+    proceed.  This is the prerequisite chain.  Sub-decomposed
+    into 6.6.1.0/.1/.2/.3 per the missing-method finding above.
 
   - The architectural callbacks (6.6.2) and external consumer
     migrations (6.6.3) can land independently AFTER 6.6.1, in
