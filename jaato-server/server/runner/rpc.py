@@ -498,6 +498,20 @@ class RunnerRPC:
             # the runner-process exit.
             return self._handle_session_shutdown()
 
+        if env.method == "session.set_terminal_width":
+            # Phase 3 §3.3c precursor: write-only config — push
+            # the daemon's terminal width to the runner so
+            # enrichment notifications format correctly.  args =
+            # ``{"width": int}``.
+            return self._handle_session_set_terminal_width(env.args)
+
+        if env.method == "session.set_streaming_enabled":
+            # Phase 3 §3.3c precursor: write-only config — toggle
+            # the session's streaming mode.  args =
+            # ``{"enabled": bool}``.  Daemon's
+            # ``client.set_streaming_enabled`` will delegate here.
+            return self._handle_session_set_streaming_enabled(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -902,6 +916,74 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"usage": dict(usage)}
+
+    def _handle_session_set_terminal_width(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Push the daemon's terminal width to the runner-side
+        JaatoSession (Phase 3 §3.3c precursor).
+
+        Args: ``{"width": int}``.  Returns ``{"ok": True}`` on
+        success.  Validates that width is a positive integer —
+        terminal-width zero / negative is nonsensical and a
+        common bug-detection signal.
+        """
+        width = args.get("width")
+        if not isinstance(width, int) or width <= 0:
+            return False, {
+                "error": (
+                    f"session.set_terminal_width: 'width' must be a "
+                    f"positive int; got {width!r}"
+                ),
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            session.set_terminal_width(width)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.set_terminal_width: setter raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
+            }
+        return True, {"ok": True}
+
+    def _handle_session_set_streaming_enabled(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Toggle the runner-side JaatoSession's streaming mode
+        (Phase 3 §3.3c precursor).
+
+        Args: ``{"enabled": bool}``.  Returns ``{"ok": True}`` on
+        success.  Coerces truthy non-bool values to bool — daemon
+        callers should pass actual booleans, but the coercion
+        avoids spurious failures for ``enabled: 1`` etc. that
+        commonly cross the JSON wire.
+        """
+        enabled = args.get("enabled")
+        if enabled is None:
+            return False, {
+                "error": "session.set_streaming_enabled: missing 'enabled' arg",
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            session.set_streaming_enabled(bool(enabled))
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.set_streaming_enabled: setter raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
+            }
+        return True, {"ok": True}
 
     def _handle_session_shutdown(self) -> "tuple[bool, Any]":
         """Graceful runner-side session teardown.

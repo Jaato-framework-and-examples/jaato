@@ -829,6 +829,47 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_set_terminal_width(
+        self, width: int, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Push the daemon's terminal width to the runner-side
+        JaatoSession.  Validates width client-side too — defensive
+        against typos that would only surface at runner-decode."""
+        if not isinstance(width, int) or width <= 0:
+            raise ValueError(
+                f"session_set_terminal_width: width must be positive int; "
+                f"got {width!r}"
+            )
+        await self._call_named(
+            "session.set_terminal_width", {"width": width}, timeout=timeout,
+        )
+
+    def session_set_terminal_width_threadsafe(
+        self, width: int, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_set_terminal_width(width, timeout=timeout),
+            timeout=timeout,
+        )
+
+    async def session_set_streaming_enabled(
+        self, enabled: bool, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Toggle the runner-side JaatoSession's streaming mode."""
+        await self._call_named(
+            "session.set_streaming_enabled",
+            {"enabled": bool(enabled)},
+            timeout=timeout,
+        )
+
+    def session_set_streaming_enabled_threadsafe(
+        self, enabled: bool, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_set_streaming_enabled(enabled, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_shutdown(
         self, *, timeout: Optional[float] = 10.0,
     ) -> str:
