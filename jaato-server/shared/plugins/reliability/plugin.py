@@ -547,6 +547,46 @@ class ReliabilityPlugin(RunnerForwardingMixin):
         """Set session context for failure tracking."""
         self._session_id = session_id
 
+    def on_subagent_terminated(
+        self,
+        agent_id: str,
+        session_id: Optional[str],
+    ) -> None:
+        """Phase 3 §3.11 + peer-review M4: drop session-id-keyed
+        state for a finished subagent.
+
+        Auto-discovered by :meth:`SubagentPlugin.set_runtime` and
+        invoked from :meth:`SubagentPlugin._close_session_unlocked`
+        when a subagent finishes — normal completion, error
+        termination, or operator cancel.  Without this teardown,
+        a long-lived parent session accumulates unbounded
+        ``(session_id, tool_name)`` entries in
+        ``self._session_tool_successes`` from completed subagents.
+
+        Args:
+            agent_id: The subagent's identifier in
+                :class:`SubagentPlugin`'s registry (unused here).
+            session_id: The underlying JaatoSession's id — the key
+                this plugin's session-tool-success counters are
+                indexed by.  ``None`` means the subagent never had
+                a session attached; nothing to drop.
+        """
+        if not session_id:
+            return
+        # Drop every (session_id, *) entry from the success counter.
+        stale_keys = [
+            key for key in self._session_tool_successes
+            if isinstance(key, tuple) and len(key) == 2 and key[0] == session_id
+        ]
+        for key in stale_keys:
+            self._session_tool_successes.pop(key, None)
+        if stale_keys:
+            logger.debug(
+                "reliability: dropped %d session-tool-success entries "
+                "for terminated subagent session_id=%s",
+                len(stale_keys), session_id,
+            )
+
     def set_turn_index(self, turn_index: int) -> None:
         """Update current turn index."""
         self._turn_index = turn_index
