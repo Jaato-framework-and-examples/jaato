@@ -2460,10 +2460,9 @@ class SessionManager:
 
         # Resolve to absolute path to avoid CWD issues
         state_path = (session_dir / "plans" / "_state.json").resolve()
-        state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(state_path, 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=2)
+            from shared.atomic_write import atomic_write_json
+            atomic_write_json(state_path, state)
             logger.debug(f"Saved TODO state: {state_path}")
         except Exception as e:
             logger.error(f"Failed to save TODO state: {e}")
@@ -2522,11 +2521,13 @@ class SessionManager:
             if not full_state:
                 continue
 
-            # Write to file
+            # Write to file (atomically — Phase 3 §3.14).  A SIGTERM
+            # mid-write would otherwise leave a corrupt subagent state
+            # file that the disk-restore path can't parse.
             agent_file = subagents_dir / f"{agent_id}.json"
             try:
-                with open(agent_file, 'w', encoding='utf-8') as f:
-                    json.dump(full_state, f, indent=2)
+                from shared.atomic_write import atomic_write_json
+                atomic_write_json(agent_file, full_state)
                 logger.debug(f"Saved subagent state: {agent_file}")
             except Exception as e:
                 logger.error(f"Failed to save subagent {agent_id}: {e}")
