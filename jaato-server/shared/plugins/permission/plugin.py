@@ -29,6 +29,7 @@ from .channels import (
 )
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback, HelpLines
 from ...ui_utils import format_permission_options, format_tool_args_summary
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 # Import TYPE_CHECKING to avoid circular imports
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from ..registry import PluginRegistry
 
 
-class PermissionPlugin:
+class PermissionPlugin(RunnerForwardingMixin):
     """Plugin that provides permission control for tool execution.
 
     This plugin acts as a middleware layer that intercepts tool execution
@@ -78,6 +79,17 @@ class PermissionPlugin:
         # This ensures only one permission prompt is shown at a time when
         # multiple tools request permission concurrently (parallel execution)
         self._channel_lock = threading.Lock()
+        # Phase 3 §3.7 + peer-review M3: lock around per-session policy
+        # mutations so a cross-session ``permission.add_rule`` RPC
+        # arriving mid-ASK can't let the next call for the same tool
+        # bypass the prompt nondeterministically.  Acquired on every
+        # rule mutation (whitelist add, blacklist add, rule delete)
+        # and around the ASK-resolution "rule miss check + channel
+        # wait" critical section once §3.7's full migration lands.
+        # For Phase 3 part-1 (this commit) the lock exists + is
+        # acquired on the mutation paths; the ASK-side acquisition
+        # happens with the channel migration follow-on.
+        self._policy_lock = threading.Lock()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Workspace path for evaluator resolution and EvalContext
@@ -396,12 +408,19 @@ class PermissionPlugin:
         Use this to programmatically whitelist tools that should be auto-approved,
         such as those returned by plugins' get_auto_approved_tools().
 
+        Phase 3 §3.7 + peer-review M3: acquires ``_policy_lock`` so
+        the mutation can't race with an in-flight ASK on the same
+        tool — without the lock, an operator's
+        ``permission.add_rule`` arriving mid-prompt would let the
+        next call for the tool bypass the prompt nondeterministically.
+
         Args:
             tools: List of tool names to whitelist.
         """
         if self._policy and tools:
-            for tool in tools:
-                self._policy.whitelist_tools.add(tool)
+            with self._policy_lock:
+                for tool in tools:
+                    self._policy.whitelist_tools.add(tool)
 
     # Suspension management methods
 
@@ -492,12 +511,26 @@ class PermissionPlugin:
         """Return executors for model tools and user commands.
 
         Exposure is controlled via the registry (expose_tool/unexpose_tool).
+
+        Phase 3 §3.7: forwards via runner-RPC when a runner is
+        attached.  ``askPermission`` ASK relays through
+        ``client.prompt_operator`` (§3.2.1) once the channel
+        migration lands; for now the daemon-side instance still
+        owns the channel state and the runner-side ``askPermission``
+        invocation forwards the ``_execute_ask_permission`` body
+        unchanged.
+
+        The cross-cutting ``check_permission`` method (line 1058)
+        is NOT in this dict — it's called directly by
+        ``ToolExecutor`` at every tool dispatch and stays daemon-
+        side until the seat-flip routes the model loop to the
+        runner.
         """
-        return {
+        return self.wrap_executors_for_runner_forwarding({
             "askPermission": self._execute_ask_permission,
             # User commands
             "permissions": self.execute_permissions,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the permission system."""

@@ -87,6 +87,7 @@ from jaato_sdk.plugins.base import (
 )
 
 from shared.path_utils import normalize_for_comparison
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.session_context import get_current_session
 from shared.trace import trace as _trace_write
 
@@ -95,7 +96,7 @@ from shared.trace import trace as _trace_write
 MAX_TRANSITIVE_DEPTH = 10
 
 
-class ReferencesPlugin:
+class ReferencesPlugin(RunnerForwardingMixin):
     """Plugin for managing reference source injection into model context.
 
     The plugin maintains a catalog of reference sources and:
@@ -1690,14 +1691,22 @@ class ReferencesPlugin:
         return all_tools
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return tool executors."""
-        return {
+        """Return tool executors.
+
+        Phase 3 §3.8: forwards via runner-RPC when a runner is
+        attached.  ``selectReferences``'s fragment-load path (when
+        admitting an external workspace path) crosses via
+        ``apparmor.add_reference_fragment`` (§3.2.2) — the
+        runner-side body invokes that RPC primitive when needed;
+        callers see the same ``(success, message)`` tuple shape.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "selectReferences": self._execute_select,   # model tool
             "listReferences": self._execute_list,        # model tool
             "validateReference": self._execute_validate_reference,  # model tool
             "compute_embedding": self._execute_compute_embedding,  # model tool (gen-references agent)
             "references": self._execute_references_cmd,  # user command (refs + nested bundle ops)
-        }
+        })
 
     def _execute_select(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute model-driven reference selection by ID or tags.

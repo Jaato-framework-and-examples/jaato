@@ -36,10 +36,11 @@ from .models import (
     Memory,
 )
 from .storage import MemoryStorage
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
-class MemoryPlugin:
+class MemoryPlugin(RunnerForwardingMixin):
     """Plugin for model self-curated persistent memory across sessions.
 
     This plugin allows the model to:
@@ -386,10 +387,19 @@ class MemoryPlugin:
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return tool executors.
 
+        Phase 3 §3.9: forwards via runner-RPC when a runner is
+        attached.  ``~/.jaato/memories/`` is rw under every
+        session's profile (template line 334), so the runner
+        writes ``memories/raw/<id>.json`` and ``curated.jsonl``
+        directly via tempfile-rename — same concurrency story as
+        today.  Embedding-cache sharing is a criterion-2 daemon
+        placement deferred per parent §4.2; revisit if cross-runner
+        RAM cost bites.
+
         Returns:
             Dict mapping tool names to executor functions
         """
-        return {
+        return self.wrap_executors_for_runner_forwarding({
             "store_memory": self._execute_store,
             "retrieve_memories": self._execute_retrieve,
             "list_memory_tags": self._execute_list_tags,
@@ -397,7 +407,7 @@ class MemoryPlugin:
             "delete_memory": self._execute_delete,
             # User command
             "memory": self.execute_memory,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions describing memory capabilities.
