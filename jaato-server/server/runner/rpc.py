@@ -439,6 +439,37 @@ class RunnerRPC:
             # callers branch on ``ready`` / ``has_host``.
             return self._handle_session_health_check()
 
+        if env.method == "session.get_session_state":
+            # Phase 3 §3.3c precursor: read a single session-state
+            # key from the runner-side JaatoSession.  args =
+            # ``{"key": str, "default": Any}``.  Mirrors the
+            # JaatoSession.get_session_state(key, default) shape.
+            return self._handle_session_get_state(env.args)
+
+        if env.method == "session.set_session_state":
+            # Phase 3 §3.3c precursor: write a single session-state
+            # key on the runner-side JaatoSession.  args =
+            # ``{"key": str, "value": Any}``.  ``value`` must be
+            # JSON-serializable per the JaatoSession contract;
+            # daemon-side serialization already enforces this so
+            # we just propagate.
+            return self._handle_session_set_state(env.args)
+
+        if env.method == "session.is_running":
+            # Phase 3 §3.3c precursor: read-only probe — is a
+            # message currently being processed?  Daemon's
+            # ``client.is_processing`` check delegates here once
+            # the seat-flip lands.
+            return self._handle_session_is_running()
+
+        if env.method == "session.request_stop":
+            # Phase 3 §3.3c precursor: signal cancellation to the
+            # runner-side JaatoSession's in-flight message.  args
+            # = ``{"reason": str}``.  Returns whether a cancellation
+            # was actually issued (False if no message was
+            # running).
+            return self._handle_session_request_stop(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -633,6 +664,152 @@ class RunnerRPC:
             "session_id": host.session_id,
             "tool_count": tool_count,
         }
+
+    def _require_ready_session(
+        self,
+    ) -> "tuple[bool, Any, Any]":
+        """Common precondition for the session-state RPC handlers.
+
+        Phase 3 §3.3c precursor.  Resolves the bootstrapped
+        runner-side JaatoSession; returns a ``(ready, error_or_None,
+        session_or_None)`` tuple.  ``ready=True`` means the session
+        is bootstrapped + configured and the caller can use
+        ``session`` directly; ``ready=False`` means an error tuple
+        ready to return from the dispatcher.
+        """
+        with self._session_lock:
+            host = self._session_host
+        if host is None:
+            return False, (False, {
+                "error": "session not bootstrapped on this runner",
+                "stage": "no_host",
+            }), None
+        session = host.session
+        if session is None:
+            return False, (False, {
+                "error": (
+                    "session host bootstrapped but JaatoSession is None "
+                    "(test-stub mode or configure() failed)"
+                ),
+                "stage": "no_session",
+            }), None
+        return True, None, session
+
+    def _handle_session_get_state(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Read a single session-state key from the runner-side
+        JaatoSession.
+
+        Args (over the wire): ``{"key": str, "default": Any}``.
+
+        Returns:
+            ``(True, {"value": Any})`` on success.  The value is
+            whatever ``JaatoSession.get_session_state(key,
+            default)`` returns — possibly ``None``, a primitive,
+            or a JSON-serializable container.
+
+            ``(False, {"error": ..., "stage": ...})`` when the
+            session isn't bootstrapped or configure failed.
+        """
+        key = args.get("key")
+        if not isinstance(key, str) or not key:
+            return False, {
+                "error": "session.get_session_state: missing 'key' arg",
+                "stage": "decode",
+            }
+        default = args.get("default")
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            value = session.get_session_state(key, default)
+        except Exception as exc:  # noqa: BLE001 — provider may raise
+            return False, {
+                "error": (
+                    f"session.get_session_state: provider for {key!r} "
+                    f"raised {type(exc).__name__}: {exc}"
+                ),
+                "stage": "provider",
+            }
+        return True, {"value": value}
+
+    def _handle_session_set_state(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Write a single session-state key on the runner-side
+        JaatoSession.
+
+        Args: ``{"key": str, "value": Any}``.  ``value`` must be
+        JSON-serializable per the
+        :meth:`JaatoSession.set_session_state` contract — the
+        JSON wire format already enforces this on the daemon
+        side, but we re-check on receipt to surface a clean
+        error if a non-serialisable value somehow crosses
+        (e.g., a future binary-frame channel).
+        """
+        key = args.get("key")
+        if not isinstance(key, str) or not key:
+            return False, {
+                "error": "session.set_session_state: missing 'key' arg",
+                "stage": "decode",
+            }
+        if "value" not in args:
+            return False, {
+                "error": "session.set_session_state: missing 'value' arg",
+                "stage": "decode",
+            }
+        value = args["value"]
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            session.set_session_state(key, value)
+        except TypeError as exc:
+            # JaatoSession raises TypeError when value isn't JSON-
+            # serialisable.  Surface the underlying message so the
+            # daemon-side caller can attribute the failure.
+            return False, {
+                "error": f"session.set_session_state: {exc}",
+                "stage": "validate",
+            }
+        return True, {"ok": True}
+
+    def _handle_session_is_running(self) -> "tuple[bool, Any]":
+        """Read-only: is a message currently being processed?
+
+        Mirrors :meth:`JaatoSession.is_running`.  Returns
+        ``{"running": bool}`` on success, error envelope when no
+        session is bootstrapped (so the daemon can distinguish
+        "no session" from "session present but idle").
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        return True, {"running": bool(session.is_running())}
+
+    def _handle_session_request_stop(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Signal cancellation to the runner-side JaatoSession's
+        in-flight message.
+
+        Args: ``{"reason": str}`` — optional; defaults to
+        ``"user_cancelled"`` per the JaatoSession contract.
+
+        Returns ``{"cancelled": bool}`` — True if a cancellation
+        was actually issued (a message was running), False if no
+        message was running (no-op).  Mirrors the boolean
+        :meth:`JaatoSession.request_stop` returns.
+        """
+        reason = args.get("reason", "")
+        if not isinstance(reason, str):
+            reason = ""
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        cancelled = bool(session.request_stop(reason=reason))
+        return True, {"cancelled": cancelled}
 
     @property
     def session_host(self):
