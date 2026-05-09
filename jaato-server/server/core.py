@@ -456,15 +456,20 @@ class JaatoServer:
 
         Available after ``initialize()`` completes.  Returns ``None``
         if the server is not yet initialized or has no session.
+
+        Phase 3 §7c step 6.2: read directly from ``self._runtime.event_bus``.
+        Pre-§7c-step-6.2 the property reached through
+        ``self._jaato.get_session()._runtime.event_bus`` — three
+        levels of indirection where the runtime is already daemon-
+        side per §4.2.  Mirrors the migration in ``_get_event_bus``
+        (server/core.py:1004) shipped during §7c step 4 first pass.
         """
-        if self._jaato:
-            try:
-                session = self._jaato.get_session()
-                if session:
-                    return session._runtime.event_bus
-            except (RuntimeError, AttributeError):
-                pass
-        return None
+        if self._runtime is None:
+            return None
+        try:
+            return self._runtime.event_bus
+        except AttributeError:
+            return None
 
     @property
     def workspace_path(self) -> Optional[str]:
@@ -588,28 +593,35 @@ class JaatoServer:
         self,
         confine_context: Callable,
     ) -> None:
-        """Enable thread-level AppArmor confinement for tool execution.
+        """No-op since Phase 3 §7c step 6.2 (kept for back-compat).
 
-        Wraps every tool call in a thread-level AppArmor confinement
-        context.  The current OS thread is confined to the session's
-        profile for the duration of the call, and any subprocess spawned
-        from that thread (CLI, interactive_shell, pexpect) inherits the
-        confinement automatically via fork+exec.
+        Pre-§7c this method wired a thread-level AppArmor
+        confinement context onto the daemon-side ``ToolExecutor``,
+        so every tool call ran inside the context manager and
+        inherited the confinement via fork+exec for spawned
+        subprocesses.  The daemon's executor is dead post-§7b.2
+        (tool execution flows through the runner subprocess, which
+        is already process-confined via AppArmor at spawn time —
+        see ``server/runner_spawn.py`` + ``server/runner/__main__.py``);
+        the daemon-side thread-level wiring this method installed
+        had no effect post-§7b.2 even when called.
 
-        Called by the WebSocket server after session creation for remote
-        clients with AppArmor enabled.
+        The method is preserved as a no-op rather than removed
+        because external integrations (jaato-premium, etc.) may
+        still call it.  No live caller exists in the OSS tree; if
+        a caller is re-introduced, ``server/runner_spawner.py``'s
+        invariant guard will detect it (see the §3.13 / §4.6
+        re-introduction check at runner_spawner.py:210).
 
         Args:
-            confine_context: Zero-argument callable returning a context
-                manager that confines the current thread to the session's
-                AppArmor profile.
+            confine_context: Ignored.  Kept for ABI stability.
         """
-        if not self._jaato:
-            logger.warning("set_apparmor_confinement called before client initialized")
-            return
-        session = self._jaato.get_session()
-        if session and session._executor:
-            session._executor.set_apparmor_context(confine_context)
+        # Intentionally no-op.  See docstring for rationale.
+        if confine_context is not None:
+            logger.debug(
+                "set_apparmor_confinement called (no-op since §7c step 6.2; "
+                "runner subprocess is process-confined at spawn time)"
+            )
 
     def set_pre_init_confine_context(
         self,
@@ -691,13 +703,30 @@ class JaatoServer:
                 ``cgroup.events`` snapshot dict, or ``None`` when
                 cgroups are unavailable.
         """
-        if not self._jaato:
-            logger.warning("set_runtime_limits called before client initialized")
-            return
-        session = self._jaato.get_session()
-        if session and session._executor:
-            session._executor.set_runtime_limits(
-                attach_callback, limits, event_reader,
+        # Phase 3 §7c step 6.2: this method is now a no-op kept
+        # for back-compat with WS callers (websocket.py:721) that
+        # still invoke it on every WS-provisioned session.  The
+        # daemon-side ``ToolExecutor`` is dead post-§7b.2 (tool
+        # execution flows through the runner subprocess); the
+        # runner-side cgroup attach is set via env vars at
+        # spawn time (``JAATO_RUNNER_CGROUP_PATH`` etc., see
+        # ``server/runner_spawner.py``), and the runner-side
+        # executor reads its app-layer ``RuntimeLimits`` from the
+        # bootstrap envelope's ``env_overrides`` mechanism +
+        # provider config — neither of which travels through this
+        # method.  The pre-§7c daemon-side wiring this method
+        # installed had no effect post-§7b.2 even when called.
+        #
+        # Future cleanup: §7d (cgroup attach migration) may
+        # introduce a runner-RPC for streaming live-cgroup-events
+        # back to daemon for OTel; until then the
+        # ``event_reader`` argument simply isn't consumed by
+        # anyone post-seat-flip.
+        if attach_callback is not None or limits is not None:
+            logger.debug(
+                "set_runtime_limits called (no-op since §7c step 6.2; "
+                "runner subprocess gets cgroup attach + RuntimeLimits at "
+                "spawn time, not via this daemon-side method)"
             )
 
     def set_reference_authorizer(self, authorizer) -> None:
@@ -1110,14 +1139,40 @@ class JaatoServer:
                 status=agent.status,
             ))
 
-        # Emit instruction budget for main agent
-        if self._jaato:
-            session = self._jaato.get_session()
-            if session and session.instruction_budget:
-                emit(InstructionBudgetEvent(
-                    agent_id=session.agent_id,
-                    budget_snapshot=session.instruction_budget.snapshot(),
-                ))
+        # Emit instruction budget for main agent.
+        #
+        # Phase 3 §7c step 6.2: read the runner-side session's
+        # instruction-budget snapshot via the
+        # ``session.snapshot_instruction_budget`` RPC (added in
+        # §7c step 6.1 (2/3) at commit 1043bfde) instead of
+        # reaching into the daemon-side ``_jaato.get_session()
+        # .instruction_budget``.  Returns None when the runner-
+        # side budget hasn't been populated yet (pre-configure)
+        # — same skip-emit semantics as the pre-§7c
+        # ``if session.instruction_budget:`` guard.
+        rpc = self._runner_rpc
+        if rpc is not None:
+            forwarder = getattr(
+                rpc, "session_snapshot_instruction_budget_threadsafe", None,
+            )
+            if callable(forwarder):
+                try:
+                    snapshot = forwarder(timeout=2.0)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.debug(
+                        "emit_current_state: snapshot_instruction_budget "
+                        "RPC failed (%s) — skipping budget emit",
+                        exc,
+                    )
+                    snapshot = None
+                if snapshot is not None:
+                    # ``agent_id`` is a top-level key in the snapshot
+                    # dict (see InstructionBudget.snapshot()), so we
+                    # don't need a separate read.
+                    emit(InstructionBudgetEvent(
+                        agent_id=snapshot.get("agent_id", self._main_agent_id),
+                        budget_snapshot=snapshot,
+                    ))
 
         # Emit restored subagent state from SubagentPlugin
         # This handles subagents that were restored from persistence but not yet
@@ -3257,7 +3312,37 @@ class JaatoServer:
             return
 
         if self._model_running:
-            # Inject directly into the session's queue (USER source - high priority)
+            # Inject directly into the session's queue (USER source — high priority).
+            #
+            # Phase 3 §7c step 6.2: forward to the runner-side
+            # session via the ``session.inject_prompt`` RPC
+            # (added in §7c step 6.1 (3/3) at commit 14e57709)
+            # instead of reaching into the daemon-side
+            # ``_jaato.get_session().inject_prompt``.  The
+            # ``SourceType`` enum is serialized as its lowercase
+            # string value across the wire.
+            rpc = self._runner_rpc
+            if rpc is not None:
+                forwarder = getattr(
+                    rpc, "session_inject_prompt_threadsafe", None,
+                )
+                if callable(forwarder):
+                    try:
+                        forwarder(
+                            text,
+                            source_id="user",
+                            source_type=SourceType.USER.value,
+                            timeout=2.0,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — boundary
+                        logger.warning(
+                            "inject_prompt RPC failed (%s) — mid-turn "
+                            "prompt was not queued",
+                            exc,
+                        )
+                        # Fall through; the daemon-side leg below
+                        # (legacy in-process queue) will still run
+                        # during the §7c rollout window.
             if self._jaato:
                 session = self._jaato.get_session()
                 session.inject_prompt(text, source_id="user", source_type=SourceType.USER)
