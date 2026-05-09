@@ -27,6 +27,7 @@ Usage:
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "gc"
 
+PLUGIN_TIER = "daemon"
 import sys
 from typing import Callable, Dict, Optional
 

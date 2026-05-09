@@ -40,6 +40,7 @@ from .plugin import BackgroundPlugin, create_plugin
 
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "daemon"
 __all__ = [
     # Protocol and data structures
     'BackgroundCapable',

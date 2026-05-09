@@ -39,6 +39,7 @@ installation (e.g., TUI distribution only needs models and channels).
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 _LAZY_IMPORTS = {
     # Models (from SDK)
     "StepStatus": ("jaato_sdk.plugins.todo.models", "StepStatus"),

@@ -7,6 +7,7 @@ invalidations without modifying requests.
 
 PLUGIN_KIND = "cache"
 
+PLUGIN_TIER = "daemon"
 from .plugin import ZhipuAICachePlugin, create_plugin
 
-__all__ = ["PLUGIN_KIND", "ZhipuAICachePlugin", "create_plugin"]
+__all__ = ["PLUGIN_KIND", "PLUGIN_TIER", "ZhipuAICachePlugin", "create_plugin"]

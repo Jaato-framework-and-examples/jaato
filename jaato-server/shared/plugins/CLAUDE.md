@@ -15,6 +15,40 @@ from .plugin import MyPlugin, create_plugin
 __all__ = ["MyPlugin", "create_plugin", "PLUGIN_KIND"]
 ```
 
+## Critical: `PLUGIN_TIER` for the Confined-Runner Partition
+
+Every plugin that declares `PLUGIN_KIND` **must** also declare
+`PLUGIN_TIER` (Phase 3 §3.3.5).  Tier classification per the parent
+design `docs/design/per_session_confined_runner.md` §4.2:
+
+```python
+# shared/plugins/my_plugin/__init__.py
+
+PLUGIN_KIND = "tool"
+PLUGIN_TIER = "runner"  # or "daemon"
+
+from .plugin import MyPlugin, create_plugin
+
+__all__ = ["MyPlugin", "create_plugin", "PLUGIN_KIND", "PLUGIN_TIER"]
+```
+
+**Tier rules:**
+- `"daemon"` — provider clients, OAuth tokens, GC over session history,
+  cache state, formatters, telemetry forwarding, `*_auth` plugins.
+- `"runner"` — workspace FS access, subprocess spawn (cli, lsp, mcp,
+  interactive_shell, notebook), per-session in-memory state
+  (permission, references, memory, todo, etc.).
+
+**Why this matters:** `PluginRegistry.discover(tier_filter="...")`
+filters discovery by tier.  Without `PLUGIN_TIER`, a plugin is
+silently excluded when a tier filter is set — same footgun as
+missing `PLUGIN_KIND`.
+
+The build-fail gate is in `shared/tests/test_plugin_tier_partition.py`:
+new plugins without an explicit tier fail
+`test_every_plugin_with_kind_has_tier`.  Daemon-runner overlap
+fails `test_daemon_and_runner_tiers_are_disjoint`.
+
 ## Critical: `SESSION_INDEPENDENT` for Auth Plugins
 
 Auth plugins must also declare `SESSION_INDEPENDENT = True` in `__init__.py`.
