@@ -735,10 +735,22 @@ class SessionManager:
         4. ``server.initialize()`` — return ``(None, None)`` on
            failure (the underlying error already emitted to the
            client).
-        5. Build the :class:`Session` record with the
-           ``planned_sandbox_mode`` read back from the server
-           (Phase 2's pre-init hook stashes the apparmor opt-in
-           value on ``server._planned_sandbox_mode``).
+        5. Build the :class:`Session` record with ``sandbox_mode``
+           resolved per the priority chain:
+           a. ``envelope.sandbox_mode`` — disk-restore's pre-known
+              value (the saved Session record's mode).
+           b. Return value of
+              :meth:`_provision_ipc_apparmor_and_spawn_runner`
+              (§3.13's inline call) — apparmor opt-in result for
+              the IPC creation path.
+           c. ``None`` — no opt-in / non-confined session.
+
+           Phase 3 §3.13 removed the legacy
+           ``server._planned_sandbox_mode`` stash slot; the
+           apparmor opt-in is now read directly inside the
+           inline provisioning call (whose return value flows
+           into priority chain step (b)) rather than via a
+           transient attribute on JaatoServer.
 
         The helper does NOT do:
 

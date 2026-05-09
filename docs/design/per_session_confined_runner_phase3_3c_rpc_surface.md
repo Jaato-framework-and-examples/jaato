@@ -98,13 +98,18 @@ All wrappers live in
   proves handlers compose correctly across a realistic
   bootstrap → state ops → config → shutdown sequence.
 
-## 6. Daemon-side migrations done
+## 6. Daemon-side migrations done (vanguard)
 
 | Daemon site | Old behavior | New behavior |
 |---|---|---|
 | `JaatoServer.shutdown` | closes RPC transport directly (SIGTERM races plugin teardown) | calls `runner_rpc.session_shutdown_threadsafe(timeout=5)` first; then transport close.  Best-effort: failures log + proceed |
 | `JaatoServer.terminal_width` setter | propagates only to in-process `_jaato` + formatter pipelines | also forwards via `runner_rpc.session_set_terminal_width_threadsafe(width, timeout=2)` |
 | `JaatoServer.set_presentation_context` | propagates only to in-process `_jaato` | also forwards via `runner_rpc.session_set_presentation_context_threadsafe(ctx, timeout=2)` |
+
+These three are the seat-flip's **vanguard** — proof the dispatch
+pattern works end-to-end against real call sites, not exhaustive.
+The remaining ~47 `self._jaato.X` sites in `core.py` (50 total —
+3 vanguard) follow the same shape per bucket §7b below.
 
 All three follow the same pattern:
 
@@ -120,55 +125,270 @@ All three follow the same pattern:
 ## 7. Remaining work (the seat-flip itself)
 
 The dispatch surface is comprehensive enough that the seat-flip
-can proceed handler-by-handler:
+can proceed handler-by-handler.  Daemon-side migration scope (the
+canonical count, replacing the original "~95"):
+
+| File | `self._jaato.X` access count | Notes |
+|---|---|---|
+| `server/core.py` | 50 | Bulk of `_jaato.send_message`, `respond_to_*`, state setters / getters; the seat-flip's main migration target. |
+| `server/websocket.py` | 18 (named `_jaato_server.X`) | WS-standalone direct API.  Same patterns as core but without the daemon-event-emit glue. |
+| `server/command_router.py` | 1 | `session.server._jaato.get_runtime` — single fork-ask call site. |
+
+Total: **~69 daemon-side dispatch sites**.  Reading wider call
+sites (`server/__main__.py`, plugin-extension hooks) adds ~5 more.
 
 ### 7a. Always-spawn the runner
 
-Currently the runner spawns only when the IPC client opts into
-apparmor (`_provision_ipc_apparmor_and_spawn_runner`).  For the
-seat-flip to work, every IPC + WS-standalone session needs a
-runner so daemon-side `_jaato.X` calls have something to dispatch
-to.  Decoupling runner spawn from apparmor opt-in is a single
-focused change.
+**Status: design pending.**
 
-### 7b. Migrate remaining `self._jaato.X` call sites
+Today the runner spawns only when the IPC client opts into
+apparmor (`SessionManager._provision_ipc_apparmor_and_spawn_runner`).
+For the seat-flip to work, every IPC + WS-standalone session
+needs a runner so daemon-side `_jaato.X` calls have a dispatch
+target.
 
-`core.py` has ~95 `self._jaato.X` references.  Most fall into
-patterns the dispatch surface already covers:
+Open design questions (peer-review M1):
+
+1. **Profile schema.** Today profiles can opt-in to apparmor
+   independently.  After 7a, every IPC + WS-standalone session
+   has a runner regardless of the apparmor flag.  Two modes the
+   doc must pick:
+   - **Mandatory**: runner always spawned for IPC/WS.  Apparmor
+     becomes a confinement-mode flag inside the runner-spawn
+     path.  Eliminates the `spawn_runner: bool` knob.
+     Recommended — matches the "runner is always the seat" design
+     endpoint.
+   - **Configurable**: new `spawn_runner: bool` profile field
+     independent of `apparmor`.  Defaults True for IPC/WS.
+     Allows daemon operators to fall back to in-process mode
+     (e.g., extreme-low-latency single-tenant deployments).
+     Adds a feature surface that must stay maintained.
+2. **Performance.** Subprocess spawn + RPC handshake + plugin
+   discovery is non-trivial latency at session-create time.
+   Daemons hosting many short-lived sessions (CI test harnesses,
+   serverless adapters) feel this most.  Mitigation: amortize
+   plugin-discovery cost across pre-spawned warm runners (a pool)
+   — defer to Phase 4+ if measured baseline is acceptable.
+3. **Test fixtures.** A large fraction of existing tests don't
+   have a runner attached.  After 7a they all do — fixture
+   surface changes significantly.  Some integration tests may
+   break or need re-baseline.  Specifically:
+   - All `_FakeJaatoServer` based tests (currently ~40 in the
+     server suite) gain a runner side; either the fake exposes
+     an in-process JaatoSession-equivalent, or the test
+     constructs a real `socketpair`-driven runner stub.
+   - The §3.3c precursor tests already use the
+     `_FakeSession` + `RunnerSessionHost` pattern that survives
+     the seat-flip; those tests stay green.
+
+Files touched:
+- `server/session_manager.py` — split
+  `_provision_ipc_apparmor_and_spawn_runner` into
+  `_spawn_session_runner_unconditional` (always called) +
+  `_provision_apparmor_for_session` (opt-in only).  The IPC
+  bootstrap path always invokes the spawn helper; apparmor is
+  layered atop iff the client opted in.
+- `server/runner_spawn.py` — already independent; no changes
+  needed but verify the helper handles the no-apparmor path
+  cleanly (the runner's `aa_change_profile` becomes a no-op
+  when no profile is attached — should fall through to the
+  `JAATO_RUNNER_DISABLE_CONFINE=1` mode, which Phase 2's
+  `runner/__main__.py` already supports).
+- `server/websocket.py` — apply the same split for the WS-
+  standalone bootstrap.
+
+Tests:
+- New `tests/integration/test_runner_always_spawned.py` —
+  exercises an IPC `session.new` without apparmor opt-in;
+  asserts `server.runner_rpc is not None` post-init.
+- Existing apparmor-opt-in path tests still pass (apparmor is
+  layered, not gated).
+- A performance-baseline test recording session-create p95
+  latency — ratchet to detect regressions after 7a lands.
+
+One commit; lands BEFORE 7b.
+
+### 7b. Migrate remaining daemon-side dispatch sites
+
+Split into three sub-buckets per peer-review M2 — each has
+comparable scope to §3.7 and warrants its own commit.
+
+#### 7b.1. Stateless setters / readers (the easy bulk)
+
+Most fall into patterns the existing dispatch surface already
+covers:
 
 - `_jaato.set_*` → `runner_rpc.session_set_*_threadsafe`
 - `_jaato.get_session().get_session_state(...)` → `runner_rpc.session_get_state`
 - `_jaato.is_processing` → `runner_rpc.session_is_running`
 - `_jaato.stop()` → `runner_rpc.session_request_stop`
+- `_jaato.get_history()` → `runner_rpc.session_get_history`
+- `_jaato.get_context_usage()` → `runner_rpc.session_get_context_usage`
 
-The HARD ones aren't in the surface yet:
+Of the 50 sites in `core.py`, an audit (`grep self._jaato\.` +
+manual classification) puts ~30 in this bucket.  Each migration
+follows the vanguard pattern (write to both during transition);
+no new RPC handlers needed.
 
-- `_jaato.send_message(prompt, ...)` — streams, multi-turn,
-  permission interaction, plugin enrichment.  The biggest
-  single handler.  Existing `tool.execute` already shows the
-  streaming pattern (`_make_on_output` callback through the
-  stream-frame channel); `session.send_message` follows it but
-  with a much larger plugin/permission/enrichment surface.
-- `_jaato.respond_to_permission`, `respond_to_clarification`,
-  etc. — interaction responses that flow through channels.
-- Provider auth + credential flow (`_jaato.get_runtime`).
+One commit per cluster (lifecycle, state, config, etc.); ~5
+commits total in this bucket.
+
+#### 7b.2. `session.send_message` (the big one)
+
+The biggest single handler.  Open design questions:
+
+1. **Streaming/multi-turn pattern.** The existing `tool.execute`
+   handler streams output via `_make_on_output(request_id)`
+   bridging into the daemon's stream-frame channel.
+   `session.send_message` follows the same pattern but with a
+   larger per-call surface:
+   - Model API request (provider plugin invocation runs daemon-
+     tier per §4.2; the runner-side session hands off to
+     daemon-side runtime via `client.complete` RPC — yet another
+     primitive).
+   - Plugin enrichment pipeline: prompt enrichment, system-
+     instruction enrichment, response enrichment.  All run
+     runner-side post-seat-flip.
+   - Function-calling loop (multi-turn until model stops calling
+     tools).  Each turn round-trips through the model API
+     daemon-side.
+   - Permission ASK during tool execution: relays through the
+     existing `client.prompt_operator` primitive (§3.2.1), not a
+     new channel.  The §3.7 `RunnerRPCChannel` is the same
+     plumbing, *NOT* a sibling.
+2. **Cancellation.** `tool.execute` handles cancellation via the
+   `cancel` frame routed by `RunnerRPC._handle_cancel`.
+   `session.send_message`'s cancel propagates through the same
+   mechanism: the runner-side session checks the per-call
+   cancel token at each turn boundary.
+3. **Wire shape.** Args = `{"prompt": str, "agent_id": str?, ...}`.
+   Streams chunks via the stream-frame channel.  Response = the
+   final model response dict (matches today's
+   `JaatoSession.send_message` return).
+
+Files touched:
+- `server/runner/rpc.py` — add `session.send_message` handler;
+  reuses the streaming + cancel infrastructure already proven
+  for `tool.execute`.
+- `server/runner_rpc_client.py` — async wrapper +
+  `session_send_message_threadsafe` (note: long-running, so
+  `timeout=None` default with explicit caller-side cancellation
+  via the cancel frame).
+- `server/core.py` — migrate `JaatoServer.send_message` to call
+  the wrapper.  This is the LAST big migration before the
+  seat-flip's final flag-removal commit.
+
+Tests: integration test driving a real provider stub through the
+RPC; cancellation mid-stream; multi-turn with permission ASK.
+
+One commit; depends on 7a.
+
+#### 7b.3. Response handlers + `get_runtime`
+
+Reverse-direction interaction responses:
+
+- `_jaato.respond_to_permission(request_id, response)` — daemon
+  receives client response, forwards to runner-side waiting
+  future.
+- `_jaato.respond_to_clarification(...)`, `respond_to_clarification_batch(...)`,
+  `respond_to_reference_selection(...)` — same shape.
+
+The §3.2.1 `client.prompt_operator` is the analogous shape but
+in the OPPOSITE direction (runner→daemon→client).  These four
+need the daemon→runner direction.  The natural mechanism:
+runner-side ASK queue (already partially built per §3.12 ASK-
+queue work) gets a `respond` method; daemon RPC `session.respond_to_X`
+calls into it.
+
+`_jaato.get_runtime` (sent 6× from `core.py`):
+- Provider auth + credential flow stays daemon-side per §4.2
+  (model_provider plugins are daemon-tier).
+- The runner-side session calls back to daemon via a new
+  `runtime.complete` primitive (provider invocation) — analogous
+  to `client.prompt_operator` but for model API calls.
+- Daemon-side `_jaato.get_runtime` callers are mostly for
+  introspection (provider name, model name, ledger
+  state) — these become `runner_rpc.session_get_provider_info`
+  read-only handlers.
+
+Files touched:
+- `server/runner/rpc.py` — 4 response handlers + 1 introspection.
+- `server/runner_rpc_client.py` — 5 wrapper pairs.
+- `server/runner/rpc_client.py` — `runtime.complete` primitive
+  (new direction; analogous to §3.2.1's `prompt_operator`).
+- `shared/jaato_runtime.py` — provider invocation pluggable
+  via the runner-side `complete` callback when seated runner-
+  side; in-process when daemon-side.
+- `server/core.py` — migrate the 5 introspection sites + 4
+  response sites.
+
+One commit per category (response handlers, then runtime
+primitive + provider invocation refactor); 2 commits.
 
 ### 7c. Remove the in-process `JaatoSession`
 
-After all `self._jaato.X` callers migrate, the `_jaato` field can
-be removed from `JaatoServer.__init__`.  The runner-side host
-becomes the single source of truth.  `JAATO_RUNNER_HOSTS_SESSION`
-flag goes away.
+After all 7b migrations land, the `_jaato` field can be removed
+from `JaatoServer.__init__`.  The runner-side host becomes the
+single source of truth.
+
+**`JAATO_RUNNER_HOSTS_SESSION` flag lifetime** (peer-review M4):
+the v5 plan §3.3b N4 specified the flag "lands and is removed
+within the same PR."  As implemented, the flag has been live
+across ~24 §3.3c precursor commits.  This is a **scope expansion
+from v5 N4** — the design has shifted from "single-PR
+transitional flag" to "multi-PR transitional flag with explicit
+removal commit."  Both readings are defensible; this doc picks
+the latter:
+
+- The flag is a **multi-PR transitional shape**.
+- It exists for the duration of §3.3c precursor → §7c rollout.
+- Removed in §7c's final commit (alongside the
+  `_jaato`-field removal from JaatoServer).
+- Operators never see the flag on a released server version
+  (still upholds N4's intent — the user-facing concern was
+  preventing operator-visible feature-flag accumulation, which
+  this doesn't violate).
+
+Files touched:
+- `server/core.py` — remove `self._jaato` field + all None-
+  guarded fallbacks (the `if self._jaato:` checks become
+  unconditional `if self._runner_rpc:` checks).
+- `shared/jaato_runtime.py` — `create_session` no longer
+  instantiates `JaatoSession`; builds envelope, dispatches to
+  runner, returns runner-RPC handle.
+- `server/__main__.py` — remove `JAATO_RUNNER_HOSTS_SESSION`
+  env-var read + the conditional bootstrap-envelope dispatch.
+- `server/runner/__main__.py` — flag check goes away;
+  runner-side JaatoSession host is unconditional.
+
+One commit; depends on 7a + 7b.1 + 7b.2 + 7b.3.
 
 ### 7d. Dependent migrations
 
 - **§3.11 default-share + isolation knob**: ephemeral subagents
   share the parent's runner via `BootstrapEnvelope.parent_runner_handle`.
+  Unblocks once 7a lands (parent has a runner unconditionally).
 - **§3.12 ASK queue + drain**: runner-side permission plugin
   buffers ASK prompts when no client is attached
-  (`Session.restored_pending_attach`); flushes on attach.
-- **Cgroup attach migration**: cgroup attach moves runner-side
-  alongside the seat-flip.
+  (`Session.restored_pending_attach`); flushes on attach via
+  the §7b.3 response handlers.
+- **Cgroup attach migration**: per peer-review M3 — currently
+  daemon-side via `shared/ai_tool_runner.py:_cgroup_attach`
+  (verified at line 211).  §3.5 (commit 03a5166d) migrated
+  subprocess-spawning plugins to forward via runner-RPC but
+  **did NOT migrate the cgroup-attach mechanism itself** — the
+  daemon-side `set_runtime_limits` callback still threads
+  through.  Runner-side cgroup attach lands in §7d as a
+  follow-on:
+  - Files: `server/runner/cli_runner.py` gains
+    `_cgroup_attach_to_session_cgroup()` invoked at Popen time;
+    the runner subprocess is itself in the cgroup so child
+    processes inherit by default — `_cgroup_attach` becomes
+    an inherit-check rather than an explicit move.
+  - Test: existing `test_runtime_limits_e2e.py:312/354` gates
+    the migration via `_can_migrate_to(_find_writable_cgroup_parent())`.
+  - One commit; depends on 7a (always-spawn) so the runner
+    has a stable cgroup placement.
 
 ## 8. Test invariant for the next contributor
 
@@ -185,3 +405,22 @@ the matching handler MUST have:
 
 This ensures the wire contract stays frozen while the daemon-
 side code churns.
+
+## 9. Bisect anchors
+
+The §3.3c precursor work is bounded by the following commit range:
+
+- **First**: `5796ba93` — `runner: add session.health_check RPC handler`
+- **Last** (precursors only): `395b71f8` — `runner: add session.get_turn_accounting RPC handler`
+- **Design doc**: `37a9500e` — this doc's initial landing.
+
+Daemon-side migrations done within the precursor window:
+
+- `45a2dbd8` — `JaatoServer.shutdown` → `session.shutdown`
+- `b2c0772d` — `JaatoServer.terminal_width` setter forwards
+- `c3d5ec08` — `JaatoServer.set_presentation_context` forwards
+
+A future bisect that fingers a session-RPC regression should
+look in this range first; the lifecycle composition test
+(`test_session_dispatch_lifecycle_e2e.py`) is the most
+load-bearing single test for cross-handler ordering.
