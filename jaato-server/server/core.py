@@ -1295,16 +1295,19 @@ class JaatoServer:
         Iterates session tools and the full registry to cover both active
         and deferred tools. Calls ``name_to_id`` eagerly so the reverse map
         is populated as a side effect.
+
+        Phase 3 §7c step 3b: replaced the private ``session._tools``
+        read with the public :meth:`JaatoClient.get_tool_schemas`
+        accessor (which forwards to
+        :meth:`JaatoSession.get_tool_schemas`).
         """
         from shared.tool_id_map import name_to_id
         mappings: Dict[str, str] = {}
         if self._jaato:
-            session = self._jaato.get_session()
-            if session:
-                for schema in (session._tools or []):
-                    mappings[name_to_id(schema.name)] = schema.name
-                    if schema.category:
-                        mappings[name_to_id(schema.category, prefix="c")] = schema.category
+            for schema in self._jaato.get_tool_schemas():
+                mappings[name_to_id(schema.name)] = schema.name
+                if schema.category:
+                    mappings[name_to_id(schema.category, prefix="c")] = schema.category
         if self.registry:
             for schema in self.registry.get_exposed_tool_schemas():
                 mappings[name_to_id(schema.name)] = schema.name

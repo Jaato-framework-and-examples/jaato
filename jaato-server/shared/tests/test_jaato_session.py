@@ -996,3 +996,45 @@ class TestSetInitialHistory:
         session.set_initial_history([self._make_user_message("turn 1")])
 
         assert session._system_instruction == "you are agent X"
+
+
+class TestGetToolSchemas:
+    """Tests for ``JaatoSession.get_tool_schemas`` (Phase 3 §7c step 3b).
+
+    Public read accessor replacing daemon-side reads of the
+    private ``self._tools`` attribute.
+    """
+
+    def test_returns_empty_list_before_configure(self):
+        """Pre-configure: ``self._tools`` is None.  The accessor
+        returns ``[]`` so callers can iterate unconditionally."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        assert session._tools is None
+        assert session.get_tool_schemas() == []
+
+    def test_returns_copy_of_tools_after_configure(self):
+        """Post-configure: returns a list of the resolved schemas.
+        The returned list is a copy — callers can't mutate the
+        session's internal state by appending to the result."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        schema_a = MagicMock(name="schema_a")
+        schema_b = MagicMock(name="schema_b")
+        session._tools = [schema_a, schema_b]
+
+        result = session.get_tool_schemas()
+
+        assert result == [schema_a, schema_b]
+        # Mutating the result must not touch session state.
+        result.append(MagicMock(name="injected"))
+        assert len(session._tools) == 2
+
+    def test_returns_empty_list_when_tools_empty(self):
+        """``self._tools = []`` (post-configure with no tools) is
+        a legitimate state — the accessor returns ``[]`` (not
+        ``None``) so callers iterate cleanly."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session._tools = []
+        assert session.get_tool_schemas() == []

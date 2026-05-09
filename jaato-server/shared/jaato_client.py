@@ -354,6 +354,19 @@ class JaatoClient:
         if agent_name is not None:
             self._agent_name = agent_name
 
+    def get_tool_schemas(self) -> List['ToolSchema']:
+        """Forward to :meth:`JaatoSession.get_tool_schemas`.
+
+        Phase 3 §7c step 3b: public surface so daemon-side callers
+        can read the session's resolved tool schemas without
+        reaching into ``client._session._tools`` (the private
+        attribute).  Returns an empty list when no session is
+        attached (i.e. before :meth:`connect`).
+        """
+        if self._session is None:
+            return []
+        return self._session.get_tool_schemas()
+
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models from the provider.
 

@@ -2610,6 +2610,25 @@ class JaatoSession:
             )
         self._emit_instruction_budget_update()
 
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Read accessor for the session's resolved tool schemas.
+
+        Returns the list of :class:`ToolSchema` instances the session
+        has activated for the current model — this is the resolved
+        subset (preloaded plugins + on-demand activations), not the
+        registry's full exposed set.
+
+        Returns an empty list when ``configure()`` hasn't run yet
+        (``self._tools is None``) — callers can iterate the result
+        unconditionally without a None check.
+
+        Phase 3 §7c step 3b: replaces daemon-side reads of the
+        private ``self._tools`` attribute (e.g. core.py's
+        ``_build_tool_id_mappings``).  Pre-§7c-step-3b the daemon
+        reached into the private list directly.
+        """
+        return list(self._tools) if self._tools else []
+
     def refresh_tools(self) -> None:
         """Refresh tools from the runtime.
 

@@ -212,3 +212,30 @@ class TestJaatoClientSetAgentIdentity:
         client = JaatoClient(provider_name="anthropic")
         assert client._agent_id == "main"
         assert client._agent_name == "Main Agent"
+
+
+class TestJaatoClientGetToolSchemas:
+    """Tests for ``JaatoClient.get_tool_schemas`` (Phase 3 §7c step 3b).
+
+    Public read accessor replacing daemon-side
+    ``client.get_session()._tools`` private-attribute reads.
+    """
+
+    def test_returns_empty_list_before_connect(self):
+        """No session attached → empty list.  Callers can iterate
+        the result unconditionally without a None check."""
+        client = JaatoClient(provider_name="anthropic")
+        assert client.get_tool_schemas() == []
+
+    def test_forwards_to_session_get_tool_schemas(self):
+        """When a session is attached, the call delegates to
+        ``session.get_tool_schemas()``."""
+        client = JaatoClient(provider_name="anthropic")
+        fake_session = MagicMock()
+        fake_session.get_tool_schemas.return_value = ["s1", "s2"]
+        client._session = fake_session
+
+        result = client.get_tool_schemas()
+
+        fake_session.get_tool_schemas.assert_called_once_with()
+        assert result == ["s1", "s2"]
