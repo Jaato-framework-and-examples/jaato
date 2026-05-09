@@ -230,6 +230,13 @@ class RunnerRPC:
         self._outgoing_lock = threading.Lock()
         self._next_outgoing_id = 1
 
+        # Phase 3 §3.3c: runner-side session host (constructed when
+        # the daemon sends ``session.bootstrap``).  ``None`` until
+        # then.  Plugin migrations §3.4-§3.10 route runner-tier
+        # dispatch through this host's session executor.
+        self._session_host = None  # type: Optional[Any]
+        self._session_lock = threading.Lock()
+
     # --------------------------- write paths ---------------------------
 
     def _write(self, payload: Dict[str, Any]) -> None:
@@ -378,7 +385,94 @@ class RunnerRPC:
                 return False, {"error": "tool.execute: missing 'name' arg"}
             return self._execute_fn(tool_name, tool_args)
 
+        if env.method == "session.bootstrap":
+            # Phase 3 §3.3c: daemon hands the runner a
+            # SessionInitEnvelope; the runner constructs the live
+            # JaatoSession host and stashes it for downstream
+            # dispatch (Phase 4+ removes the daemon-side seat).
+            return self._handle_session_bootstrap(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
+
+    def _handle_session_bootstrap(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Run the runner-side session bootstrap from a daemon envelope.
+
+        Constructs a :class:`server.runner.session.RunnerSessionHost`
+        from the supplied :class:`SessionInitEnvelope` and stashes it
+        on the dispatcher.  Returns a small status dict the daemon
+        can log + branch on (``ready``, ``session_id``, ``stage`` on
+        failure).
+
+        Idempotency: re-bootstrap with the same envelope returns
+        ``ok`` without re-constructing.  Re-bootstrap with a
+        different envelope is a hard failure — the daemon's spawn
+        should issue exactly one bootstrap per runner.
+        """
+        from .envelope import SessionInitEnvelope
+        from .session import (
+            BootstrapError,
+            RunnerSessionHost,
+            bootstrap_session,
+        )
+
+        try:
+            envelope = SessionInitEnvelope.from_dict(args)
+        except (KeyError, ValueError) as exc:
+            return False, {
+                "error": f"session.bootstrap: invalid envelope: {exc}",
+                "stage": "decode",
+            }
+
+        with self._session_lock:
+            existing = self._session_host
+            if existing is not None:
+                if existing.envelope == envelope:
+                    return True, {
+                        "ok": True,
+                        "ready": existing.is_ready,
+                        "session_id": existing.session_id,
+                        "note": "already bootstrapped (idempotent re-call)",
+                    }
+                return False, {
+                    "error": (
+                        f"session.bootstrap: runner already hosting "
+                        f"session_id={existing.session_id!r}; refusing to "
+                        f"re-bootstrap with different envelope"
+                    ),
+                    "stage": "duplicate",
+                }
+
+        try:
+            host: RunnerSessionHost = bootstrap_session(envelope)
+        except BootstrapError as exc:
+            return False, {
+                "error": f"session.bootstrap: {exc.message}",
+                "stage": exc.stage,
+            }
+
+        with self._session_lock:
+            self._session_host = host
+
+        return True, {
+            "ok": True,
+            "ready": host.is_ready,
+            "session_id": host.session_id,
+        }
+
+    @property
+    def session_host(self):
+        """Read accessor for the currently-bootstrapped session host.
+
+        Returns ``None`` until ``session.bootstrap`` has been called
+        successfully.  Phase 3 §3.4-§3.10 will route runner-tier
+        plugin dispatch through ``host.session._executor`` instead
+        of the cli-only Phase 2 ``execute_fn``; this property is
+        the read seat for that future.
+        """
+        with self._session_lock:
+            return self._session_host
 
     def _handle_cancel(self, frame: CancelFrame) -> None:
         with self._active_lock:

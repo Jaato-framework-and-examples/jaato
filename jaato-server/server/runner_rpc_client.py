@@ -46,7 +46,10 @@ import logging
 import os
 import signal
 import socket
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING, Tuple
+
+if TYPE_CHECKING:  # pragma: no cover — types only
+    from shared.session_envelope import SessionInitEnvelope
 
 from shared.framing import (
     FrameTooLargeError,
@@ -567,3 +570,83 @@ class RunnerRPCClient:
         )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
+
+    # --------------------- session.bootstrap (Phase 3 §3.3c) -------------
+
+    async def bootstrap_session(
+        self,
+        envelope: "SessionInitEnvelope",
+        *,
+        timeout: Optional[float] = 30.0,
+    ) -> Dict[str, Any]:
+        """Send a ``session.bootstrap`` RPC carrying *envelope*.
+
+        Phase 3 §3.3c part 1: the runner stores the resulting
+        :class:`server.runner.session.RunnerSessionHost` and is
+        ready to dispatch runner-tier plugin calls against
+        ``host.session._executor`` (Phase 3 §3.4-§3.10 wave
+        migrations).
+
+        Args:
+            envelope: Pre-built :class:`SessionInitEnvelope`.
+                Daemon callers build this from the resolved profile
+                + plugin set inside ``_create_session_impl`` (or
+                §3.12.0's bootstrap helper).
+            timeout: Wall-clock cap.  Default 30s — bootstrap may
+                involve provider connect + plugin discovery on the
+                runner side, which can be slow on cold imports.
+
+        Returns:
+            The response envelope's ``result`` dict (typed by the
+            runner-side ``_handle_session_bootstrap``):
+            ``{"ok": True, "ready": bool, "session_id": str}`` on
+            success; ``{"error": "...", "stage": "..."}`` on
+            failure.
+
+        Raises:
+            RunnerCallError: transport-level failure (peer
+                disconnect, malformed frame).
+            asyncio.TimeoutError: when *timeout* fires.
+        """
+        from shared.session_envelope import SessionInitEnvelope as _SE
+        if not isinstance(envelope, _SE):
+            raise TypeError(
+                f"bootstrap_session: expected SessionInitEnvelope, got "
+                f"{type(envelope).__name__}"
+            )
+
+        coro = self.call("session.bootstrap", envelope.to_dict())
+        if timeout is not None:
+            response = await asyncio.wait_for(coro, timeout)
+        else:
+            response = await coro
+
+        if not response.ok or response.error is not None:
+            err_type = response.error.type if response.error else "UnknownError"
+            err_msg = response.error.message if response.error else "no message"
+            raise RunnerCallError(
+                f"session.bootstrap failed: {err_type}: {err_msg}"
+            )
+        result = response.result if isinstance(response.result, dict) else {}
+        return result
+
+    def bootstrap_session_threadsafe(
+        self,
+        envelope: "SessionInitEnvelope",
+        *,
+        timeout: Optional[float] = 30.0,
+    ) -> Dict[str, Any]:
+        """Synchronous wrapper for ``bootstrap_session`` from worker
+        threads.
+
+        ``_create_session_impl`` runs synchronously in a worker
+        thread (today's hook architecture); this wrapper lets it
+        send the bootstrap envelope without bouncing through
+        ``asyncio.run_coroutine_threadsafe`` boilerplate at every
+        call site.
+        """
+        coro = self.bootstrap_session(envelope, timeout=timeout)
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(
+            timeout=(timeout + 5.0 if timeout is not None else None),
+        )
