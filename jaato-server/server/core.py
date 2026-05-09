@@ -3626,9 +3626,40 @@ class JaatoServer:
         Returns:
             True if stop was initiated.
         """
+        # Phase 3 §7b.1 migration: cancel signal goes to BOTH the
+        # daemon-side JaatoSession (existing) AND the runner-side
+        # JaatoSession (new) so whichever holds the in-flight
+        # message receives the cancel.  In the post-§7c seat-flip
+        # world only the runner-side will, but during the
+        # transition window writing to both keeps cancellation
+        # behavior consistent.
+        daemon_cancelled = False
         if self._jaato and self._jaato.is_processing:
-            return self._jaato.stop()
-        return False
+            daemon_cancelled = self._jaato.stop()
+
+        runner_cancelled = False
+        rpc = self._runner_rpc
+        if rpc is not None:
+            forwarder = getattr(rpc, "session_request_stop_threadsafe", None)
+            if callable(forwarder):
+                try:
+                    runner_cancelled = bool(forwarder(
+                        reason="user_stop", timeout=2.0,
+                    ))
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.debug(
+                        "stop: runner RPC propagation failed (%s) — "
+                        "daemon-side cancel still issued (%s)",
+                        exc, daemon_cancelled,
+                    )
+
+        # Return True if EITHER side reported a cancellation
+        # actually issued.  Pre-§7c the daemon-side is
+        # authoritative; post-§7c the runner-side will be.  Both
+        # paths preserve the existing API contract: True iff a
+        # cancel was actually issued (False when no message
+        # running).
+        return daemon_cancelled or runner_cancelled
 
     def execute_command(self, command: str, args: List[str]) -> Dict[str, Any]:
         """Execute a command.
