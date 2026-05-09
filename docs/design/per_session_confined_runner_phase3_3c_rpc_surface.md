@@ -467,7 +467,8 @@ migrations + the actual field removal) was enumerated:
 | **§7c step 6** | Atomic seat-flip — absorbs the read migrations folded from step 5.  **Pre-implementation audit (post-step-4-first-pass) revised the original 6a/6b/6c shape:** the `_jaato.get_session()` readers — originally classified as a single "INTERNAL refactor" sub-step (6b) — actually have 4 distinct dispositions that each need their own treatment.  Updated decomposition below.  Removes the `JAATO_RUNNER_HOSTS_SESSION` env-var doc references along the way. | Pending. |
 |     **§7c step 6 disposition audit** | Per-`get_session()`-reader disposition table built from the actual call sites in `server/core.py`.  Recorded for the next implementer.  See "Step 6 disposition audit" below. | **Shipped (audit-only).** |
 |     **§7c step 6.1** | Add 3 new runner-RPC handlers (each §7b.2-scale: handler + daemon-side wrapper + unit + e2e tests): `session.set_reference_authorizer`, `session.snapshot_instruction_budget`, `session.inject_prompt`.  Prerequisites for the daemon-side reader migrations in 6.2. | Pending. |
-|     **§7c step 6.2** | Migrate `_jaato.get_session()` readers per the disposition audit below.  Some delete (daemon-tier executor reaches), some forward via runner-RPC (the new handlers from 6.1), some require architectural callback-wiring decisions (`_event_bus_tools` + `instruction_budget` callback at lines 1891, 1907; `set_prompt_injected_callback` at line 3273).  Last category gates on runner-side event-bus access plumbing — may itself fan out into sub-commits. | Pending. |
+|     **§7c step 6.2** | Migrate the **6 straightforward `_jaato.get_session()` readers** per the disposition audit below: 2 deletes (lines 610, 697 — daemon-tier executor reaches), 3 new-RPC forwards (lines 725, 1091, 3238 — using the handlers from 6.1), 1 trivial migration to `self._runtime.event_bus` (line 462).  Self-contained commit — does not depend on the architectural callback decisions in 6.2.5. | Pending. |
+|     **§7c step 6.2.5** | Migrate the **3 architectural callback-rewire `get_session()` readers** (lines 1891, 1907, 3273 — `_event_bus_tools` + `instruction_budget` callback wiring + `set_prompt_injected_callback`).  Each gates on runner-side event-bus access plumbing which the Phase 3 plan parked as out-of-scope.  Decoupled from 6.2 so that step's progress doesn't get tied to an architectural decision that may not be ready.  May itself fan out into multiple commits depending on the event-bus plumbing decisions. | Pending. |
 |     **§7c step 6.3** | Drop write-both daemon-side legs (clear_history, stop, terminal_width property setter, set_presentation_context, init's set_terminal_width direct call) — safe ONLY after 6.2 completes (until then, daemon-side `get_session()` readers still depend on the daemon-side session having current state). | Pending. |
 |     **§7c step 6.4** | Delete WIRING calls per the §7c step 3c clarification: `set_session_plugin`, `configure_plugins_only`, `configure_tools` (×2), `set_gc_plugin` (×2).  Runner already gets equivalent config via the bootstrap envelope. | Pending. |
 |     **§7c step 6.5** | Migrate the remaining ~5 introspection reads not covered by step 4: `model_name` / `provider_name` (lines 1665-1666), `auth_info` (1990, 4241), `verify_auth` (1728, 4143), `get_user_commands` / `execute_user_command` (3755, 3778, 3954), `get_model_completions` (3983).  Routes through `self._runtime` for runtime-tier reads + `self._jaato.get_session()._provider` reaches for session-tier reads (which themselves collapse if 6.2 lands first). | Pending. |
@@ -609,6 +610,14 @@ Per peer-review request after the worker's §7b.1 scope correction
 `core.py` plus 25 plain truthiness checks (`if self._jaato:`,
 total 75 references) are classified below by **enclosing method**
 + **bucket**.  The classification is grounded in init ordering:
+
+> **Cross-reference:** this appendix's INTERNAL bucket lumps every
+> `self._jaato.get_session()` reader under a single classification.
+> Step 6's pre-implementation audit (post-step-4-first-pass) showed
+> those readers actually have **four distinct dispositions** (delete,
+> new-RPC-handler, architectural callback rewire, trivial migration).
+> For the per-`get_session()`-reader sub-classification, see the
+> **"Step 6 disposition audit"** in §7c's sequencing table above.
 
 ### Init ordering (the load-bearing fact)
 
