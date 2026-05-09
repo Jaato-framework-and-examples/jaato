@@ -467,3 +467,142 @@ A future bisect that fingers a session-RPC regression should
 look in this range first; the lifecycle composition test
 (`test_session_dispatch_lifecycle_e2e.py`) is the most
 load-bearing single test for cross-handler ordering.
+
+## 10. §7b.1 audit appendix — per-site classification
+
+Per peer-review request after the worker's §7b.1 scope correction
+(commit `fafe90a6`).  The 50 `self._jaato.X` call sites in
+`core.py` plus 25 plain truthiness checks (`if self._jaato:`,
+total 75 references) are classified below by **enclosing method**
++ **bucket**.  The classification is grounded in init ordering:
+
+### Init ordering (the load-bearing fact)
+
+```
+SessionManager._bootstrap_session(envelope):
+  1. _run_pre_initialize_hooks(server, session_id, workspace_path, client_id)
+  2. _provision_ipc_apparmor_and_spawn_runner(...)  ← inline per §3.13
+        ├── apparmor.add_session_profile(...)        (daemon-side)
+        ├── runner_spawn.spawn_session_runner(...)   (forks runner)
+        │     └── server.set_runner_rpc(rpc, spawned)  ← runner_rpc set HERE
+        └── (auto-sends session.bootstrap envelope)   ← runner-side session ready
+  3. server.initialize()                              ← every _jaato.X site here
+                                                       has runner_rpc available
+  4. Build Session record
+```
+
+So **every `self._jaato.X` site that runs from inside or after
+`server.initialize()` has `self._runner_rpc` available.** Only
+sites in `JaatoServer.__init__` itself are truly pre-runner.
+
+### Available `session.*` RPC handlers (15)
+
+`bootstrap`, `health_check`, `get_session_state`,
+`set_session_state`, `get_all_session_state`, `is_running`,
+`request_stop`, `get_history`, `get_context_usage`,
+`get_turn_accounting`, `set_terminal_width`,
+`set_streaming_enabled`, `set_presentation_context`, `reset`,
+`shutdown`.
+
+**Notably absent:** `send_message` (the §7b.2 task; not in
+surface yet); `get_context_limit` (today's
+`get_context_usage` returns a dict that *may* include
+`context_limit`, with a fallback to a separate `get_context_limit`
+call — adding the dict field would make the fallback
+unnecessary).
+
+### Bucket key
+
+| Bucket | Meaning |
+|---|---|
+| **DONE** | Already migrated (vanguard) |
+| **NOW** | Migratable today: post-runner-spawn AND a matching RPC handler exists |
+| **DAEMON** | Stays daemon-side per §4.2 (provider/auth/runtime/event_bus/UI) |
+| **INTERNAL** | Reads/writes `JaatoSession`'s private state (`_executor`, `_tools`, `_agent_id`, `_agent_name`, etc.) — refactored away during §7c, not migrated |
+| **WIRING** | Wires daemon-side state INTO the in-process JaatoSession (`configure_tools`, `set_session_plugin`, `set_gc_plugin`) — migrates when the runner-side equivalents exist |
+| **§7b.2** | Belongs to the `send_message` migration task |
+| **TRULY-PRE** | Runs before runner-spawn — defer to post-§7c |
+| **TRUTHINESS** | `if self._jaato:` truthiness check; becomes `if self._runner_rpc:` post-§7c, no individual migration |
+
+### Per-method classification
+
+| Method (line range) | Sites | Bucket |
+|---|---|---|
+| `__init__` (215-418) | 309 (truthiness) | **TRUTHINESS** (collapses post-§7c) |
+| `event_bus` getter (430-443) | 436, 438 | **DAEMON** (event_bus is daemon-tier) |
+| `terminal_width` setter (490-523) | 498, 499 | **DONE** (vanguard `b2c0772d`) |
+| `set_presentation_context` (525-561) | 543, 544 | **DONE** (vanguard `c3d5ec08`) |
+| `set_apparmor_confinement` (563-588) | 583, 586 | **INTERNAL** (sets `session._apparmor_context`) |
+| `set_pre_init_confine_context` (590-628) | 625, 626 | **DAEMON** (`get_runtime`) |
+| `set_runtime_limits` (630-675) | 668, 671 | **INTERNAL** (sets `session._executor` runtime limits) |
+| `set_reference_authorizer` (677-701) | 694, 699 | **INTERNAL** (sets `session._reference_plugin._authorizer`) |
+| `_get_event_bus` (978-988) | 984, 985 | **DAEMON** (`get_runtime` → `event_bus`) |
+| `emit_current_state` (1002-1081) | 1061, 1062 | **NOW** (could use `session.get_all_session_state` RPC) |
+| `_build_tool_id_mappings` (1281-1302) | 1290, 1291 | **INTERNAL** (reads `session._tools`) |
+| `initialize` (1340-1969) | 14 sites | **mixed**, see breakdown below |
+| `_run_connect_provider` (1426-1460) | 1436, 1444, 1454 | **DAEMON** (constructs `_jaato`, calls `connect`, reads runtime) |
+| `_setup_session_plugin` (2197-2246) | 2203, 2215 | **WIRING** (`set_session_plugin` wires daemon-side) |
+| `_setup_agent_hooks` (2248-2639) | 2251, 2622, 2624, 2626, 2628 | **INTERNAL** (`_agent_id`, `_agent_name`) + **DAEMON** (`set_ui_hooks`) |
+| `send_message` (3147-3190) | 3154, 3163, 3164 | **§7b.2** |
+| `_start_model_thread` (3192-3474) | 3198, 3199 | **§7b.2** |
+| `_find_plugin_for_command` (3552-3584) | 3561, 3564 | **DAEMON** (`get_runtime`) |
+| `_get_sandbox_paths` (3586-3621) | 3593, 3596 | **DAEMON** (`get_runtime`) |
+| `stop` (3623-3631) | 3629, 3630 | **NOW** (`session.is_running` + `session.request_stop`) |
+| `execute_command` (3633-3732) | 3643, 3646, 3669 | **DAEMON** (user-commands UI surface) |
+| `clear_history` (3734-3748) | 3736, 3737 | **NOW** (`session.reset`) |
+| `get_session` (3759-3769) | 3767, 3769 | **INTERNAL** (returns `JaatoSession` reference) — refactor as part of §7c |
+| `get_available_commands` (3824-3829) | 3826, 3828 | **DAEMON** (UI commands) |
+| `get_available_models` (3847-3860) | 3852, 3857 | **DAEMON** (model completion list) |
+| `_check_auth_completion` (4006-4133) | 4017, 4029, 4038, 4047, 4086, 4087, 4088, 4115 | **mixed** — same shape as `initialize` |
+
+#### `initialize()` and `_check_auth_completion()` — the 14+8 mixed clusters
+
+Both methods do the daemon-side wiring sequence after auth.
+Same shape, same bucket distribution:
+
+| Site (initialize / _check_auth_completion) | Bucket |
+|---|---|
+| 1627 `model_name` | **DAEMON** (provider read) |
+| 1628 `provider_name` | **DAEMON** |
+| 1629 `set_terminal_width` | **NOW** (handler exists; this is the per-site insight the worker flagged) |
+| 1665 / 4017 `verify_auth` | **DAEMON** (auth) |
+| 1729 `configure_plugins_only` | **WIRING** |
+| 1748 / 4029 `configure_tools` | **WIRING** |
+| 1799 `get_runtime` | **DAEMON** |
+| 1818 / 4038 `set_gc_plugin` | **WIRING** (gc is daemon-tier per §4.2 but the call wires it INTO `_jaato`) |
+| 1829, 1845 / 4047 `get_session` | **INTERNAL** |
+| 1899 / 4087 `get_context_usage` | **NOW** (handler exists) |
+| 1900 / 4088 `get_context_limit` | **NOW-with-caveat** (handler missing; either add a sibling handler OR extend `get_context_usage` dict to always include `context_limit`, removing the fallback) |
+| 1928 / 4115 `auth_info` | **DAEMON** (auth) |
+| 1898 / 4086 (truthiness) | **TRUTHINESS** |
+
+### Bucket totals
+
+| Bucket | Site count | Status |
+|---|---|---|
+| **DONE** (vanguard) | 4 | Shipped: shutdown, terminal_width setter, presentation_context setter (3 vanguard commits) |
+| **NOW** | ~10 | The §7b.1 cleanly-migratable scope.  Sites: 1061-1062 (emit_current_state), 1629 (init's set_terminal_width call), 1899/4087 (get_context_usage ×2), 3629-3630 (stop), 3737 (clear_history), 1900/4088 (get_context_limit ×2 — needs handler addition first) |
+| **DAEMON** | ~22 | Stay daemon-side per §4.2 |
+| **INTERNAL** | ~12 | Refactor away during §7c |
+| **WIRING** | ~7 | Migrate when runner-side counterparts exist (§7b.1 phase 2 or post-§7c) |
+| **§7b.2** | 5 | `send_message` + `_start_model_thread` cluster |
+| **TRULY-PRE** | 0 | None — `__init__` only has a truthiness check |
+| **TRUTHINESS** | ~15 | Collapse post-§7c |
+
+**Total: 75** (50 attribute calls + 25 truthiness checks).
+
+### Implication for §7b.1
+
+The honest §7b.1 scope is **~10 sites** (matches the worker's
+"5-10" estimate, confirmed by audit).  Migrate as ~3 commits:
+
+1. **`session.get_context_limit` handler addition** — small precursor; add the field to the `get_context_usage` dict and (optionally) the standalone handler.  Removes the fallback in 1900/4088.
+2. **State-reader cluster** (1061-1062, 1899/4087, 1900/4088) — daemon-side reads via `session_get_all_state` / `session_get_context_usage`.  ~3 sites.
+3. **Lifecycle cluster** (1629, 3629-3630, 3737) — `session_set_terminal_width` direct call (not via property), `session_is_running` / `session_request_stop`, `session_reset`.  ~4 sites.
+
+Total: 3 commits, ~10 sites migrated, ~10 left in DAEMON / INTERNAL / WIRING / §7b.2 buckets that the seat-flip will close as §7b.2 + §7c land.
+
+### What this audit does NOT decide
+
+- **§7a (always-spawn) impact on this audit:** if §7a lands first, every IPC + WS session has a runner regardless of apparmor opt-in.  The audit's classifications don't change (init ordering is unchanged — the runner spawns at the same step), but the PROPORTION of sessions where the migrated sites actually take the runner path goes from "apparmor-opt-in subset" to "all sessions."  This is the correctness amplification §7a delivers.
+- **§7c flag-removal sequencing:** the **TRUTHINESS** + **INTERNAL** + **WIRING** buckets all collapse during §7c (when `_jaato` field is removed).  This audit doesn't sequence those collapses; that's §7c's task.

@@ -337,6 +337,17 @@ class JaatoServer:
         # one; Phase 3 makes it always-runner across all four session
         # bootstrap paths — see plan §"Non-IPC bootstrap path
         # deferral").
+        #
+        # Phase 3 §7b.1 audit (see
+        # docs/design/per_session_confined_runner_phase3_3c_rpc_surface.md
+        # §10 "audit appendix"): every ``self._jaato.X`` site reachable
+        # from inside ``initialize()`` or anywhere it calls into has
+        # ``self._runner_rpc`` available — set_runner_rpc fires from
+        # within ``runner_spawn.spawn_session_runner`` BEFORE
+        # ``server.initialize()`` runs.  ``__init__`` is the only
+        # truly-pre-runner site; everything else can dispatch to the
+        # runner.  See appendix for the per-site bucket table
+        # (DONE / NOW / DAEMON / INTERNAL / WIRING / §7b.2 / TRUTHINESS).
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
 
