@@ -98,15 +98,73 @@ class PermissionPlugin(RunnerForwardingMixin):
         # on_requested: (tool_name, request_id, tool_args, response_options, call_id) -> None
         self._on_permission_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None
         self._on_permission_resolved: Optional[Callable[[str, str, bool, str], None]] = None
+        # Phase 3 §3.7 deeper: cached RunnerRPCChannel instance.  When
+        # the plugin runs runner-side, ASK decisions can't reach the
+        # connected client through ConsoleChannel / WebhookChannel —
+        # the runner is in an AppArmor-confined process with no
+        # client connection.  Instead, ``_get_channel()`` checks
+        # ``self._registry.runner_rpc_client`` and uses
+        # :class:`RunnerRPCChannel` to relay through
+        # ``client.prompt_operator``.  Resolved lazily on first ASK
+        # so init-order (set_registry vs runner_rpc_client attach)
+        # doesn't matter; cached on first hit.
+        self._runner_rpc_channel: Optional[Channel] = None
 
     def _get_channel(self) -> Optional[Channel]:
         """Get the channel for the current thread.
 
-        Returns the thread-local channel if set (for subagents),
-        otherwise returns the default channel.
+        Returns, in priority order:
+
+        1. The thread-local channel if set — used by subagents which
+           run in separate threads with their own per-thread channel.
+        2. The runner-RPC channel if a runner-side ``RunnerRPCClient``
+           is attached to the plugin registry (Phase 3 §3.7 deeper) —
+           the runner-side ASK relay through the daemon's
+           ``client.prompt_operator`` RPC primitive.
+        3. The plugin's default channel (ConsoleChannel etc.) — the
+           in-process / pre-Phase-3 path.
         """
         thread_channel = getattr(self._thread_local, 'channel', None)
-        return thread_channel if thread_channel is not None else self._channel
+        if thread_channel is not None:
+            return thread_channel
+        runner_channel = self._get_runner_rpc_channel()
+        if runner_channel is not None:
+            return runner_channel
+        return self._channel
+
+    def _get_runner_rpc_channel(self) -> Optional[Channel]:
+        """Resolve / cache the :class:`RunnerRPCChannel` for runner-side use.
+
+        Phase 3 §3.7 deeper.  Returns ``None`` when the plugin runs
+        daemon-side (no runner-RPC client attached to the registry)
+        so the caller falls back to the in-process channel.
+
+        Caches on first successful resolution: subsequent ASKs reuse
+        the same channel instance.  The cached instance is reset on
+        ``shutdown()`` so a subsequent ``initialize()`` (e.g.,
+        re-expose with new config) re-resolves cleanly.
+        """
+        if self._runner_rpc_channel is not None:
+            return self._runner_rpc_channel
+        registry = self._registry
+        if registry is None:
+            return None
+        rpc_client = getattr(registry, 'runner_rpc_client', None)
+        if rpc_client is None:
+            return None
+        prompt_operator = getattr(rpc_client, 'prompt_operator', None)
+        if prompt_operator is None:
+            return None
+        # Lazy-import to avoid a top-level dependency on the channel
+        # module (which lazy-imports PromptPayload from .types in
+        # turn — keeps the import graph DAG-shaped).
+        from .runner_rpc_channel import RunnerRPCChannel
+        self._runner_rpc_channel = RunnerRPCChannel(prompt_operator)
+        self._trace(
+            "_get_runner_rpc_channel: resolved RunnerRPCChannel "
+            "(runner-side ASK relay active)"
+        )
+        return self._runner_rpc_channel
 
     def set_registry(self, registry: 'PluginRegistry') -> None:
         """Set the plugin registry for tool-to-plugin lookups.
@@ -254,6 +312,10 @@ class PermissionPlugin(RunnerForwardingMixin):
         self._allow_all = False
         self._turn_suspended = False
         self._idle_suspended = False
+        # Phase 3 §3.7 deeper: drop the cached runner-RPC channel so a
+        # subsequent ``initialize()`` re-resolves against the (possibly
+        # different) registry's ``runner_rpc_client`` attribute.
+        self._runner_rpc_channel = None
 
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
