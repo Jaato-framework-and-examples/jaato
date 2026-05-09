@@ -541,8 +541,139 @@ framing).  If a future review decides to ship a transitional
 "daemon-side seat half-broken" window, step 6.4 could land
 in isolation; that's a deliberate scope choice the audit is
 not asked to make.
-|     **§7c step 6.5** | Migrate the remaining ~5 introspection reads not covered by step 4: `model_name` / `provider_name` (lines 1665-1666), `auth_info` (1990, 4241), `verify_auth` (1728, 4143), `get_user_commands` / `execute_user_command` (3755, 3778, 3954), `get_model_completions` (3983).  Routes through `self._runtime` for runtime-tier reads + `self._jaato.get_session()._provider` reaches for session-tier reads (which themselves collapse if 6.2 lands first). | Pending. |
-|     **§7c step 6.6** | Remove `self._jaato` field + collapse the ~15 `if self._jaato:` truthiness checks to `if self._runner_rpc:`.  This is the actual seat-flip's "the daemon-side session is gone" moment.  Mechanical diff; safe ONLY after 6.1 → 6.5 land. | Pending. |
+|     **§7c step 6.5** | Migrate the remaining ~5 introspection reads not covered by step 4: `model_name` / `provider_name` (lines 1665-1666), `auth_info` (1990, 4241), `verify_auth` (1728, 4143), `get_user_commands` / `execute_user_command` (3755, 3778, 3954), `get_model_completions` (3983).  Routes through `self._runtime` for runtime-tier reads + `self._jaato.get_session()._provider` reaches for session-tier reads (which themselves collapse if 6.2 lands first). | **Audit revised** in §7c step 6.6 disposition audit below.  Splits into: 4 clean sites readable from `_runtime` directly (`model_name` / `provider_name` / `verify_auth` ×2), 5 transitively-load-bearing sites that depend on `_jaato._session` (`auth_info` ×2, `get_user_commands` ×2, `execute_user_command`, `get_model_completions`).  The clean sites can ship as a small standalone commit (step 6.5 proper); the transitively-load-bearing sites collapse into step 6.6 alongside `_jaato`-removal. |
+|     **§7c step 6.6** | Remove `self._jaato` field + collapse the ~15 `if self._jaato:` truthiness checks to `if self._runner_rpc:`.  This is the actual seat-flip's "the daemon-side session is gone" moment.  Mechanical diff; safe ONLY after 6.1 → 6.5 land. | **Pending — sub-commit decomposition recorded in the §7c step 6.6 disposition audit below.**  Original "mechanical diff" framing was over-simplified; the audit reveals 4 sub-commits worth of cross-cutting work absorbed by 6.6 alongside the field removal: (6.6.1) 3 new RPC handlers for external `JaatoServer.get_session()` consumers' persistence-restore paths in `session_manager.py`; (6.6.2) architectural callbacks rewire (the original step 6.2.5 work, now folded in); (6.6.3) external consumer migrations across `session_manager.py` + `websocket.py` (8 callers of the public `JaatoServer.get_session()`); (6.6.4) the actual atomic field removal + WIRING absorbs + transitively-load-bearing introspection cleanups + truthiness collapses.  See sub-commit table below. |
+
+### Step 6.6 disposition audit
+
+Mirroring cd3ecf20's audit shape and ac088e67's audit shape.
+The §7c step 6.4 audit established that WIRING calls are
+transitively load-bearing via `_jaato._session`.  This audit
+extends the same discipline to the broader set of remaining
+`_jaato` sites + the external `JaatoServer.get_session()`
+consumers.
+
+#### Per-site classification (35 active sites in `core.py`)
+
+Every non-comment `self._jaato.X` site post-§7c-step-6.3,
+classified by what it actually reads:
+
+| Site | Operation | Read source | Classification |
+|---|---|---|---|
+| 767 | `get_session()` daemon leg of `set_reference_authorizer` (split out per 6.3) | `_jaato._session` | Stays — drops with references-plugin runner-side migration sub-track |
+| 1407 | `get_tool_schemas()` for `_build_tool_id_mappings` | `_jaato._session._tools` (or empty list when `_session` None) | Transitively load-bearing; drops with 6.6.4 |
+| 1558 | `JaatoClient(...)` constructor + `connect()` call | Daemon-side construction | Stays — refactor to daemon-direct `JaatoRuntime` construction in 6.6.4 |
+| 1565 | `self._runtime = self._jaato.get_runtime()` (alias-write) | `_jaato._runtime` | Refactor — split JaatoClient construction so daemon constructs JaatoRuntime directly in 6.6.4 |
+| 1747 | `self._model_name = self._jaato.model_name or model_name` | `_jaato._model_name` (pure JaatoClient state, not session-dependent) | **CLEAN — step 6.5** |
+| 1748 | `self._model_provider = self._jaato.provider_name` | `_jaato._provider_name` (pure JaatoClient state) — also exposed as `_runtime.provider_name` | **CLEAN — step 6.5** |
+| 1806 | `self._jaato.verify_auth(...)` (init path) | `_jaato._runtime.verify_auth(...)` — runtime-tier, not session-dependent | **CLEAN — step 6.5** |
+| 1870 | `configure_plugins_only(...)` WIRING | runtime-tier wiring | Drops with 6.6.4 (per 6.4 audit) |
+| 1889 | `configure_tools(...)` WIRING — **creates `_jaato._session`** | Highest-impact WIRING call | Drops with 6.6.4 (per 6.4 audit) |
+| 1958 | `set_gc_plugin(...)` WIRING | `_jaato._session.set_gc_plugin(...)` | Drops with 6.6.4 (per 6.4 audit) |
+| 1969 | `_event_bus_tools` callback wiring | `_jaato._session._event_bus_tools` | **ARCHITECTURAL — step 6.6.2** |
+| 1985 | `instruction_budget` callback wiring (init path) | `_jaato._session._on_instruction_budget_updated` | **ARCHITECTURAL — step 6.6.2** |
+| 2039, 2040 | `get_context_usage` / `get_context_limit` (init path) | `_jaato._session.get_context_usage()` / `.get_context_limit()` | DEFER-§7c reads — drop in 6.6.4; runner-RPC handlers exist (`session.snapshot_instruction_budget` covers usage; `session.get_context_limit` added at 34ecbe0a) |
+| 2068 | `auth_info` (init path) | `_jaato._session._provider.get_auth_info()` | **TRANSITIVELY LOAD-BEARING — step 6.6.4** |
+| 2355 | `set_session_plugin(...)` WIRING | `_jaato._session.set_session_plugin(...)` | Drops with 6.6.4 (per 6.4 audit) |
+| 2775 | `self._jaato.set_agent_identity(...)` (in `_setup_agent_hooks`) | `_jaato._agent_id` / `_jaato._agent_name` (pure JaatoClient state since §7c step 3a) | **TRANSITIVELY-USED — step 6.6.4** (the daemon-side `_jaato.set_ui_hooks(hooks)` at 2780 forwards hooks to `_session` if it exists; setting agent_id without a session is benign but the cascade through 2780 needs care) |
+| 2780 | `self._jaato.set_ui_hooks(hooks)` | Forwards to `_jaato._session.set_ui_hooks(hooks, self._agent_id)` | **TRANSITIVELY LOAD-BEARING — step 6.6.4** |
+| 3374 | `set_prompt_injected_callback` (NOT None-safe) | `_jaato._session.set_prompt_injected_callback(...)` | **ARCHITECTURAL — step 6.6.2** (the AttributeError-on-None site flagged in 6.4 audit) |
+| 3844, 4045 | `get_user_commands()` | `_jaato._session.get_user_commands()` (returns `{}` when no session) | **TRANSITIVELY LOAD-BEARING — step 6.6.4** |
+| 3867 | `execute_user_command(command, parsed_args)` | `_jaato._session.execute_user_command(...)` (raises RuntimeError when no session) | **TRANSITIVELY LOAD-BEARING — step 6.6.4** |
+| 3986 | `get_session()` (public method) returns the session | Returns `_jaato._session` to 8 external consumers | **EXTERNAL-FACING — step 6.6.3** (8 callers in session_manager + websocket; see external-consumer table below) |
+| 4074 | `get_model_completions(["select"])` | `_jaato._session.get_model_completions(...)` (returns `[]` when no session) | **TRANSITIVELY LOAD-BEARING — step 6.6.4** |
+| 4234 | `verify_auth(allow_interactive=False)` (auth-completion path) | `_jaato._runtime.verify_auth(...)` — runtime-tier | **CLEAN — step 6.5** |
+| 4246 | `configure_tools(...)` WIRING (mirror of 1889) | Same as 1889 | Drops with 6.6.4 |
+| 4255 | `set_gc_plugin(...)` WIRING (mirror of 1958) | Same as 1958 | Drops with 6.6.4 |
+| 4264 | `instruction_budget` callback (auth-completion mirror of 1985) | Same as 1985 | **ARCHITECTURAL — step 6.6.2** |
+| 4304, 4305 | `get_context_usage` / `get_context_limit` (auth-completion mirrors of 2039/2040) | Same as 2039/2040 | DEFER-§7c reads — drop in 6.6.4 |
+| 4332 | `auth_info` (auth-completion mirror of 2068) | Same as 2068 | **TRANSITIVELY LOAD-BEARING — step 6.6.4** |
+
+**Bucket totals:**
+
+| Bucket | Sites | Disposition |
+|---|---|---|
+| **CLEAN** (step 6.5) | 1747, 1748, 1806, 4234 | 4 sites; ship as small standalone pre-6.6 commit |
+| **TRANSITIVELY LOAD-BEARING** (step 6.6.4) | 1407, 2068, 2775, 2780, 3844, 3867, 4045, 4074, 4332 | 9 sites; cleanup folds into 6.6.4 alongside field removal |
+| **ARCHITECTURAL** (step 6.6.2) | 1969, 1985, 3374, 4264 | 4 sites; were the original step 6.2.5 work — now folded into 6.6.2 |
+| **EXTERNAL-FACING** (step 6.6.3) | 3986 | 1 site; 8 external consumers (see table below) |
+| **WIRING** (step 6.6.4 absorbs from §7c step 6.4) | 1870, 1889, 1958, 2355, 4246, 4255 | 6 sites; per 6.4 audit, drops with field removal |
+| **DEFER-§7c reads** (step 6.6.4 absorbs from path-A §7c step 5 fold) | 2039, 2040, 4304, 4305 | 4 sites; drops with field removal — runner-RPC handlers exist |
+| **Construction sites** (step 6.6.4 refactor) | 1558, 1565 | 2 sites; refactor JaatoClient → daemon-direct JaatoRuntime construction |
+| **Split-out** (separate sub-track) | 767 | 1 site; references-plugin runner-side migration |
+
+**Total: 35 active code sites + ~15 truthiness checks → all converge in step 6.6.**
+
+#### External consumer audit for `JaatoServer.get_session()`
+
+The public method at line 3986 returns `_jaato._session` to
+external consumers.  Inventory + per-caller migration target:
+
+| File:Line | Operation | What it does with the session | Migration target |
+|---|---|---|---|
+| `core.py:3213` | `get_cancel_token` closure | Reads `session._cancel_token` (private) | **Delete** — the legacy in-process cancel-token is dead post-§7b.2.  Cancellation already routes through `_runner_rpc.session_request_stop_threadsafe`. |
+| `core.py:3601` | `signal_completion` filter | Reads `session._tools` (filters for tool name) | **Refactor** to use existing `JaatoClient.get_tool_schemas()` (added §7c step 3b at 7b30c237) OR direct `self.registry.get_exposed_tool_schemas()` walk. |
+| `websocket.py:1481` | event-bus access | Reads `jaato_session._runtime.event_bus` | **Trivial migration** — `event_bus` lives daemon-side per §4.2.  Use `server.event_bus` property (already migrated to `self._runtime.event_bus` in §7c step 6.2). |
+| `websocket.py:1485` | event-bus access (alternate path) | Same as 1481 | Same migration as 1481 |
+| `session_manager.py:1968` | initial state injection | Calls `jaato_session.set_session_state(key, value)` | **Use existing runner-RPC** — `session.set_session_state` handler shipped pre-§7c precursor.  Daemon-side wrapper: `session_set_session_state_threadsafe`. |
+| `session_manager.py:2130` | initial-history seeding | Calls `jaato_session.set_initial_history(initial_history)` | **NEW runner-RPC needed** — `session.set_initial_history` handler.  Wire shape: list of Message dicts; runner-side reconstructs the Message instances.  ~§7b.2-scale (Messages have provider-specific structure but the JaatoSession.set_initial_history method itself is well-bounded). |
+| `session_manager.py:2185` | cross-session prompt injection | Calls `jaato_session.inject_prompt(text, source_id, source_type)` | **Use existing runner-RPC** — `session.inject_prompt` handler shipped at §7c step 6.1 (3/3) commit 14e57709. |
+| `session_manager.py:2558` | turn_accounting restore | Reads `server._jaato.get_context_usage()` + writes `jaato_session._turn_accounting = list(...)` (private attr assignment) | **NEW runner-RPC needed** — `session.restore_turn_accounting` handler.  Wire shape: list of dicts.  Used during session-restore from disk persistence; ~§7b.2-scale. |
+| `session_manager.py:2591` | conversation budget restore | Calls `jaato_session.instruction_budget.restore_conversation_from_snapshot(state.budget_state)` + reads `instruction_budget.snapshot()` | **NEW runner-RPC needed** — `session.restore_conversation_budget` handler.  Mirrors the existing `session.snapshot_instruction_budget` (§7c step 6.1 at 1043bfde) but in the inverse direction.  ~§7b.2-scale. |
+
+**Total: 8 callers; 1 delete, 4 reuse-existing-RPC, 3 NEW runner-RPC handlers needed.**
+
+#### Sub-commit decomposition for step 6.6
+
+Decomposed into 4 sub-commits + 1 standalone pre-6.6 commit
+(6.5).  Per the audit's findings:
+
+| Sub-commit | Scope | Estimated tests |
+|---|---|---|
+| **§7c step 6.5** (standalone, pre-6.6) | 4 CLEAN introspection migrations: `model_name` / `provider_name` (lines 1747-1748) + `verify_auth` ×2 (1806, 4234).  Read directly from `self._runtime` instead of `self._jaato.X`. | Existing tests cover; minimal new tests. |
+| **§7c step 6.6.1** | Add 3 new runner-RPC handlers (each §7b.2-scale: handler + daemon-side wrapper + unit + e2e tests) consumed by the external `get_session()` migration in 6.6.3: `session.set_initial_history`, `session.restore_turn_accounting`, `session.restore_conversation_budget`.  Prerequisites for 6.6.3. | ~30-40 new tests across 3 handlers. |
+| **§7c step 6.6.2** | Architectural callbacks rewire (the original §7c step 6.2.5 work, now folded in).  4 sites: 1969 / 1985 / 3374 / 4264.  Gates on runner-side event-bus access plumbing — may itself fan out. | New tests for each callback path. |
+| **§7c step 6.6.3** | External consumer migrations: 8 `get_session()` callers in `session_manager.py` + `websocket.py` + `core.py`.  Migrate each to its target per the external-consumer table above (1 delete, 4 reuse-existing-RPC, 3 use-new-RPCs from 6.6.1).  Also drops the public `JaatoServer.get_session()` method. | Per-consumer unit/integration tests. |
+| **§7c step 6.6.4** | Atomic seat-flip moment.  Removes `self._jaato` field; absorbs the 6 WIRING deletions (per 6.4 audit); migrates the 9 transitively-load-bearing sites; migrates the 4 DEFER-§7c read sites; refactors the 2 construction sites; collapses the ~15 truthiness checks; deletes the public `JaatoServer.get_session()` method (consumers migrated in 6.6.3).  Mechanical diff dominated by the absorbed-scope items. | Existing test suite proves runner-only path; net test delta likely negative due to write-both-specific test churn. |
+
+#### What this audit decides:
+
+  - The 6.5/6.6 boundary is fuzzy — only 4 sites are truly
+    "clean" (read from `_runtime` directly, no `_session`
+    reach).  The other 5 originally-scoped 6.5 sites
+    (`auth_info` ×2, `get_user_commands` ×2, plus
+    `execute_user_command`, `get_model_completions`) are
+    transitively load-bearing and fold into 6.6.4.
+
+  - Step 6.6 is materially larger than the original
+    "mechanical diff" framing — it absorbs WIRING (6.4),
+    architectural callbacks (was 6.2.5), external consumer
+    migrations (this audit found 8), DEFER-§7c reads (path-A
+    fold of step 5), 5 transitively-load-bearing 6.5 sites,
+    and the construction-site refactor.
+
+  - **3 new runner-RPC handlers must land first** (step 6.6.1)
+    before the external consumer migrations in 6.6.3 can
+    proceed.  This is the prerequisite chain.
+
+  - The architectural callbacks (6.6.2) and external consumer
+    migrations (6.6.3) can land independently AFTER 6.6.1, in
+    either order.  6.6.4 is the atomic seat-flip and lands
+    last.
+
+#### What this audit does NOT decide:
+
+  - Whether `set_initial_history`'s wire shape can serialize
+    Messages cleanly across the RPC boundary.  Provider-
+    specific Message subtypes may need a `Message.to_dict()` /
+    `from_dict()` round-trip.  Decide at step 6.6.1
+    implementation time.
+
+  - Whether the references-plugin runner-side migration (which
+    enables dropping the `set_reference_authorizer` daemon leg
+    at site 767 — split out per §7c step 6.3) lands during
+    §7c or post-§7c.  Out of audit scope; flagged for a
+    separate sub-track.
 
 ### Step 6 disposition audit
 
