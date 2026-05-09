@@ -21,6 +21,7 @@ from jaato_sdk.plugins.model_provider.types import ToolSchema, CancelledExceptio
 from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
 from shared.ai_tool_runner import get_current_cancel_token
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -176,7 +177,7 @@ class LogCapture:
         return True
 
 
-class MCPToolPlugin:
+class MCPToolPlugin(RunnerForwardingMixin):
     """Plugin that provides MCP (Model Context Protocol) tool execution.
 
     This plugin connects to MCP servers defined in .mcp.json and exposes
@@ -433,7 +434,12 @@ class MCPToolPlugin:
         tool_names = [name for name in executors.keys() if name != 'mcp']
         self._trace(f"get_executors: returning {len(executors)} executors ({tool_count} MCP tools from {len(self._tool_cache)} servers): {tool_names[:10]}...")
 
-        return executors
+        # Phase 3 §3.5 wave 2: forwards via runner-RPC when a runner
+        # is attached so the long-lived MCP-server stdio subprocesses
+        # spawn under the runner's AppArmor profile.  Wrap AFTER the
+        # dynamic per-server executors are built so each one gets
+        # the same forward treatment.
+        return self.wrap_executors_for_runner_forwarding(executors)
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions describing available MCP tools."""

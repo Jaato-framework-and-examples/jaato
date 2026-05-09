@@ -22,6 +22,7 @@ from jaato_sdk.plugins.model_provider.types import ToolSchema
 from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 
 # Maximum concurrent interactive sessions
@@ -34,7 +35,7 @@ REAPER_INTERVAL = 30.0
 DEFAULT_MAX_IDLE = 300  # 5 minutes
 
 
-class InteractiveShellPlugin:
+class InteractiveShellPlugin(RunnerForwardingMixin):
     """Plugin that provides interactive shell session management.
 
     Allows the model to spawn long-lived sessions and drive any
@@ -407,15 +408,27 @@ class InteractiveShellPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor mapping for all tools."""
-        return {
+        """Return executor mapping for all tools.
+
+        Phase 3 §3.5 wave 2: forwards via runner-RPC when a runner
+        is attached so spawned PTY subprocesses inherit the runner's
+        AppArmor profile (kernel-confined per-session multitenancy
+        becomes real for shell sessions).  Falls through to in-
+        process for sessions without a runner.
+
+        Cgroup attach + runtime-limits plumbing migration (per plan
+        §3.5 / peer-review M2) lands in a follow-on commit; for now
+        the runner-side path uses the default cgroup attach the
+        runner's ``set_runtime_limits`` already wires.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             'shell_spawn': self._exec_spawn,
             'shell_input': self._exec_input,
             'shell_read': self._exec_read,
             'shell_control': self._exec_control,
             'shell_close': self._exec_close,
             'shell_list': self._exec_list,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for interactive shell tools."""
