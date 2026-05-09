@@ -428,6 +428,17 @@ class RunnerRPC:
             # dispatch (Phase 4+ removes the daemon-side seat).
             return self._handle_session_bootstrap(env.args)
 
+        if env.method == "session.health_check":
+            # Phase 3 §3.3c precursor: read-only probe of the
+            # runner-side session host's status.  Daemon uses this
+            # to verify the bidirectional session-method dispatch
+            # surface works (independent of the tool.execute path)
+            # before §3.3c's full daemon-shell rewrite migrates
+            # send_message / get_history / etc. through the same
+            # surface.  Always returns ok=True with a status dict;
+            # callers branch on ``ready`` / ``has_host``.
+            return self._handle_session_health_check()
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -563,6 +574,64 @@ class RunnerRPC:
             "ok": True,
             "ready": host.is_ready,
             "session_id": host.session_id,
+        }
+
+    def _handle_session_health_check(self) -> "tuple[bool, Any]":
+        """Read-only probe of the runner-side session host's status.
+
+        Phase 3 §3.3c precursor.  Returns a status dict the daemon
+        can use to verify that the runner has bootstrapped a
+        session AND that the bidirectional session-method dispatch
+        surface is reachable (independent of the ``tool.execute``
+        path).  This is the smallest non-bootstrap session-method
+        RPC handler — proves the wiring before §3.3c's full
+        daemon-shell rewrite adds ``session.send_message`` / etc.
+        through the same surface.
+
+        Returns:
+            ``ok=True`` with a status dict carrying:
+
+            - ``has_host`` (bool): True iff
+              ``session.bootstrap`` has been called.
+            - ``ready`` (bool): True iff the host has a configured
+              JaatoSession (False during construction, after
+              shutdown, or in test-stub mode).
+            - ``session_id`` (str): The bootstrapped envelope's
+              session_id; empty string when no host is set.
+            - ``tool_count`` (int): Count of tool schemas the
+              session's plugin registry exposes.  ``-1`` when the
+              session is None / not yet ready / can't enumerate.
+              Useful as a sanity check that the runner-side plugin
+              set actually loaded.
+        """
+        with self._session_lock:
+            host = self._session_host
+
+        if host is None:
+            return True, {
+                "has_host": False,
+                "ready": False,
+                "session_id": "",
+                "tool_count": -1,
+            }
+
+        tool_count = -1
+        session = host.session
+        if session is not None:
+            try:
+                runtime = getattr(session, "_runtime", None)
+                registry = getattr(runtime, "registry", None) if runtime else None
+                if registry is not None:
+                    schemas = registry.get_exposed_tool_schemas()
+                    tool_count = len(schemas)
+            except Exception:  # noqa: BLE001 — probe must not raise
+                tool_count = -1
+
+        return True, {
+            "has_host": True,
+            "ready": host.is_ready,
+            "session_id": host.session_id,
+            "tool_count": tool_count,
         }
 
     @property
