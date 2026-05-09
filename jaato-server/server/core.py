@@ -1744,8 +1744,19 @@ class JaatoServer:
             ))
             return False
 
-        self._model_name = self._jaato.model_name or model_name
-        self._model_provider = self._jaato.provider_name
+        # Phase 3 §7c step 6.5: read directly from the daemon-side
+        # ``self._runtime`` instead of through ``self._jaato``.
+        # ``model_name`` was redundantly OR'd with ``self._jaato.model_name``
+        # — JaatoClient's ``model_name`` property returns
+        # ``self._model_name`` set at ``connect()`` time to the same
+        # ``model`` arg the daemon passed in, so the OR was always
+        # equivalent to just the param.  ``provider_name`` is exposed
+        # on JaatoRuntime per §4.2 (model_provider plugins are
+        # daemon-tier).
+        self._model_name = model_name
+        self._model_provider = (
+            self._runtime.provider_name if self._runtime is not None else None
+        )
         # Phase 3 §7c step 6.3: post-init terminal_width sync goes
         # straight to the runner-side JaatoSession (the only
         # source of truth post-step-6.3).  The runner spawn
@@ -1803,7 +1814,12 @@ class JaatoServer:
                     profile_plugin_configs = (
                         self._profile.plugin_configs if self._profile else None
                     )
-                    auth_ok = self._jaato.verify_auth(
+                    # Phase 3 §7c step 6.5: read directly from
+                    # ``self._runtime`` instead of through ``self._jaato``.
+                    # JaatoClient.verify_auth is a thin forwarder to
+                    # ``self._runtime.verify_auth(...)``; runtime is daemon-
+                    # tier per §4.2.
+                    auth_ok = self._runtime.verify_auth(
                         allow_interactive=True,
                         on_message=auth_message,
                         plugin_configs=profile_plugin_configs,
@@ -4231,7 +4247,8 @@ class JaatoServer:
         try:
             with self._with_session_env(), self._in_workspace():
                 self._trace(f"[auth] Workspace path: {self._workspace_path}")
-                auth_ok = self._jaato.verify_auth(allow_interactive=False)
+                # Phase 3 §7c step 6.5: read directly from ``self._runtime``.
+                auth_ok = self._runtime.verify_auth(allow_interactive=False)
             if auth_ok:
                 self._trace("[auth] Auth completed successfully, finishing initialization...")
                 self._auth_pending = False
