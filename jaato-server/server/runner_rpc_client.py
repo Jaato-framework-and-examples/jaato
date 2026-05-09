@@ -1023,6 +1023,46 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_snapshot_instruction_budget(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Optional[Dict[str, Any]]":
+        """Read the runner-side JaatoSession's InstructionBudget
+        snapshot.
+
+        Phase 3 §7c step 6.1.  Replaces the pre-§7c daemon-side
+        read ``self._jaato.get_session().instruction_budget.snapshot()``
+        in ``JaatoServer.emit_current_state`` (core.py:1091).
+
+        Returns the snapshot dict (with ``session_id`` / ``agent_id``
+        / ``agent_type`` / ``context_limit`` / ``total_tokens`` /
+        ``utilization_percent`` / ``entries`` etc.) when the runner-
+        side session has a budget configured, or ``None`` when the
+        budget hasn't been populated yet (pre-:meth:`JaatoSession.configure`).
+
+        Caller pulls ``agent_id`` from the returned dict directly;
+        no separate RPC needed.
+        """
+        result = await self._call_named(
+            "session.snapshot_instruction_budget", {}, timeout=timeout,
+        )
+        snapshot = result.get("snapshot")
+        if snapshot is None:
+            return None
+        if not isinstance(snapshot, dict):
+            raise RunnerCallError(
+                f"session_snapshot_instruction_budget: expected dict, "
+                f"got {type(snapshot).__name__}"
+            )
+        return dict(snapshot)
+
+    def session_snapshot_instruction_budget_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Optional[Dict[str, Any]]":
+        return self._run_threadsafe(
+            self.session_snapshot_instruction_budget(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,

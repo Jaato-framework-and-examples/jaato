@@ -580,6 +580,14 @@ class RunnerRPC:
             # RPC to authorize paths).  args = ``{"enabled": bool}``.
             return self._handle_session_set_reference_authorizer(env.args)
 
+        if env.method == "session.snapshot_instruction_budget":
+            # Phase 3 §7c step 6.1: read the runner-side
+            # JaatoSession's InstructionBudget snapshot for the
+            # daemon's ``emit_current_state`` call site.  Returns
+            # ``{"snapshot": <dict|None>}``.  None means the session
+            # has no budget yet (pre-configure).  args = ``{}``.
+            return self._handle_session_snapshot_instruction_budget()
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1084,6 +1092,83 @@ class RunnerRPC:
                 "stage": "set",
             }
         return True, {"ok": True}
+
+    def _handle_session_snapshot_instruction_budget(
+        self,
+    ) -> "tuple[bool, Any]":
+        """Read the runner-side JaatoSession's InstructionBudget
+        snapshot for the daemon's ``emit_current_state`` call site.
+
+        Phase 3 §7c step 6.1.  Pre-§7c the daemon read
+        ``session.instruction_budget.snapshot()`` directly from
+        the in-process JaatoSession (core.py:1091).  Post-§7c
+        step 6.2 that read migrates to this RPC.
+
+        Returns ``{"snapshot": <dict>}`` when the runner-side
+        session has an instruction_budget configured (i.e.
+        post-:meth:`JaatoSession.configure`).  Returns
+        ``{"snapshot": None}`` when no budget exists yet — the
+        daemon's caller treats None as "skip the
+        InstructionBudgetEvent emit", matching pre-§7c behavior
+        (the ``if session.instruction_budget:`` guard).
+
+        The snapshot dict already includes ``session_id`` /
+        ``agent_id`` / ``agent_type`` / ``context_limit`` /
+        ``total_tokens`` / ``utilization_percent`` etc. — see
+        :meth:`InstructionBudget.snapshot` for the full schema.
+        Caller pulls ``agent_id`` from the returned dict directly;
+        no separate RPC needed.
+
+        Defensive contract: the snapshot may include nested dicts
+        (``entries``); we ``copy.deepcopy`` to isolate daemon-side
+        mutation from runner-side state.
+
+        On read failure (e.g. ``snapshot()`` raises), returns a
+        clean ``stage="read"`` error rather than crashing the
+        runner.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        # Read the budget — None when session.configure() hasn't
+        # populated it yet.  ``getattr`` so a JaatoSession variant
+        # without the property surfaces as snapshot=None rather
+        # than AttributeError (forward-compat).
+        budget = getattr(session, "instruction_budget", None)
+        if budget is None:
+            return True, {"snapshot": None}
+        snapshot_fn = getattr(budget, "snapshot", None)
+        if not callable(snapshot_fn):
+            return False, {
+                "error": (
+                    "session.snapshot_instruction_budget: instruction_budget "
+                    "has no snapshot() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            raw = snapshot_fn()
+        except Exception as exc:  # noqa: BLE001 — read boundary
+            return False, {
+                "error": (
+                    f"session.snapshot_instruction_budget: snapshot() raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "read",
+            }
+        if not isinstance(raw, dict):
+            return False, {
+                "error": (
+                    f"session.snapshot_instruction_budget: expected dict, "
+                    f"got {type(raw).__name__}"
+                ),
+                "stage": "read",
+            }
+        # Deep-copy to isolate daemon-side mutation; the snapshot
+        # contains a nested ``entries`` dict whose values may be
+        # further nested.
+        import copy
+        return True, {"snapshot": copy.deepcopy(raw)}
 
     def _handle_session_get_turn_accounting(self) -> "tuple[bool, Any]":
         """Read the runner-side per-turn token usage / timing list.
