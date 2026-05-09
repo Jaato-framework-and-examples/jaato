@@ -523,6 +523,14 @@ class RunnerRPC:
             # those code paths.
             return self._handle_session_get_all_state()
 
+        if env.method == "session.set_presentation_context":
+            # Phase 3 §3.3c precursor: push the daemon's
+            # PresentationContext (client display capabilities) to
+            # the runner-side JaatoSession so its system-prompt
+            # display-context block matches.  args =
+            # ``{"context": <serialized PresentationContext dict>}``.
+            return self._handle_session_set_presentation_context(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -927,6 +935,74 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"usage": dict(usage)}
+
+    def _handle_session_set_presentation_context(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Push the daemon's PresentationContext to the runner-
+        side JaatoSession (Phase 3 §3.3c precursor).
+
+        Args: ``{"context": <dict>}`` — the serialized
+        PresentationContext (Pydantic model).  Reconstructs the
+        model on the runner side via ``model_validate`` /
+        ``parse_obj`` so the JaatoSession setter receives the
+        correct type.
+
+        Returns ``{"ok": True}`` on success.
+
+        Defensive: schema validation failures surface as
+        ``stage="decode"`` errors so daemon-side callers can
+        attribute the failure (vs the generic transport boundary).
+        """
+        ctx_dict = args.get("context")
+        if not isinstance(ctx_dict, dict):
+            return False, {
+                "error": (
+                    f"session.set_presentation_context: 'context' must "
+                    f"be a dict; got {type(ctx_dict).__name__}"
+                ),
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            from jaato_sdk.events import PresentationContext
+            # Pydantic v2 uses model_validate; v1 uses parse_obj.
+            # Try v2 first, fall back to v1.
+            ctor = (
+                getattr(PresentationContext, "model_validate", None)
+                or getattr(PresentationContext, "parse_obj", None)
+            )
+            if ctor is None:
+                return False, {
+                    "error": (
+                        "session.set_presentation_context: cannot "
+                        "reconstruct PresentationContext (no "
+                        "model_validate / parse_obj)"
+                    ),
+                    "stage": "decode",
+                }
+            ctx = ctor(ctx_dict)
+        except Exception as exc:  # noqa: BLE001 — schema validation
+            return False, {
+                "error": (
+                    f"session.set_presentation_context: schema "
+                    f"validation failed: {type(exc).__name__}: {exc}"
+                ),
+                "stage": "decode",
+            }
+        try:
+            session.set_presentation_context(ctx)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.set_presentation_context: setter raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
+            }
+        return True, {"ok": True}
 
     def _handle_session_get_all_state(self) -> "tuple[bool, Any]":
         """Bulk-snapshot all session-attached state.

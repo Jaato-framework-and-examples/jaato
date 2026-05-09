@@ -542,6 +542,23 @@ class JaatoServer:
         # Propagate full context to JaatoClient → JaatoSession
         if self._jaato:
             self._jaato.set_presentation_context(ctx)
+        # Phase 3 §3.3c migration: also push to the runner-side
+        # JaatoSession (when a runner is attached) so the runner's
+        # system-prompt display-context block matches the daemon's
+        # view of client capabilities.  Best-effort: failures log
+        # but don't block the daemon-side flow.
+        rpc = self._runner_rpc
+        if rpc is not None:
+            forwarder = getattr(rpc, "session_set_presentation_context_threadsafe", None)
+            if callable(forwarder):
+                try:
+                    forwarder(ctx, timeout=2.0)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.debug(
+                        "set_presentation_context: runner RPC propagation "
+                        "failed (%s) — daemon-side state still updated",
+                        exc,
+                    )
 
     def set_apparmor_confinement(
         self,

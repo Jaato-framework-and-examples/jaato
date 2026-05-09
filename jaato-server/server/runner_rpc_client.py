@@ -829,6 +829,41 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_set_presentation_context(
+        self, ctx: Any, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Push the daemon's PresentationContext to the runner.
+
+        Accepts either a Pydantic model instance (calls
+        ``model_dump`` / ``dict`` to serialize) or a pre-serialized
+        dict.  The runner-side handler reconstructs the model via
+        ``model_validate``.
+        """
+        if hasattr(ctx, "model_dump"):
+            ctx_dict = ctx.model_dump()
+        elif hasattr(ctx, "dict"):
+            ctx_dict = ctx.dict()
+        elif isinstance(ctx, dict):
+            ctx_dict = ctx
+        else:
+            raise TypeError(
+                f"session_set_presentation_context: ctx must be a "
+                f"Pydantic model or dict; got {type(ctx).__name__}"
+            )
+        await self._call_named(
+            "session.set_presentation_context",
+            {"context": ctx_dict},
+            timeout=timeout,
+        )
+
+    def session_set_presentation_context_threadsafe(
+        self, ctx: Any, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_set_presentation_context(ctx, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_all_state(
         self, *, timeout: Optional[float] = 10.0,
     ) -> Dict[str, Any]:
