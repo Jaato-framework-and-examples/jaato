@@ -42,6 +42,7 @@ from .find_replace import (
 )
 from .edit_core import apply_edit, EditNotFoundError, AmbiguousEditError
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -62,7 +63,7 @@ def _detect_workspace_root() -> Optional[str]:
     return None
 
 
-class FileEditPlugin:
+class FileEditPlugin(RunnerForwardingMixin):
     """Plugin for file reading and editing operations.
 
     Tools provided:
@@ -659,8 +660,12 @@ class FileEditPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor functions for each tool."""
-        return {
+        """Return executor functions for each tool.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "readFile": self._execute_read_file,
             "updateFile": self._execute_update_file,
             "writeNewFile": self._execute_write_new_file,
@@ -672,7 +677,7 @@ class FileEditPlugin:
             "findAndReplace": self._execute_find_and_replace,
             "restoreFile": self._execute_restore_file,
             "listBackups": self._execute_list_backups,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for file editing tools."""

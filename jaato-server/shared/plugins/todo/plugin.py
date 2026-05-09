@@ -28,6 +28,7 @@ from shared.trace import trace as _trace_write
 from .config_loader import load_config, TodoConfig
 from .event_bus import TaskEventBus
 from jaato_sdk.plugins.base import UserCommand
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 
 # Thread-local storage for per-agent context
@@ -69,7 +70,7 @@ def _is_validation_step(description: str) -> bool:
     return bool(_VALIDATION_STEP_PATTERN.search(description))
 
 
-class TodoPlugin:
+class TodoPlugin(RunnerForwardingMixin):
     """Plugin that provides plan registration and progress tracking.
 
     This plugin exposes tools for the LLM to:
@@ -625,8 +626,12 @@ class TodoPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executors for TODO tools."""
-        return {
+        """Return the executors for TODO tools.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "createPlan": self._execute_create_plan,
             "startPlan": self._execute_start_plan,
             "setStepStatus": self._execute_set_step_status,
@@ -639,7 +644,7 @@ class TodoPlugin:
             "addDependentStep": self._execute_add_dependent_step,
             "completeStepWithOutput": self._execute_complete_step_with_output,
             "getBlockedSteps": self._execute_get_blocked_steps,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the TODO plugin."""

@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from ..background.mixin import BackgroundCapableMixin
 from jaato_sdk.plugins.base import UserCommand
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from ..streaming import StreamingCapable, StreamChunk, ChunkCallback
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ def _check_ast_grep_available() -> bool:
         return False
 
 
-class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
+class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForwardingMixin):
     """Plugin providing AST-based structural code search.
 
     This plugin offers semantic code search using ast-grep-py:
@@ -274,10 +275,14 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor functions for each tool."""
-        return {
+        """Return the executor functions for each tool.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "ast_search": self._execute_ast_search,
-        }
+        })
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that don't require permission (read-only operations)."""
