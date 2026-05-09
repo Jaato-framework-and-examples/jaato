@@ -21,6 +21,7 @@ from jaato_sdk.plugins.base import (
     UserCommand,
 )
 from jaato_sdk.plugins.model_provider.types import ThinkingConfig
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from .config import (
     ThinkingPluginConfig,
     ThinkingPreset,
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 _thread_local = threading.local()
 
 
-class ThinkingPlugin:
+class ThinkingPlugin(RunnerForwardingMixin):
     """Plugin for controlling extended thinking/reasoning modes.
 
     This plugin provides the /thinking command for users to control
@@ -161,10 +162,14 @@ class ThinkingPlugin:
         return []
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executors for user commands."""
-        return {
+        """Return executors for user commands.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "thinking": self._execute_thinking_command,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions - none for this plugin."""

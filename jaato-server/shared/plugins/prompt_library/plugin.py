@@ -96,6 +96,7 @@ from jaato_sdk.plugins.model_provider.types import ToolSchema
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, HelpLines
 from .validation import PromptValidator, format_validation_error
 from shared.http import get_httpx_client
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 # Type alias for output callback: (source, text, mode) -> None
@@ -163,7 +164,7 @@ class FetchResult:
     source_params: str = ""
 
 
-class PromptLibraryPlugin:
+class PromptLibraryPlugin(RunnerForwardingMixin):
     """Plugin that provides prompt library functionality.
 
     Users can:
@@ -1752,7 +1753,11 @@ class PromptLibraryPlugin:
         for name in self._discover_prompts():
             executors[f"prompt.{name}"] = self._make_prompt_executor(name)
 
-        return executors
+        # Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        # is attached; falls through to in-process otherwise.  The
+        # wrap happens AFTER the dynamic prompt.<name> executors are
+        # built so each one gets the same forward treatment.
+        return self.wrap_executors_for_runner_forwarding(executors)
 
     def _make_prompt_executor(self, prompt_name: str) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
         """Factory for prompt tool executors.

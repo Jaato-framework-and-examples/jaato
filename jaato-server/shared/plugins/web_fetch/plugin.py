@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlparse
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -29,7 +30,7 @@ PDF_EXTENSIONS = {'.pdf'}
 MAX_PDF_SIZE_BYTES = 50 * 1024 * 1024
 
 
-class WebFetchPlugin(BackgroundCapableMixin):
+class WebFetchPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
     """Plugin that fetches and parses web page content.
 
     Supports multiple output modes:
@@ -229,8 +230,14 @@ class WebFetchPlugin(BackgroundCapableMixin):
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {'web_fetch': self._execute}
+        """Return the executor mapping.
+
+        Phase 3 §3.6 wave 3: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            'web_fetch': self._execute,
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the web fetch tool."""

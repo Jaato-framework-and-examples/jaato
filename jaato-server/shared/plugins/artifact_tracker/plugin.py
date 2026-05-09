@@ -31,6 +31,7 @@ from .models import (
 )
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from jaato_sdk.plugins.base import UserCommand, ToolResultEnrichmentResult
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -82,7 +83,7 @@ def _detect_workspace_root() -> Optional[str]:
     return None
 
 
-class ArtifactTrackerPlugin:
+class ArtifactTrackerPlugin(RunnerForwardingMixin):
     """Plugin that tracks artifacts created/modified by the model.
 
     Key features:
@@ -324,17 +325,46 @@ class ArtifactTrackerPlugin:
             self._registry = ArtifactRegistry()
 
     def _save_state(self) -> None:
-        """Save state to storage file."""
+        """Save state to storage file atomically.
+
+        Phase 3 §3.10 / §3.14 atomic-write contract: write to a
+        temp file in the same directory + ``os.replace`` rename so
+        a SIGTERM mid-write never produces a partial / corrupted
+        file.  Same pattern as ``waypoint`` and ``memory`` (curated
+        layer).  See parent design §4.6 (atomic-write requirement
+        for runner-tier persistence) + plan §3.14.
+        """
         if not self._registry:
             return
         storage_path = self._resolve_storage_path()
         if not storage_path:
             return
 
+        storage_dir = os.path.dirname(storage_path)
         try:
-            os.makedirs(os.path.dirname(storage_path), exist_ok=True)
-            with open(storage_path, 'w') as f:
-                json.dump(self._registry.to_dict(), f, indent=2)
+            os.makedirs(storage_dir, exist_ok=True)
+            # Tempfile in the SAME directory as the target so
+            # ``os.replace`` is an atomic intra-filesystem rename
+            # (cross-fs renames fall back to copy-then-unlink and
+            # would defeat the atomicity guarantee).
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".artifact_tracker_state.",
+                suffix=".tmp",
+                dir=storage_dir,
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self._registry.to_dict(), f, indent=2)
+                os.replace(tmp_path, storage_path)
+            except BaseException:
+                # Cleanup the tempfile on any failure (KeyboardInterrupt
+                # included so the SIGTERM-mid-write window doesn't leave
+                # detritus behind).
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except IOError as e:
             print(f"Warning: Failed to save artifact tracker state: {e}")
 
@@ -612,8 +642,12 @@ class ArtifactTrackerPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executors for artifact tracking tools."""
-        return {
+        """Return the executors for artifact tracking tools.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "trackArtifact": self._execute_track_artifact,
             "updateArtifact": self._execute_update_artifact,
             "listArtifacts": self._execute_list_artifacts,
@@ -624,7 +658,7 @@ class ArtifactTrackerPlugin:
             "notifyChange": self._execute_notify_change,
             # User command aliases
             "artifacts": self._execute_list_artifacts,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the artifact tracker plugin.

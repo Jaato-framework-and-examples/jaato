@@ -23,6 +23,7 @@ from jaato_sdk.plugins.model_provider.types import ToolSchema
 
 from .config import WebhookConfig, load_config
 from .http_server import WebhookHTTPServer
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ _thread_local = threading.local()
 _MAX_BUFFER_SIZE = 1000
 
 
-class WebhookPlugin:
+class WebhookPlugin(RunnerForwardingMixin):
     """Webhook ingress plugin for daemon agent sessions.
 
     Provides three tools:
@@ -211,12 +212,16 @@ class WebhookPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return tool executor mapping."""
-        return {
+        """Return tool executor mapping.
+
+        Phase 3 §3.6 wave 3: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             'webhook_subscribe': self._execute_subscribe,
             'webhook_poll': self._execute_poll,
             'webhook_status': self._execute_status,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions describing webhook tools."""

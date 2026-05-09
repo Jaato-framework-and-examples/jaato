@@ -36,6 +36,7 @@ from jaato_sdk.plugins.base import (
 )
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 if TYPE_CHECKING:
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
     from jaato_sdk.plugins.model_provider.types import Message
 
 
-class WaypointPlugin:
+class WaypointPlugin(RunnerForwardingMixin):
     """Plugin for marking and restoring session waypoints.
 
     This plugin provides BOTH user-facing commands AND model tools with an
@@ -384,8 +385,12 @@ class WaypointPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return command executors for both user commands and model tools."""
-        return {
+        """Return command executors for both user commands and model tools.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             # User command
             "waypoint": self._execute_waypoint,
             # Model tools
@@ -394,7 +399,7 @@ class WaypointPlugin:
             "create_waypoint": self._execute_create_waypoint,
             "restore_waypoint": self._execute_restore_waypoint,
             "delete_waypoint": self._execute_delete_waypoint,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions explaining waypoint ownership model."""

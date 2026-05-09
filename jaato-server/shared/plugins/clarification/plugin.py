@@ -16,10 +16,11 @@ from .models import (
     Question,
     QuestionType,
 )
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
-class ClarificationPlugin:
+class ClarificationPlugin(RunnerForwardingMixin):
     """Plugin that allows the model to request clarifications from the user.
 
     This plugin provides a tool for the AI model to ask the user multiple
@@ -226,8 +227,14 @@ class ClarificationPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the mapping of tool names to executor functions."""
-        return {"request_clarification": self._execute_clarification}
+        """Return the mapping of tool names to executor functions.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            "request_clarification": self._execute_clarification,
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the AI model."""
