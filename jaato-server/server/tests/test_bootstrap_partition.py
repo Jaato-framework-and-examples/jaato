@@ -72,19 +72,24 @@ _SCAN_ROOTS = (
 # explaining why direct construction is justified (per the §3.12.0
 # spec's contributor guidance).
 PERMITTED_CONSTRUCTION_SITES: Set[Tuple[str, str]] = {
-    # The unified bootstrap helper itself — the single source of
-    # truth that all paths funnel through.  This entry stays
-    # permanently.
-    ("server/session_manager.py", "_bootstrap_session"),
-    # Three §3.12 follow-on paths that haven't migrated yet.  Each
-    # of these will be removed from the allow-list as its
-    # migration commit lands per the §3.12.0 → §3.12 ordering.
-    ("server/session_manager.py", "_load_session_impl"),
+    # The unified bootstrap sub-helper — the single source of truth
+    # that all SessionManager-level paths funnel through.  Phase 3
+    # §3.12 disk-restore migration extracted this from
+    # ``_bootstrap_session`` so the disk-restore path can share the
+    # construction logic without inheriting the create-session
+    # Session-record shape.  This entry stays permanently.
+    ("server/session_manager.py", "_construct_and_initialize_server"),
+    # §3.12 follow-on path that hasn't migrated yet — ephemeral
+    # subagent fan-out has a structurally different JaatoServer
+    # construction (initialize() with model/provider/tools kwargs
+    # rather than env_file-driven resolution) that needs envelope
+    # accommodation.  Removed from the allow-list when its
+    # migration commit lands.
     ("server/session_manager.py", "_run_ephemeral_session_impl"),
     # WS standalone bootstrap — §3.12 follow-on.  The
     # ``_bootstrap_and_initialize`` helper here mirrors the
     # SessionManager pattern but is a separate code path that
-    # doesn't yet route through ``_bootstrap_session``.
+    # doesn't yet route through ``_construct_and_initialize_server``.
     ("server/websocket.py", "_bootstrap_and_initialize"),
     # Test fixture in server/tests/ that constructs a server
     # directly to test outbound-event transformers.  Although

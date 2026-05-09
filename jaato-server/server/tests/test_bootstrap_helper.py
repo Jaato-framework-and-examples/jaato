@@ -130,8 +130,20 @@ def _patch_jaato_server():
 def _bind_helper(fake_mgr: _FakeSessionManager):
     """Bind the real ``_bootstrap_session`` to *fake_mgr* so the
     helper runs against the fake's pre-init hook + the fake
-    JaatoServer."""
+    JaatoServer.
+
+    Phase 3 §3.12 disk-restore migration extracted
+    ``_construct_and_initialize_server`` as the inner helper that
+    ``_bootstrap_session`` delegates to.  Bind both so the fake_mgr
+    invocation chain stays intact (without this, the
+    ``self._construct_and_initialize_server(envelope)`` call inside
+    ``_bootstrap_session`` would raise AttributeError on the fake)."""
     from server.session_manager import SessionManager
+    fake_mgr._construct_and_initialize_server = (
+        SessionManager._construct_and_initialize_server.__get__(
+            fake_mgr, SessionManager,
+        )
+    )
     return SessionManager._bootstrap_session.__get__(fake_mgr, SessionManager)
 
 

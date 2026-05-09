@@ -749,14 +749,79 @@ class SessionManager:
             ``(None, None)`` if ``server.initialize()`` failed
             (error already reported via the in-init event sink).
 
-        Phase 3 §3.12.0 only migrates the IPC path.  The other
-        three paths (disk-restore, ephemeral, WS-standalone) keep
-        their inline construction until §3.12 lands their
-        per-path migrations.  An AST partition test
-        (``test_bootstrap_partition.py``) tracks the remaining
-        non-helper construction sites with an explicit allow-list
-        so a contributor adding a NEW path is forced to either
-        funnel through this helper or extend the allow-list.
+        Phase 3 §3.12.0 migrated the IPC path.  Phase 3 §3.12
+        disk-restore migration routes ``_load_session_impl`` through
+        the inner :meth:`_construct_and_initialize_server` helper —
+        the helper splits the JaatoServer-construction-and-init from
+        the Session-record assembly so the disk-restore path can
+        share the construction logic while building its own
+        record (with ``last_activity`` / ``user_inputs`` / etc.
+        from the saved state).  The ephemeral path follows in a
+        future commit.
+
+        An AST partition test (``test_bootstrap_partition.py``)
+        tracks remaining direct ``JaatoServer(...)`` construction
+        sites with an explicit allow-list so a contributor adding
+        a NEW path is forced to either funnel through here (or the
+        sub-helper) or extend the allow-list.
+        """
+        server, planned_sandbox = self._construct_and_initialize_server(envelope)
+        if server is None:
+            return None, None
+
+        session = Session(
+            session_id=envelope.session_id,
+            name=envelope.name,
+            server=server,
+            created_at=(
+                envelope.timestamp.isoformat()
+                if envelope.timestamp is not None
+                else datetime.now(timezone.utc).isoformat()
+            ),
+            description=envelope.description,
+            is_dirty=True,  # New session needs saving
+            workspace_path=envelope.workspace_path,
+            config_root=envelope.config_root,
+            provisioned=envelope.provisioned,
+            created_by=envelope.created_by,
+            sandbox_mode=planned_sandbox,
+        )
+
+        return server, session
+
+    def _construct_and_initialize_server(
+        self,
+        envelope: 'BootstrapEnvelope',
+    ) -> Tuple[Optional[JaatoServer], Optional[str]]:
+        """JaatoServer construction + pre-init + initialize, shared
+        across IPC and disk-restore bootstrap paths (Phase 3 §3.12).
+
+        Splits out from :meth:`_bootstrap_session` so the
+        disk-restore path (which assembles a different Session
+        record from the saved state — ``last_activity``,
+        ``user_inputs``, restored ``is_dirty``) can share the
+        construction logic without inheriting the create-session
+        Session-record shape.
+
+        Body matches the §3.12.0 spec:
+
+        1. Construct ``JaatoServer`` from envelope construction
+           fields.
+        2. Push ``config_root`` onto the server BEFORE pre-init
+           hooks so plugins see the override.
+        3. Call ``_provision_ipc_apparmor_and_spawn_runner`` (§3.13
+           inline relocation) — clean no-op when ``client_id`` is
+           ``None`` or no apparmor opt-in.
+        4. Run remaining pre-init hooks (WS + third-party).
+        5. ``server.initialize()`` — return ``(None, None)`` on
+           failure.
+        6. Resolve sandbox_mode: ``envelope.sandbox_mode`` wins
+           (disk-restore's pre-known value); else IPC method
+           result; else None.
+
+        Returns:
+            ``(JaatoServer, sandbox_mode)`` on success;
+            ``(None, None)`` on init failure.
         """
         server = JaatoServer(
             env_file=envelope.env_file,
@@ -813,38 +878,15 @@ class SessionManager:
         if not server.initialize():
             return None, None
 
-        # Resolve sandbox_mode for the Session record.  Priority:
-        # 1. ``envelope.sandbox_mode`` — the authoritative pre-resolved
-        #    value carried by the disk-restore path (and any future
-        #    path that resolves the mode before calling the helper).
-        # 2. Result of the inline IPC apparmor provisioning above.
+        # Resolve sandbox_mode.  Priority:
+        # 1. ``envelope.sandbox_mode`` — authoritative pre-resolved
+        #    value (disk-restore's saved mode).
+        # 2. Result of inline IPC apparmor provisioning.
         # 3. None — no opt-in / non-confined.
-        # The Phase 2 ``server._planned_sandbox_mode`` stash slot was
-        # removed in §3.13 — the envelope and the inline call together
-        # provide all the information the Session record needs.
         planned_sandbox = envelope.sandbox_mode
         if planned_sandbox is None:
             planned_sandbox = ipc_sandbox_mode
-
-        session = Session(
-            session_id=envelope.session_id,
-            name=envelope.name,
-            server=server,
-            created_at=(
-                envelope.timestamp.isoformat()
-                if envelope.timestamp is not None
-                else datetime.now(timezone.utc).isoformat()
-            ),
-            description=envelope.description,
-            is_dirty=True,  # New session needs saving
-            workspace_path=envelope.workspace_path,
-            config_root=envelope.config_root,
-            provisioned=envelope.provisioned,
-            created_by=envelope.created_by,
-            sandbox_mode=planned_sandbox,
-        )
-
-        return server, session
+        return server, planned_sandbox
 
     def _run_pre_initialize_hooks(
         self,
@@ -2227,34 +2269,41 @@ class SessionManager:
                 session_env_file = workspace_env
                 logger.debug(f"_load_session: using workspace env_file: {session_env_file}")
 
-        server = JaatoServer(
-            env_file=session_env_file,
-            provider=None,  # Let env_file determine provider
-            on_event=init_callback,
+        # Phase 3 §3.12 disk-restore migration: route the JaatoServer
+        # construction + pre-init hooks + initialize through the
+        # unified ``_construct_and_initialize_server`` sub-helper that
+        # the IPC path also uses.  The disk-restore path supplies the
+        # saved ``state.sandbox_mode`` via ``envelope.sandbox_mode``
+        # so the Session record below reflects the pre-restart value
+        # rather than re-running the apparmor opt-in lookup (which
+        # is a client-driven concept that doesn't apply to disk
+        # restore).
+        envelope = BootstrapEnvelope(
             session_id=session_id,
+            workspace_path=state.workspace_path,
+            name=state.description or f"Session {session_id}",
+            description=state.description,
+            client_id=None,  # disk-restore path; no client-driven opt-in
+            sandbox_mode=getattr(state, "sandbox_mode", None),
+            restore_state={"loaded_state": state},
+            env_file=session_env_file,
             instruction_token_cache=self._instruction_token_cache,
+            on_event_during_init=init_callback,
         )
-        logger.debug(f"_load_session: JaatoServer created, calling initialize()...")
-
-        # Pre-initialize hooks fire BEFORE initialize() so transports
-        # can provision per-session kernel resources (AppArmor profile,
-        # cgroup) before configure() runs prefetch scripts.  Server
-        # 0.6.49+; mirror of the same call site in create_session.
-        self._run_pre_initialize_hooks(
-            server, session_id, state.workspace_path,
-        )
-
         try:
-            init_result = server.initialize()
-            logger.debug(f"_load_session: initialize() returned {init_result}")
-            if not init_result:
-                logger.error(f"Failed to initialize server for session {session_id}")
-                return None
+            server, _restore_sandbox = self._construct_and_initialize_server(envelope)
         except Exception as e:
-            logger.error(f"_load_session: initialize() raised exception: {type(e).__name__}: {e}")
+            logger.error(
+                f"_load_session: initialize() raised exception: "
+                f"{type(e).__name__}: {e}"
+            )
             import traceback
             logger.error(f"_load_session: traceback:\n{traceback.format_exc()}")
             return None
+        if server is None:
+            logger.error(f"Failed to initialize server for session {session_id}")
+            return None
+        logger.debug(f"_load_session: initialize() returned True")
 
         logger.debug(f"_load_session: server initialized for {session_id}")
 
