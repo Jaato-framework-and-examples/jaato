@@ -383,6 +383,20 @@ class RunnerRPC:
             tool_args = dict(env.args.get("args") or {})
             if not tool_name:
                 return False, {"error": "tool.execute: missing 'name' arg"}
+            # Phase 3 §3.3c part 3a: when a session host has been
+            # bootstrapped, route through its executor so the full
+            # runner-tier plugin set is reachable (not just the
+            # cli-only Phase 2 ``execute_fn``).  Falls through to the
+            # Phase 2 surface when no host is set — preserves
+            # cli-only runners + tests.
+            with self._session_lock:
+                host = self._session_host
+            if host is not None and host.session is not None:
+                executor = getattr(host.session, "_executor", None)
+                if executor is not None:
+                    return self._dispatch_via_session_executor(
+                        executor, tool_name, tool_args, env.id,
+                    )
             return self._execute_fn(tool_name, tool_args)
 
         if env.method == "session.bootstrap":
@@ -393,6 +407,74 @@ class RunnerRPC:
             return self._handle_session_bootstrap(env.args)
 
         return False, {"error": f"unknown method: {env.method!r}"}
+
+    def _dispatch_via_session_executor(
+        self,
+        executor: Any,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        request_id: int,
+    ) -> "tuple[bool, Any]":
+        """Run *tool_name* through the bootstrapped session's executor.
+
+        Phase 3 §3.3c part 3a.  The session's ``ToolExecutor`` (from
+        ``shared/ai_tool_runner.py``) takes additional parameters
+        beyond ``(name, args)`` — a streaming-output callback and a
+        cancel token — that the runner-side dispatcher already
+        manages via thread-local state.  This shim threads them
+        through so the in-process plugin contract works
+        runner-side without changes.
+
+        The shared module's ``ToolExecutor.execute`` reads the
+        cancel token + output callback from
+        ``shared.ai_tool_runner._thread_local`` when not passed
+        explicitly, so we install both via the same thread-local
+        the session-side executor expects (mirroring what
+        cli_runner does when forwarding through to ``run_command``).
+        """
+        # Build the per-call streaming adapter (adapts the runner's
+        # ``on_output(source, text, mode)`` thread-local protocol to
+        # whatever in-process executor expects).  The session's
+        # executor reads ``_thread_local.tool_output_callback`` if
+        # set.  Wire that to our own thread-local so chunks flow
+        # through the runner's stream-frame channel.
+        on_output = self._make_on_output(request_id)
+        active_token = None
+        with self._active_lock:
+            active = self._active_calls.get(request_id)
+        if active is not None:
+            active_token = active.cancel_token
+
+        # Bridge into the in-process thread-local that
+        # ToolExecutor.execute reads from when callbacks are not
+        # passed explicitly.
+        try:
+            from shared.ai_tool_runner import _thread_local as _ai_tl
+        except ImportError:
+            _ai_tl = None
+
+        prior_cb = None
+        prior_token = None
+        if _ai_tl is not None:
+            prior_cb = getattr(_ai_tl, "tool_output_callback", None)
+            prior_token = getattr(_ai_tl, "cancel_token", None)
+            _ai_tl.tool_output_callback = on_output
+            if active_token is not None:
+                _ai_tl.cancel_token = active_token
+
+        try:
+            ok, result = executor.execute(
+                tool_name,
+                tool_args,
+                tool_output_callback=on_output,
+                cancel_token=active_token,
+            )
+        finally:
+            if _ai_tl is not None:
+                _ai_tl.tool_output_callback = prior_cb
+                _ai_tl.cancel_token = prior_token
+
+        return ok, result
 
     def _handle_session_bootstrap(
         self, args: Dict[str, Any],
