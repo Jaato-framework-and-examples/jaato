@@ -497,6 +497,20 @@ class RunnerRPC:
             # snapshot).
             return self._handle_session_get_context_limit()
 
+        if env.method == "session.send_message":
+            # Phase 3 §7b.2: the big one — runner-side
+            # JaatoSession.send_message dispatched via runner-RPC.
+            # Streams output chunks back through the existing
+            # stream-frame channel (mirrors tool.execute's
+            # _make_on_output bridge); cancellation propagates via
+            # the existing cancel-frame mechanism + an on_cancel
+            # hook into the session's request_stop.
+            #
+            # Long-running: returns when the model loop closes.
+            # Wire shape: args = {"prompt": str}; result =
+            # {"response": str}.
+            return self._handle_session_send_message(env.args, env.id)
+
         if env.method == "session.shutdown":
             # Phase 3 §3.3c precursor: graceful runner-side session
             # teardown.  Calls the bootstrapped JaatoSession's
@@ -1244,6 +1258,127 @@ class RunnerRPC:
                 "stage": "set",
             }
         return True, {"ok": True}
+
+    def _handle_session_send_message(
+        self, args: Dict[str, Any], request_id: int,
+    ) -> "tuple[bool, Any]":
+        """Phase 3 §7b.2: the big one.
+
+        Runs ``JaatoSession.send_message(prompt, on_output=...)`` on
+        the bootstrapped runner-side session.  Streams output
+        chunks back through the existing stream-frame channel
+        (the daemon-side wrapper picks them up via the
+        ``on_output`` callback the daemon-side caller provided).
+        Cancellation propagates via the existing cancel-frame
+        mechanism: when the daemon sends a ``cancel`` frame for
+        this request_id, the dispatcher's
+        :meth:`_handle_cancel` cancels
+        ``_active_calls[request_id].cancel_token``; we hook
+        ``on_cancel`` to call ``session.request_stop`` so the
+        in-flight message wakes up and exits.
+
+        Args (over the wire): ``{"prompt": str}``.
+
+        Returns:
+            ``(True, {"response": str})`` — the final model
+            response text on success.
+            ``(False, {"error": ..., "stage": ...})`` on validation
+            failure / no-host / cancellation / exception.
+
+        This handler is long-running.  The dispatcher's worker
+        thread blocks on ``session.send_message`` for the
+        duration of the model's function-calling loop; cancel
+        frames during that window propagate cleanly via the
+        on_cancel hook.
+
+        Wire-cost note: model API calls happen runner-side via
+        the runner's own JaatoRuntime + provider plugin (the
+        §3.3b factory constructs a full runtime including
+        provider).  Post-§7c the design intent (§4.2) is for
+        providers to stay daemon-side and the runner to invoke
+        them via a future ``client.complete`` callback primitive
+        (§7b.3).  Until that lands, the runner-side provider is
+        a transitional duplicate of the daemon's — duplicate
+        cost but functionally correct.
+        """
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str):
+            return False, {
+                "error": "session.send_message: missing 'prompt' arg (str)",
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+
+        # Streaming bridge.  ``_make_on_output(request_id)`` returns
+        # a callable that pumps each chunk onto the stream-frame
+        # channel for the daemon-side wrapper to receive.  Same
+        # mechanism tool.execute uses.
+        on_output = self._make_on_output(request_id)
+
+        # Cancel-frame hook.  When the daemon sends a cancel for
+        # this request_id, _handle_cancel triggers
+        # ``_active_calls[request_id].cancel_token.cancel()``.  We
+        # install an on_cancel callback that propagates that into
+        # the session's own request_stop so the in-flight model
+        # loop exits at the next turn boundary.
+        with self._active_lock:
+            active = self._active_calls.get(request_id)
+
+        def _on_dispatcher_cancel() -> None:
+            try:
+                session.request_stop(reason="rpc_cancel")
+            except Exception:  # noqa: BLE001 — cancel best-effort
+                logger.exception(
+                    "session.send_message: request_stop raised during "
+                    "cancel propagation",
+                )
+
+        if active is not None and active.cancel_token is not None:
+            try:
+                active.cancel_token.on_cancel(_on_dispatcher_cancel)
+            except Exception:  # noqa: BLE001 — on_cancel optional
+                logger.debug(
+                    "session.send_message: cancel_token.on_cancel "
+                    "registration raised; cancellation may not "
+                    "propagate to session",
+                )
+
+        # Run the message loop.  Model API calls happen
+        # synchronously here; output streams via on_output.
+        try:
+            response = session.send_message(prompt, on_output=on_output)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            # Cancellation surfaces as a typed exception today
+            # (CancelledException from the model_provider types).
+            # Translate the cancel case to the dispatcher's
+            # CancelledException error envelope so the daemon-side
+            # wrapper sees the same shape as a tool.execute cancel.
+            from jaato_sdk.plugins.model_provider.types import (
+                CancelledException,
+            )
+            if isinstance(exc, CancelledException):
+                return False, {
+                    "error": str(exc) or "Cancelled",
+                    "stage": "cancelled",
+                }
+            return False, {
+                "error": (
+                    f"session.send_message: model loop raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "send",
+            }
+
+        # Defensive: send_message returns str by contract; coerce
+        # if a custom session subclass returns something else.
+        if response is None:
+            response = ""
+        elif not isinstance(response, str):
+            response = str(response)
+
+        return True, {"response": response}
 
     def _handle_session_shutdown(self) -> "tuple[bool, Any]":
         """Graceful runner-side session teardown.

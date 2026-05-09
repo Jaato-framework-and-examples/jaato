@@ -985,6 +985,88 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_send_message(
+        self,
+        prompt: str,
+        *,
+        on_output: Optional[Any] = None,
+        cancel_token: Optional[Any] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
+        """Phase 3 §7b.2: dispatch ``session.send_message`` to the
+        runner.  Long-running — streams output via ``on_output``
+        and returns the final response text.
+
+        Args:
+            prompt: User message to send to the model.
+            on_output: Optional callback ``(source, text, mode)``
+                invoked for each output chunk as the model
+                streams.  Same shape ``call()`` already supports
+                via the stream-frame channel.
+            cancel_token: Optional CancelToken — when tripped,
+                the daemon-side ``call`` sends a cancel frame to
+                the runner; the runner-side handler propagates
+                via the session's ``request_stop``.
+            timeout: Wall-clock cap.  ``None`` (default) means no
+                timeout — model API calls + multi-turn loops can
+                legitimately take minutes.  Daemon-side callers
+                wanting a hard cap pass an explicit value.
+
+        Returns:
+            The final model response text.
+
+        Raises:
+            RunnerCallError: on transport failure, cancellation
+                (``stage="cancelled"``), or send-loop crash
+                (``stage="send"``).
+        """
+        coro = self.call(
+            "session.send_message",
+            {"prompt": prompt},
+            on_output=on_output,
+            cancel_token=cancel_token,
+        )
+        if timeout is not None:
+            response = await asyncio.wait_for(coro, timeout)
+        else:
+            response = await coro
+        if not response.ok or response.error is not None:
+            err_type = response.error.type if response.error else "UnknownError"
+            err_msg = response.error.message if response.error else "no error message"
+            raise RunnerCallError(
+                f"session.send_message failed: {err_type}: {err_msg}"
+            )
+        if not isinstance(response.result, dict):
+            raise RunnerCallError(
+                f"session.send_message: unexpected result type "
+                f"{type(response.result).__name__}; expected dict"
+            )
+        return str(response.result.get("response", ""))
+
+    def session_send_message_threadsafe(
+        self,
+        prompt: str,
+        *,
+        on_output: Optional[Any] = None,
+        cancel_token: Optional[Any] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
+        """Synchronous wrapper for ``session_send_message`` from
+        worker threads.  Note: long-running; the future may block
+        the calling thread for the duration of the model loop.
+        Daemon-side callers in worker pools should set
+        ``timeout`` if a hard cap is desired."""
+        coro = self.session_send_message(
+            prompt,
+            on_output=on_output,
+            cancel_token=cancel_token,
+            timeout=timeout,
+        )
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(
+            timeout=(timeout + 5.0 if timeout is not None else None),
+        )
+
     async def session_shutdown(
         self, *, timeout: Optional[float] = 10.0,
     ) -> str:
