@@ -853,15 +853,15 @@ def _spawn_session_runner(
     profile_name: str,
     daemon_loop,
 ) -> None:
-    """Spawn the per-session runner subprocess and wire its RPC handle
-    onto the JaatoServer (IPC path).
+    """Spawn the per-session runner subprocess + dispatch the bootstrap
+    envelope (IPC path).
 
-    Phase 3 §3.12: this wrapper composes
-    :func:`server.runner_spawn.spawn_session_runner` (the shared
-    spawn primitive used by both IPC and WS apparmor pre-init hooks)
-    with the IPC-only Phase 3 §3.3c part 2 envelope dispatch.  The
-    WS hook calls ``spawn_session_runner`` directly without the
-    envelope step.
+    Phase 3 §3.12 + §7c step 2: composes the shared
+    :func:`server.runner_spawn.spawn_session_runner` (process spawn) +
+    :func:`server.runner_spawn.dispatch_bootstrap_envelope` (RPC dispatch
+    of ``session.bootstrap``).  The WS hook calls the same two
+    helpers in sequence — see ``server/websocket.py``'s apparmor
+    pre-init hook.
 
     Args:
         server: The session's ``JaatoServer`` instance.
@@ -874,11 +874,15 @@ def _spawn_session_runner(
         daemon_loop: The daemon's main asyncio loop — needed to run
             ``RunnerRPCClient.start()`` since it's async.
 
-    Raises on any failure.  The caller (the session hook) catches
-    and downgrades to ``sandbox_mode = "soft"`` per the §4.6 fallback
-    contract.
+    Raises on spawn failure.  The bootstrap-dispatch leg is failure-
+    tolerant (logs WARNING + returns).  The caller (the session
+    hook) catches spawn failures and downgrades to
+    ``sandbox_mode = "soft"`` per the §4.6 fallback contract.
     """
-    from server.runner_spawn import spawn_session_runner
+    from server.runner_spawn import (
+        spawn_session_runner,
+        dispatch_bootstrap_envelope,
+    )
 
     spawn_session_runner(
         server=server,
@@ -888,137 +892,22 @@ def _spawn_session_runner(
         daemon_loop=daemon_loop,
     )
 
-    rpc = server.runner_rpc
-
-    # Phase 3 §7c step 1: send the session.bootstrap envelope so
-    # the runner-side JaatoSession host is populated alongside the
-    # daemon-side one.  This used to be gated on
-    # ``JAATO_RUNNER_HOSTS_SESSION`` (a §3.3b → §3.3c transitional
-    # review-aid flag); the flag was removed in §7c step 1 because
-    # the runner-side host is now an unconditional precondition for
-    # the seat-flip's later steps (§7c removes the daemon-side leg).
-    # Daemon-side JaatoSession is still authoritative until the
-    # full seat-flip lands; coexistence is intentional during the
-    # §7c rollout.
-    #
-    # Bootstrap failure does NOT kill the session — the daemon-side
-    # JaatoSession is still authoritative.  Log loudly so the
-    # operator notices the runner host isn't actually populated.
-    try:
-        envelope = _build_session_envelope(
-            server=server,
-            session_id=session_id,
-            workspace_path=workspace_path,
-            profile_name=profile_name,
-        )
-        result = rpc.bootstrap_session_threadsafe(envelope, timeout=30.0)
-        logger.info(
-            "runner session.bootstrap acknowledged for %s: %s",
-            session_id, result,
-        )
-    except Exception as exc:  # noqa: BLE001 — boundary surface
-        logger.warning(
-            "runner session.bootstrap failed for %s: %s — "
-            "daemon-side JaatoSession remains authoritative",
-            session_id, exc, exc_info=True,
-        )
-
-
-def _build_session_envelope(
-    *,
-    server,  # JaatoServer (forward-typed; importing the real type
-             # creates a cycle through server/core.py).
-    session_id: str,
-    workspace_path: Optional[str],
-    profile_name: str,
-) -> "SessionInitEnvelope":
-    """Build a :class:`SessionInitEnvelope` from a pre-init JaatoServer.
-
-    Phase 3 §3.3c part 2.  Reads the resolved profile from the
-    server (set in ``SessionManager._create_session_impl`` before
-    the pre-init hooks fire) and constructs the envelope the
-    runner-side host needs.
-
-    Defaults applied for fields that would otherwise be empty:
-    - ``provider_name`` → ``"anthropic"`` (the framework default).
-    - ``model_name`` → ``""`` (the runner-side validate stage will
-      reject; surfaced loudly).
-
-    Args:
-        server: The :class:`JaatoServer` instance — has ``_profile``
-            set to a :class:`SubagentProfile` if a profile was
-            resolved.  ``None`` for inline-spec / no-profile sessions.
-        session_id: Stable session identifier.
-        workspace_path: Session's workspace; ``None`` for headless.
-        profile_name: AppArmor profile name (informational; the
-            envelope's ``profile_name`` field carries it for
-            audit attribution).
-
-    Returns:
-        A :class:`SessionInitEnvelope` ready for
-        :meth:`RunnerRPCClient.bootstrap_session_threadsafe`.
-    """
-    from shared.session_envelope import SessionInitEnvelope
-
-    profile = getattr(server, "_profile", None)
-    provider_name = ""
-    model_name = ""
-    plugin_specs: list = []
-    plugin_configs_dict: dict = {}
-    preloaded: set = set()
-    system_instructions: Optional[str] = None
-    gc_dict: Optional[dict] = None
-    env_overrides: dict = {}
-
-    if profile is not None:
-        provider_name = getattr(profile, "provider", None) or ""
-        model_name = getattr(profile, "model", None) or ""
-        # plugins is a list of clean names (strings); preloaded_plugins
-        # is a set of names; plugin_configs is a dict.
-        names = list(getattr(profile, "plugins", []) or [])
-        preloaded = set(getattr(profile, "preloaded_plugins", set()) or set())
-        plugin_configs_dict = dict(
-            getattr(profile, "plugin_configs", {}) or {},
-        )
-        for name in names:
-            entry: dict = {"name": name, "preload": name in preloaded}
-            cfg = plugin_configs_dict.get(name)
-            if cfg:
-                entry["config"] = dict(cfg)
-            plugin_specs.append(entry)
-        system_instructions = getattr(profile, "system_instructions", None)
-        gc_obj = getattr(profile, "gc", None)
-        if gc_obj is not None:
-            # GCProfileConfig has ``type`` + ``config`` (dict).  Flatten
-            # to a single dict for the envelope.
-            gc_type = getattr(gc_obj, "type", None)
-            gc_config = getattr(gc_obj, "config", None) or {}
-            if gc_type:
-                gc_dict = {"type": gc_type, **dict(gc_config)}
-        env_overrides = dict(getattr(profile, "env", {}) or {})
-
-    # Provider fallback — the JaatoRuntime default is "google_genai"
-    # but Phase 3's runner-tier plugins are most-tested against
-    # anthropic.  When neither the profile nor the env explicitly
-    # specifies, fall back to anthropic which has the broadest
-    # plugin compat coverage.
-    if not provider_name:
-        provider_name = "anthropic"
-
-    return SessionInitEnvelope(
+    dispatch_bootstrap_envelope(
+        server=server,
         session_id=session_id,
         workspace_path=workspace_path,
         profile_name=profile_name,
-        provider_name=provider_name,
-        model_name=model_name,
-        plugins=plugin_specs,
-        system_instructions=system_instructions,
-        agent_id="main",
-        gc=gc_dict,
-        agent_params={},
-        config_root=getattr(server, "config_root", None),
-        env_overrides=env_overrides,
     )
+
+
+# ``_build_session_envelope`` was relocated to ``server.runner_spawn``
+# in §7c step 2 (where it sits next to ``dispatch_bootstrap_envelope``,
+# the only caller).  Re-export under the legacy name so existing test
+# imports + any external callers keep working without churn.  Marked
+# private; remove the alias when the broader §7c seat-flip is done.
+from server.runner_spawn import (  # noqa: E402, F401 — back-compat re-export
+    build_session_envelope as _build_session_envelope,
+)
 
 
 def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:

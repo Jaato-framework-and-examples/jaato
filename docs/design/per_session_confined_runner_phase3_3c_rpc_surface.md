@@ -137,12 +137,13 @@ withdrawal):
                                                        remaining "NOW" sites re-bucketed
                                                        to DEFER-§7c per §10 wrap-up table)
     → §7b.2 (session.send_message)                 ← shipped (3ca3c14d)
-      → §7c (remove in-process JaatoSession + flag) ← step 1 shipped
+      → §7c (remove in-process JaatoSession + flag) ← steps 1-2 shipped
                                                        (always-bootstrap +
                                                        JAATO_RUNNER_HOSTS_SESSION
-                                                       flag removed); steps
-                                                       2-7 pending. See §7c
-                                                       sequencing table.
+                                                       flag removed; WS
+                                                       bootstrap parity);
+                                                       steps 3-7 pending. See
+                                                       §7c sequencing table.
         → §7d (cgroup attach migration; depends on
                7a's stable cgroup placement)
 ```
@@ -455,7 +456,7 @@ migrations + the actual field removal) was enumerated:
 | Step | Focus | Status |
 |---|---|---|
 | **§7c step 1** | Always-bootstrap the runner-side session (remove `JAATO_RUNNER_HOSTS_SESSION` flag from the IPC spawn path; bootstrap dispatches unconditionally; failure-tolerant). | **Shipped.**  Files: `server/__main__.py`, `server/runner_spawn.py`, `server/runner/__main__.py`, `server/runner/session.py` (doc-comments).  New regression test: `server/tests/test_spawn_session_runner_always_bootstraps.py` (8 tests pinning the unconditional dispatch + failure tolerance + flag-value irrelevance). |
-| **§7c step 2** | WS-side bootstrap parity (WS spawn currently lacks the bootstrap dispatch; add it so WS sessions also get a runner-side `JaatoSession`). | Pending. |
+| **§7c step 2** | WS-side bootstrap parity (WS spawn lacked the bootstrap dispatch; refactored the IPC envelope-build + dispatch into a shared `dispatch_bootstrap_envelope` helper in `server/runner_spawn.py` and wired both IPC + WS callers through it). | **Shipped.**  Files: `server/runner_spawn.py` (new `build_session_envelope` + `dispatch_bootstrap_envelope` helpers — relocated from `__main__.py`), `server/__main__.py` (call-site rewritten through the helper; legacy `_build_session_envelope` re-exported under the old private name for back-compat), `server/websocket.py` (WS hook calls `dispatch_bootstrap_envelope` after `spawn_session_runner`).  New tests: `server/tests/test_dispatch_bootstrap_envelope.py` (4 unit tests pinning happy-path + None-rpc no-op + failure-swallow + timeout-threading), plus 2 new tests in `test_ws_always_spawn_runner.py` covering the WS bootstrap dispatch on confined + unconfined paths. |
 | **§7c step 3** | INTERNAL + WIRING bucket refactors — replace `_jaato.get_session()._executor` / `set_session_plugin` / `set_gc_plugin` with daemon-side direct accessors or runner-RPC equivalents.  Shrinks `_jaato.X` site count to the DAEMON-only residual. | Pending. |
 | **§7c step 4** | DAEMON bucket migration — split `JaatoClient` so `JaatoRuntime` lives daemon-side under a new `self._runtime` field; convert `_jaato.provider_name` / `_jaato.model_name` / `_jaato.is_connected` / `_jaato.auth_info` / `get_runtime` to direct `self._runtime.X` reads.  Introspection collapse from §7b.3 lands here. | Pending. |
 | **§7c step 5** | DEFER-§7c read migrations — switch `get_context_usage` / `get_context_limit` reads at `initialize()` + `_check_auth_completion()` to runner-RPC reads (now safe because the runner is the source of truth post-step-4). | Pending. |

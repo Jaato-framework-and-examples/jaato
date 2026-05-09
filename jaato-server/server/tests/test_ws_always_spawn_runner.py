@@ -102,19 +102,32 @@ def _register_and_get_hook(ws: Any) -> Any:
 
 @pytest.fixture(autouse=True)
 def _patch_spawn():
-    """Replace ``spawn_session_runner`` with a stub recorder."""
+    """Replace ``spawn_session_runner`` + ``dispatch_bootstrap_envelope``
+    with stub recorders so tests focus on the WS hook's spawn-side
+    behavior without forking real runners or sending real RPC.
+
+    Phase 3 §7c step 2 added the ``dispatch_bootstrap_envelope``
+    call after spawn; the fixture stubs both helpers so tests
+    written against the spawn-only contract stay green and new
+    tests can assert the bootstrap dispatch fires too."""
     spawn_calls: List[Dict[str, Any]] = []
     spawn_outcome: Dict[str, Any] = {"raise": None}
+    bootstrap_calls: List[Dict[str, Any]] = []
 
     def _fake_spawn(**kwargs: Any) -> None:
         spawn_calls.append(kwargs)
         if spawn_outcome["raise"] is not None:
             raise spawn_outcome["raise"]
 
-    with patch("server.runner_spawn.spawn_session_runner", _fake_spawn):
+    def _fake_bootstrap(**kwargs: Any) -> None:
+        bootstrap_calls.append(kwargs)
+
+    with patch("server.runner_spawn.spawn_session_runner", _fake_spawn), \
+         patch("server.runner_spawn.dispatch_bootstrap_envelope", _fake_bootstrap):
         yield {
             "spawn_calls": spawn_calls,
             "spawn_outcome": spawn_outcome,
+            "bootstrap_calls": bootstrap_calls,
         }
 
 
@@ -302,3 +315,64 @@ def test_ws_hook_spawn_failure_logs_and_returns(
     hook(_server_stub(), "s-spawn-fail", str(sess_dir), client_id=None)
     # Spawn was attempted.
     assert len(_patch_spawn["spawn_calls"]) == 1
+    # Bootstrap was NOT attempted — the hook returns after the
+    # spawn failure, so dispatch_bootstrap_envelope never fires.
+    assert len(_patch_spawn["bootstrap_calls"]) == 0
+
+
+# ----------------------------------------------------------------------
+# §7c step 2: bootstrap dispatch fires after spawn (WS path)
+# ----------------------------------------------------------------------
+
+
+def test_ws_hook_dispatches_bootstrap_after_spawn(
+    tmp_path, _patch_spawn,
+) -> None:
+    """§7c step 2 invariant: the WS hook calls
+    ``dispatch_bootstrap_envelope`` after a successful spawn so the
+    runner-side JaatoSession host gets populated.  Pre-§7c-step-2
+    this dispatch was IPC-only — every WS session left the
+    runner-side host NULL."""
+    ws_root = tmp_path / "ws_root"
+    ws_root.mkdir()
+    sess_dir = ws_root / "session_dir"
+    sess_dir.mkdir()
+
+    ws = _make_ws_server(str(ws_root), _FakeAppArmor())
+    hook = _register_and_get_hook(ws)
+
+    hook(_server_stub(), "s-bootstrap", str(sess_dir), client_id=None)
+
+    # Spawn fired exactly once + bootstrap fired exactly once.
+    assert len(_patch_spawn["spawn_calls"]) == 1
+    assert len(_patch_spawn["bootstrap_calls"]) == 1
+
+    bootstrap = _patch_spawn["bootstrap_calls"][0]
+    assert bootstrap["session_id"] == "s-bootstrap"
+    assert bootstrap["workspace_path"] == str(sess_dir)
+    # profile_name passed through from apparmor provisioning.
+    assert bootstrap["profile_name"] == "jaato-ws-s-bootstrap"
+
+
+def test_ws_hook_dispatches_bootstrap_on_unconfined_path(
+    tmp_path, _patch_spawn,
+) -> None:
+    """The unconfined path (apparmor unavailable / disabled) also
+    bootstraps — the seat-flip needs the runner-side host populated
+    regardless of confinement state."""
+    ws_root = tmp_path / "ws_root"
+    ws_root.mkdir()
+    sess_dir = ws_root / "session_dir"
+    sess_dir.mkdir()
+
+    apparmor = _FakeAppArmor()
+    apparmor.available = False
+    ws = _make_ws_server(str(ws_root), apparmor)
+    hook = _register_and_get_hook(ws)
+
+    hook(_server_stub(), "s-no-aa-boot", str(sess_dir), client_id=None)
+
+    assert len(_patch_spawn["spawn_calls"]) == 1
+    assert len(_patch_spawn["bootstrap_calls"]) == 1
+    # profile_name is empty on the unconfined path.
+    assert _patch_spawn["bootstrap_calls"][0]["profile_name"] == ""

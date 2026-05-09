@@ -608,7 +608,10 @@ class JaatoWSServer:
             # outcome.  The dispatch surface is always available;
             # confinement is layered atop iff apparmor succeeded.
             try:
-                from server.runner_spawn import spawn_session_runner
+                from server.runner_spawn import (
+                    spawn_session_runner,
+                    dispatch_bootstrap_envelope,
+                )
                 spawn_session_runner(
                     server=server,
                     session_id=session_id,
@@ -626,6 +629,21 @@ class JaatoWSServer:
                     session_id, type(exc).__name__, exc, exc_info=True,
                 )
                 return
+
+            # Phase 3 §7c step 2: dispatch the session.bootstrap RPC
+            # so the runner-side JaatoSession host is populated.
+            # Pre-§7c-step-2 the WS path skipped this dispatch
+            # entirely (only IPC sent the envelope), leaving every
+            # WS session with a NULL runner-side host.  Failure is
+            # logged but does not propagate — the daemon-side
+            # JaatoSession is still authoritative during the §7c
+            # rollout window.
+            dispatch_bootstrap_envelope(
+                server=server,
+                session_id=session_id,
+                workspace_path=workspace_path,
+                profile_name=profile_name,
+            )
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
             sess = sm.get_session(session_id)
