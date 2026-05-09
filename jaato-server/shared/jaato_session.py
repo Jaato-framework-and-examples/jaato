@@ -7207,6 +7207,66 @@ NOTES
         """Get token usage and timing per turn."""
         return list(self._turn_accounting)
 
+    def restore_turn_accounting(
+        self, turns: List[Dict[str, Any]],
+    ) -> None:
+        """Replace the per-turn token-usage / timing list.
+
+        Pre-§7c-step-6.6.1.0 the daemon's persistence-restore
+        path (``server/session_manager.py:2558``) reached into
+        the private ``self._turn_accounting`` attribute directly:
+
+            jaato_session._turn_accounting = list(state.turn_accounting)
+
+        That violated the same encapsulation discipline §7c step
+        3a (set_agent_identity) + step 3b (get_tool_schemas)
+        established.  This public method replaces the
+        private-attr write with a stable surface that the
+        upcoming ``session.restore_turn_accounting`` runner-RPC
+        (§7c step 6.6.1.2) can wrap.
+
+        Args:
+            turns: List of per-turn dicts from a
+                :class:`SessionState` snapshot.  Caller owns the
+                list; a shallow copy is taken to isolate
+                in-session state from caller mutation.
+        """
+        self._turn_accounting = list(turns)
+
+    def restore_conversation_budget(
+        self, snapshot: Dict[str, Any],
+    ) -> None:
+        """Restore the CONVERSATION budget entry from a saved snapshot.
+
+        Pre-§7c-step-6.6.1.0 the daemon's persistence-restore
+        path (``server/session_manager.py:2592-2593``) reached
+        through the session into the underlying
+        :class:`InstructionBudget`:
+
+            jaato_session.instruction_budget.restore_conversation_from_snapshot(
+                state.budget_state)
+
+        The :meth:`InstructionBudget.restore_conversation_from_snapshot`
+        method exists, but JaatoSession had no public wrapper.
+        This method exposes the operation as a stable
+        JaatoSession-level surface for the upcoming
+        ``session.restore_conversation_budget`` runner-RPC
+        (§7c step 6.6.1.3).
+
+        No-op when ``self._instruction_budget`` is None
+        (pre-:meth:`configure`); matches the daemon caller's
+        existing ``if jaato_session.instruction_budget:`` guard.
+
+        Args:
+            snapshot: Conversation-source snapshot dict from a
+                :class:`SessionState`'s ``budget_state``.  Format
+                is opaque here; the underlying InstructionBudget
+                method validates + reconstructs the entry tree.
+        """
+        if self._instruction_budget is None:
+            return
+        self._instruction_budget.restore_conversation_from_snapshot(snapshot)
+
     def get_context_limit(self) -> int:
         """Get the context window limit for the current model."""
         if not self._provider:

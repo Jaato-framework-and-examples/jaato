@@ -2553,10 +2553,16 @@ class SessionManager:
             if main_agent_id in server._agents:
                 server._agents[main_agent_id].history = list(state.history)
 
-            # Restore turn accounting (reset_session clears it, so we restore after)
+            # Restore turn accounting (reset_session clears it, so we restore after).
+            # Phase 3 §7c step 6.6.1.0: use the public
+            # JaatoSession.restore_turn_accounting() method instead
+            # of reaching into the private ``_turn_accounting``
+            # attribute.  The public surface is the prerequisite
+            # for the upcoming ``session.restore_turn_accounting``
+            # runner-RPC handler (§7c step 6.6.1.2).
             if state.turn_accounting:
                 jaato_session = server._jaato.get_session()
-                jaato_session._turn_accounting = list(state.turn_accounting)
+                jaato_session.restore_turn_accounting(state.turn_accounting)
                 logger.debug(f"Restored {len(state.turn_accounting)} turn accounting entries for session {session_id}")
 
                 # Update server's agent state and emit context update
@@ -2586,11 +2592,21 @@ class SessionManager:
                     logger.debug(f"Emitted ContextUpdatedEvent: {usage.get('percent_used', 0.0):.1f}% used")
 
         # Restore conversation budget if present (other budget sources are
-        # automatically populated during session recreation)
+        # automatically populated during session recreation).
+        # Phase 3 §7c step 6.6.1.0: use the public
+        # JaatoSession.restore_conversation_budget() method instead
+        # of reaching through ``session.instruction_budget`` into
+        # the underlying InstructionBudget's
+        # ``restore_conversation_from_snapshot``.  The public
+        # surface is the prerequisite for the upcoming
+        # ``session.restore_conversation_budget`` runner-RPC
+        # handler (§7c step 6.6.1.3).  The method is no-op when
+        # the session's instruction_budget is None, so we drop
+        # the explicit guard.
         if state.budget_state and server._jaato:
             jaato_session = server._jaato.get_session()
             if jaato_session and jaato_session.instruction_budget:
-                jaato_session.instruction_budget.restore_conversation_from_snapshot(state.budget_state)
+                jaato_session.restore_conversation_budget(state.budget_state)
                 logger.debug(f"Restored conversation budget for session {session_id}")
                 # Emit budget event so clients show correct budget
                 server.emit(InstructionBudgetEvent(
