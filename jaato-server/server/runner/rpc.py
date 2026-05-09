@@ -512,6 +512,17 @@ class RunnerRPC:
             # ``client.set_streaming_enabled`` will delegate here.
             return self._handle_session_set_streaming_enabled(env.args)
 
+        if env.method == "session.get_all_session_state":
+            # Phase 3 §3.3c precursor: bulk-snapshot all session-
+            # attached state.  Mirrors
+            # ``JaatoSession.get_all_session_state()`` which
+            # invokes every registered provider once + merges with
+            # set-state values; provider values win on collision.
+            # Used by the daemon at journal-save / waypoint-snapshot
+            # / fork-snapshot time once the seat-flip migrates
+            # those code paths.
+            return self._handle_session_get_all_state()
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -916,6 +927,55 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"usage": dict(usage)}
+
+    def _handle_session_get_all_state(self) -> "tuple[bool, Any]":
+        """Bulk-snapshot all session-attached state.
+
+        Phase 3 §3.3c precursor.  Daemon-side journal-save /
+        waypoint-snapshot / fork-snapshot paths will delegate
+        here once the seat-flip migrates them.
+
+        Returns ``{"state": <dict>}`` — a JSON-friendly snapshot
+        merging set-state values + provider returns.  Provider
+        values win on key collision (matches the underlying
+        ``JaatoSession.get_all_session_state`` contract).
+        Returned dict is a copy — daemon-side mutation doesn't
+        propagate back into session state.
+
+        On read failure (e.g. a provider raises), returns a clean
+        ``stage="read"`` error rather than crashing the runner.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        getter = getattr(session, "get_all_session_state", None)
+        if not callable(getter):
+            return False, {
+                "error": (
+                    "session.get_all_session_state: session has no "
+                    "get_all_session_state method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            snapshot = getter()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.get_all_session_state: read failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "read",
+            }
+        if not isinstance(snapshot, dict):
+            return False, {
+                "error": (
+                    f"session.get_all_session_state: expected dict, "
+                    f"got {type(snapshot).__name__}"
+                ),
+                "stage": "read",
+            }
+        return True, {"state": dict(snapshot)}
 
     def _handle_session_set_terminal_width(
         self, args: Dict[str, Any],

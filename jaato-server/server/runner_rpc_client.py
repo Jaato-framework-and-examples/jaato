@@ -829,6 +829,30 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_all_state(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        """Bulk-snapshot the runner-side session-attached state.
+
+        Returns the full state dict (set-state + provider values
+        merged; provider wins on key collision).  Default 10s
+        timeout because providers may take time (encryption,
+        external lookups, etc.) and the snapshot is invoked at
+        journal-save time when latency tolerance is higher.
+        """
+        result = await self._call_named(
+            "session.get_all_session_state", {}, timeout=timeout,
+        )
+        return dict(result.get("state", {}))
+
+    def session_get_all_state_threadsafe(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_get_all_state(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_set_terminal_width(
         self, width: int, *, timeout: Optional[float] = 5.0,
     ) -> None:
