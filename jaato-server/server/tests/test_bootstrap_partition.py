@@ -79,13 +79,6 @@ PERMITTED_CONSTRUCTION_SITES: Set[Tuple[str, str]] = {
     # construction logic without inheriting the create-session
     # Session-record shape.  This entry stays permanently.
     ("server/session_manager.py", "_construct_and_initialize_server"),
-    # §3.12 follow-on path that hasn't migrated yet — ephemeral
-    # subagent fan-out has a structurally different JaatoServer
-    # construction (initialize() with model/provider/tools kwargs
-    # rather than env_file-driven resolution) that needs envelope
-    # accommodation.  Removed from the allow-list when its
-    # migration commit lands.
-    ("server/session_manager.py", "_run_ephemeral_session_impl"),
     # WS standalone bootstrap — §3.12 follow-on.  The
     # ``_bootstrap_and_initialize`` helper here mirrors the
     # SessionManager pattern but is a separate code path that

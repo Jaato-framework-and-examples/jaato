@@ -4359,23 +4359,37 @@ class SessionManager:
             Summary string from the model's final response.
         """
         import json as _json
-        from server.core import JaatoServer
+        import uuid
+        from shared.plugins.subagent.config import build_inline_profile
 
         # Parse profile/config
         profile_data = _json.loads(profile_json) if profile_json else {}
         inline_data = _json.loads(inline_config_json) if inline_config_json else {}
 
-        # Determine model and plugins from profile or inline config
-        model = profile_data.get("model") or inline_data.get("model")
-        provider = profile_data.get("provider") or inline_data.get("provider")
-        plugins = profile_data.get("plugins") or inline_data.get("plugins", [])
-        system_instructions = (
-            profile_data.get("system_instructions")
-            or inline_data.get("system_instructions")
+        # Phase 3 §3.12 ephemeral migration: route through the unified
+        # ``_construct_and_initialize_server`` sub-helper.  Compose the
+        # ephemeral inputs (model/provider/plugins/system_instructions
+        # /max_turns) into a single inline ``SubagentProfile`` so the
+        # construction shape matches the IPC + disk-restore paths
+        # (env_file-driven JaatoServer construction with a profile
+        # override) rather than the pre-§3.12 broken
+        # ``JaatoServer().initialize(model=, provider_name=, tools=)``
+        # signature (the underlying ``JaatoServer.initialize`` takes
+        # no kwargs — that call would have raised TypeError; the
+        # ephemeral path was effectively unreachable in production).
+        merged: Dict[str, Any] = {}
+        for source in (profile_data, inline_data):
+            for key, value in source.items():
+                merged.setdefault(key, value)
+        profile = build_inline_profile(
+            merged,
+            name="<ephemeral>",
+            description=f"Ephemeral subagent: {agent_name}",
         )
-        max_turns = profile_data.get("max_turns") or inline_data.get("max_turns", 10)
 
-        # Save and set workspace context if provided (Phase 5)
+        # Save and set workspace context if provided (Phase 5).
+        # The env-driven workspace root + chdir survive untouched —
+        # they're a separate concern from the bootstrap helper.
         prev_cwd = None
         prev_workspace_root = None
         if workspace_path:
@@ -4385,14 +4399,29 @@ class SessionManager:
             os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
 
         try:
-            # Create a temporary JaatoServer for the ephemeral session
-            server = JaatoServer()
-            server.initialize(
-                model=model,
-                provider_name=provider,
-                tools=plugins,
-                system_instructions=system_instructions,
+            # Build the bootstrap envelope.  ``client_id=None`` because
+            # ephemeral subagent fan-out has no client-driven apparmor
+            # opt-in (per §3.12 spec; runner-sharing semantics for
+            # default-share / opt-in-isolation come with §3.11 + the
+            # seat-flip).  ``parent_runner_handle`` stays None for now
+            # — Phase 3's spec for ephemeral migration adds the
+            # parent-runner reference for shared-runner default once
+            # the seat-flip lands.
+            envelope = BootstrapEnvelope(
+                session_id=f"ephemeral-{uuid.uuid4().hex[:12]}",
+                workspace_path=workspace_path,
+                name=agent_name or "<ephemeral>",
+                description="Ephemeral subagent fan-out",
+                client_id=None,
+                profile=profile,
+                agent_name=agent_name or "main",
             )
+            server, _sandbox = self._construct_and_initialize_server(envelope)
+            if server is None:
+                # Init failure already emitted via the in-init sink;
+                # surface a minimal hint to the caller so the
+                # subagent fan-out doesn't silently swallow.
+                return "Ephemeral session initialization failed."
 
             # Set workspace path on the registry so plugins discover it
             if workspace_path and hasattr(server, 'registry') and server.registry:
