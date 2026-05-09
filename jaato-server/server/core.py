@@ -3735,6 +3735,23 @@ class JaatoServer:
         """Clear conversation history."""
         if self._jaato:
             self._jaato.reset_session()
+        # Phase 3 §7b.1 migration: also forward to the runner-side
+        # JaatoSession (when a runner is attached) so its history
+        # state matches the daemon's after the clear.  Best-effort:
+        # forwarding failures log but don't block the daemon-side
+        # state update.
+        rpc = self._runner_rpc
+        if rpc is not None:
+            forwarder = getattr(rpc, "session_reset_threadsafe", None)
+            if callable(forwarder):
+                try:
+                    forwarder(timeout=2.0)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.debug(
+                        "clear_history: runner RPC propagation "
+                        "failed (%s) — daemon-side state still updated",
+                        exc,
+                    )
         self._original_inputs = []
         if self._main_agent_id in self._agents:
             main_state = self._agents[self._main_agent_id]
