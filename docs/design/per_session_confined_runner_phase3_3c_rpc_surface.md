@@ -127,25 +127,33 @@ All three follow the same pattern:
 The dispatch surface is comprehensive enough that the seat-flip
 can proceed handler-by-handler.
 
-**Recommended bucket order** (per peer-review v2):
+**Recommended bucket order** (per peer-review v2 + v3 §7b.3
+withdrawal):
 
 ```
-§7a (always-spawn)
-  → §7b.1 (stateless setters / readers; ~5 commits)
-    → §7b.2 (session.send_message; 1 commit)
-      → §7b.3 (response handlers + get_runtime; 2 commits)
-        → §7c (remove in-process JaatoSession + flag)
-          → §7d (cgroup attach migration; depends on 7a's
-                 stable cgroup placement)
+§7a (always-spawn)                                 ← shipped (55ae4ba0 / 20526f4d)
+  → §7b.1 (stateless setters / readers; ~5 commits)← in-flight, ~5 of ~10 sites done
+    → §7b.2 (session.send_message)                 ← shipped (3ca3c14d)
+      → §7c (remove in-process JaatoSession + flag)
+        → §7d (cgroup attach migration; depends on
+               7a's stable cgroup placement)
 ```
 
-§7b.1-§7b.3 internally share a common dependency on §7a
-(always-spawn) — until the runner is unconditionally available,
-the daemon-side migrations would need a fallback shim.  Order
-within 7b is bottom-up by complexity; the response-handler
-sub-bucket (7b.3) lands last because it requires the new
-``runtime.complete`` primitive which itself reuses the
-streaming-channel patterns proven in 7b.2's ``send_message``.
+**§7b.3 was withdrawn after empirical investigation** (commit
+`fafe90a6`'s ahead-of-time §7b.3 audit).  The proposed scope
+(4 new `session.respond_to_*` RPCs + a `session_get_provider_info`
+introspection RPC) duplicated existing infrastructure or
+front-ran architecture not yet built.  See §7b.3 below for the
+detailed reasoning; the short version: response-handler wiring
+already lives in `PromptOperatorHandler.resolve_response()`,
+and provider/model introspection reads daemon-side `JaatoRuntime`
+directly per §4.2 (model_provider plugins are daemon-tier).
+Both sets of sites collapse during §7c without new RPCs.
+
+§7b.1 + §7b.2 share a common dependency on §7a (always-spawn) —
+until the runner is unconditionally available, the daemon-side
+migrations would need a fallback shim.  Order within 7b is
+bottom-up by complexity.
 
 Daemon-side migration scope (the canonical count, replacing the
 original "~95"):
@@ -305,47 +313,110 @@ RPC; cancellation mid-stream; multi-turn with permission ASK.
 
 One commit; depends on 7a.
 
-#### 7b.3. Response handlers + `get_runtime`
+#### 7b.3. Response handlers + `get_runtime` — **WITHDRAWN**
 
-Reverse-direction interaction responses:
+**Status: withdrawn.** Empirical investigation (worker commit
+`fafe90a6`'s pre-implementation audit; reviewer-confirmed) found
+that the originally-scoped work either duplicates existing
+infrastructure or front-runs architecture that doesn't need to
+be built.  The audit-of-record:
 
-- `_jaato.respond_to_permission(request_id, response)` — daemon
-  receives client response, forwards to runner-side waiting
-  future.
-- `_jaato.respond_to_clarification(...)`, `respond_to_clarification_batch(...)`,
-  `respond_to_reference_selection(...)` — same shape.
+##### Response-handler half
 
-The §3.2.1 `client.prompt_operator` is the analogous shape but
-in the OPPOSITE direction (runner→daemon→client).  These four
-need the daemon→runner direction.  The natural mechanism:
-runner-side ASK queue (already partially built per §3.12 ASK-
-queue work) gets a `respond` method; daemon RPC `session.respond_to_X`
-calls into it.
+The original framing assumed `_jaato.respond_to_permission(...)` /
+`respond_to_clarification(...)` / `respond_to_clarification_batch(...)` /
+`respond_to_reference_selection(...)` were internal `_jaato.X` call
+sites needing forwarding to the runner.  They are not.
 
-`_jaato.get_runtime` (sent 6× from `core.py`):
-- Provider auth + credential flow stays daemon-side per §4.2
-  (model_provider plugins are daemon-tier).
-- The runner-side session calls back to daemon via a new
-  `runtime.complete` primitive (provider invocation) — analogous
-  to `client.prompt_operator` but for model API calls.
-- Daemon-side `_jaato.get_runtime` callers are mostly for
-  introspection (provider name, model name, ledger
-  state) — these become `runner_rpc.session_get_provider_info`
-  read-only handlers.
+Tracing the actual call sites:
 
-Files touched:
-- `server/runner/rpc.py` — 4 response handlers + 1 introspection.
-- `server/runner_rpc_client.py` — 5 wrapper pairs.
-- `server/runner/rpc_client.py` — `runtime.complete` primitive
-  (new direction; analogous to §3.2.1's `prompt_operator`).
-- `shared/jaato_runtime.py` — provider invocation pluggable
-  via the runner-side `complete` callback when seated runner-
-  side; in-process when daemon-side.
-- `server/core.py` — migrate the 5 introspection sites + 4
-  response sites.
+```
+WS client → server/websocket.py:1387-1406
+              → JaatoServer.respond_to_X(request_id, response, ...)
+                  → daemon-side response queue
 
-One commit per category (response handlers, then runtime
-primitive + provider invocation refactor); 2 commits.
+IPC client → server/session_manager.py:4146-4158
+              → JaatoServer.respond_to_X(...)
+                  → daemon-side response queue
+```
+
+`respond_to_X` are **client-facing entry points on JaatoServer**,
+not internal `_jaato.X` consumers.  They flow client responses
+INTO the daemon's response-queue infrastructure.
+
+The runner-side ASK round-trip already has a working primitive:
+`server/runner_rpc_handlers/prompt_operator.py:PromptOperatorHandler`
+(class at line 58) — the runner emits ASK via `client.prompt_operator`
+RPC, awaits the response as the RPC return value, and the daemon's
+transport layer calls `PromptOperatorHandler.resolve_response()`
+(line 162) to set the matching future when the client's response
+arrives.  Future-keyed-by-request-id, complete + tested.
+
+Adding `session.respond_to_*` RPC handlers would create a parallel
+daemon→runner pathway that **duplicates** what `PromptOperatorHandler`
+already does.  The **actual** remaining work is wiring the
+daemon-side `respond_to_X` methods to call into
+`PromptOperatorHandler.resolve_response()` — which only makes sense
+once the runner-side permission plugin is the source of truth for
+ASK state.  That gating is **§7c**, not §7b.3.
+
+##### `get_runtime` half
+
+Audit of `_jaato.get_runtime` call sites in `core.py` (verified
+post-§7b.1-shipped state):
+
+| Line | Use | Migration path |
+|---|---|---|
+| 637 | `runtime.set_confine_context_factory(...)` | **Stays daemon-side** — init-time apparmor wiring, daemon-tier per §4.7 |
+| 996 | `runtime.event_bus` | **Stays daemon-side** — event_bus is daemon-tier per §4.2 |
+| 1465 | `runtime.set_confine_context_factory(...)` | **Stays daemon-side** — same as 637 |
+| 1810 | `runtime.event_bus` | **Stays daemon-side** — same as 996 |
+| 3575 | `runtime.registry` walk for command lookup | **Refactor in §7c** — registry split decisions live there |
+| 3607 | `runtime.registry` walk for command lookup | **Refactor in §7c** — same as 3575 |
+
+All `get_runtime` call sites are either daemon-tier wiring (the 4
+init-time / event_bus cases) or registry walks that refactor as
+part of §7c's `_jaato`-removal pass.  None need a new RPC.
+
+The `session_get_provider_info` introspection handler proposed in
+the original §7b.3 was supposed to cover sparse read-only sites
+like `_jaato.provider_name` / `_jaato.model_name` / `_jaato.is_connected` /
+`_jaato.auth_info`.  But these properties read from the
+`JaatoRuntime` instance, which **stays daemon-side per §4.2**
+(model_provider plugins are daemon-tier).  Post-§7c, the daemon
+reads `self._runtime.provider_name` directly without going
+through the runner — same parallel-pathway problem the response-
+handler RPCs would have created.
+
+##### What §7b.3 leaves to §7c
+
+Two threads roll forward into §7c:
+
+1. **Response-handler wiring**: when §7c activates the runner-side
+   permission plugin as authoritative, `respond_to_X` on
+   `JaatoServer` is rewired to call
+   `prompt_operator_handler.resolve_response(request_id, ...)`
+   (already-existing primitive) instead of the daemon-side
+   response queue.  Small refactor inside §7c, not a new RPC.
+
+2. **Introspection collapse**: when §7c removes the `_jaato` field,
+   the read-only callers (`provider_name`, `model_name`,
+   `is_connected`, `auth_info`) become direct daemon-side
+   `JaatoRuntime` reads.  Zero RPC, zero handler, zero wrapper.
+
+##### Files touched (this withdrawal)
+
+- This doc — §7b.3 marked WITHDRAWN with the audit-of-record above.
+- `server/runner/rpc.py` — no new handlers added for §7b.3.
+- `server/runner_rpc_client.py` — no new wrappers added for §7b.3.
+- `server/core.py` — no new migrations for §7b.3; affected sites
+  collapse during §7c.
+
+##### Commit budget
+
+Original §7b.3: 2 commits (response handlers + runtime primitive).
+Revised §7b.3: **0 commits**.  §7c absorbs the response-handler
+rewiring + introspection collapse.
 
 ### 7c. Remove the in-process `JaatoSession`
 
@@ -383,7 +454,10 @@ Files touched:
 - `server/runner/__main__.py` — flag check goes away;
   runner-side JaatoSession host is unconditional.
 
-One commit; depends on 7a + 7b.1 + 7b.2 + 7b.3.
+One commit (logically — the §7c change-set absorbs the
+response-handler rewiring + introspection collapse withdrawn from
+§7b.3, so the actual landing may be 2-3 reviewable commits).
+Depends on 7a + 7b.1 + 7b.2.
 
 ### 7d. Dependent migrations
 
