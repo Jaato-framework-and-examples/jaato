@@ -829,6 +829,23 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_turn_accounting(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> list:
+        """Read the runner-side per-turn token usage / timing list."""
+        result = await self._call_named(
+            "session.get_turn_accounting", {}, timeout=timeout,
+        )
+        return list(result.get("turns", []))
+
+    def session_get_turn_accounting_threadsafe(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> list:
+        return self._run_threadsafe(
+            self.session_get_turn_accounting(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_reset(
         self, *, timeout: Optional[float] = 5.0,
     ) -> None:

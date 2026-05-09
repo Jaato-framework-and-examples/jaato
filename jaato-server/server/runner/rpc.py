@@ -540,6 +540,13 @@ class RunnerRPC:
             # task.  args = ``{}``.
             return self._handle_session_reset()
 
+        if env.method == "session.get_turn_accounting":
+            # Phase 3 §3.3c precursor: read the runner-side
+            # token-usage / timing per-turn list.  Daemon's
+            # session-info / persistence paths use this for
+            # telemetry attribution + journal save.
+            return self._handle_session_get_turn_accounting()
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -944,6 +951,40 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"usage": dict(usage)}
+
+    def _handle_session_get_turn_accounting(self) -> "tuple[bool, Any]":
+        """Read the runner-side per-turn token usage / timing list.
+
+        Phase 3 §3.3c precursor.  Returns
+        ``{"turns": [<dict>, ...]}``.  Each entry is the dict
+        :meth:`JaatoSession.get_turn_accounting` produces (a
+        list of per-turn account dicts).  Empty list when no
+        turns recorded.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            turns = session.get_turn_accounting()
+        except Exception as exc:  # noqa: BLE001 — read boundary
+            return False, {
+                "error": (
+                    f"session.get_turn_accounting: read failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "read",
+            }
+        if not isinstance(turns, list):
+            return False, {
+                "error": (
+                    f"session.get_turn_accounting: expected list, "
+                    f"got {type(turns).__name__}"
+                ),
+                "stage": "read",
+            }
+        # Defensive: each entry should be a dict; copy to isolate
+        # daemon-side mutation.
+        return True, {"turns": [dict(t) if isinstance(t, dict) else t for t in turns]}
 
     def _handle_session_reset(self) -> "tuple[bool, Any]":
         """Clear the runner-side JaatoSession's conversation history.
