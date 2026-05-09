@@ -1127,6 +1127,55 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_set_initial_history(
+        self,
+        messages: "List[Any]",
+        *,
+        timeout: Optional[float] = 10.0,
+    ) -> None:
+        """Seed the runner-side session with replayed conversation
+        history from a SessionState snapshot.
+
+        Phase 3 §7c step 6.6.1.1.  Replaces the pre-§7c daemon-
+        side call ``jaato_session.set_initial_history(initial_history)``
+        at ``server/session_manager.py:2130``.
+
+        Daemon callers pass a list of :class:`Message` instances;
+        the wrapper serializes via
+        ``shared.plugins.session.serializer.serialize_history``
+        before sending.  Wire shape is the same JSON-compatible
+        dict-list disk persistence uses.
+
+        Default timeout is 10s — set_initial_history is normally
+        cheap (just appends to an empty history) but the
+        deserialize step on the runner side iterates every
+        message + every part, so we give some headroom for
+        large-history seeds (waypoint forks can carry hundreds
+        of messages).
+
+        Args:
+            messages: List of :class:`Message` instances.
+                Caller owns the list; the wrapper takes a copy
+                via ``serialize_history``.
+        """
+        from shared.plugins.session.serializer import serialize_history
+
+        body = {"messages": serialize_history(messages)}
+        await self._call_named(
+            "session.set_initial_history", body, timeout=timeout,
+        )
+
+    def session_set_initial_history_threadsafe(
+        self,
+        messages: "List[Any]",
+        *,
+        timeout: Optional[float] = 10.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_set_initial_history(messages, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,

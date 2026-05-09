@@ -599,6 +599,18 @@ class RunnerRPC:
             # "event").
             return self._handle_session_inject_prompt(env.args)
 
+        if env.method == "session.set_initial_history":
+            # Phase 3 §7c step 6.6.1.1: seed an empty session
+            # with replayed conversation history from a SessionState
+            # snapshot.  Replaces the daemon-side direct call at
+            # session_manager.py:2130.  args = ``{"messages":
+            # [<serialized message dict>, ...]}`` — the daemon
+            # serializes via shared/plugins/session/serializer.py
+            # and the runner deserializes there too, so the wire
+            # carries the same JSON-compatible shape disk
+            # persistence already uses.
+            return self._handle_session_set_initial_history(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1275,6 +1287,97 @@ class RunnerRPC:
                     f"{type(exc).__name__}: {exc}"
                 ),
                 "stage": "inject",
+            }
+        return True, {"ok": True}
+
+    def _handle_session_set_initial_history(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Seed the runner-side session with replayed conversation history.
+
+        Phase 3 §7c step 6.6.1.1.  Replaces the pre-§7c daemon-
+        side call ``jaato_session.set_initial_history(initial_history)``
+        in ``server/session_manager.py:2130`` (the
+        ``create_headless_session`` path that seeds
+        ``initial_history`` before the first ``send_message``).
+
+        Wire shape: ``{"messages": [<dict>, ...]}`` where each
+        dict is a serialized :class:`Message` from
+        ``shared.plugins.session.serializer.serialize_message``.
+        The runner deserializes via
+        :func:`shared.plugins.session.serializer.deserialize_history`
+        — the same code disk persistence uses, so the wire-shape
+        is the round-trippable JSON format already proven in
+        ``test_serializer.py``.
+
+        Defensive contract:
+
+          - ``messages`` must be a list (missing key or non-list
+            → ``stage="decode"``).
+          - Per-element decode failures (malformed Part type,
+            missing role) surface as ``stage="decode"`` with
+            the underlying serializer error, not as a partial
+            seed.
+          - :meth:`JaatoSession.set_initial_history` itself
+            raises ``RuntimeError`` if the session is not idle
+            or its history is non-empty — the daemon-side
+            persistence-restore path never violates this, but a
+            defensive ``stage="set"`` wraps it to surface
+            misuse cleanly.
+
+        Args: ``{"messages": List[Dict[str, Any]]}``.
+        Returns: ``{"ok": True}`` on success.
+        """
+        messages_data = args.get("messages")
+        if messages_data is None:
+            return False, {
+                "error": (
+                    "session.set_initial_history: 'messages' key required"
+                ),
+                "stage": "decode",
+            }
+        if not isinstance(messages_data, list):
+            return False, {
+                "error": (
+                    f"session.set_initial_history: 'messages' must be a list; "
+                    f"got {type(messages_data).__name__}"
+                ),
+                "stage": "decode",
+            }
+
+        try:
+            from shared.plugins.session.serializer import deserialize_history
+            messages = deserialize_history(messages_data)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.set_initial_history: deserialize failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "decode",
+            }
+
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        setter = getattr(session, "set_initial_history", None)
+        if not callable(setter):
+            return False, {
+                "error": (
+                    "session.set_initial_history: session has no "
+                    "set_initial_history method (rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            setter(messages)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.set_initial_history: set_initial_history raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
             }
         return True, {"ok": True}
 
