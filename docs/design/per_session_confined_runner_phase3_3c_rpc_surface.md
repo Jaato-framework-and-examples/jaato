@@ -470,7 +470,77 @@ migrations + the actual field removal) was enumerated:
 |     **§7c step 6.2** | Migrate the **6 straightforward `_jaato.get_session()` readers** per the disposition audit below: 2 deletes (lines 610, 697 — daemon-tier executor reaches), 3 new-RPC forwards (lines 725, 1091, 3238 — using the handlers from 6.1), 1 trivial migration to `self._runtime.event_bus` (line 462).  Self-contained commit — does not depend on the architectural callback decisions in 6.2.5. | **Shipped.**  Per-site disposition: (a) line 462 `event_bus` property — migrated to `self._runtime.event_bus` (mirrors `_get_event_bus` from §7c step 4 first pass).  (b) line 610 `set_apparmor_confinement` — body gutted to no-op (zero live callers in OSS tree; the runner subprocess is process-confined at spawn time, so daemon-side thread-level wiring this method installed had no effect post-§7b.2).  (c) line 697 `set_runtime_limits` — body gutted to no-op (WS still calls it; runner-side gets cgroup attach + limits via env vars at spawn time).  (d) line 725 `set_reference_authorizer` — already write-both since §7c step 6.1 (1/3); daemon-side leg drops naturally with the references-plugin runner-side migration in a separate sub-track.  (e) line 1091 `emit_current_state` instruction_budget read — REPLACED with `session_snapshot_instruction_budget_threadsafe` RPC forward; runner-side becomes source of truth for the snapshot.  (f) line 3238 `inject_prompt` — added write-both: forwards via `session_inject_prompt_threadsafe` RPC AND keeps the daemon-side leg (drops in step 6.3 alongside other write-both daemon legs).  Tests: 600/600 server suite green. |
 |     **§7c step 6.2.5** | Migrate the **3 architectural callback-rewire `get_session()` readers** (lines 1891, 1907, 3273 — `_event_bus_tools` + `instruction_budget` callback wiring + `set_prompt_injected_callback`).  Each gates on runner-side event-bus access plumbing which the Phase 3 plan parked as out-of-scope.  Decoupled from 6.2 so that step's progress doesn't get tied to an architectural decision that may not be ready.  May itself fan out into multiple commits depending on the event-bus plumbing decisions. | Pending. |
 |     **§7c step 6.3** | Drop write-both daemon-side legs (clear_history, stop, terminal_width property setter, set_presentation_context, init's set_terminal_width direct call) — safe ONLY after 6.2 completes (until then, daemon-side `get_session()` readers still depend on the daemon-side session having current state). | **Shipped (6 of 7 legs):** dropped daemon-side legs of `clear_history` (was §7b.1 8cbb8ba2), `stop` (was §7b.1 fafe90a6), `terminal_width` property setter (was vanguard b2c0772d), `set_presentation_context` (was vanguard c3d5ec08), init's `set_terminal_width` direct call (was §7b.1 7f8be0cb), and `inject_prompt` (was §7c step 6.2).  **Split-out per reviewer's clause:** `set_reference_authorizer` daemon-side leg KEPT for now — the daemon-side references plugin (still active until tier-filtered runner-side migration lands as a separate sub-track) consumes the Python authorizer object via `session.get_reference_authorizer()`.  Dropping it would break kernel-layer authorization for WS sessions with confined references; will drop alongside the references-plugin runner-side migration.  Test churn: 5 write-both-specific assertions collapsed in `test_jaato_server_clear_history_forwards.py` + `test_jaato_server_stop_forwards.py`; the surviving runner-only assertions prove the post-§7c-step-6.3 contract holds.  `_jaato` count 66 → 55 (-11; 6 legs yielded 11 reductions because some sites had paired truthiness checks).  Tests: 597/597 server suite green. |
-|     **§7c step 6.4** | Delete WIRING calls per the §7c step 3c clarification: `set_session_plugin`, `configure_plugins_only`, `configure_tools` (×2), `set_gc_plugin` (×2).  Runner already gets equivalent config via the bootstrap envelope. | Pending. |
+|     **§7c step 6.4** | Delete WIRING calls per the §7c step 3c clarification: `set_session_plugin`, `configure_plugins_only`, `configure_tools` (×2), `set_gc_plugin` (×2).  Runner already gets equivalent config via the bootstrap envelope. | **Deferred — collapses into step 6.6** per the disposition audit below.  The 6 WIRING calls are load-bearing for the daemon-side seat during the §7c rollout window (specifically: `configure_tools` is what *creates* the daemon-side `JaatoClient._session` instance; many surviving daemon-side `_jaato` consumers — architectural callbacks 1969/1985/3374/4264 + `auth_info` reads + the public `get_session()` method called from session_manager + websocket + `set_ui_hooks` — depend on that instance existing).  Dropping the WIRING calls in isolation would silently null out the daemon-side session and cascade.  Step 6.6's `_jaato`-field removal eliminates them naturally; no separate step 6.4 commit needed. |
+
+### Step 6.4 disposition audit
+
+Mirroring cd3ecf20's audit shape for the 9 `get_session()`
+readers.  The 6 WIRING call sites + their downstream
+dependencies:
+
+| Site | Wires what onto JaatoClient | Side effect — what does the daemon-side seat lose if dropped? | Disposition |
+|---|---|---|---|
+| 1870 (`init` `configure_plugins_only`) | runtime.registry / runtime.permission_plugin / runtime.ledger | Runtime-side plugin discovery for the daemon's runtime instance; same registry instance is also wired runner-side via the bootstrap envelope.  Daemon's runtime can still respond to `provider_name` / `is_connected` reads (those don't depend on `configure_plugins`). | Stays — drops with step 6.6. |
+| 1889 (`init` `configure_tools`) | runtime.registry/permission/ledger + **creates `_jaato._session`** | **Highest impact:** without this call, `_jaato._session` is None.  Cascades to: callback wiring at 1969/1985 (None-safe — silently no-ops), 3374's `set_prompt_injected_callback` (NOT None-safe — AttributeError), `auth_info` reads at 2068/4332 (returns ``""``), public `get_session()` method at 3986 (returns None to many external consumers including session_manager fork/journal paths + websocket persistence). | Stays — drops with step 6.6. |
+| 1958 (`init` `set_gc_plugin`) | gc_plugin onto session | Session's GC trigger.  Daemon-side `send_message` is gone post-§7b.2, so the GC's trigger path is itself dormant; but session-state save points may still trigger GC daemon-side via the `_get_event_bus` path.  Even if dormant, the WIRING call's failure mode is "AttributeError because `_jaato._session` is None" (cascades from 1889). | Stays — drops with step 6.6. |
+| 2355 (`_setup_session_plugin` `set_session_plugin`) | session_plugin (persistence) | Persistence plugin is still consumed daemon-side for save/resume/sessions/delete-session/backtoturn user commands — those flow through `JaatoServer.execute_user_command` → daemon-tier path.  Dropping this WIRING call silently disables the persistence plugin's daemon-side hooks. | Stays — drops with step 6.6. |
+| 4246 (`_check_auth_completion` `configure_tools`) | Mirror of 1889 | Same as 1889 — load-bearing creation of `_jaato._session` for the auth-deferred init path. | Stays — drops with step 6.6. |
+| 4255 (`_check_auth_completion` `set_gc_plugin`) | Mirror of 1958 | Same as 1958. | Stays — drops with step 6.6. |
+
+#### Reviewer's symmetric question, answered:
+
+> Post-6.2/6.3, do any of the 4 architectural callbacks (1970/1986/3382/4282) or the connect/runtime path read `_jaato.permission_plugin` / `_jaato.gc_plugin` / `_jaato.session_plugin` / `_jaato.registry`?
+
+**Direct attribute reads:** No.  The surviving `_jaato.X` sites
+read public methods/properties (`model_name`, `provider_name`,
+`auth_info`, `get_session`, `verify_auth`, `get_user_commands`,
+`execute_user_command`, `get_model_completions`,
+`get_tool_schemas`, `set_agent_identity`, `set_ui_hooks`).  None
+read the wired plugin instances directly.
+
+**Transitive reads through `get_session()`:** Yes — extensively.
+The wired plugins' instances are *consumed* by the daemon-side
+JaatoSession that `configure_tools` creates.  Dropping WIRING
+makes `_jaato._session = None`, breaking every site that calls
+`_jaato.get_session()` non-None-safely + degrading several that
+are None-safe (callback wiring silently no-ops; `auth_info`
+returns ``""``; public `get_session()` returns None to external
+consumers in session_manager + websocket).
+
+**Conclusion:** the WIRING calls are not *directly* load-bearing
+(no `_jaato.permission_plugin` reads exist) but they are
+*transitively* load-bearing via `_jaato._session`.  The same
+discipline that produced the §7c step 6.3 split-out for
+`set_reference_authorizer` applies here: do not drop calls
+whose absence cascades through indirect consumers.
+
+#### Sequencing implication:
+
+Step 6.4 as originally framed ("delete the 6 WIRING calls in
+their own commit") is **incompatible** with the rollout window
+where steps 6.2.5 / 6.5 / 6.6 haven't landed yet.  Two options:
+
+  - **Option A (chosen):** fold step 6.4 into step 6.6.  When
+    `_jaato` is removed, the WIRING calls are mechanically
+    deleted alongside (they reference `self._jaato` which no
+    longer exists); the cascading consumers also rewrite/remove
+    in the same commit.  Single coherent diff.
+
+  - **Option B (rejected):** insert a step 6.4-prereq doing the
+    cascade-rewrites first — migrate 1969/1985/3374/4264 to
+    runner-RPCs (= step 6.2.5), migrate `auth_info` /
+    `get_session` consumers (= part of step 6.5), THEN delete
+    WIRING.  Adds a multi-commit chain that step 6.6 absorbs
+    anyway; doesn't reduce review surface.
+
+#### What this audit does NOT decide:
+
+The audit assumes the §7c rollout window's daemon-side seat is
+still functional (per the path-A "atomic seat-flip in step 6.6"
+framing).  If a future review decides to ship a transitional
+"daemon-side seat half-broken" window, step 6.4 could land
+in isolation; that's a deliberate scope choice the audit is
+not asked to make.
 |     **§7c step 6.5** | Migrate the remaining ~5 introspection reads not covered by step 4: `model_name` / `provider_name` (lines 1665-1666), `auth_info` (1990, 4241), `verify_auth` (1728, 4143), `get_user_commands` / `execute_user_command` (3755, 3778, 3954), `get_model_completions` (3983).  Routes through `self._runtime` for runtime-tier reads + `self._jaato.get_session()._provider` reaches for session-tier reads (which themselves collapse if 6.2 lands first). | Pending. |
 |     **§7c step 6.6** | Remove `self._jaato` field + collapse the ~15 `if self._jaato:` truthiness checks to `if self._runner_rpc:`.  This is the actual seat-flip's "the daemon-side session is gone" moment.  Mechanical diff; safe ONLY after 6.1 → 6.5 land. | Pending. |
 
