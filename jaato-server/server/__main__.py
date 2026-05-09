@@ -890,36 +890,38 @@ def _spawn_session_runner(
 
     rpc = server.runner_rpc
 
-    # Phase 3 §3.3c part 2: when JAATO_RUNNER_HOSTS_SESSION is set,
-    # also send the session.bootstrap envelope so the runner-side
-    # JaatoSession host gets exercised.  Daemon-side JaatoSession is
-    # NOT removed in this commit — that's part 3 (the seat-flip).
-    # Coexistence is intentional during the §3.3 review window.
-    if os.environ.get("JAATO_RUNNER_HOSTS_SESSION", "").strip().lower() in (
-        "1", "true", "yes",
-    ):
-        try:
-            envelope = _build_session_envelope(
-                server=server,
-                session_id=session_id,
-                workspace_path=workspace_path,
-                profile_name=profile_name,
-            )
-            result = rpc.bootstrap_session_threadsafe(envelope, timeout=30.0)
-            logger.info(
-                "runner session.bootstrap acknowledged for %s: %s",
-                session_id, result,
-            )
-        except Exception as exc:  # noqa: BLE001 — boundary surface
-            # Bootstrap failure does NOT kill the session — the
-            # daemon-side JaatoSession is still authoritative until
-            # part 3.  Log loudly so the operator notices the runner
-            # host isn't actually populated.
-            logger.warning(
-                "runner session.bootstrap failed for %s: %s — "
-                "daemon-side JaatoSession remains authoritative",
-                session_id, exc, exc_info=True,
-            )
+    # Phase 3 §7c step 1: send the session.bootstrap envelope so
+    # the runner-side JaatoSession host is populated alongside the
+    # daemon-side one.  This used to be gated on
+    # ``JAATO_RUNNER_HOSTS_SESSION`` (a §3.3b → §3.3c transitional
+    # review-aid flag); the flag was removed in §7c step 1 because
+    # the runner-side host is now an unconditional precondition for
+    # the seat-flip's later steps (§7c removes the daemon-side leg).
+    # Daemon-side JaatoSession is still authoritative until the
+    # full seat-flip lands; coexistence is intentional during the
+    # §7c rollout.
+    #
+    # Bootstrap failure does NOT kill the session — the daemon-side
+    # JaatoSession is still authoritative.  Log loudly so the
+    # operator notices the runner host isn't actually populated.
+    try:
+        envelope = _build_session_envelope(
+            server=server,
+            session_id=session_id,
+            workspace_path=workspace_path,
+            profile_name=profile_name,
+        )
+        result = rpc.bootstrap_session_threadsafe(envelope, timeout=30.0)
+        logger.info(
+            "runner session.bootstrap acknowledged for %s: %s",
+            session_id, result,
+        )
+    except Exception as exc:  # noqa: BLE001 — boundary surface
+        logger.warning(
+            "runner session.bootstrap failed for %s: %s — "
+            "daemon-side JaatoSession remains authoritative",
+            session_id, exc, exc_info=True,
+        )
 
 
 def _build_session_envelope(

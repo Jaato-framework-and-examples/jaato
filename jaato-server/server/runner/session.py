@@ -5,23 +5,20 @@ Receives a :class:`SessionInitEnvelope` over the RPC channel at
 runner startup, constructs the session, runs ``configure()``, and
 exposes the resulting handle for downstream RPC dispatch.
 
-Lifecycle relationship to §3.3c:
+Lifecycle relationship to §7c:
 
-This commit (§3.3b) ships the host SHAPE — the bootstrap function,
-the envelope-to-runtime wiring, the test scaffold.  The daemon side
-still instantiates :class:`JaatoSession` in-process at this point;
-the runner-side host coexists with it under the
-``JAATO_RUNNER_HOSTS_SESSION=true`` build-internal review-aid flag.
+This module ships the host SHAPE — the bootstrap function, the
+envelope-to-runtime wiring, the test scaffold.  As of §7c step 1
+the daemon dispatches the ``session.bootstrap`` RPC unconditionally
+(was previously gated on ``JAATO_RUNNER_HOSTS_SESSION`` — flag
+removed in §7c step 1).  The daemon-side :class:`JaatoSession`
+still instantiates in-process at this point; the runner-side host
+coexists with it under the §7c rollout window.
 
-§3.3c flips the authoritative seat: the daemon's session lifecycle
-moves to dispatching against the runner's host; the in-process
-JaatoSession reference disappears from ``JaatoServer``; the flag
-goes away.
-
-Per peer-review N4 + plan §3.3b: this is **NOT a feature flag** in
-the parent design §5 sense.  Both commits ship in the same PR;
-the flag's lifetime is bounded to the commit window so reviewers
-can read §3.3b's diff without §3.3c's rewrite mixed in.
+Subsequent §7c steps flip the authoritative seat: the daemon's
+session lifecycle moves to dispatching against the runner's host;
+the in-process JaatoSession reference disappears from
+:class:`JaatoServer`.
 
 The bootstrap is testable in isolation via the ``runtime_factory``
 constructor argument — tests inject a stub runtime that bypasses
@@ -118,14 +115,14 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
     Production path; tests inject a stub.  Lives at module level
     rather than inline in ``bootstrap_session`` so the import-time
     cost of pulling in the heavy ``JaatoRuntime`` is paid only when
-    actually needed (a runner started without
-    ``JAATO_RUNNER_HOSTS_SESSION`` skips this).
+    actually needed (a runner that never receives a
+    ``session.bootstrap`` RPC skips this).
     """
-    # Import inside the factory so the cli-only Phase 2 runner path
+    # Import inside the factory so the runner's import surface
     # doesn't force the JaatoRuntime import (and its provider plugin
-    # transitive imports) at module load.  Phase 3 runners hosting
-    # a session pay this once per process; the cost is amortized
-    # against the spawn cost.
+    # transitive imports) at module load.  Runners that receive a
+    # session.bootstrap RPC pay this once per process; the cost is
+    # amortized against the spawn cost.
     from pathlib import Path
     from shared.jaato_runtime import JaatoRuntime
 
@@ -178,18 +175,13 @@ def bootstrap_session(
 
     Notes on §3.3b vs §3.3c scope:
 
-    This commit's bootstrap goes through ``runtime.create_session``
-    via the runtime factory but does NOT yet wire the resulting
-    session into the runner's RPC dispatch (so daemon→runner
-    ``tool.execute`` calls don't route to it yet).  §3.3c connects
-    the seat: the daemon shell rewrite stops instantiating its own
-    JaatoSession, the runner's RPC server starts dispatching tool
-    calls against ``host.session``, and the
-    ``JAATO_RUNNER_HOSTS_SESSION`` flag goes away.
-
-    For the §3.3b → §3.3c window, both sides hold a JaatoSession;
-    the daemon's is authoritative.  This is reviewable
-    incrementally.
+    This module's bootstrap goes through ``runtime.create_session``
+    via the runtime factory.  The runner's RPC dispatch routes
+    session.* calls against ``host.session`` (see
+    ``server/runner/rpc.py`` — ``_session_host`` field).  As of
+    §7c step 1 the daemon dispatches the ``session.bootstrap`` RPC
+    unconditionally; the daemon-side ``JaatoSession`` still
+    coexists and is authoritative until the seat-flip steps land.
     """
     # ---- 1. Validate ----
     try:

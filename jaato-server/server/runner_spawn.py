@@ -22,10 +22,12 @@ Lifecycle:
 Failures raise; the caller catches and downgrades the session to
 ``sandbox_mode = "soft"`` per the §4.6 fallback contract.
 
-Phase 3 §3.3c part 2's optional ``JAATO_RUNNER_HOSTS_SESSION``
-bootstrap-envelope dispatch stays in ``server/__main__.py``'s
-wrapper — that's part of the seat-flip bring-up window, not the
-shared spawn primitive.
+Phase 3 §7c step 1: the bootstrap-envelope dispatch
+(``rpc.bootstrap_session_threadsafe``) stays in
+``server/__main__.py``'s wrapper — that's part of the seat-flip
+bring-up window, not the shared spawn primitive.  As of §7c step
+1 the dispatch is unconditional (was previously gated on
+``JAATO_RUNNER_HOSTS_SESSION``; flag removed).
 """
 
 from __future__ import annotations

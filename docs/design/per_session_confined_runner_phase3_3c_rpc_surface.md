@@ -137,10 +137,12 @@ withdrawal):
                                                        remaining "NOW" sites re-bucketed
                                                        to DEFER-§7c per §10 wrap-up table)
     → §7b.2 (session.send_message)                 ← shipped (3ca3c14d)
-      → §7c (remove in-process JaatoSession + flag,
-             absorbs §7b.3 response-handler rewiring
-             + introspection collapse + DEFER-§7c
-             read-site migrations)
+      → §7c (remove in-process JaatoSession + flag) ← step 1 shipped
+                                                       (always-bootstrap +
+                                                       JAATO_RUNNER_HOSTS_SESSION
+                                                       flag removed); steps
+                                                       2-7 pending. See §7c
+                                                       sequencing table.
         → §7d (cgroup attach migration; depends on
                7a's stable cgroup placement)
 ```
@@ -445,23 +447,31 @@ After all 7b migrations land, the `_jaato` field can be removed
 from `JaatoServer.__init__`.  The runner-side host becomes the
 single source of truth.
 
+**Sequencing.**  The original "one logical commit" estimate has
+been refined into discrete steps as the absorbed scope (response-
+handler rewiring + introspection collapse + DEFER-§7c read
+migrations + the actual field removal) was enumerated:
+
+| Step | Focus | Status |
+|---|---|---|
+| **§7c step 1** | Always-bootstrap the runner-side session (remove `JAATO_RUNNER_HOSTS_SESSION` flag from the IPC spawn path; bootstrap dispatches unconditionally; failure-tolerant). | **Shipped.**  Files: `server/__main__.py`, `server/runner_spawn.py`, `server/runner/__main__.py`, `server/runner/session.py` (doc-comments).  New regression test: `server/tests/test_spawn_session_runner_always_bootstraps.py` (8 tests pinning the unconditional dispatch + failure tolerance + flag-value irrelevance). |
+| **§7c step 2** | WS-side bootstrap parity (WS spawn currently lacks the bootstrap dispatch; add it so WS sessions also get a runner-side `JaatoSession`). | Pending. |
+| **§7c step 3** | INTERNAL + WIRING bucket refactors — replace `_jaato.get_session()._executor` / `set_session_plugin` / `set_gc_plugin` with daemon-side direct accessors or runner-RPC equivalents.  Shrinks `_jaato.X` site count to the DAEMON-only residual. | Pending. |
+| **§7c step 4** | DAEMON bucket migration — split `JaatoClient` so `JaatoRuntime` lives daemon-side under a new `self._runtime` field; convert `_jaato.provider_name` / `_jaato.model_name` / `_jaato.is_connected` / `_jaato.auth_info` / `get_runtime` to direct `self._runtime.X` reads.  Introspection collapse from §7b.3 lands here. | Pending. |
+| **§7c step 5** | DEFER-§7c read migrations — switch `get_context_usage` / `get_context_limit` reads at `initialize()` + `_check_auth_completion()` to runner-RPC reads (now safe because the runner is the source of truth post-step-4). | Pending. |
+| **§7c step 6** | Remove `self._jaato` field from `JaatoServer.__init__`; collapse the ~15 `if self._jaato:` truthiness checks to `if self._runner_rpc:`; remove the `JAATO_RUNNER_HOSTS_SESSION` env-var doc references. | Pending. |
+| **§7c step 7** | Wire `PromptOperatorHandler` into the daemon's session bootstrap + thread `respond_to_X` through `prompt_operator_handler.resolve_response()`.  Response-handler rewiring from §7b.3 lands here.  Gated on permission-plugin runner-side activation (a separate sub-track that doesn't block steps 1-6). | Pending. |
+
 **`JAATO_RUNNER_HOSTS_SESSION` flag lifetime** (peer-review M4):
 the v5 plan §3.3b N4 specified the flag "lands and is removed
-within the same PR."  As implemented, the flag has been live
-across ~24 §3.3c precursor commits.  This is a **scope expansion
-from v5 N4** — the design has shifted from "single-PR
-transitional flag" to "multi-PR transitional flag with explicit
-removal commit."  Both readings are defensible; this doc picks
-the latter:
-
-- The flag is a **multi-PR transitional shape**.
-- It exists for the duration of §3.3c precursor → §7c rollout.
-- Removed in §7c's final commit (alongside the
-  `_jaato`-field removal from JaatoServer).
-- Operators never see the flag on a released server version
-  (still upholds N4's intent — the user-facing concern was
-  preventing operator-visible feature-flag accumulation, which
-  this doesn't violate).
+within the same PR."  As implemented, the flag was live across
+~24 §3.3c precursor commits — a **scope expansion from v5 N4**
+(single-PR transitional flag → multi-PR transitional flag with
+explicit removal commit).  The flag was removed in **§7c step 1**
+(this doc-revision's commit).  Operators never see the flag on a
+released server version (still upholds N4's intent — the
+user-facing concern was preventing operator-visible feature-flag
+accumulation, which this doesn't violate).
 
 Files touched:
 - `server/core.py` — remove `self._jaato` field + all None-

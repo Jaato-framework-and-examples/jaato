@@ -11,15 +11,13 @@ socketpair inherited as fd 3 and per-session config in env:
 - ``JAATO_RUNNER_LOG_PATH`` — optional log-file path (else fd 1/2 left
   inherited from the daemon — see plan §5.1 for the per-workspace
   log default that the daemon's spawner sets).
-- ``JAATO_RUNNER_HOSTS_SESSION`` — Phase 3 §3.3b transitional
-  review-aid flag.  When ``"1"`` / ``"true"``, the runner is
-  authoritative for ``JaatoSession`` hosting; when unset, the
-  daemon side instantiates and the runner is the cli-only Phase 2
-  surface.  This flag is consumed by §3.3c's ``session.bootstrap``
-  RPC handler (not yet wired here); §3.3b ships only the bootstrap
-  function (``server.runner.session.bootstrap_session``) + its unit
-  tests.  NOT a feature flag in the parent §5 sense — bounded to
-  the §3.3b → §3.3c PR window.
+- (no env vars consumed by this entry point — the runner-side
+  session bootstrap is driven by the daemon's
+  ``session.bootstrap`` RPC; the daemon dispatches that
+  unconditionally as of Phase 3 §7c step 1.  The historical
+  ``JAATO_RUNNER_HOSTS_SESSION`` review-aid flag was removed in
+  §7c step 1 — see ``server/__main__.py`` for the
+  always-bootstrap call site.)
 
 Bootstrap order (§4.6):
 1. Read profile from env.
