@@ -125,8 +125,30 @@ All three follow the same pattern:
 ## 7. Remaining work (the seat-flip itself)
 
 The dispatch surface is comprehensive enough that the seat-flip
-can proceed handler-by-handler.  Daemon-side migration scope (the
-canonical count, replacing the original "~95"):
+can proceed handler-by-handler.
+
+**Recommended bucket order** (per peer-review v2):
+
+```
+§7a (always-spawn)
+  → §7b.1 (stateless setters / readers; ~5 commits)
+    → §7b.2 (session.send_message; 1 commit)
+      → §7b.3 (response handlers + get_runtime; 2 commits)
+        → §7c (remove in-process JaatoSession + flag)
+          → §7d (cgroup attach migration; depends on 7a's
+                 stable cgroup placement)
+```
+
+§7b.1-§7b.3 internally share a common dependency on §7a
+(always-spawn) — until the runner is unconditionally available,
+the daemon-side migrations would need a fallback shim.  Order
+within 7b is bottom-up by complexity; the response-handler
+sub-bucket (7b.3) lands last because it requires the new
+``runtime.complete`` primitive which itself reuses the
+streaming-channel patterns proven in 7b.2's ``send_message``.
+
+Daemon-side migration scope (the canonical count, replacing the
+original "~95"):
 
 | File | `self._jaato.X` access count | Notes |
 |---|---|---|
@@ -153,16 +175,16 @@ Open design questions (peer-review M1):
    independently.  After 7a, every IPC + WS-standalone session
    has a runner regardless of the apparmor flag.  Two modes the
    doc must pick:
-   - **Mandatory**: runner always spawned for IPC/WS.  Apparmor
-     becomes a confinement-mode flag inside the runner-spawn
-     path.  Eliminates the `spawn_runner: bool` knob.
-     Recommended — matches the "runner is always the seat" design
-     endpoint.
-   - **Configurable**: new `spawn_runner: bool` profile field
-     independent of `apparmor`.  Defaults True for IPC/WS.
-     Allows daemon operators to fall back to in-process mode
-     (e.g., extreme-low-latency single-tenant deployments).
-     Adds a feature surface that must stay maintained.
+   - **Mandatory** (chosen): runner always spawned for IPC/WS.
+     Apparmor becomes a confinement-mode flag inside the runner-
+     spawn path.  Eliminates the `spawn_runner: bool` knob.  Per
+     peer-review v2 confirmation: "a `spawn_runner: bool` knob
+     would just defer the seat-flip's complexity into a permanent
+     config-mode bifurcation.  Mandatory = single posture =
+     simpler maintenance."
+   - **Configurable** (rejected): new `spawn_runner: bool`
+     profile field independent of `apparmor`.  Adds a feature
+     surface that must stay maintained.  Rejected.
 2. **Performance.** Subprocess spawn + RPC handshake + plugin
    discovery is non-trivial latency at session-create time.
    Daemons hosting many short-lived sessions (CI test harnesses,
@@ -384,9 +406,30 @@ One commit; depends on 7a + 7b.1 + 7b.2 + 7b.3.
     `_cgroup_attach_to_session_cgroup()` invoked at Popen time;
     the runner subprocess is itself in the cgroup so child
     processes inherit by default — `_cgroup_attach` becomes
-    an inherit-check rather than an explicit move.
+    an inherit-check rather than an explicit move.  This is
+    materially simpler than today's per-process explicit
+    migrate (per peer-review v2 observation #2).
   - Test: existing `test_runtime_limits_e2e.py:312/354` gates
     the migration via `_can_migrate_to(_find_writable_cgroup_parent())`.
+  - **Additional test required** (per peer-review v2 observation
+    #2): grandchild cgroup inheritance — a process spawned by a
+    runner-tier plugin (e.g., `interactive_shell`'s pexpect-spawned
+    PTY child, or `cli`'s subprocess child) MUST inherit the
+    runner's cgroup placement.  Inheritance vs explicit-move is
+    the stress case for this approach: today's per-process
+    `_cgroup_attach` callback runs once per Popen and is
+    explicit; inheritance relies on the kernel's default child-
+    inherits-parent behavior, which is correct under cgroup v2
+    but worth pinning with an integration test that:
+    1. Spawns a runner attached to a specific cgroup.
+    2. Has the runner spawn an interactive_shell PTY (or cli
+       subprocess).
+    3. Reads `/proc/<pty_child_pid>/cgroup` from the daemon side
+       and asserts it matches the runner's expected cgroup
+       placement.
+    4. Repeats for a grandchild (the PTY's child shell).
+    Catches the regression where a future kernel / cgroup-driver
+    change breaks inheritance silently.
   - One commit; depends on 7a (always-spawn) so the runner
     has a stable cgroup placement.
 
