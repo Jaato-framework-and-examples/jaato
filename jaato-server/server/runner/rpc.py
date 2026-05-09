@@ -588,6 +588,17 @@ class RunnerRPC:
             # has no budget yet (pre-configure).  args = ``{}``.
             return self._handle_session_snapshot_instruction_budget()
 
+        if env.method == "session.inject_prompt":
+            # Phase 3 §7c step 6.1: inject a prompt into the
+            # runner-side session's message queue (mid-turn or
+            # idle-routed based on source_type).  Replaces the
+            # daemon-side direct call at core.py:3238.  args =
+            # ``{"text": str, "source_id": str?, "source_type":
+            # str?}`` where source_type is the SourceType enum's
+            # .value (e.g. "user", "parent", "child", "system",
+            # "event").
+            return self._handle_session_inject_prompt(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1169,6 +1180,103 @@ class RunnerRPC:
         # further nested.
         import copy
         return True, {"snapshot": copy.deepcopy(raw)}
+
+    def _handle_session_inject_prompt(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Inject a prompt into the runner-side session's message queue.
+
+        Phase 3 §7c step 6.1.  Replaces the pre-§7c daemon-side
+        call ``self._jaato.get_session().inject_prompt(text, ...)``
+        at server/core.py:3238.
+
+        ``JaatoSession.inject_prompt`` accepts a ``SourceType`` enum
+        instance; the wire carries its string value (e.g. "user")
+        which the handler maps back to the enum.
+
+        Args:
+            text: required str — the prompt text.
+            source_id: optional str — sender identifier (defaults
+                to "unknown" inside JaatoSession).
+            source_type: optional str — one of the
+                :class:`shared.message_queue.SourceType` enum
+                values ("parent", "child", "user", "system",
+                "event").  Defaults to "user" inside JaatoSession.
+
+        Returns ``{"ok": True}`` on success.
+
+        Defensive contract: ``text`` is REQUIRED — missing key
+        surfaces as ``stage="decode"`` rather than silently
+        injecting an empty prompt.  Unknown ``source_type`` value
+        surfaces as ``stage="decode"`` rather than collapsing to
+        the framework default — protects against typos that would
+        misroute message priority.
+        """
+        from shared.message_queue import SourceType
+
+        text = args.get("text")
+        if not isinstance(text, str):
+            return False, {
+                "error": (
+                    f"session.inject_prompt: 'text' must be a str; "
+                    f"got {type(text).__name__}"
+                ),
+                "stage": "decode",
+            }
+        source_id = args.get("source_id")
+        if source_id is not None and not isinstance(source_id, str):
+            return False, {
+                "error": (
+                    f"session.inject_prompt: 'source_id' must be a str "
+                    f"or omitted; got {type(source_id).__name__}"
+                ),
+                "stage": "decode",
+            }
+        source_type_str = args.get("source_type")
+        source_type_enum: Any = None
+        if source_type_str is not None:
+            if not isinstance(source_type_str, str):
+                return False, {
+                    "error": (
+                        f"session.inject_prompt: 'source_type' must be a str "
+                        f"or omitted; got {type(source_type_str).__name__}"
+                    ),
+                    "stage": "decode",
+                }
+            try:
+                source_type_enum = SourceType(source_type_str)
+            except ValueError:
+                valid = sorted(s.value for s in SourceType)
+                return False, {
+                    "error": (
+                        f"session.inject_prompt: 'source_type' must be one "
+                        f"of {valid}; got {source_type_str!r}"
+                    ),
+                    "stage": "decode",
+                }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        injector = getattr(session, "inject_prompt", None)
+        if not callable(injector):
+            return False, {
+                "error": (
+                    "session.inject_prompt: session has no inject_prompt "
+                    "method (rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            injector(text, source_id=source_id, source_type=source_type_enum)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.inject_prompt: inject raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "inject",
+            }
+        return True, {"ok": True}
 
     def _handle_session_get_turn_accounting(self) -> "tuple[bool, Any]":
         """Read the runner-side per-turn token usage / timing list.

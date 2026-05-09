@@ -1063,6 +1063,70 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_inject_prompt(
+        self,
+        text: str,
+        *,
+        source_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Inject a prompt into the runner-side session's message
+        queue (mid-turn or idle-routed based on source_type).
+
+        Phase 3 §7c step 6.1.  Replaces the pre-§7c daemon-side
+        call ``self._jaato.get_session().inject_prompt(text, ...)``
+        in ``JaatoServer.execute_command``-side code paths
+        (core.py:3238).
+
+        Args:
+            text: The prompt text to inject.
+            source_id: Optional sender id (defaults to "unknown"
+                runner-side).
+            source_type: Optional ``SourceType`` enum value as
+                string (one of "parent", "child", "user", "system",
+                "event"; defaults to "user" runner-side).  Daemon-
+                side callers typically have a
+                :class:`shared.message_queue.SourceType` enum
+                instance — pass ``source_type=enum.value`` to
+                serialize.
+
+        The wire carries ``source_type`` as the enum's string
+        value to keep the wire schema JSON-compatible; the runner-
+        side handler maps it back to the enum.
+        """
+        if not isinstance(text, str):
+            raise ValueError(
+                f"session_inject_prompt: text must be str; "
+                f"got {type(text).__name__}"
+            )
+        body: Dict[str, Any] = {"text": text}
+        if source_id is not None:
+            body["source_id"] = source_id
+        if source_type is not None:
+            body["source_type"] = source_type
+        await self._call_named(
+            "session.inject_prompt", body, timeout=timeout,
+        )
+
+    def session_inject_prompt_threadsafe(
+        self,
+        text: str,
+        *,
+        source_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_inject_prompt(
+                text,
+                source_id=source_id,
+                source_type=source_type,
+                timeout=timeout,
+            ),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,
