@@ -1222,6 +1222,52 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_restore_conversation_budget(
+        self,
+        snapshot: "Dict[str, Any]",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Restore the runner-side session's CONVERSATION instruction-
+        budget entry from a SessionState snapshot.
+
+        Phase 3 §7c step 6.6.1.3.  Replaces the pre-§7c daemon-
+        side reach at ``server/session_manager.py:2592-2593``.
+        Wraps the public method
+        ``JaatoSession.restore_conversation_budget`` added in
+        §7c step 6.6.1.0.
+
+        Wire shape: ``{"snapshot": <dict>}`` — the snapshot is
+        a JSON-native dict produced by
+        ``InstructionBudget.get_conversation_snapshot()`` /
+        ``SourceEntry.to_dict()``.  Same wire-shape-reuse
+        rationale as 6.6.1.1's `set_initial_history` and
+        6.6.1.2's `restore_turn_accounting`: no special wrapper
+        needed, the persistence shape IS the wire shape.
+
+        Args:
+            snapshot: Conversation-source snapshot dict from a
+                :class:`SessionState`'s ``budget_state``.  Empty
+                / falsy snapshots are permitted (the underlying
+                method is documented as no-op for empty input).
+        """
+        await self._call_named(
+            "session.restore_conversation_budget",
+            {"snapshot": dict(snapshot)},
+            timeout=timeout,
+        )
+
+    def session_restore_conversation_budget_threadsafe(
+        self,
+        snapshot: "Dict[str, Any]",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_restore_conversation_budget(snapshot, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,

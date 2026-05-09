@@ -624,6 +624,20 @@ class RunnerRPC:
             # rationale as 6.6.1.1).
             return self._handle_session_restore_turn_accounting(env.args)
 
+        if env.method == "session.restore_conversation_budget":
+            # Phase 3 §7c step 6.6.1.3: restore the runner-side
+            # session's CONVERSATION instruction-budget entry from
+            # a SessionState snapshot.  Replaces the daemon-side
+            # reach at session_manager.py:2592-2593 through
+            # ``session.instruction_budget.restore_conversation_from_snapshot``
+            # (now public
+            # ``JaatoSession.restore_conversation_budget`` since
+            # §7c step 6.6.1.0).  args = ``{"snapshot": <dict>}``
+            # — the snapshot is a JSON-native dict produced by
+            # ``InstructionBudget.get_conversation_snapshot()`` /
+            # ``SourceEntry.to_dict()`` (no special wrapper).
+            return self._handle_session_restore_conversation_budget(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1476,6 +1490,91 @@ class RunnerRPC:
             return False, {
                 "error": (
                     f"session.restore_turn_accounting: setter raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
+            }
+        return True, {"ok": True}
+
+    def _handle_session_restore_conversation_budget(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Restore the runner-side session's CONVERSATION instruction-
+        budget entry from a SessionState snapshot.
+
+        Phase 3 §7c step 6.6.1.3.  Replaces the pre-§7c daemon-
+        side reach at ``server/session_manager.py:2592-2593``:
+
+            jaato_session.instruction_budget.restore_conversation_from_snapshot(
+                state.budget_state)
+
+        Now wraps the public method
+        :meth:`JaatoSession.restore_conversation_budget` added
+        in §7c step 6.6.1.0 (commit 13ce5939).  The public
+        method is no-op when ``self._instruction_budget`` is
+        None (pre-:meth:`configure`); this handler preserves
+        that semantic — a "successful" no-op rather than an
+        error.
+
+        Wire shape: ``{"snapshot": <dict>}`` — the snapshot is
+        a JSON-native dict produced by
+        :meth:`InstructionBudget.get_conversation_snapshot` /
+        :meth:`SourceEntry.to_dict` (see
+        instruction_budget.py:399).  No special wrapper needed;
+        the wire shape IS the persistence shape.
+
+        Defensive contract:
+
+          - ``snapshot`` must be a dict (missing key or non-
+            dict → ``stage="decode"``).
+          - Empty / falsy snapshot is permitted: the underlying
+            method is documented as no-op when ``snapshot`` is
+            empty (instruction_budget.py:407 ``if not snapshot:
+            return``).  Treat ``{"snapshot": {}}`` as success.
+          - Per-key schema NOT validated — accepts any dict
+            shape.  The underlying ``restore_conversation_from_snapshot``
+            handles its own structural checks (gc_policy enum,
+            children recursion); a malformed snapshot surfaces
+            as ``stage="set"``.
+
+        Args: ``{"snapshot": Dict[str, Any]}``.
+        Returns: ``{"ok": True}`` on success.
+        """
+        if "snapshot" not in args:
+            return False, {
+                "error": (
+                    "session.restore_conversation_budget: 'snapshot' key required"
+                ),
+                "stage": "decode",
+            }
+        snapshot = args["snapshot"]
+        if not isinstance(snapshot, dict):
+            return False, {
+                "error": (
+                    f"session.restore_conversation_budget: 'snapshot' must "
+                    f"be a dict; got {type(snapshot).__name__}"
+                ),
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        setter = getattr(session, "restore_conversation_budget", None)
+        if not callable(setter):
+            return False, {
+                "error": (
+                    "session.restore_conversation_budget: session has no "
+                    "restore_conversation_budget method (rolling-upgrade "
+                    "gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            setter(snapshot)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.restore_conversation_budget: setter raised "
                     f"{type(exc).__name__}: {exc}"
                 ),
                 "stage": "set",
