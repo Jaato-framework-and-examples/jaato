@@ -3885,6 +3885,36 @@ class JaatoServer:
         self._runner_rpc = None
         self._spawned_runner = None
         if rpc is not None:
+            # Phase 3 §3.3c precursor: call session.shutdown FIRST so
+            # the runner-side host calls close_session on the
+            # bootstrapped JaatoSession (firing on_session_end hooks)
+            # BEFORE we close the transport + SIGTERM the runner
+            # process.  Without this, plugin teardown ran AFTER
+            # process termination — file flushes / network closes
+            # raced against SIGKILL.
+            #
+            # session_shutdown is best-effort: if no session was
+            # bootstrapped (Phase 2 cli-only path) it returns the
+            # empty session_id; if it raises (transport already
+            # closed, runner crashed mid-call) we log + proceed to
+            # close().  Keeping shutdown robust matters more than
+            # the graceful-teardown improvement.
+            shutdown_method = getattr(rpc, "session_shutdown_threadsafe", None)
+            if callable(shutdown_method):
+                try:
+                    sid = shutdown_method(timeout=5.0)
+                    if sid:
+                        logger.debug(
+                            "JaatoServer.shutdown: runner-side "
+                            "session.shutdown for %s succeeded",
+                            sid,
+                        )
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "JaatoServer.shutdown: session.shutdown RPC "
+                        "failed (%s); proceeding to transport close",
+                        exc,
+                    )
             try:
                 import asyncio
                 loop = getattr(rpc, "_loop", None)
