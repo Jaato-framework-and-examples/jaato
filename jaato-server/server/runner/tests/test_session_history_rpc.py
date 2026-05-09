@@ -307,3 +307,67 @@ def test_dispatch_routes_get_context_usage() -> None:
     ok, result = rpc._dispatch_method(env)
     assert ok is True
     assert "usage" in result
+
+
+# ----------------------------------------------------------------------
+# Real Message serialization (regression — handler must not require
+# a to_dict method on every message; dataclasses.asdict + enum
+# coercion is the post-§3.3c-precursor fallback path)
+# ----------------------------------------------------------------------
+
+
+def test_get_history_serializes_real_message_dataclasses() -> None:
+    """Production Message instances (from
+    jaato_sdk.plugins.model_provider.types) don't define
+    to_dict() — they're plain dataclasses with Role-enum role
+    fields.  The handler must serialize them via
+    ``dataclasses.asdict`` + enum coercion so the JSON encoder
+    doesn't choke on the wire."""
+    from jaato_sdk.plugins.model_provider.types import Message
+    import json
+
+    from jaato_sdk.plugins.model_provider.types import Role
+    rpc = _make_lone_runner()
+    session = _FakeSession()
+    session.transformed_history = [
+        Message.from_text(Role.USER, "hello"),
+        Message.from_text(Role.MODEL, "hi back"),
+    ]
+    _install(rpc, session)
+
+    ok, result = rpc._handle_session_get_history({})
+    assert ok is True
+    history = result["history"]
+    assert len(history) == 2
+    # Each entry must round-trip cleanly through json.dumps
+    # (no Enum / dataclass leaks).
+    for entry in history:
+        encoded = json.dumps(entry)
+        decoded = json.loads(encoded)
+        assert decoded["role"] in ("user", "model")
+        assert isinstance(decoded["parts"], list)
+        # parts contain text Part with the original content.
+        assert decoded["parts"][0]["text"] in ("hello", "hi back")
+
+
+def test_serialize_helper_coerces_enums_recursively() -> None:
+    """The _coerce_for_json helper handles nested enums / dicts /
+    lists / tuples — covers the full conversation Part/Role tree."""
+    import enum
+    from server.runner.rpc import _coerce_for_json
+
+    class _Color(enum.Enum):
+        RED = "red"
+        BLUE = "blue"
+
+    payload = {
+        "color": _Color.RED,
+        "items": [_Color.BLUE, {"nested": _Color.RED}],
+        "tup": (_Color.RED, _Color.BLUE),
+    }
+    out = _coerce_for_json(payload)
+    assert out == {
+        "color": "red",
+        "items": ["blue", {"nested": "red"}],
+        "tup": ["red", "blue"],
+    }

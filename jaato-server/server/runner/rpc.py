@@ -846,24 +846,16 @@ class RunnerRPC:
 
         history_dicts: list = []
         for msg in messages:
-            to_dict = getattr(msg, "to_dict", None)
-            if callable(to_dict):
-                try:
-                    history_dicts.append(to_dict())
-                except Exception:  # noqa: BLE001
-                    # Single-message serialization failure must not
-                    # drop the whole history — substitute a
-                    # placeholder so the count stays accurate and
-                    # the daemon can log the issue.
-                    history_dicts.append(
-                        {"role": "system", "content": "<unserialisable>"}
-                    )
-            else:
-                # Defensive: messages without to_dict (e.g. test
-                # doubles) fall through as-is; the JSON encoder
-                # will choke if not serialisable, surfacing the
-                # bug at the wire boundary.
-                history_dicts.append(msg)
+            try:
+                history_dicts.append(_serialize_message_for_wire(msg))
+            except Exception:  # noqa: BLE001 — boundary
+                # Single-message serialization failure must not
+                # drop the whole history — substitute a
+                # placeholder so the count stays accurate and
+                # the daemon can log the issue.
+                history_dicts.append(
+                    {"role": "system", "content": "<unserialisable>"},
+                )
         return True, {"history": history_dicts}
 
     def _handle_session_get_context_usage(self) -> "tuple[bool, Any]":
@@ -1141,6 +1133,49 @@ class RunnerRPC:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _serialize_message_for_wire(msg: Any) -> Any:
+    """JSON-friendly serialization of a conversation Message
+    (Phase 3 §3.3c precursor).
+
+    Used by the runner-side ``session.get_history`` handler.  Tries
+    in order:
+
+    1. ``msg.to_dict()`` if defined — custom message types (test
+       doubles, future opt-in serializers) win.
+    2. :func:`dataclasses.asdict` for plain dataclasses (the real
+       ``shared.plugins.model_provider.types.Message`` shape).  Enum
+       values are coerced to their ``.value`` form recursively so
+       JSON encoders don't choke.
+    3. Pass-through (last resort — caller's try/except will catch).
+
+    The wire form must round-trip cleanly to ``json.dumps`` — the
+    runner-side framing uses JSON throughout.
+    """
+    to_dict = getattr(msg, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    import dataclasses
+    if dataclasses.is_dataclass(msg) and not isinstance(msg, type):
+        return _coerce_for_json(dataclasses.asdict(msg))
+    return msg
+
+
+def _coerce_for_json(value: Any) -> Any:
+    """Recursively coerce dataclass-derived dicts to JSON-friendly
+    primitives.  Enums → their ``.value``; nested dicts/lists
+    recursed; everything else passed through."""
+    import enum
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {k: _coerce_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_coerce_for_json(v) for v in value]
+    if isinstance(value, tuple):
+        return [_coerce_for_json(v) for v in value]
+    return value
 
 
 def _extract_error_message(result: Any) -> str:
