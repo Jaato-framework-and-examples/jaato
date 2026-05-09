@@ -47,6 +47,7 @@ def spawn_session_runner(
     workspace_path: str,
     profile_name: str,
     daemon_loop: asyncio.AbstractEventLoop,
+    disable_confine: bool = False,
 ) -> None:
     """Spawn the per-session runner subprocess and wire its RPC handle
     onto the JaatoServer.
@@ -58,14 +59,24 @@ def spawn_session_runner(
             cwd and as the prefix for the per-session log file path
             (plan §5.1).
         profile_name: AppArmor profile name (already loaded in the
-            kernel).
+            kernel).  Required unless *disable_confine* is set —
+            then it can be empty (the runner runs unconfined).
         daemon_loop: The daemon's main asyncio loop — needed to run
             ``RunnerRPCClient.start()`` since it's async.
+        disable_confine: Phase 3 §7a — skip kernel-level
+            confinement.  Used by the always-spawn path when the
+            client did not opt into apparmor.  The runner spawns
+            with ``JAATO_RUNNER_DISABLE_CONFINE=1``; tool execution
+            runs in the runner subprocess but without an AppArmor
+            profile applied.  The runner-RPC dispatch surface is
+            still available; the trade-off is process isolation
+            without kernel-enforced FS confinement.
 
     Raises:
         RuntimeError: when *daemon_loop* is None or the runner-RPC
             start times out.  Caller catches and downgrades to
-            ``sandbox_mode = "soft"``.
+            ``sandbox_mode = "soft"`` (or omits the field entirely
+            for the always-spawn-no-apparmor path).
         Exception: any spawn / RPC failure.  Caller catches and
             downgrades.
     """
@@ -90,6 +101,7 @@ def spawn_session_runner(
         session_id=session_id,
         workspace_path=workspace_path,
         log_path=log_path,
+        disable_confine=disable_confine,
     )
 
     rpc = RunnerRPCClient(
@@ -103,6 +115,9 @@ def spawn_session_runner(
 
     server.set_runner_rpc(rpc, spawned)
     logger.info(
-        "runner spawned for session %s: pid=%d profile=%s log=%s",
-        session_id, spawned.pid, profile_name, log_path or "(inherited)",
+        "runner spawned for session %s: pid=%d profile=%s log=%s confined=%s",
+        session_id, spawned.pid,
+        profile_name or "(none)",
+        log_path or "(inherited)",
+        not disable_confine,
     )

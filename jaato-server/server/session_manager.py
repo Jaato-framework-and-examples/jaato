@@ -495,95 +495,207 @@ class SessionManager:
         workspace_path: Optional[str],
         client_id: Optional[str],
     ) -> Optional[str]:
-        """Provision the IPC AppArmor profile + spawn the per-session runner.
+        """Provision IPC AppArmor (opt-in) + spawn the per-session runner.
 
-        Phase 3 §3.13.  Relocated from the
-        ``_ipc_apparmor_pre_init_hook`` in ``server/__main__.py``.
+        Phase 3 §3.13 + §7a.  §3.13 relocated this from the legacy
+        pre-init hook in ``server/__main__.py``.  §7a refactored the
+        body into two composed helpers — apparmor provisioning is
+        opt-in, but the runner spawn is unconditional (every IPC
+        session with a workspace gets a runner; the runner-RPC
+        dispatch surface is always available for the seat-flip's
+        ``self._jaato.X`` migrations).
 
         Lifecycle:
-        1. Skip when ``client_id`` is ``None`` (non-client paths:
-           disk-restore, ephemeral, WS-standalone — those follow
-           §3.12's per-path migration).
-        2. Look up the client's apparmor opt-in via
-           ``self._client_config[client_id]["apparmor"]``.  Skip if
-           opt-out (the default).
-        3. Skip when the session's workspace lives under a running WS
-           server's workspace_root — the WS hook owns confinement
-           there.
-        4. Lazy-init :class:`AppArmorManager` against the captured
-           daemon loop.
-        5. ``apparmor.provision_profile(...)`` — on failure, return
-           ``"soft"`` and notify the client.
-        6. :func:`spawn_session_runner` — on failure, return
-           ``"soft"`` and notify the client.
-        7. On success, return ``"apparmor"`` and notify the client.
+        1. Skip when ``client_id`` is ``None`` (non-client paths
+           supply their own bootstrap; this method is IPC-only).
+        2. Skip when the session has no ``workspace_path`` — the
+           runner needs a cwd; sessions without one don't get one
+           (matches pre-§7a behavior).
+        3. Skip when the session's workspace lives under a running
+           WS server's workspace_root — the WS hook owns this
+           lane; don't double-spawn.
+        4. **Apparmor (opt-in)**: if ``client_config["apparmor"]``
+           is set, call :meth:`_provision_apparmor_for_session` to
+           load the profile.  Returns the resolved profile_name +
+           sandbox_mode (``"apparmor"`` on success, ``"soft"`` on
+           provisioning failure).
+        5. **Spawn (unconditional)**: call
+           :meth:`_spawn_session_runner_unconditional` with the
+           profile_name from step 4 (or empty + disable_confine=True
+           when no opt-in).  Spawn failure downgrades the return
+           value to ``"soft"`` (or leaves it ``None`` for the
+           no-opt-in case).
 
         Returns:
             The planned ``sandbox_mode`` for the Session record:
             ``"apparmor"`` (kernel-confined, runner spawned),
-            ``"soft"`` (downgrade due to provisioning / spawn
-            failure), or ``None`` (no apparmor opt-in / non-IPC
-            path / no workspace).
+            ``"soft"`` (apparmor downgrade due to provisioning /
+            spawn failure), or ``None`` (no apparmor opt-in or
+            spawn was unconditional but unconfined — sandbox_mode
+            stays None for the runner-without-confinement case
+            since the field semantically tracks confinement, not
+            runner presence).
         """
-        from jaato_sdk.events import SystemMessageEvent
-
-        # Phase 2 scope: only IPC apparmor opt-in triggers spawn.
+        # Phase 7a: only IPC client-driven sessions.
         # Non-client-driven bootstrap paths (loaded-from-disk,
-        # ephemeral, standalone WS) follow §3.12's per-path migration.
+        # ephemeral, standalone WS) supply their own bootstrap.
         if client_id is None:
             return None
 
-        client_config = self._client_config.get(client_id, {})
-        if not client_config.get("apparmor"):
-            return None
-
-        def _notify(message: str, style: str) -> None:
-            """Surface an apparmor-status line to the client.
-
-            Hook fires pre-init, BEFORE the session id is mapped to a
-            client (``_client_to_session``) and BEFORE the Session
-            record exists in ``_sessions``, so we route via
-            ``_emit_to_client(client_id, ...)`` directly.  Failures
-            are swallowed — emit must not break session creation.
-            """
-            logger.info("[apparmor] %s", message)
-            try:
-                self._emit_to_client(client_id, SystemMessageEvent(
-                    message=f"[apparmor] {message}",
-                    style=style,
-                ))
-            except Exception:
-                logger.warning(
-                    "Failed to emit apparmor status event for %s",
-                    session_id, exc_info=True,
-                )
-
+        # Spawn requires a workspace (cwd target).  Sessions without
+        # one don't get a runner; pre-§7a behavior preserved.
         if not workspace_path:
-            _notify(
-                "requested but session has no workspace_path — "
-                "running unconfined",
-                style="warning",
-            )
+            client_config = self._client_config.get(client_id, {})
+            if client_config.get("apparmor"):
+                # Surface the apparmor downgrade if the client
+                # explicitly asked.  Silent skip otherwise — most
+                # IPC sessions without workspace are short-lived
+                # / headless and don't expect a runner.
+                self._notify_apparmor(
+                    client_id, session_id,
+                    "requested but session has no workspace_path — "
+                    "running unconfined",
+                    style="warning",
+                )
             return None
 
-        # If a WS server is running and this workspace is under
-        # its workspace_root, the WS hook owns confinement for
-        # this session.  Don't double-provision.
-        ws_server = getattr(self, "_ws_server_ref", None)
-        if ws_server is not None:
-            ws_root = getattr(ws_server, "_workspace_root", None)
-            if ws_root:
-                try:
-                    ws_root_real = os.path.realpath(ws_root)
-                    sess_real = os.path.realpath(workspace_path)
-                    if (
-                        sess_real == ws_root_real
-                        or sess_real.startswith(ws_root_real + os.sep)
-                    ):
-                        return None
-                except OSError:
-                    pass
+        # WS-overlap precedence: WS hook handles confinement +
+        # runner spawn for sessions whose workspace is under the
+        # WS server's root.  Skip both apparmor and spawn here so
+        # we don't duplicate.
+        if self._workspace_under_ws_root(workspace_path):
+            return None
 
+        client_config = self._client_config.get(client_id, {})
+        opt_in_apparmor = bool(client_config.get("apparmor"))
+
+        # ----- Step 4: apparmor (opt-in) -----
+        profile_name = ""
+        sandbox_mode: Optional[str] = None
+        if opt_in_apparmor:
+            profile_name, sandbox_mode = self._provision_apparmor_for_session(
+                session_id=session_id,
+                workspace_path=workspace_path,
+                client_id=client_id,
+                client_config=client_config,
+            )
+            if profile_name == "" and sandbox_mode == "soft":
+                # Apparmor unavailable / provisioning failed.
+                # Continue to the unconditional spawn but the
+                # runner is unconfined — that's the §7a intent
+                # (always have a runner; confinement is layered).
+                pass
+
+        # ----- Step 5: spawn (unconditional) -----
+        spawn_ok = self._spawn_session_runner_unconditional(
+            server=server,
+            session_id=session_id,
+            workspace_path=workspace_path,
+            client_id=client_id,
+            profile_name=profile_name,
+        )
+        if not spawn_ok:
+            # Spawn failed.  If apparmor was opted-in, downgrade
+            # to "soft"; otherwise the session continues with
+            # in-process tool execution (no sandbox_mode change).
+            if opt_in_apparmor:
+                return "soft"
+            return None
+
+        # ----- Step 5b: success notification + return -----
+        if opt_in_apparmor and sandbox_mode == "apparmor":
+            config_root = client_config.get("config_root")
+            self._notify_apparmor(
+                client_id, session_id,
+                f"profile provisioned (workspace={workspace_path}, "
+                f"config_root={config_root or '(none)'}); runner spawned",
+                style="info",
+            )
+            return "apparmor"
+        if opt_in_apparmor and sandbox_mode == "soft":
+            # Apparmor opt-in but provisioning failed; runner
+            # spawned anyway (always-spawn).
+            return "soft"
+        # No apparmor opt-in: runner spawned unconfined.
+        # sandbox_mode stays None (semantically tracks confinement
+        # — there's none here, even though there IS a runner).
+        return None
+
+    def _notify_apparmor(
+        self,
+        client_id: str,
+        session_id: str,
+        message: str,
+        style: str,
+    ) -> None:
+        """Surface an apparmor-status line to the client.
+
+        Helper extracted for reuse between the apparmor-provision
+        path and the no-workspace warning path.  Routes via
+        ``_emit_to_client`` directly because at the call point the
+        Session record doesn't exist in ``_sessions`` yet (we're
+        pre-init).  Failures are swallowed — emit must not break
+        session creation.
+        """
+        from jaato_sdk.events import SystemMessageEvent
+        logger.info("[apparmor] %s", message)
+        try:
+            self._emit_to_client(client_id, SystemMessageEvent(
+                message=f"[apparmor] {message}",
+                style=style,
+            ))
+        except Exception:
+            logger.warning(
+                "Failed to emit apparmor status event for %s",
+                session_id, exc_info=True,
+            )
+
+    def _workspace_under_ws_root(self, workspace_path: str) -> bool:
+        """Return True iff *workspace_path* is under a running WS
+        server's ``_workspace_root``.
+
+        Used by ``_provision_ipc_apparmor_and_spawn_runner`` to
+        skip its work for sessions the WS hook owns — preventing
+        double-provision + double-spawn.
+        """
+        ws_server = getattr(self, "_ws_server_ref", None)
+        if ws_server is None:
+            return False
+        ws_root = getattr(ws_server, "_workspace_root", None)
+        if not ws_root:
+            return False
+        try:
+            ws_root_real = os.path.realpath(ws_root)
+            sess_real = os.path.realpath(workspace_path)
+            return (
+                sess_real == ws_root_real
+                or sess_real.startswith(ws_root_real + os.sep)
+            )
+        except OSError:
+            return False
+
+    def _provision_apparmor_for_session(
+        self,
+        session_id: str,
+        workspace_path: str,
+        client_id: str,
+        client_config: Dict[str, Any],
+    ) -> "Tuple[str, Optional[str]]":
+        """Provision the AppArmor profile for an IPC session
+        (Phase 3 §7a — opt-in only).
+
+        Caller has already checked the apparmor opt-in flag and
+        the workspace gates.  This method does only the apparmor
+        lifecycle: lazy-init manager + provision_profile.
+
+        Returns:
+            ``(profile_name, sandbox_mode)``:
+            - ``("<name>", "apparmor")`` on success.
+            - ``("", "soft")`` when AppArmor is unavailable on the
+              host or provisioning failed.  Caller should still
+              spawn the runner (with disable_confine=True) — that's
+              the §7a always-spawn intent.
+        """
         # Lazy-init the AppArmor manager.
         if getattr(self, "_apparmor_manager", None) is None:
             from server.apparmor import AppArmorManager
@@ -595,13 +707,14 @@ class SessionManager:
 
         apparmor = self._apparmor_manager
         if not apparmor.is_available():
-            _notify(
+            self._notify_apparmor(
+                client_id, session_id,
                 "requested but AppArmor is unavailable on this "
                 "host (non-Linux, kernel module not loaded, or "
                 "apparmor_parser missing) — running unconfined",
                 style="warning",
             )
-            return "soft"
+            return "", "soft"
 
         config_root = client_config.get("config_root")
         env_file = client_config.get("env_file")
@@ -611,25 +724,57 @@ class SessionManager:
             config_root=config_root,
             env_file=env_file,
         ):
-            _notify(
+            self._notify_apparmor(
+                client_id, session_id,
                 "profile provisioning failed (see daemon log) — "
                 "running unconfined",
                 style="warning",
             )
-            return "soft"
+            return "", "soft"
 
-        # Spawn the per-session runner subprocess.
+        return apparmor.get_profile_name(session_id), "apparmor"
+
+    def _spawn_session_runner_unconditional(
+        self,
+        server: 'JaatoServer',
+        session_id: str,
+        workspace_path: str,
+        client_id: str,
+        profile_name: str,
+    ) -> bool:
+        """Spawn the per-session runner subprocess (Phase 3 §7a —
+        always-called for IPC sessions with a workspace).
+
+        Args:
+            server: The session's JaatoServer instance.
+            session_id: Session identifier.
+            workspace_path: Session workspace (the runner's cwd).
+            client_id: For warning notifications on failure.
+            profile_name: AppArmor profile to self-confine to.
+                Empty string ``""`` means run unconfined (no
+                apparmor opt-in or provisioning failed) — the
+                spawn helper passes ``disable_confine=True`` to
+                ``RunnerSpawner``.
+
+        Returns:
+            True on successful spawn; False on failure.  Caller
+            decides whether to downgrade ``sandbox_mode`` based on
+            the apparmor opt-in flag.
+        """
         try:
             from server.runner_spawn import spawn_session_runner
             spawn_session_runner(
                 server=server,
                 session_id=session_id,
                 workspace_path=workspace_path,
-                profile_name=apparmor.get_profile_name(session_id),
+                profile_name=profile_name,
                 daemon_loop=getattr(self, "_daemon_loop", None),
+                disable_confine=(profile_name == ""),
             )
+            return True
         except Exception as exc:  # noqa: BLE001 — boundary
-            _notify(
+            self._notify_apparmor(
+                client_id, session_id,
                 f"runner spawn failed ({type(exc).__name__}: {exc}) "
                 "— falling back to in-process tool execution; "
                 "session is NOT kernel-confined",
@@ -638,14 +783,7 @@ class SessionManager:
             logger.exception(
                 "runner spawn failed for session %s", session_id,
             )
-            return "soft"
-
-        _notify(
-            f"profile provisioned (workspace={workspace_path}, "
-            f"config_root={config_root or '(none)'}); runner spawned",
-            style="info",
-        )
-        return "apparmor"
+            return False
 
     def add_pre_initialize_hook(self, hook: Callable) -> None:
         """Register a callback invoked BEFORE ``server.initialize()`` runs
