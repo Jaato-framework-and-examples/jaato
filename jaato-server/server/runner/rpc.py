@@ -571,6 +571,15 @@ class RunnerRPC:
             # telemetry attribution + journal save.
             return self._handle_session_get_turn_accounting()
 
+        if env.method == "session.set_reference_authorizer":
+            # Phase 3 §7c step 6.1: forward the daemon's
+            # ReferenceAuthorizer state as a bool flag (the Python
+            # object can't cross RPC; the runner-side references
+            # plugin reads the flag + uses the existing
+            # ``apparmor.add_reference_fragment`` runner→daemon
+            # RPC to authorize paths).  args = ``{"enabled": bool}``.
+            return self._handle_session_set_reference_authorizer(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1012,6 +1021,69 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"usage": dict(usage)}
+
+    def _handle_session_set_reference_authorizer(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Forward the daemon's ``ReferenceAuthorizer`` state to the
+        runner-side ``JaatoSession`` as a bool flag.
+
+        Phase 3 §7c step 6.1.  The actual ``ReferenceAuthorizer``
+        Python object can't cross the RPC boundary (it holds a
+        daemon-side ``AppArmorManager`` reference); the daemon
+        translates ``authorizer is not None`` into a bool flag,
+        and the runner-side session stores it via
+        :meth:`JaatoSession.set_reference_authorization_enabled`.
+
+        When the references plugin migrates runner-side, it reads
+        the flag via :meth:`is_reference_authorization_enabled`
+        and uses the existing ``apparmor.add_reference_fragment``
+        runner→daemon RPC (Phase 3 §3.2.2) to authorize paths.
+        The session_id for the RPC call is already known runner-
+        side via the bootstrap envelope.
+
+        Args: ``{"enabled": bool}``.  Returns ``{"ok": True}`` on
+        success.  Coerces truthy non-bool values to bool — daemon
+        callers pass a real bool but the coercion avoids spurious
+        decode failures.
+
+        Defensive contract: a missing ``enabled`` key surfaces as
+        ``stage="decode"`` (not silently treated as ``False``); a
+        spelling slip in the daemon-side wrapper would otherwise
+        silently disable authorization.
+        """
+        if "enabled" not in args:
+            return False, {
+                "error": (
+                    "session.set_reference_authorizer: 'enabled' key required"
+                ),
+                "stage": "decode",
+            }
+        enabled = bool(args["enabled"])
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        setter = getattr(session, "set_reference_authorization_enabled", None)
+        if not callable(setter):
+            return False, {
+                "error": (
+                    "session.set_reference_authorizer: session has no "
+                    "set_reference_authorization_enabled method "
+                    "(rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            setter(enabled)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.set_reference_authorizer: setter raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
+            }
+        return True, {"ok": True}
 
     def _handle_session_get_turn_accounting(self) -> "tuple[bool, Any]":
         """Read the runner-side per-turn token usage / timing list.

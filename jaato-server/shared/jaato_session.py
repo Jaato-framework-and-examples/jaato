@@ -327,6 +327,15 @@ class JaatoSession:
         # (sandbox_manager) only.  Plugins access this via
         # get_reference_authorizer() rather than touching the slot.
         self._reference_authorizer = None
+        # Phase 3 §7c step 6.1: bool flag mirror of the authorizer
+        # for the runner-side seat.  When the daemon-side _jaato is
+        # removed (step 6.6), the runner-side session reads this
+        # via :meth:`is_reference_authorization_enabled` and uses
+        # the ``apparmor.add_reference_fragment`` runner→daemon RPC
+        # to authorize paths.  Set via
+        # :meth:`set_reference_authorization_enabled` (called by
+        # the new ``session.set_reference_authorizer`` RPC handler).
+        self._reference_authorization_enabled: bool = False
         # The active override (passed via configure()) — None means the
         # assembled pipeline output is sent on the wire; "" means no
         # system message at all; non-empty replaces the assembly entirely.
@@ -1349,6 +1358,49 @@ class JaatoSession:
         layer the plugin needs to touch.
         """
         return self._reference_authorizer
+
+    def set_reference_authorization_enabled(self, enabled: bool) -> None:
+        """Set the bool flag indicating AppArmor reference-fragment
+        authorization is available for this session.
+
+        Phase 3 §7c step 6.1.  This is the **runner-side counterpart**
+        of :meth:`set_reference_authorizer`.
+
+        Pre-§7c the daemon called :meth:`set_reference_authorizer`
+        with a Python ``ReferenceAuthorizer`` instance, which the
+        daemon-side references plugin consumed via
+        :meth:`get_reference_authorizer`.  The Python object can't
+        cross the RPC boundary (it holds a daemon-side
+        ``AppArmorManager`` reference), so post-§7c the daemon
+        forwards a bool flag instead.
+
+        When the references plugin migrates runner-side, it reads
+        :meth:`is_reference_authorization_enabled` and uses the
+        existing ``apparmor.add_reference_fragment`` runner→daemon
+        RPC (Phase 3 §3.2.2) to authorize paths.  The session_id
+        for the RPC call is already known runner-side via the
+        bootstrap envelope.
+
+        Args:
+            enabled: ``True`` if the daemon-side AppArmor manager
+                successfully provisioned a profile for this session
+                (i.e. ``ReferenceAuthorizer is not None`` daemon-
+                side).  ``False`` for unconfined sessions.
+        """
+        self._reference_authorization_enabled = bool(enabled)
+
+    def is_reference_authorization_enabled(self) -> bool:
+        """Read the AppArmor reference-fragment authorization flag.
+
+        Returns ``False`` by default (pre-set, or when the daemon
+        forwards ``enabled=False``).  Used by the runner-side
+        references plugin (post-migration) to decide whether to
+        invoke the ``apparmor.add_reference_fragment`` runner→daemon
+        RPC when admitting an external reference path.
+
+        Phase 3 §7c step 6.1.
+        """
+        return getattr(self, "_reference_authorization_enabled", False)
 
     def set_parent_cancel_token(self, token: CancelToken) -> None:
         """Set a parent cancel token for cancellation propagation.

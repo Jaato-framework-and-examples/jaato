@@ -716,15 +716,39 @@ class JaatoServer:
         enabled for the session.  ``None`` is treated as "no authorizer
         available" — the references plugin then operates with the
         in-process allowlist alone.
+
+        Phase 3 §7c step 6.1: ALSO forwards a bool flag
+        (``authorizer is not None``) to the runner-side session via
+        the new ``session.set_reference_authorizer`` RPC.  The
+        Python ``ReferenceAuthorizer`` object itself can't cross
+        the RPC (holds a daemon-side ``AppArmorManager`` reference);
+        the runner-side references plugin (post-migration) uses the
+        existing ``apparmor.add_reference_fragment`` runner→daemon
+        RPC to authorize paths, gated on the bool flag.
+
+        Best-effort forwarding: failures log at DEBUG but don't
+        block the daemon-side state update — the daemon-side
+        references plugin (still active during the §7c rollout
+        window) keeps using the Python authorizer object directly.
         """
-        if not self._jaato:
-            logger.warning(
-                "set_reference_authorizer called before client initialized"
+        if self._jaato is not None:
+            session = self._jaato.get_session()
+            if session is not None:
+                session.set_reference_authorizer(authorizer)
+        rpc = self._runner_rpc
+        if rpc is not None:
+            forwarder = getattr(
+                rpc, "session_set_reference_authorizer_threadsafe", None,
             )
-            return
-        session = self._jaato.get_session()
-        if session is not None:
-            session.set_reference_authorizer(authorizer)
+            if callable(forwarder):
+                try:
+                    forwarder(authorizer is not None, timeout=2.0)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.debug(
+                        "set_reference_authorizer: runner RPC propagation "
+                        "failed (%s) — daemon-side state still updated",
+                        exc,
+                    )
 
     @property
     def auth_pending(self) -> bool:

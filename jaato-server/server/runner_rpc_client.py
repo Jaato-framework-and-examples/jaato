@@ -985,6 +985,44 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_set_reference_authorizer(
+        self, enabled: bool, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Forward the daemon's ``ReferenceAuthorizer`` state to the
+        runner-side ``JaatoSession`` as a bool flag.
+
+        Phase 3 §7c step 6.1.  The actual ``ReferenceAuthorizer``
+        Python object can't cross the RPC boundary (it holds a
+        daemon-side ``AppArmorManager`` reference); the daemon
+        translates ``authorizer is not None`` into the bool flag.
+
+        When the references plugin migrates runner-side, it reads
+        :meth:`JaatoSession.is_reference_authorization_enabled` and
+        uses the existing ``apparmor.add_reference_fragment``
+        runner→daemon RPC to authorize paths.  The session_id for
+        the RPC call is already known runner-side via the bootstrap
+        envelope.
+
+        Args:
+            enabled: ``True`` if the daemon-side
+                ``ReferenceAuthorizer`` is non-None (i.e. WS
+                provisioned an AppArmor profile for this session).
+                ``False`` for unconfined sessions.
+        """
+        await self._call_named(
+            "session.set_reference_authorizer",
+            {"enabled": bool(enabled)},
+            timeout=timeout,
+        )
+
+    def session_set_reference_authorizer_threadsafe(
+        self, enabled: bool, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_set_reference_authorizer(enabled, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,
