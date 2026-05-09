@@ -487,6 +487,16 @@ class RunnerRPC:
             # the seat-flip lands.
             return self._handle_session_get_context_usage()
 
+        if env.method == "session.get_context_limit":
+            # Phase 3 §7b.1 precursor: read-only context-window
+            # size in tokens.  Daemon-side falls back to this
+            # when ``get_context_usage`` returns 0 / missing —
+            # split out as its own RPC for that fallback path
+            # (the alternative was extending the usage dict, but
+            # callers want the limit independently of the usage
+            # snapshot).
+            return self._handle_session_get_context_limit()
+
         if env.method == "session.shutdown":
             # Phase 3 §3.3c precursor: graceful runner-side session
             # teardown.  Calls the bootstrapped JaatoSession's
@@ -917,6 +927,43 @@ class RunnerRPC:
                     {"role": "system", "content": "<unserialisable>"},
                 )
         return True, {"history": history_dicts}
+
+    def _handle_session_get_context_limit(self) -> "tuple[bool, Any]":
+        """Read-only context-window size in tokens (Phase 3 §7b.1
+        precursor).
+
+        Returns ``{"context_limit": int}`` on success.  The
+        underlying :meth:`JaatoSession.get_context_limit` returns
+        an int directly; we wrap it in a dict for symmetry with
+        the other read handlers.
+
+        Daemon-side callers use this as a fallback when
+        ``session.get_context_usage()['context_limit']`` is 0 /
+        missing (provider not yet initialized; usage dict
+        contracts).
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            limit = session.get_context_limit()
+        except Exception as exc:  # noqa: BLE001 — read boundary
+            return False, {
+                "error": (
+                    f"session.get_context_limit: read failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "read",
+            }
+        if not isinstance(limit, int) or limit < 0:
+            return False, {
+                "error": (
+                    f"session.get_context_limit: expected non-negative "
+                    f"int, got {limit!r}"
+                ),
+                "stage": "read",
+            }
+        return True, {"context_limit": limit}
 
     def _handle_session_get_context_usage(self) -> "tuple[bool, Any]":
         """Read-only snapshot of context-window usage stats.

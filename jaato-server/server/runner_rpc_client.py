@@ -821,6 +821,27 @@ class RunnerRPCClient:
         )
         return dict(result.get("usage", {}))
 
+    async def session_get_context_limit(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> int:
+        """Read the context-window size in tokens from the runner.
+
+        Daemon-side fallback for when ``session_get_context_usage``
+        returns a usage dict with a missing / zero ``context_limit``
+        (provider not yet initialized; dict contract evolves)."""
+        result = await self._call_named(
+            "session.get_context_limit", {}, timeout=timeout,
+        )
+        return int(result.get("context_limit", 0))
+
+    def session_get_context_limit_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> int:
+        return self._run_threadsafe(
+            self.session_get_context_limit(timeout=timeout),
+            timeout=timeout,
+        )
+
     def session_get_context_usage_threadsafe(
         self, *, timeout: Optional[float] = 5.0,
     ) -> Dict[str, Any]:
