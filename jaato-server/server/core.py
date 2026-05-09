@@ -2655,11 +2655,23 @@ class JaatoServer:
         # matches on ``AgentCompletedEvent.agent_id`` — sees the agent's
         # logical identity (e.g. ``"coordinator"``) instead of the
         # default ``"main"``.
-        self._jaato._agent_id = self._main_agent_id
+        #
+        # Phase 3 §7c step 3: previously this reached into the
+        # private attributes ``_jaato._agent_id`` / ``_jaato._agent_name``
+        # directly.  Replaced with the public
+        # :meth:`JaatoClient.set_agent_identity` setter — same
+        # behavior (agent_name is set only when display_name OR
+        # profile name is non-empty, otherwise the framework's
+        # default "Main Agent" is preserved).
+        agent_name: Optional[str] = None
         if self._main_agent_display_name:
-            self._jaato._agent_name = self._main_agent_display_name
+            agent_name = self._main_agent_display_name
         elif self._profile:
-            self._jaato._agent_name = self._profile.name
+            agent_name = self._profile.name
+        self._jaato.set_agent_identity(
+            agent_id=self._main_agent_id,
+            agent_name=agent_name,
+        )
         logger.debug("  _setup_agent_hooks: calling jaato.set_ui_hooks...")
         self._jaato.set_ui_hooks(hooks)
         logger.debug("  _setup_agent_hooks: jaato.set_ui_hooks done")

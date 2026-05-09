@@ -325,6 +325,35 @@ class JaatoClient:
             )
             # Note: Don't set status to "active" here - that happens when user sends input
 
+    def set_agent_identity(
+        self,
+        agent_id: str,
+        agent_name: Optional[str] = None,
+    ) -> None:
+        """Set the client's agent identity (id + optional display name).
+
+        Public surface for the daemon to push the resolved
+        ``agent_id`` / ``agent_name`` into the client BEFORE
+        :meth:`set_ui_hooks` runs — ``set_ui_hooks`` reads
+        ``self._agent_id`` to register the AgentState (via
+        ``on_agent_created``) and forwards the id to the session
+        (via ``session.set_ui_hooks``).  Pre-§7c-step-3 the daemon
+        reached into private attributes (``self._agent_id`` /
+        ``self._agent_name``) directly; this method replaces that
+        encapsulation violation.
+
+        Args:
+            agent_id: Logical agent identifier (e.g. ``"main"``,
+                ``"coordinator"``).  Always replaces the prior id.
+            agent_name: Optional display name.  If ``None``, the
+                prior name is preserved (useful when the caller
+                only wants to update the id and let the framework
+                default ``"Main Agent"`` stand for displays).
+        """
+        self._agent_id = agent_id
+        if agent_name is not None:
+            self._agent_name = agent_name
+
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models from the provider.
 
