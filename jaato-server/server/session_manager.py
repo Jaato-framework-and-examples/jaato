@@ -52,6 +52,7 @@ from jaato_sdk.events import (
     SessionInfoEvent,
     SessionDescriptionUpdatedEvent,
     SessionProfilesEvent,
+    SessionRestoredEvent,
     ContextUpdatedEvent,
     UsageBreakdown,
     AgentCreatedEvent,
@@ -106,6 +107,16 @@ class Session:
     provisioned: bool = False  # True if workspace was auto-provisioned by server
     created_by: Optional[str] = None  # Authenticated user who created the session
     sandbox_mode: Optional[str] = None  # "apparmor" or "soft" when workspace sandboxing is active
+    # Phase 3 §3.12 disk-restore + peer-review M5/N1: True when this
+    # Session was loaded from disk and is awaiting its first
+    # client-attach.  While True, ``check_permission`` ASK paths
+    # **hold** tool calls (queue the prompt rather than deny) so a
+    # session restored after a daemon restart doesn't silently fail
+    # in-flight work.  Cleared on first client attach, at which
+    # point the daemon emits ``SessionRestoredEvent`` so the client
+    # surfaces a "review pending tool calls" prompt and drains the
+    # queue.  False for fresh / never-restored sessions.
+    restored_pending_attach: bool = False
 
 
 class SessionManager:
@@ -2086,6 +2097,25 @@ class SessionManager:
 
         return None
 
+    def _count_pending_held_tool_calls(self, session: Session) -> int:
+        """Phase 3 §3.12 + peer-review M5/N1: return the count of
+        tool calls held by the runner-side permission plugin's
+        defer-and-flush queue for *session*.
+
+        The queue itself lives runner-side and is populated when a
+        ``check_permission`` ASK lands while
+        ``Session.restored_pending_attach`` is True (no client
+        attached).  This commit lays the daemon-side foundation —
+        the actual queue + drain logic ships in a §3.12 follow-on.
+        For now the count is always 0; the helper exists so the
+        ``SessionRestoredEvent`` field is wired end-to-end and the
+        client side has a stable contract to integrate against.
+        """
+        # TODO §3.12 follow-on: query the runner-side permission
+        # plugin via runner-RPC for the pending-call count.  Until
+        # then, return 0.
+        return 0
+
     def attach_session(
         self,
         client_id: str,
@@ -2142,8 +2172,31 @@ class SessionManager:
                 self._maybe_unload_session(current)
 
             # Attach to new session
+            #
+            # Phase 3 §3.12 + peer-review M5/N1: detect first-attach
+            # to a disk-restored session BEFORE adding the client to
+            # ``attached_clients`` so the "no client previously
+            # attached" precondition is unambiguous.  The actual
+            # SessionRestoredEvent emission happens after the lock
+            # is released (event sinks should not run under the
+            # SessionManager lock).
+            was_first_attach_to_restored = (
+                session.restored_pending_attach
+                and not session.attached_clients
+            )
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
+
+            if was_first_attach_to_restored:
+                # Clear the flag now under the lock so a parallel
+                # ``check_permission`` ASK observes the new state
+                # (defer-and-flush off, normal denial / prompt
+                # behaviour resumes).  The pending-tool-call queue
+                # drain happens in the runner-side permission plugin
+                # in a §3.12 follow-on commit; this commit lays the
+                # foundation by surfacing the count of held calls
+                # via the SessionRestoredEvent emitted below.
+                session.restored_pending_attach = False
 
             # Only set workspace if session doesn't have one yet.
             # If session already has a workspace, it keeps it - clients are warned
@@ -2153,6 +2206,20 @@ class SessionManager:
                 session.server.workspace_path = workspace_path
 
         logger.info(f"Client {client_id} attached to session {session_id}")
+
+        # M5/N1: emit SessionRestoredEvent for the first attach to a
+        # disk-restored session.  The pending-tool-call count is 0
+        # for this commit (the queue infrastructure lives in the
+        # runner-side permission plugin and lands in a §3.12 follow-
+        # on); the event still fires so the client can distinguish a
+        # fresh-attach from a restored-attach for telemetry / UX.
+        if was_first_attach_to_restored:
+            self._emit_to_client(client_id, SessionRestoredEvent(
+                session_id=session_id,
+                pending_tool_call_count=self._count_pending_held_tool_calls(
+                    session,
+                ),
+            ))
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, session.server)
@@ -2431,6 +2498,13 @@ class SessionManager:
             workspace_path=state.workspace_path,
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
             provisioned=state.metadata.get('provisioned', False),
+            sandbox_mode=getattr(state, "sandbox_mode", None),
+            # Phase 3 §3.12 + peer-review M5/N1: mark this session as
+            # awaiting first client-attach.  While set, the runner-
+            # side permission plugin queues ASK prompts rather than
+            # denying them (defer-and-flush posture).  Cleared in
+            # ``attach_session`` after emitting SessionRestoredEvent.
+            restored_pending_attach=True,
         )
 
         # Restore workspace file monitor with persisted tracked state
