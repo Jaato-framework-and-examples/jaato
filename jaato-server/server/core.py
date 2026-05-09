@@ -521,16 +521,16 @@ class JaatoServer:
 
         This affects enrichment notification formatting to properly
         wrap and align text for the terminal.
+
+        Phase 3 §7c step 6.3: daemon-side leg dropped.  The
+        runner-side ``session.set_terminal_width`` RPC is now the
+        only source of truth for the runner's enrichment-
+        notification width.  ``self._terminal_width`` is still
+        tracked daemon-side for the formatter-pipeline propagation
+        below (daemon-tier formatting concern); daemon-side
+        ``JaatoSession`` state stays orphan post-§7b.2.
         """
         self._terminal_width = width
-        # Propagate to JaatoClient if connected
-        if self._jaato:
-            self._jaato.set_terminal_width(width)
-        # Phase 3 §3.3c migration: also push to the runner-side
-        # JaatoSession (when a runner is attached) so post-seat-flip
-        # the runner's enrichment notification formatting matches
-        # the daemon's terminal width.  Best-effort: failures log
-        # but don't block the daemon-side propagation.
         rpc = self._runner_rpc
         if rpc is not None:
             forwarder = getattr(rpc, "session_set_terminal_width_threadsafe", None)
@@ -540,8 +540,7 @@ class JaatoServer:
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     logger.debug(
                         "set_terminal_width: runner RPC propagation "
-                        "failed (%s) — daemon-side state still updated",
-                        exc,
+                        "failed (%s)", exc,
                     )
         # Propagate to main formatter pipeline if initialized
         if self._formatter_pipeline:
@@ -554,28 +553,33 @@ class JaatoServer:
     def set_presentation_context(self, ctx: 'PresentationContext') -> None:
         """Set the presentation context and propagate to session components.
 
-        The context is stored on ``JaatoSession`` so that the model's
-        system prompt can adapt to the client's display capabilities
-        (e.g. avoid wide tables on narrow mobile screens).  It is *not*
-        propagated to the formatter pipeline: the pipeline always emits
-        client-agnostic semantic markup (``<j-code>``, ``<j-table>``),
-        which every attached client renders natively — so there is no
-        shared rendering state for heterogeneous clients to fight over.
+        The context is stored on the runner-side ``JaatoSession``
+        so that the model's system prompt can adapt to the
+        client's display capabilities (e.g. avoid wide tables on
+        narrow mobile screens).  It is *not* propagated to the
+        formatter pipeline: the pipeline always emits client-
+        agnostic semantic markup (``<j-code>``, ``<j-table>``),
+        which every attached client renders natively — so there is
+        no shared rendering state for heterogeneous clients to
+        fight over.
+
+        Phase 3 §7c step 6.3: daemon-side leg dropped.  The
+        runner-side ``session.set_presentation_context`` RPC is
+        now the only source of truth for the system-prompt
+        display-context block.  ``self._presentation_context`` is
+        still tracked daemon-side for the ``terminal_width =
+        ctx.content_width`` sync below (daemon-tier formatter
+        concern).
 
         Args:
             ctx: Presentation context from the connected client.
         """
         self._presentation_context = ctx
-        # Keep terminal_width in sync (property setter propagates to pipelines)
+        # Keep terminal_width in sync (property setter propagates
+        # to formatter pipelines daemon-side and forwards
+        # ``set_terminal_width`` to the runner via the property's
+        # own RPC forward).
         self.terminal_width = ctx.content_width
-        # Propagate full context to JaatoClient → JaatoSession
-        if self._jaato:
-            self._jaato.set_presentation_context(ctx)
-        # Phase 3 §3.3c migration: also push to the runner-side
-        # JaatoSession (when a runner is attached) so the runner's
-        # system-prompt display-context block matches the daemon's
-        # view of client capabilities.  Best-effort: failures log
-        # but don't block the daemon-side flow.
         rpc = self._runner_rpc
         if rpc is not None:
             forwarder = getattr(rpc, "session_set_presentation_context_threadsafe", None)
@@ -585,8 +589,7 @@ class JaatoServer:
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     logger.debug(
                         "set_presentation_context: runner RPC propagation "
-                        "failed (%s) — daemon-side state still updated",
-                        exc,
+                        "failed (%s)", exc,
                     )
 
     def set_apparmor_confinement(
@@ -1743,17 +1746,15 @@ class JaatoServer:
 
         self._model_name = self._jaato.model_name or model_name
         self._model_provider = self._jaato.provider_name
-        self._jaato.set_terminal_width(self._terminal_width)
-        # Phase 3 §7b.1 migration: also forward the post-init
-        # terminal_width sync to the runner-side JaatoSession.
-        # The runner spawn happens BEFORE this line (the §3.13
-        # inline call in ``_bootstrap_session`` fires from
+        # Phase 3 §7c step 6.3: post-init terminal_width sync goes
+        # straight to the runner-side JaatoSession (the only
+        # source of truth post-step-6.3).  The runner spawn
+        # happens BEFORE this line (the §3.13 inline call in
+        # ``_bootstrap_session`` fires from
         # ``_construct_and_initialize_server`` BEFORE
         # ``server.initialize()``), so ``self._runner_rpc`` is
-        # already attached when present.  Pre-§7a (apparmor
-        # opt-in only) this was sometimes None; post-§7a always
-        # attached for sessions with workspace.  Best-effort:
-        # failures log but don't block the daemon-side init.
+        # already attached when present.  Best-effort: failures
+        # log but don't block the daemon-side init.
         rpc = self._runner_rpc
         if rpc is not None:
             forwarder = getattr(
@@ -1765,9 +1766,7 @@ class JaatoServer:
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     logger.debug(
                         "initialize: runner RPC terminal_width "
-                        "post-init sync failed (%s) — daemon-side "
-                        "state already updated",
-                        exc,
+                        "post-init sync failed (%s)", exc,
                     )
         self._emit_init_progress("Connecting to model provider", "done", 2, total_steps)
         self._emit_init_progress("Loading plugins", "done", 3, total_steps)
@@ -3314,12 +3313,11 @@ class JaatoServer:
         if self._model_running:
             # Inject directly into the session's queue (USER source — high priority).
             #
-            # Phase 3 §7c step 6.2: forward to the runner-side
-            # session via the ``session.inject_prompt`` RPC
-            # (added in §7c step 6.1 (3/3) at commit 14e57709)
-            # instead of reaching into the daemon-side
-            # ``_jaato.get_session().inject_prompt``.  The
-            # ``SourceType`` enum is serialized as its lowercase
+            # Phase 3 §7c step 6.3: daemon-side leg dropped.  The
+            # runner-side ``session.inject_prompt`` RPC (added in
+            # §7c step 6.1 (3/3) at commit 14e57709) is now the
+            # only source of truth for the mid-turn prompt queue.
+            # ``SourceType`` enum serialized as its lowercase
             # string value across the wire.
             rpc = self._runner_rpc
             if rpc is not None:
@@ -3340,15 +3338,9 @@ class JaatoServer:
                             "prompt was not queued",
                             exc,
                         )
-                        # Fall through; the daemon-side leg below
-                        # (legacy in-process queue) will still run
-                        # during the §7c rollout window.
-            if self._jaato:
-                session = self._jaato.get_session()
-                session.inject_prompt(text, source_id="user", source_type=SourceType.USER)
-                self.emit(MidTurnPromptQueuedEvent(
-                    text=text,
-                    position_in_queue=0,
+            self.emit(MidTurnPromptQueuedEvent(
+                text=text,
+                position_in_queue=0,
             ))
             return
 
@@ -3811,42 +3803,30 @@ class JaatoServer:
         """Stop current operation.
 
         Returns:
-            True if stop was initiated.
+            True iff a cancel was actually issued (False when no
+            message running).
+
+        Phase 3 §7c step 6.3: daemon-side leg dropped.  The
+        runner-side ``session.request_stop`` RPC is now the only
+        source of truth for cancellation.  Pre-step-6.3 the
+        daemon-side ``_jaato.stop()`` call mirrored the cancel
+        onto an in-process ``JaatoSession`` whose message-
+        processing loop was orphan post-§7b.2 (no message
+        processing happens daemon-side).
         """
-        # Phase 3 §7b.1 migration: cancel signal goes to BOTH the
-        # daemon-side JaatoSession (existing) AND the runner-side
-        # JaatoSession (new) so whichever holds the in-flight
-        # message receives the cancel.  In the post-§7c seat-flip
-        # world only the runner-side will, but during the
-        # transition window writing to both keeps cancellation
-        # behavior consistent.
-        daemon_cancelled = False
-        if self._jaato and self._jaato.is_processing:
-            daemon_cancelled = self._jaato.stop()
-
-        runner_cancelled = False
         rpc = self._runner_rpc
-        if rpc is not None:
-            forwarder = getattr(rpc, "session_request_stop_threadsafe", None)
-            if callable(forwarder):
-                try:
-                    runner_cancelled = bool(forwarder(
-                        reason="user_stop", timeout=2.0,
-                    ))
-                except Exception as exc:  # noqa: BLE001 — best-effort
-                    logger.debug(
-                        "stop: runner RPC propagation failed (%s) — "
-                        "daemon-side cancel still issued (%s)",
-                        exc, daemon_cancelled,
-                    )
-
-        # Return True if EITHER side reported a cancellation
-        # actually issued.  Pre-§7c the daemon-side is
-        # authoritative; post-§7c the runner-side will be.  Both
-        # paths preserve the existing API contract: True iff a
-        # cancel was actually issued (False when no message
-        # running).
-        return daemon_cancelled or runner_cancelled
+        if rpc is None:
+            return False
+        forwarder = getattr(rpc, "session_request_stop_threadsafe", None)
+        if not callable(forwarder):
+            return False
+        try:
+            return bool(forwarder(reason="user_stop", timeout=2.0))
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.debug(
+                "stop: runner RPC propagation failed (%s)", exc,
+            )
+            return False
 
     def execute_command(self, command: str, args: List[str]) -> Dict[str, Any]:
         """Execute a command.
@@ -3950,14 +3930,16 @@ class JaatoServer:
                 plugin.set_output_callback(None)
 
     def clear_history(self) -> None:
-        """Clear conversation history."""
-        if self._jaato:
-            self._jaato.reset_session()
-        # Phase 3 §7b.1 migration: also forward to the runner-side
-        # JaatoSession (when a runner is attached) so its history
-        # state matches the daemon's after the clear.  Best-effort:
-        # forwarding failures log but don't block the daemon-side
-        # state update.
+        """Clear conversation history.
+
+        Phase 3 §7c step 6.3: daemon-side leg dropped.  The
+        runner-side ``session.reset`` RPC is now the only source
+        of truth for conversation-history state.  Pre-step-6.3
+        the daemon-side ``_jaato.reset_session()`` call mirrored
+        the reset onto an in-process ``JaatoSession`` whose state
+        was orphan post-§7b.2 (no message processing happens
+        daemon-side).
+        """
         rpc = self._runner_rpc
         if rpc is not None:
             forwarder = getattr(rpc, "session_reset_threadsafe", None)
@@ -3967,7 +3949,7 @@ class JaatoServer:
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     logger.debug(
                         "clear_history: runner RPC propagation "
-                        "failed (%s) — daemon-side state still updated",
+                        "failed (%s) — daemon-side AgentState still cleared",
                         exc,
                     )
         self._original_inputs = []
