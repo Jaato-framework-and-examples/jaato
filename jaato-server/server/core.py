@@ -497,6 +497,23 @@ class JaatoServer:
         # Propagate to JaatoClient if connected
         if self._jaato:
             self._jaato.set_terminal_width(width)
+        # Phase 3 §3.3c migration: also push to the runner-side
+        # JaatoSession (when a runner is attached) so post-seat-flip
+        # the runner's enrichment notification formatting matches
+        # the daemon's terminal width.  Best-effort: failures log
+        # but don't block the daemon-side propagation.
+        rpc = self._runner_rpc
+        if rpc is not None:
+            forwarder = getattr(rpc, "session_set_terminal_width_threadsafe", None)
+            if callable(forwarder):
+                try:
+                    forwarder(width, timeout=2.0)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.debug(
+                        "set_terminal_width: runner RPC propagation "
+                        "failed (%s) — daemon-side state still updated",
+                        exc,
+                    )
         # Propagate to main formatter pipeline if initialized
         if self._formatter_pipeline:
             self._formatter_pipeline.set_console_width(width)
