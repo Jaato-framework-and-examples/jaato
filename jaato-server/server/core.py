@@ -1638,6 +1638,31 @@ class JaatoServer:
         self._model_name = self._jaato.model_name or model_name
         self._model_provider = self._jaato.provider_name
         self._jaato.set_terminal_width(self._terminal_width)
+        # Phase 3 §7b.1 migration: also forward the post-init
+        # terminal_width sync to the runner-side JaatoSession.
+        # The runner spawn happens BEFORE this line (the §3.13
+        # inline call in ``_bootstrap_session`` fires from
+        # ``_construct_and_initialize_server`` BEFORE
+        # ``server.initialize()``), so ``self._runner_rpc`` is
+        # already attached when present.  Pre-§7a (apparmor
+        # opt-in only) this was sometimes None; post-§7a always
+        # attached for sessions with workspace.  Best-effort:
+        # failures log but don't block the daemon-side init.
+        rpc = self._runner_rpc
+        if rpc is not None:
+            forwarder = getattr(
+                rpc, "session_set_terminal_width_threadsafe", None,
+            )
+            if callable(forwarder):
+                try:
+                    forwarder(self._terminal_width, timeout=2.0)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.debug(
+                        "initialize: runner RPC terminal_width "
+                        "post-init sync failed (%s) — daemon-side "
+                        "state already updated",
+                        exc,
+                    )
         self._emit_init_progress("Connecting to model provider", "done", 2, total_steps)
         self._emit_init_progress("Loading plugins", "done", 3, total_steps)
 
