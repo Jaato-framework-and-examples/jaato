@@ -636,7 +636,7 @@ Decomposed into 4 sub-commits + 1 standalone pre-6.6 commit
 | **§7c step 6.6.1.1** | Add `session.set_initial_history` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.set_initial_history` already exists (line 8252).  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_set_initial_history_rpc.py`.  Wire shape: `{"messages": [<dict>, ...]}` reusing the existing `shared.plugins.session.serializer.serialize_history` / `deserialize_history` round-trip the disk-persistence path already exercises.  Tests pin: happy path 2-message round-trip, empty-list seed accepted, provenance-fields (model + provider) preservation across the wire, missing/non-list/malformed-dict args → `stage="decode"`, no_host / setter-raises / missing-method error paths, dispatch routing, e2e wrapper for 3 scenarios. |
 | **§7c step 6.6.1.2** | Add `session.restore_turn_accounting` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_turn_accounting` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_restore_turn_accounting_rpc.py`.  Wire shape: `{"turns": [<dict>, ...]}` direct (turn entries are already JSON-native dicts in the persistence serializer at `serializer.py:215`; no special encode/decode).  Tests pin: happy path round-trip, empty-list accepted, arbitrary dict keys preserved (cache-token / thinking-token / provenance fields), missing/non-list/non-dict-element args → `stage="decode"` (per-element validation catches wire-corruption / version-skew at the boundary), no_host / setter-raises / missing-method error paths, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant. |
 | **§7c step 6.6.1.3** | Add `session.restore_conversation_budget` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_conversation_budget` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_restore_conversation_budget_rpc.py`.  Wire shape: `{"snapshot": <dict>}` direct (the snapshot is a JSON-native dict produced by `InstructionBudget.get_conversation_snapshot()` / `SourceEntry.to_dict()`; same wire-shape-reuse rationale as 6.6.1.1 + 6.6.1.2 — persistence shape IS wire shape).  Tests pin: happy path, empty-dict accepted (matches underlying method's no-op-on-empty contract), nested SourceEntry children preserved, missing/non-dict args → `stage="decode"`, no_host / setter-raises (e.g. invalid gc_policy enum) / missing-method error paths, no-op-when-no-budget contract preserved, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant.  **§7c step 6.6.1 trio CLOSED — 6.6.3 unblocked.** |
-| **§7c step 6.6.2** | Architectural callbacks rewire (the original §7c step 6.2.5 work, now folded in).  4 sites: 1969 / 1985 / 3374 / 4264.  Gates on runner-side event-bus access plumbing — may itself fan out. | New tests for each callback path. |
+| **§7c step 6.6.2** | Architectural callbacks rewire (the original §7c step 6.2.5 work, now folded in).  4 sites: 1969 / 1985 / 3374 / 4264.  Gates on runner-side event-bus access plumbing — may itself fan out. | **Audit revised** in §7c step 6.6.2 disposition audit below.  Audit reveals the original "4 sites" was incomplete (7 callback wiring sites total; 3 were missed: `set_continuation_callback` at 3415, `set_retry_callback` at 3430, `set_mid_turn_interrupt_callback` at 3440).  6 of 7 are pure emit-to-client; 5 of those don't even hit the daemon EventBus (unmapped event types).  Continuation_callback (3415) is the only daemon-logic-driven site.  **Step 6.6.2 collapses into 6.6.4** — the callback wiring naturally disappears alongside `_start_model_thread`'s migration to `session_send_message_threadsafe`.  No event-bus plumbing required.  No new RPC handlers needed (extend the existing `session.send_message` stream channel with notification frames). |
 | **§7c step 6.6.3** | External consumer migrations: 8 `get_session()` callers in `session_manager.py` + `websocket.py` + `core.py`.  Migrate each to its target per the external-consumer table above (1 delete, 4 reuse-existing-RPC, 3 use-new-RPCs from 6.6.1).  Also drops the public `JaatoServer.get_session()` method. | Per-consumer unit/integration tests. |
 | **§7c step 6.6.4** | Atomic seat-flip moment.  Removes `self._jaato` field; absorbs the 6 WIRING deletions (per 6.4 audit); migrates the 9 transitively-load-bearing sites; migrates the 4 DEFER-§7c read sites; refactors the 2 construction sites; collapses the ~15 truthiness checks; deletes the public `JaatoServer.get_session()` method (consumers migrated in 6.6.3).  Mechanical diff dominated by the absorbed-scope items. | Existing test suite proves runner-only path; net test delta likely negative due to write-both-specific test churn. |
 
@@ -819,6 +819,273 @@ Depends on 7a + 7b.1 + 7b.2.
     change breaks inheritance silently.
   - One commit; depends on 7a (always-spawn) so the runner
     has a stable cgroup placement.
+
+### Step 6.6.2 disposition audit
+
+Mirroring cd3ecf20 / ac088e67 / 875e48bd / 4d53fd49 — the
+fifth audit in the §7c chain.  Per the reviewer's framing
+("§7c step 6.6.2 ... is the architectural decision point I
+called for ... 6 architectural shapes ... narrowed to the best
+two ... worth a 30-minute audit before any code commits").
+
+#### Audit Step 1 — site inventory (the "4 sites" was incomplete)
+
+The §7c step 6.6 disposition audit (commit 875e48bd) flagged 4
+callback rewire sites: 1969 / 1985 / 3374 / 4264.  Re-survey
+post-§7c-step-6.5 turned up **3 additional sites in
+`_start_model_thread`** that the original audit missed:
+
+| Site | Callback | What it triggers |
+|---|---|---|
+| 1996 | `_event_bus_tools._on_subscribed = ...` | `server.emit(EventsSubscribedEvent)` |
+| 2011 | `session.set_instruction_budget_callback(cb)` (init path) | `server.emit(InstructionBudgetEvent)` |
+| 3391 | `session.set_prompt_injected_callback(cb)` | `server.emit(MidTurnPromptInjectedEvent)` |
+| 3415 | `session.set_continuation_callback(cb)` | `server._start_model_thread(child_messages)` + `server.emit(AgentStatusChangedEvent)` + `server._pending_continuation = ...` |
+| 3430 | `session.set_retry_callback(cb)` | `server.emit(RetryEvent)` |
+| 3440 | `session.set_mid_turn_interrupt_callback(cb)` | `server.emit(MidTurnInterruptEvent)` + tracing |
+| 4291 | `session.set_instruction_budget_callback(cb)` (auth-completion mirror of 2011) | `server.emit(InstructionBudgetEvent)` |
+
+**Total: 7 callback sites** (not 4).  Missing 3 sites would
+have produced silent callback gaps post-seat-flip — the same
+class of issue the prior 4 audits caught.  Audit-of-record
+discipline catches this kind of inventory error.
+
+#### Audit Step 2 — E filter (vestigial / daemon-side consumer survey)
+
+Per the reviewer's recommendation: "audit each site for
+vestigial-ness; for genuinely-load-bearing sites, push callback
+runner-side ... sites that can't push runner-side (daemon-side
+consumers like reactor) get the Path C stream."
+
+Three questions per site:
+
+1. Does the daemon-side `JaatoServer.emit(<Event>)` route the
+   event through the daemon's EventBus (for plugin / reactor
+   subscribers)?
+2. Are there any actual daemon-side subscribers for these
+   event types (jaato-premium reactor, plugin
+   `subscribe_to_bus`, etc.)?
+3. Does the callback do any non-emit daemon-side work?
+
+**Per-event-type bus mapping** (read from `_SERVER_TO_BUS` at
+`server/core.py:127`):
+
+| Event type | In `_SERVER_TO_BUS`? | If yes, bus type |
+|---|---|---|
+| `EventsSubscribedEvent` | **No** — unmapped | Goes directly to client; never touches bus |
+| `InstructionBudgetEvent` | **No** — unmapped | Direct to client |
+| `MidTurnPromptInjectedEvent` | **No** — unmapped | Direct to client |
+| `RetryEvent` | **No** — unmapped | Direct to client |
+| `MidTurnInterruptEvent` | **No** — unmapped | Direct to client |
+| `AgentStatusChangedEvent` (within continuation_callback) | **Yes** | `BusEventType.AGENT_STATUS_CHANGED` |
+
+**Daemon-side subscribers for these event types** (grep
+`subscribe.*<EventName>` across server/ + shared/):
+
+  - `EventsSubscribedEvent`: 0 subscribers
+  - `InstructionBudgetEvent`: 0 subscribers
+  - `MidTurnPromptInjectedEvent`: 0 subscribers
+  - `RetryEvent`: 0 subscribers
+  - `MidTurnInterruptEvent`: 0 subscribers
+  - `AgentStatusChangedEvent` (bus): subscribers TBD (reactor
+    in jaato-premium per CLAUDE.md; not in OSS tree)
+
+**Per-site classification:**
+
+| Site | Pure emit? | Daemon-side bus consumer? | Daemon-side logic? | E-filter verdict |
+|---|---|---|---|---|
+| 1996 | ✅ Yes (EventsSubscribedEvent) | No (unmapped) | None | **Vestigial** for daemon — pure client notification |
+| 2011 | ✅ Yes (InstructionBudgetEvent) | No (unmapped) | None | **Vestigial** for daemon — pure client notification |
+| 3391 | ✅ Yes (MidTurnPromptInjectedEvent) | No (unmapped) | None | **Vestigial** for daemon — pure client notification |
+| 3415 | ❌ No — emits AgentStatusChanged AND calls `_start_model_thread` AND writes `_pending_continuation` | Possibly (AgentStatusChanged is mapped) | **Yes** — restarts model thread daemon-side | **Load-bearing** — triggers daemon-side action |
+| 3430 | ✅ Yes (RetryEvent) | No (unmapped) | None | **Vestigial** for daemon — pure client notification |
+| 3440 | ✅ Yes (MidTurnInterruptEvent) | No (unmapped) | None | **Vestigial** for daemon — pure client notification |
+| 4291 | ✅ Yes (InstructionBudgetEvent) | No (unmapped) | None | **Vestigial** for daemon (mirror of 2011) |
+
+**6 of 7 callbacks are vestigial-for-daemon.**  Their entire
+purpose is "fire `server.emit(<Event>)` to fan out to clients."
+Zero daemon-side reactors / plugin subscribers / jaato-premium
+hooks consume any of these 5 unmapped event types.
+
+The 1 load-bearing site (continuation_callback at 3415) needs
+its own treatment — see Step 4 below.
+
+#### Audit Step 3 — pre-existing context: `_start_model_thread` is daemon-side
+
+The 7 callback wiring sites all live inside `_start_model_thread`
+(except 2011 + 4291 which run during `initialize()` /
+`_check_auth_completion`).  This method runs daemon-side.  It:
+
+  1. Wires the callbacks onto `_jaato.get_session()`.
+  2. Calls `server._jaato.send_message(prompt, on_output=..., ...)`
+     at line 3503 (and 3526 for the formatter-feedback
+     continuation loop).
+
+**Critical pre-existing finding**: §7b.2 (commit 3ca3c14d)
+shipped the `session.send_message` runner-RPC handler + daemon
+wrapper, BUT did not migrate the daemon-side
+`_jaato.send_message()` callers.  The daemon's
+`_start_model_thread` still uses the in-process daemon-side
+session for actual model execution.  This was the write-both-
+without-leg-drop pattern §7b.1 used (with daemon-side leg
+intact); the leg-drop is part of step 6.6.4.
+
+When step 6.6.4 removes `_jaato`, `_start_model_thread` MUST
+switch to `session_send_message_threadsafe(...)`.  At that
+point:
+
+  - The daemon no longer holds the session; can't install
+    in-process callbacks on it.
+  - The runner-side session emits its callbacks runner-side.
+  - The daemon needs to receive notifications somehow to do its
+    follow-up actions (emit-to-client; restart model thread).
+
+This re-frames the question: **the callback rewires aren't an
+"event-bus plumbing" decision; they're a "how does runner-side
+send_message notify the daemon of intra-session events" decision.**
+The existing `session.send_message` RPC already has a streaming
+output channel (per the §7b.2 commit message: "Streams output
+chunks via the existing stream-frame channel").  Extending it to
+multiplex notification frames is the obvious shape.
+
+#### Audit Step 4 — architectural decision per site
+
+Surveyed 6 alternatives (A bidirectional event RPC; B daemon-
+side callback registry with runner→daemon push; C stream-based
+subscription; D inverted runner-side callbacks; E vestigial-
+audit; F event-bus mirror).  Per-site decision:
+
+**Sites 1996, 2011, 3391, 3430, 3440, 4291 (6 vestigial-for-daemon)**:
+
+  Path: extend the existing `session.send_message` RPC's stream
+  channel with **notification frames** alongside output frames.
+  Daemon-side wrapper demuxes notification frames and invokes
+  `server.emit(<Event>)`.  This is **Path C (stream-based
+  subscription)** with the **E-filter applied first**:
+
+  - Runner-side session installs its OWN callbacks (in-process
+    runner-side); each callback writes a notification frame
+    onto the existing stream channel.
+  - Daemon-side wrapper for `session_send_message_threadsafe`
+    grows a notification-frame demuxer that reconstructs the
+    appropriate `Event` instance and calls `server.emit(...)`.
+  - **No new RPC handlers needed.**  Zero new wire surface;
+    extends the existing stream-frame channel.
+
+**Site 3415 (continuation_callback — load-bearing)**:
+
+  Path: same notification-frame channel, but with a different
+  daemon-side handler.  Continuation triggers "start another
+  model thread" daemon-side, which post-seat-flip means "call
+  `session_send_message_threadsafe(...)` again."
+
+  - Runner-side session emits a `continuation_needed` notification
+    frame with the child_messages text.
+  - Daemon-side wrapper for `session_send_message_threadsafe`'s
+    notification-demuxer recognizes the frame and either:
+    (a) Stashes into `server._pending_continuation` if a
+        send_message is currently in flight (for the existing
+        "pick up after current turn" semantic), OR
+    (b) Calls `server._start_model_thread(child_messages)`
+        directly if the daemon is idle.
+  - The daemon-side action is identical to today's
+    continuation_callback body; only the trigger source moves.
+
+**Pre-audit critical question answered**:
+
+> Is event-bus plumbing in-scope for Phase 3, or a Phase 4+
+> concern that 6.6.2 should defer entirely?
+
+**Mostly DEFER.**  Of the 7 callback sites, only 1
+(`AgentStatusChangedEvent` within continuation_callback) hits
+the daemon's EventBus today.  The other 6 events are unmapped
+in `_SERVER_TO_BUS` — they go directly to clients without
+touching the bus.  No event-bus plumbing required for them.
+
+The `AgentStatusChangedEvent` bus emission still happens
+post-seat-flip — it's emitted by `server.emit(...)` daemon-side
+when the daemon receives the continuation notification frame,
+same as today.  No runner-side bus access needed.
+
+**The original "event-bus plumbing" framing was a misnomer.**
+The actual plumbing is "runner→daemon notification stream" —
+which the existing `session.send_message` stream channel
+already provides.
+
+#### Audit Step 5 — sub-commit decomposition
+
+**Step 6.6.2 collapses into step 6.6.4** alongside the
+`_jaato.send_message()` migration.  The callbacks naturally
+disappear because they're wired by daemon-side
+`_start_model_thread`, and `_start_model_thread` itself
+simplifies dramatically when send_message moves to RPC:
+
+  - Pre-§7c step 6.6.4: `_start_model_thread` wires 7 callbacks
+    on `_jaato.get_session()` + calls `_jaato.send_message(...)`.
+  - Post-§7c step 6.6.4: `_start_model_thread` simply calls
+    `session_send_message_threadsafe(prompt, ...)` with a
+    notification-handler kwarg.  The notification handler
+    invokes `server.emit(...)` for the 5 vestigial events and
+    invokes `_start_model_thread(child_messages)` for the
+    continuation case.
+  - The 7 callback wiring sites + `_pending_continuation`
+    machinery + the continuation-flow logic ALL collapse
+    around the new notification-stream shape.
+
+**Required prerequisite (NEW finding from this audit)**:
+extending the runner-side `session.send_message` handler +
+daemon-side wrapper to support notification frames.  This is
+NOT a new RPC handler (no new dispatch route, no new method
+name); it's an extension to the existing stream-frame protocol.
+
+Step 6.6.4's scope grows by:
+
+  - Notification-frame protocol extension on the
+    `session.send_message` RPC (~2 commits if split: protocol +
+    consumer-side wiring).
+  - The 7 callback wirings deletion + replacement with
+    notification-handler kwarg.
+  - The daemon-side `_jaato.send_message()` → RPC migration.
+  - The continuation-flow refactor.
+
+These all land together because they're tightly coupled —
+splitting them would create transitional broken states.
+
+#### What this audit decides
+
+  - **§7c step 6.6.2 is REMOVED as a separate sub-commit.**
+    Folded into 6.6.4 alongside the daemon-side `_jaato.send_message`
+    migration that triggers the natural callback-disappearance.
+
+  - **No new RPC handlers needed.**  The 6 vestigial-for-daemon
+    callbacks + the continuation_callback all flow through an
+    extension to the existing `session.send_message` stream
+    channel.
+
+  - **No event-bus plumbing required.**  5 of the 6 emitted
+    event types are unmapped in `_SERVER_TO_BUS` (direct-to-client);
+    the 1 mapped one (`AgentStatusChangedEvent`) still goes
+    through `server.emit(...)` daemon-side.
+
+  - **Audit caught a 3-site inventory miss.**  The original
+    "4 sites" was off by 3 — `set_continuation_callback`,
+    `set_retry_callback`, `set_mid_turn_interrupt_callback` were
+    missing.  Audit-discipline tally: 5 audits, 5 silent-
+    regression catches.
+
+#### What this audit does NOT decide
+
+  - Notification-frame wire format.  The existing stream-frame
+    protocol carries `(stream_id, data)` for output chunks;
+    notification frames need a discriminator (frame_type:
+    "output" | "notification").  Decide at 6.6.4 implementation
+    time.
+
+  - Whether to ship the notification-frame protocol extension
+    as a separate commit before 6.6.4 (cleaner review boundary)
+    or inline in 6.6.4 (single coherent diff).  Decide at
+    implementation time once the wire-format question is
+    settled.
 
 ## 8. Test invariant for the next contributor
 
