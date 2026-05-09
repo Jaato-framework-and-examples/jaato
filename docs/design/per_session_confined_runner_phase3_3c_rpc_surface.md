@@ -637,7 +637,7 @@ Decomposed into 4 sub-commits + 1 standalone pre-6.6 commit
 | **§7c step 6.6.1.2** | Add `session.restore_turn_accounting` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_turn_accounting` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_restore_turn_accounting_rpc.py`.  Wire shape: `{"turns": [<dict>, ...]}` direct (turn entries are already JSON-native dicts in the persistence serializer at `serializer.py:215`; no special encode/decode).  Tests pin: happy path round-trip, empty-list accepted, arbitrary dict keys preserved (cache-token / thinking-token / provenance fields), missing/non-list/non-dict-element args → `stage="decode"` (per-element validation catches wire-corruption / version-skew at the boundary), no_host / setter-raises / missing-method error paths, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant. |
 | **§7c step 6.6.1.3** | Add `session.restore_conversation_budget` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_conversation_budget` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_restore_conversation_budget_rpc.py`.  Wire shape: `{"snapshot": <dict>}` direct (the snapshot is a JSON-native dict produced by `InstructionBudget.get_conversation_snapshot()` / `SourceEntry.to_dict()`; same wire-shape-reuse rationale as 6.6.1.1 + 6.6.1.2 — persistence shape IS wire shape).  Tests pin: happy path, empty-dict accepted (matches underlying method's no-op-on-empty contract), nested SourceEntry children preserved, missing/non-dict args → `stage="decode"`, no_host / setter-raises (e.g. invalid gc_policy enum) / missing-method error paths, no-op-when-no-budget contract preserved, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant.  **§7c step 6.6.1 trio CLOSED — 6.6.3 unblocked.** |
 | **§7c step 6.6.2** | Architectural callbacks rewire (the original §7c step 6.2.5 work, now folded in).  4 sites: 1969 / 1985 / 3374 / 4264.  Gates on runner-side event-bus access plumbing — may itself fan out. | **Audit revised** in §7c step 6.6.2 disposition audit below.  Audit reveals the original "4 sites" was incomplete (7 callback wiring sites total; 3 were missed: `set_continuation_callback` at 3415, `set_retry_callback` at 3430, `set_mid_turn_interrupt_callback` at 3440).  6 of 7 are pure emit-to-client; 5 of those don't even hit the daemon EventBus (unmapped event types).  Continuation_callback (3415) is the only daemon-logic-driven site.  **Step 6.6.2 collapses into 6.6.4** — the callback wiring naturally disappears alongside `_start_model_thread`'s migration to `session_send_message_threadsafe`.  No event-bus plumbing required.  No new RPC handlers needed (extend the existing `session.send_message` stream channel with notification frames). |
-| **§7c step 6.6.3** | External consumer migrations: 8 `get_session()` callers in `session_manager.py` + `websocket.py` + `core.py`.  Migrate each to its target per the external-consumer table above (1 delete, 4 reuse-existing-RPC, 3 use-new-RPCs from 6.6.1).  Also drops the public `JaatoServer.get_session()` method. | Per-consumer unit/integration tests. |
+| **§7c step 6.6.3** | External consumer migrations: 8 `get_session()` callers in `session_manager.py` + `websocket.py` + `core.py`.  Migrate each to its target per the external-consumer table above (1 delete, 4 reuse-existing-RPC, 3 use-new-RPCs from 6.6.1).  Also drops the public `JaatoServer.get_session()` method. | **Audit revised** in §7c step 6.6.3 disposition audit below — original "8 callers" was a 9-site undercount.  Cross-grep of ALL `_jaato.get_session()` reach patterns (private + public) reveals **17 sites total** (8 missing in `session_manager.py`).  5 of the 17 need NEW RPC handlers (`session.append_history_message`, `session.snapshot_conversation_budget`, `session.set_parallel_tools_override`, `session.replay_messages`, `session.resolve_fork_point`).  Sub-decomposition: 6.6.3.0 audit-correction (THIS) → 6.6.3.1-.5 (5 new RPC handlers per 6.1 trio cadence) → 6.6.3.6 (full migration + public method drop). |
 | **§7c step 6.6.4** | Atomic seat-flip moment.  Removes `self._jaato` field; absorbs the 6 WIRING deletions (per 6.4 audit); migrates the 9 transitively-load-bearing sites; migrates the 4 DEFER-§7c read sites; refactors the 2 construction sites; collapses the ~15 truthiness checks; deletes the public `JaatoServer.get_session()` method (consumers migrated in 6.6.3).  Mechanical diff dominated by the absorbed-scope items. | Existing test suite proves runner-only path; net test delta likely negative due to write-both-specific test churn. |
 
 #### Missing-method finding (§7c step 6.6.1 prerequisite check)
@@ -1087,6 +1087,114 @@ splitting them would create transitional broken states.
     implementation time once the wire-format question is
     settled.
 
+### Step 6.6.3 disposition audit
+
+Mirroring cd3ecf20 / ac088e67 / 875e48bd / 4d53fd49 / 9f28f96d
+— the sixth audit in the §7c chain.  Per the 6.6.2 audit's
+inventory-miss lesson and the reviewer's recommendation to
+"cross-grep for ALL `_jaato.get_session()` reach patterns
+rather than relying on prior classifications," this audit
+re-runs the inventory with the corrected pattern.
+
+#### Audit Step 1 — corrected site inventory
+
+The §7c step 6.6 disposition audit (commit 875e48bd) listed 8
+external `JaatoServer.get_session()` callers based on the
+PUBLIC method.  Cross-grep of `(server\.|jaato\.|_jaato\.)get_session()`
+patterns (catching both public-method calls and private-attr
+reaches) reveals **17 sites total** — **9 sites missed by the
+original audit** (8 in `session_manager.py`, 1 in
+`websocket.py` was correct).
+
+Full inventory + per-site disposition:
+
+| # | Site | Operation | Migration target |
+|---|---|---|---|
+| 1 | `core.py:3229` | `get_cancel_token` closure → `session._cancel_token` | **Delete** — legacy in-process cancel-token dead post-§7b.2 |
+| 2 | `core.py:3617` | `signal_completion` filter → `session._tools` walk | **Use existing** `JaatoClient.get_tool_schemas()` (added §7c step 3b at 7b30c237) |
+| 3 | `websocket.py:1481` | event-bus access → `jaato_session._runtime.event_bus` | **Use existing** `server.event_bus` property (migrated to `self._runtime.event_bus` in §7c step 6.2) |
+| 4 | `websocket.py:1485` | event-bus access (alternate path) | Same as 1481 |
+| 5 | `session_manager.py:1968` | `set_session_state(key, value)` (initial-state injection) | **Use existing** `session_set_session_state_threadsafe` (§3.3c precursor) |
+| 6 | `session_manager.py:2130` | `set_initial_history(initial_history)` | **Use existing** `session_set_initial_history_threadsafe` (§7c step 6.6.1.1, commit 3f859e3a) |
+| 7 | `session_manager.py:2185` | `inject_prompt(text, source_id, source_type)` | **Use existing** `session_inject_prompt_threadsafe` (§7c step 6.1 (3/3), commit 14e57709) |
+| 8 | `session_manager.py:2564` | `restore_turn_accounting(turns)` | **Use existing** `session_restore_turn_accounting_threadsafe` (§7c step 6.6.1.2, commit 82b8da29) |
+| 9 | `session_manager.py:2607` | `restore_conversation_budget(snapshot)` | **Use existing** `session_restore_conversation_budget_threadsafe` (§7c step 6.6.1.3, commit b40d2439) |
+| 10 | `session_manager.py:2855` | Append synthetic tool message: `session.get_history()` + `session.reset_session(modified_history)` | **NEW RPC needed** — `session.append_history_message` (mirrors the §7b.1 lifecycle straggler pattern; pure write).  Alternatively reuse `session.set_initial_history` after `session.reset` round-trip — but that's a multi-RPC dance for what should be one operation.  Single dedicated handler is cleaner. |
+| 11 | `session_manager.py:2986` | `instruction_budget.get_conversation_snapshot()` (persistence-save path) | **NEW RPC needed** — `session.snapshot_conversation_budget`.  Inverse of `session.restore_conversation_budget` (6.6.1.3); same wire-shape (`SourceEntry.to_dict()` JSON-native dict). |
+| 12 | `session_manager.py:4096` | `_parallel_tools_override` private write (per-turn override) | **NEW RPC needed** — `session.set_parallel_tools_override`.  Simple bool flag setter; ~§7b.2-precursor scale. |
+| 13 | `session_manager.py:4243` | `instruction_budget.snapshot()` for `InstructionBudgetEvent` emit | **Use existing** `session_snapshot_instruction_budget_threadsafe` (§7c step 6.1 (2/3), commit 1043bfde) |
+| 14 | `session_manager.py:4290` | `inject_prompt` via SDK request handler (mirror of 2185) | Same as 7 — **use existing** `session_inject_prompt_threadsafe` |
+| 15 | `session_manager.py:4318` | `ReplayMessagesRequest` → `session.replay_messages(messages, timeout)` (provider-blocking) | **NEW RPC needed** — `session.replay_messages`.  Streaming + cancel-aware shape similar to `session.send_message` (§7b.2 commit 3ca3c14d).  Returns response_text after blocking on provider call. |
+| 16 | `session_manager.py:4353` | `ResolveForkPointRequest` → `session.resolve_fork_point(history, after_message, after_tool_call, after_timestamp)` (pure read) | **NEW RPC needed** — `session.resolve_fork_point`.  Pure read; returns int (fork_index).  ~§7b.2-precursor scale. |
+| 17 | `core.py:3986` | Public `JaatoServer.get_session()` method itself | **Delete** — drops alongside `_jaato`-field removal in step 6.6.4 (no consumers remain after migrations 1-16). |
+
+#### Audit Step 2 — bucket totals
+
+| Bucket | Sites | Disposition |
+|---|---|---|
+| **Delete outright** | 1 (cancel_token) + 17 (public method) | 2 sites |
+| **Use existing accessor / RPC** | 2, 3, 4, 5, 6, 7, 8, 9, 13, 14 | 10 sites; covered by §7c step 3b's `get_tool_schemas`, §7c step 6.2's `event_bus` property, §3.3c precursor `set_session_state`, §7c step 6.1 trio's `inject_prompt` + `snapshot_instruction_budget`, §7c step 6.6.1 trio's `set_initial_history` + `restore_turn_accounting` + `restore_conversation_budget` |
+| **NEW RPC handlers** | 10, 11, 12, 15, 16 | 5 sites; require new prerequisite handlers before migration can land |
+
+**Inventory miss diagnosis**: the original §7c step 6.6 audit
+focused on `JaatoServer.get_session()` (the PUBLIC method on
+the server class).  Cross-grepping `_jaato.get_session()`
+(the underlying JaatoClient call, reachable via private-attr
+access) was missed — `session_manager.py` reaches into the
+server's `_jaato` field directly in 9 sites.  The §7c step
+6.6.2 audit caught a similar inventory miss (4 sites → 7).
+Pattern is consistent.
+
+#### Audit Step 3 — sub-commit decomposition
+
+Step 6.6.3 cannot ship as a single commit per the corrected
+scope.  Decomposition mirrors the §7c step 6.6.1 sub-pattern
+(prerequisites first, then migration):
+
+| Sub-commit | Scope |
+|---|---|
+| **§7c step 6.6.3.0** | Audit doc update + corrected inventory + the 3 reviewer-flagged audit-discipline notes added to §10 (THIS commit). |
+| **§7c step 6.6.3.1** | Add `session.append_history_message` RPC + handler + wrapper + tests.  May require a new `JaatoSession.append_history_message(message)` public method first (audit-of-record for missing-method finding TBD at implementation). |
+| **§7c step 6.6.3.2** | Add `session.snapshot_conversation_budget` RPC.  Inverse of `restore_conversation_budget` from 6.6.1.3.  No missing-method gap (`InstructionBudget.get_conversation_snapshot` exists). |
+| **§7c step 6.6.3.3** | Add `session.set_parallel_tools_override` RPC.  Public method addition: `JaatoSession.set_parallel_tools_override(enabled)` to wrap the private `_parallel_tools_override` field. |
+| **§7c step 6.6.3.4** | Add `session.replay_messages` RPC.  Streaming + cancel-aware shape; largest of the 5 new handlers (similar scale to `session.send_message`). |
+| **§7c step 6.6.3.5** | Add `session.resolve_fork_point` RPC.  Pure-read shape. |
+| **§7c step 6.6.3.6** | Migrate all 17 sites + drop the public `JaatoServer.get_session()` method.  Each site uses the appropriate existing-or-new RPC per the inventory table above. |
+
+Total: 7 sub-commits (1 audit + 5 new handlers + 1 migration).
+Each handler-sub-commit is ~12-15 tests per the 6.1 trio
+cadence.  The migration sub-commit's test churn likely
+includes deleting tests that pinned the daemon-side write-both
+pattern for these sites.
+
+#### What this audit decides
+
+  - **§7c step 6.6.3 expands from 1 commit to 7.**  Same
+    pattern as the §7c step 6.6.1 audit (1 → 4) caught.
+
+  - **5 NEW prerequisite RPC handlers required** before site
+    migration can land: `session.append_history_message`,
+    `session.snapshot_conversation_budget`,
+    `session.set_parallel_tools_override`,
+    `session.replay_messages`, `session.resolve_fork_point`.
+
+  - **Audit-discipline tally: 6 audits, 6 silent-regression
+    catches.**  This audit's miss class is consistent with the
+    6.6.2 audit's (inventory shortfall when prior audit
+    classified a subset).
+
+#### What this audit does NOT decide
+
+  - The wire shape for `session.replay_messages` — does it
+    stream output via the §7b.2 stream channel like
+    `session.send_message`, or block-and-return?  Decide at
+    6.6.3.4 implementation; likely streaming for parity.
+
+  - Whether the 5 new handlers can ship in parallel (they're
+    independent prerequisites for site migration) or must
+    serialize.  Independent in principle; serializing per the
+    6.1 trio cadence keeps reviewability tight.
+
 ## 8. Test invariant for the next contributor
 
 If a daemon-side migration commits to the runner-RPC surface,
@@ -1137,6 +1245,101 @@ total 75 references) are classified below by **enclosing method**
 > new-RPC-handler, architectural callback rewire, trivial migration).
 > For the per-`get_session()`-reader sub-classification, see the
 > **"Step 6 disposition audit"** in §7c's sequencing table above.
+
+### Audit-discipline notes (reusable primitives)
+
+Recorded across the §7c audit chain (cd3ecf20 / ac088e67 /
+875e48bd / 4d53fd49 / 9f28f96d / this commit's 6.6.3 audit).
+The audit-of-record discipline produced re-usable primitives
+that future audits can apply mechanically:
+
+#### Note 1 — Cross-grep ALL reach patterns, not just the public surface
+
+The §7c step 6.6.2 audit (commit 9f28f96d) found 3 callback
+sites the prior 6.6 audit missed.  The §7c step 6.6.3 audit
+found 9 `_jaato.get_session()` reaches the prior 6.6 audit
+missed (8 in `session_manager.py`, 1 in `websocket.py`).  Both
+inventory misses had the same root cause: prior audits
+classified a subset (the public method's call sites) without
+cross-grepping the underlying private-attr reach pattern.
+
+**Reusable primitive**: when auditing a public surface (e.g.
+`JaatoServer.get_session()`), ALSO cross-grep:
+
+  - The underlying object's private-attr access pattern
+    (`_jaato.get_session()` here)
+  - Any forwarding wrappers / properties that expose the same
+    object via a different name
+  - The implementation method itself (in case it has internal
+    callers)
+
+Failing this catches inventory misses that propagate as
+silent regressions when the audited surface is removed.
+
+#### Note 2 — `_SERVER_TO_BUS` mapping is a re-usable diagnostic
+
+The §7c step 6.6.2 audit (commit 9f28f96d) discovered that 5
+of 6 callback-emitted event types are UNMAPPED in
+`server/core.py:127`'s `_SERVER_TO_BUS` dict — they go
+directly to clients and never touch the daemon's EventBus.
+This was the load-bearing diagnostic for the audit's
+"event-bus plumbing is mostly DEFER" conclusion.
+
+**Reusable primitive**: any future "is this Event wired to
+the bus or does it go direct-to-client?" question can be
+answered by grepping `_SERVER_TO_BUS` in `server/core.py`:
+
+  - Mapped event types → published to bus + forwarded to
+    client (potential daemon-side reactor consumers)
+  - Unmapped event types → direct to client only (no
+    daemon-side consumer possible)
+
+If an audit needs to determine whether a callback's emitted
+events have daemon-side consumers, this dict is the
+authoritative source.  Combined with `grep -rn
+"subscribe.*<EventName>"` for the mapped types, the survey is
+mechanical.
+
+#### Note 3 — The §7b.2 stream channel multiplex pattern (inverse-virtue at the streaming layer)
+
+The §7c step 6.6.2 audit (commit 9f28f96d) recommended
+extending the existing `session.send_message` stream channel
+with notification frames rather than inventing a new
+runner→daemon notification primitive.  Same inverse-virtue
+as §7c step 6.6.1.1's reuse of `serialize_history` /
+`deserialize_history` (commit 3f859e3a) — except applied to
+the streaming layer instead of the serialization layer.
+
+**Reusable primitive**: when an audit identifies a need for a
+new runner→daemon notification channel, check first whether
+the existing `session.send_message` stream channel can carry
+it.  Adding a frame-type discriminator to multiplex
+notification frames alongside output frames is cheaper than:
+
+  - A new RPC method (new dispatch route + new wire surface)
+  - A new long-lived stream subscription (new lifecycle
+    management + new test surface)
+  - A daemon-side event-bus mirror (two buses to keep
+    coherent)
+
+The pattern compresses test surface (no new wire format to
+exhaustively test) and inherits the §7b.2 stream channel's
+already-battle-tested cancellation + ordering guarantees.
+
+#### Audit-discipline tally (across §7c)
+
+| Audit | Catch |
+|---|---|
+| cd3ecf20 (§7c step 6) | 9 `get_session()` readers had 4 distinct dispositions; original 6a/6b/6c framing was wrong |
+| ac088e67 (§7c step 6.4) | All 6 WIRING calls transitively load-bearing via `_jaato._session`; 6.4 collapses into 6.6 |
+| 875e48bd (§7c step 6.6) | 35 sites + 8 external consumers + sub-commit decomposition |
+| 4d53fd49 (§7c step 6.6.1) | 2 of 3 proposed RPC handlers had missing underlying methods |
+| 9f28f96d (§7c step 6.6.2) | 3-site inventory miss (4 → 7); event-bus plumbing was a misnomer |
+| THIS (§7c step 6.6.3) | 9-site inventory miss (8 → 17); 5 new RPC handlers needed |
+
+**6 audits, 6 silent-regression catches.**  Each audit
+recorded a re-usable primitive (cross-grep, bus-mapping, or
+inverse-virtue pattern).
 
 ### Init ordering (the load-bearing fact)
 
