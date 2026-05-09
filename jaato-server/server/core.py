@@ -351,6 +351,19 @@ class JaatoServer:
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
 
+        # Phase 3 §7c step 4: direct daemon-side reference to the
+        # ``JaatoRuntime`` (provider config + auth + plugin registry +
+        # ledger).  Populated after ``connect()`` returns; aliased to
+        # ``self._jaato._runtime`` during the §7c rollout so all
+        # introspection sites can read it without going through the
+        # ``self._jaato.get_runtime()`` indirection.
+        #
+        # Post-step-6 (when ``self._jaato`` is removed) this becomes
+        # the sole daemon-side runtime handle.  Per §4.2,
+        # ``JaatoRuntime`` stays daemon-side (model_provider plugins
+        # are daemon-tier); only ``JaatoSession`` moves runner-side.
+        self._runtime: Optional["JaatoRuntime"] = None
+
         # Phase 3 §3.13: the ``_planned_sandbox_mode`` slot was
         # removed.  Phase 2's IPC apparmor pre-init hook used it as
         # a transitional channel to communicate the planned mode
@@ -633,10 +646,12 @@ class JaatoServer:
         # before connect()), propagate immediately.  Otherwise the
         # factory is read from self._pre_init_confine_context_factory
         # during initialize() right before configure_tools.
-        if self._jaato is not None:
-            runtime = self._jaato.get_runtime()
-            if runtime is not None:
-                runtime.set_confine_context_factory(confine_context_factory)
+        #
+        # Phase 3 §7c step 4: read directly from ``self._runtime``
+        # (populated by the connect() call site) instead of going
+        # through ``self._jaato.get_runtime()``.
+        if self._runtime is not None:
+            self._runtime.set_confine_context_factory(confine_context_factory)
 
     def set_runtime_limits(
         self,
@@ -991,11 +1006,14 @@ class JaatoServer:
 
         Returns None during early init before the runtime is created,
         or if no JaatoClient is connected yet.
+
+        Phase 3 §7c step 4: read directly from ``self._runtime``
+        (set by the connect() site) instead of
+        ``self._jaato.get_runtime()``.  ``is_connected`` check is
+        preserved via the runtime's own state.
         """
-        if self._jaato and self._jaato.is_connected:
-            runtime = self._jaato.get_runtime()
-            if runtime:
-                return runtime.event_bus
+        if self._runtime is not None and self._runtime.is_connected:
+            return self._runtime.event_bus
         return None
 
     def set_event_callback(self, callback: EventCallback) -> None:
@@ -1456,6 +1474,13 @@ class JaatoServer:
                                 )
                             with _s2.sub("client_connect"):
                                 self._jaato.connect(project_id, location, model_name)
+                            # Phase 3 §7c step 4: alias the runtime onto
+                            # the daemon-side ``self._runtime`` field so
+                            # introspection sites can read it without the
+                            # ``self._jaato.get_runtime()`` indirection.
+                            # Post-step-6 (when ``_jaato`` is removed)
+                            # this becomes the canonical handle.
+                            self._runtime = self._jaato.get_runtime()
                             # Propagate the pre-init AppArmor confine-context
                             # factory onto the runtime now that it exists.
                             # Server 0.6.50+; sessions created on this
@@ -1464,12 +1489,11 @@ class JaatoServer:
                             if (
                                 self._pre_init_confine_context_factory
                                 is not None
+                                and self._runtime is not None
                             ):
-                                runtime = self._jaato.get_runtime()
-                                if runtime is not None:
-                                    runtime.set_confine_context_factory(
-                                        self._pre_init_confine_context_factory,
-                                    )
+                                self._runtime.set_confine_context_factory(
+                                    self._pre_init_confine_context_factory,
+                                )
                 except Exception as e:
                     _connect_error = e
 
@@ -1833,11 +1857,10 @@ class JaatoServer:
                         return False
 
                 # Wire formatter pipeline into runtime so output formatters can
-                # contribute system instructions (e.g., mermaid rendering hints)
-                if self._formatter_pipeline:
-                    runtime = self._jaato.get_runtime()
-                    if runtime:
-                        runtime.set_formatter_pipeline(self._formatter_pipeline)
+                # contribute system instructions (e.g., mermaid rendering hints).
+                # Phase 3 §7c step 4: read directly from ``self._runtime``.
+                if self._formatter_pipeline and self._runtime is not None:
+                    self._runtime.set_formatter_pipeline(self._formatter_pipeline)
 
                 # Agent profile GC takes precedence over file-based GC
                 with _s5.sub("gc_config"):
@@ -3608,12 +3631,14 @@ class JaatoServer:
 
         Returns:
             The plugin instance or None if not found.
+
+        Phase 3 §7c step 4: read directly from ``self._runtime``
+        instead of ``self._jaato.get_runtime()``.
         """
-        if not self._jaato:
+        if self._runtime is None:
             return None
 
-        runtime = self._jaato.get_runtime()
-        registry = runtime.registry
+        registry = self._runtime.registry
         if not registry:
             return None
 
@@ -3626,7 +3651,7 @@ class JaatoServer:
                         return plugin
 
         # Also check permission plugin
-        perm = runtime.permission_plugin
+        perm = self._runtime.permission_plugin
         if perm and hasattr(perm, 'get_user_commands'):
             for cmd in perm.get_user_commands():
                 if cmd.name == command:
@@ -3639,13 +3664,15 @@ class JaatoServer:
 
         Returns:
             List of {path, description} dicts for the client's completion cache.
+
+        Phase 3 §7c step 4: read directly from ``self._runtime``
+        instead of ``self._jaato.get_runtime()``.
         """
         paths = []
-        if not self._jaato:
+        if self._runtime is None:
             return paths
 
-        runtime = self._jaato.get_runtime()
-        registry = runtime.registry if runtime else None
+        registry = self._runtime.registry
         if not registry:
             return paths
 
