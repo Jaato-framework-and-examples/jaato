@@ -340,16 +340,16 @@ class JaatoServer:
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
 
-        # Sandbox-mode planned by a pre-initialize hook.  The Session
-        # record (which carries ``sandbox_mode``) is constructed by
-        # SessionManager AFTER ``initialize()`` returns; pre-init hooks
-        # can't set ``Session.sandbox_mode`` directly because the
-        # record doesn't exist yet.  Hook stashes the planned value
-        # here; ``_create_session_impl`` reads it back when building
-        # the Session.  ``None`` means "no plan; default Session
-        # behavior".  Used by the IPC apparmor pre-init hook in
-        # ``server/__main__.py`` (Phase 2 task 2.3 post-rebase).
-        self._planned_sandbox_mode: Optional[str] = None
+        # Phase 3 §3.13: the ``_planned_sandbox_mode`` slot was
+        # removed.  Phase 2's IPC apparmor pre-init hook used it as
+        # a transitional channel to communicate the planned mode
+        # to ``_create_session_impl``'s Session-record assembly.
+        # After §3.13's relocation, the apparmor opt-in lookup lives
+        # inline in ``SessionManager._provision_ipc_apparmor_and_spawn_runner``
+        # which returns the mode directly to ``_bootstrap_session``;
+        # the disk-restore path passes its known mode via
+        # ``BootstrapEnvelope.sandbox_mode``.  Neither needs a
+        # server-side stash anymore.
 
         # Pricing table — loaded lazily on first use; populates
         # UsageBreakdown.cost_usd on emitted Context/Turn events when

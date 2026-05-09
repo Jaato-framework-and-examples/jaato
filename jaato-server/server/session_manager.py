@@ -425,6 +425,217 @@ class SessionManager:
         """
         self._session_hooks.append(hook)
 
+    # ------------------------------------------------------------------
+    # IPC AppArmor + runner spawn (Phase 3 §3.13)
+    # ------------------------------------------------------------------
+    #
+    # Phase 2 §2.3 wired this as a pre-initialize hook in
+    # server/__main__.py.  Phase 3 §3.13 relocates the logic into the
+    # SessionManager itself so it lives next to the bootstrap helper
+    # rather than reaching across module boundaries via a hook
+    # registration: the hook indirection was a transitional step,
+    # not the design endpoint.  The helper is now invoked inline from
+    # ``_bootstrap_session`` AFTER ``JaatoServer`` construction and
+    # BEFORE ``_run_pre_initialize_hooks`` (which still fires for the
+    # WS-side pre-init hook + any third-party hooks).
+    #
+    # The AppArmorManager + daemon_loop dependencies the relocated
+    # method needs are wired at daemon startup via
+    # :meth:`set_apparmor_dependencies` (called from
+    # ``server/__main__.py``).  Tests construct a SessionManager
+    # without these dependencies; the method is a clean no-op when
+    # they're unset.
+
+    def set_apparmor_dependencies(
+        self,
+        ws_server: Any = None,
+        daemon_loop: Any = None,
+    ) -> None:
+        """Wire the IPC AppArmor + runner-spawn dependencies (§3.13).
+
+        Phase 3 §3.13.  Called once at daemon startup by
+        ``server/__main__.py:JaatoDaemon.start``.  The relocated IPC
+        apparmor logic in :meth:`_provision_ipc_apparmor_and_spawn_runner`
+        reads these to:
+
+        - Skip provisioning for sessions whose workspace lives under a
+          running WS server's root (those are handled by the WS hook,
+          not by us — avoids double-provisioning).
+        - Pass the daemon's main asyncio loop to the
+          :class:`AppArmorManager` so confined-worker mutations
+          dispatch back to the unconfined main loop, AND to the
+          :func:`spawn_session_runner` helper which runs
+          ``RunnerRPCClient.start()`` async.
+
+        Args:
+            ws_server: Optional reference to the running WS server.
+                ``None`` for IPC-only daemons.
+            daemon_loop: The daemon's main asyncio loop.  ``None`` is
+                accepted but disables apparmor provisioning (no
+                AppArmor manager can be constructed without it).
+        """
+        self._ws_server_ref = ws_server
+        self._daemon_loop = daemon_loop
+
+    def _provision_ipc_apparmor_and_spawn_runner(
+        self,
+        server: 'JaatoServer',
+        session_id: str,
+        workspace_path: Optional[str],
+        client_id: Optional[str],
+    ) -> Optional[str]:
+        """Provision the IPC AppArmor profile + spawn the per-session runner.
+
+        Phase 3 §3.13.  Relocated from the
+        ``_ipc_apparmor_pre_init_hook`` in ``server/__main__.py``.
+
+        Lifecycle:
+        1. Skip when ``client_id`` is ``None`` (non-client paths:
+           disk-restore, ephemeral, WS-standalone — those follow
+           §3.12's per-path migration).
+        2. Look up the client's apparmor opt-in via
+           ``self._client_config[client_id]["apparmor"]``.  Skip if
+           opt-out (the default).
+        3. Skip when the session's workspace lives under a running WS
+           server's workspace_root — the WS hook owns confinement
+           there.
+        4. Lazy-init :class:`AppArmorManager` against the captured
+           daemon loop.
+        5. ``apparmor.provision_profile(...)`` — on failure, return
+           ``"soft"`` and notify the client.
+        6. :func:`spawn_session_runner` — on failure, return
+           ``"soft"`` and notify the client.
+        7. On success, return ``"apparmor"`` and notify the client.
+
+        Returns:
+            The planned ``sandbox_mode`` for the Session record:
+            ``"apparmor"`` (kernel-confined, runner spawned),
+            ``"soft"`` (downgrade due to provisioning / spawn
+            failure), or ``None`` (no apparmor opt-in / non-IPC
+            path / no workspace).
+        """
+        from jaato_sdk.events import SystemMessageEvent
+
+        # Phase 2 scope: only IPC apparmor opt-in triggers spawn.
+        # Non-client-driven bootstrap paths (loaded-from-disk,
+        # ephemeral, standalone WS) follow §3.12's per-path migration.
+        if client_id is None:
+            return None
+
+        client_config = self._client_config.get(client_id, {})
+        if not client_config.get("apparmor"):
+            return None
+
+        def _notify(message: str, style: str) -> None:
+            """Surface an apparmor-status line to the client.
+
+            Hook fires pre-init, BEFORE the session id is mapped to a
+            client (``_client_to_session``) and BEFORE the Session
+            record exists in ``_sessions``, so we route via
+            ``_emit_to_client(client_id, ...)`` directly.  Failures
+            are swallowed — emit must not break session creation.
+            """
+            logger.info("[apparmor] %s", message)
+            try:
+                self._emit_to_client(client_id, SystemMessageEvent(
+                    message=f"[apparmor] {message}",
+                    style=style,
+                ))
+            except Exception:
+                logger.warning(
+                    "Failed to emit apparmor status event for %s",
+                    session_id, exc_info=True,
+                )
+
+        if not workspace_path:
+            _notify(
+                "requested but session has no workspace_path — "
+                "running unconfined",
+                style="warning",
+            )
+            return None
+
+        # If a WS server is running and this workspace is under
+        # its workspace_root, the WS hook owns confinement for
+        # this session.  Don't double-provision.
+        ws_server = getattr(self, "_ws_server_ref", None)
+        if ws_server is not None:
+            ws_root = getattr(ws_server, "_workspace_root", None)
+            if ws_root:
+                try:
+                    ws_root_real = os.path.realpath(ws_root)
+                    sess_real = os.path.realpath(workspace_path)
+                    if (
+                        sess_real == ws_root_real
+                        or sess_real.startswith(ws_root_real + os.sep)
+                    ):
+                        return None
+                except OSError:
+                    pass
+
+        # Lazy-init the AppArmor manager.
+        if getattr(self, "_apparmor_manager", None) is None:
+            from server.apparmor import AppArmorManager
+            daemon_loop = getattr(self, "_daemon_loop", None)
+            self._apparmor_manager = AppArmorManager(
+                workspace_root=workspace_path,
+                loop=daemon_loop,
+            )
+
+        apparmor = self._apparmor_manager
+        if not apparmor.is_available():
+            _notify(
+                "requested but AppArmor is unavailable on this "
+                "host (non-Linux, kernel module not loaded, or "
+                "apparmor_parser missing) — running unconfined",
+                style="warning",
+            )
+            return "soft"
+
+        config_root = client_config.get("config_root")
+        env_file = client_config.get("env_file")
+        if not apparmor.provision_profile(
+            session_id,
+            workspace_path,
+            config_root=config_root,
+            env_file=env_file,
+        ):
+            _notify(
+                "profile provisioning failed (see daemon log) — "
+                "running unconfined",
+                style="warning",
+            )
+            return "soft"
+
+        # Spawn the per-session runner subprocess.
+        try:
+            from server.runner_spawn import spawn_session_runner
+            spawn_session_runner(
+                server=server,
+                session_id=session_id,
+                workspace_path=workspace_path,
+                profile_name=apparmor.get_profile_name(session_id),
+                daemon_loop=getattr(self, "_daemon_loop", None),
+            )
+        except Exception as exc:  # noqa: BLE001 — boundary
+            _notify(
+                f"runner spawn failed ({type(exc).__name__}: {exc}) "
+                "— falling back to in-process tool execution; "
+                "session is NOT kernel-confined",
+                style="warning",
+            )
+            logger.exception(
+                "runner spawn failed for session %s", session_id,
+            )
+            return "soft"
+
+        _notify(
+            f"profile provisioned (workspace={workspace_path}, "
+            f"config_root={config_root or '(none)'}); runner spawned",
+            style="info",
+        )
+        return "apparmor"
+
     def add_pre_initialize_hook(self, hook: Callable) -> None:
         """Register a callback invoked BEFORE ``server.initialize()`` runs
         (server 0.6.49+).
@@ -567,14 +778,28 @@ class SessionManager:
         if envelope.config_root:
             server.config_root = envelope.config_root
 
+        # Phase 3 §3.13: IPC apparmor provisioning + runner spawn
+        # used to live in a pre-initialize hook registered from
+        # ``server/__main__.py``.  The hook indirection was a
+        # transitional step from Phase 2 §2.3; Phase 3 inlines the
+        # logic here so the call site is co-located with the rest
+        # of the bootstrap helper.  The method is a clean no-op
+        # when ``client_id`` is None or the client did not opt in
+        # to apparmor; non-IPC paths continue unaffected.
+        ipc_sandbox_mode = self._provision_ipc_apparmor_and_spawn_runner(
+            server,
+            envelope.session_id,
+            envelope.workspace_path,
+            envelope.client_id,
+        )
+
         # Pre-initialize hooks fire BEFORE initialize() — gives
         # transports a window to provision kernel resources
         # (AppArmor profile, cgroup) so prefetch can run inside
-        # the session's confinement instead of unconfined.  Phase 2
-        # task 2.3+: the IPC AppArmor pre-init hook ALSO spawns
-        # the per-session runner subprocess here, so plugins
-        # discovered during initialize() see ``registry.runner_rpc``
-        # set at configure time.
+        # the session's confinement instead of unconfined.  After
+        # §3.13 the IPC apparmor hook is no longer registered
+        # here (relocated to the inline call above); the WS hook
+        # and any third-party hooks continue to use this surface.
         self._run_pre_initialize_hooks(
             server,
             envelope.session_id,
@@ -588,14 +813,18 @@ class SessionManager:
         if not server.initialize():
             return None, None
 
-        # Read back planned_sandbox_mode the IPC apparmor pre-init
-        # hook stashed (Phase 2 task 2.3).  If the envelope already
-        # carries a sandbox_mode (e.g., disk-restore path passes
-        # the previously-saved value in), prefer the envelope's —
-        # it's the authoritative source of pre-restart state.
+        # Resolve sandbox_mode for the Session record.  Priority:
+        # 1. ``envelope.sandbox_mode`` — the authoritative pre-resolved
+        #    value carried by the disk-restore path (and any future
+        #    path that resolves the mode before calling the helper).
+        # 2. Result of the inline IPC apparmor provisioning above.
+        # 3. None — no opt-in / non-confined.
+        # The Phase 2 ``server._planned_sandbox_mode`` stash slot was
+        # removed in §3.13 — the envelope and the inline call together
+        # provide all the information the Session record needs.
         planned_sandbox = envelope.sandbox_mode
         if planned_sandbox is None:
-            planned_sandbox = getattr(server, "_planned_sandbox_mode", None)
+            planned_sandbox = ipc_sandbox_mode
 
         session = Session(
             session_id=envelope.session_id,

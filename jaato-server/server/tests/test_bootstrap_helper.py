@@ -39,9 +39,10 @@ from shared.session_envelope import BootstrapEnvelope
 
 class _FakeJaatoServer:
     """Stand-in for :class:`JaatoServer` capturing the kwargs the
-    bootstrap helper passes in, exposing a controllable
-    ``initialize`` outcome and the ``_planned_sandbox_mode`` slot
-    Phase 2's IPC apparmor pre-init hook stashes on."""
+    bootstrap helper passes in and exposing a controllable
+    ``initialize`` outcome.  Phase 3 §3.13 removed the
+    ``_planned_sandbox_mode`` slot — apparmor mode now flows via
+    the SessionManager helper's return value."""
 
     instances: List["_FakeJaatoServer"] = []
 
@@ -49,9 +50,6 @@ class _FakeJaatoServer:
         self.kwargs = dict(kwargs)
         # Default to success; tests override.
         self._initialize_outcome = True
-        # Phase 2 IPC apparmor pre-init hook stashes the planned
-        # mode here; tests can patch via the fixture.
-        self._planned_sandbox_mode: Optional[str] = None
         self.config_root: Optional[str] = None
         self.registry = None  # session_ops wiring is post-helper
         # Track call order so tests can assert lifecycle ordering.
@@ -73,12 +71,22 @@ class _FakeSessionManager:
     Reuses the real implementation by importing ``SessionManager``
     and binding the method to this instance — keeps the helper
     under test rather than reimplementing it.
+
+    Phase 3 §3.13: also stubs
+    ``_provision_ipc_apparmor_and_spawn_runner`` (the relocated
+    inline IPC apparmor logic) so tests can drive its return value
+    without exercising the real apparmor / spawn machinery.
     """
 
     def __init__(self) -> None:
         self.pre_init_hook_calls: List[Tuple[Any, str, Optional[str], Optional[str]]] = []
         # Capture lifecycle order across helper invocations.
         self.lifecycle_log: List[str] = []
+        # §3.13 stub: return value from
+        # _provision_ipc_apparmor_and_spawn_runner.  Tests set this
+        # to drive the apparmor branch without real apparmor calls.
+        self.ipc_provision_return: Optional[str] = None
+        self.ipc_provision_calls: List[Tuple[Any, str, Optional[str], Optional[str]]] = []
 
     def _run_pre_initialize_hooks(
         self,
@@ -93,6 +101,21 @@ class _FakeSessionManager:
         if isinstance(server, _FakeJaatoServer):
             server.lifecycle_log.append("pre_init_hooks")
         self.lifecycle_log.append("pre_init_hooks")
+
+    def _provision_ipc_apparmor_and_spawn_runner(
+        self,
+        server: Any,
+        session_id: str,
+        workspace_path: Optional[str],
+        client_id: Optional[str],
+    ) -> Optional[str]:
+        self.ipc_provision_calls.append(
+            (server, session_id, workspace_path, client_id),
+        )
+        if isinstance(server, _FakeJaatoServer):
+            server.lifecycle_log.append("ipc_apparmor_provision")
+        self.lifecycle_log.append("ipc_apparmor_provision")
+        return self.ipc_provision_return
 
 
 @pytest.fixture(autouse=True)
@@ -166,6 +189,9 @@ def test_jaato_server_constructed_with_envelope_fields() -> None:
 
 
 def test_pre_init_hooks_fire_before_initialize() -> None:
+    """Phase 3 §3.13 lifecycle ordering: the inline IPC apparmor
+    provisioning runs first, then pre-init hooks (WS + third-party),
+    then ``server.initialize()``."""
     fake_mgr = _FakeSessionManager()
     helper = _bind_helper(fake_mgr)
     envelope = BootstrapEnvelope(
@@ -176,7 +202,11 @@ def test_pre_init_hooks_fire_before_initialize() -> None:
     )
     server, _ = helper(envelope)
     assert server is not None
-    assert server.lifecycle_log == ["pre_init_hooks", "initialize"]
+    assert server.lifecycle_log == [
+        "ipc_apparmor_provision",
+        "pre_init_hooks",
+        "initialize",
+    ]
 
 
 def test_config_root_set_before_pre_init_hooks() -> None:
@@ -246,49 +276,70 @@ def test_failed_initialize_returns_none_pair() -> None:
 
 
 # ----------------------------------------------------------------------
-# planned_sandbox_mode read-back
+# sandbox_mode resolution (Phase 3 §3.13)
+#
+# After §3.13 the IPC apparmor logic lives inline in
+# ``SessionManager._provision_ipc_apparmor_and_spawn_runner``,
+# called from ``_bootstrap_session`` BEFORE pre-init hooks fire.
+# The Session record's ``sandbox_mode`` resolves with priority:
+#   1. ``envelope.sandbox_mode`` (disk-restore path's pre-known value)
+#   2. The IPC provisioning method's return value
+#   3. None (no opt-in / non-confined)
+# The Phase 2 ``server._planned_sandbox_mode`` slot was removed.
 # ----------------------------------------------------------------------
 
 
-def test_planned_sandbox_mode_read_from_server_stash() -> None:
-    """When the IPC apparmor pre-init hook stashes
-    ``_planned_sandbox_mode = "apparmor"`` on the server, the
-    Session record reflects it."""
+def test_ipc_provisioning_apparmor_lands_on_session() -> None:
+    """When the inline IPC apparmor provisioning returns
+    ``"apparmor"``, the Session record reflects it."""
     fake_mgr = _FakeSessionManager()
+    fake_mgr.ipc_provision_return = "apparmor"
     helper = _bind_helper(fake_mgr)
-
-    def _hook_with_stash(server, sid, ws, cid):
-        server._planned_sandbox_mode = "apparmor"
-        fake_mgr.pre_init_hook_calls.append((server, sid, ws, cid))
-        if isinstance(server, _FakeJaatoServer):
-            server.lifecycle_log.append("pre_init_hooks")
-
-    fake_mgr._run_pre_initialize_hooks = _hook_with_stash  # type: ignore
 
     envelope = BootstrapEnvelope(
         session_id="sess-6",
         workspace_path="/tmp/ws",
         name="sandbox-test",
+        client_id="client-A",
     )
     _, session = helper(envelope)
     assert session is not None
     assert session.sandbox_mode == "apparmor"
+    # Provision was called with the envelope's identity fields.
+    assert len(fake_mgr.ipc_provision_calls) == 1
+    _, sid, ws, cid = fake_mgr.ipc_provision_calls[0]
+    assert sid == "sess-6"
+    assert ws == "/tmp/ws"
+    assert cid == "client-A"
 
 
-def test_envelope_sandbox_mode_overrides_server_stash() -> None:
-    """Disk-restore path: envelope.sandbox_mode is the
-    authoritative pre-restart value; the helper must prefer it
-    over whatever the (possibly empty) server stash holds."""
+def test_ipc_provisioning_soft_lands_on_session() -> None:
+    """When apparmor is requested but unavailable / provisioning
+    fails, the IPC method returns ``"soft"`` and the Session
+    record reflects the downgrade."""
     fake_mgr = _FakeSessionManager()
+    fake_mgr.ipc_provision_return = "soft"
     helper = _bind_helper(fake_mgr)
 
-    def _hook_with_stash(server, sid, ws, cid):
-        # Hook stashes "apparmor" but envelope says "kernel" (a
-        # hypothetical other mode); envelope wins.
-        server._planned_sandbox_mode = "apparmor"
-        fake_mgr.pre_init_hook_calls.append((server, sid, ws, cid))
+    envelope = BootstrapEnvelope(
+        session_id="sess-soft",
+        workspace_path="/tmp/ws",
+        name="soft-fallback",
+        client_id="client-B",
+    )
+    _, session = helper(envelope)
+    assert session is not None
+    assert session.sandbox_mode == "soft"
 
-    fake_mgr._run_pre_initialize_hooks = _hook_with_stash  # type: ignore
+
+def test_envelope_sandbox_mode_overrides_ipc_provision() -> None:
+    """Disk-restore path: envelope.sandbox_mode is the authoritative
+    pre-restart value; the helper must prefer it over whatever the
+    inline IPC provisioning returns.  This pins the precedence
+    documented on ``_bootstrap_session``."""
+    fake_mgr = _FakeSessionManager()
+    fake_mgr.ipc_provision_return = "apparmor"  # would normally win
+    helper = _bind_helper(fake_mgr)
 
     envelope = BootstrapEnvelope(
         session_id="sess-7",
@@ -301,11 +352,14 @@ def test_envelope_sandbox_mode_overrides_server_stash() -> None:
     assert session.sandbox_mode == "kernel"
 
 
-def test_no_sandbox_mode_yields_none() -> None:
-    """Plain session with no apparmor opt-in: sandbox_mode is
-    ``None`` on the Session record."""
+def test_no_ipc_provision_no_envelope_yields_none() -> None:
+    """Plain session with no apparmor opt-in (provisioning method
+    returns None) and no envelope-supplied mode: Session record's
+    ``sandbox_mode`` is None."""
     fake_mgr = _FakeSessionManager()
+    fake_mgr.ipc_provision_return = None
     helper = _bind_helper(fake_mgr)
+
     envelope = BootstrapEnvelope(
         session_id="sess-8",
         workspace_path=None,
@@ -314,6 +368,30 @@ def test_no_sandbox_mode_yields_none() -> None:
     _, session = helper(envelope)
     assert session is not None
     assert session.sandbox_mode is None
+
+
+def test_ipc_provision_fires_before_pre_init_hooks() -> None:
+    """§3.13 lifecycle ordering: the relocated IPC apparmor logic
+    runs BEFORE ``_run_pre_initialize_hooks`` (which still fires
+    for the WS-side hook + third-party hooks).  Tests that the
+    runner is up before any pre-init hook observes the server."""
+    fake_mgr = _FakeSessionManager()
+    helper = _bind_helper(fake_mgr)
+
+    envelope = BootstrapEnvelope(
+        session_id="sess-order",
+        workspace_path="/tmp/ws",
+        name="order",
+        client_id="client-X",
+    )
+    _, session = helper(envelope)
+    assert session is not None
+    # Lifecycle log on the SessionManager records both events in
+    # the correct order.
+    assert fake_mgr.lifecycle_log == [
+        "ipc_apparmor_provision",
+        "pre_init_hooks",
+    ]
 
 
 # ----------------------------------------------------------------------
