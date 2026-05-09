@@ -470,6 +470,23 @@ class RunnerRPC:
             # running).
             return self._handle_session_request_stop(env.args)
 
+        if env.method == "session.get_history":
+            # Phase 3 §3.3c precursor: read the runner-side
+            # JaatoSession's conversation history.  args = ``{}`` or
+            # ``{"raw": bool}`` — when raw=True returns the
+            # un-transformed view (premium pseudonymization
+            # consumers); default returns the transformed view that
+            # lives in the canonical container.
+            return self._handle_session_get_history(env.args)
+
+        if env.method == "session.get_context_usage":
+            # Phase 3 §3.3c precursor: read-only snapshot of
+            # context-window usage stats (model, total_tokens,
+            # context_limit, percent_used, etc.).  Daemon-side
+            # ``ContextUpdatedEvent`` emission delegates here once
+            # the seat-flip lands.
+            return self._handle_session_get_context_usage()
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -787,6 +804,101 @@ class RunnerRPC:
         if not ready:
             return err
         return True, {"running": bool(session.is_running())}
+
+    def _handle_session_get_history(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Read the runner-side JaatoSession's conversation history.
+
+        Args: ``{"raw": bool}`` — optional; defaults to False.
+        When True returns the un-transformed view via
+        ``get_history_raw()`` (used by premium consumers that need
+        the pre-pseudonymization form for user display); when
+        False returns the canonical transformed view.
+
+        Returns:
+            ``(True, {"history": [<Message dict>, ...]})``.  Each
+            message is serialized via ``to_dict()`` so the wire
+            form is JSON-friendly.  History order is preserved
+            (oldest first).
+
+        Phase 3 §3.3c precursor.  Daemon-side
+        ``client.get_history()`` will delegate here once the
+        seat-flip migrates that surface.
+        """
+        raw = bool(args.get("raw", False))
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            messages = (
+                session.get_history_raw() if raw
+                else session.get_history()
+            )
+        except Exception as exc:  # noqa: BLE001 — read boundary
+            return False, {
+                "error": (
+                    f"session.get_history: read failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "read",
+            }
+
+        history_dicts: list = []
+        for msg in messages:
+            to_dict = getattr(msg, "to_dict", None)
+            if callable(to_dict):
+                try:
+                    history_dicts.append(to_dict())
+                except Exception:  # noqa: BLE001
+                    # Single-message serialization failure must not
+                    # drop the whole history — substitute a
+                    # placeholder so the count stays accurate and
+                    # the daemon can log the issue.
+                    history_dicts.append(
+                        {"role": "system", "content": "<unserialisable>"}
+                    )
+            else:
+                # Defensive: messages without to_dict (e.g. test
+                # doubles) fall through as-is; the JSON encoder
+                # will choke if not serialisable, surfacing the
+                # bug at the wire boundary.
+                history_dicts.append(msg)
+        return True, {"history": history_dicts}
+
+    def _handle_session_get_context_usage(self) -> "tuple[bool, Any]":
+        """Read-only snapshot of context-window usage stats.
+
+        Returns the dict :meth:`JaatoSession.get_context_usage`
+        produces (model, context_limit, total_tokens,
+        prompt_tokens, output_tokens, turns, percent_used,
+        tokens_remaining).  Wrapped in ``{"usage": <dict>}`` so
+        the wire shape is symmetric with the other read handlers.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            usage = session.get_context_usage()
+        except Exception as exc:  # noqa: BLE001 — read boundary
+            return False, {
+                "error": (
+                    f"session.get_context_usage: read failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "read",
+            }
+        # Defensive: ensure the result is a dict even if a custom
+        # session subclass returns something else.
+        if not isinstance(usage, dict):
+            return False, {
+                "error": (
+                    f"session.get_context_usage: expected dict, got "
+                    f"{type(usage).__name__}"
+                ),
+                "stage": "read",
+            }
+        return True, {"usage": dict(usage)}
 
     def _handle_session_request_stop(
         self, args: Dict[str, Any],
