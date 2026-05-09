@@ -13,6 +13,7 @@ from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
@@ -91,7 +92,7 @@ _WRITE_OUTPUT_CMDS = frozenset({
 })
 
 
-class CLIToolPlugin(BackgroundCapableMixin):
+class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
     """Plugin that provides CLI command execution capability.
 
     Supports background execution via BackgroundCapableMixin. Commands that
@@ -376,8 +377,18 @@ class CLIToolPlugin(BackgroundCapableMixin):
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {'cli_based_tool': self._execute}
+        """Return the executor mapping.
+
+        Phase 3: forwards via runner-RPC when a runner is attached
+        (the canonical wave-1 pattern); falls through to in-process
+        otherwise.  This collapses Phase 2's hand-rolled
+        ``_execute_via_runner`` indirection in ``_execute`` onto the
+        shared ``RunnerForwardingMixin`` — same wire path, same
+        cancellation contract, less per-plugin duplication.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            'cli_based_tool': self._execute,
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the CLI tool."""
@@ -1034,7 +1045,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     # --- End path sandboxing implementation ---
 
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a CLI command.
+        """Execute a CLI command in-process.
 
         Exactly one of the following forms should be provided:
         1. command: full shell-like command string (preferred for simplicity).
@@ -1043,15 +1054,14 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         Shell metacharacters (pipes, redirections, command chaining) are auto-detected
         and the command is executed through the shell when required.
 
-        **Phase 2 confined-runner dispatch.**  When this session has a
-        runner subprocess attached (``registry.runner_rpc`` is set —
-        only true for IPC sessions that opted into AppArmor as of
-        Phase 2), the call is forwarded over RPC to the runner; the
-        cli ``subprocess.Popen`` happens inside the kernel-confined
-        runner process so the spawned child inherits the per-session
-        AppArmor profile.  When no runner is attached, the call falls
-        through to the in-process path below — same code path as
-        before Phase 2.
+        **Phase 3 dispatch.**  When the session has a runner subprocess
+        attached, ``get_executors`` wraps this method with the
+        ``RunnerForwardingMixin`` forwarder, which routes the call
+        through ``tool.execute`` RPC instead of invoking this body.
+        The cli ``subprocess.Popen`` then happens inside the kernel-
+        confined runner process so the spawned child inherits the
+        per-session AppArmor profile.  When no runner is attached,
+        the wrapper falls through to this in-process path.
 
         Args:
             args: Dict containing 'command' and optionally 'args' and 'extra_paths'.
@@ -1059,13 +1069,6 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         Returns:
             Dict containing stdout, stderr and returncode; on failure contains error.
         """
-        # ----- Phase 2 confined-runner dispatch -----
-        runner_rpc = getattr(self._plugin_registry, "runner_rpc", None) \
-            if self._plugin_registry is not None else None
-        if runner_rpc is not None:
-            return self._execute_via_runner(runner_rpc, args)
-
-        # ----- Legacy in-process path (no runner attached) -----
         try:
             command = args.get('command')
             arg_list = args.get('args')
@@ -1165,89 +1168,6 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
         except Exception as exc:
             return {'error': str(exc)}
-
-
-    def _execute_via_runner(
-        self, runner_rpc, args: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Forward a cli execute call to the runner subprocess via RPC.
-
-        Phase 2 task 2.5: the daemon-side cli plugin becomes a thin
-        stub when a runner is attached.  This method:
-
-        1. Resolves the streaming callback and cancel token from the
-           in-process thread-locals (``get_current_tool_output_callback``
-           / ``get_current_cancel_token``) — same contract today's
-           model->plugin call site uses.
-        2. Calls ``runner_rpc.call_threadsafe(...)`` which wraps an
-           asyncio call onto the daemon's main loop and blocks the
-           current (executor worker) thread until the typed envelope
-           comes back.
-        3. Translates the envelope into the legacy result-dict shape
-           the model + history pipeline expects today.
-
-        On a CancelledException raised inside the runner, this method
-        re-raises it locally so ``ToolExecutor.execute`` translates
-        it to ``FinishReason.CANCELLED`` exactly as in the in-process
-        path.
-        """
-        # Adapter from the in-process (source, text, mode) callback
-        # contract to the runner-side stream-frame shape.
-        in_proc_cb = get_current_tool_output_callback()
-
-        on_output = None
-        if in_proc_cb is not None:
-            def on_output(source: str, text: str, mode: Optional[str] = None) -> None:
-                # The daemon-side callback expects (source, text, mode);
-                # the runner's stream frames carry exactly those fields.
-                in_proc_cb(source, text, mode)
-
-        cancel_token = get_current_cancel_token()
-
-        try:
-            envelope = runner_rpc.call_threadsafe(
-                "tool.execute",
-                {"name": "cli_based_tool", "args": dict(args)},
-                on_output=on_output,
-                cancel_token=cancel_token,
-                # No wall-clock here — the runner's run_command
-                # honours JAATO_RUNNER_TOOL_TIMEOUT_SECONDS (set by the
-                # spawner from the session's RuntimeLimits) so the
-                # daemon-side wait should be unbounded.
-                timeout=None,
-            )
-        except Exception as exc:  # noqa: BLE001 — RPC transport boundary
-            # If the RPC itself failed (peer disconnect, malformed
-            # frame), surface as a tool error rather than a hard
-            # exception so the model gets a clean message.
-            return {
-                "error": (
-                    f"cli_based_tool: runner RPC failed: "
-                    f"{type(exc).__name__}: {exc}"
-                ),
-            }
-
-        # The runner's typed envelope wraps either a successful
-        # result-dict or an error payload.  When the runner reported
-        # CancelledException, propagate it locally so the in-process
-        # pipeline classifies the call as cancelled (not just failed).
-        if envelope.error is not None and envelope.error.type == "CancelledException":
-            raise CancelledException(envelope.error.message or "Cancelled")
-
-        # Domain failures: ok=False with a structured result already
-        # present (e.g. "executable not found") flow through unchanged
-        # — the model sees the same dict shape the in-process path
-        # would have returned.
-        if envelope.ok and isinstance(envelope.result, dict):
-            return envelope.result
-
-        # Domain failure with non-dict result, OR a non-cancellation
-        # error: synthesise a legacy-shape error dict.
-        if isinstance(envelope.result, dict):
-            return envelope.result
-        if envelope.error is not None:
-            return {"error": envelope.error.message}
-        return {"error": "cli_based_tool: empty response from runner"}
 
 
 def create_plugin() -> CLIToolPlugin:
