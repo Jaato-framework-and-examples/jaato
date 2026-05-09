@@ -1053,12 +1053,14 @@ def _spawn_session_runner(
     daemon_loop,
 ) -> None:
     """Spawn the per-session runner subprocess and wire its RPC handle
-    onto the JaatoServer.
+    onto the JaatoServer (IPC path).
 
-    Called from the IPC AppArmor session hook AFTER
-    ``apparmor.provision_profile`` returns successfully.  The runner
-    self-confines via ``aa_change_profile`` against the just-loaded
-    profile (see :mod:`server.runner.bootstrap`).
+    Phase 3 §3.12: this wrapper composes
+    :func:`server.runner_spawn.spawn_session_runner` (the shared
+    spawn primitive used by both IPC and WS apparmor pre-init hooks)
+    with the IPC-only Phase 3 §3.3c part 2 envelope dispatch.  The
+    WS hook calls ``spawn_session_runner`` directly without the
+    envelope step.
 
     Args:
         server: The session's ``JaatoServer`` instance.
@@ -1075,46 +1077,17 @@ def _spawn_session_runner(
     and downgrades to ``sandbox_mode = "soft"`` per the §4.6 fallback
     contract.
     """
-    import asyncio
-    import os
+    from server.runner_spawn import spawn_session_runner
 
-    from server.runner_spawner import RunnerSpawner
-    from server.runner_rpc_client import RunnerRPCClient
-
-    if daemon_loop is None:
-        raise RuntimeError(
-            "_spawn_session_runner: daemon loop unavailable; cannot "
-            "start RunnerRPCClient"
-        )
-
-    spawner = RunnerSpawner()
-
-    log_path: Optional[str] = None
-    if workspace_path:
-        log_dir = os.path.join(workspace_path, ".jaato", "logs")
-        log_path = os.path.join(log_dir, f"runner-{session_id}.log")
-
-    spawned = spawner.spawn(
-        profile_name=profile_name,
+    spawn_session_runner(
+        server=server,
         session_id=session_id,
         workspace_path=workspace_path,
-        log_path=log_path,
+        profile_name=profile_name,
+        daemon_loop=daemon_loop,
     )
 
-    rpc = RunnerRPCClient(
-        spawned.parent_socket,
-        runner_pid=spawned.pid,
-        loop=daemon_loop,
-    )
-
-    fut = asyncio.run_coroutine_threadsafe(rpc.start(), daemon_loop)
-    fut.result(timeout=10.0)
-
-    server.set_runner_rpc(rpc, spawned)
-    logger.info(
-        "runner spawned for session %s: pid=%d profile=%s log=%s",
-        session_id, spawned.pid, profile_name, log_path or "(inherited)",
-    )
+    rpc = server.runner_rpc
 
     # Phase 3 §3.3c part 2: when JAATO_RUNNER_HOSTS_SESSION is set,
     # also send the session.bootstrap envelope so the runner-side

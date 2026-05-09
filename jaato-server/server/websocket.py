@@ -516,12 +516,27 @@ class JaatoWSServer:
             server: JaatoServer,
             session_id: str,
             workspace_path: Optional[str],
+            client_id: Optional[str] = None,
         ) -> None:
-            """Provision the AppArmor profile BEFORE ``server.initialize()``
-            so prefetch scripts run inside the session's confinement
-            (server 0.6.49+).  Failure here is non-fatal — the post-init
-            hook downgrades the session to ``soft`` mode if the profile
+            """Provision the AppArmor profile + spawn the per-session
+            runner BEFORE ``server.initialize()`` so prefetch scripts
+            run inside the session's confinement and plugins
+            discovered during ``configure()`` see ``registry.runner_rpc``
+            already wired (server 0.6.49+; runner spawn added Phase 3
+            §3.12).  Failure here is non-fatal — the post-init hook
+            downgrades the session to ``soft`` mode if the profile
             wasn't loaded.
+
+            Phase 3 §3.12 — converted from the legacy 3-arg
+            signature ``(server, session_id, workspace_path)`` to
+            the 4-arg form ``(server, session_id, workspace_path,
+            client_id)`` matching the IPC apparmor pre-init hook
+            from Phase 2 §2.3.  The ``client_id`` argument is
+            unused by the WS gate (which keys off
+            workspace-under-WS-root rather than per-client opt-in)
+            but accepting it keeps the dispatcher's modern path
+            engaged without falling through to the legacy compat
+            branch in ``_run_pre_initialize_hooks``.
 
             Server 0.6.50+: ALSO stashes the confine-context factory on
             the server so ``configure()``'s dynamic-instructions
@@ -558,6 +573,43 @@ class JaatoWSServer:
             # run unconfined daemon-side; per-session tool execution
             # runs in the runner subprocess, which self-confines.
             # See docs/design/per_session_confined_runner.md §4.6.
+
+            # Phase 3 §3.12: spawn the per-session runner subprocess
+            # alongside the apparmor profile (matching the IPC
+            # hook's behaviour from Phase 2 §2.3).  Plugins
+            # discovered during ``configure()`` see
+            # ``registry.runner_rpc`` set at configure time —
+            # the runner-RPC handle is the same primitive both
+            # transports rely on.  Failure here downgrades the
+            # session to soft mode rather than killing it; Phase 4
+            # may make this strict (apparmor=on requires runner=on).
+            daemon_loop = ws_server._event_loop
+            if daemon_loop is None:
+                logger.warning(
+                    "AppArmor pre-init: ws_server has no daemon loop "
+                    "captured — runner not spawned for session %s; "
+                    "post-init hook will downgrade to soft mode",
+                    session_id,
+                )
+                return
+            try:
+                from server.runner_spawn import spawn_session_runner
+                spawn_session_runner(
+                    server=server,
+                    session_id=session_id,
+                    workspace_path=workspace_path,
+                    profile_name=apparmor.get_profile_name(session_id),
+                    daemon_loop=daemon_loop,
+                )
+            except Exception as exc:  # noqa: BLE001 — spawn boundary
+                logger.warning(
+                    "AppArmor pre-init: runner spawn failed for "
+                    "session %s (%s: %s) — falling back to in-process "
+                    "tool execution; post-init hook will downgrade to "
+                    "soft mode",
+                    session_id, type(exc).__name__, exc, exc_info=True,
+                )
+                return
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
             sess = sm.get_session(session_id)
