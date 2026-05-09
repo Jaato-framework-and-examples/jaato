@@ -531,6 +531,15 @@ class RunnerRPC:
             # ``{"context": <serialized PresentationContext dict>}``.
             return self._handle_session_set_presentation_context(env.args)
 
+        if env.method == "session.reset":
+            # Phase 3 §3.3c precursor: clear the runner-side
+            # JaatoSession's conversation history.  Today only
+            # supports the no-history "fresh reset" path —
+            # restoring a saved history requires Message
+            # round-trip serialization which is its own design
+            # task.  args = ``{}``.
+            return self._handle_session_reset()
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -935,6 +944,33 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"usage": dict(usage)}
+
+    def _handle_session_reset(self) -> "tuple[bool, Any]":
+        """Clear the runner-side JaatoSession's conversation history.
+
+        Phase 3 §3.3c precursor.  Calls
+        ``JaatoSession.reset_session()`` with no history — fresh
+        reset.  Restoring a saved history requires Message
+        round-trip serialization (Message lacks ``from_dict``
+        today) and lands as a separate handler when that design
+        completes.
+
+        Returns ``{"ok": True}`` on success.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            session.reset_session()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.reset: reset_session raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "reset",
+            }
+        return True, {"ok": True}
 
     def _handle_session_set_presentation_context(
         self, args: Dict[str, Any],
