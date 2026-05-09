@@ -518,28 +518,46 @@ class JaatoWSServer:
             workspace_path: Optional[str],
             client_id: Optional[str] = None,
         ) -> None:
-            """Provision the AppArmor profile + spawn the per-session
-            runner BEFORE ``server.initialize()`` so prefetch scripts
-            run inside the session's confinement and plugins
-            discovered during ``configure()`` see ``registry.runner_rpc``
-            already wired (server 0.6.49+; runner spawn added Phase 3
-            §3.12).  Failure here is non-fatal — the post-init hook
-            downgrades the session to ``soft`` mode if the profile
-            wasn't loaded.
+            """Spawn the per-session runner unconditionally for
+            WS-provisioned sessions; layer apparmor confinement atop
+            iff the kernel module is available.
 
-            Phase 3 §3.12 — converted from the legacy 3-arg
-            signature ``(server, session_id, workspace_path)`` to
-            the 4-arg form ``(server, session_id, workspace_path,
-            client_id)`` matching the IPC apparmor pre-init hook
-            from Phase 2 §2.3.  The ``client_id`` argument is
-            unused by the WS gate (which keys off
+            Phase 3 §7a (WS counterpart to the IPC always-spawn
+            refactor in ``SessionManager._provision_ipc_apparmor_and_spawn_runner``).
+            Pre-§7a this skipped both apparmor AND spawn when
+            apparmor was unavailable; post-§7a the spawn is
+            unconditional so the runner-RPC dispatch surface is
+            always available for the seat-flip's ``self._jaato.X``
+            migrations.
+
+            Lifecycle:
+            1. Skip when no workspace_path (no cwd target for the
+               runner).
+            2. Skip when workspace is NOT under the WS server's
+               workspace_root (IPC / user-CWD session — IPC hook
+               handles its own).
+            3. Resolve the daemon loop; skip if unavailable
+               (start() should always have captured it; defensive
+               only).
+            4. **Apparmor (opt-in via host availability)**: if the
+               WS server has an :class:`AppArmorManager` and it's
+               available, provision the per-session profile.  On
+               provisioning failure, log a warning and continue
+               unconfined.
+            5. **Spawn (unconditional)**: spawn the runner with the
+               provisioned profile (or empty + ``disable_confine=True``
+               if apparmor is unavailable / failed).  Spawn failure
+               logs a warning and the session falls back to
+               in-process tool execution.
+
+            ``client_id`` is unused by the WS gate (which keys off
             workspace-under-WS-root rather than per-client opt-in)
             but accepting it keeps the dispatcher's modern path
             engaged without falling through to the legacy compat
             branch in ``_run_pre_initialize_hooks``.
 
-            Server 0.6.50+: ALSO stashes the confine-context factory on
-            the server so ``configure()``'s dynamic-instructions
+            Server 0.6.50+: ALSO stashes the confine-context factory
+            on the server so ``configure()``'s dynamic-instructions
             expansion wraps prefetch scripts in
             ``apparmor_confine(profile)``.  The factory is propagated
             onto the runtime once ``initialize()`` constructs it
@@ -547,9 +565,10 @@ class JaatoWSServer:
             """
             if not workspace_path:
                 return
-            apparmor = ws_server._apparmor
-            if not apparmor or not apparmor.is_available():
-                return
+
+            # Gate: only WS-provisioned sessions (workspace under
+            # WS server's root) take this path.  Non-WS sessions
+            # (IPC / user-CWD) are handled by the IPC hook.
             try:
                 ws_workspace_root = os.path.realpath(ws_server._workspace_root)
                 sess_workspace = os.path.realpath(workspace_path)
@@ -560,46 +579,43 @@ class JaatoWSServer:
                 or sess_workspace.startswith(ws_workspace_root + os.sep)
             ):
                 return  # IPC or user-CWD session — not WS-provisioned
-            if not apparmor.provision_profile(session_id, workspace_path):
-                logger.warning(
-                    "AppArmor pre-init: provision_profile failed for "
-                    "session %s — post-init hook will downgrade to soft mode",
-                    session_id,
-                )
-                return
-            # Phase 2 (confined runner): profile is loaded in the
-            # kernel above; the daemon does NOT install a confine-
-            # context onto its own threads.  configure() / prefetch
-            # run unconfined daemon-side; per-session tool execution
-            # runs in the runner subprocess, which self-confines.
-            # See docs/design/per_session_confined_runner.md §4.6.
 
-            # Phase 3 §3.12: spawn the per-session runner subprocess
-            # alongside the apparmor profile (matching the IPC
-            # hook's behaviour from Phase 2 §2.3).  Plugins
-            # discovered during ``configure()`` see
-            # ``registry.runner_rpc`` set at configure time —
-            # the runner-RPC handle is the same primitive both
-            # transports rely on.  Failure here downgrades the
-            # session to soft mode rather than killing it; Phase 4
-            # may make this strict (apparmor=on requires runner=on).
             daemon_loop = ws_server._event_loop
             if daemon_loop is None:
                 logger.warning(
                     "AppArmor pre-init: ws_server has no daemon loop "
-                    "captured — runner not spawned for session %s; "
-                    "post-init hook will downgrade to soft mode",
+                    "captured — runner not spawned for session %s",
                     session_id,
                 )
                 return
+
+            # ----- Apparmor (opt-in via host availability) -----
+            apparmor = ws_server._apparmor
+            profile_name = ""  # empty = unconfined (disable_confine=True)
+            if apparmor is not None and apparmor.is_available():
+                if apparmor.provision_profile(session_id, workspace_path):
+                    profile_name = apparmor.get_profile_name(session_id)
+                else:
+                    logger.warning(
+                        "AppArmor pre-init: provision_profile failed for "
+                        "session %s — runner will spawn unconfined; "
+                        "post-init hook will downgrade to soft mode",
+                        session_id,
+                    )
+                    # profile_name stays empty → unconfined spawn
+
+            # Phase 3 §7a: spawn the runner regardless of apparmor
+            # outcome.  The dispatch surface is always available;
+            # confinement is layered atop iff apparmor succeeded.
             try:
                 from server.runner_spawn import spawn_session_runner
                 spawn_session_runner(
                     server=server,
                     session_id=session_id,
                     workspace_path=workspace_path,
-                    profile_name=apparmor.get_profile_name(session_id),
+                    profile_name=profile_name,
                     daemon_loop=daemon_loop,
+                    disable_confine=(profile_name == ""),
                 )
             except Exception as exc:  # noqa: BLE001 — spawn boundary
                 logger.warning(
