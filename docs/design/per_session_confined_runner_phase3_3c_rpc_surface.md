@@ -132,9 +132,15 @@ withdrawal):
 
 ```
 §7a (always-spawn)                                 ← shipped (55ae4ba0 / 20526f4d)
-  → §7b.1 (stateless setters / readers; ~5 commits)← in-flight, ~5 of ~10 sites done
+  → §7b.1 (stateless setters / readers)            ← shipped (3 vanguard + 3 iteration:
+                                                       8cbb8ba2 + fafe90a6 + 7f8be0cb;
+                                                       remaining "NOW" sites re-bucketed
+                                                       to DEFER-§7c per §10 wrap-up table)
     → §7b.2 (session.send_message)                 ← shipped (3ca3c14d)
-      → §7c (remove in-process JaatoSession + flag)
+      → §7c (remove in-process JaatoSession + flag,
+             absorbs §7b.3 response-handler rewiring
+             + introspection collapse + DEFER-§7c
+             read-site migrations)
         → §7d (cgroup attach migration; depends on
                7a's stable cgroup placement)
 ```
@@ -243,10 +249,13 @@ One commit; lands BEFORE 7b.
 Split into three sub-buckets per peer-review M2 — each has
 comparable scope to §3.7 and warrants its own commit.
 
-#### 7b.1. Stateless setters / readers (the easy bulk)
+#### 7b.1. Stateless setters / readers (the easy bulk) — **shipped**
 
-Most fall into patterns the existing dispatch surface already
-covers:
+**Status: shipped (6 commits).**  Final scope smaller than the
+original ~10-site estimate after the §10 audit appendix's
+NOW-bucket re-classification (5 read-side sites deferred to §7c).
+
+Patterns the existing dispatch surface covers:
 
 - `_jaato.set_*` → `runner_rpc.session_set_*_threadsafe`
 - `_jaato.get_session().get_session_state(...)` → `runner_rpc.session_get_state`
@@ -255,13 +264,25 @@ covers:
 - `_jaato.get_history()` → `runner_rpc.session_get_history`
 - `_jaato.get_context_usage()` → `runner_rpc.session_get_context_usage`
 
-Of the 50 sites in `core.py`, an audit (`grep self._jaato\.` +
-manual classification) puts ~30 in this bucket.  Each migration
-follows the vanguard pattern (write to both during transition);
-no new RPC handlers needed.
+Each migration followed the vanguard write-both pattern (call
+daemon-side AND forward to runner during transition); no new RPC
+handlers required.
 
-One commit per cluster (lifecycle, state, config, etc.); ~5
-commits total in this bucket.
+Shipped commits (chronological):
+
+| Commit | Site | Method |
+|---|---|---|
+| `45a2dbd8` | `JaatoServer.shutdown` | `session.shutdown` |
+| `b2c0772d` | `JaatoServer.terminal_width` setter | `session.set_terminal_width` |
+| `c3d5ec08` | `JaatoServer.set_presentation_context` | `session.set_presentation_context` |
+| `8cbb8ba2` | `JaatoServer.clear_history` | `session.reset` |
+| `fafe90a6` | `JaatoServer.stop` | `session.request_stop` |
+| `7f8be0cb` | `initialize()` post-init terminal_width sync | `session.set_terminal_width` (direct call, bypasses property) |
+
+Five originally-NOW READ sites (context_usage / context_limit at
+init + auth-completion) plus `emit_current_state`'s
+`instruction_budget` read fold into §7c — see §10 wrap-up table
+for the per-site re-bucketing rationale.
 
 #### 7b.2. `session.send_message` (the big one)
 
@@ -654,27 +675,34 @@ Same shape, same bucket distribution:
 
 | Bucket | Site count | Status |
 |---|---|---|
-| **DONE** (vanguard) | 4 | Shipped: shutdown, terminal_width setter, presentation_context setter (3 vanguard commits) |
-| **NOW** | ~10 | The §7b.1 cleanly-migratable scope.  Sites: 1061-1062 (emit_current_state), 1629 (init's set_terminal_width call), 1899/4087 (get_context_usage ×2), 3629-3630 (stop), 3737 (clear_history), 1900/4088 (get_context_limit ×2 — needs handler addition first) |
+| **DONE** (vanguard + §7b.1 iteration) | 6 | All shipped.  Vanguard (3): `shutdown`, `terminal_width` setter, `set_presentation_context`.  §7b.1 iteration (3): `clear_history` (8cbb8ba2), `stop` (fafe90a6), init-time `set_terminal_width` direct call (7f8be0cb). |
+| **DEFER-§7c** (was originally tagged NOW) | ~5 | Re-bucketed per 7f8be0cb's audit-correction: read-time sites that the seat-flip naturally collapses.  See "§7b.1 wrap-up: NOW-bucket re-classification" below. |
 | **DAEMON** | ~22 | Stay daemon-side per §4.2 |
 | **INTERNAL** | ~12 | Refactor away during §7c |
 | **WIRING** | ~7 | Migrate when runner-side counterparts exist (§7b.1 phase 2 or post-§7c) |
-| **§7b.2** | 5 | `send_message` + `_start_model_thread` cluster |
+| **§7b.2** | 5 | `send_message` + `_start_model_thread` cluster — shipped (3ca3c14d) |
 | **TRULY-PRE** | 0 | None — `__init__` only has a truthiness check |
 | **TRUTHINESS** | ~15 | Collapse post-§7c |
 
 **Total: 75** (50 attribute calls + 25 truthiness checks).
 
-### Implication for §7b.1
+### §7b.1 wrap-up: NOW-bucket re-classification
 
-The honest §7b.1 scope is **~10 sites** (matches the worker's
-"5-10" estimate, confirmed by audit).  Migrate as ~3 commits:
+The audit's original "NOW" bucket included 5 sites that subsequent
+implementation work re-bucketed.  Recorded for posterity:
 
-1. **`session.get_context_limit` handler addition** — small precursor; add the field to the `get_context_usage` dict and (optionally) the standalone handler.  Removes the fallback in 1900/4088.
-2. **State-reader cluster** (1061-1062, 1899/4087, 1900/4088) — daemon-side reads via `session_get_all_state` / `session_get_context_usage`.  ~3 sites.
-3. **Lifecycle cluster** (1629, 3629-3630, 3737) — `session_set_terminal_width` direct call (not via property), `session_is_running` / `session_request_stop`, `session_reset`.  ~4 sites.
+| Audit-line | Code today | Original bucket | Final bucket | Reason |
+|---|---|---|---|---|
+| 1061-1062 | 1072-1078 (`emit_current_state` reads `session.instruction_budget`) | NOW | **DAEMON** | The audit assumed `session.get_all_session_state` would cover this.  It doesn't — `instruction_budget` is a private attribute exposed via property, not a registered state provider.  Migration would require a dedicated `session.get_instruction_budget` RPC, which is daemon-tier (instruction-budget tracking lives daemon-side per §4.2). |
+| 1899 / 4087 | 1935 / 4171 (`get_context_usage` reads at init / auth-completion) | NOW | **DEFER-§7c** | READS at initialize / auth-completion time.  Daemon-side `_jaato` is the source of truth pre-§7c (just-initialized; runner-side session has zero usage at this moment).  Migrating reads NOW would break the toolbar's initial-usage display.  Defer to post-§7c when the runner becomes the source of truth. |
+| 1900 / 4088 | 1936 / 4172 (`get_context_limit` reads at init / auth-completion) | NOW | **DEFER-§7c** | Same shape as `get_context_usage` reads above.  The precursor handler `session.get_context_limit` (added at 34ecbe0a) is in place for the eventual flip. |
 
-Total: 3 commits, ~10 sites migrated, ~10 left in DAEMON / INTERNAL / WIRING / §7b.2 buckets that the seat-flip will close as §7b.2 + §7c land.
+**Net §7b.1 closed scope:** 6 WRITE sites migrated across 6 commits (3
+vanguard + 3 iteration).  All read-side sites + emit_current_state
+collapse during §7c — no further §7b.1 work is required.
+
+The 7f8be0cb commit message contains the canonical audit correction;
+this table is its design-doc-resident counterpart.
 
 ### What this audit does NOT decide
 
