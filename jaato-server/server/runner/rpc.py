@@ -2531,31 +2531,65 @@ class RunnerRPC:
                     "propagate to session",
                 )
 
+        # Phase 3 §7c step 6.6.4.2: install notification-emitting
+        # callbacks on the runner-side session for the duration of
+        # this send_message call.  Per the §7c step 6.6.2 audit
+        # (commit 9f28f96d): the 7 daemon-side callback wirings
+        # at sites 1996/2011/3391/3415/3430/3440/4291 collapse
+        # into runner-side notification emissions via the §7c
+        # step 6.6.4.1 NotificationFrame protocol (commit
+        # 6e31d375).  Each session callback emits a frame with a
+        # well-known event_type; the daemon-side wrapper's
+        # ``on_notification`` handler (installed in §7c step
+        # 6.6.4.3) demuxes by event_type and invokes
+        # ``server.emit(<Event>)`` or ``server._start_model_thread(...)``.
+        #
+        # Save the original callbacks so we can restore on exit —
+        # other callers (e.g. the daemon's pre-§7c-step-6.6.4.3
+        # ``_start_model_thread``) may have wired their own.
+        # Until 6.6.4.3 lands the daemon-side leg drop, this
+        # runner-side wiring is dormant: the runner-side session
+        # never processes a turn (the daemon's
+        # ``_jaato.send_message()`` does), so the emit_notification
+        # calls don't fire.  Behavior-preserving installation.
+        original_callbacks = self._install_session_notification_callbacks(
+            session, request_id,
+        )
+
         # Run the message loop.  Model API calls happen
         # synchronously here; output streams via on_output.
         try:
-            response = session.send_message(prompt, on_output=on_output)
-        except Exception as exc:  # noqa: BLE001 — boundary
-            # Cancellation surfaces as a typed exception today
-            # (CancelledException from the model_provider types).
-            # Translate the cancel case to the dispatcher's
-            # CancelledException error envelope so the daemon-side
-            # wrapper sees the same shape as a tool.execute cancel.
-            from jaato_sdk.plugins.model_provider.types import (
-                CancelledException,
-            )
-            if isinstance(exc, CancelledException):
+            try:
+                response = session.send_message(prompt, on_output=on_output)
+            except Exception as exc:  # noqa: BLE001 — boundary
+                # Cancellation surfaces as a typed exception today
+                # (CancelledException from the model_provider types).
+                # Translate the cancel case to the dispatcher's
+                # CancelledException error envelope so the daemon-side
+                # wrapper sees the same shape as a tool.execute cancel.
+                from jaato_sdk.plugins.model_provider.types import (
+                    CancelledException,
+                )
+                if isinstance(exc, CancelledException):
+                    return False, {
+                        "error": str(exc) or "Cancelled",
+                        "stage": "cancelled",
+                    }
                 return False, {
-                    "error": str(exc) or "Cancelled",
-                    "stage": "cancelled",
+                    "error": (
+                        f"session.send_message: model loop raised "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    "stage": "send",
                 }
-            return False, {
-                "error": (
-                    f"session.send_message: model loop raised "
-                    f"{type(exc).__name__}: {exc}"
-                ),
-                "stage": "send",
-            }
+        finally:
+            # Phase 3 §7c step 6.6.4.2: restore any pre-existing
+            # callbacks the session had so other callers (e.g. a
+            # daemon-side _start_model_thread that wired its own)
+            # see the same shape after this RPC completes.
+            self._restore_session_notification_callbacks(
+                session, original_callbacks,
+            )
 
         # Defensive: send_message returns str by contract; coerce
         # if a custom session subclass returns something else.
@@ -2565,6 +2599,250 @@ class RunnerRPC:
             response = str(response)
 
         return True, {"response": response}
+
+    # ----------------------------------------------------------------------
+    # §7c step 6.6.4.2: notification-emitting callback wiring for the
+    # runner-side session during ``session.send_message`` handling.
+    #
+    # Maps each session callback to a NotificationFrame ``event_type`` +
+    # payload via the §7c step 6.6.4.1 protocol (commit 6e31d375).
+    # The daemon-side wrapper's ``on_notification`` handler (installed
+    # in §7c step 6.6.4.3) demuxes by event_type and invokes
+    # ``server.emit(<Event>)`` or ``server._start_model_thread(...)``.
+    #
+    # Until 6.6.4.3 lands the daemon-side leg drop, the runner-side
+    # session never processes a turn (the daemon's
+    # ``_jaato.send_message()`` does), so these callbacks are dormant
+    # — installation is behavior-preserving.
+    # ----------------------------------------------------------------------
+
+    # Event-type constants — daemon-side demuxer matches on these.
+    _NOTIF_INSTRUCTION_BUDGET_UPDATED = "instruction_budget_updated"
+    _NOTIF_PROMPT_INJECTED = "prompt_injected"
+    _NOTIF_CONTINUATION_NEEDED = "continuation_needed"
+    _NOTIF_RETRY = "retry"
+    _NOTIF_MID_TURN_INTERRUPT = "mid_turn_interrupt"
+    _NOTIF_EVENTS_SUBSCRIBED = "events_subscribed"
+
+    def _install_session_notification_callbacks(
+        self, session: Any, request_id: int,
+    ) -> Dict[str, Any]:
+        """Install notification-emitting callbacks on the session.
+
+        Phase 3 §7c step 6.6.4.2.  Each session callback emits a
+        NotificationFrame with a well-known event_type; daemon-
+        side handler demuxes.
+
+        Returns a dict of original callbacks (for restoration in
+        ``_restore_session_notification_callbacks``).  Best-effort:
+        sessions without a particular setter (rolling-upgrade
+        scenario, or test stubs) are silently skipped — the
+        corresponding event type just won't fire.
+
+        Args:
+            session: The runner-side JaatoSession.
+            request_id: The in-flight call's id; threaded into
+                each NotificationFrame.
+        """
+        rpc = self
+        originals: Dict[str, Any] = {}
+
+        # instruction_budget_callback(snapshot: dict) -> None
+        if hasattr(session, "set_instruction_budget_callback"):
+            originals["instruction_budget"] = getattr(
+                session, "_on_instruction_budget_updated", None,
+            )
+
+            def _ib_cb(snapshot: dict) -> None:
+                try:
+                    rpc.emit_notification(
+                        request_id=request_id,
+                        event_type=rpc._NOTIF_INSTRUCTION_BUDGET_UPDATED,
+                        payload={"snapshot": dict(snapshot or {})},
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("instruction_budget notify raised")
+
+            try:
+                session.set_instruction_budget_callback(_ib_cb)
+            except Exception:  # noqa: BLE001
+                logger.debug("set_instruction_budget_callback raised")
+
+        # prompt_injected_callback(text: str) -> None
+        if hasattr(session, "set_prompt_injected_callback"):
+            originals["prompt_injected"] = getattr(
+                session, "_on_prompt_injected", None,
+            )
+
+            def _pi_cb(text: str) -> None:
+                try:
+                    rpc.emit_notification(
+                        request_id=request_id,
+                        event_type=rpc._NOTIF_PROMPT_INJECTED,
+                        payload={"text": str(text or "")},
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("prompt_injected notify raised")
+
+            try:
+                session.set_prompt_injected_callback(_pi_cb)
+            except Exception:  # noqa: BLE001
+                logger.debug("set_prompt_injected_callback raised")
+
+        # continuation_callback(child_messages: str) -> None
+        if hasattr(session, "set_continuation_callback"):
+            originals["continuation"] = getattr(
+                session, "_on_continuation_needed", None,
+            )
+
+            def _cont_cb(child_messages: str) -> None:
+                try:
+                    rpc.emit_notification(
+                        request_id=request_id,
+                        event_type=rpc._NOTIF_CONTINUATION_NEEDED,
+                        payload={"child_messages": str(child_messages or "")},
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("continuation notify raised")
+
+            try:
+                session.set_continuation_callback(_cont_cb)
+            except Exception:  # noqa: BLE001
+                logger.debug("set_continuation_callback raised")
+
+        # retry_callback(message: str, attempt: int, max_attempts: int, delay: float)
+        if hasattr(session, "set_retry_callback"):
+            originals["retry"] = getattr(session, "_on_retry", None)
+
+            def _retry_cb(
+                message: str, attempt: int, max_attempts: int, delay: float,
+            ) -> None:
+                try:
+                    rpc.emit_notification(
+                        request_id=request_id,
+                        event_type=rpc._NOTIF_RETRY,
+                        payload={
+                            "message": str(message or ""),
+                            "attempt": int(attempt),
+                            "max_attempts": int(max_attempts),
+                            "delay": float(delay),
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("retry notify raised")
+
+            try:
+                session.set_retry_callback(_retry_cb)
+            except Exception:  # noqa: BLE001
+                logger.debug("set_retry_callback raised")
+
+        # mid_turn_interrupt_callback(partial_chars: int, prompt_preview: str)
+        if hasattr(session, "set_mid_turn_interrupt_callback"):
+            originals["mid_turn_interrupt"] = getattr(
+                session, "_on_mid_turn_interrupt", None,
+            )
+
+            def _mti_cb(partial_chars: int, prompt_preview: str) -> None:
+                try:
+                    rpc.emit_notification(
+                        request_id=request_id,
+                        event_type=rpc._NOTIF_MID_TURN_INTERRUPT,
+                        payload={
+                            "partial_chars": int(partial_chars),
+                            "prompt_preview": str(prompt_preview or ""),
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("mid_turn_interrupt notify raised")
+
+            try:
+                session.set_mid_turn_interrupt_callback(_mti_cb)
+            except Exception:  # noqa: BLE001
+                logger.debug("set_mid_turn_interrupt_callback raised")
+
+        # _event_bus_tools._on_subscribed(agent_id: str, event_names: list)
+        # Direct private-attr write — JaatoSession exposes
+        # _event_bus_tools as a private attr without a public setter
+        # for the on_subscribed slot.  Mirrors the daemon-side pattern
+        # at core.py:1996 (pre-§7c-step-6.6.4.3).
+        ebt = getattr(session, "_event_bus_tools", None)
+        if ebt is not None and hasattr(ebt, "_on_subscribed"):
+            originals["events_subscribed"] = ebt._on_subscribed
+
+            def _ebt_cb(agent_id: str, event_names: list) -> None:
+                try:
+                    rpc.emit_notification(
+                        request_id=request_id,
+                        event_type=rpc._NOTIF_EVENTS_SUBSCRIBED,
+                        payload={
+                            "agent_id": str(agent_id or ""),
+                            "event_names": list(event_names or []),
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("events_subscribed notify raised")
+
+            ebt._on_subscribed = _ebt_cb
+
+        return originals
+
+    def _restore_session_notification_callbacks(
+        self, session: Any, originals: Dict[str, Any],
+    ) -> None:
+        """Restore the session's pre-installation callbacks.
+
+        Phase 3 §7c step 6.6.4.2.  Counterpart to
+        :meth:`_install_session_notification_callbacks`.  Each
+        restoration is best-effort — if a setter raises, log
+        and continue (don't mask the original send_message
+        result with a teardown error).
+        """
+        if "instruction_budget" in originals and hasattr(
+            session, "set_instruction_budget_callback",
+        ):
+            try:
+                session.set_instruction_budget_callback(
+                    originals["instruction_budget"],
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("restore instruction_budget callback raised")
+        if "prompt_injected" in originals and hasattr(
+            session, "set_prompt_injected_callback",
+        ):
+            try:
+                session.set_prompt_injected_callback(
+                    originals["prompt_injected"],
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("restore prompt_injected callback raised")
+        if "continuation" in originals and hasattr(
+            session, "set_continuation_callback",
+        ):
+            try:
+                session.set_continuation_callback(originals["continuation"])
+            except Exception:  # noqa: BLE001
+                logger.debug("restore continuation callback raised")
+        if "retry" in originals and hasattr(session, "set_retry_callback"):
+            try:
+                session.set_retry_callback(originals["retry"])
+            except Exception:  # noqa: BLE001
+                logger.debug("restore retry callback raised")
+        if "mid_turn_interrupt" in originals and hasattr(
+            session, "set_mid_turn_interrupt_callback",
+        ):
+            try:
+                session.set_mid_turn_interrupt_callback(
+                    originals["mid_turn_interrupt"],
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("restore mid_turn_interrupt callback raised")
+        if "events_subscribed" in originals:
+            ebt = getattr(session, "_event_bus_tools", None)
+            if ebt is not None and hasattr(ebt, "_on_subscribed"):
+                try:
+                    ebt._on_subscribed = originals["events_subscribed"]
+                except Exception:  # noqa: BLE001
+                    logger.debug("restore events_subscribed slot raised")
 
     def _handle_session_shutdown(self) -> "tuple[bool, Any]":
         """Graceful runner-side session teardown.
