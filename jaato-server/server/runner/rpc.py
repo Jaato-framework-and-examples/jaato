@@ -675,6 +675,25 @@ class RunnerRPC:
             # turn-pre-send_message.
             return self._handle_session_set_parallel_tools_override(env.args)
 
+        if env.method == "session.replay_messages":
+            # Phase 3 §7c step 6.6.3.4: run a one-shot completion
+            # against an arbitrary message list (capability
+            # primitive for session-manipulation tools — fork /
+            # interrogate / replay).  Replaces the daemon-side
+            # call at session_manager.py:4338.  args =
+            # ``{"messages": [<dict>, ...], "timeout": float?}``
+            # — messages serialized via the existing
+            # serialize_history (same wire-shape-reuse rationale
+            # as 6.6.1.1's set_initial_history + 6.6.3.1's
+            # append_history_message).  Returns
+            # ``{"response_text": str}``.
+            #
+            # Blocking (the underlying ``replay_messages`` waits
+            # for exclusive provider access) — daemon caller
+            # already runs in a worker thread per the pre-§7c
+            # pattern at session_manager.py:4336.
+            return self._handle_session_replay_messages(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1702,6 +1721,124 @@ class RunnerRPC:
                 "stage": "set",
             }
         return True, {"ok": True}
+
+    def _handle_session_replay_messages(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Run a one-shot completion against an arbitrary message
+        list and return the model's text response.
+
+        Phase 3 §7c step 6.6.3.4.  Replaces the pre-§7c daemon-
+        side call at ``server/session_manager.py:4338``.  Wraps
+        the existing public method
+        :meth:`JaatoSession.replay_messages` (already at
+        jaato_session.py:8252; no missing-method gap).
+
+        Wire shape:
+          - ``messages``: List of serialized Message dicts (from
+            ``shared.plugins.session.serializer.serialize_message``).
+            Same wire-shape-reuse rationale as 6.6.1.1's
+            ``set_initial_history`` + 6.6.3.1's
+            ``append_history_message``.
+          - ``timeout`` (optional): float seconds.  Defaults to
+            120.0 (matching the underlying method's default).
+          - Returns ``{"response_text": str}`` on success.
+
+        Blocking semantic:
+
+          The underlying ``replay_messages`` waits for exclusive
+          provider access (so concurrent in-flight turn calls
+          serialize).  This handler runs synchronously inside
+          the runner's RPC dispatcher.  Daemon caller's pre-§7c
+          pattern was to invoke from a worker thread — that
+          pattern is preserved post-seat-flip via the daemon-
+          side wrapper's normal awaitable path (the dispatcher
+          loop on the daemon side won't block a single RPC for
+          minutes).
+
+        Defensive contract:
+
+          - 'messages' must be a list of dicts (missing key,
+            non-list, or non-dict element → ``stage="decode"``).
+          - 'timeout' (optional) must be a number > 0 if
+            provided.
+          - Per-element decode failures (malformed Part type,
+            missing role) surface as ``stage="decode"`` with
+            the underlying serializer error.
+          - The session-side method may raise on provider
+            errors; defensively wrapped as ``stage="replay"``
+            (distinct from the standard ``stage="set"`` since
+            this is an active completion, not a pure setter).
+
+        Args: ``{"messages": List[Dict], "timeout": float?}``.
+        Returns: ``{"response_text": str}`` on success.
+        """
+        messages_data = args.get("messages")
+        if messages_data is None:
+            return False, {
+                "error": (
+                    "session.replay_messages: 'messages' key required"
+                ),
+                "stage": "decode",
+            }
+        if not isinstance(messages_data, list):
+            return False, {
+                "error": (
+                    f"session.replay_messages: 'messages' must be a list; "
+                    f"got {type(messages_data).__name__}"
+                ),
+                "stage": "decode",
+            }
+
+        timeout = args.get("timeout", 120.0)
+        if timeout is not None:
+            if not isinstance(timeout, (int, float)) or timeout <= 0:
+                return False, {
+                    "error": (
+                        f"session.replay_messages: 'timeout' must be a "
+                        f"positive number; got {timeout!r}"
+                    ),
+                    "stage": "decode",
+                }
+
+        try:
+            from shared.plugins.session.serializer import deserialize_history
+            messages = deserialize_history(messages_data)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.replay_messages: deserialize failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "decode",
+            }
+
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        replayer = getattr(session, "replay_messages", None)
+        if not callable(replayer):
+            return False, {
+                "error": (
+                    "session.replay_messages: session has no "
+                    "replay_messages method (rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            response_text = replayer(messages, timeout=float(timeout))
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.replay_messages: replay raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "replay",
+            }
+        # Coerce to str — defensive against a custom session
+        # subclass returning non-str (matches §7c step 6.1 (3/3)
+        # send_message's response coercion pattern).
+        return True, {"response_text": str(response_text or "")}
 
     def _handle_session_set_parallel_tools_override(
         self, args: Dict[str, Any],

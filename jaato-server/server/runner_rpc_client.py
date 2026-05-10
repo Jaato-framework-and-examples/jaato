@@ -1388,6 +1388,73 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_replay_messages(
+        self,
+        messages: "List[Any]",
+        *,
+        replay_timeout: float = 120.0,
+        timeout: Optional[float] = 180.0,
+    ) -> str:
+        """Run a one-shot completion against an arbitrary message
+        list and return the model's text response.
+
+        Phase 3 §7c step 6.6.3.4.  Replaces the pre-§7c daemon-
+        side call at ``server/session_manager.py:4338``.  Wraps
+        the existing public method
+        ``JaatoSession.replay_messages`` (no missing-method gap).
+
+        Wire shape: ``{"messages": [<dict>, ...], "timeout":
+        float}`` — messages serialized via the existing
+        ``serialize_history`` (same wire-shape-reuse rationale as
+        6.6.1.1 + 6.6.3.1).  Returns the model's text response
+        directly (the wrapper unwraps ``{"response_text": str}``).
+
+        Args:
+            messages: The full message list to send to the
+                provider.  Caller owns construction; the wrapper
+                serializes via ``serialize_history``.
+            replay_timeout: Maximum seconds to wait for exclusive
+                provider access on the runner side.  Default
+                120s (matches ``JaatoSession.replay_messages``'s
+                default).
+            timeout: Optional wall-clock cap on the RPC itself.
+                Default 180s — wider than ``replay_timeout`` so
+                the runner's domain-level timeout fires before
+                the transport-level one.
+        """
+        from shared.plugins.session.serializer import serialize_history
+
+        body = {
+            "messages": serialize_history(messages),
+            "timeout": float(replay_timeout),
+        }
+        result = await self._call_named(
+            "session.replay_messages", body, timeout=timeout,
+        )
+        response_text = result.get("response_text")
+        if not isinstance(response_text, str):
+            raise RunnerCallError(
+                f"session_replay_messages: expected str response_text; "
+                f"got {type(response_text).__name__}"
+            )
+        return response_text
+
+    def session_replay_messages_threadsafe(
+        self,
+        messages: "List[Any]",
+        *,
+        replay_timeout: float = 120.0,
+        timeout: Optional[float] = 180.0,
+    ) -> str:
+        return self._run_threadsafe(
+            self.session_replay_messages(
+                messages,
+                replay_timeout=replay_timeout,
+                timeout=timeout,
+            ),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,
