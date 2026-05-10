@@ -763,9 +763,74 @@ Per the reviewer's pre-laid framing + this audit's findings:
 | **§7c step 6.6.4.3a** | Prerequisite `session.try_completion_nudge` RPC.  Single round-trip read+inc operation on `_signal_completion_called` / `_completion_nudges_fired` private state — collapses 3 daemon-side reaches (`core.py:3646/3647/3649`) into one RPC.  JaatoSession gains a public `try_completion_nudge(max_nudges)` method returning `(should_nudge: bool, nudges_fired: int)`; runner-side handler + daemon-side wrapper land alongside.  Matches the 6.6.3 missing-method cadence (prerequisite RPC ships before daemon-side migration). | **Shipped.** 17 new tests in `server/runner/tests/test_session_try_completion_nudge_rpc.py`.  Public method `JaatoSession.try_completion_nudge(max_nudges)` added (atomic check-and-increment, returns `(should_nudge, nudges_fired)`); runner handler `_handle_session_try_completion_nudge` with stage codes `decode`/`no_host`/`no_session`/`missing_method`/`call`; daemon wrapper `session_try_completion_nudge[_threadsafe]`.  Defensive contract: rejects bool `max_nudges` (Python int subclass blind spot); rolling-upgrade safe (missing-method on the session class surfaces as typed stage code, not crash). |
 | **§7c step 6.6.4.3b** | Atomic seat-flip: leg drop + 9-callback collapse + 7-wiring delete + handler install.  Switches `_start_model_thread` to `session_send_message_threadsafe(...)`; deletes the 7 daemon-side `set_*_callback` wirings (4 init-time + 3 per-call); installs the daemon-side `on_notification` demuxer fanning to `server.emit(<Event>)` / `server._start_model_thread(...)`; adopts the 6.6.4.3a `try_completion_nudge` RPC for the completion-nudge guard.  Runner-side `_handle_session_send_message` extends to also wire `on_usage_update` + `on_gc_threshold` per-call kwargs as notification-emitting shims (closing the audit-caught kwargs-drop gap). | **Shipped.** 21 new tests in `server/tests/test_send_message_seat_flip_643b.py`.  Runner-side: 2 new event-type constants (`usage_update`, `gc_threshold`) + per-call kwarg shims `_make_usage_update_notification_shim` / `_make_gc_threshold_notification_shim` (no install/restore — kwargs only live for one call).  Daemon-side: `_build_send_message_notification_handler` factory returns 8-branch demuxer (instruction_budget_updated / prompt_injected / continuation_needed / retry / mid_turn_interrupt / events_subscribed / usage_update / gc_threshold + unknown-type forward-compat drop).  Atomic deletions: 4 init-time + 3 per-call setter wirings, both `_jaato.send_message(...)` legs in `_start_model_thread`, completion-nudge private-attr reaches.  AST-based regression-pin tests guard against re-introduction. |
 | **§7c step 6.6.4.4** | WIRING deletions (per 6.4 audit).  6 daemon-side calls delete: `configure_plugins_only`, `configure_tools` ×2, `set_gc_plugin` ×2, `set_session_plugin`.  Daemon-side `_setup_session_plugin` may need a refactor — the `set_session_plugin` site's daemon-side hook (description-callback emission) might need preservation.  **Flag for 6.6.4.4 implementation review.**  **Narrowed to safe-only per 6.6.4.4 implementation-review audit (see below)**: scope reduced to 3 sites (`set_gc_plugin` ×2 + `set_session_plugin`).  The other 3 (`configure_*` calls) collapse with 6.6.4.5's atomic field removal because they have cascading downstream daemon-side read dependencies. | ~5-10 |
-| **§7c step 6.6.4.5** | Atomic field removal + cleanup.  Removes `self._jaato` field; collapses ~14 truthiness checks; migrates the runtime-access reads (3 sites in session_manager + 1 in websocket) to `server._runtime`; migrates the DEFER-§7c reads; migrates auth_info / get_user_commands / execute_user_command / get_model_completions (with potential new RPC handlers OR daemon-side alternatives); refactors construction sites (1558, 1565); deletes the JaatoClient construction entirely (the daemon constructs JaatoRuntime directly).  **Now also absorbs the 3 deferred WIRING calls** (`configure_plugins_only`, `configure_tools` ×2) per the 6.6.4.4 audit's narrowing.  Largest single diff but mostly mechanical. | ~20-30 (test churn from removed write-both-specific tests) |
+| **§7c step 6.6.4.5** | Atomic field removal + cleanup.  Removes `self._jaato` field; collapses ~14 truthiness checks; migrates the runtime-access reads (3 sites in session_manager + 1 in websocket) to `server._runtime`; migrates the DEFER-§7c reads; migrates auth_info / get_user_commands / execute_user_command / get_model_completions (with potential new RPC handlers OR daemon-side alternatives); refactors construction sites (1558, 1565); deletes the JaatoClient construction entirely (the daemon constructs JaatoRuntime directly).  **Now also absorbs the 3 deferred WIRING calls** (`configure_plugins_only`, `configure_tools` ×2) per the 6.6.4.4 audit's narrowing.  **Split into 4 sub-commits per 6.6.4.5 implementation-review audit (G3 + Refinement 1)**: 5a (truthiness + runtime reads), 5b (existing-RPC reads + daemon-runtime reads + get_tool_schemas cache), 5d (construction refactor), 5e (atomic field removal).  5c (set_agent_identity/set_ui_hooks RPCs) **eliminated** by missing-method audit — both are daemon-side state mutations that disappear with field removal, no new RPCs needed. | ~20-30 (test churn from removed write-both-specific tests) |
 
-**Total: 6 implementation sub-commits + 1 audit (post-6.6.4.0 audit count).**
+**Total: 9 implementation sub-commits + 1 audit (post-6.6.4.0 audit count).**
+
+#### §7c step 6.6.4.5 implementation-review audit (mid-commit)
+
+Pre-6.6.4.5-implementation cross-grep + dependency analysis caught
+**~77 touch sites across 3 files** — by far the largest scope in
+the §7c series.
+
+**Site inventory:**
+
+| File | Count | Categories |
+|---|---|---|
+| `core.py` | ~60 | Construction (3), WIRING (3 deferred from 6.6.4.4), reads (~25), truthiness checks (~14), comments (~15) |
+| `session_manager.py` | 13 | `get_runtime()` ×4, `get_context_usage()` ×1, `reset_session()` ×1, `get_history()` ×1, etc. |
+| `websocket.py` | 4 | All `get_runtime()` reads |
+
+**G3 split decision (per "always split" policy):**
+
+| Sub-commit | Scope | Risk |
+|---|---|---|
+| **5a** | Truthiness collapses + 5 `get_runtime()` → `self._runtime` reads | Low — mechanical |
+| **5b** | Existing-RPC reads (~10 `get_context_usage`/`get_context_limit`, 1 `get_turn_accounting`, 1 `reset_session`) + 8 daemon-side runtime reads (`auth_info`, `user_commands`, `model_completions`, `execute_user_command`) + `get_tool_schemas` via daemon-side `_runtime` cache (Refinement 2) | Low-medium |
+| **5d** | Construction refactor — daemon constructs `JaatoRuntime` directly; remove `self._jaato.get_runtime()` indirection at construction site (lines 1550-1565).  Pre-audit per Refinement 3: verify `JaatoRuntime.__init__()` signature can be called daemon-direct. | Medium — architectural pivot |
+| **5e** | Atomic `_jaato`-field removal + ~14 truthiness collapses + 3 deferred WIRING drops (1886/1905/4397) + drop `set_agent_identity` / `set_ui_hooks` calls (per Refinement 1's missing-method audit) | High — large diff, pure cleanup |
+
+**Refinement 1 — Missing-method audit for 5c (eliminated):**
+
+| Site | `JaatoSession` underlying method | `JaatoClient` body | Verdict |
+|---|---|---|---|
+| `core.py:2793` `_jaato.set_agent_identity(...)` | ❌ doesn't exist (`set_agent_context` exists but for runner-side) | Mutates daemon-side `_agent_id` / `_agent_name`; doesn't propagate to session | **No new RPC needed** — daemon-side state mutation; equivalent state already on `JaatoServer._main_agent_id`.  Call drops with field removal. |
+| `core.py:2798` `_jaato.set_ui_hooks(hooks)` | ✅ exists (`set_ui_hooks(hooks, agent_id)` at jaato_session.py:778) | Sets daemon-side state + propagates to session | **No new RPC needed** — runner-side `_ui_hooks` is already None post-6.6.4.3b (no runner-side wiring exists; cross-grep confirmed); all `if self._ui_hooks:` callsites null-guard.  The `AgentUIHooks` object isn't serializable across the wire anyway. Daemon-side state lives on `JaatoServer` / `subagent_plugin` (registered separately). |
+
+5c eliminated; G3 collapses from 7 sub-commits to 4.
+
+**Refinement 2 — `get_tool_schemas()` strategy: daemon-side `_runtime` cache.**
+
+Per §4.2 tier classification, the plugin registry is daemon-tier.
+Daemon already has the resolved plugin list at bootstrap-envelope-
+construction time.  Cache populated at session-init from the
+envelope's resolved plugin list; read-only, stable across session
+lifetime, single populate-point.  Zero new RPC handlers; smaller
+blast radius for 5b.  Cache invalidation: not needed today (registry
+doesn't mutate mid-session); flag if it ever does.
+
+**Refinement 3 — 5d construction-refactor pre-audit (deferred to 5d implementation):**
+
+Verify `JaatoRuntime.__init__()` can be called daemon-direct
+(currently invoked via `JaatoClient`).  If `JaatoRuntime` expects
+construction-time `JaatoClient` state, 5d needs a refactor of
+`JaatoRuntime.__init__` first.  Likely small but unverified —
+flag for 5d implementation review.
+
+**Audit Findings:**
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | Scope is ~10× any prior sub-commit (~77 touch sites) | Split via G3 (4 sub-commits) |
+| 2 | `set_agent_identity` / `set_ui_hooks` don't need new RPCs (daemon-side state only) | 5c eliminated |
+| 3 | Runner-side `_ui_hooks` is already None post-6.6.4.3b — runner-side tool lifecycle events silently no-op via that path.  Pre-existing gap. | Orthogonal to 6.6.4.5; flag for follow-up alongside Finding 2's description-callback fix |
+| 4 | `_runtime` lifecycle untangling: post-removal, daemon constructs `JaatoRuntime` directly (was `self._jaato.get_runtime()`).  Runtime persists daemon-side for event_bus, plugin registry, user commands, auth state. | Handled in 5d |
+
+**Audit-discipline tally: 12 audits, 12 silent-regression catches.**
+Today's audit caught the scope-explosion (G3 split) AND the
+"RPCs not actually needed" simplification (5c eliminated, would
+have over-engineered with 2 unnecessary RPC handlers + 24-30 tests)
+AND surfaced Findings 3-4.
 
 #### §7c step 6.6.4.4 implementation-review audit (mid-commit)
 
