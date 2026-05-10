@@ -2570,9 +2570,16 @@ class SessionManager:
             session_dir = pathlib.Path(self._session_config.storage_path) / session_id
         self._configure_todo_storage(server, session_dir)
 
-        # Restore history to the server's JaatoClient
-        if state.history and server._jaato:
-            server._jaato.reset_session(state.history)
+        # Restore history to the runner-side session.
+        # Phase 3 §7c step 6.6.4.5b: route through the
+        # ``session.set_initial_history`` RPC (added §7c step 6.6.1.1)
+        # instead of ``server._jaato.reset_session(state.history)``.
+        # Semantically equivalent at this site: the runner-side session
+        # was just bootstrapped with empty history, which matches
+        # ``set_initial_history``'s "session must be idle and history
+        # must be empty" precondition.
+        if state.history and server._runner_rpc is not None:
+            server._runner_rpc.session_set_initial_history_threadsafe(state.history)
             logger.debug(f"Restored {len(state.history)} messages for session {session_id}")
 
             # Resolve the session's main agent id once — it may be the
@@ -2610,13 +2617,13 @@ class SessionManager:
                             )
 
                 # Update server's agent state and emit context update.
-                # Note: ``server._jaato.get_context_usage()`` below is
-                # a DEFER-§7c read per the audit; collapses in
-                # §7c step 6.6.4 alongside _jaato removal.
+                # Phase 3 §7c step 6.6.4.5b: route ``get_context_usage``
+                # through the runner-RPC instead of the daemon-side
+                # JaatoClient indirection.
                 if main_agent_id in server._agents:
                     main_state = server._agents[main_agent_id]
                     main_state.turn_accounting = list(state.turn_accounting)
-                    usage = server._jaato.get_context_usage()
+                    usage = server._runner_rpc.session_get_context_usage_threadsafe()
                     main_state.context_usage = {
                         'total_tokens': usage.get('total_tokens', 0),
                         'prompt_tokens': usage.get('prompt_tokens', 0),
@@ -3014,9 +3021,13 @@ class SessionManager:
         try:
             # Get history directly from JaatoClient to ensure we capture
             # in-progress turns (the agent state cache is only updated at turn end)
+            # Phase 3 §7c step 6.6.4.5b: fetch history via the
+            # ``session.get_history`` RPC instead of the daemon-side
+            # JaatoClient indirection.  Captures in-progress turns
+            # (the agent state cache only updates at turn end).
             history = []
-            if session.server and session.server._jaato:
-                history = session.server._jaato.get_history()
+            if session.server and session.server._runner_rpc is not None:
+                history = session.server._runner_rpc.session_get_history_threadsafe()
             turn_accounting = []
 
             if session.server:

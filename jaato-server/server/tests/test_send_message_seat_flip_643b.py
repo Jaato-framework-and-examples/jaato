@@ -291,6 +291,15 @@ def _make_server_for_demuxer() -> JaatoServer:
     srv._jaato = MagicMock()
     srv._jaato.get_context_limit.return_value = 100_000
     srv._jaato.get_turn_accounting.return_value = [object(), object()]
+    # Phase 3 §7c step 6.6.4.5b: usage_update demuxer branch now reads
+    # via ``server._runner_rpc.session_get_*_threadsafe`` instead of
+    # daemon-side ``server._jaato.get_*``.  Mock the runner-RPC handle
+    # so the demuxer test exercises the post-migration path.
+    srv._runner_rpc = MagicMock()
+    srv._runner_rpc.session_get_context_limit_threadsafe.return_value = 100_000
+    srv._runner_rpc.session_get_turn_accounting_threadsafe.return_value = (
+        [object(), object()]
+    )
     return srv
 
 

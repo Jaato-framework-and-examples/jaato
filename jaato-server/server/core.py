@@ -1999,11 +1999,19 @@ class JaatoServer:
             # not a recurring callback, so notification-frame routing
             # would be overkill.
             with _s5.sub("instruction_budget"):
-                session = self._jaato.get_session()
-                if session and session.instruction_budget:
+                # Phase 3 §7c step 6.6.4.5b: read budget snapshot via the
+                # ``session.snapshot_instruction_budget`` RPC (added §7c
+                # step 6.1) instead of reaching into
+                # ``self._jaato.get_session().instruction_budget.snapshot()``.
+                # ``agent_id`` is carried in the snapshot dict itself.
+                snapshot = (
+                    self._runner_rpc.session_snapshot_instruction_budget_threadsafe()
+                    if self._runner_rpc is not None else None
+                )
+                if snapshot:
                     self.emit(InstructionBudgetEvent(
-                        agent_id=session.agent_id,
-                        budget_snapshot=session.instruction_budget.snapshot(),
+                        agent_id=snapshot.get("agent_id", "main"),
+                        budget_snapshot=snapshot,
                     ))
 
         self._emit_init_progress("Configuring tools", "done", 5, total_steps)
@@ -2039,10 +2047,15 @@ class JaatoServer:
             self._agents[self._main_agent_id].gc_continuous_mode = gc_continuous_mode
 
         # Emit initial context update so toolbar shows correct usage at startup
-        # This must happen after _create_main_agent() so client has the agent registered
-        if self._jaato:
-            usage = self._jaato.get_context_usage()
-            context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
+        # This must happen after _create_main_agent() so client has the agent registered.
+        # Phase 3 §7c step 6.6.4.5b: route through runner-RPC instead of
+        # the daemon-side JaatoClient indirection.
+        if self._runner_rpc is not None:
+            usage = self._runner_rpc.session_get_context_usage_threadsafe()
+            context_limit = (
+                usage.get('context_limit')
+                or self._runner_rpc.session_get_context_limit_threadsafe()
+            )
             self.emit(ContextUpdatedEvent(
                 agent_id=self._main_agent_id,
                 usage=self._build_usage(
@@ -2596,7 +2609,11 @@ class JaatoServer:
                         'turns': turns,
                         'percent_used': percent_used,
                     }
-                context_limit = server._jaato.get_context_limit() if server._jaato else 0
+                # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
+                context_limit = (
+                    server._runner_rpc.session_get_context_limit_threadsafe()
+                    if server._runner_rpc is not None else 0
+                )
                 # Pull cache tokens from the most recent turn entry so the
                 # usage matches Turn{Completed,Progress}Event in expressivity.
                 # The protocol callback doesn't carry them, but we have the
@@ -2750,7 +2767,11 @@ class JaatoServer:
             def on_turn_progress(self, agent_id, total_tokens, prompt_tokens,
                                  output_tokens, percent_used, pending_tool_calls,
                                  cache_read_tokens=None, cache_creation_tokens=None):
-                context_limit = server._jaato.get_context_limit() if server._jaato else 0
+                # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
+                context_limit = (
+                    server._runner_rpc.session_get_context_limit_threadsafe()
+                    if server._runner_rpc is not None else 0
+                )
                 server.emit(TurnProgressEvent(
                     agent_id=agent_id,
                     usage=server._build_usage(
@@ -3487,14 +3508,19 @@ class JaatoServer:
                     total_tokens = int(payload.get("total_tokens", 0))
                     if total_tokens == 0:
                         return
-                    if server._jaato is None:
+                    # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
+                    if server._runner_rpc is None:
                         return
-                    context_limit = server._jaato.get_context_limit()
+                    context_limit = (
+                        server._runner_rpc.session_get_context_limit_threadsafe()
+                    )
                     percent_used = (
                         (total_tokens / context_limit * 100)
                         if context_limit > 0 else 0
                     )
-                    turn_accounting = server._jaato.get_turn_accounting()
+                    turn_accounting = (
+                        server._runner_rpc.session_get_turn_accounting_threadsafe()
+                    )
                     turns = len(turn_accounting)
                     server.emit(ContextUpdatedEvent(
                         agent_id=server._main_agent_id,
@@ -3619,9 +3645,12 @@ class JaatoServer:
                         )
 
                     # Update context usage
-                    if server._jaato:
-                        usage = server._jaato.get_context_usage()
-                        context_limit = server._jaato.get_context_limit()
+                    # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
+                    if server._runner_rpc is not None:
+                        usage = server._runner_rpc.session_get_context_usage_threadsafe()
+                        context_limit = (
+                            server._runner_rpc.session_get_context_limit_threadsafe()
+                        )
                         server.emit(ContextUpdatedEvent(
                             agent_id=server._main_agent_id,
                             usage=server._build_usage(
@@ -4420,14 +4449,18 @@ class JaatoServer:
                 # consumed by ``_build_send_message_notification_handler``.
                 # Initial-budget snapshot emit below stays daemon-side — it's
                 # a one-shot after configure_tools().
-                session = self._jaato.get_session()
-                if session:
-                    # Emit initial budget snapshot
-                    if session.instruction_budget:
-                        self.emit(InstructionBudgetEvent(
-                            agent_id=session.agent_id,
-                            budget_snapshot=session.instruction_budget.snapshot(),
-                        ))
+                # Phase 3 §7c step 6.6.4.5b: read budget snapshot via the
+                # ``session.snapshot_instruction_budget`` RPC (mirror of
+                # initialize() site).
+                snapshot = (
+                    self._runner_rpc.session_snapshot_instruction_budget_threadsafe()
+                    if self._runner_rpc is not None else None
+                )
+                if snapshot:
+                    self.emit(InstructionBudgetEvent(
+                        agent_id=snapshot.get("agent_id", "main"),
+                        budget_snapshot=snapshot,
+                    ))
 
                 self._emit_init_progress("Configuring tools", "done", 5, 6)
 
@@ -4448,10 +4481,14 @@ class JaatoServer:
                     main_state.gc_target_percent = gc_target_percent
                     main_state.gc_continuous_mode = gc_continuous_mode
 
-                # Emit initial context update so toolbar shows correct usage
-                if self._jaato:
-                    usage = self._jaato.get_context_usage()
-                    context_limit = usage.get('context_limit') or self._jaato.get_context_limit()
+                # Emit initial context update so toolbar shows correct usage.
+                # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
+                if self._runner_rpc is not None:
+                    usage = self._runner_rpc.session_get_context_usage_threadsafe()
+                    context_limit = (
+                        usage.get('context_limit')
+                        or self._runner_rpc.session_get_context_limit_threadsafe()
+                    )
                     self.emit(ContextUpdatedEvent(
                         agent_id=self._main_agent_id,
                         usage=self._build_usage(
