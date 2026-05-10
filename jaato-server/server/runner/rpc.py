@@ -512,6 +512,16 @@ class RunnerRPC:
             # running).
             return self._handle_session_request_stop(env.args)
 
+        if env.method == "session.try_completion_nudge":
+            # Phase 3 §7c step 6.6.4.3a: atomic check-and-increment
+            # for the completion-nudge guard.  Collapses 3 daemon-
+            # side private-attr reaches (read
+            # ``_signal_completion_called`` + read/inc
+            # ``_completion_nudges_fired``) into one round-trip.
+            # args = ``{"max_nudges": int}``.  Returns
+            # ``{"should_nudge": bool, "nudges_fired": int}``.
+            return self._handle_session_try_completion_nudge(env.args)
+
         if env.method == "session.get_history":
             # Phase 3 §3.3c precursor: read the runner-side
             # JaatoSession's conversation history.  args = ``{}`` or
@@ -2923,6 +2933,71 @@ class RunnerRPC:
             return err
         cancelled = bool(session.request_stop(reason=reason))
         return True, {"cancelled": cancelled}
+
+    def _handle_session_try_completion_nudge(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Atomic check-and-increment for the completion-nudge guard.
+
+        Phase 3 §7c step 6.6.4.3a.  Collapses 3 daemon-side reaches
+        (``_signal_completion_called`` read,
+        ``_completion_nudges_fired`` read, increment) into one
+        round-trip — required for §7c step 6.6.4.3b's seat-flip
+        where the JaatoSession lives in this runner process.
+
+        Args: ``{"max_nudges": int}`` — caller's nudge-budget knob
+        (the existing daemon-side site uses
+        ``MAX_COMPLETION_NUDGES = 2``).
+
+        Returns:
+            ``(True, {"should_nudge": bool, "nudges_fired": int})``.
+            ``nudges_fired`` is the post-increment value when
+            ``should_nudge`` is True; the unchanged current count
+            otherwise.
+            ``(False, {"error": ..., "stage": "decode"})`` when
+            ``max_nudges`` is missing or not an int.
+            ``(False, {"error": ..., "stage": "no_host" | "no_session"})``
+            when the session host isn't bootstrapped.
+            ``(False, {"error": ..., "stage": "missing_method"})``
+            when the bootstrapped session lacks the public method
+            (rolling-upgrade scenario where the runner is newer
+            than the daemon's session class).
+        """
+        max_nudges = args.get("max_nudges")
+        if not isinstance(max_nudges, int) or isinstance(max_nudges, bool):
+            return False, {
+                "error": (
+                    "session.try_completion_nudge: missing or non-int "
+                    "'max_nudges' arg"
+                ),
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try_method = getattr(session, "try_completion_nudge", None)
+        if not callable(try_method):
+            return False, {
+                "error": (
+                    "session.try_completion_nudge: session class lacks "
+                    "public try_completion_nudge() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            should_nudge, nudges_fired = try_method(max_nudges)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.try_completion_nudge: try_completion_nudge "
+                    f"raised {type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        return True, {
+            "should_nudge": bool(should_nudge),
+            "nudges_fired": int(nudges_fired),
+        }
 
     @property
     def session_host(self):

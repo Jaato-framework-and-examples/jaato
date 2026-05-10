@@ -909,6 +909,49 @@ class JaatoSession:
         """
         self._on_mid_turn_interrupt = callback
 
+    def try_completion_nudge(self, max_nudges: int) -> Tuple[bool, int]:
+        """Atomic check-and-increment for the completion-nudge guard.
+
+        Phase 3 §7c step 6.6.4.3a.  Collapses three private-state
+        reaches (``_signal_completion_called`` read,
+        ``_completion_nudges_fired`` read, ``_completion_nudges_fired``
+        increment) into one method so daemon-side callers don't need
+        direct private-attr access — required for the runner-RPC
+        seat-flip in §7c step 6.6.4.3b where the JaatoSession lives
+        in a separate process.
+
+        Decision: returns ``(True, n+1)`` when a nudge should fire
+        (agent didn't call ``signal_completion`` AND the budget isn't
+        exhausted) — also bumps the counter atomically so callers
+        don't need to do it.  Returns ``(False, current)`` otherwise
+        (no counter change).
+
+        Args:
+            max_nudges: Bound on ``_completion_nudges_fired``.
+                Caller's nudge-budget knob (the existing daemon-side
+                site uses ``MAX_COMPLETION_NUDGES = 2``).  Must be
+                non-negative; values <= 0 always yield
+                ``(False, current)``.
+
+        Returns:
+            ``(should_nudge, nudges_fired_after_this_call)``.
+            ``nudges_fired_after_this_call`` reflects the
+            post-increment value when ``should_nudge`` is True;
+            otherwise it's the unchanged current count.
+
+        Thread-safety: matches the existing private-attr access
+        pattern — the model_thread is the sole writer at the loop
+        boundary.  No additional locking added (would be a behavior
+        change).
+        """
+        if (
+            not getattr(self, "_signal_completion_called", False)
+            and getattr(self, "_completion_nudges_fired", 0) < max_nudges
+        ):
+            self._completion_nudges_fired += 1
+            return True, self._completion_nudges_fired
+        return False, getattr(self, "_completion_nudges_fired", 0)
+
     def inject_prompt(
         self,
         text: str,

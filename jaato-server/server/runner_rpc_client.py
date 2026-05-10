@@ -839,6 +839,59 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_try_completion_nudge(
+        self,
+        max_nudges: int,
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> Tuple[bool, int]:
+        """Atomic check-and-increment for the completion-nudge guard.
+
+        Phase 3 §7c step 6.6.4.3a.  Replaces 3 daemon-side
+        private-attr reaches into the JaatoSession
+        (``_signal_completion_called`` read,
+        ``_completion_nudges_fired`` read + increment) with one
+        RPC round-trip — required for §7c step 6.6.4.3b's
+        seat-flip where the JaatoSession lives in a separate
+        process.
+
+        Args:
+            max_nudges: Caller's nudge-budget knob (the
+                ``_start_model_thread`` site uses
+                ``MAX_COMPLETION_NUDGES = 2``).
+
+        Returns:
+            ``(should_nudge, nudges_fired)`` tuple.
+            ``nudges_fired`` is the post-increment value when
+            ``should_nudge`` is True; the unchanged current count
+            otherwise.
+
+        Raises:
+            RunnerCallError on transport failure or runner-side
+                exception (decode / no_host / no_session /
+                missing_method / call).
+        """
+        result = await self._call_named(
+            "session.try_completion_nudge",
+            {"max_nudges": int(max_nudges)},
+            timeout=timeout,
+        )
+        return (
+            bool(result.get("should_nudge", False)),
+            int(result.get("nudges_fired", 0)),
+        )
+
+    def session_try_completion_nudge_threadsafe(
+        self,
+        max_nudges: int,
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> Tuple[bool, int]:
+        return self._run_threadsafe(
+            self.session_try_completion_nudge(max_nudges, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_history(
         self,
         *,
