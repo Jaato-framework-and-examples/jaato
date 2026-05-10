@@ -1472,19 +1472,19 @@ class JaatoWSServer:
 
         # Find the session's EventBus.
         # In daemon mode: SessionManager → Session → JaatoServer → JaatoClient → session → runtime
-        # In standalone mode: self._jaato_server → JaatoClient → session → runtime
+        # Phase 3 §7c step 6.6.3.6: read event_bus directly from
+        # the daemon-side ``server._runtime`` (daemon-tier per
+        # §4.2; mirrors the migration in core.py's event_bus
+        # property at §7c step 6.2).  Eliminates the
+        # ``_jaato.get_session()._runtime.event_bus`` indirection.
         bus = None
         if self._command_router:
             sm = self._command_router._session_manager
             session_obj = sm.get_session(session_id) if hasattr(sm, 'get_session') else None
-            if session_obj and session_obj.server and session_obj.server._jaato:
-                jaato_session = session_obj.server._jaato.get_session()
-                if jaato_session:
-                    bus = jaato_session._runtime.event_bus
-        elif self._jaato_server and self._jaato_server._jaato:
-            jaato_session = self._jaato_server._jaato.get_session()
-            if jaato_session:
-                bus = jaato_session._runtime.event_bus
+            if session_obj and session_obj.server and session_obj.server._runtime:
+                bus = session_obj.server._runtime.event_bus
+        elif self._jaato_server and self._jaato_server._runtime:
+            bus = self._jaato_server._runtime.event_bus
 
         if not bus:
             await self._send_error(client_id, "Session event bus not available")

@@ -1963,14 +1963,25 @@ class SessionManager:
         # and register providers for incrementally-mutated state.  Any
         # JSON-serialisability error surfaces here at the call site
         # (set_session_state validates the value at attach time).
+        # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+        # the existing ``session.set_session_state`` RPC (§3.3c
+        # precursor) instead of reaching into the daemon-side
+        # session via ``server.get_session()``.
         if initial_session_state:
-            try:
-                jaato_session = server.get_session()
-            except RuntimeError:
-                jaato_session = None
-            if jaato_session is not None:
-                for key, value in initial_session_state.items():
-                    jaato_session.set_session_state(key, value)
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is not None:
+                forwarder = getattr(
+                    rpc, "session_set_state_threadsafe", None,
+                )
+                if callable(forwarder):
+                    for key, value in initial_session_state.items():
+                        try:
+                            forwarder(key, value, timeout=2.0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "set_session_state forward failed for "
+                                "key=%r: %s", key, exc,
+                            )
 
         # Run session hooks after the Session is stored so hooks can
         # call get_session() to modify session attributes (e.g. sandbox_mode).
@@ -2127,8 +2138,17 @@ class SessionManager:
                     session_id,
                 )
                 return ""
-            jaato_session = session_record.server.get_session()
-            jaato_session.set_initial_history(initial_history)
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side
+            # via the new ``session.set_initial_history`` RPC
+            # (§7c step 6.6.1.1, commit 3f859e3a) instead of
+            # reaching into the daemon-side session.
+            rpc = getattr(session_record.server, "_runner_rpc", None)
+            if rpc is not None:
+                forwarder = getattr(
+                    rpc, "session_set_initial_history_threadsafe", None,
+                )
+                if callable(forwarder):
+                    forwarder(initial_history, timeout=10.0)
 
         if initial_prompt:
             from jaato_sdk.events import SendMessageRequest
@@ -2181,14 +2201,29 @@ class SessionManager:
             session = self._sessions.get(target_session_id)
         if session is None:
             return False
-        try:
-            jaato_session = session.server.get_session()
-        except RuntimeError:
-            # Session record exists but no underlying JaatoSession yet.
+        # Phase 3 §7c step 6.6.3.6: forward to runner-side via the
+        # existing ``session.inject_prompt`` RPC (§7c step 6.1
+        # (3/3) at commit 14e57709).  ``SourceType`` enum
+        # serialized as its lowercase string value across the
+        # wire.
+        rpc = getattr(session.server, "_runner_rpc", None)
+        if rpc is None:
             return False
-        jaato_session.inject_prompt(
-            text, source_id=source_id, source_type=source_type
-        )
+        forwarder = getattr(rpc, "session_inject_prompt_threadsafe", None)
+        if not callable(forwarder):
+            return False
+        try:
+            forwarder(
+                text,
+                source_id=source_id,
+                source_type=(
+                    source_type.value if source_type is not None else None
+                ),
+                timeout=2.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("inject_prompt forward failed: %s", exc)
+            return False
         return True
 
     def get_session_workspace(self, session_id: str) -> Optional[str]:
@@ -2554,18 +2589,30 @@ class SessionManager:
                 server._agents[main_agent_id].history = list(state.history)
 
             # Restore turn accounting (reset_session clears it, so we restore after).
-            # Phase 3 §7c step 6.6.1.0: use the public
-            # JaatoSession.restore_turn_accounting() method instead
-            # of reaching into the private ``_turn_accounting``
-            # attribute.  The public surface is the prerequisite
-            # for the upcoming ``session.restore_turn_accounting``
-            # runner-RPC handler (§7c step 6.6.1.2).
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side
+            # via the new ``session.restore_turn_accounting``
+            # RPC (§7c step 6.6.1.2 at commit 82b8da29) instead
+            # of reaching into the daemon-side session.
             if state.turn_accounting:
-                jaato_session = server._jaato.get_session()
-                jaato_session.restore_turn_accounting(state.turn_accounting)
-                logger.debug(f"Restored {len(state.turn_accounting)} turn accounting entries for session {session_id}")
+                rpc = getattr(server, "_runner_rpc", None)
+                if rpc is not None:
+                    forwarder = getattr(
+                        rpc, "session_restore_turn_accounting_threadsafe", None,
+                    )
+                    if callable(forwarder):
+                        try:
+                            forwarder(state.turn_accounting, timeout=5.0)
+                            logger.debug(f"Restored {len(state.turn_accounting)} turn accounting entries for session {session_id}")
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "restore_turn_accounting forward failed: %s",
+                                exc,
+                            )
 
-                # Update server's agent state and emit context update
+                # Update server's agent state and emit context update.
+                # Note: ``server._jaato.get_context_usage()`` below is
+                # a DEFER-§7c read per the audit; collapses in
+                # §7c step 6.6.4 alongside _jaato removal.
                 if main_agent_id in server._agents:
                     main_state = server._agents[main_agent_id]
                     main_state.turn_accounting = list(state.turn_accounting)
@@ -2603,16 +2650,48 @@ class SessionManager:
         # handler (§7c step 6.6.1.3).  The method is no-op when
         # the session's instruction_budget is None, so we drop
         # the explicit guard.
-        if state.budget_state and server._jaato:
-            jaato_session = server._jaato.get_session()
-            if jaato_session and jaato_session.instruction_budget:
-                jaato_session.restore_conversation_budget(state.budget_state)
-                logger.debug(f"Restored conversation budget for session {session_id}")
-                # Emit budget event so clients show correct budget
-                server.emit(InstructionBudgetEvent(
-                    agent_id=jaato_session.agent_id,
-                    budget_snapshot=jaato_session.instruction_budget.snapshot(),
-                ))
+        # Phase 3 §7c step 6.6.3.6: forward to runner-side via the
+        # new ``session.restore_conversation_budget`` RPC (§7c step
+        # 6.6.1.3 at commit b40d2439); use the existing
+        # ``session.snapshot_instruction_budget`` (§7c step 6.1
+        # (2/3) at commit 1043bfde) for the post-restore emit.
+        if state.budget_state:
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is not None:
+                restorer = getattr(
+                    rpc, "session_restore_conversation_budget_threadsafe", None,
+                )
+                snapshotter = getattr(
+                    rpc, "session_snapshot_instruction_budget_threadsafe", None,
+                )
+                if callable(restorer):
+                    try:
+                        restorer(state.budget_state, timeout=5.0)
+                        logger.debug(
+                            f"Restored conversation budget for session {session_id}",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "restore_conversation_budget forward failed: %s",
+                            exc,
+                        )
+                if callable(snapshotter):
+                    try:
+                        snapshot = snapshotter(timeout=5.0)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "snapshot_instruction_budget forward failed: %s",
+                            exc,
+                        )
+                        snapshot = None
+                    if snapshot is not None:
+                        # Emit budget event so clients show correct budget.
+                        # ``agent_id`` is a top-level key in the snapshot
+                        # dict (per InstructionBudget.snapshot() schema).
+                        server.emit(InstructionBudgetEvent(
+                            agent_id=snapshot.get('agent_id', server.main_agent_id),
+                            budget_snapshot=snapshot,
+                        ))
 
         # Restore subagent state if present in metadata
         if state.metadata.get('subagents') and server._jaato:
@@ -2849,19 +2928,32 @@ class SessionManager:
         # Create a TOOL message with all synthetic results
         synthetic_message = Message(role=Role.TOOL, parts=synthetic_parts)
 
-        # Inject into history based on which agent was executing
+        # Inject into history based on which agent was executing.
+        # Phase 3 §7c step 6.6.3.6: forward the synthetic message
+        # via the new ``session.append_history_message`` RPC
+        # (§7c step 6.6.3.1 at commit aa9059ec) instead of the
+        # daemon-side get-modify-reset dance.  The runner-side
+        # JaatoSession.append_history_message wraps the same
+        # get-history + append + reset_session flow internally
+        # (preserves the ``_turn_accounting`` clear semantic).
         if agent_id == 'main':
-            if server._jaato:
-                jaato_session = server._jaato.get_session()
-                if jaato_session:
-                    # Append the synthetic tool message to history using proper API
-                    current_history = jaato_session.get_history()
-                    current_history.append(synthetic_message)
-                    jaato_session.reset_session(current_history)
-                    logger.info(
-                        f"Recovered {len(pending_calls)} interrupted tool call(s) "
-                        f"for main agent in session {session_id}"
-                    )
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is not None:
+                forwarder = getattr(
+                    rpc, "session_append_history_message_threadsafe", None,
+                )
+                if callable(forwarder):
+                    try:
+                        forwarder(synthetic_message, timeout=5.0)
+                        logger.info(
+                            f"Recovered {len(pending_calls)} interrupted tool call(s) "
+                            f"for main agent in session {session_id}"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "append_history_message forward failed: %s",
+                            exc,
+                        )
         else:
             # Subagent recovery - find the subagent session
             if server.registry:
@@ -2980,12 +3072,29 @@ class SessionManager:
                 subagent_metadata['plugin_states'] = plugin_states
 
             # Get conversation budget for persistence (other budget sources are
-            # automatically recreated when the session is restored)
+            # automatically recreated when the session is restored).
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+            # the new ``session.snapshot_conversation_budget`` RPC
+            # (§7c step 6.6.3.2 at commit abd7ec08) instead of
+            # reaching into the daemon-side session's
+            # instruction_budget.
             budget_state = None
-            if session.server and session.server._jaato:
-                jaato_session = session.server._jaato.get_session()
-                if jaato_session and jaato_session.instruction_budget:
-                    budget_state = jaato_session.instruction_budget.get_conversation_snapshot()
+            if session.server is not None:
+                rpc = getattr(session.server, "_runner_rpc", None)
+                if rpc is not None:
+                    snapshotter = getattr(
+                        rpc,
+                        "session_snapshot_conversation_budget_threadsafe",
+                        None,
+                    )
+                    if callable(snapshotter):
+                        try:
+                            budget_state = snapshotter(timeout=5.0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "snapshot_conversation_budget forward failed: %s",
+                                exc,
+                            )
 
             # Get workspace file tracking state for persistence
             workspace_files = None
@@ -4093,9 +4202,26 @@ class SessionManager:
             # The session clears the override after the turn.  None
             # leaves env-driven behaviour unchanged.
             if event.parallel_tools is not None:
-                jaato_session = server._jaato.get_session() if server._jaato else None
-                if jaato_session is not None:
-                    jaato_session._parallel_tools_override = event.parallel_tools
+                # Phase 3 §7c step 6.6.3.6: forward to runner-side
+                # via the new ``session.set_parallel_tools_override``
+                # RPC (§7c step 6.6.3.3 at commit b678ce2c) instead
+                # of the private-attr write on the daemon-side
+                # session.
+                rpc = getattr(server, "_runner_rpc", None)
+                if rpc is not None:
+                    forwarder = getattr(
+                        rpc,
+                        "session_set_parallel_tools_override_threadsafe",
+                        None,
+                    )
+                    if callable(forwarder):
+                        try:
+                            forwarder(event.parallel_tools, timeout=2.0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "set_parallel_tools_override forward failed: %s",
+                                exc,
+                            )
 
             # Track user input for command history restoration
             if event.text and event.text.strip():
@@ -4239,12 +4365,30 @@ class SessionManager:
             agent_id = event.agent_id or main_id
 
             if agent_id == main_id or agent_id == "main":
-                # Main agent budget from JaatoClient session
-                jaato_session = server._jaato.get_session() if server._jaato else None
-                if jaato_session and jaato_session.instruction_budget:
+                # Main agent budget — Phase 3 §7c step 6.6.3.6:
+                # forward to runner-side via the existing
+                # ``session.snapshot_instruction_budget`` RPC (§7c
+                # step 6.1 (2/3) at commit 1043bfde).
+                snapshot = None
+                rpc = getattr(server, "_runner_rpc", None)
+                if rpc is not None:
+                    snapshotter = getattr(
+                        rpc,
+                        "session_snapshot_instruction_budget_threadsafe",
+                        None,
+                    )
+                    if callable(snapshotter):
+                        try:
+                            snapshot = snapshotter(timeout=5.0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "snapshot_instruction_budget forward failed: %s",
+                                exc,
+                            )
+                if snapshot is not None:
                     self._emit_to_client(client_id, InstructionBudgetEvent(
                         agent_id=agent_id,
-                        budget_snapshot=jaato_session.instruction_budget.snapshot(),
+                        budget_snapshot=snapshot,
                     ))
                 else:
                     self._emit_to_client(client_id, ErrorEvent(
@@ -4286,95 +4430,177 @@ class SessionManager:
         # See ``project_backlog_sdk_feature_parity.md``.
 
         elif isinstance(event, InjectPromptRequest):
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+            # the existing ``session.inject_prompt`` RPC (§7c step
+            # 6.1 (3/3) at commit 14e57709) instead of reaching
+            # into the daemon-side session.  The runner-side
+            # handler validates source_type itself, but we pre-
+            # validate daemon-side to surface the typed error
+            # to clients without an RPC round-trip.
             from shared.message_queue import SourceType
-            jaato_session = server._jaato.get_session() if server._jaato else None
-            if jaato_session is None:
+            try:
+                source_type = SourceType(event.source_type)
+            except ValueError:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=(
+                        f"Invalid source_type: {event.source_type!r}. "
+                        f"Valid values: {[s.value for s in SourceType]}"
+                    ),
+                    error_type="ValidationError",
+                ))
+                return
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is None:
                 self._emit_to_client(client_id, ErrorEvent(
                     error="No active JaatoSession",
                     error_type="SessionError",
                 ))
             else:
-                # Map the request's string source_type to the enum.
-                # Invalid values surface as a clear error rather than
-                # silently defaulting — the SDK should be explicit.
-                try:
-                    source_type = SourceType(event.source_type)
-                except ValueError:
-                    self._emit_to_client(client_id, ErrorEvent(
-                        error=(
-                            f"Invalid source_type: {event.source_type!r}. "
-                            f"Valid values: {[s.value for s in SourceType]}"
-                        ),
-                        error_type="ValidationError",
-                    ))
-                    return
-                jaato_session.inject_prompt(
-                    event.text,
-                    source_id=event.source_id,
-                    source_type=source_type,
+                forwarder = getattr(
+                    rpc, "session_inject_prompt_threadsafe", None,
                 )
+                if callable(forwarder):
+                    try:
+                        forwarder(
+                            event.text,
+                            source_id=event.source_id,
+                            source_type=source_type.value,
+                            timeout=5.0,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._emit_to_client(client_id, ErrorEvent(
+                            error=f"inject_prompt forward failed: {exc}",
+                            error_type="SessionError",
+                        ))
+                else:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error="No active JaatoSession",
+                        error_type="SessionError",
+                    ))
 
         elif isinstance(event, ReplayMessagesRequest):
-            jaato_session = server._jaato.get_session() if server._jaato else None
-            if jaato_session is None:
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+            # the new ``session.replay_messages`` RPC (§7c step
+            # 6.6.3.4 at commit 24ed6c0f) instead of reaching
+            # into the daemon-side session.  When ``event.messages``
+            # is None, the runner's handler falls back to the
+            # session's history — but the wrapper requires a
+            # messages list, so we read history first via the
+            # existing ``session.get_history`` RPC (§3.3c precursor).
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is None:
                 self._emit_to_client(client_id, ReplayMessagesResultEvent(
                     request_id=event.request_id,
                     error="No active JaatoSession",
                 ))
             else:
-                # Deserialise messages when supplied; fall back to the
-                # session's current history when omitted (= "continue
-                # from current state with no new user input").
-                if event.messages is None:
-                    messages = jaato_session.get_history()
+                replayer = getattr(
+                    rpc, "session_replay_messages_threadsafe", None,
+                )
+                if not callable(replayer):
+                    self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                        request_id=event.request_id,
+                        error="No active JaatoSession",
+                    ))
                 else:
-                    from shared.plugins.session.serializer import deserialize_history
-                    messages = deserialize_history(event.messages)
-                # Run in a worker thread — replay_messages blocks
-                # until the provider call completes, and we don't
-                # want to stall the dispatcher.
-                def run_replay():
-                    try:
-                        response_text = jaato_session.replay_messages(
-                            messages, timeout=event.timeout_seconds,
+                    # Resolve messages: use the request's if provided;
+                    # else fall back to the runner-side session's
+                    # current history via the existing get_history
+                    # RPC.  Deserialize daemon-side first when the
+                    # request supplied a list (the runner handler
+                    # also does this; we deserialize early to surface
+                    # malformed input as a typed daemon error).
+                    if event.messages is not None:
+                        from shared.plugins.session.serializer import deserialize_history
+                        try:
+                            messages = deserialize_history(event.messages)
+                        except Exception as exc:  # noqa: BLE001
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                error=f"deserialize failed: {exc}",
+                            ))
+                            return
+                    else:
+                        history_getter = getattr(
+                            rpc, "session_get_history_threadsafe", None,
                         )
-                        self._emit_to_client(client_id, ReplayMessagesResultEvent(
-                            request_id=event.request_id,
-                            response_text=response_text,
-                        ))
-                    except Exception as exc:
-                        self._emit_to_client(client_id, ReplayMessagesResultEvent(
-                            request_id=event.request_id,
-                            error=f"{type(exc).__name__}: {exc}",
-                        ))
-                threading.Thread(target=run_replay, daemon=True).start()
+                        if not callable(history_getter):
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                error="No active JaatoSession",
+                            ))
+                            return
+                        try:
+                            messages = history_getter(timeout=5.0)
+                        except Exception as exc:  # noqa: BLE001
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                error=f"get_history failed: {exc}",
+                            ))
+                            return
+
+                    # Run in a worker thread — replay_messages
+                    # blocks until the provider call completes.
+                    def run_replay():
+                        try:
+                            response_text = replayer(
+                                messages,
+                                replay_timeout=event.timeout_seconds,
+                                timeout=event.timeout_seconds + 60.0,
+                            )
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                response_text=response_text,
+                            ))
+                        except Exception as exc:
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                error=f"{type(exc).__name__}: {exc}",
+                            ))
+                    threading.Thread(target=run_replay, daemon=True).start()
 
         elif isinstance(event, ResolveForkPointRequest):
-            jaato_session = server._jaato.get_session() if server._jaato else None
-            if jaato_session is None:
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side
+            # via the new ``session.resolve_fork_point`` RPC (§7c
+            # step 6.6.3.5 at commit e4eddc0e).  The runner-side
+            # handler defaults ``history`` to its own
+            # ``session.get_history()`` when omitted (matches the
+            # pre-§7c daemon-side pattern at line 4573).
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is None:
                 self._emit_to_client(client_id, ResolveForkPointResultEvent(
                     request_id=event.request_id,
                     fork_index=-1,
                     error="No active JaatoSession",
                 ))
             else:
-                try:
-                    fork_index = jaato_session.resolve_fork_point(
-                        history=jaato_session.get_history(),
-                        after_message=event.after_message,
-                        after_tool_call=event.after_tool_call,
-                        after_timestamp=event.after_timestamp,
-                    )
-                    self._emit_to_client(client_id, ResolveForkPointResultEvent(
-                        request_id=event.request_id,
-                        fork_index=fork_index,
-                    ))
-                except Exception as exc:
+                resolver = getattr(
+                    rpc, "session_resolve_fork_point_threadsafe", None,
+                )
+                if not callable(resolver):
                     self._emit_to_client(client_id, ResolveForkPointResultEvent(
                         request_id=event.request_id,
                         fork_index=-1,
-                        error=f"{type(exc).__name__}: {exc}",
+                        error="No active JaatoSession",
                     ))
+                else:
+                    try:
+                        fork_index = resolver(
+                            after_message=event.after_message,
+                            after_tool_call=event.after_tool_call,
+                            after_timestamp=event.after_timestamp,
+                            timeout=5.0,
+                        )
+                        self._emit_to_client(client_id, ResolveForkPointResultEvent(
+                            request_id=event.request_id,
+                            fork_index=fork_index,
+                        ))
+                    except Exception as exc:
+                        self._emit_to_client(client_id, ResolveForkPointResultEvent(
+                            request_id=event.request_id,
+                            fork_index=-1,
+                            error=f"{type(exc).__name__}: {exc}",
+                        ))
 
         # ─── SDK feature parity — permission policy verbs ───────────────
         # Typed verbs replacing stringly-typed CommandRequest("permissions",

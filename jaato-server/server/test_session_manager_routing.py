@@ -5,6 +5,10 @@ These primitives let an extension address a loaded session by ID rather
 than just acting on the session whose event triggered the extension.
 The premium reactor framework's cross-session ``inject_prompt`` action
 sits directly on top of ``inject_prompt_to_session``.
+
+Phase 3 §7c step 6.6.3.6: ``inject_prompt_to_session`` was migrated to
+forward via the runner-RPC ``session.inject_prompt`` instead of
+reaching into the daemon-side session.  Tests updated accordingly.
 """
 
 from datetime import datetime, timezone
@@ -13,18 +17,31 @@ from typing import Any, List, Optional, Tuple
 from .session_manager import Session, SessionManager
 
 
-class _FakeJaatoSession:
-    """Captures inject_prompt calls so tests can assert on them."""
+class _FakeRunnerRPC:
+    """Captures session_inject_prompt_threadsafe calls.
 
-    def __init__(self) -> None:
-        self.calls: List[Tuple[str, Optional[str], Optional[Any]]] = []
+    Phase 3 §7c step 6.6.3.6: the daemon's
+    ``inject_prompt_to_session`` now forwards via the runner-side
+    RPC.  This fake captures the wrapper invocation directly; the
+    runner-side handler's wire shape is exercised in
+    ``test_session_inject_prompt_rpc.py``.
+    """
 
-    def inject_prompt(
+    def __init__(self, raise_on_call: bool = False) -> None:
+        # Each tuple: (text, source_id, source_type-string)
+        self.calls: List[Tuple[str, Optional[str], Optional[str]]] = []
+        self._raise = raise_on_call
+
+    def session_inject_prompt_threadsafe(
         self,
         text: str,
+        *,
         source_id: Optional[str] = None,
-        source_type: Optional[Any] = None,
+        source_type: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> None:
+        if self._raise:
+            raise RuntimeError("RPC unavailable")
         self.calls.append((text, source_id, source_type))
 
 
@@ -32,18 +49,25 @@ class _FakeJaatoServer:
     """Just enough of JaatoServer's surface for the routing test.
 
     ``raise_on_get_session=True`` simulates the "session record exists
-    but underlying JaatoSession not yet initialised" case (the real
-    JaatoServer.get_session raises RuntimeError in that state).
+    but underlying RPC not yet initialised" case — i.e.
+    ``self._runner_rpc is None`` post-§7c-step-6.6.3.6 (the
+    real JaatoServer's runner_rpc is None until spawn completes).
     """
 
     def __init__(self, raise_on_get_session: bool = False) -> None:
-        self.session = _FakeJaatoSession()
-        self._raise = raise_on_get_session
+        if raise_on_get_session:
+            self._runner_rpc = None
+        else:
+            self._runner_rpc = _FakeRunnerRPC()
 
-    def get_session(self) -> _FakeJaatoSession:
-        if self._raise:
-            raise RuntimeError("No active session")
-        return self.session
+    @property
+    def session(self):
+        """Test-side accessor for the runner-RPC's captured calls.
+
+        Returns an object exposing ``calls`` for assertion shape
+        compatibility with the pre-§7c-step-6.6.3.6 test fakes.
+        """
+        return self._runner_rpc if self._runner_rpc is not None else _FakeRunnerRPC()
 
 
 def _make_session(session_id: str, server: _FakeJaatoServer) -> Session:
@@ -82,6 +106,9 @@ class TestInjectPromptToSession:
 
         assert ok is True
         assert server.session.calls == [
+            # source_type=None is preserved across the wire (the
+            # runner-side handler applies its own
+            # SourceType.USER default downstream).
             ("hello from reactor", "reactor", None)
         ]
 
@@ -109,7 +136,12 @@ class TestInjectPromptToSession:
 
     def test_passes_source_metadata_through(self):
         """source_id and source_type must reach inject_prompt verbatim
-        so priority-based queueing works for cross-session injects too."""
+        so priority-based queueing works for cross-session injects too.
+
+        Phase 3 §7c step 6.6.3.6: source_type crosses the runner-RPC
+        wire as its lowercase string value (the SourceType enum
+        is reconstructed runner-side per the §7c step 6.1 (3/3)
+        ``session.inject_prompt`` handler at commit 14e57709)."""
         from shared.message_queue import SourceType
 
         manager, server = _make_manager_with_session("sess_2")
@@ -123,7 +155,7 @@ class TestInjectPromptToSession:
 
         assert ok is True
         assert server.session.calls == [
-            ("system event", "webhook:github", SourceType.EVENT)
+            ("system event", "webhook:github", "event")
         ]
 
     def test_default_source_metadata_omitted(self):

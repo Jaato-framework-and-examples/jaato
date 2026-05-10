@@ -3224,18 +3224,23 @@ class JaatoServer:
         """Set up queue-based channels for permission/clarification."""
         server = self
 
-        def get_cancel_token():
-            if server._jaato:
-                session = server._jaato.get_session()
-                if session and hasattr(session, '_cancel_token'):
-                    return session._cancel_token
-            return None
-
+        # Phase 3 §7c step 6.6.3.6: the legacy in-process cancel-
+        # token closure has been deleted.  The daemon-side
+        # ``_jaato.get_session()._cancel_token`` reach was a
+        # vestige of the pre-§7b.2 daemon-side message-processing
+        # path.  Post-§7b.2 cancellation routes through
+        # ``self._runner_rpc.session_request_stop_threadsafe(...)``
+        # via :meth:`JaatoServer.stop` (§7b.1 8cbb8ba2), which
+        # is the authoritative cancel surface.  The
+        # CancelTokenProxy presented here is now always
+        # not-cancelled — preserved as a no-op stub for
+        # back-compat with the channels API contract; channel
+        # consumers should call ``server.stop()`` for actual
+        # cancellation.
         class CancelTokenProxy:
             @property
             def is_cancelled(self):
-                token = get_cancel_token()
-                return token.is_cancelled if token else False
+                return False
 
         cancel_token_proxy = CancelTokenProxy()
 
@@ -3613,16 +3618,26 @@ class JaatoServer:
                 # contract: TUI / web / chat sessions stay alive across
                 # turns until the user disconnects.
                 MAX_COMPLETION_NUDGES = 2
+                # Phase 3 §7c step 6.6.3.6: tool-schemas filter
+                # uses the public ``JaatoClient.get_tool_schemas()``
+                # (added §7c step 3b at 7b30c237) instead of
+                # reaching into the private ``session._tools``.
+                # The ``jaato_session`` variable below is still
+                # needed for ``_signal_completion_called`` /
+                # ``_completion_nudges_fired`` private-state
+                # access — those collapse in §7c step 6.6.4
+                # alongside ``_jaato`` removal.
                 jaato_session = (
                     server._jaato.get_session()
                     if server._jaato is not None else None
                 )
-                signal_completion_in_surface = (
-                    jaato_session is not None
-                    and any(
-                        getattr(t, 'name', None) == 'signal_completion'
-                        for t in getattr(jaato_session, '_tools', []) or []
-                    )
+                tool_schemas = (
+                    server._jaato.get_tool_schemas()
+                    if server._jaato is not None else []
+                )
+                signal_completion_in_surface = any(
+                    getattr(t, 'name', None) == 'signal_completion'
+                    for t in tool_schemas
                 )
                 if (
                     status == "done"
@@ -3989,17 +4004,34 @@ class JaatoServer:
         """Check if model is currently processing."""
         return self._model_running
 
-    def get_session(self):
-        """Return the underlying ``JaatoSession`` for direct API access.
-
-        Used by session-manipulation tools (e.g. the ``session_ops``
-        plugin's ``interrogate_session``) that compose ``get_history()``,
-        ``resolve_fork_point()``, and ``replay_messages()`` to drive
-        forks and replays from outside the session.
-        """
-        if not self._jaato:
-            raise RuntimeError("No active session")
-        return self._jaato.get_session()
+    # Phase 3 §7c step 6.6.3.6: ``JaatoServer.get_session()``
+    # was removed.  Pre-§7c-step-6.6.3.6 it returned the
+    # underlying daemon-side ``JaatoSession`` instance for
+    # direct API access by session-manipulation tools (e.g.
+    # session_ops's interrogate_session).  Post-seat-flip the
+    # session lives runner-side and is not directly accessible
+    # from the daemon process; consumers should use the
+    # runner-RPC surface instead:
+    #
+    #   - ``server._runner_rpc.session_get_history_threadsafe()``
+    #     for history reads (§3.3c precursor).
+    #   - ``server._runner_rpc.session_replay_messages_threadsafe(messages)``
+    #     for replay (§7c step 6.6.3.4 at commit 24ed6c0f).
+    #   - ``server._runner_rpc.session_resolve_fork_point_threadsafe(...)``
+    #     for fork-point resolution (§7c step 6.6.3.5 at e4eddc0e).
+    #   - ``server._runner_rpc.session_inject_prompt_threadsafe(...)``
+    #     for prompt injection (§7c step 6.1 (3/3) at 14e57709).
+    #   - ``server._runner_rpc.session_set_initial_history_threadsafe(...)``
+    #     for history seeding (§7c step 6.6.1.1 at 3f859e3a).
+    #   - ``server._runner_rpc.session_append_history_message_threadsafe(...)``
+    #     for synthetic-message append (§7c step 6.6.3.1 at aa9059ec).
+    #   - ``server._runner_rpc.session_set_session_state_threadsafe(...)``
+    #     for state injection (§3.3c precursor).
+    #   - ``server._runner_rpc.session_snapshot_instruction_budget_threadsafe()``
+    #     / ``session_snapshot_conversation_budget_threadsafe()`` for
+    #     budget reads (§7c step 6.1 (2/3) + 6.6.3.2).
+    #   - ``server._runner_rpc.session_restore_*_threadsafe(...)`` for
+    #     persistence-restore paths (§7c step 6.6.1 trio + 6.6.3.2).
 
     @property
     def is_waiting_for_input(self) -> bool:
