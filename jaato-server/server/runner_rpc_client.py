@@ -1313,6 +1313,45 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_snapshot_conversation_budget(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Optional[Dict[str, Any]]":
+        """Return the runner-side session's CONVERSATION
+        instruction-budget snapshot for persistence-save.
+
+        Phase 3 §7c step 6.6.3.2.  Inverse of
+        ``session_restore_conversation_budget`` (6.6.1.3).
+        Replaces the pre-§7c daemon-side reach at
+        ``server/session_manager.py:2986``.  Wraps the public
+        method ``JaatoSession.snapshot_conversation_budget``
+        added in §7c step 6.6.3.0.
+
+        Returns the snapshot dict (JSON-native; same shape disk
+        persistence already exercises) when the budget has a
+        conversation entry; returns ``None`` when budget
+        unavailable / no conversation entry.
+        """
+        result = await self._call_named(
+            "session.snapshot_conversation_budget", {}, timeout=timeout,
+        )
+        snapshot = result.get("snapshot")
+        if snapshot is None:
+            return None
+        if not isinstance(snapshot, dict):
+            raise RunnerCallError(
+                f"session_snapshot_conversation_budget: expected dict, "
+                f"got {type(snapshot).__name__}"
+            )
+        return dict(snapshot)
+
+    def session_snapshot_conversation_budget_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Optional[Dict[str, Any]]":
+        return self._run_threadsafe(
+            self.session_snapshot_conversation_budget(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,

@@ -651,6 +651,18 @@ class RunnerRPC:
             # set_initial_history).
             return self._handle_session_append_history_message(env.args)
 
+        if env.method == "session.snapshot_conversation_budget":
+            # Phase 3 §7c step 6.6.3.2: return the runner-side
+            # session's CONVERSATION instruction-budget snapshot
+            # for persistence-save.  Inverse of
+            # ``session.restore_conversation_budget`` (6.6.1.3).
+            # Replaces the daemon-side reach at
+            # session_manager.py:2986 through
+            # ``session.instruction_budget.get_conversation_snapshot``.
+            # args = ``{}``.  Returns ``{"snapshot": <dict|None>}``
+            # — None when no budget configured (pre-configure).
+            return self._handle_session_snapshot_conversation_budget()
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1678,6 +1690,80 @@ class RunnerRPC:
                 "stage": "set",
             }
         return True, {"ok": True}
+
+    def _handle_session_snapshot_conversation_budget(
+        self,
+    ) -> "tuple[bool, Any]":
+        """Return the runner-side session's CONVERSATION
+        instruction-budget snapshot for persistence-save.
+
+        Phase 3 §7c step 6.6.3.2.  Inverse of
+        :meth:`_handle_session_restore_conversation_budget`
+        (6.6.1.3).  Replaces the pre-§7c daemon-side reach at
+        ``server/session_manager.py:2986``:
+
+            jaato_session.instruction_budget.get_conversation_snapshot()
+
+        Now wraps the public method
+        :meth:`JaatoSession.snapshot_conversation_budget` added
+        in §7c step 6.6.3.0.
+
+        Returns ``{"snapshot": <dict>}`` when the runner-side
+        session has a budget with a conversation entry; returns
+        ``{"snapshot": None}`` when no budget exists yet
+        (pre-:meth:`configure`) or when the budget has no
+        conversation source entry.
+
+        Wire shape: same JSON-native dict the persistence
+        serializer already exercises (`SourceEntry.to_dict()`).
+        Same wire-shape-reuse rationale as the §7c step 6.1
+        trio + 6.6.1 trio.
+
+        Defensive contract:
+
+          - The snapshot may be a nested dict (recursive
+            children); we ``copy.deepcopy`` to isolate daemon-
+            side mutation from runner-side state — same shape
+            as ``session.snapshot_instruction_budget`` (§7c
+            step 6.1 (2/3) at commit 1043bfde).
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        getter = getattr(session, "snapshot_conversation_budget", None)
+        if not callable(getter):
+            return False, {
+                "error": (
+                    "session.snapshot_conversation_budget: session has no "
+                    "snapshot_conversation_budget method (rolling-upgrade "
+                    "gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            raw = getter()
+        except Exception as exc:  # noqa: BLE001 — read boundary
+            return False, {
+                "error": (
+                    f"session.snapshot_conversation_budget: getter raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "read",
+            }
+        if raw is None:
+            return True, {"snapshot": None}
+        if not isinstance(raw, dict):
+            return False, {
+                "error": (
+                    f"session.snapshot_conversation_budget: expected dict "
+                    f"or None, got {type(raw).__name__}"
+                ),
+                "stage": "read",
+            }
+        # Deep-copy to isolate daemon-side mutation; the snapshot
+        # may contain nested ``children`` sub-dicts.
+        import copy
+        return True, {"snapshot": copy.deepcopy(raw)}
 
     def _handle_session_get_turn_accounting(self) -> "tuple[bool, Any]":
         """Read the runner-side per-turn token usage / timing list.

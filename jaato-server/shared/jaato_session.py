@@ -7267,6 +7267,39 @@ NOTES
             return
         self._instruction_budget.restore_conversation_from_snapshot(snapshot)
 
+    def snapshot_conversation_budget(self) -> Optional[Dict[str, Any]]:
+        """Return a serializable snapshot of the CONVERSATION budget
+        entry for persistence.
+
+        Inverse of :meth:`restore_conversation_budget` (added in
+        §7c step 6.6.1.0).  Pre-§7c-step-6.6.3.0 the daemon's
+        persistence-save path
+        (``server/session_manager.py:2986``) reached through the
+        session into the underlying :class:`InstructionBudget`:
+
+            jaato_session.instruction_budget.get_conversation_snapshot()
+
+        The :meth:`InstructionBudget.get_conversation_snapshot`
+        method exists (instruction_budget.py:390), but
+        JaatoSession had no public wrapper.  This method exposes
+        the operation as a stable JaatoSession-level surface for
+        the upcoming ``session.snapshot_conversation_budget``
+        runner-RPC (§7c step 6.6.3.2).
+
+        Returns ``None`` when ``self._instruction_budget`` is
+        None (pre-:meth:`configure`); matches the daemon caller's
+        existing ``if jaato_session.instruction_budget:`` guard
+        semantic.
+
+        Returns:
+            Conversation-source snapshot dict (JSON-native), or
+            ``None`` when budget unavailable / no conversation
+            entry exists.
+        """
+        if self._instruction_budget is None:
+            return None
+        return self._instruction_budget.get_conversation_snapshot()
+
     def append_history_message(self, message: Message) -> None:
         """Append a single message to the session's history.
 
