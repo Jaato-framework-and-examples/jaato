@@ -262,33 +262,31 @@ def test_runner_rpc_get_history_call_present() -> None:
 
 
 def test_jaato_user_command_reads_still_present_until_5c() -> None:
-    """Pin ``_jaato.get_user_commands()`` /
-    ``_jaato.execute_user_command()`` /
-    ``_jaato.get_model_completions()`` / ``_jaato.auth_info`` are NOT
-    yet migrated — they're session-tier methods, not runtime-tier,
-    so they need new RPCs.  Per the in-flight 6.6.4.5b audit, these
-    move to §7c step 6.6.4.5c (re-introduced after the original 5c
-    was eliminated by Refinement 1's missing-method audit).  If
-    these tests start failing because count went to 0, 5c has landed."""
-    user_command_calls = _module_calls_jaato_method(
-        core_module, "get_user_commands",
-    )
+    """Pin remaining session-tier `_jaato.X` reads not yet migrated
+    by 5c sub-commits.  Tracks per-handler progress through Path D's
+    5-handler decomposition:
+
+    - 5c.1 ✅ migrated `_jaato.auth_info` reads (commit bff782a4)
+    - 5c.2 ✅ migrated `_jaato.get_user_commands()` reads
+    - 5c.3 (pending) — `_jaato.execute_user_command()`
+    - 5c.4 (pending) — `_jaato.get_model_completions()`
+    - 5c.5 (pending) — `_jaato.get_tool_schemas()` (different
+      callsite shape: read inside `for schema in ...` and
+      conditional check)
+
+    Update each assertion's expected count when its sub-commit lands.
+    """
     execute_calls = _module_calls_jaato_method(
         core_module, "execute_user_command",
     )
     completions_calls = _module_calls_jaato_method(
         core_module, "get_model_completions",
     )
-    assert len(user_command_calls) >= 2, (
-        f"Expected ≥2 ``_jaato.get_user_commands()`` call sites; found "
-        f"{len(user_command_calls)}.  If 5c has landed and these were "
-        f"migrated to RPC, delete this pin."
-    )
     assert len(execute_calls) >= 1, (
         f"Expected ≥1 ``_jaato.execute_user_command()`` call site; found "
-        f"{len(execute_calls)}."
+        f"{len(execute_calls)}.  If 5c.3 has landed, delete this assertion."
     )
     assert len(completions_calls) >= 1, (
         f"Expected ≥1 ``_jaato.get_model_completions()`` call site; found "
-        f"{len(completions_calls)}."
+        f"{len(completions_calls)}.  If 5c.4 has landed, delete this assertion."
     )

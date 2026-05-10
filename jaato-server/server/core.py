@@ -4012,7 +4012,13 @@ class JaatoServer:
         if not self._jaato:
             return {"error": "Client not initialized"}
 
-        user_commands = self._jaato.get_user_commands()
+        # Phase 3 §7c step 6.6.4.5c.2: route through runner-RPC
+        # (dict-shape-only wire format reconstructed daemon-side
+        # into UserCommand NamedTuples — full ``parse_command_args``
+        # surface preserved).
+        if self._runner_rpc is None:
+            return {"error": "Client not initialized"}
+        user_commands = self._runner_rpc.session_get_user_commands_threadsafe()
         if command not in user_commands:
             return {"error": f"Unknown command: {command}"}
 
@@ -4228,9 +4234,15 @@ class JaatoServer:
 
     def get_available_commands(self) -> Dict[str, str]:
         """Get available commands with descriptions."""
-        if not self._jaato:
+        # Phase 3 §7c step 6.6.4.5c.2: route through runner-RPC.
+        if self._runner_rpc is None:
             return {}
-        user_commands = self._jaato.get_user_commands()
+        try:
+            user_commands = (
+                self._runner_rpc.session_get_user_commands_threadsafe()
+            )
+        except Exception:  # noqa: BLE001 — display-only, fall back to {}
+            return {}
         return {name: cmd.description for name, cmd in user_commands.items()}
 
     def get_available_tools(self) -> List[Dict[str, Any]]:

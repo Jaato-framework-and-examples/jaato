@@ -529,6 +529,17 @@ class RunnerRPC:
             # args = ``{}``.  Returns ``{"auth_info": str}``.
             return self._handle_session_get_auth_info()
 
+        if env.method == "session.get_user_commands":
+            # Phase 3 §7c step 6.6.4.5c.2: read the runner-side
+            # session's user-command catalog.  Replaces 2 daemon-side
+            # reaches into ``self._jaato.get_user_commands()``.
+            # args = ``{}``.  Returns
+            # ``{"commands": {<name>: <UserCommand-as-dict>, ...}}``.
+            # Wire shape per the 5c.2 audit decision: dict-shape-only
+            # (Path B) — UserCommand + CommandParameter are NamedTuples
+            # with primitive fields, no callables to strip.
+            return self._handle_session_get_user_commands()
+
         if env.method == "session.get_history":
             # Phase 3 §3.3c precursor: read the runner-side
             # JaatoSession's conversation history.  args = ``{}`` or
@@ -3139,6 +3150,87 @@ class RunnerRPC:
                 "stage": "call",
             }
         return True, {"auth_info": str(auth_info or "")}
+
+    def _handle_session_get_user_commands(self) -> "tuple[bool, Any]":
+        """Read the runner-side session's user-command catalog.
+
+        Phase 3 §7c step 6.6.4.5c.2.  Replaces 2 daemon-side reaches
+        into ``self._jaato.get_user_commands()``.  Wire shape per
+        the 5c.2 audit decision: **dict-shape-only** (Path B).
+        ``UserCommand`` and ``CommandParameter`` are NamedTuples
+        with primitive fields (str/bool) — no callables, no class
+        refs, no Type[X] — so straight dict serialization is
+        sufficient.
+
+        Daemon callers reconstruct ``UserCommand`` instances on
+        receipt; the handler callable itself stays runner-side and
+        gets invoked via ``session.execute_user_command`` (5c.3).
+
+        Returns:
+            ``(True, {"commands": {<name>: <UserCommand-as-dict>, ...}})``
+            on success.  Per-command dict shape::
+
+                {
+                    "name": str,
+                    "description": str,
+                    "share_with_model": bool,
+                    "parameters": [
+                        {"name": str, "description": str,
+                         "required": bool, "capture_rest": bool},
+                        ...
+                    ] | null
+                }
+
+            ``(False, {"error": ..., "stage": ...})`` on
+            ``no_host`` / ``no_session`` / ``missing_method`` /
+            ``call``.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        get_method = getattr(session, "get_user_commands", None)
+        if not callable(get_method):
+            return False, {
+                "error": (
+                    "session.get_user_commands: session class lacks public "
+                    "get_user_commands() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            commands = get_method()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.get_user_commands: get_user_commands raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        # Serialize each UserCommand to dict.  Per the audit, fields
+        # are all primitives + Optional[List[CommandParameter]] which
+        # is itself a primitive-only NamedTuple.
+        serialized: Dict[str, Any] = {}
+        for name, cmd in (commands or {}).items():
+            params_serialized = None
+            cmd_params = getattr(cmd, "parameters", None)
+            if cmd_params:
+                params_serialized = [
+                    {
+                        "name": str(getattr(p, "name", "")),
+                        "description": str(getattr(p, "description", "")),
+                        "required": bool(getattr(p, "required", False)),
+                        "capture_rest": bool(getattr(p, "capture_rest", False)),
+                    }
+                    for p in cmd_params
+                ]
+            serialized[str(name)] = {
+                "name": str(getattr(cmd, "name", name)),
+                "description": str(getattr(cmd, "description", "")),
+                "share_with_model": bool(getattr(cmd, "share_with_model", False)),
+                "parameters": params_serialized,
+            }
+        return True, {"commands": serialized}
 
     @property
     def session_host(self):

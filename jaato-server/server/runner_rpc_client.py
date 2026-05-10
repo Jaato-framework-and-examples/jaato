@@ -928,6 +928,70 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_user_commands(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> "Dict[str, Any]":
+        """Read the runner-side session's user-command catalog.
+
+        Phase 3 §7c step 6.6.4.5c.2.  Replaces 2 daemon-side reaches
+        into ``self._jaato.get_user_commands()``.  Wire shape per the
+        5c.2 audit decision: dict-shape-only — the wrapper
+        reconstructs ``UserCommand`` / ``CommandParameter`` NamedTuple
+        instances on receipt so daemon callers can use the existing
+        ``parse_command_args(cmd, raw_args)`` helper unmodified.
+
+        Returns a ``Dict[str, UserCommand]`` matching the pre-§7c
+        ``JaatoClient.get_user_commands()`` shape.
+
+        Raises:
+            RunnerCallError on transport failure or runner-side
+                exception (no_host / no_session / missing_method /
+                call).
+        """
+        from jaato_sdk.plugins.base import UserCommand, CommandParameter
+
+        result = await self._call_named(
+            "session.get_user_commands", {}, timeout=timeout,
+        )
+        commands_raw = result.get("commands", {})
+        if not isinstance(commands_raw, dict):
+            raise RunnerCallError(
+                f"session_get_user_commands: expected dict for "
+                f"'commands', got {type(commands_raw).__name__}"
+            )
+        commands: Dict[str, UserCommand] = {}
+        for name, cmd_dict in commands_raw.items():
+            if not isinstance(cmd_dict, dict):
+                continue
+            params_raw = cmd_dict.get("parameters")
+            params: "Optional[list]" = None
+            if isinstance(params_raw, list):
+                params = [
+                    CommandParameter(
+                        name=str(p.get("name", "")),
+                        description=str(p.get("description", "")),
+                        required=bool(p.get("required", False)),
+                        capture_rest=bool(p.get("capture_rest", False)),
+                    )
+                    for p in params_raw
+                    if isinstance(p, dict)
+                ]
+            commands[str(name)] = UserCommand(
+                name=str(cmd_dict.get("name", name)),
+                description=str(cmd_dict.get("description", "")),
+                share_with_model=bool(cmd_dict.get("share_with_model", False)),
+                parameters=params,
+            )
+        return commands
+
+    def session_get_user_commands_threadsafe(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> "Dict[str, Any]":
+        return self._run_threadsafe(
+            self.session_get_user_commands(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_history(
         self,
         *,
