@@ -2551,26 +2551,37 @@ class RunnerRPC:
         # 6e31d375).  Each session callback emits a frame with a
         # well-known event_type; the daemon-side wrapper's
         # ``on_notification`` handler (installed in §7c step
-        # 6.6.4.3) demuxes by event_type and invokes
+        # 6.6.4.3b) demuxes by event_type and invokes
         # ``server.emit(<Event>)`` or ``server._start_model_thread(...)``.
         #
         # Save the original callbacks so we can restore on exit —
-        # other callers (e.g. the daemon's pre-§7c-step-6.6.4.3
+        # other callers (e.g. the daemon's pre-§7c-step-6.6.4.3b
         # ``_start_model_thread``) may have wired their own.
-        # Until 6.6.4.3 lands the daemon-side leg drop, this
-        # runner-side wiring is dormant: the runner-side session
-        # never processes a turn (the daemon's
-        # ``_jaato.send_message()`` does), so the emit_notification
-        # calls don't fire.  Behavior-preserving installation.
         original_callbacks = self._install_session_notification_callbacks(
             session, request_id,
         )
 
+        # Phase 3 §7c step 6.6.4.3b: per-call notification shims
+        # for ``on_usage_update`` + ``on_gc_threshold`` kwargs.
+        # Audit Finding 1: these aren't ``set_*_callback`` setters
+        # — they're send_message kwargs, so they live only for
+        # this one call (no install/restore needed).  Closes the
+        # 7→9-callback miss caught by the §7c step 6.6.4.3
+        # implementation-review audit.
+        usage_shim = self._make_usage_update_notification_shim(request_id)
+        gc_shim = self._make_gc_threshold_notification_shim(request_id)
+
         # Run the message loop.  Model API calls happen
-        # synchronously here; output streams via on_output.
+        # synchronously here; output streams via on_output;
+        # usage + gc-threshold events stream via notification frames.
         try:
             try:
-                response = session.send_message(prompt, on_output=on_output)
+                response = session.send_message(
+                    prompt,
+                    on_output=on_output,
+                    on_usage_update=usage_shim,
+                    on_gc_threshold=gc_shim,
+                )
             except Exception as exc:  # noqa: BLE001 — boundary
                 # Cancellation surfaces as a typed exception today
                 # (CancelledException from the model_provider types).
@@ -2633,6 +2644,82 @@ class RunnerRPC:
     _NOTIF_RETRY = "retry"
     _NOTIF_MID_TURN_INTERRUPT = "mid_turn_interrupt"
     _NOTIF_EVENTS_SUBSCRIBED = "events_subscribed"
+    # §7c step 6.6.4.3b additions — the audit-caught per-call kwargs.
+    _NOTIF_USAGE_UPDATE = "usage_update"
+    _NOTIF_GC_THRESHOLD = "gc_threshold"
+
+    def _make_usage_update_notification_shim(
+        self, request_id: int,
+    ) -> Any:
+        """Build a per-call ``on_usage_update`` shim that emits a
+        ``usage_update`` NotificationFrame.
+
+        Phase 3 §7c step 6.6.4.3b.  The daemon-side handler
+        consumes the serialized ``TokenUsage`` dict + the runner-
+        side context-limit/turns lookups it does and re-emits
+        ``ContextUpdatedEvent`` daemon-side.  The serializer runs
+        runner-side because it has the live ``TokenUsage`` object;
+        the daemon side reconstructs from primitives.
+
+        Defensive: a ``TokenUsage`` instance is a dataclass with
+        well-known field names (prompt_tokens, output_tokens,
+        total_tokens, plus optional cache/reasoning/thinking/
+        cost_usd).  ``getattr`` keeps the shim resilient to
+        provider-side subclasses adding fields.
+        """
+        rpc = self
+
+        def _shim(usage: Any) -> None:
+            try:
+                payload = {
+                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                    "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                    "cache_read_tokens": getattr(usage, "cache_read_tokens", None),
+                    "cache_creation_tokens": getattr(
+                        usage, "cache_creation_tokens", None,
+                    ),
+                    "reasoning_tokens": getattr(usage, "reasoning_tokens", None),
+                    "thinking_tokens": getattr(usage, "thinking_tokens", None),
+                    "cost_usd": getattr(usage, "cost_usd", None),
+                }
+                rpc.emit_notification(
+                    request_id=request_id,
+                    event_type=rpc._NOTIF_USAGE_UPDATE,
+                    payload=payload,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("usage_update notify raised")
+
+        return _shim
+
+    def _make_gc_threshold_notification_shim(
+        self, request_id: int,
+    ) -> Any:
+        """Build a per-call ``on_gc_threshold`` shim that emits a
+        ``gc_threshold`` NotificationFrame.
+
+        Phase 3 §7c step 6.6.4.3b.  Signature: ``(percent_used:
+        float, threshold: float) -> None``.  Daemon-side handler
+        re-emits ``SystemMessageEvent`` with the audit-text the
+        pre-migration daemon callback used.
+        """
+        rpc = self
+
+        def _shim(percent_used: float, threshold: float) -> None:
+            try:
+                rpc.emit_notification(
+                    request_id=request_id,
+                    event_type=rpc._NOTIF_GC_THRESHOLD,
+                    payload={
+                        "percent_used": float(percent_used),
+                        "threshold": float(threshold),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("gc_threshold notify raised")
+
+        return _shim
 
     def _install_session_notification_callbacks(
         self, session: Any, request_id: int,

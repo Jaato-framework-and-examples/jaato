@@ -1979,43 +1979,23 @@ class JaatoServer:
                 if gc_strategy.startswith('gc_'):
                     gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
 
-            # Wire event subscription notification so WS clients learn
-            # which event types the agent is listening for.
-            with _s5.sub("event_bus_hooks"):
-                session = self._jaato.get_session()
-                if session and hasattr(session, '_event_bus_tools') and session._event_bus_tools:
-                    _server_ref = self
-
-                    def _on_subscribed(agent_id: str, event_names: list) -> None:
-                        from jaato_sdk.events import EventsSubscribedEvent
-                        _server_ref.emit(EventsSubscribedEvent(
-                            agent_id=agent_id,
-                            event_names=event_names,
-                        ))
-
-                    session._event_bus_tools._on_subscribed = _on_subscribed
-
-            # Set up instruction budget callback and emit initial budget
-            # This must happen after configure_tools() which populates the budget
+            # Phase 3 §7c step 6.6.4.3b: deleted ``_event_bus_tools._on_subscribed``
+            # wiring + ``set_instruction_budget_callback`` wiring.  Both
+            # collapse into runner-side notification emissions consumed
+            # by the ``_build_send_message_notification_handler`` demuxer
+            # via the §7c step 6.6.4.1 NotificationFrame protocol
+            # (commit 6e31d375) + §7c step 6.6.4.2 install machinery
+            # (commit 973923c6).  The initial-budget snapshot emit
+            # below stays daemon-side — it's a one-shot after configure_tools(),
+            # not a recurring callback, so notification-frame routing
+            # would be overkill.
             with _s5.sub("instruction_budget"):
                 session = self._jaato.get_session()
-                if session:
-                    server = self
-
-                    def instruction_budget_callback(snapshot: dict):
-                        server.emit(InstructionBudgetEvent(
-                            agent_id=snapshot.get('agent_id', 'main'),
-                            budget_snapshot=snapshot,
-                        ))
-
-                    session.set_instruction_budget_callback(instruction_budget_callback)
-
-                    # Emit initial budget snapshot
-                    if session.instruction_budget:
-                        self.emit(InstructionBudgetEvent(
-                            agent_id=session.agent_id,
-                            budget_snapshot=session.instruction_budget.snapshot(),
-                        ))
+                if session and session.instruction_budget:
+                    self.emit(InstructionBudgetEvent(
+                        agent_id=session.agent_id,
+                        budget_snapshot=session.instruction_budget.snapshot(),
+                    ))
 
         self._emit_init_progress("Configuring tools", "done", 5, total_steps)
 
@@ -3385,104 +3365,187 @@ class JaatoServer:
         # Start model in background (file references should be expanded client-side)
         self._start_model_thread(text)
 
-    def _start_model_thread(self, prompt: str) -> None:
-        """Start the model call in a background thread."""
+    def _build_send_message_notification_handler(self):
+        """Build the per-call ``on_notification`` demuxer used by
+        ``_start_model_thread``'s runner-RPC ``session.send_message``.
+
+        Phase 3 §7c step 6.6.4.3b.  Replaces 9 daemon-side
+        callback wirings (7 ``set_*_callback`` setters at sites
+        1996/2011/3396/3420/3435/3445/4323 + 2 per-call kwargs
+        ``on_usage_update`` / ``on_gc_threshold`` at 3511-3512 /
+        3534-3535) with one demuxer that branches on the
+        NotificationFrame ``event_type``.  Runner-side session
+        emits the frames during ``send_message``; this handler
+        runs daemon-side off the read-loop thread.
+
+        Each branch mirrors the pre-§7c-step-6.6.4.3b daemon-side
+        callback body — same emit-events, same trace logs, same
+        side effects (e.g. ``_pending_continuation`` stash, recursive
+        ``_start_model_thread`` for parent-idle continuation).
+        """
         server = self
 
-        # Set up callback for when injected prompts are processed
-        # This allows UI to remove prompts from pending bar
-        if self._jaato:
-            session = self._jaato.get_session()
-            session.set_prompt_injected_callback(
-                lambda text: server.emit(MidTurnPromptInjectedEvent(text=text))
-            )
-
-            # Set up callback for when child messages need continuation
-            # This triggers a new turn when subagent sends messages while parent is idle
-            def continuation_callback(child_messages: str):
-                if not child_messages:
-                    return
-                if not server._model_running:
-                    # Normal path: parent is idle between turns
-                    server._trace(f"CONTINUATION: Child messages drained ({len(child_messages)} chars), triggering new turn")
-                    server.emit(AgentStatusChangedEvent(
-                        agent_id=server._main_agent_id,
-                        status="active",
+        def _handle(event_type: str, payload: Dict[str, Any]) -> None:
+            try:
+                if event_type == "instruction_budget_updated":
+                    snapshot = payload.get("snapshot") or {}
+                    server.emit(InstructionBudgetEvent(
+                        agent_id=snapshot.get("agent_id", "main"),
+                        budget_snapshot=snapshot,
                     ))
-                    server._start_model_thread(child_messages)
-                else:
-                    # Called from _drain_child_messages() inside send_message()
-                    # while _model_running is still True.  Stash for the
-                    # model_thread finally block to pick up.
-                    server._pending_continuation = child_messages
-                    server._trace(f"CONTINUATION: Stashed {len(child_messages)} chars (model still running)")
+                    return
 
-            session.set_continuation_callback(continuation_callback)
+                if event_type == "prompt_injected":
+                    text = payload.get("text", "") or ""
+                    server.emit(MidTurnPromptInjectedEvent(text=text))
+                    return
 
-            # Set up callback for retry notifications
-            # This notifies the client when API calls are being retried due to rate limits
-            def retry_callback(message: str, attempt: int, max_attempts: int, delay: float) -> None:
-                # Determine error type from message
-                error_type = "rate_limit" if "rate-limit" in message.lower() else "transient"
-                server.emit(RetryEvent(
-                    message=message,
-                    attempt=attempt,
-                    max_attempts=max_attempts,
-                    delay=delay,
-                    error_type=error_type,
-                ))
+                if event_type == "continuation_needed":
+                    child_messages = payload.get("child_messages", "") or ""
+                    if not child_messages:
+                        return
+                    if not server._model_running:
+                        # Normal path: parent is idle between turns.
+                        server._trace(
+                            f"CONTINUATION: Child messages drained "
+                            f"({len(child_messages)} chars), triggering new turn",
+                        )
+                        server.emit(AgentStatusChangedEvent(
+                            agent_id=server._main_agent_id,
+                            status="active",
+                        ))
+                        server._start_model_thread(child_messages)
+                    else:
+                        # Stash for the model_thread finally block to pick up.
+                        server._pending_continuation = child_messages
+                        server._trace(
+                            f"CONTINUATION: Stashed {len(child_messages)} "
+                            f"chars (model still running)",
+                        )
+                    return
 
-            session.set_retry_callback(retry_callback)
+                if event_type == "retry":
+                    message = payload.get("message", "") or ""
+                    error_type = (
+                        "rate_limit"
+                        if "rate-limit" in message.lower()
+                        else "transient"
+                    )
+                    server.emit(RetryEvent(
+                        message=message,
+                        attempt=int(payload.get("attempt", 0)),
+                        max_attempts=int(payload.get("max_attempts", 0)),
+                        delay=float(payload.get("delay", 0.0)),
+                        error_type=error_type,
+                    ))
+                    return
 
-            # Set up callback for when streaming is interrupted for mid-turn prompt
-            def mid_turn_interrupt_callback(partial_chars: int, prompt_preview: str):
-                server._trace(f"MID_TURN_INTERRUPT: partial={partial_chars}, preview={prompt_preview[:50]}...")
-                server.emit(MidTurnInterruptEvent(
-                    partial_response_chars=partial_chars,
-                    user_prompt_preview=prompt_preview,
-                ))
+                if event_type == "mid_turn_interrupt":
+                    partial_chars = int(payload.get("partial_chars", 0))
+                    prompt_preview = payload.get("prompt_preview", "") or ""
+                    server._trace(
+                        f"MID_TURN_INTERRUPT: partial={partial_chars}, "
+                        f"preview={prompt_preview[:50]}...",
+                    )
+                    server.emit(MidTurnInterruptEvent(
+                        partial_response_chars=partial_chars,
+                        user_prompt_preview=prompt_preview,
+                    ))
+                    return
 
-            session.set_mid_turn_interrupt_callback(mid_turn_interrupt_callback)
+                if event_type == "events_subscribed":
+                    from jaato_sdk.events import EventsSubscribedEvent
+                    server.emit(EventsSubscribedEvent(
+                        agent_id=payload.get("agent_id", "") or "",
+                        event_names=list(payload.get("event_names") or []),
+                    ))
+                    return
 
-            # Note: instruction_budget_callback is set up in initialize() after configure_tools()
+                if event_type == "usage_update":
+                    total_tokens = int(payload.get("total_tokens", 0))
+                    if total_tokens == 0:
+                        return
+                    if server._jaato is None:
+                        return
+                    context_limit = server._jaato.get_context_limit()
+                    percent_used = (
+                        (total_tokens / context_limit * 100)
+                        if context_limit > 0 else 0
+                    )
+                    turn_accounting = server._jaato.get_turn_accounting()
+                    turns = len(turn_accounting)
+                    server.emit(ContextUpdatedEvent(
+                        agent_id=server._main_agent_id,
+                        usage=server._build_usage(
+                            prompt_tokens=int(payload.get("prompt_tokens", 0)),
+                            output_tokens=int(payload.get("output_tokens", 0)),
+                            total_tokens=total_tokens,
+                            cache_read_tokens=payload.get("cache_read_tokens"),
+                            cache_creation_tokens=payload.get(
+                                "cache_creation_tokens",
+                            ),
+                            reasoning_tokens=payload.get("reasoning_tokens"),
+                            thinking_tokens=payload.get("thinking_tokens"),
+                            cost_usd_override=payload.get("cost_usd"),
+                        ),
+                        context_limit=context_limit,
+                        percent_used=percent_used,
+                        tokens_remaining=max(0, context_limit - total_tokens),
+                        turns=turns,
+                    ))
+                    return
+
+                if event_type == "gc_threshold":
+                    percent_used = float(payload.get("percent_used", 0.0))
+                    threshold = float(payload.get("threshold", 0.0))
+                    server.emit(SystemMessageEvent(
+                        message=(
+                            f"Context usage ({percent_used:.1f}%) exceeds "
+                            f"threshold ({threshold}%). GC will run after "
+                            f"this turn."
+                        ),
+                        style="warning",
+                    ))
+                    return
+
+                # Unknown event_type — log and drop.  Forward-compat
+                # for runner-side additions the daemon hasn't been
+                # taught about yet.
+                server._trace(
+                    f"NOTIFICATION_UNKNOWN: event_type={event_type!r} "
+                    f"dropped (daemon doesn't recognize)",
+                )
+            except Exception:
+                logger.exception(
+                    "send_message notification handler raised for "
+                    "event_type=%r — event dropped, model loop continues",
+                    event_type,
+                )
+
+        return _handle
+
+    def _start_model_thread(self, prompt: str) -> None:
+        """Start the model call in a background thread.
+
+        Phase 3 §7c step 6.6.4.3b: switched from
+        ``server._jaato.send_message(...)`` (daemon-side
+        JaatoSession) to
+        ``server._runner_rpc.session_send_message_threadsafe(...)``
+        (runner-RPC).  The 7 daemon-side ``set_*_callback`` wirings
+        (4 init-time at sites 1996/2011/4313 + 3 per-call here)
+        delete; runner-side session emits NotificationFrames; the
+        ``on_notification`` demuxer below fans out by event_type.
+        Closes the audit-caught 7→9 callback miss by also
+        wiring ``on_usage_update`` + ``on_gc_threshold`` per-call
+        kwargs runner-side as notification shims.
+        """
+        server = self
 
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks
             pass
 
-        def usage_update_callback(usage) -> None:
-            if usage.total_tokens == 0:
-                return
-            if server._jaato:
-                context_limit = server._jaato.get_context_limit()
-                percent_used = (usage.total_tokens / context_limit * 100) if context_limit > 0 else 0
-                # Get current turn count from accounting
-                turn_accounting = server._jaato.get_turn_accounting()
-                turns = len(turn_accounting)
-                server.emit(ContextUpdatedEvent(
-                    agent_id=server._main_agent_id,
-                    usage=server._build_usage(
-                        prompt_tokens=usage.prompt_tokens,
-                        output_tokens=usage.output_tokens,
-                        total_tokens=usage.total_tokens,
-                        cache_read_tokens=getattr(usage, 'cache_read_tokens', None),
-                        cache_creation_tokens=getattr(usage, 'cache_creation_tokens', None),
-                        reasoning_tokens=getattr(usage, 'reasoning_tokens', None),
-                        thinking_tokens=getattr(usage, 'thinking_tokens', None),
-                        # Provider-side cost wins; falls back to pricing table
-                        cost_usd_override=getattr(usage, 'cost_usd', None),
-                    ),
-                    context_limit=context_limit,
-                    percent_used=percent_used,
-                    tokens_remaining=max(0, context_limit - usage.total_tokens),
-                    turns=turns,
-                ))
-
-        def gc_threshold_callback(percent_used: float, threshold: float) -> None:
-            server.emit(SystemMessageEvent(
-                message=f"Context usage ({percent_used:.1f}%) exceeds threshold ({threshold}%). GC will run after this turn.",
-                style="warning",
-            ))
+        notification_handler = server._build_send_message_notification_handler()
 
         # Capture logging context for propagation into model thread
         from server.session_logging import (
@@ -3505,11 +3568,10 @@ class JaatoServer:
                 # Run in workspace context so file operations use client's CWD
                 # Also apply session env so provider/tools can access session-specific config
                 with server._with_session_env(), server._in_workspace():
-                    server._jaato.send_message(
+                    server._runner_rpc.session_send_message_threadsafe(
                         prompt,
                         on_output=output_callback,
-                        on_usage_update=usage_update_callback,
-                        on_gc_threshold=gc_threshold_callback,
+                        on_notification=notification_handler,
                     )
 
                     # Auto-continuation for formatter feedback
@@ -3528,11 +3590,10 @@ class JaatoServer:
                         feedback_prompt = (
                             f"<hidden>[Formatter Feedback]\n{feedback}</hidden>"
                         )
-                        server._jaato.send_message(
+                        server._runner_rpc.session_send_message_threadsafe(
                             feedback_prompt,
                             on_output=output_callback,
-                            on_usage_update=usage_update_callback,
-                            on_gc_threshold=gc_threshold_callback,
+                            on_notification=notification_handler,
                         )
 
                     # Update context usage
@@ -3618,19 +3679,22 @@ class JaatoServer:
                 # contract: TUI / web / chat sessions stay alive across
                 # turns until the user disconnects.
                 MAX_COMPLETION_NUDGES = 2
-                # Phase 3 §7c step 6.6.3.6: tool-schemas filter
-                # uses the public ``JaatoClient.get_tool_schemas()``
-                # (added §7c step 3b at 7b30c237) instead of
-                # reaching into the private ``session._tools``.
-                # The ``jaato_session`` variable below is still
-                # needed for ``_signal_completion_called`` /
-                # ``_completion_nudges_fired`` private-state
-                # access — those collapse in §7c step 6.6.4
-                # alongside ``_jaato`` removal.
-                jaato_session = (
-                    server._jaato.get_session()
-                    if server._jaato is not None else None
-                )
+                # Phase 3 §7c step 6.6.4.3b: completion-nudge
+                # guard now goes through the runner-RPC
+                # ``session.try_completion_nudge`` handler (shipped
+                # in §7c step 6.6.4.3a at commit 68abe7c8).  The
+                # one round-trip atomically reads
+                # ``_signal_completion_called``, reads
+                # ``_completion_nudges_fired``, and increments
+                # the latter when a nudge should fire — replacing
+                # the pre-§7c-step-6.6.4.3b 3 private-attr
+                # reaches into ``server._jaato.get_session()``.
+                #
+                # ``signal_completion_in_surface`` stays daemon-
+                # side: tool-schemas already routed through the
+                # daemon-side ``JaatoClient.get_tool_schemas()``
+                # (§7c step 6.6.3.6 at commit 89f0c001), and
+                # daemon-tier filtering is unchanged.
                 tool_schemas = (
                     server._jaato.get_tool_schemas()
                     if server._jaato is not None else []
@@ -3639,19 +3703,35 @@ class JaatoServer:
                     getattr(t, 'name', None) == 'signal_completion'
                     for t in tool_schemas
                 )
+                should_nudge = False
+                nudges_fired = 0
                 if (
                     status == "done"
-                    and jaato_session is not None
                     and signal_completion_in_surface
-                    and not getattr(jaato_session, '_signal_completion_called', False)
-                    and getattr(jaato_session, '_completion_nudges_fired', 0) < MAX_COMPLETION_NUDGES
+                    and server._runner_rpc is not None
                 ):
-                    jaato_session._completion_nudges_fired += 1
+                    try:
+                        should_nudge, nudges_fired = (
+                            server._runner_rpc
+                                .session_try_completion_nudge_threadsafe(
+                                    MAX_COMPLETION_NUDGES,
+                                )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Nudge guard is best-effort — a transport
+                        # error here just means no nudge fires this
+                        # turn.  Don't tear down the model thread.
+                        server._trace(
+                            f"COMPLETION_NUDGE_RPC: try_completion_nudge "
+                            f"raised {type(exc).__name__}: {exc} — "
+                            f"skipping nudge this turn",
+                        )
+                if should_nudge:
                     server._trace(
                         f"COMPLETION_NUDGE: agent ended its loop without "
                         f"signal_completion (nudge "
-                        f"{jaato_session._completion_nudges_fired}/"
-                        f"{MAX_COMPLETION_NUDGES}) — re-prompting"
+                        f"{nudges_fired}/{MAX_COMPLETION_NUDGES}) "
+                        f"— re-prompting"
                     )
                     nudge = (
                         "Your session is about to end without calling "
@@ -4309,19 +4389,14 @@ class JaatoServer:
                     if gc_strategy.startswith('gc_'):
                         gc_strategy = gc_strategy[3:]
 
-                # Set up instruction budget callback and emit initial events
+                # Phase 3 §7c step 6.6.4.3b: ``set_instruction_budget_callback``
+                # wiring deleted (mirror of the initialize() site).  Recurring
+                # budget updates flow runner→daemon via NotificationFrames
+                # consumed by ``_build_send_message_notification_handler``.
+                # Initial-budget snapshot emit below stays daemon-side — it's
+                # a one-shot after configure_tools().
                 session = self._jaato.get_session()
                 if session:
-                    server = self
-
-                    def instruction_budget_callback(snapshot: dict):
-                        server.emit(InstructionBudgetEvent(
-                            agent_id=snapshot.get('agent_id', 'main'),
-                            budget_snapshot=snapshot,
-                        ))
-
-                    session.set_instruction_budget_callback(instruction_budget_callback)
-
                     # Emit initial budget snapshot
                     if session.instruction_budget:
                         self.emit(InstructionBudgetEvent(

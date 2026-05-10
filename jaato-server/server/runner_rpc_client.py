@@ -1713,6 +1713,7 @@ class RunnerRPCClient:
         prompt: str,
         *,
         on_output: Optional[Any] = None,
+        on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
     ) -> str:
@@ -1720,10 +1721,16 @@ class RunnerRPCClient:
         worker threads.  Note: long-running; the future may block
         the calling thread for the duration of the model loop.
         Daemon-side callers in worker pools should set
-        ``timeout`` if a hard cap is desired."""
+        ``timeout`` if a hard cap is desired.
+
+        Phase 3 §7c step 6.6.4.3b: ``on_notification`` plumbs
+        through to the underlying async wrapper for the 9-callback
+        collapse demuxer used by ``_start_model_thread``.
+        """
         coro = self.session_send_message(
             prompt,
             on_output=on_output,
+            on_notification=on_notification,
             cancel_token=cancel_token,
             timeout=timeout,
         )
