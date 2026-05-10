@@ -2083,7 +2083,16 @@ class JaatoServer:
         # from the start (profile may have set a non-default policy).
         self.emit_permission_status()
 
-        auth_info = self._jaato.auth_info if self._jaato else ""
+        # Phase 3 §7c step 6.6.4.5c.1: route through runner-RPC.  Best-
+        # effort: a transport error here just means no auth-info suffix
+        # in the display message; don't propagate the failure.
+        try:
+            auth_info = (
+                self._runner_rpc.session_get_auth_info_threadsafe()
+                if self._runner_rpc is not None else ""
+            )
+        except Exception:  # noqa: BLE001 — display-only, fall back to ""
+            auth_info = ""
         auth_suffix = f" ({auth_info})" if auth_info else ""
         self.emit(SystemMessageEvent(
             message=f"Connected to {self._model_provider}/{self._model_name}{auth_suffix}",
@@ -4515,7 +4524,16 @@ class JaatoServer:
                     message="Authentication successful. Session is now ready.",
                     style="success",
                 ))
-                auth_info = self._jaato.auth_info if self._jaato else ""
+                # Phase 3 §7c step 6.6.4.5c.1: route through runner-RPC.  Best-
+                # effort: a transport error here just means no auth-info
+                # suffix in the display message; don't propagate the failure.
+                try:
+                    auth_info = (
+                        self._runner_rpc.session_get_auth_info_threadsafe()
+                        if self._runner_rpc is not None else ""
+                    )
+                except Exception:  # noqa: BLE001 — display-only, fall back to ""
+                    auth_info = ""
                 auth_suffix = f" ({auth_info})" if auth_info else ""
                 self.emit(SystemMessageEvent(
                     message=f"Connected to {self._model_provider}/{self._model_name}{auth_suffix}",

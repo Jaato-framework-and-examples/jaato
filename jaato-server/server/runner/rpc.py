@@ -522,6 +522,13 @@ class RunnerRPC:
             # ``{"should_nudge": bool, "nudges_fired": int}``.
             return self._handle_session_try_completion_nudge(env.args)
 
+        if env.method == "session.get_auth_info":
+            # Phase 3 §7c step 6.6.4.5c.1: read provider-credential
+            # source string from the runner-side session.  Replaces
+            # the daemon-side ``self._jaato.auth_info`` reach.
+            # args = ``{}``.  Returns ``{"auth_info": str}``.
+            return self._handle_session_get_auth_info()
+
         if env.method == "session.get_history":
             # Phase 3 §3.3c precursor: read the runner-side
             # JaatoSession's conversation history.  args = ``{}`` or
@@ -3085,6 +3092,53 @@ class RunnerRPC:
             "should_nudge": bool(should_nudge),
             "nudges_fired": int(nudges_fired),
         }
+
+    def _handle_session_get_auth_info(self) -> "tuple[bool, Any]":
+        """Read the credential-source description string from the
+        runner-side session's provider.
+
+        Phase 3 §7c step 6.6.4.5c.1.  Replaces 2 daemon-side reaches
+        into ``self._jaato.auth_info`` (core.py:2073, 4481) — the
+        property reads ``_session._provider.get_auth_info()`` daemon-
+        side, which post-seat-flip is the wrong (dead) session.
+
+        Returns:
+            ``(True, {"auth_info": str})`` on success.  Empty string
+            when no provider is attached or the provider doesn't
+            implement ``get_auth_info`` — same defensive shape the
+            old daemon-side property had.
+
+            ``(False, {"error": ..., "stage": ...})`` on
+            ``no_host`` / ``no_session`` / ``missing_method``.
+
+        ``missing_method`` surfaces when the session class lacks the
+        ``get_auth_info`` public method — covers the rolling-upgrade
+        scenario where the runner is newer than the daemon's
+        JaatoSession class.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        get_method = getattr(session, "get_auth_info", None)
+        if not callable(get_method):
+            return False, {
+                "error": (
+                    "session.get_auth_info: session class lacks public "
+                    "get_auth_info() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            auth_info = get_method()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.get_auth_info: get_auth_info raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        return True, {"auth_info": str(auth_info or "")}
 
     @property
     def session_host(self):

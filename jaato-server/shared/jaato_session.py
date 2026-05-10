@@ -909,6 +909,31 @@ class JaatoSession:
         """
         self._on_mid_turn_interrupt = callback
 
+    def get_auth_info(self) -> str:
+        """Return a description of the credential source the session's
+        provider is using.
+
+        Phase 3 §7c step 6.6.4.5c.1.  Public wrapper that surfaces
+        the underlying ``ModelProviderPlugin.get_auth_info()`` value
+        without daemon-side callers reaching into the private
+        ``self._provider`` attr — required for the runner-RPC seat-
+        flip where the JaatoSession lives in a separate process.
+
+        Returns a human-readable string like ``"API key from
+        ~/.jaato/zhipuai_auth.json"`` or ``"PKCE OAuth"``.  Empty
+        string when no provider is attached (pre-:meth:`configure`)
+        or the provider doesn't implement ``get_auth_info``.
+
+        Closes the missing-method gap caught by the §7c step
+        6.6.4.5c.0 audit (commit a88676ca).
+        """
+        if self._provider and hasattr(self._provider, 'get_auth_info'):
+            try:
+                return str(self._provider.get_auth_info() or "")
+            except Exception:  # noqa: BLE001 — best-effort display string
+                return ""
+        return ""
+
     def try_completion_nudge(self, max_nudges: int) -> Tuple[bool, int]:
         """Atomic check-and-increment for the completion-nudge guard.
 

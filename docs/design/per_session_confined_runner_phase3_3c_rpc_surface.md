@@ -830,7 +830,7 @@ wire-shape decisions per-handler reviewers will need.
 | Sub-commit | Scope |
 |---|---|
 | **5c.0** | This audit doc (no code) |
-| **5c.1** | Add `JaatoSession.get_auth_info()` public method + `session.get_auth_info` RPC handler + daemon wrapper + tests + migrate 2 daemon callsites (core.py:2073, 4481) |
+| **5c.1** | Add `JaatoSession.get_auth_info()` public method + `session.get_auth_info` RPC handler + daemon wrapper + tests + migrate 2 daemon callsites (core.py:2073, 4481).  **Shipped.** 14 new tests in `server/runner/tests/test_session_get_auth_info_rpc.py`.  Public method `JaatoSession.get_auth_info()` added (returns `_provider.get_auth_info()` with try/except defensive wrap; returns `""` when no provider).  Runner handler `_handle_session_get_auth_info` with stage codes `no_host`/`no_session`/`missing_method`/`call`.  Daemon wrapper `session_get_auth_info[_threadsafe]`.  2 daemon callsites migrated; both wrapped in try/except (display-only, fall back to `""` on transport error). |
 | **5c.2** | `session.get_user_commands` RPC + wrapper + tests + migrate 2 daemon callsites (core.py:3977, 4195).  Wire-shape: serialize `UserCommand` dataclass |
 | **5c.3** | `session.execute_user_command` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4000).  Wire-shape: handle `HelpLines`-or-other non-JSON result |
 | **5c.4** | `session.get_model_completions` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4224).  Wire-shape: serialize `CommandCompletion` |

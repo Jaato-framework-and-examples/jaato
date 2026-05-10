@@ -892,6 +892,42 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_auth_info(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> str:
+        """Read the credential-source description string from the
+        runner-side session's provider.
+
+        Phase 3 §7c step 6.6.4.5c.1.  Replaces 2 daemon-side reaches
+        into ``self._jaato.auth_info`` (core.py:2073, 4481) — the
+        property reads ``_session._provider.get_auth_info()`` daemon-
+        side, which post-seat-flip is the wrong (dead) session.
+
+        Returns a human-readable string like ``"API key from
+        ~/.jaato/zhipuai_auth.json"`` or ``"PKCE OAuth"``.  Empty
+        string when no provider is attached or the provider doesn't
+        implement ``get_auth_info``.
+
+        Raises:
+            RunnerCallError on transport failure or runner-side
+                exception (no_host / no_session / missing_method /
+                call).  Daemon callers using this in display paths
+                may want to wrap in try/except and fall back to ""
+                on any error.
+        """
+        result = await self._call_named(
+            "session.get_auth_info", {}, timeout=timeout,
+        )
+        return str(result.get("auth_info", "") or "")
+
+    def session_get_auth_info_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> str:
+        return self._run_threadsafe(
+            self.session_get_auth_info(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_history(
         self,
         *,
