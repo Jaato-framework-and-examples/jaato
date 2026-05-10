@@ -1971,7 +1971,16 @@ class JaatoServer:
             gc_continuous_mode = False
             if gc_result:
                 gc_plugin, gc_config = gc_result
-                self._jaato.set_gc_plugin(gc_plugin, gc_config)
+                # Phase 3 §7c step 6.6.4.4: ``self._jaato.set_gc_plugin(...)``
+                # WIRING deleted.  GC trigger path is now runner-side post-
+                # 6.6.4.3b (the daemon-side _session is no longer the live
+                # one for the model loop), so propagating the GC plugin to
+                # the daemon-side session was dead-weight.  The runner's
+                # SessionInitEnvelope already carries the GC plugin spec
+                # for runner-side install at bootstrap time.  Daemon-side
+                # ``gc_threshold`` / ``gc_strategy`` / ``gc_target_percent``
+                # / ``gc_continuous_mode`` reads below stay daemon-tier
+                # (they feed AgentState UI fields, not the GC trigger path).
                 gc_threshold = gc_config.threshold_percent
                 gc_target_percent = gc_config.target_percent
                 gc_continuous_mode = gc_config.continuous_mode
@@ -2347,9 +2356,22 @@ class JaatoServer:
             session_plugin = create_session_plugin()
             logger.debug("  _setup_session_plugin: initializing session plugin...")
             session_plugin.initialize({'storage_path': session_config.storage_path})
-            logger.debug("  _setup_session_plugin: setting session plugin on jaato...")
-            self._jaato.set_session_plugin(session_plugin, session_config)
-            logger.debug("  _setup_session_plugin: session plugin set")
+            # Phase 3 §7c step 6.6.4.4: ``self._jaato.set_session_plugin(...)``
+            # WIRING deleted.  Propagating the session_plugin to the
+            # daemon-side ``_jaato._session`` is dead-weight post-6.6.4.3b
+            # — the daemon-side session no longer runs the enrichment
+            # pipeline.  The runner's ``SessionInitEnvelope`` carries
+            # the session_plugin spec for runner-side install at bootstrap
+            # time.
+            #
+            # Note (6.6.4.4 audit Finding 2, deferred): the daemon-side
+            # ``set_description_callback`` below is wired on the
+            # daemon-side ``session_plugin`` instance — but the model
+            # invokes ``set_description`` runner-side, firing the
+            # runner-side instance's callback.  Daemon never sees it.
+            # This regression is pre-existing from 6.6.4.3b, not caused
+            # by 6.6.4.4.  Fix planned via a new ``description_updated``
+            # NotificationFrame event_type.
 
             # Set session ID on plugin so it knows the current session
             if self._session_id and hasattr(session_plugin, 'set_session_id'):
@@ -4381,7 +4403,10 @@ class JaatoServer:
                 gc_continuous_mode = False
                 if gc_result:
                     gc_plugin, gc_config = gc_result
-                    self._jaato.set_gc_plugin(gc_plugin, gc_config)
+                    # Phase 3 §7c step 6.6.4.4: ``set_gc_plugin`` WIRING
+                    # deleted (mirror of initialize() site).  GC trigger
+                    # path is runner-side post-6.6.4.3b; daemon-side
+                    # propagation is dead-weight.
                     gc_threshold = gc_config.threshold_percent
                     gc_target_percent = gc_config.target_percent
                     gc_continuous_mode = gc_config.continuous_mode
