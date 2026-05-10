@@ -638,7 +638,180 @@ Decomposed into 4 sub-commits + 1 standalone pre-6.6 commit
 | **§7c step 6.6.1.3** | Add `session.restore_conversation_budget` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_conversation_budget` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_restore_conversation_budget_rpc.py`.  Wire shape: `{"snapshot": <dict>}` direct (the snapshot is a JSON-native dict produced by `InstructionBudget.get_conversation_snapshot()` / `SourceEntry.to_dict()`; same wire-shape-reuse rationale as 6.6.1.1 + 6.6.1.2 — persistence shape IS wire shape).  Tests pin: happy path, empty-dict accepted (matches underlying method's no-op-on-empty contract), nested SourceEntry children preserved, missing/non-dict args → `stage="decode"`, no_host / setter-raises (e.g. invalid gc_policy enum) / missing-method error paths, no-op-when-no-budget contract preserved, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant.  **§7c step 6.6.1 trio CLOSED — 6.6.3 unblocked.** |
 | **§7c step 6.6.2** | Architectural callbacks rewire (the original §7c step 6.2.5 work, now folded in).  4 sites: 1969 / 1985 / 3374 / 4264.  Gates on runner-side event-bus access plumbing — may itself fan out. | **Audit revised** in §7c step 6.6.2 disposition audit below.  Audit reveals the original "4 sites" was incomplete (7 callback wiring sites total; 3 were missed: `set_continuation_callback` at 3415, `set_retry_callback` at 3430, `set_mid_turn_interrupt_callback` at 3440).  6 of 7 are pure emit-to-client; 5 of those don't even hit the daemon EventBus (unmapped event types).  Continuation_callback (3415) is the only daemon-logic-driven site.  **Step 6.6.2 collapses into 6.6.4** — the callback wiring naturally disappears alongside `_start_model_thread`'s migration to `session_send_message_threadsafe`.  No event-bus plumbing required.  No new RPC handlers needed (extend the existing `session.send_message` stream channel with notification frames). |
 | **§7c step 6.6.3** | External consumer migrations: 8 `get_session()` callers in `session_manager.py` + `websocket.py` + `core.py`.  Migrate each to its target per the external-consumer table above (1 delete, 4 reuse-existing-RPC, 3 use-new-RPCs from 6.6.1).  Also drops the public `JaatoServer.get_session()` method. | **Audit revised** in §7c step 6.6.3 disposition audit below — original "8 callers" was a 9-site undercount.  Cross-grep of ALL `_jaato.get_session()` reach patterns (private + public) reveals **17 sites total** (8 missing in `session_manager.py`).  5 of the 17 need NEW RPC handlers (`session.append_history_message`, `session.snapshot_conversation_budget`, `session.set_parallel_tools_override`, `session.replay_messages`, `session.resolve_fork_point`).  Sub-decomposition: 6.6.3.0 audit-correction (THIS) → 6.6.3.1-.5 (5 new RPC handlers per 6.1 trio cadence) → 6.6.3.6 (full migration + public method drop). |
-| **§7c step 6.6.4** | Atomic seat-flip moment.  Removes `self._jaato` field; absorbs the 6 WIRING deletions (per 6.4 audit); migrates the 9 transitively-load-bearing sites; migrates the 4 DEFER-§7c read sites; refactors the 2 construction sites; collapses the ~15 truthiness checks; deletes the public `JaatoServer.get_session()` method (consumers migrated in 6.6.3).  Mechanical diff dominated by the absorbed-scope items. | Existing test suite proves runner-only path; net test delta likely negative due to write-both-specific test churn. |
+| **§7c step 6.6.4** | Atomic seat-flip moment.  Removes `self._jaato` field; absorbs WIRING deletions; migrates remaining transitively-load-bearing sites; migrates DEFER-§7c read sites; folds in 6.6.2 (architectural callbacks via send_message stream channel); deletes the public `JaatoServer.get_session()` method (already done in 6.6.3.6); collapses truthiness checks. | **Audit revised** in §7c step 6.6.4 disposition audit below.  Cross-grep reveals additional inventory not in prior audits: 4 `_jaato.get_runtime()` reaches in session_manager + websocket (post-step-4-first-pass migration; daemon-side runtime is daemon-tier per §4.2 — these collapse to `self._runtime` reads).  Sub-decomposition matches the reviewer's pre-laid 6.6.4.1-6.6.4.5 split with one addition (6.6.4.0 audit).  Each sub-commit independently reviewable. |
+
+### Step 6.6.4 disposition audit
+
+Mirroring cd3ecf20 / ac088e67 / 875e48bd / 4d53fd49 / 9f28f96d
+/ 2752fd46 — the seventh audit in the §7c chain.  Per the
+reviewer's "expect a 6.6.4 disposition audit alongside" framing
+(parallel to 6.6.3 work stream).
+
+#### Audit Step 1 — site inventory (post-§7c-step-6.6.3.6)
+
+Cross-grep for `self._jaato\b` + `server._jaato\b` (per the §10
+audit-discipline note 1) reveals the full remaining surface:
+
+  - `core.py`: 66 references (counting truthiness + comments)
+  - `session_manager.py`: 13 references
+  - `websocket.py`: 4 references
+
+  Total: ~83 references.
+
+Active code (excluding doc comments):
+
+**core.py** (35 active sites):
+
+| Category | Sites | Disposition |
+|---|---|---|
+| **Field declaration** | 309 (``self._jaato: Optional[JaatoClient] = None``) | Delete in 6.6.4.5 |
+| **Construction + connect** | 1558 (``self._jaato = JaatoClient(...)``), 1565 (``self._runtime = self._jaato.get_runtime()`` aliasing) | Refactor in 6.6.4.5 — daemon constructs JaatoRuntime directly |
+| **Truthiness checks** | 766, 1406, 2054, 2359, 2407, 3327, 3394, 3872, 4091, 4117, 4352, 766, 2084 (×2), 4381 (×2) | ~14 truthiness checks — collapse in 6.6.4.5 |
+| **WIRING calls** (per 6.4 audit) | 1886 (configure_plugins_only), 1905 (configure_tools), 1974 (set_gc_plugin), 2371 (set_session_plugin), 4295 (configure_tools mirror), 4304 (set_gc_plugin mirror) | Delete in 6.6.4.4 |
+| **Architectural callbacks** (6.6.2 fold) | 1985 (_event_bus_tools), 2001 (instruction_budget init), 3395 (set_prompt_injected_callback), 4313 (instruction_budget auth-completion) | Notification-frame stream extension in 6.6.4.1 + 6.6.4.2 |
+| **set_agent_identity / set_ui_hooks** | 2791, 2796 | Migrate via existing RPC OR drop (set_ui_hooks is daemon→runner state push; new RPC may be needed) — **flag for 6.6.4.2 review** |
+| **DEFER-§7c reads** | 2055/2056 (get_context_usage/limit), 2084 (auth_info), 4353/4354 (get_context_usage/limit auth-mirror), 4381 (auth_info auth-mirror) | Migrate via existing snapshot_instruction_budget RPC + new auth_info RPC OR daemon-side auth_info read.  **Flag for 6.6.4.5 review.** |
+| **Transitively load-bearing reads** | 1407 (get_tool_schemas — already migrated to public method, but the wrapper still goes through `_jaato._session`), 3631 (signal_completion private-attr read of `_signal_completion_called`), 3875/4093 (get_user_commands ×2), 3898 (execute_user_command), 4122 (get_model_completions) | Migrate in 6.6.4.5 — get_user_commands / execute_user_command / get_model_completions go through `self.registry` directly daemon-side OR new RPCs |
+| **References-plugin split-out** | 767 (set_reference_authorizer daemon-side leg) | Stays — references-plugin runner-side migration sub-track |
+| **send_message daemon-side leg** (§7c step 6.3 didn't drop) | 3539 (auto-continuation send_message), 3562 (formatter-feedback send_message; line offsets approximate) | Migrate to `session_send_message_threadsafe` in 6.6.4.3 |
+
+**session_manager.py** (13 active sites):
+
+| Category | Sites | Disposition |
+|---|---|---|
+| **Truthiness checks** | 2574, 2697, 3013, 3361, 3449 | Collapse in 6.6.4.5 |
+| **runtime access** (§4.2 daemon-tier) | 2826 (get_runtime()), 3362 (get_runtime()), 3450 (get_runtime()) | Migrate to `server._runtime` — same pattern as core.py event_bus migration in §7c step 6.2 |
+| **session reset / history reads** | 2575 (reset_session via existing RPC), 3014 (get_history via existing RPC), 2619 (get_context_usage via existing RPC) | Migrate via existing `session.reset` / `session.get_history` / `session.get_context_usage` RPCs in 6.6.4.5 |
+
+**websocket.py** (1 active site post-6.6.3.6):
+
+| Category | Sites | Disposition |
+|---|---|---|
+| **runtime access** | 2092 (get_runtime() in `_jaato_server._jaato.get_runtime()`) | Migrate to `_jaato_server._runtime` — same pattern |
+
+#### Audit Step 2 — bucket totals
+
+| Bucket | Site count | Sub-commit |
+|---|---|---|
+| Notification-frame protocol (NEW wire format) | 1 (the protocol itself) | **6.6.4.1** |
+| Architectural callback collapse using new protocol | 4 callbacks + supporting refactor | **6.6.4.2** |
+| send_message migration (daemon→runner) | 2 daemon-side `_jaato.send_message()` legs | **6.6.4.3** |
+| WIRING deletions | 6 calls (configure_tools ×2 + configure_plugins_only + set_gc_plugin ×2 + set_session_plugin) | **6.6.4.4** |
+| `_jaato`-field removal + truthiness collapse + cleanup | ~14 truthiness checks + ~10 transitively-load-bearing reads + DEFER-§7c reads + construction sites + runtime-access migrations + remaining 1 references-plugin split-out (kept) | **6.6.4.5** |
+
+#### Audit Step 3 — new prerequisite RPC handlers needed?
+
+Cross-check against the §7c step 6.6.3 audit's missing-method
+discipline:
+
+  - **Notification-frame protocol** (6.6.4.1): NOT a new RPC.
+    Extends the existing `session.send_message` stream channel
+    with a frame-type discriminator.  Per §7c step 6.6.2 audit
+    (commit 9f28f96d): "the existing session.send_message stream
+    channel already provides" the runner→daemon notification
+    surface.  Wire format addition only; no new dispatch route.
+
+  - **send_message migration** (6.6.4.3): NOT a new RPC.
+    `session.send_message` already exists from §7b.2 (commit
+    3ca3c14d); 6.6.4.3 just switches the daemon caller's leg
+    from `_jaato.send_message()` to
+    `session_send_message_threadsafe()`.
+
+  - **WIRING deletions** (6.6.4.4): NO new RPCs needed.  Per
+    §7c step 6.4 audit (commit ac088e67): "These sites pass
+    rich Python plugin instances that can't cross an RPC
+    boundary, but the runner-side session ALREADY receives the
+    equivalent configuration via the SessionInitEnvelope."
+    Sites just delete daemon-side; no runner equivalents
+    needed.
+
+  - **Field removal + cleanup** (6.6.4.5): mostly mechanical.
+    But potential new RPCs for the `auth_info` reads and
+    `get_user_commands` / `execute_user_command` /
+    `get_model_completions` — see flagged dispositions above.
+
+**Potential 6.6.4.5 new RPC needs** (audit can't fully resolve
+without implementation):
+
+  - `session.get_auth_info` (str return) — auth_info reads at
+    sites 2084, 4381.  Daemon-tier alternative: read from
+    `self._runtime._provider.get_auth_info()` directly.  Decide
+    at 6.6.4.5 implementation.
+  - `session.get_user_commands` / `session.execute_user_command`
+    / `session.get_model_completions` — at sites 3875/4093,
+    3898, 4122.  Daemon-tier alternative: walk `self.registry`
+    directly for user-commands; that's the canonical surface.
+    Decide at 6.6.4.5 implementation.
+  - `session.set_ui_hooks` — at 2796.  Push hooks state to the
+    runner-side session.  May need a new handler.
+
+Three potential new prereq handlers; final count decided at
+6.6.4.5 implementation (similar to how 6.6.3.0 audit refined
+its "5 new handlers" estimate vs the original "3 new handlers"
+in 6.6.1).
+
+#### Audit Step 4 — sub-commit decomposition
+
+Per the reviewer's pre-laid framing + this audit's findings:
+
+| Sub-commit | Scope | Estimated tests |
+|---|---|---|
+| **§7c step 6.6.4.0** | Audit doc update (THIS commit). | 0 |
+| **§7c step 6.6.4.1** | Notification-frame protocol on the `session.send_message` stream channel.  Frame-type discriminator (`output` vs `notification`); daemon-side wrapper grows a notification-frame demuxer.  No new dispatch route; wire format extension only. | ~20-30 (new wire format edge cases) |
+| **§7c step 6.6.4.2** | 7-callback collapse using the new notification protocol.  Daemon-side `_start_model_thread` callback wirings (4 + 3 = 7 sites flagged in §7c step 6.6.2 audit) all delete; runner-side session emits notification frames; daemon's `session_send_message` wrapper demuxes + invokes `server.emit(<Event>)` or `server._start_model_thread(...)` for continuation. | ~15-20 |
+| **§7c step 6.6.4.3** | send_message daemon-side leg drop.  `_start_model_thread` switches from `server._jaato.send_message(...)` to `server._runner_rpc.session_send_message_threadsafe(...)`.  Couples tightly with 6.6.4.1+6.6.4.2 (the notification stream is what makes daemon-side _start_model_thread's local state mutations work post-migration). | ~10-15 |
+| **§7c step 6.6.4.4** | WIRING deletions (per 6.4 audit).  6 daemon-side calls delete: `configure_plugins_only`, `configure_tools` ×2, `set_gc_plugin` ×2, `set_session_plugin`.  Daemon-side `_setup_session_plugin` may need a refactor — the `set_session_plugin` site's daemon-side hook (description-callback emission) might need preservation.  **Flag for 6.6.4.4 implementation review.** | ~5-10 |
+| **§7c step 6.6.4.5** | Atomic field removal + cleanup.  Removes `self._jaato` field; collapses ~14 truthiness checks; migrates the runtime-access reads (3 sites in session_manager + 1 in websocket) to `server._runtime`; migrates the DEFER-§7c reads; migrates auth_info / get_user_commands / execute_user_command / get_model_completions (with potential new RPC handlers OR daemon-side alternatives); refactors construction sites (1558, 1565); deletes the JaatoClient construction entirely (the daemon constructs JaatoRuntime directly).  Largest single diff but mostly mechanical. | ~20-30 (test churn from removed write-both-specific tests) |
+
+**Total: 5 implementation sub-commits + 1 audit (this commit).**
+
+#### Audit Step 5 — what stays in place (split-outs)
+
+| Site | Reason kept |
+|---|---|
+| `core.py:767` (`set_reference_authorizer` daemon-side leg) | §7c step 6.3 split-out: references-plugin runner-side migration is a separate sub-track.  Daemon-side leg drops with that migration, not 6.6.4. |
+| `core.py:3631` (`_signal_completion_called` private-attr read) | Daemon-side counter in `_start_model_thread` recovery path.  Either gets migrated alongside _start_model_thread refactor in 6.6.4.3 (move counter to JaatoServer state) or migrated to a new RPC.  **Flag for 6.6.4.3 implementation review.** |
+
+#### What this audit decides
+
+  - §7c step 6.6.4 expands from 1 commit to 6 (audit + 5
+    implementations).  Same pattern as prior audits.
+
+  - The 6.6.4.1-6.6.4.5 reviewer-pre-laid split holds, plus
+    audit-required 6.6.4.0 (this commit).
+
+  - Notification-frame protocol is wire-format-only (no new
+    dispatch route).  Per §7c step 6.6.2 audit's
+    inverse-virtue: reuse `session.send_message`'s existing
+    stream channel.
+
+  - Up to 3 potential new prerequisite RPC handlers in
+    6.6.4.5 (auth_info / get_user_commands /
+    set_ui_hooks).  Audit-of-record discipline applied at
+    implementation time per 6.6.3 missing-method pattern.
+
+  - Audit-discipline tally: 7 audits, 7 silent-regression
+    catches.  This audit caught the `_jaato.get_runtime()`
+    inventory miss (4 sites in session_manager + websocket)
+    that prior audits missed.
+
+#### What this audit does NOT decide
+
+  - Notification-frame wire format (frame-type discriminator
+    encoding).  Decide at 6.6.4.1 implementation.
+
+  - Whether `_signal_completion_called` counter migrates to
+    JaatoServer state or new RPC.  Decide at 6.6.4.3
+    implementation.
+
+  - Whether `_setup_session_plugin`'s daemon-side
+    description-callback hook is preserved or rewired.  Decide
+    at 6.6.4.4 implementation.
+
+  - Specific 6.6.4.5 new-handler count (auth_info /
+    get_user_commands / set_ui_hooks): 0-3 depending on
+    implementation choices.  Apply 6.6.3 missing-method
+    pattern per-handler.
 
 #### Missing-method finding (§7c step 6.6.1 prerequisite check)
 
