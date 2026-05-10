@@ -63,6 +63,7 @@ from server.runner.envelope import (
     KIND_RESPONSE,
     KIND_STREAM,
     CancelFrame,
+    NotificationFrame,
     RequestEnvelope,
     ResponseEnvelope,
     StreamFrame,
@@ -75,6 +76,13 @@ logger = logging.getLogger(__name__)
 # Type alias for the per-call streaming callback (mirrors
 # server.runner.rpc.get_current_output_callback).
 OnOutputCb = Callable[[str, str, Optional[str]], None]
+
+# Type alias for the per-call notification callback (Phase 3
+# §7c step 6.6.4.1).  Receives ``(event_type, payload)`` for
+# each NotificationFrame the runner emits during the in-flight
+# call.  Synchronous — runs inside the daemon's read loop, so
+# the callback should be fast (queue work elsewhere if needed).
+OnNotificationCb = Callable[[str, Dict[str, Any]], None]
 
 
 class RunnerCallError(RuntimeError):
@@ -131,6 +139,10 @@ class RunnerRPCClient:
         self._in_flight: Dict[int, "asyncio.Future[ResponseEnvelope]"] = {}
         # Per-call streaming callback — looked up on every stream frame.
         self._stream_cbs: Dict[int, OnOutputCb] = {}
+        # Phase 3 §7c step 6.6.4.1: per-call notification callback —
+        # looked up on every NotificationFrame.  Registered via
+        # :meth:`call`'s ``on_notification`` kwarg.
+        self._notification_cbs: Dict[int, OnNotificationCb] = {}
 
         # Phase 3 §3.2: handler registry for runner → daemon RPCs.
         # Lazy-init to an empty server so callers that don't use the
@@ -221,6 +233,7 @@ class RunnerRPCClient:
                 )
         self._in_flight.clear()
         self._stream_cbs.clear()
+        self._notification_cbs.clear()
 
         # 2. Wait for runner to exit.
         await self._wait_runner_exit(timeout)
@@ -314,6 +327,7 @@ class RunnerRPCClient:
                         continue
                     fut = self._in_flight.pop(env.id, None)
                     self._stream_cbs.pop(env.id, None)
+                    self._notification_cbs.pop(env.id, None)
                     if fut is not None and not fut.done():
                         fut.set_result(env)
                     else:
@@ -360,13 +374,42 @@ class RunnerRPCClient:
                         lambda t, fid=env.id: self._dispatch_tasks.pop(fid, None)
                     )
                 elif kind == KIND_EVENT:
-                    # Phase 3 wires this into the daemon's EventBus
-                    # per §4.4.  For Phase 2 we drop them with a
-                    # debug log.
-                    logger.debug(
-                        "RunnerRPCClient: unhandled event frame: %r",
-                        payload,
-                    )
+                    # Phase 3 §7c step 6.6.4.1: dispatch
+                    # notification frames to the per-call
+                    # notification callback registered via
+                    # :meth:`call`'s ``on_notification`` kwarg.
+                    # Used by §7c step 6.6.4.2's 7-callback
+                    # collapse — runner-side session callbacks
+                    # emit NotificationFrame; daemon-side
+                    # consumer demuxes by ``event_type``.
+                    try:
+                        nf = NotificationFrame.from_dict(payload)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "RunnerRPCClient: malformed notification frame: %r",
+                            payload,
+                        )
+                        continue
+                    cb = self._notification_cbs.get(nf.id)
+                    if cb is None:
+                        # No registered handler for this in-flight
+                        # call — debug-log + drop.  Matches the
+                        # pre-§7c-step-6.6.4.1 unhandled-event
+                        # log behavior.
+                        logger.debug(
+                            "RunnerRPCClient: unhandled notification "
+                            "frame for id=%d (event_type=%r)",
+                            nf.id, nf.event_type,
+                        )
+                        continue
+                    try:
+                        cb(nf.event_type, nf.payload)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "RunnerRPCClient: on_notification for "
+                            "id=%d (event_type=%r) raised",
+                            nf.id, nf.event_type,
+                        )
                 else:
                     logger.warning(
                         "RunnerRPCClient: unknown frame kind=%r", kind,
@@ -390,6 +433,7 @@ class RunnerRPCClient:
                     )
             self._in_flight.clear()
             self._stream_cbs.clear()
+            self._notification_cbs.clear()
 
     # --------------------- runner → daemon dispatch --------------------
 
@@ -451,6 +495,7 @@ class RunnerRPCClient:
         args: Optional[Dict[str, Any]] = None,
         *,
         on_output: Optional[OnOutputCb] = None,
+        on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
     ) -> ResponseEnvelope:
         """Send a request, await the terminating response.
@@ -461,6 +506,12 @@ class RunnerRPCClient:
                 "args": {"command": "echo hi"}}``).
             on_output: Optional callback invoked for each stream frame
                 ``(source, text, mode)``.
+            on_notification: Optional callback invoked for each
+                NotificationFrame (Phase 3 §7c step 6.6.4.1)
+                ``(event_type, payload)``.  Used by long-running
+                RPCs (currently :meth:`session.send_message`)
+                for runner-side session callbacks that surface
+                events back to the daemon.
             cancel_token: Optional :class:`CancelToken` (the SDK type).
                 If set and tripped, sends a cancel frame to the runner.
 
@@ -488,6 +539,8 @@ class RunnerRPCClient:
         self._in_flight[request_id] = fut
         if on_output is not None:
             self._stream_cbs[request_id] = on_output
+        if on_notification is not None:
+            self._notification_cbs[request_id] = on_notification
 
         # Wire cancel-token → cancel frame.  We register a callback
         # that schedules ``_send_cancel`` onto our loop.  The token
@@ -520,6 +573,7 @@ class RunnerRPCClient:
         finally:
             self._in_flight.pop(request_id, None)
             self._stream_cbs.pop(request_id, None)
+            self._notification_cbs.pop(request_id, None)
 
     async def _send_cancel(self, request_id: int) -> None:
         """Send a cancel frame for *request_id* if the call is still in flight."""
@@ -1536,6 +1590,7 @@ class RunnerRPCClient:
         prompt: str,
         *,
         on_output: Optional[Any] = None,
+        on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
     ) -> str:
@@ -1549,6 +1604,16 @@ class RunnerRPCClient:
                 invoked for each output chunk as the model
                 streams.  Same shape ``call()`` already supports
                 via the stream-frame channel.
+            on_notification: Optional callback
+                ``(event_type, payload)`` invoked for each
+                NotificationFrame the runner emits during the
+                in-flight call.  Phase 3 §7c step 6.6.4.1 wire-
+                format extension.  Used by the §7c step 6.6.4.2
+                7-callback collapse for runner-side session
+                callbacks (instruction-budget updates, retry
+                notifications, mid-turn-interrupt events,
+                continuation triggers, etc.) that surface back
+                to the daemon during streaming.
             cancel_token: Optional CancelToken — when tripped,
                 the daemon-side ``call`` sends a cancel frame to
                 the runner; the runner-side handler propagates
@@ -1570,6 +1635,7 @@ class RunnerRPCClient:
             "session.send_message",
             {"prompt": prompt},
             on_output=on_output,
+            on_notification=on_notification,
             cancel_token=cancel_token,
         )
         if timeout is not None:

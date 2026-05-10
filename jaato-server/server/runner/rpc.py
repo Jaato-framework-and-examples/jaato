@@ -73,6 +73,7 @@ from .envelope import (
     STREAM_CHANNEL_DISPLAY,
     CancelFrame,
     ErrorPayload,
+    NotificationFrame,
     RequestEnvelope,
     ResponseEnvelope,
     StreamFrame,
@@ -275,6 +276,47 @@ class RunnerRPC:
             text=text,
             mode=mode,
             channel=STREAM_CHANNEL_DISPLAY,
+        )
+        self._write(frame.to_dict())
+
+    def emit_notification(
+        self,
+        request_id: int,
+        event_type: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Emit a notification frame for the given in-flight call.
+
+        Phase 3 §7c step 6.6.4.1.  Runner-side session callbacks
+        (instruction-budget updates, retry notifications, etc.)
+        call this to surface events back to the daemon during
+        long-running RPCs (currently :meth:`session.send_message`).
+        The daemon-side per-call notification handler (registered
+        via :meth:`RunnerRPCClient.call`'s ``on_notification``
+        kwarg) demuxes by ``event_type`` and routes to the
+        appropriate ``server.emit(<Event>)`` or other action.
+
+        Per the §7c step 6.6.2 audit (commit 9f28f96d): this is
+        the wire-format extension the audit's "stream-channel
+        multiplex" rationale called for.  Same wire socket as
+        :class:`StreamFrame` (output chunks); different ``kind``
+        discriminator (``"event"`` vs ``"stream"``).
+
+        Used by §7c step 6.6.4.2's 7-callback collapse.
+
+        Args:
+            request_id: The in-flight call's id (must match the
+                outer ``RequestEnvelope.id``).
+            event_type: Discriminator for the daemon-side demux.
+                Caller and consumer agree on the set; the protocol
+                doesn't validate per-event-type contracts.
+            payload: Event-type-specific dict.  Defaults to empty
+                dict for parameter-less notifications.
+        """
+        frame = NotificationFrame(
+            id=request_id,
+            event_type=event_type,
+            payload=dict(payload or {}),
         )
         self._write(frame.to_dict())
 
