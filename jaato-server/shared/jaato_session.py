@@ -7267,6 +7267,39 @@ NOTES
             return
         self._instruction_budget.restore_conversation_from_snapshot(snapshot)
 
+    def set_parallel_tools_override(self, enabled: bool) -> None:
+        """Stash a per-turn override for parallel-tool execution.
+
+        Pre-§7c-step-6.6.3.0 the daemon's SDK request handler
+        (``server/session_manager.py:4096``) reached into the
+        private attribute directly:
+
+            jaato_session._parallel_tools_override = event.parallel_tools
+
+        That violated the same encapsulation discipline §7c
+        step 3a / 3b / 6.1 (1/3) / 6.6.1.0 / 6.6.3.0 / 6.6.3.1 /
+        6.6.3.2 established.  This public method replaces the
+        private-attr write with a stable surface that the
+        upcoming ``session.set_parallel_tools_override``
+        runner-RPC (§7c step 6.6.3.3) can wrap.
+
+        Semantic: the override wins over ``JAATO_PARALLEL_TOOLS``
+        env-var consultation for the current turn ONLY.  The
+        session's tool-execution branch reads the override at
+        line 4886-4889 and clears it after one read — i.e. each
+        ``set_parallel_tools_override(True)`` call affects
+        exactly the next turn that consults the override.
+
+        Args:
+            enabled: True to force parallel-tool execution for the
+                next turn; False to disable.  Caller passes the
+                raw bool from the SDK request; daemon's existing
+                ``if event.parallel_tools is not None:`` guard
+                prevents passing None (no-override) through this
+                method.
+        """
+        self._parallel_tools_override = bool(enabled)
+
     def snapshot_conversation_budget(self) -> Optional[Dict[str, Any]]:
         """Return a serializable snapshot of the CONVERSATION budget
         entry for persistence.

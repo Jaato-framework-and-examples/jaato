@@ -663,6 +663,18 @@ class RunnerRPC:
             # — None when no budget configured (pre-configure).
             return self._handle_session_snapshot_conversation_budget()
 
+        if env.method == "session.set_parallel_tools_override":
+            # Phase 3 §7c step 6.6.3.3: stash a per-turn
+            # override for parallel-tool execution on the
+            # runner-side session.  Replaces the daemon-side
+            # private-attr write at session_manager.py:4096
+            # (now public ``JaatoSession.set_parallel_tools_override``
+            # since §7c step 6.6.3.0).  args = ``{"enabled": bool}``.
+            # Override is consumed once and cleared after the
+            # next turn boundary; this RPC's lifecycle is per-
+            # turn-pre-send_message.
+            return self._handle_session_set_parallel_tools_override(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1685,6 +1697,71 @@ class RunnerRPC:
             return False, {
                 "error": (
                     f"session.append_history_message: appender raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
+            }
+        return True, {"ok": True}
+
+    def _handle_session_set_parallel_tools_override(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Stash a per-turn parallel-tools override on the runner-
+        side session.
+
+        Phase 3 §7c step 6.6.3.3.  Replaces the pre-§7c daemon-
+        side private-attr write at
+        ``server/session_manager.py:4096``:
+
+            jaato_session._parallel_tools_override = event.parallel_tools
+
+        Now wraps the public method
+        :meth:`JaatoSession.set_parallel_tools_override` added
+        in §7c step 6.6.3.0.
+
+        Wire shape: ``{"enabled": bool}``.  Coerces truthy /
+        falsy non-bool values to bool (matches §7c step 6.1
+        (1/3)'s ``set_reference_authorizer`` pattern).
+
+        Defensive contract:
+
+          - 'enabled' key REQUIRED — missing surfaces as
+            stage="decode" rather than silently treating as
+            False (which would silently disable parallel-tool
+            execution; opposite of operator intent).
+          - Setter never raises in practice (it's a single
+            attribute write), but defensively wraps in
+            stage="set".
+
+        Args: ``{"enabled": bool}``.
+        Returns: ``{"ok": True}`` on success.
+        """
+        if "enabled" not in args:
+            return False, {
+                "error": (
+                    "session.set_parallel_tools_override: 'enabled' key required"
+                ),
+                "stage": "decode",
+            }
+        enabled = bool(args["enabled"])
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        setter = getattr(session, "set_parallel_tools_override", None)
+        if not callable(setter):
+            return False, {
+                "error": (
+                    "session.set_parallel_tools_override: session has no "
+                    "set_parallel_tools_override method (rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            setter(enabled)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.set_parallel_tools_override: setter raised "
                     f"{type(exc).__name__}: {exc}"
                 ),
                 "stage": "set",

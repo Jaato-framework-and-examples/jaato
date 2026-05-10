@@ -1352,6 +1352,42 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_set_parallel_tools_override(
+        self, enabled: bool, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Stash a per-turn parallel-tools override on the runner-
+        side session.
+
+        Phase 3 §7c step 6.6.3.3.  Replaces the pre-§7c daemon-
+        side private-attr write at
+        ``server/session_manager.py:4096``.  Wraps the public
+        method ``JaatoSession.set_parallel_tools_override``
+        added in §7c step 6.6.3.0.
+
+        The override is consumed once and cleared after the
+        next turn boundary — caller's lifecycle is per-turn-
+        pre-send_message.  Daemon's existing ``if event.parallel_tools
+        is not None:`` guard at session_manager.py:4095 prevents
+        passing None through this wrapper.
+
+        Args:
+            enabled: True to force parallel-tool execution for
+                the next turn; False to disable.
+        """
+        await self._call_named(
+            "session.set_parallel_tools_override",
+            {"enabled": bool(enabled)},
+            timeout=timeout,
+        )
+
+    def session_set_parallel_tools_override_threadsafe(
+        self, enabled: bool, *, timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_set_parallel_tools_override(enabled, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,
