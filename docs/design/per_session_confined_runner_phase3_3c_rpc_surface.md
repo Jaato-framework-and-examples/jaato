@@ -787,7 +787,54 @@ the §7c series.
 |---|---|---|
 | **5a** | Truthiness collapses + 5 `get_runtime()` → `self._runtime` reads | **Shipped.** 5 new tests in `server/tests/test_get_runtime_migration_645a.py`.  Migrated 4 call sites: `session_manager.py` ×3 (lines 2826, 3361-3364, 3449-3452), `websocket.py` ×1 (line 2092).  The 5th site (`core.py:1565`) is the populator — stays until 5d's construction refactor.  Truthiness collapses **deferred** to 5e (the `self._jaato` truthiness checks remain defensive for pre-init paths until the field itself is removed).  Behavior-preserving migration: `_runtime` is non-None iff `_jaato` was successfully connected. |
 | **5b** | Existing-RPC reads (~10 `get_context_usage`/`get_context_limit`, 1 `get_turn_accounting`, 1 `reset_session`) + 8 daemon-side runtime reads (`auth_info`, `user_commands`, `model_completions`, `execute_user_command`) + `get_tool_schemas` via daemon-side `_runtime` cache (Refinement 2) | **Shipped — narrowed to 15 mechanical sites only.**  12 new tests in `server/tests/test_existing_rpc_migration_645b.py`.  Pre-implementation cross-grep verifying RPC/method existence caught a scope-mismatch in the 6.6.4.5 audit: `auth_info`, `get_user_commands`, `execute_user_command`, `get_model_completions` are session-tier methods (not runtime-tier as labeled) — need new RPCs, deferred to **5c (re-introduced)**.  `get_tool_schemas` cache also deferred to 5c after verifying `JaatoRuntime.get_tool_schemas()` returns the registry's full set (not the session-resolved subset that `JaatoSession.get_tool_schemas()` returns) — semantically different and would cause `signal_completion_in_surface` filter regressions.  Migrations: 4× `get_context_usage`, 6× `get_context_limit`, 1× `get_turn_accounting`, 1× `reset_session` → `set_initial_history` (semantically equivalent at the restore-from-disk site), 1× `get_history`, 2× `get_session().instruction_budget.snapshot()` → `session_snapshot_instruction_budget` RPC.  `_jaato.get_session()` count drops from 4 → 1 (the references-plugin deferred site at core.py:767 stays). |
-| **5c** | (re-introduced) 4 user-command/auth_info migrations + `get_tool_schemas` migration via new RPCs.  Sub-decomposes per the 6.6.1/6.6.3 cadence: one new RPC handler per sub-commit with missing-method audit + ~12-15 tests each.  Candidates: `session.get_auth_info`, `session.get_user_commands`, `session.execute_user_command`, `session.get_model_completions`, `session.get_tool_schemas`. | TBD per per-handler decomposition |
+| **5c** | (re-introduced) 4 user-command/auth_info migrations + `get_tool_schemas` migration via new RPCs.  Sub-decomposes per the 6.6.1/6.6.3 cadence: one new RPC handler per sub-commit with missing-method audit + ~12-15 tests each.  Candidates: `session.get_auth_info`, `session.get_user_commands`, `session.execute_user_command`, `session.get_model_completions`, `session.get_tool_schemas`.  **Path D adopted** (5 individual commits + 5c.0 audit prereq) — preserves per-handler bisectability + per-commit reviewability. |
+
+#### §7c step 6.6.4.5c missing-method audit (pre-implementation)
+
+Mirrors the 6.6.1.0 / 6.6.3 / 6.6.4.3 missing-method audit
+discipline.  Verifies each proposed RPC handler has an actual
+underlying public method on `JaatoSession` before committing to
+the handler's existence in a plan.
+
+| Proposed RPC | Underlying JaatoSession method | Status |
+|---|---|---|
+| `session.get_auth_info` | `JaatoSession.get_auth_info` | ❌ **MISSING.**  `JaatoClient.auth_info` (jaato_client.py:165) reaches `self._session._provider.get_auth_info()` (provider's method, accessed via session's private `_provider` attr).  Needs a public wrapper on JaatoSession that returns `self._provider.get_auth_info()` (or `""` when no provider).  Lands in 5c.1 alongside the RPC handler. |
+| `session.get_user_commands` | `JaatoSession.get_user_commands` (jaato_session.py:7544) | ✅ EXISTS.  Returns `Dict[str, UserCommand]`.  Wire-shape note: `UserCommand` is a dataclass — needs serialization for transport (similar to `Message`/`Part` round-trip in 6.6.1). |
+| `session.execute_user_command` | `JaatoSession.execute_user_command` (jaato_session.py:7548) | ✅ EXISTS.  Returns `tuple[Any, bool]` — `(result, share_with_model)`.  Wire-shape concern: `result` may be `HelpLines` (display-only, not JSON-serializable) for some commands; needs wire-shape decision at 5c.3 implementation.  Side effect: when `share_with_model=True`, the call injects into conversation history — already handled session-tier so the RPC is a single round-trip. |
+| `session.get_model_completions` | `JaatoSession.get_model_completions` (jaato_session.py:3299) | ✅ EXISTS.  Takes `args: List[str]`, returns `List[CommandCompletion]`.  Wire-shape note: `CommandCompletion` is a small dataclass — straightforward serialization. |
+| `session.get_tool_schemas` | `JaatoSession.get_tool_schemas` (jaato_session.py:2708) | ✅ EXISTS (confirmed earlier).  Returns `List[ToolSchema]` — the session-resolved subset (not `JaatoRuntime`'s full registry set).  Wire-shape note: `ToolSchema` may carry frozen-set traits + nested schemas; serialization shape needs verification at 5c.5 implementation. |
+
+**Findings:**
+
+1. **1 of 5 needs a missing-method add** — `JaatoSession.get_auth_info()`.
+   Lands in 5c.1 alongside its RPC handler (matches 6.6.3.1 / 6.6.3.2 /
+   6.6.3.3 / 6.6.4.3a cadence: "RPC + JaatoSession public method"
+   in the same commit).
+
+2. **3 wire-shape concerns** for follow-up decisions during
+   per-handler implementation:
+   - `UserCommand` dataclass serialization (5c.2)
+   - `HelpLines`-or-other-non-JSON `result` shapes (5c.3)
+   - `ToolSchema` with traits/nested schemas (5c.5)
+
+3. **No false-positive RPCs** — all 5 candidates target real
+   session-tier behavior daemon-side callers exercise today.
+
+**Audit-discipline tally: 14 audits, 14 silent-regression catches.**
+Today's audit caught the 1 missing public method (would have
+failed at 5c.1's missing-method check otherwise) AND surfaced 3
+wire-shape decisions per-handler reviewers will need.
+
+**Path D sub-decomposition (5 commits + audit prereq):**
+
+| Sub-commit | Scope |
+|---|---|
+| **5c.0** | This audit doc (no code) |
+| **5c.1** | Add `JaatoSession.get_auth_info()` public method + `session.get_auth_info` RPC handler + daemon wrapper + tests + migrate 2 daemon callsites (core.py:2073, 4481) |
+| **5c.2** | `session.get_user_commands` RPC + wrapper + tests + migrate 2 daemon callsites (core.py:3977, 4195).  Wire-shape: serialize `UserCommand` dataclass |
+| **5c.3** | `session.execute_user_command` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4000).  Wire-shape: handle `HelpLines`-or-other non-JSON result |
+| **5c.4** | `session.get_model_completions` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4224).  Wire-shape: serialize `CommandCompletion` |
+| **5c.5** | `session.get_tool_schemas` RPC + wrapper + tests + migrate 2 daemon callsites (core.py:1407, 3721).  Wire-shape: serialize `ToolSchema` with traits/nested schemas |
 | **5d** | Construction refactor — daemon constructs `JaatoRuntime` directly; remove `self._jaato.get_runtime()` indirection at construction site (lines 1550-1565).  Pre-audit per Refinement 3: verify `JaatoRuntime.__init__()` signature can be called daemon-direct. | Medium — architectural pivot |
 | **5e** | Atomic `_jaato`-field removal + ~14 truthiness collapses + 3 deferred WIRING drops (1886/1905/4397) + drop `set_agent_identity` / `set_ui_hooks` calls (per Refinement 1's missing-method audit) | High — large diff, pure cleanup |
 
