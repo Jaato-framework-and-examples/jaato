@@ -992,6 +992,87 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_execute_user_command(
+        self,
+        name: str,
+        args: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[float] = 60.0,
+    ) -> Tuple[Any, bool]:
+        """Invoke a user command on the runner-side session.
+
+        Phase 3 §7c step 6.6.4.5c.3.  Replaces the daemon-side
+        reach into ``self._jaato.execute_user_command(name, args)``
+        (core.py:4044).
+
+        Default timeout is 60s — user commands run synchronously
+        and may include slow network ops (auth flows, model
+        catalog fetches).  Daemon callers wanting a hard cap
+        pass an explicit value.
+
+        Args:
+            name: Command name (e.g. ``"auth"``, ``"model"``).
+            args: Optional parsed-args dict from
+                ``parse_command_args``.
+
+        Returns:
+            ``(result, shared_with_model)`` tuple matching the
+            pre-§7c ``JaatoClient.execute_user_command`` shape.
+            ``result`` is reconstructed on receipt:
+            - tagged ``HelpLines`` → :class:`HelpLines` instance
+              with ``lines`` re-tupled (``List[tuple]``).
+            - tagged ``dict`` → the dict unchanged.
+            - tagged ``str`` → the stringified value.
+
+        Raises:
+            RunnerCallError on transport failure or runner-side
+                exception (decode / no_host / no_session /
+                missing_method / call).  Daemon-side exception
+                handler at core.py wraps user-command failures in
+                ``{"error": ...}`` returns.
+        """
+        from jaato_sdk.plugins.base import HelpLines
+
+        result_dict = await self._call_named(
+            "session.execute_user_command",
+            {"name": str(name), "args": dict(args or {})},
+            timeout=timeout,
+        )
+        tagged = result_dict.get("result", {})
+        shared = bool(result_dict.get("shared", False))
+
+        if not isinstance(tagged, dict) or "_kind" not in tagged:
+            # Defensive: unrecognized shape — surface as str
+            # (matches daemon-side ``str(result)`` fallback).
+            return str(tagged) if tagged is not None else "", shared
+
+        kind = tagged.get("_kind")
+        if kind == "HelpLines":
+            lines_raw = tagged.get("lines", []) or []
+            # Re-tuple each line entry — the wire flattens tuples to
+            # lists, but the daemon's HelpLines.lines contract is
+            # ``List[tuple]``.
+            lines = [tuple(entry) for entry in lines_raw if isinstance(entry, list)]
+            return HelpLines(lines=lines), shared
+        if kind == "dict":
+            value = tagged.get("value", {})
+            return (value if isinstance(value, dict) else {}), shared
+        # kind == "str" or anything else.
+        value = tagged.get("value", "")
+        return str(value or ""), shared
+
+    def session_execute_user_command_threadsafe(
+        self,
+        name: str,
+        args: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: Optional[float] = 60.0,
+    ) -> Tuple[Any, bool]:
+        return self._run_threadsafe(
+            self.session_execute_user_command(name, args, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_history(
         self,
         *,

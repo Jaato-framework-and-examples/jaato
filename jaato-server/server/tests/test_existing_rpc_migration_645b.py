@@ -268,7 +268,7 @@ def test_jaato_user_command_reads_still_present_until_5c() -> None:
 
     - 5c.1 ✅ migrated `_jaato.auth_info` reads (commit bff782a4)
     - 5c.2 ✅ migrated `_jaato.get_user_commands()` reads
-    - 5c.3 (pending) — `_jaato.execute_user_command()`
+    - 5c.3 ✅ migrated `_jaato.execute_user_command()` reads
     - 5c.4 (pending) — `_jaato.get_model_completions()`
     - 5c.5 (pending) — `_jaato.get_tool_schemas()` (different
       callsite shape: read inside `for schema in ...` and
@@ -276,15 +276,8 @@ def test_jaato_user_command_reads_still_present_until_5c() -> None:
 
     Update each assertion's expected count when its sub-commit lands.
     """
-    execute_calls = _module_calls_jaato_method(
-        core_module, "execute_user_command",
-    )
     completions_calls = _module_calls_jaato_method(
         core_module, "get_model_completions",
-    )
-    assert len(execute_calls) >= 1, (
-        f"Expected ≥1 ``_jaato.execute_user_command()`` call site; found "
-        f"{len(execute_calls)}.  If 5c.3 has landed, delete this assertion."
     )
     assert len(completions_calls) >= 1, (
         f"Expected ≥1 ``_jaato.get_model_completions()`` call site; found "

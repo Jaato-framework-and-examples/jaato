@@ -4041,7 +4041,18 @@ class JaatoServer:
             plugin.set_output_callback(output_callback)
 
         try:
-            result, shared = self._jaato.execute_user_command(command, parsed_args)
+            # Phase 3 §7c step 6.6.4.5c.3: route through runner-RPC.
+            # Per-type reconstruction (Path A bounded to HelpLines /
+            # dict / str) preserves the structured-access invariants
+            # the downstream code depends on (`isinstance(result,
+            # HelpLines)` at 4073, `isinstance(result, dict)` +
+            # `result.get("success")` at 4078, `isinstance(result,
+            # dict)` at the IPC-return fallback).
+            result, shared = (
+                self._runner_rpc.session_execute_user_command_threadsafe(
+                    command, parsed_args,
+                )
+            )
 
             # Send accumulated _emit() output as a single system message
             if output_parts:

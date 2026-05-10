@@ -540,6 +540,22 @@ class RunnerRPC:
             # with primitive fields, no callables to strip.
             return self._handle_session_get_user_commands()
 
+        if env.method == "session.execute_user_command":
+            # Phase 3 §7c step 6.6.4.5c.3: invoke a user command on
+            # the runner-side session.  Replaces the daemon-side reach
+            # into ``self._jaato.execute_user_command(name, args)``.
+            # args = ``{"name": str, "args": dict}``.  Returns
+            # ``{"result": <tagged-dict>, "shared": bool}`` where the
+            # tagged dict is one of:
+            #   {"_kind": "HelpLines", "lines": [[text, style], ...]}
+            #   {"_kind": "dict", "value": <json-dict>}
+            #   {"_kind": "str", "value": <str>}  (other types coerced)
+            # Wire shape per the 5c.3 audit (Path A bounded to 3 cases):
+            # daemon does structured access on HelpLines.lines and
+            # dict keys for "model" / IPC return; everything else is
+            # display-only and stringifies safely.
+            return self._handle_session_execute_user_command(env.args)
+
         if env.method == "session.get_history":
             # Phase 3 §3.3c precursor: read the runner-side
             # JaatoSession's conversation history.  args = ``{}`` or
@@ -3231,6 +3247,101 @@ class RunnerRPC:
                 "parameters": params_serialized,
             }
         return True, {"commands": serialized}
+
+    def _handle_session_execute_user_command(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Invoke a user command on the runner-side session.
+
+        Phase 3 §7c step 6.6.4.5c.3.  Replaces the daemon-side reach
+        into ``self._jaato.execute_user_command(name, args)``
+        (core.py:4044).  Wire shape per the 5c.3 audit decision:
+        **Path A** (per-type reconstruction) bounded to 3 result
+        shapes — pre-implementation grep verified the daemon does
+        structured access on ``HelpLines.lines`` and dict keys for
+        the "model" command + IPC-return shape.
+
+        Args: ``{"name": str, "args": dict}``.
+
+        Returns:
+            ``(True, {"result": <tagged-dict>, "shared": bool})``
+            on success.  ``shared`` is the second half of the
+            JaatoSession.execute_user_command return tuple
+            (``share_with_model`` flag).  ``result`` is one of:
+
+            - ``{"_kind": "HelpLines", "lines": [[text, style], ...]}``
+              when result is a :class:`HelpLines`.
+            - ``{"_kind": "dict", "value": <json-dict>}`` when the
+              result is a dict (covers the "model" command's
+              ``{"success": ..., "current_model": ...}`` shape).
+            - ``{"_kind": "str", "value": <str>}`` otherwise
+              (everything-else coerced — display-only).
+
+            ``(False, {"error": ..., "stage": ...})`` on
+            ``decode`` (missing/malformed args) / ``no_host`` /
+            ``no_session`` / ``missing_method`` / ``call``.
+        """
+        name = args.get("name")
+        if not isinstance(name, str) or not name:
+            return False, {
+                "error": (
+                    "session.execute_user_command: missing or non-str "
+                    "'name' arg"
+                ),
+                "stage": "decode",
+            }
+        cmd_args = args.get("args", {})
+        if cmd_args is None:
+            cmd_args = {}
+        if not isinstance(cmd_args, dict):
+            return False, {
+                "error": (
+                    f"session.execute_user_command: 'args' must be a "
+                    f"dict (got {type(cmd_args).__name__})"
+                ),
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        exec_method = getattr(session, "execute_user_command", None)
+        if not callable(exec_method):
+            return False, {
+                "error": (
+                    "session.execute_user_command: session class lacks "
+                    "public execute_user_command() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            result, shared = exec_method(name, cmd_args)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.execute_user_command: execute_user_command "
+                    f"raised {type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+
+        # Per-type serialization (Path A bounded to 3 shapes).
+        from jaato_sdk.plugins.base import HelpLines
+        if isinstance(result, HelpLines):
+            # ``lines`` is List[tuple]; serialize as list-of-lists for
+            # JSON safety (tuples become lists on the wire anyway).
+            tagged = {
+                "_kind": "HelpLines",
+                "lines": [list(t) for t in (result.lines or [])],
+            }
+        elif isinstance(result, dict):
+            tagged = {"_kind": "dict", "value": result}
+        else:
+            # str-or-other-coerced.  Matches the daemon-side
+            # pre-§7c-step-6.6.4.5c.3 IPC-return fallback at
+            # core.py:4099 (``{"result": str(result)}``).
+            tagged = {"_kind": "str", "value": str(result) if result is not None else ""}
+
+        return True, {"result": tagged, "shared": bool(shared)}
 
     @property
     def session_host(self):
