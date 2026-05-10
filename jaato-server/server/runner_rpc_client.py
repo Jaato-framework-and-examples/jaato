@@ -1268,6 +1268,51 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_append_history_message(
+        self,
+        message: "Any",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        """Append a single message to the runner-side session's history.
+
+        Phase 3 §7c step 6.6.3.1.  Replaces the pre-§7c daemon-
+        side get-modify-reset dance at
+        ``server/session_manager.py:2855`` (interrupted-tool-
+        call recovery).  Wraps the public method
+        ``JaatoSession.append_history_message`` added in §7c
+        step 6.6.3.0.
+
+        Wire shape: ``{"message": <dict>}`` — serialized
+        :class:`Message` per
+        ``shared.plugins.session.serializer.serialize_message``.
+        Same wire-shape-reuse rationale as 6.6.1.1's
+        set_initial_history.
+
+        Args:
+            message: A :class:`Message` instance.  Daemon
+                callers pass the Message directly; the wrapper
+                serializes via ``serialize_message`` before
+                sending.
+        """
+        from shared.plugins.session.serializer import serialize_message
+
+        body = {"message": serialize_message(message)}
+        await self._call_named(
+            "session.append_history_message", body, timeout=timeout,
+        )
+
+    def session_append_history_message_threadsafe(
+        self,
+        message: "Any",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> None:
+        self._run_threadsafe(
+            self.session_append_history_message(message, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,

@@ -7267,6 +7267,37 @@ NOTES
             return
         self._instruction_budget.restore_conversation_from_snapshot(snapshot)
 
+    def append_history_message(self, message: Message) -> None:
+        """Append a single message to the session's history.
+
+        Pre-§7c-step-6.6.3.0 the daemon's interrupted-tool-call
+        recovery path (``server/session_manager.py:2855``) did
+        the get-modify-reset dance manually:
+
+            current_history = jaato_session.get_history()
+            current_history.append(synthetic_message)
+            jaato_session.reset_session(current_history)
+
+        That worked but was awkward — three calls for one
+        operation, and `reset_session` clears
+        ``_turn_accounting`` as a side effect (which the
+        recovery path actually wants, since the interrupted
+        turn's accounting is mid-flight).  This method
+        preserves the existing semantic exactly: appends the
+        message + clears turn_accounting (via the underlying
+        ``reset_session`` call).
+
+        Phase 3 §7c step 6.6.3.0 (encapsulation cleanup,
+        prerequisite for §7c step 6.6.3.1's
+        ``session.append_history_message`` runner-RPC).
+
+        Args:
+            message: A :class:`Message` instance to append.
+        """
+        current_history = self.get_history()
+        current_history.append(message)
+        self.reset_session(current_history)
+
     def get_context_limit(self) -> int:
         """Get the context window limit for the current model."""
         if not self._provider:

@@ -638,6 +638,19 @@ class RunnerRPC:
             # ``SourceEntry.to_dict()`` (no special wrapper).
             return self._handle_session_restore_conversation_budget(env.args)
 
+        if env.method == "session.append_history_message":
+            # Phase 3 §7c step 6.6.3.1: append a single message
+            # to the runner-side session's history.  Replaces the
+            # daemon-side get-modify-reset dance at
+            # session_manager.py:2855 (interrupted-tool-call
+            # recovery path).  args = ``{"message": <serialized
+            # message dict>}`` — wire shape reuses
+            # shared/plugins/session/serializer.py's
+            # serialize_message / deserialize_message round-trip
+            # (same wire-shape-reuse rationale as 6.6.1.1's
+            # set_initial_history).
+            return self._handle_session_append_history_message(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1575,6 +1588,91 @@ class RunnerRPC:
             return False, {
                 "error": (
                     f"session.restore_conversation_budget: setter raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "set",
+            }
+        return True, {"ok": True}
+
+    def _handle_session_append_history_message(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Append a single message to the runner-side session's
+        history.
+
+        Phase 3 §7c step 6.6.3.1.  Replaces the pre-§7c daemon-
+        side get-modify-reset dance at
+        ``server/session_manager.py:2855`` (interrupted-tool-
+        call recovery path).  Wraps the public method
+        :meth:`JaatoSession.append_history_message` added in
+        §7c step 6.6.3.0.
+
+        Wire shape: ``{"message": <dict>}`` where the dict is a
+        serialized :class:`Message` from
+        ``shared.plugins.session.serializer.serialize_message``.
+        Same wire-shape-reuse rationale as 6.6.1.1's
+        ``set_initial_history``: no new wire format invented.
+
+        Defensive contract:
+
+          - ``message`` must be a dict (missing key or non-dict
+            → ``stage="decode"``).
+          - Per-element decode failures (missing role, unknown
+            Part type) surface as ``stage="decode"`` with the
+            underlying serializer error.
+          - Underlying ``append_history_message`` calls
+            ``reset_session(modified_history)``, which clears
+            ``_turn_accounting`` as a side effect — the daemon
+            caller's existing semantic is preserved exactly.
+
+        Args: ``{"message": Dict[str, Any]}``.
+        Returns: ``{"ok": True}`` on success.
+        """
+        message_data = args.get("message")
+        if message_data is None:
+            return False, {
+                "error": (
+                    "session.append_history_message: 'message' key required"
+                ),
+                "stage": "decode",
+            }
+        if not isinstance(message_data, dict):
+            return False, {
+                "error": (
+                    f"session.append_history_message: 'message' must be a "
+                    f"dict; got {type(message_data).__name__}"
+                ),
+                "stage": "decode",
+            }
+        try:
+            from shared.plugins.session.serializer import deserialize_message
+            message = deserialize_message(message_data)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.append_history_message: deserialize failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        appender = getattr(session, "append_history_message", None)
+        if not callable(appender):
+            return False, {
+                "error": (
+                    "session.append_history_message: session has no "
+                    "append_history_message method (rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            appender(message)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.append_history_message: appender raised "
                     f"{type(exc).__name__}: {exc}"
                 ),
                 "stage": "set",
