@@ -26,3 +26,48 @@ plan. Promote to a feature branch / ticket when work is ready to start.
   detector.
 - **Open questions**: Cache invalidation cost on Anthropic provider; detector
   scope v1 conservatism; budget-reset semantics.
+
+### Runner-side `_ui_hooks` is None — tool lifecycle events silently no-op
+
+- **Design**: [docs/design/project_backlog_runner_ui_hooks_gap.md](design/project_backlog_runner_ui_hooks_gap.md)
+- **Status**: Pre-existing gap surfaced by §7c step 6.6.4.5 audit (Finding 3).
+  Not in scope for the §7c series.
+- **Summary**: Post-§7c step 6.6.4.3b seat-flip, the runner-side `JaatoSession`
+  is the live session for tool execution but its `_ui_hooks` attribute is
+  never set (cross-grep of `server/runner/` confirms zero references).  All
+  10 `if self._ui_hooks: self._ui_hooks.on_*(...)` callsites in
+  `jaato_session.py` (`on_tool_call_start`, `on_tool_call_end`,
+  `on_tool_output`, `on_turn_progress`,
+  `on_agent_instruction_budget_updated`) are null-guarded → silently no-op
+  runner-side.
+- **Why it matters**: Whether this matters depends on whether something else
+  routes those events daemon-side via a different path (e.g., executor-
+  boundary wrapping, NotificationFrame extension).  Needs investigation
+  before deciding on a fix.
+- **Likely fix shapes**: (a) extend the §7c step 6.6.4.1 NotificationFrame
+  protocol with new event_types for the 5 ui_hooks methods (10th–14th
+  events alongside the current 8); (b) install a runner-side hooks shim at
+  bootstrap that emits notification frames matching the AgentUIHooks
+  protocol surface.
+
+### Daemon-side description-callback hook is silently broken post-6.6.4.3b
+
+- **Design**: [docs/design/project_backlog_description_callback_gap.md](design/project_backlog_description_callback_gap.md)
+- **Status**: Pre-existing gap surfaced by §7c step 6.6.4.4 audit (Finding 2).
+  Not in scope for the §7c series.
+- **Summary**: `_setup_session_plugin` wires `on_description_changed` on the
+  daemon-side `session_plugin` instance.  The runner has its own
+  `session_plugin` instance constructed from the bootstrap envelope's plugin
+  list.  When the model invokes the `set_description` tool, it fires the
+  runner-side instance's callback → daemon never sees it →
+  `SessionDescriptionUpdatedEvent` no longer emits.
+- **Why it matters**: Session description updates (used by the UI's session
+  picker and persistence layer's auto-titling) silently stop flowing once a
+  session is past first-message setup.  Sessions retain whatever description
+  was set pre-seat-flip, or none at all.
+- **Likely fix shapes**: (a) new `description_updated` NotificationFrame
+  event_type extending the §7c step 6.6.4.1 protocol (would expand the
+  daemon-side demuxer from 8 branches to 9); (b) runner-side
+  `set_description_callback` install hook in
+  `_install_session_notification_callbacks` (parallels the 6 callbacks
+  already wired there).
