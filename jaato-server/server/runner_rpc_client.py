@@ -1455,6 +1455,82 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_resolve_fork_point(
+        self,
+        *,
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+        history: "Optional[List[Any]]" = None,
+        timeout: Optional[float] = 5.0,
+    ) -> int:
+        """Resolve a fork-point specifier to a message index in
+        the runner-side session's history.
+
+        Phase 3 §7c step 6.6.3.5.  Replaces the pre-§7c daemon-
+        side call at ``server/session_manager.py:4362``.  Wraps
+        the existing public method
+        ``JaatoSession.resolve_fork_point`` (no missing-method
+        gap).
+
+        Wire shape: ``{"after_message": int?, "after_tool_call":
+        str?, "after_timestamp": str?, "history": [<dict>...]?}``.
+        Returns the int fork_index.
+
+        When ``history`` is None (default), the runner uses
+        ``session.get_history()`` — matches the daemon caller's
+        existing pattern at session_manager.py:4363 which
+        always passed the session's current history.
+
+        Args:
+            after_message: Direct message index specifier.
+            after_tool_call: Tool-call id specifier.
+            after_timestamp: HH:MM:SS or ISO timestamp specifier.
+            history: Optional pre-snapshotted history.  When
+                None, the runner reads its own current history.
+            timeout: RPC wall-clock cap.
+        """
+        body: Dict[str, Any] = {}
+        if after_message is not None:
+            body["after_message"] = int(after_message)
+        if after_tool_call is not None:
+            body["after_tool_call"] = str(after_tool_call)
+        if after_timestamp is not None:
+            body["after_timestamp"] = str(after_timestamp)
+        if history is not None:
+            from shared.plugins.session.serializer import serialize_history
+            body["history"] = serialize_history(history)
+        result = await self._call_named(
+            "session.resolve_fork_point", body, timeout=timeout,
+        )
+        fork_index = result.get("fork_index")
+        if not isinstance(fork_index, int):
+            raise RunnerCallError(
+                f"session_resolve_fork_point: expected int fork_index; "
+                f"got {type(fork_index).__name__}"
+            )
+        return fork_index
+
+    def session_resolve_fork_point_threadsafe(
+        self,
+        *,
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+        history: "Optional[List[Any]]" = None,
+        timeout: Optional[float] = 5.0,
+    ) -> int:
+        return self._run_threadsafe(
+            self.session_resolve_fork_point(
+                after_message=after_message,
+                after_tool_call=after_tool_call,
+                after_timestamp=after_timestamp,
+                history=history,
+                timeout=timeout,
+            ),
+            timeout=timeout,
+        )
+
     async def session_send_message(
         self,
         prompt: str,

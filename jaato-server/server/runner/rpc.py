@@ -694,6 +694,21 @@ class RunnerRPC:
             # pattern at session_manager.py:4336.
             return self._handle_session_replay_messages(env.args)
 
+        if env.method == "session.resolve_fork_point":
+            # Phase 3 §7c step 6.6.3.5: resolve a fork-point
+            # specifier (after_message / after_tool_call /
+            # after_timestamp) to a message index in the
+            # session's history.  Replaces the daemon-side call
+            # at session_manager.py:4362 (ResolveForkPointRequest
+            # SDK handler).  args = ``{"after_message": int?,
+            # "after_tool_call": str?, "after_timestamp": str?,
+            # "history": [<dict>, ...]?}`` — history is optional;
+            # runner defaults to ``session.get_history()`` (the
+            # daemon caller's existing pattern at line 4363).
+            # Returns ``{"fork_index": int}``.  Pure read; no
+            # cancel surface, no streaming.
+            return self._handle_session_resolve_fork_point(env.args)
+
         return False, {"error": f"unknown method: {env.method!r}"}
 
     def _dispatch_via_session_executor(
@@ -1721,6 +1736,169 @@ class RunnerRPC:
                 "stage": "set",
             }
         return True, {"ok": True}
+
+    def _handle_session_resolve_fork_point(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Resolve a fork-point specifier to a message index in
+        the session's history.
+
+        Phase 3 §7c step 6.6.3.5.  Replaces the pre-§7c daemon-
+        side call at ``server/session_manager.py:4362``.  Wraps
+        the existing public method
+        :meth:`JaatoSession.resolve_fork_point` (already at
+        jaato_session.py:8455; no missing-method gap — this is
+        the second of the 5 prerequisites without an
+        encapsulation cleanup).
+
+        Wire shape:
+
+          - ``after_message`` (optional int): direct message
+            index.
+          - ``after_tool_call`` (optional str): tool-call id;
+            returns the index of the message containing the
+            FunctionCall.id or its ToolResult.
+          - ``after_timestamp`` (optional str): HH:MM:SS or ISO
+            timestamp; returns the index of the last message at
+            or before this time.
+          - ``history`` (optional list): the history to search.
+            When omitted, the runner uses
+            ``session.get_history()`` (the daemon caller's
+            existing pattern at line 4363).
+
+          Exactly one of the 3 specifiers SHOULD be set.  The
+          underlying method documents that "if none are given,
+          returns the last message index" — the handler
+          preserves that semantic.
+
+        Returns: ``{"fork_index": int}``.
+
+        Defensive contract:
+
+          - All 3 specifiers optional; underlying method handles
+            the all-None case gracefully.
+          - 'history' (when provided) must be a list of dicts.
+            Per-element decode failures surface as
+            stage="decode".
+          - When 'history' is omitted, the runner reads
+            ``session.get_history()``.
+          - resolve_fork_point may raise on malformed timestamp
+            strings; defensively wrapped as stage="resolve".
+
+        Args: ``{"after_message": int?, "after_tool_call": str?,
+                 "after_timestamp": str?, "history": List[Dict]?}``.
+        Returns: ``{"fork_index": int}``.
+        """
+        after_message = args.get("after_message")
+        if after_message is not None and not isinstance(after_message, int):
+            return False, {
+                "error": (
+                    f"session.resolve_fork_point: 'after_message' must be "
+                    f"int or omitted; got {type(after_message).__name__}"
+                ),
+                "stage": "decode",
+            }
+        after_tool_call = args.get("after_tool_call")
+        if after_tool_call is not None and not isinstance(after_tool_call, str):
+            return False, {
+                "error": (
+                    f"session.resolve_fork_point: 'after_tool_call' must "
+                    f"be str or omitted; got {type(after_tool_call).__name__}"
+                ),
+                "stage": "decode",
+            }
+        after_timestamp = args.get("after_timestamp")
+        if after_timestamp is not None and not isinstance(after_timestamp, str):
+            return False, {
+                "error": (
+                    f"session.resolve_fork_point: 'after_timestamp' must "
+                    f"be str or omitted; got {type(after_timestamp).__name__}"
+                ),
+                "stage": "decode",
+            }
+
+        history_data = args.get("history")
+        history: Any = None
+        if history_data is not None:
+            if not isinstance(history_data, list):
+                return False, {
+                    "error": (
+                        f"session.resolve_fork_point: 'history' must be a "
+                        f"list or omitted; got {type(history_data).__name__}"
+                    ),
+                    "stage": "decode",
+                }
+            try:
+                from shared.plugins.session.serializer import deserialize_history
+                history = deserialize_history(history_data)
+            except Exception as exc:  # noqa: BLE001 — boundary
+                return False, {
+                    "error": (
+                        f"session.resolve_fork_point: deserialize failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    "stage": "decode",
+                }
+
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        resolver = getattr(session, "resolve_fork_point", None)
+        if not callable(resolver):
+            return False, {
+                "error": (
+                    "session.resolve_fork_point: session has no "
+                    "resolve_fork_point method (rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        # Default history to session.get_history() when omitted —
+        # matches the daemon caller's existing pattern at
+        # session_manager.py:4363.
+        if history is None:
+            history_getter = getattr(session, "get_history", None)
+            if not callable(history_getter):
+                return False, {
+                    "error": (
+                        "session.resolve_fork_point: session has no "
+                        "get_history method (cannot default 'history' arg)"
+                    ),
+                    "stage": "missing_method",
+                }
+            try:
+                history = history_getter()
+            except Exception as exc:  # noqa: BLE001 — boundary
+                return False, {
+                    "error": (
+                        f"session.resolve_fork_point: get_history raised "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    "stage": "read",
+                }
+        try:
+            fork_index = resolver(
+                history=history,
+                after_message=after_message,
+                after_tool_call=after_tool_call,
+                after_timestamp=after_timestamp,
+            )
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.resolve_fork_point: resolver raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "resolve",
+            }
+        if not isinstance(fork_index, int):
+            return False, {
+                "error": (
+                    f"session.resolve_fork_point: expected int fork_index; "
+                    f"got {type(fork_index).__name__}"
+                ),
+                "stage": "resolve",
+            }
+        return True, {"fork_index": fork_index}
 
     def _handle_session_replay_messages(
         self, args: Dict[str, Any],
