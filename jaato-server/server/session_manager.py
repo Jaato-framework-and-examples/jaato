@@ -2822,8 +2822,13 @@ class SessionManager:
                 except Exception as e:
                     logger.error(f"Failed to load subagent state {agent_file}: {e}")
 
-        # Get runtime from server's jaato client
-        runtime = server._jaato.get_runtime() if server._jaato else None
+        # Phase 3 §7c step 6.6.4.5a: read ``server._runtime`` directly
+        # instead of going through ``server._jaato.get_runtime()``.
+        # ``self._runtime`` has been the daemon-side runtime field since
+        # §7c step 4 first pass (commit 7c34f218); this site completes
+        # the pattern.  Behavior-preserving: ``_runtime`` is non-None
+        # iff ``_jaato`` was successfully connected.
+        runtime = server._runtime
         if not runtime:
             logger.warning("Cannot restore subagents: no runtime available")
             return 0
@@ -3357,11 +3362,11 @@ class SessionManager:
         if not matches:
             return text
 
+        # Phase 3 §7c step 6.6.4.5a: read ``server._runtime`` directly.
         prompt_plugin = None
-        if server._jaato:
-            runtime = server._jaato.get_runtime()
-            if runtime and runtime.registry:
-                prompt_plugin = runtime.registry.get_plugin("prompt_library")
+        runtime = server._runtime
+        if runtime and runtime.registry:
+            prompt_plugin = runtime.registry.get_plugin("prompt_library")
         if prompt_plugin is None or not hasattr(
             prompt_plugin, '_execute_prompt_command'
         ):
@@ -3444,12 +3449,11 @@ class SessionManager:
         if not matches:
             return text
 
-        # Get prompt library plugin
+        # Phase 3 §7c step 6.6.4.5a: read ``server._runtime`` directly.
         prompt_plugin = None
-        if server._jaato:
-            runtime = server._jaato.get_runtime()
-            if runtime and runtime.registry:
-                prompt_plugin = runtime.registry.get_plugin("prompt_library")
+        runtime = server._runtime
+        if runtime and runtime.registry:
+            prompt_plugin = runtime.registry.get_plugin("prompt_library")
 
         # Process matches in reverse to preserve positions
         result = text

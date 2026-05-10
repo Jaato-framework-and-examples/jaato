@@ -2087,15 +2087,16 @@ class JaatoWSServer:
                 if cat_name and cat_desc:
                     registry.register_category(cat_name, cat_desc)
 
-        # Refresh the runtime's tool schema list so the model sees new tools
-        if session.server and session.server._jaato:
-            runtime = session.server._jaato.get_runtime()
-            if runtime and hasattr(runtime, '_all_tool_schemas'):
-                existing = {s.name for s in runtime._all_tool_schemas}
-                for name, schema in registry._core_tools.items():
-                    if name not in existing:
-                        runtime._all_tool_schemas.append(schema)
-                logger.info("Refreshed runtime tool list for client %s", client_id)
+        # Refresh the runtime's tool schema list so the model sees new tools.
+        # Phase 3 §7c step 6.6.4.5a: read ``session.server._runtime`` directly
+        # instead of going through ``session.server._jaato.get_runtime()``.
+        runtime = session.server._runtime if session.server else None
+        if runtime and hasattr(runtime, '_all_tool_schemas'):
+            existing = {s.name for s in runtime._all_tool_schemas}
+            for name, schema in registry._core_tools.items():
+                if name not in existing:
+                    runtime._all_tool_schemas.append(schema)
+            logger.info("Refreshed runtime tool list for client %s", client_id)
 
         # Emit updated tool ID registry so clients can resolve IDs for
         # the newly-registered client-provided tools.

@@ -785,7 +785,7 @@ the §7c series.
 
 | Sub-commit | Scope | Risk |
 |---|---|---|
-| **5a** | Truthiness collapses + 5 `get_runtime()` → `self._runtime` reads | Low — mechanical |
+| **5a** | Truthiness collapses + 5 `get_runtime()` → `self._runtime` reads | **Shipped.** 5 new tests in `server/tests/test_get_runtime_migration_645a.py`.  Migrated 4 call sites: `session_manager.py` ×3 (lines 2826, 3361-3364, 3449-3452), `websocket.py` ×1 (line 2092).  The 5th site (`core.py:1565`) is the populator — stays until 5d's construction refactor.  Truthiness collapses **deferred** to 5e (the `self._jaato` truthiness checks remain defensive for pre-init paths until the field itself is removed).  Behavior-preserving migration: `_runtime` is non-None iff `_jaato` was successfully connected. |
 | **5b** | Existing-RPC reads (~10 `get_context_usage`/`get_context_limit`, 1 `get_turn_accounting`, 1 `reset_session`) + 8 daemon-side runtime reads (`auth_info`, `user_commands`, `model_completions`, `execute_user_command`) + `get_tool_schemas` via daemon-side `_runtime` cache (Refinement 2) | Low-medium |
 | **5d** | Construction refactor — daemon constructs `JaatoRuntime` directly; remove `self._jaato.get_runtime()` indirection at construction site (lines 1550-1565).  Pre-audit per Refinement 3: verify `JaatoRuntime.__init__()` signature can be called daemon-direct. | Medium — architectural pivot |
 | **5e** | Atomic `_jaato`-field removal + ~14 truthiness collapses + 3 deferred WIRING drops (1886/1905/4397) + drop `set_agent_identity` / `set_ui_hooks` calls (per Refinement 1's missing-method audit) | High — large diff, pure cleanup |
