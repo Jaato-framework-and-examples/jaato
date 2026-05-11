@@ -556,6 +556,18 @@ class RunnerRPC:
             # display-only and stringifies safely.
             return self._handle_session_execute_user_command(env.args)
 
+        if env.method == "session.get_model_completions":
+            # Phase 3 §7c step 6.6.4.5c.4: get completion candidates
+            # for the "model" command's subcommand arguments.  Replaces
+            # 2 daemon-side reaches: core.py:4285 (model-name list)
+            # and command_router.py:1149 (model-subcommand expansion).
+            # args = ``{"args": List[str]}``.  Returns
+            # ``{"completions": [{"value": str, "description": str}, ...]}``.
+            # Wire shape per the 5c.4 audit decision: dict-shape-only
+            # (Path A) — CommandCompletion is a NamedTuple with
+            # primitive fields (value, description), no callables.
+            return self._handle_session_get_model_completions(env.args)
+
         if env.method == "session.get_history":
             # Phase 3 §3.3c precursor: read the runner-side
             # JaatoSession's conversation history.  args = ``{}`` or
@@ -3342,6 +3354,81 @@ class RunnerRPC:
             tagged = {"_kind": "str", "value": str(result) if result is not None else ""}
 
         return True, {"result": tagged, "shared": bool(shared)}
+
+    def _handle_session_get_model_completions(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Get completion candidates for the "model" command's
+        subcommand arguments.
+
+        Phase 3 §7c step 6.6.4.5c.4.  Replaces 2 daemon-side
+        reaches: ``core.py:4285`` (model-name list for the toolbar)
+        and ``command_router.py:1149`` (model-subcommand expansion
+        for the IPC completion catalog).  Wire shape per the
+        5c.4 audit decision: dict-shape-only (Path A) — mirror
+        of 5c.2's UserCommand serialization since CommandCompletion
+        is also a NamedTuple with primitive fields only
+        (``value: str``, ``description: str``).
+
+        Args: ``{"args": List[str]}`` — the arguments typed so
+        far.  Empty list returns subcommands (``list`` / ``select``
+        / ``help``); ``["select"]`` returns model names; etc.
+
+        Returns:
+            ``(True, {"completions": [{"value": str, "description": str}, ...]})``
+            on success.  Empty list when no completions match.
+
+            ``(False, {"error": ..., "stage": ...})`` on
+            ``decode`` (non-list args) / ``no_host`` /
+            ``no_session`` / ``missing_method`` / ``call``.
+        """
+        raw_args = args.get("args", [])
+        if raw_args is None:
+            raw_args = []
+        if not isinstance(raw_args, list):
+            return False, {
+                "error": (
+                    f"session.get_model_completions: 'args' must be a "
+                    f"list (got {type(raw_args).__name__})"
+                ),
+                "stage": "decode",
+            }
+        # Coerce each entry to str — wire safety for callers that
+        # might send non-str types in the list.
+        str_args = [str(a) for a in raw_args]
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        get_method = getattr(session, "get_model_completions", None)
+        if not callable(get_method):
+            return False, {
+                "error": (
+                    "session.get_model_completions: session class lacks "
+                    "public get_model_completions() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            completions = get_method(str_args)
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.get_model_completions: get_model_completions "
+                    f"raised {type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        # Serialize each CommandCompletion (NamedTuple with
+        # primitive fields, mirror of UserCommand serialization
+        # in 5c.2).
+        serialized = [
+            {
+                "value": str(getattr(c, "value", "")),
+                "description": str(getattr(c, "description", "") or ""),
+            }
+            for c in (completions or [])
+        ]
+        return True, {"completions": serialized}
 
     @property
     def session_host(self):

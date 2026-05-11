@@ -1073,6 +1073,70 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_model_completions(
+        self,
+        args: "Optional[list]" = None,
+        *,
+        timeout: Optional[float] = 10.0,
+    ) -> "list":
+        """Get completion candidates for the "model" command's
+        subcommand arguments.
+
+        Phase 3 §7c step 6.6.4.5c.4.  Replaces 2 daemon-side
+        reaches into ``self._jaato.get_model_completions(args)``
+        (core.py:4285 + command_router.py:1149).  Wire shape per
+        the 5c.4 audit: dict-shape-only (Path A, mirror of 5c.2's
+        UserCommand pattern).
+
+        Args:
+            args: Optional list of argument strings typed so far.
+                ``None`` or empty list returns subcommands;
+                ``["select"]`` returns model names; etc.
+
+        Returns:
+            List of :class:`CommandCompletion` NamedTuple
+            instances reconstructed on receipt — daemon callers
+            can read ``.value`` and ``.description`` unchanged.
+
+        Raises:
+            RunnerCallError on transport failure or runner-side
+                exception (decode / no_host / no_session /
+                missing_method / call).
+        """
+        from jaato_sdk.plugins.base import CommandCompletion
+
+        result = await self._call_named(
+            "session.get_model_completions",
+            {"args": list(args or [])},
+            timeout=timeout,
+        )
+        completions_raw = result.get("completions", [])
+        if not isinstance(completions_raw, list):
+            raise RunnerCallError(
+                f"session_get_model_completions: expected list for "
+                f"'completions', got {type(completions_raw).__name__}"
+            )
+        completions = []
+        for entry in completions_raw:
+            if not isinstance(entry, dict):
+                continue
+            completions.append(CommandCompletion(
+                value=str(entry.get("value", "")),
+                description=str(entry.get("description", "") or ""),
+            ))
+        return completions
+
+    def session_get_model_completions_threadsafe(
+        self,
+        args: "Optional[list]" = None,
+        *,
+        timeout: Optional[float] = 10.0,
+    ) -> "list":
+        return self._run_threadsafe(
+            self.session_get_model_completions(args, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_history(
         self,
         *,

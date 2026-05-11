@@ -4277,12 +4277,18 @@ class JaatoServer:
 
         Returns list of model name strings.
         """
-        if not self._jaato:
+        # Phase 3 §7c step 6.6.4.5c.4: route through runner-RPC.
+        # Get model completions for the "select" subcommand to get
+        # actual model names (calling with [] returns subcommands
+        # like "list", "select" instead).
+        if self._runner_rpc is None:
             return []
-        # Get model completions for the "select" subcommand to get actual model names
-        # (calling with [] returns subcommands like "list", "select" instead)
         try:
-            completions = self._jaato.get_model_completions(["select"])
+            completions = (
+                self._runner_rpc.session_get_model_completions_threadsafe(
+                    ["select"],
+                )
+            )
             return [c.value if hasattr(c, 'value') else str(c) for c in completions]
         except Exception:
             return []

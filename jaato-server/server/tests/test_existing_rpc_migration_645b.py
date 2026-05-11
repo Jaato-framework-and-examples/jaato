@@ -269,17 +269,21 @@ def test_jaato_user_command_reads_still_present_until_5c() -> None:
     - 5c.1 ✅ migrated `_jaato.auth_info` reads (commit bff782a4)
     - 5c.2 ✅ migrated `_jaato.get_user_commands()` reads
     - 5c.3 ✅ migrated `_jaato.execute_user_command()` reads
-    - 5c.4 (pending) — `_jaato.get_model_completions()`
+    - 5c.4 ✅ migrated `_jaato.get_model_completions()` reads
     - 5c.5 (pending) — `_jaato.get_tool_schemas()` (different
       callsite shape: read inside `for schema in ...` and
       conditional check)
 
     Update each assertion's expected count when its sub-commit lands.
+    When all 5c sub-commits land, this whole test can be deleted —
+    the only `_jaato.X` calls remaining are the construction-site
+    + truthiness-check sites handled by 5d/5e.
     """
-    completions_calls = _module_calls_jaato_method(
-        core_module, "get_model_completions",
+    tool_schema_calls = _module_calls_jaato_method(
+        core_module, "get_tool_schemas",
     )
-    assert len(completions_calls) >= 1, (
-        f"Expected ≥1 ``_jaato.get_model_completions()`` call site; found "
-        f"{len(completions_calls)}.  If 5c.4 has landed, delete this assertion."
+    assert len(tool_schema_calls) >= 1, (
+        f"Expected ≥1 ``_jaato.get_tool_schemas()`` call site; found "
+        f"{len(tool_schema_calls)}.  If 5c.5 has landed, delete this "
+        f"whole test file (all 5c sub-commits complete)."
     )
