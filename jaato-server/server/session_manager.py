@@ -762,7 +762,10 @@ class SessionManager:
             the apparmor opt-in flag.
         """
         try:
-            from server.runner_spawn import spawn_session_runner
+            from server.runner_spawn import (
+                spawn_session_runner,
+                dispatch_bootstrap_envelope,
+            )
             spawn_session_runner(
                 server=server,
                 session_id=session_id,
@@ -771,6 +774,50 @@ class SessionManager:
                 daemon_loop=getattr(self, "_daemon_loop", None),
                 disable_confine=(profile_name == ""),
             )
+            # Phase 3 post-Step-7 regression fix (Path B):
+            # synchronously dispatch ``session.bootstrap`` so the
+            # runner-side ``JaatoSession`` host is populated BEFORE
+            # ``server.initialize()`` runs.  Pre-fix the IPC path
+            # spawned the runner but never sent the bootstrap RPC,
+            # leaving ``RunnerRPC._session_host = None`` for the
+            # session lifetime.  Every daemon-side
+            # ``self._runner_rpc.session_X_threadsafe()`` call
+            # then raced against an unbootstrapped runner-side
+            # session — handler correctly returned
+            # ``stage="no_session"`` per the §3.3c surface
+            # defensive contract, but the wrapper raised
+            # ``RunnerCallError`` and crashed daemon-side init.
+            #
+            # The WS path has shipped this synchronous dispatch
+            # since §7c step 2 (commit 6e31d375 era) at
+            # ``websocket.py:690``.  This commit mirrors that
+            # pattern for IPC sessions, closing the structural
+            # asymmetry.
+            #
+            # Inline try/except so a bootstrap-dispatch hiccup
+            # doesn't roll back the spawn-success return — spawn
+            # already succeeded by this point.  Bootstrap-RPC
+            # failures log WARNING via ``dispatch_bootstrap_envelope``
+            # itself; the inline guard here additionally tolerates
+            # ``server.runner_rpc`` being absent (test-stub
+            # JaatoServer fakes that don't fully replicate the
+            # post-spawn attribute set).
+            try:
+                dispatch_bootstrap_envelope(
+                    server=server,
+                    session_id=session_id,
+                    workspace_path=workspace_path,
+                    profile_name=profile_name,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning(
+                    "IPC session.bootstrap dispatch failed for %s "
+                    "(%s: %s) — session will start with an "
+                    "unbootstrapped runner-side host; downstream "
+                    "session.* RPCs may race-fail until the "
+                    "runner-side bootstrap completes some other way",
+                    session_id, type(exc).__name__, exc,
+                )
             return True
         except Exception as exc:  # noqa: BLE001 — boundary
             self._notify_apparmor(
