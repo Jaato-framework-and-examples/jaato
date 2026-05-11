@@ -1649,6 +1649,177 @@ pattern for these sites.
     serialize.  Independent in principle; serializing per the
     6.1 trio cadence keeps reviewability tight.
 
+### §7d disposition audit (pre-implementation)
+
+Mirrors the audit-discipline pattern that ran 18-for-18 across §7c.
+Prerequisites for §7d: §7a (always-spawn the runner) shipped;
+seat-flip complete (§7c step 6.6.4.5e at commit a922082f).  §7d
+adds runner-subprocess-side cgroup placement so child processes
+(cli, interactive_shell PTY children) inherit the per-session
+cgroup automatically — the architectural simplification peer-
+review v2 observation #2 called out.
+
+**Q1 — Cgroup attach mechanics: where + how is the runner placed
+into the per-session cgroup?**
+
+Current state (pre-§7d):
+
+- `server/cgroups.py:CgroupsManager.provision_cgroup(session_id,
+  config)` creates the cgroup at `/sys/fs/cgroup/<root>/jaato-
+  <session>/` and applies limits.  WS sessions trigger this at
+  line `websocket.py:703`.
+- `CgroupsManager.make_attach_callback(session_id)` returns a
+  zero-arg callable that does `open("cgroup.procs", "w").write(
+  str(os.getpid()))` from within the forked child.  Designed
+  for `Popen(preexec_fn=...)`.
+- Today's daemon-side `set_runtime_limits` (core.py:674-736) is
+  a documented no-op since §7c step 6.2 (commit message: "runner
+  subprocess gets cgroup attach + RuntimeLimits at spawn time,
+  not via this daemon-side method").  Comment foresaw §7d as
+  the implementation step.
+
+`RunnerSpawner.spawn` (runner_spawner.py:83-166):
+- Forks via `os.fork()` (line 143).
+- Child: `_exec_runner` dup's the socket fd → 3, optionally
+  redirects stdout/stderr, closes inherited fds, exec's runner.
+- **No cgroup attach today** — the runner ends up in the
+  daemon's cgroup (the host's session.scope or the daemon's
+  systemd unit).
+
+Implementation shape for §7d:
+
+Between `os.fork()` and `_exec_runner` in the child branch, call
+the attach callback returned by `CgroupsManager.make_attach_callback(session_id)`.
+Concretely: pass an optional `attach_callback` to
+`RunnerSpawner.spawn(...)` and invoke it right after the fork.
+Same mechanism as today's plugin-level `Popen(preexec_fn=...)`,
+just one level higher (the runner's own pid migrates, not each
+plugin subprocess).
+
+**Q2 — Inherit verification: explicit `/proc/<child>/cgroup`
+check vs trust-by-default?**
+
+cgroup v2 default behavior: children inherit their parent's
+cgroup placement.  `fork()` puts the child in the parent's
+cgroup; `exec()` doesn't change cgroup membership.  Linux
+kernel ≥4.5 (cgroup v2 stable since 4.5) treats this as
+guaranteed.
+
+Verdict: **trust-by-default + one-shot integration test**.
+Per-spawn `/proc/<pid>/cgroup` checks would be a paranoia tax;
+inheritance is a kernel contract.  The integration test
+(below) pins inheritance under realistic conditions so a future
+kernel-driver change breaking inheritance fails loudly.
+
+**Q3 — Existing `_can_migrate_to(_find_writable_cgroup_parent())`
+gate at test_runtime_limits_e2e.py: integration-test entry
+point?**
+
+The test file already exists at
+`jaato-server/shared/tests/test_runtime_limits_e2e.py` with
+`TestRealKernel` skipif-gated on a writable cgroup parent
+(lines 460-485).  §7d adds new test cases inside the existing
+`TestRealKernel` class:
+
+1. **Runner-spawn-into-cgroup**: spawn a real runner under
+   `RunnerSpawner.spawn(session_id, ..., cgroup_attach=...)`;
+   read `/proc/<runner_pid>/cgroup` from the daemon; assert
+   the runner's cgroup ancestry matches the session cgroup.
+2. **Child-inherit**: have the runner execute a cli tool that
+   forks a subprocess (e.g., `bash -c "sleep 1 & echo $!"`);
+   read `/proc/<child_pid>/cgroup`; assert matches the
+   runner's cgroup.
+3. **Grandchild-inherit (PTY stress case)**: have the runner
+   spawn an `interactive_shell` PTY; assert the PTY's child
+   shell (pexpect-spawned grandchild) inherits the same
+   cgroup.  This is peer-review v2 observation #2's
+   stress-case test.
+
+**Q4 — `shared/ai_tool_runner.py:211` daemon-side
+`_cgroup_attach`: stay or delete?**
+
+Today this field is set via `ToolExecutor.set_runtime_limits`,
+which the daemon's `set_runtime_limits` (core.py:674) ALREADY
+no-ops since §7c step 6.2.  Daemon-side `ToolExecutor` is dead
+post-seat-flip (tool execution flows through the runner
+subprocess); the field is set but never read.
+
+**Verdict: leave the field declaration + setter in place for
+now.**  Two reasons:
+
+1. **Disk-restored sessions fallback (§3.12 plan)**: until
+   Phase 4+ ships its own session-restore path, disk-restored
+   sessions could theoretically fall through to in-process
+   daemon-side tool execution (defensive against the runner-
+   spawn failure path).  Today's `set_runtime_limits` no-op is
+   benign; keeping it preserves the fallback's correctness if
+   any restore-path regression surfaces.
+2. **Runner-side `_cgroup_attach` in plugins (cli,
+   interactive_shell)**: post-§7d, the runner subprocess is
+   itself in the cgroup, so child Popen's inherit by default
+   → `_cgroup_attach` becomes a **no-op preexec_fn**
+   structurally (existing `_noop` callable in CgroupsManager
+   already serves this when cgroup is unavailable).  Plugin-
+   side code stays unchanged — same Popen pattern, no-op
+   callback.  Future cleanup could delete the plugin-side field
+   entirely; out of §7d scope.
+
+**Q5 — PTY grandchildren inheritance (peer-review v2 obs #2's
+stress case)?**
+
+`interactive_shell/plugin.py:576` does
+`Popen(..., preexec_fn=self._cgroup_attach)`.  Post-§7d the
+runner subprocess is in the cgroup; the PTY (pexpect-spawned
+child) inherits; the PTY's child shell (grandchild) inherits.
+Three levels of inheritance for one cgroup decision — kernel
+contract holds for cgroup v2.  The integration test pins this
+explicitly.
+
+**Q6 — §3.11 isolated-subagent opt-in status?**
+
+Cross-grep of `agent_params.*isolated` / `isolated_subagent`:
+no production sites found.  The comment at
+`session_manager.py:4889` describes the planned semantics
+("default-share / opt-in-isolation come with §3.11 + the
+seat-flip") but the actual `agent_params.isolated: true` →
+fresh-runner spawn path **doesn't exist yet**.  The seat-flip
+(§7c) just enabled the architectural prerequisite.  The
+termination-hook portion of §3.11 shipped (subagent
+termination hook + reliability cleanup); the isolation-opt-in
+portion is **separate work, post-§7d**.
+
+Disposition: §3.11 isolated-subagent opt-in is OUT OF SCOPE for
+§7d.  Track as a follow-up or backlog entry depending on
+prioritization.
+
+#### §7d audit findings
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | Runner-spawn cgroup attach is a single preexec_fn call between fork() and _exec_runner | Single-commit migration; ~5 lines in RunnerSpawner |
+| 2 | Inheritance is a cgroup-v2 kernel contract; no per-spawn verification needed | Trust-by-default + integration tests pin the contract |
+| 3 | Integration tests gate on existing `_can_migrate_to` infrastructure (test_runtime_limits_e2e.py) | 3 new TestRealKernel tests: runner-spawn / child-inherit / grandchild-inherit |
+| 4 | Daemon-side `ToolExecutor._cgroup_attach` field stays (defensive against disk-restore fallback) | Out of §7d scope; cleanup deferred to Phase 4+ |
+| 5 | WS session: `set_runtime_limits(...)` call (websocket.py:721) is already a documented no-op since §7c step 6.2 | Leave-as-is; plan deletion for a separate cleanup commit |
+| 6 | Plugin-level `_cgroup_attach` becomes a no-op preexec_fn post-§7d (peer-review v2 obs #2 realized) | Mechanical realization; no immediate plugin code changes needed |
+| 7 | §3.11 isolated-subagent opt-in NOT shipped; out of §7d scope | Defer to follow-up per prioritization |
+
+#### §7d sub-decomposition
+
+Single-commit migration per the audit's findings (mechanical
+implementation, contract pinned by tests).
+
+| Sub-step | Scope | Test pin |
+|---|---|---|
+| **7d** | `RunnerSpawner.spawn` accepts optional `cgroup_attach: Callable[[], None]` arg; SessionManager / WS handlers pass `cgroups.make_attach_callback(session_id)` at spawn time; child invokes the callback between `os.fork()` and `_exec_runner` | 3 new TestRealKernel tests (runner-spawn / child-inherit / grandchild-inherit) + ~5 unit tests for the spawn-arg plumbing |
+
+**Audit-discipline tally: 19 audits, 19 silent-regression
+catches** (today's catch: the daemon-side `_cgroup_attach`
+field-deletion question — keeping it was the safer call given
+the §3.12 disk-restore fallback path).
+
+§7d ships as a single-commit migration; no further split needed.
+
 ## 8. Test invariant for the next contributor
 
 If a daemon-side migration commits to the runner-RPC surface,
