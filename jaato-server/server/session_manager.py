@@ -1722,6 +1722,117 @@ class SessionManager:
             return False
         return True
 
+    def _cascade_teardown_isolated_subagents(
+        self,
+        parent_session_id: str,
+    ) -> int:
+        """Tear down every isolated sub-runner owned by a parent
+        session (Phase 4 §4.3.6d).
+
+        Called when a parent session is unloaded or shut down.
+        Iterates ``_isolated_sub_runners`` filtering by
+        ``parent_session_id``; for each handle:
+          1. Close the sub-runner's RPC client (sends EOF, waits
+             for the sub-runner subprocess to exit).
+          2. Tear down the sub-cgroup (``cgroup.kill`` atomic
+             termination, then rmdir).
+          3. Tear down the sub-AppArmor profile (``apparmor_parser -R``).
+          4. Remove the handle from ``_isolated_sub_runners``.
+
+        Best-effort throughout — each step wrapped in try/except so
+        a single teardown failure doesn't strand the others.  Returns
+        the count of handles torn down for logging / metrics.
+
+        Args:
+            parent_session_id: Parent session whose isolated
+                sub-runners should be torn down.
+
+        Returns:
+            Number of handles processed (whether or not each
+            individual teardown step succeeded).
+        """
+        import asyncio
+
+        with self._lock:
+            owned_handles = [
+                handle for handle in self._isolated_sub_runners.values()
+                if handle.parent_session_id == parent_session_id
+            ]
+
+        if not owned_handles:
+            return 0
+
+        logger.info(
+            "_cascade_teardown_isolated_subagents: tearing down "
+            "%d sub-runner(s) for parent_session=%s",
+            len(owned_handles), parent_session_id,
+        )
+
+        for handle in owned_handles:
+            # 1. Close RPC client (signals EOF; sub-runner exits).
+            try:
+                daemon_loop = getattr(self, "_daemon_loop", None)
+                if daemon_loop is not None and hasattr(handle.rpc, "close"):
+                    fut = asyncio.run_coroutine_threadsafe(
+                        handle.rpc.close(), daemon_loop,
+                    )
+                    try:
+                        fut.result(timeout=5.0)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "cascade teardown: RPC close timed out "
+                            "for %s — continuing",
+                            handle.isolated_session_id,
+                        )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "cascade teardown: RPC close failed for %s",
+                    handle.isolated_session_id,
+                )
+
+            # 2. Tear down sub-cgroup (if one was provisioned).
+            if handle.cgroup_path:
+                try:
+                    cgroups_manager = self._resolve_cgroups_manager()
+                    if cgroups_manager is not None:
+                        cgroups_manager.teardown_cgroup(
+                            handle.isolated_session_id,
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "cascade teardown: sub-cgroup teardown "
+                        "failed for %s",
+                        handle.isolated_session_id,
+                    )
+
+            # 3. Tear down sub-AppArmor profile (if one was loaded).
+            if handle.sub_apparmor_profile:
+                try:
+                    apparmor_manager = self._resolve_apparmor_manager()
+                    if apparmor_manager is not None:
+                        apparmor_manager.teardown_sub_profile(
+                            parent_session_id=handle.parent_session_id,
+                            subagent_id=handle.subagent_id,
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "cascade teardown: sub-AppArmor teardown "
+                        "failed for %s",
+                        handle.isolated_session_id,
+                    )
+
+            # 4. Remove from registry.
+            with self._lock:
+                self._isolated_sub_runners.pop(
+                    handle.isolated_session_id, None,
+                )
+            logger.info(
+                "cascade teardown: completed for %s",
+                handle.isolated_session_id,
+            )
+
+        return len(owned_handles)
+
     def _rollback_isolated_resources(
         self,
         *,
@@ -4416,6 +4527,28 @@ class SessionManager:
 
         # Stop workspace monitor
         self._stop_workspace_monitor(session_id)
+
+        # Phase 4 §4.3.6d: cascade-teardown any isolated subagents
+        # owned by this parent.  Must run BEFORE the parent's
+        # server.shutdown() so we have a chance to close sub-runner
+        # RPCs cleanly; running after shutdown leaves orphaned
+        # processes that the daemon loses track of.
+        try:
+            n_torn_down = self._cascade_teardown_isolated_subagents(
+                parent_session_id=session_id,
+            )
+            if n_torn_down > 0:
+                logger.info(
+                    "Unload: cascade-teardown completed for %d isolated "
+                    "subagent(s) of session %s",
+                    n_torn_down, session_id,
+                )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.exception(
+                "Unload: cascade-teardown raised for session %s — "
+                "continuing with server.shutdown",
+                session_id,
+            )
 
         # Shutdown server and remove from memory
         session.server.shutdown()
