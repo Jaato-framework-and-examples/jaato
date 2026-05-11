@@ -1,9 +1,23 @@
 # Backlog: runner-side `_ui_hooks` is None — tool lifecycle events silently no-op
 
-> **Status**: Pre-existing gap surfaced by §7c step 6.6.4.5 audit (Finding 3).
-> Not in scope for the §7c series.  See
-> [`per_session_confined_runner_phase3_3c_rpc_surface.md`](per_session_confined_runner_phase3_3c_rpc_surface.md)
-> for full context.
+> **Status**: ✅ **CLOSED by Path F (cycle 7).**  Originally surfaced by §7c
+> step 6.6.4.5 audit (Finding 3); deferred with the wrong assumption that
+> events might be redundant.  Cycle 7 integration test against a real
+> provider empirically proved the events ARE load-bearing for TUI
+> rendering (model response chunks, tool calls, turn progress all
+> silently dropped pre-Path-F).
+>
+> **Resolution**: Option A (extend NotificationFrame protocol) shipped.
+> Runner-side `_AgentUIHooksNotificationShim` emits 4 new event_types
+> (`tool_call_start`, `tool_call_end`, `tool_output`, `turn_progress`);
+> daemon-side demuxer routes through `ServerAgentHooks` for event emit.
+> See [`per_session_confined_runner_phase3_3c_rpc_surface.md`](per_session_confined_runner_phase3_3c_rpc_surface.md)
+> §"Path F pre-implementation audit (cycle 7 — third chain)" for the
+> full audit + design.  Meta-lesson recorded there: audit-of-record
+> discipline catches gaps, but DEFERRAL judgment can be wrong when
+> audit time can't predict downstream visibility.  Phase 4+ guidance:
+> when migrating in-process callback chains to RPC, audit by callback-
+> TYPE and enumerate every consumer, not just by call-site.
 
 ## Problem
 

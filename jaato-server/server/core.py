@@ -375,6 +375,16 @@ class JaatoServer:
         # uninitialized — readers fall back to 0 / payload value.
         self._cached_context_limit: Optional[int] = None
 
+        # Path F (cycle 7) §7c streaming-response chain: cached
+        # ServerAgentHooks instance.  Populated in
+        # ``_setup_agent_hooks`` during initialize().  Read by the
+        # send_message notification demuxer to re-emit runner-side
+        # ``tool_call_*`` / ``tool_output`` / ``turn_progress``
+        # events through the same daemon-side path the pre-§7c
+        # in-process flow used.  Pre-Path-F the runner-side
+        # ``_ui_hooks`` was None and these events silently dropped.
+        self._agent_hooks: Optional[Any] = None
+
         # Phase 3 §7c step 4: direct daemon-side reference to the
         # ``JaatoRuntime`` (provider config + auth + plugin registry +
         # ledger).  Populated after ``connect()`` returns; aliased to
@@ -2856,6 +2866,14 @@ class JaatoServer:
 
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")
         hooks = ServerAgentHooks()
+        # Path F (cycle 7): cache the hooks instance so the daemon-
+        # side notification demuxer (``_build_send_message_notification_handler``)
+        # can route runner-emitted ``tool_call_start`` /
+        # ``tool_call_end`` / ``tool_output`` / ``turn_progress``
+        # frames through the same hooks that pre-§7c fired in-process.
+        # Without this cache the demuxer would need to walk
+        # ``self.registry.get_plugin("subagent")._ui_hooks`` per call.
+        self._agent_hooks = hooks
         # Propagate the resolved agent identity to the JaatoClient/JaatoSession
         # BEFORE set_ui_hooks runs.  ``set_ui_hooks`` reads ``self._agent_id``
         # both to register the AgentState (via ``on_agent_created``) and to
@@ -2890,6 +2908,22 @@ class JaatoServer:
                 subagent_plugin.set_ui_hooks(hooks)
                 logger.debug("  _setup_agent_hooks: subagent.set_ui_hooks done")
         logger.debug("  _setup_agent_hooks: completed")
+
+    def _get_ui_hooks(self) -> Optional[Any]:
+        """Return the daemon-side ``ServerAgentHooks`` instance, or
+        ``None`` if ``_setup_agent_hooks`` hasn't run yet.
+
+        Path F (cycle 7).  The send_message notification demuxer
+        reads this to route ``tool_call_*`` / ``tool_output`` /
+        ``turn_progress`` events through the daemon-side hooks,
+        re-using their formatting + state-mutation logic without
+        duplicating it inside the demuxer.
+
+        Defensive: returns ``None`` rather than raising so a
+        notification arriving before hooks are wired (rare — would
+        require runner activity pre-initialize) drops cleanly.
+        """
+        return getattr(self, "_agent_hooks", None)
 
     def _setup_permission_hooks(self) -> None:
         """Set up permission lifecycle hooks."""
@@ -3621,6 +3655,73 @@ class JaatoServer:
                     ))
                     return
 
+                # Path F (cycle 7) F.3: AgentUIHooks bridge.  Each
+                # branch routes the notification payload through the
+                # existing ``ServerAgentHooks`` instance so daemon-side
+                # formatting + state-mutation logic stays in one
+                # place (no divergence from the pre-§7c-step-6.6.4.3b
+                # in-process flow).  Hooks live on the subagent
+                # plugin per _setup_agent_hooks; ``server._agents``
+                # gives us direct access to the same instance.
+                if event_type == "tool_call_start":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_tool_call_start(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            tool_name=payload.get("tool_name", ""),
+                            tool_args=payload.get("tool_args") or {},
+                            call_id=payload.get("call_id"),
+                        )
+                    return
+
+                if event_type == "tool_call_end":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_tool_call_end(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            tool_name=payload.get("tool_name", ""),
+                            success=bool(payload.get("success", False)),
+                            duration_seconds=float(
+                                payload.get("duration_seconds", 0.0) or 0.0
+                            ),
+                            error_message=payload.get("error_message"),
+                            call_id=payload.get("call_id"),
+                            backgrounded=bool(payload.get("backgrounded", False)),
+                            continuation_id=payload.get("continuation_id"),
+                            show_output=payload.get("show_output"),
+                            show_popup=payload.get("show_popup"),
+                        )
+                    return
+
+                if event_type == "tool_output":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_tool_output(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            call_id=payload.get("call_id", ""),
+                            chunk=payload.get("chunk", ""),
+                        )
+                    return
+
+                if event_type == "turn_progress":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_turn_progress(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            total_tokens=int(payload.get("total_tokens", 0) or 0),
+                            prompt_tokens=int(payload.get("prompt_tokens", 0) or 0),
+                            output_tokens=int(payload.get("output_tokens", 0) or 0),
+                            percent_used=float(
+                                payload.get("percent_used", 0.0) or 0.0
+                            ),
+                            pending_tool_calls=int(
+                                payload.get("pending_tool_calls", 0) or 0
+                            ),
+                            cache_read_tokens=payload.get("cache_read_tokens"),
+                            cache_creation_tokens=payload.get("cache_creation_tokens"),
+                        )
+                    return
+
                 # Unknown event_type — log and drop.  Forward-compat
                 # for runner-side additions the daemon hasn't been
                 # taught about yet.
@@ -3655,8 +3756,27 @@ class JaatoServer:
         server = self
 
         def output_callback(source: str, text: str, mode: str) -> None:
-            # Skip - output is routed through agent hooks
-            pass
+            # Path F (cycle 7): emit ``AgentOutputEvent`` for stream
+            # frames the runner-side ``on_output`` produces.  Pre-§7c
+            # this was a no-op because the daemon-side ``_ui_hooks``
+            # fired ``on_agent_output`` in-process; post-§7c the
+            # runner-side ``_ui_hooks`` is None and the stream-frame
+            # path is the only route for text chunks back to the
+            # daemon.  Route through ``ServerAgentHooks.on_agent_output``
+            # so the formatter pipeline + ``<hidden>`` filtering
+            # logic stays in one place.
+            hooks = server._get_ui_hooks()
+            if hooks is not None:
+                try:
+                    hooks.on_agent_output(
+                        server._main_agent_id, source, text, mode,
+                    )
+                except Exception:  # noqa: BLE001 — never let an emit
+                    # failure crash the streaming read-loop callback
+                    logger.exception(
+                        "output_callback on_agent_output raised "
+                        "(source=%r mode=%r)", source, mode,
+                    )
 
         notification_handler = server._build_send_message_notification_handler()
 

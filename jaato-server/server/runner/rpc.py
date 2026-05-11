@@ -2740,6 +2740,16 @@ class RunnerRPC:
     _NOTIF_USAGE_UPDATE = "usage_update"
     _NOTIF_GC_THRESHOLD = "gc_threshold"
 
+    # Path F (cycle 7): AgentUIHooks methods that the runner-side
+    # session calls but `_ui_hooks` is None post-§7c — see backlog
+    # `project_backlog_runner_ui_hooks_gap.md` (Finding 3).  Each
+    # event_type mirrors one ui_hooks method; daemon-side demuxer
+    # re-emits via ServerAgentHooks.
+    _NOTIF_TOOL_CALL_START = "tool_call_start"
+    _NOTIF_TOOL_CALL_END = "tool_call_end"
+    _NOTIF_TOOL_OUTPUT = "tool_output"
+    _NOTIF_TURN_PROGRESS = "turn_progress"
+
     def _make_usage_update_notification_shim(
         self, request_id: int,
     ) -> Any:
@@ -3013,6 +3023,27 @@ class RunnerRPC:
 
             ebt._on_subscribed = _ebt_cb
 
+        # Path F (cycle 7): install an AgentUIHooks shim that emits
+        # notification frames for the 4 ui_hooks methods the runner-
+        # side session calls (on_tool_call_start, on_tool_call_end,
+        # on_tool_output, on_turn_progress).  See backlog
+        # project_backlog_runner_ui_hooks_gap.md.  Pre-Path-F the
+        # runner-side ``session._ui_hooks`` was None and all calls
+        # silently dropped — TUI never saw tool events or turn
+        # progress.  Direct attribute assignment (vs ``set_ui_hooks``)
+        # because ``set_ui_hooks`` also overwrites ``_agent_id``;
+        # the shim only needs the hooks slot.  Stored under key
+        # ``ui_hooks`` so restore-on-exit can put the original
+        # (typically None) back.
+        if hasattr(session, "_ui_hooks"):
+            originals["ui_hooks"] = session._ui_hooks
+            try:
+                session._ui_hooks = _AgentUIHooksNotificationShim(
+                    rpc, request_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("ui_hooks shim install raised")
+
         return originals
 
     def _restore_session_notification_callbacks(
@@ -3072,6 +3103,14 @@ class RunnerRPC:
                     ebt._on_subscribed = originals["events_subscribed"]
                 except Exception:  # noqa: BLE001
                     logger.debug("restore events_subscribed slot raised")
+        # Path F (cycle 7): restore the pre-shim ui_hooks (typically
+        # None for the runner-side session — see backlog
+        # project_backlog_runner_ui_hooks_gap.md).
+        if "ui_hooks" in originals and hasattr(session, "_ui_hooks"):
+            try:
+                session._ui_hooks = originals["ui_hooks"]
+            except Exception:  # noqa: BLE001
+                logger.debug("restore ui_hooks raised")
 
     def _handle_session_shutdown(self) -> "tuple[bool, Any]":
         """Graceful runner-side session teardown.
@@ -3830,6 +3869,188 @@ class RunnerRPC:
             self._sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+
+
+# ----------------------------------------------------------------------
+# Path F (cycle 7): AgentUIHooks → NotificationFrame shim
+# ----------------------------------------------------------------------
+
+
+class _AgentUIHooksNotificationShim:
+    """Runner-side ``AgentUIHooks`` shim that emits NotificationFrames.
+
+    Path F (cycle 7).  Bridges the 4 ``AgentUIHooks`` methods the
+    runner-side ``JaatoSession`` calls (``on_tool_call_start``,
+    ``on_tool_call_end``, ``on_tool_output``, ``on_turn_progress``)
+    to the §7c step 6.6.4.1 NotificationFrame protocol.  Daemon-side
+    ``_build_send_message_notification_handler`` demuxes by
+    ``event_type`` and re-emits via ``ServerAgentHooks``.
+
+    Methods not listed are no-ops — the daemon-side already covers
+    the other ``AgentUIHooks`` methods via different paths:
+    - ``on_agent_created`` / ``on_agent_status_changed`` /
+      ``on_agent_completed`` / ``on_session_quiescent`` /
+      ``on_agent_turn_completed`` / ``on_agent_context_updated`` /
+      ``on_agent_gc_config`` / ``on_agent_history_updated``: invoked
+      by daemon-side code (subagent plugin, JaatoClient wrapper)
+      against daemon-side ``ServerAgentHooks`` directly.
+    - ``on_agent_instruction_budget_updated``: already covered by
+      the §7c step 6.6.4.2 ``instruction_budget_updated``
+      notification frame.
+
+    Pre-Path-F the runner-side session's ``_ui_hooks`` was None and
+    these methods silently dropped — see
+    ``docs/design/project_backlog_runner_ui_hooks_gap.md``
+    (Finding 3) for the audit-of-record back-reference.
+    """
+
+    def __init__(self, rpc: Any, request_id: int) -> None:
+        self._rpc = rpc
+        self._request_id = request_id
+
+    def on_tool_call_start(
+        self,
+        agent_id: str,
+        tool_name: str,
+        tool_args: "Dict[str, Any]",
+        call_id: Optional[str] = None,
+    ) -> None:
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_TOOL_CALL_START,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "tool_name": str(tool_name or ""),
+                    "tool_args": dict(tool_args or {}),
+                    "call_id": call_id,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tool_call_start notify raised")
+
+    def on_tool_call_end(
+        self,
+        agent_id: str,
+        tool_name: str,
+        success: bool,
+        duration_seconds: float,
+        error_message: Optional[str] = None,
+        call_id: Optional[str] = None,
+        backgrounded: bool = False,
+        continuation_id: Optional[str] = None,
+        show_output: Optional[bool] = None,
+        show_popup: Optional[bool] = None,
+    ) -> None:
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_TOOL_CALL_END,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "tool_name": str(tool_name or ""),
+                    "success": bool(success),
+                    "duration_seconds": float(duration_seconds),
+                    "error_message": error_message,
+                    "call_id": call_id,
+                    "backgrounded": bool(backgrounded),
+                    "continuation_id": continuation_id,
+                    "show_output": show_output,
+                    "show_popup": show_popup,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tool_call_end notify raised")
+
+    def on_tool_output(
+        self,
+        agent_id: str,
+        call_id: str,
+        chunk: str,
+    ) -> None:
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_TOOL_OUTPUT,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "call_id": str(call_id or ""),
+                    "chunk": str(chunk or ""),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("tool_output notify raised")
+
+    def on_turn_progress(
+        self,
+        agent_id: str,
+        total_tokens: int,
+        prompt_tokens: int,
+        output_tokens: int,
+        percent_used: float,
+        pending_tool_calls: int,
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
+    ) -> None:
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_TURN_PROGRESS,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "total_tokens": int(total_tokens or 0),
+                    "prompt_tokens": int(prompt_tokens or 0),
+                    "output_tokens": int(output_tokens or 0),
+                    "percent_used": float(percent_used or 0.0),
+                    "pending_tool_calls": int(pending_tool_calls or 0),
+                    "cache_read_tokens": cache_read_tokens,
+                    "cache_creation_tokens": cache_creation_tokens,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("turn_progress notify raised")
+
+    # ---- no-op fillers for the rest of the AgentUIHooks protocol ----
+    # The runner-side session doesn't call these (per the
+    # backlog doc's callsite enumeration), but defining them keeps
+    # the shim duck-type-compatible with AgentUIHooks consumers
+    # that might iterate or hasattr-check.
+
+    def on_agent_created(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_agent_output(self, *args: Any, **kwargs: Any) -> None:
+        # Runner-side session uses the ``on_output`` kwarg path
+        # (stream frames), not _ui_hooks.on_agent_output — covered
+        # daemon-side at _start_model_thread's output_callback.
+        pass
+
+    def on_agent_status_changed(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_agent_completed(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_session_quiescent(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_agent_turn_completed(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_agent_context_updated(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_agent_gc_config(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_agent_history_updated(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_agent_instruction_budget_updated(self, *args: Any, **kwargs: Any) -> None:
+        # Covered by §7c step 6.6.4.2 instruction_budget_updated
+        # notification — invoked via set_instruction_budget_callback,
+        # not via _ui_hooks.
+        pass
 
 
 # ----------------------------------------------------------------------
