@@ -24,11 +24,12 @@ suites stay valid bit-exact).
 
 from __future__ import annotations
 
+from typing import Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
 
-from server.session_manager import SessionManager
+from server.session_manager import SessionManager, SubRunnerHandle
 
 
 def _valid_payload(**overrides):
@@ -53,26 +54,46 @@ def _valid_payload(**overrides):
 def _make_session_manager(
     apparmor_manager=None,
     cgroups_manager=None,
+    spawn_returns: Any = None,
+    spawn_raises: Optional[Exception] = None,
 ) -> SessionManager:
     """Construct a SessionManager for unit tests.
 
     ``_spawn_isolated_runner`` reads:
     - ``_apparmor_manager`` via ``_resolve_apparmor_manager``
     - ``_cgroups_manager`` via ``_resolve_cgroups_manager``
+    - ``_do_spawn_isolated_runner`` (§4.3.6a sub-runner spawn)
 
     An ``__new__`` instance without the attributes returns ``None``
     from the resolvers, which the helper translates to "X
     unavailable" branches (graceful degradation per Audit 7 for
     cgroups; hard stop at stage=sub_profile for AppArmor).
 
-    Tests that need to exercise §4.3.4+§4.3.5 advances should pass
-    in mocked managers via the kwargs.
+    Phase 4 §4.3.6a: ``_do_spawn_isolated_runner`` raises
+    ``RuntimeError`` when ``_daemon_loop`` is unset (the default).
+    Tests that need to exercise the §4.3.6a SUCCESS path (handle
+    stored in ``_isolated_sub_runners``) pass ``spawn_returns=<handle>``.
+    Tests that need the spawn-failure rollback can either leave
+    spawn_returns=None (defaults to RuntimeError) or pass
+    ``spawn_raises=...``.
+
+    Also initializes ``_isolated_sub_runners`` + ``_lock`` so the
+    helper's ``with self._lock`` registration path works.
     """
     sm = SessionManager.__new__(SessionManager)
+    import threading
+    sm._lock = threading.RLock()
+    sm._isolated_sub_runners = {}
     if apparmor_manager is not None:
         sm._apparmor_manager = apparmor_manager
     if cgroups_manager is not None:
         sm._cgroups_manager = cgroups_manager
+    if spawn_returns is not None or spawn_raises is not None:
+        def _stub_spawn(**kwargs):
+            if spawn_raises is not None:
+                raise spawn_raises
+            return spawn_returns
+        sm._do_spawn_isolated_runner = _stub_spawn  # type: ignore[method-assign]
     return sm
 
 
@@ -209,9 +230,14 @@ class TestSubProfileProvisioningStage:
     AppArmor failure remains stage=sub_profile.
     """
 
-    def test_apparmor_success_no_cgroups_advances_to_forwarding(self):
-        """Sub-AppArmor success + no CgroupsManager wired →
-        stage=forwarding (graceful degradation per Audit 7)."""
+    def test_apparmor_success_no_cgroups_no_daemon_loop_rolls_back(self):
+        """Sub-AppArmor success + no CgroupsManager + no daemon_loop
+        (the default test-fixture state post-§4.3.6a) → spawn raises
+        RuntimeError("daemon loop unavailable") → rollback fires →
+        stage=forwarding with apparmor_profile="" + cgroup_path="".
+
+        This pins the §4.3.6a rollback path triggered by missing
+        spawn infrastructure (test fakes / pre-init bootstrap)."""
         apparmor = _make_default_apparmor()
         sm = _make_session_manager(apparmor_manager=apparmor)
 
@@ -225,14 +251,22 @@ class TestSubProfileProvisioningStage:
 
         assert result["ok"] is False
         assert result["stage"] == "forwarding"
-        assert result["apparmor_profile"] == "jaato-ws-sess-A//agent-1"
+        # Rollback cleared the diagnostic fields.
+        assert result["apparmor_profile"] == ""
         assert result["cgroup_path"] == ""
-        # Stage message mentions §4.3.6 (next stage).
-        assert "§4.3.6" in result["error"]
+        # Spawn-failure message must reference the rollback.
+        assert "spawn failed" in result["error"].lower()
+        assert "rolled back" in result["error"].lower()
+        # AppArmor provision invoked once + teardown invoked once
+        # (rollback).
         apparmor.provision_sub_profile.assert_called_once_with(
             parent_session_id="sess-A",
             subagent_id="agent-1",
             workspace_path="/work",
+        )
+        apparmor.teardown_sub_profile.assert_called_once_with(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
         )
 
     def test_apparmor_failure_returns_sub_profile_with_kernel_error(self):
@@ -285,11 +319,37 @@ class TestSubProfileProvisioningStage:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _make_spawn_handle(
+    parent_session_id: str = "sess-A",
+    subagent_id: str = "agent-1",
+    sub_apparmor_profile: str = "jaato-ws-sess-A//agent-1",
+    cgroup_path: str = "",
+    pid: int = 12345,
+) -> SubRunnerHandle:
+    """Build a SubRunnerHandle for tests that need spawn to succeed.
+    Includes mocked rpc + spawned (MagicMock) so callers can
+    inspect what the §4.3.6b/c/d wiring would dispatch."""
+    rpc = MagicMock()
+    spawned = MagicMock()
+    spawned.pid = pid
+    return SubRunnerHandle(
+        parent_session_id=parent_session_id,
+        subagent_id=subagent_id,
+        isolated_session_id=f"{parent_session_id}__sub_{subagent_id}",
+        rpc=rpc,
+        spawned=spawned,
+        sub_apparmor_profile=sub_apparmor_profile,
+        cgroup_path=cgroup_path,
+    )
+
+
 class TestSubCgroupProvisioningStage:
     """Phase 4 §4.3.5: with AppArmor success + CgroupsManager wired,
     the helper exercises the sub-cgroup creation path.
 
-    Four sub-paths per Audit 7's stage-advance table:
+    Post-§4.3.6a, these tests use ``spawn_returns=<handle>`` to
+    bypass the daemon_loop check + isolate cgroup behavior.  Cgroup
+    branch coverage stays:
     - cgroups unavailable → stage=forwarding, cgroup_path=""
     - profile has no runtime_limits → stage=forwarding, cgroup_path=""
     - cgroups + limits + success → stage=forwarding, cgroup_path=<path>
@@ -304,7 +364,9 @@ class TestSubCgroupProvisioningStage:
         cgroups = MagicMock()
         cgroups.is_available.return_value = False
         sm = _make_session_manager(
-            apparmor_manager=apparmor, cgroups_manager=cgroups,
+            apparmor_manager=apparmor,
+            cgroups_manager=cgroups,
+            spawn_returns=_make_spawn_handle(cgroup_path=""),
         )
 
         result = sm._spawn_isolated_runner(
@@ -332,7 +394,9 @@ class TestSubCgroupProvisioningStage:
         cgroups = MagicMock()
         cgroups.is_available.return_value = True
         sm = _make_session_manager(
-            apparmor_manager=apparmor, cgroups_manager=cgroups,
+            apparmor_manager=apparmor,
+            cgroups_manager=cgroups,
+            spawn_returns=_make_spawn_handle(cgroup_path=""),
         )
 
         result = sm._spawn_isolated_runner(
@@ -358,8 +422,11 @@ class TestSubCgroupProvisioningStage:
         cgroups.get_cgroup_path.return_value = Path(
             "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1",
         )
+        cgroup_str = "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1"
         sm = _make_session_manager(
-            apparmor_manager=apparmor, cgroups_manager=cgroups,
+            apparmor_manager=apparmor,
+            cgroups_manager=cgroups,
+            spawn_returns=_make_spawn_handle(cgroup_path=cgroup_str),
         )
 
         result = sm._spawn_isolated_runner(
@@ -376,9 +443,7 @@ class TestSubCgroupProvisioningStage:
         )
 
         assert result["stage"] == "forwarding"
-        assert result["cgroup_path"] == (
-            "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1"
-        )
+        assert result["cgroup_path"] == cgroup_str
         # provision_cgroup invoked with the isolated_session_id.
         provision_call = cgroups.provision_cgroup.call_args
         assert provision_call[0][0] == "sess-A__sub_agent-1"
@@ -517,3 +582,158 @@ class TestProfileFieldRoundTrip:
         )
         # Reaches sub_profile — reconstruction succeeded.
         assert result["stage"] == "sub_profile"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# §4.3.6a sub-runner spawn + handle registration
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestSpawnInvocation:
+    """Phase 4 §4.3.6a: with AppArmor success + (optional) cgroup
+    success, the helper invokes ``_do_spawn_isolated_runner`` and
+    registers the returned handle in ``_isolated_sub_runners``.
+
+    Tests use ``spawn_returns=<handle>`` to bypass real subprocess
+    spawning while still exercising the helper's call chain +
+    handle bookkeeping."""
+
+    def test_spawn_success_registers_handle(self):
+        """Successful spawn → handle stored in
+        ``_isolated_sub_runners`` keyed by isolated_session_id."""
+        apparmor = _make_default_apparmor()
+        handle = _make_spawn_handle(pid=12345)
+        sm = _make_session_manager(
+            apparmor_manager=apparmor,
+            spawn_returns=handle,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["stage"] == "forwarding"
+        # Diagnostic fields prove spawn happened.
+        assert result["sub_runner_pid"] == 12345
+        assert result["sub_session_id"] == "sess-A__sub_agent-1"
+        # Handle registered under the isolated session id.
+        assert "sess-A__sub_agent-1" in sm._isolated_sub_runners
+        assert sm._isolated_sub_runners["sess-A__sub_agent-1"] is handle
+
+    def test_spawn_failure_rolls_back_apparmor_and_cgroup(self):
+        """``_do_spawn_isolated_runner`` raises → rollback chain
+        fires (cgroup teardown + AppArmor teardown).  Return has
+        cleared diagnostic fields."""
+        apparmor = _make_default_apparmor()
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = True
+        cgroups.provision_cgroup.return_value = True
+        from pathlib import Path
+        cgroups.get_cgroup_path.return_value = Path(
+            "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1",
+        )
+
+        sm = _make_session_manager(
+            apparmor_manager=apparmor,
+            cgroups_manager=cgroups,
+            spawn_raises=RuntimeError("spawn boom"),
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits={
+                    "memory_max_bytes": 2 * 1024**3,
+                    "pids_max": 128,
+                },
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["stage"] == "forwarding"
+        assert result["apparmor_profile"] == ""
+        assert result["cgroup_path"] == ""
+        # Both teardowns invoked.
+        cgroups.teardown_cgroup.assert_called_once_with(
+            "sess-A__sub_agent-1",
+        )
+        apparmor.teardown_sub_profile.assert_called_once_with(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+        )
+        # Handle NOT registered.
+        assert "sess-A__sub_agent-1" not in sm._isolated_sub_runners
+        # Error mentions spawn failure + rollback.
+        assert "spawn failed" in result["error"].lower()
+        assert "rolled back" in result["error"].lower()
+        assert "spawn boom" in result["error"]
+
+    def test_spawn_failure_with_cgroup_only_no_handle_left(self):
+        """Spawn failure when cgroup was provisioned but AppArmor
+        teardown crashes — still returns gracefully."""
+        apparmor = _make_default_apparmor()
+        apparmor.teardown_sub_profile.side_effect = RuntimeError(
+            "teardown boom",
+        )
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = True
+        cgroups.provision_cgroup.return_value = True
+        from pathlib import Path
+        cgroups.get_cgroup_path.return_value = Path(
+            "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1",
+        )
+
+        sm = _make_session_manager(
+            apparmor_manager=apparmor,
+            cgroups_manager=cgroups,
+            spawn_raises=RuntimeError("spawn boom"),
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits={
+                    "memory_max_bytes": 2 * 1024**3,
+                    "pids_max": 128,
+                },
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        # Helper returns gracefully even when rollback's own teardown
+        # crashes — the return shape is unchanged.
+        assert result["stage"] == "forwarding"
+        assert result["apparmor_profile"] == ""
+        # Rollback was attempted even though AppArmor teardown threw.
+        cgroups.teardown_cgroup.assert_called_once()
+        apparmor.teardown_sub_profile.assert_called_once()
+        # Handle NOT registered.
+        assert "sess-A__sub_agent-1" not in sm._isolated_sub_runners
+
+    def test_spawn_default_no_daemon_loop_returns_runtime_error_message(self):
+        """Without ``spawn_returns`` / ``spawn_raises``, the default
+        spawn helper raises ``RuntimeError`` because ``_daemon_loop``
+        isn't set.  Confirms the default test-fixture path doesn't
+        crash silently — it surfaces an error envelope."""
+        apparmor = _make_default_apparmor()
+        sm = _make_session_manager(apparmor_manager=apparmor)
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["stage"] == "forwarding"
+        assert "spawn failed" in result["error"].lower()
+        assert "daemon loop unavailable" in result["error"].lower()
