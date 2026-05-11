@@ -1451,6 +1451,14 @@ class PermissionPlugin(RunnerForwardingMixin):
                             # Mark as edited in context for UI display
                             if was_edited:
                                 request_context["was_edited"] = True
+                            # Phase 4 §4.1 (J.A): propagate the active
+                            # ``call_id`` so the runner-RPC channel can
+                            # thread it through the PromptPayload, and
+                            # the daemon's PromptOperatorHandler can
+                            # include it in PermissionInputModeEvent
+                            # for TUI per-tool-block correlation.
+                            if call_id:
+                                request_context["call_id"] = call_id
 
                             request = PermissionRequest.create(
                                 tool_name=tool_name,

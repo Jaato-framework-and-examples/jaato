@@ -183,10 +183,46 @@ async def test_input_mode_event_carries_payload_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_input_mode_call_id_is_none_path_j_a() -> None:
-    """Pin: call_id is None — Path J.A backlog (PromptPayload
-    doesn't carry call_id; follow-up if TUI per-tool-block
-    correlation surfaces the need)."""
+async def test_input_mode_call_id_propagates_from_payload() -> None:
+    """Pin: call_id propagates from PromptPayload through to the
+    emitted PermissionInputModeEvent.
+
+    Phase 4 §4.1 (J.A) closure.  Pre-§4.1 this pin asserted
+    ``call_id is None`` because PromptPayload didn't carry the
+    field.  Post-§4.1 the runner-side permission plugin populates
+    ``context['call_id']``, the runner-RPC channel reads it into
+    ``PromptPayload.call_id``, and PromptOperatorHandler threads
+    it through to ``PermissionInputModeEvent.call_id`` for TUI
+    per-tool-block correlation.
+    """
+    emitted: List[Any] = []
+    handler = PromptOperatorHandler(emitted.append)
+
+    payload = PromptPayload(
+        request_id="r-1", session_id="s-1", tool_name="cli",
+        call_id="tool-call-abc-123",
+    )
+
+    async def _resolve() -> None:
+        await asyncio.sleep(0.02)
+        handler.resolve_response("r-1", "y")
+
+    asyncio.create_task(_resolve())
+    await handler.handle(payload.to_dict())
+
+    assert emitted[1].call_id == "tool-call-abc-123", (
+        "Phase 4 §4.1 regression: call_id didn't propagate from "
+        "PromptPayload to PermissionInputModeEvent.  TUI cannot "
+        "correlate the permission prompt to its per-tool-block "
+        "widget when parallel tools are in flight."
+    )
+
+
+@pytest.mark.asyncio
+async def test_input_mode_call_id_defaults_to_none_when_omitted() -> None:
+    """Pin: when the runner doesn't populate call_id (legacy/
+    forward-compat scenarios), PermissionInputModeEvent.call_id
+    is None — preserves the Path J.A backward-compat contract."""
     emitted: List[Any] = []
     handler = PromptOperatorHandler(emitted.append)
 

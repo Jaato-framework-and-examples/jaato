@@ -177,9 +177,19 @@ class RunnerRPCChannel(Channel):
         # the Channel ABC unchanged.
         session_id = ""
         agent_id = ""
+        call_id: Optional[str] = None
         if isinstance(request.context, dict):
             session_id = str(request.context.get("session_id", "") or "")
             agent_id = str(request.context.get("agent_id", "") or "")
+            # Phase 4 §4.1 (J.A): tool-call correlator threaded via
+            # context dict (same channel-ABC-stable pattern as
+            # session_id/agent_id).  The runner-side permission
+            # plugin populates this when a permission check fires
+            # from inside an active tool call.  None for ASKs not
+            # bound to a specific call.
+            ctx_call_id = request.context.get("call_id")
+            if isinstance(ctx_call_id, str) and ctx_call_id:
+                call_id = ctx_call_id
 
         # Choose the response-options list the daemon-side handler
         # will advertise to the connected client.
@@ -200,6 +210,7 @@ class RunnerRPCChannel(Channel):
             tool_args=dict(request.arguments),
             response_options=response_options_dicts,
             agent_id=agent_id,
+            call_id=call_id,
         )
 
         try:

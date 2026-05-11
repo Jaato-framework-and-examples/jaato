@@ -158,18 +158,20 @@ class PromptOperatorHandler:
         # this emit the user's 'y' keypress is queued as a chat
         # message instead of an ASK response.
         #
-        # Field gaps documented as backlog (Path J.A/B):
-        # - call_id: PromptPayload doesn't carry the tool's call_id;
-        #   set to None.  Follow-up if TUI per-tool-block correlation
-        #   surfaces the need.
-        # - editable_metadata: requires permission_plugin reference
-        #   for schema lookup; set to None.  Follow-up if editing
-        #   flow surfaces the need.
+        # Phase 4 §4.1 (J.A): ``call_id`` now propagates from the
+        # runner-side ASK origin via ``PromptPayload.call_id``.
+        # TUI uses this for per-tool-block correlation when multiple
+        # tools are in flight simultaneously.
+        #
+        # Field gap documented as backlog (Path J.B): editable_metadata
+        # still requires permission_plugin reference for schema
+        # lookup; set to None.  Follow-up §4.2 if editing flow
+        # surfaces the need.
         input_mode_event = PermissionInputModeEvent(
             agent_id=payload.agent_id,
             request_id=payload.request_id,
             tool_name=payload.tool_name,
-            call_id=None,
+            call_id=payload.call_id,
             response_options=list(payload.response_options),
             tool_args=dict(payload.tool_args) if payload.tool_args else None,
             editable_metadata=None,

@@ -63,6 +63,17 @@ class PromptPayload:
         warning_level: ``"info"`` / ``"warning"`` / ``"error"``.
         agent_id: Agent identifier (for cascade workloads where
             multiple agents hit the same client).
+        call_id: Tool-call correlator (Phase 4 §4.1 / J.A).  When the
+            ASK fires from inside a tool's permission check, the
+            runner's permission plugin propagates the active
+            ``call_id`` here so the daemon's
+            ``PromptOperatorHandler`` can include it in the emitted
+            :class:`PermissionInputModeEvent` — letting the TUI
+            correlate the permission prompt to its per-tool-block
+            display widget.  ``None`` for ASKs not bound to a
+            specific tool call (currently no such site exists; the
+            field is ``Optional`` to preserve forward-compat with
+            future operator-prompt channels).
     """
 
     request_id: str
@@ -75,6 +86,7 @@ class PromptPayload:
     warnings: Optional[str] = None
     warning_level: Optional[str] = None
     agent_id: str = ""
+    call_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -88,6 +100,7 @@ class PromptPayload:
             "warnings": self.warnings,
             "warning_level": self.warning_level,
             "agent_id": self.agent_id,
+            "call_id": self.call_id,
         }
 
     @classmethod
@@ -103,6 +116,9 @@ class PromptPayload:
             warnings=d.get("warnings"),
             warning_level=d.get("warning_level"),
             agent_id=str(d.get("agent_id", "")),
+            # Path 4 §4.1: backward-compat — older runners that
+            # don't populate call_id deserialize to None.
+            call_id=d.get("call_id"),
         )
 
 
