@@ -50,6 +50,34 @@ plan. Promote to a feature branch / ticket when work is ready to start.
   bootstrap that emits notification frames matching the AgentUIHooks
   protocol surface.
 
+### §3.11 isolated-subagent opt-in (`agent_params.isolated: true` → fresh runner)
+
+- **Design**: [docs/design/per_session_confined_runner.md §3.11](design/per_session_confined_runner.md)
+- **Status**: Termination-hook portion shipped (subagent termination hook +
+  reliability cleanup at `subagent/plugin.py:118` + M4 plumbing).  Isolation-
+  opt-in portion deferred — was gated on the §7c seat-flip, which shipped
+  at commit `a922082f`.  Not in scope for §7d.
+- **Summary**: Subagents currently share the parent's runner subprocess
+  per §4.3 default.  The §3.11 spec adds an opt-in via `agent_params.isolated:
+  true` that spawns a fresh runner subprocess with its own sub-profile
+  (AppArmor + cgroup).  Cross-grep at §7d audit time (commit `b16d31f3`):
+  no production sites found for `agent_params.*isolated` /
+  `isolated_subagent` — the architectural prerequisite (seat-flip) is
+  satisfied but the opt-in path isn't wired.
+- **Why it matters**: Enables stronger isolation for untrusted subagent
+  workloads (e.g., model-generated code execution under a tighter sandbox
+  than the parent's profile permits).  Important for jaato-as-a-service
+  deployments where subagents may run partially-trusted plugins.
+- **Likely fix shape**: Extend `SubagentPlugin._spawn_subagent` to detect
+  the `agent_params.isolated: true` flag; route through
+  `SessionManager.create_session(...)` with a fresh `RunnerSpawner.spawn`
+  invocation (the §7d cgroup-attach plumbing is already in place); wire a
+  sub-AppArmor-profile / sub-cgroup naming scheme (e.g.,
+  `jaato-ws-<parent>-sub-<n>`).
+- **Out of scope**: Default-share vs opt-in-isolation policy semantics —
+  the spec already settled "default-share for parity with pre-§3.11
+  behavior; isolation is opt-in only."
+
 ### Daemon-side description-callback hook is silently broken post-6.6.4.3b
 
 - **Design**: [docs/design/project_backlog_description_callback_gap.md](design/project_backlog_description_callback_gap.md)
