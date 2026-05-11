@@ -197,15 +197,17 @@ def build_session_envelope(
         model_name = getattr(profile, "model", None) or ""
         names = list(getattr(profile, "plugins", []) or [])
         preloaded = set(getattr(profile, "preloaded_plugins", set()) or set())
-        plugin_configs_dict = dict(
-            getattr(profile, "plugin_configs", {}) or {},
-        )
+        # Phase 4 §C: carry the full profile.plugin_configs at the
+        # envelope's top level (schema v2) so auto-loaded plugins not
+        # named in profile.plugins (e.g. permission) receive their
+        # profile overrides.  Closes backlog §3.3c.X.  Per-entry
+        # ``config`` is no longer set — entries are {name, preload} only.
+        plugin_configs_dict = {
+            k: dict(v)
+            for k, v in (getattr(profile, "plugin_configs", {}) or {}).items()
+        }
         for name in names:
-            entry: dict = {"name": name, "preload": name in preloaded}
-            cfg = plugin_configs_dict.get(name)
-            if cfg:
-                entry["config"] = dict(cfg)
-            plugin_specs.append(entry)
+            plugin_specs.append({"name": name, "preload": name in preloaded})
         system_instructions = getattr(profile, "system_instructions", None)
         gc_obj = getattr(profile, "gc", None)
         if gc_obj is not None:
@@ -248,6 +250,7 @@ def build_session_envelope(
         provider_name=provider_name,
         model_name=model_name,
         plugins=plugin_specs,
+        plugin_configs=plugin_configs_dict,
         system_instructions=system_instructions,
         agent_id="main",
         gc=gc_dict,

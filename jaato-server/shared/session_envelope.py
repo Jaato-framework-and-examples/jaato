@@ -45,7 +45,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 # Bumped per schema change.  Runners refuse a higher-version
 # envelope from the daemon (forward-compat is opt-in, not free).
-SESSION_ENVELOPE_VERSION = 1
+SESSION_ENVELOPE_VERSION = 2
 
 
 @dataclass
@@ -79,9 +79,18 @@ class SessionInitEnvelope:
             should instantiate.  Each entry is a dict carrying
             ``name`` (str) + ``preload`` (bool — Phase 2 carries
             this via ``"name(preload)"`` syntax; Phase 3 normalizes
-            to typed dict) + optional ``config`` (dict).  The
-            daemon's profile resolver expands ``signal_completion(preload)``
-            shorthand into the typed form before sending.
+            to typed dict).  Per-plugin configs live in
+            ``plugin_configs`` (Phase 4 §C) — a top-level dict that
+            carries the full ``profile.plugin_configs`` map so
+            auto-loaded plugins (``permission``, ``gc_*``, etc.) that
+            aren't in this list still receive their profile overrides.
+        plugin_configs: Map of plugin name → config dict, mirroring
+            ``profile.plugin_configs``.  Carries configs for **all**
+            plugins the profile names — including ones the runner
+            auto-loads without them appearing in ``plugins``.  Pre-§C
+            the per-plugin config lived in ``plugins[i].config`` and
+            was dropped for non-listed plugins; this field closes that
+            gap (backlog §3.3c.X).  Schema v2.
         system_instructions: Resolved system-instructions text the
             runner installs onto the JaatoSession.  ``None`` for
             sessions that compose instructions on-the-fly via
@@ -122,6 +131,12 @@ class SessionInitEnvelope:
     provider_name: str
     model_name: str
     plugins: List[Dict[str, Any]] = field(default_factory=list)
+    # Phase 4 §C: top-level plugin configs map (replaces per-entry
+    # ``plugins[i].config`` which only carried configs for plugins
+    # named in ``plugins``).  Carries the full ``profile.plugin_configs``
+    # so auto-loaded plugins like ``permission`` receive their profile
+    # overrides too.  Schema v2 — old runners refuse v2 envelopes.
+    plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     system_instructions: Optional[str] = None
     agent_id: str = "main"
     gc: Optional[Dict[str, Any]] = None
@@ -158,6 +173,7 @@ class SessionInitEnvelope:
             "provider_name": self.provider_name,
             "model_name": self.model_name,
             "plugins": [dict(p) for p in self.plugins],
+            "plugin_configs": {k: dict(v) for k, v in self.plugin_configs.items()},
             "system_instructions": self.system_instructions,
             "agent_id": self.agent_id,
             "gc": dict(self.gc) if self.gc is not None else None,
@@ -203,6 +219,10 @@ class SessionInitEnvelope:
             provider_name=str(d.get("provider_name", "")),
             model_name=str(d.get("model_name", "")),
             plugins=[dict(p) for p in (d.get("plugins") or [])],
+            plugin_configs={
+                k: dict(v)
+                for k, v in (d.get("plugin_configs") or {}).items()
+            },
             system_instructions=d.get("system_instructions"),
             agent_id=str(d.get("agent_id", "main")),
             gc=dict(d["gc"]) if d.get("gc") else None,

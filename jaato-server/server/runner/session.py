@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Protocol, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Protocol, TYPE_CHECKING
 
 from shared.session_envelope import SessionInitEnvelope
 
@@ -224,11 +224,14 @@ def _configure_runtime_plugins(
             "session_id": session_id,
         },
     }
-    # Merge envelope-supplied per-plugin configs from
-    # build_session_envelope (runner_spawn.py:200-208).
-    for entry in envelope.plugins:
-        name = entry.get("name")
-        cfg = entry.get("config")
+    # Phase 4 §C: merge profile.plugin_configs into the runner-side
+    # per-plugin init dict.  Reads from envelope.plugin_configs (the
+    # full top-level map) instead of the per-entry plugins[i].config
+    # that pre-§C only carried configs for plugins named in
+    # profile.plugins.  This is what lets auto-loaded plugins like
+    # ``permission`` (loaded below by name even when not in
+    # profile.plugins) pick up their profile overrides.
+    for name, cfg in envelope.plugin_configs.items():
         if isinstance(name, str) and name and isinstance(cfg, dict) and cfg:
             existing = plugin_configs.get(name, {})
             plugin_configs[name] = {**existing, **dict(cfg)}
@@ -247,10 +250,12 @@ def _configure_runtime_plugins(
         registry.set_config_root(envelope.config_root)
 
     # Step 8: permission plugin.  Default policy mirrors daemon-side
-    # `core.py:1712-1721` baseline; profile overrides not yet
-    # propagated through the envelope (backlog §3.3c.X).
-    permission_plugin = PermissionPlugin()
-    permission_plugin.initialize({
+    # `core.py:1778-1794` baseline; profile-supplied
+    # ``plugin_configs.permission`` overrides are now applied via the
+    # Phase 4 §C envelope.plugin_configs field (schema v2).  Shallow
+    # merge: top-level keys from the profile (most commonly ``policy``)
+    # replace defaults.  Mirrors daemon-side ``permission_init_config.update(...)``.
+    permission_init_config: Dict[str, Any] = {
         "channel_type": "queue",
         "channel_config": {"use_colors": False},
         "workspace_path": workspace_path,
@@ -259,7 +264,12 @@ def _configure_runtime_plugins(
             "whitelist": {"tools": [], "patterns": []},
             "blacklist": {"tools": [], "patterns": []},
         },
-    })
+    }
+    profile_perm_config = envelope.plugin_configs.get("permission")
+    if profile_perm_config:
+        permission_init_config.update(profile_perm_config)
+    permission_plugin = PermissionPlugin()
+    permission_plugin.initialize(permission_init_config)
 
     # Step 9: wire onto the runtime.  ``ledger=None`` because token
     # accounting is daemon-tier per §4.2.
@@ -453,18 +463,20 @@ def _build_session(
     ``preloaded_plugins=...``.
     """
     tool_names: List[str] = []
-    plugin_configs: dict = {}
     preloaded: set = set()
     for entry in envelope.plugins:
         name = entry.get("name")
         if not isinstance(name, str) or not name:
             raise ValueError(f"plugin entry missing 'name': {entry!r}")
         tool_names.append(name)
-        cfg = entry.get("config")
-        if isinstance(cfg, dict) and cfg:
-            plugin_configs[name] = dict(cfg)
         if entry.get("preload"):
             preloaded.add(name)
+    # Phase 4 §C: per-plugin configs come from the top-level
+    # envelope.plugin_configs map (schema v2); shallow-copy so the
+    # callee can't mutate the envelope's dict.
+    plugin_configs: dict = {
+        k: dict(v) for k, v in envelope.plugin_configs.items()
+    }
 
     return runtime.create_session(
         model=envelope.model_name,
