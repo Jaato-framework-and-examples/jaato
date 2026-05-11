@@ -642,6 +642,13 @@ plugin_configs:
       enable_thinking: true        # extended-reasoning request + extraction
       thinking_budget: 16384       # → reasoning.max_tokens
       thinking_level: "high"       # → reasoning.effort (low/medium/high)
+      cache_prompt: "auto"         # "auto" (default) / true / false —
+                                   # stamps cache_control breakpoints on the
+                                   # system block and last tool definition
+                                   # (Anthropic / Gemini upstreams).  See
+                                   # https://openrouter.ai/docs/features/prompt-caching
+      cache_ttl: "5m"              # "5m" (default) or "1h" (2x write
+                                   # premium, no mid-session cache miss)
 
     # routing — OpenRouter `provider` extension; forwarded via extra_body
     routing:
@@ -662,7 +669,7 @@ plugin_configs:
 | Layer | Keys | Purpose |
 |-------|------|---------|
 | top-level | `api_key`, `http_referer`, `app_title` | auth / identity |
-| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget`, `thinking_level` | OpenAI Chat Completions body fields. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl` | OpenAI Chat Completions body fields. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. |
 | `routing` | OpenRouter [provider routing](https://openrouter.ai/docs/features/provider-routing) keys | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts). |
 | `framework_overrides` | `context_length`, `base_url` | rare escape hatches; normally context length is discovered from the OpenRouter catalog at connect time. |
 

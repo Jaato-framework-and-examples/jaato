@@ -75,13 +75,20 @@ from jaato_sdk.plugins.model_provider.types import (
     ThinkingConfig,
     TurnResult,
 )
+from .cache import (
+    make_cache_control,
+    model_supports_explicit_cache,
+    resolve_cache_active,
+)
 from .converters import (
+    apply_cache_usage,
     deserialize_history as _deserialize_history,
     get_original_tool_name,
     history_to_openai,
     map_finish_reason,
     response_from_openai,
     serialize_history as _serialize_history,
+    system_message_with_cache,
     tool_schemas_to_openai,
 )
 from .env import (
@@ -197,6 +204,21 @@ class OpenRouterProvider:
         # Anthropic provider's default.
         self._enable_thinking: bool = False
 
+        # Prompt-caching configuration.  ``_cache_prompt`` is the raw
+        # profile knob (``"auto"`` | True | False | "on"/"off"/...);
+        # :func:`resolve_cache_active` interprets it against the active
+        # model to decide whether to stamp ``cache_control`` breakpoints
+        # on outgoing requests.  ``_cache_ttl`` selects the 5-minute
+        # (default) or 1-hour ephemeral cache.
+        #
+        # Cache usage parsing (``prompt_tokens_details.cached_tokens``,
+        # ``cache_creation_input_tokens``, ``cost``) is unconditional —
+        # automatic-cache upstreams (OpenAI, DeepSeek, Grok) report
+        # savings even without breakpoints, and the daemon's ledger
+        # should reflect them either way.
+        self._cache_prompt: Any = "auto"
+        self._cache_ttl: str = "5m"
+
         # Agent context for trace identification
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
@@ -246,6 +268,13 @@ class OpenRouterProvider:
         - ``api_params`` (OpenAI Chat Completions request body fields):
             - ``temperature``, ``top_p``, ``top_k``, ``max_tokens``
             - ``enable_thinking``, ``thinking_budget``, ``thinking_level``
+            - ``cache_prompt`` (``"auto"`` / True / False; default
+              ``"auto"`` enables explicit caching only for upstreams
+              that need ``cache_control`` breakpoints — Anthropic
+              Claude, Gemini 1.5/2.5/3 — and lets other upstreams
+              cache automatically)
+            - ``cache_ttl`` (``"5m"`` default, ``"1h"`` for the
+              extended-TTL variant)
         - ``routing`` (OpenRouter ``provider`` extension — a dict
           forwarded verbatim via ``extra_body`` on every request):
             - ``order``, ``allow_fallbacks``, ``require_parameters``,
@@ -407,6 +436,24 @@ class OpenRouterProvider:
                     f"'low' / 'medium' / 'high', got {level_extra!r}"
                 )
             self._thinking_level = level_str
+
+        # Prompt-caching knobs live alongside the other request-body
+        # params.  ``cache_prompt`` defaults to ``"auto"`` (on for
+        # explicit-cache upstreams, off otherwise).  ``cache_ttl`` of
+        # ``"1h"`` opts in to the extended-TTL variant (double write
+        # premium, but no mid-session cache miss on hour-long agents).
+        cache_prompt_extra = _knob("cache_prompt", layer=api_params)
+        if cache_prompt_extra is not None:
+            self._cache_prompt = cache_prompt_extra
+        cache_ttl_extra = _knob("cache_ttl", layer=api_params)
+        if cache_ttl_extra is not None:
+            ttl_str = str(cache_ttl_extra).lower()
+            if ttl_str not in ("5m", "1h"):
+                raise ValueError(
+                    "OpenRouter 'cache_ttl' must be '5m' or '1h', "
+                    f"got {cache_ttl_extra!r}"
+                )
+            self._cache_ttl = ttl_str
 
         if not self._api_key:
             raise APIKeyNotFoundError(
@@ -648,6 +695,15 @@ class OpenRouterProvider:
                     return ctx
         return None
 
+    def _caching_active(self) -> bool:
+        """Whether to stamp ``cache_control`` breakpoints on this request.
+
+        Resolved against the active model: ``"auto"`` only flips on for
+        explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+), while
+        an explicit True / False profile setting wins regardless.
+        """
+        return resolve_cache_active(self._cache_prompt, self._model_name)
+
     def _build_extra_body(self) -> Dict[str, Any]:
         """Build OpenRouter-specific top-level body fields for each request.
 
@@ -680,6 +736,11 @@ class OpenRouterProvider:
                 reasoning["max_tokens"] = self._thinking_budget
             if reasoning:
                 body["reasoning"] = reasoning
+        # Opt in to OpenRouter's detailed usage block.  Cost and the
+        # cache-creation token count are only emitted when this flag is
+        # set; standard ``prompt_tokens_details.cached_tokens`` comes
+        # back regardless but the opt-in costs us nothing extra.
+        body["usage"] = {"include": True}
         return body
 
     # ==================== Stateless Completion ====================
@@ -707,14 +768,21 @@ class OpenRouterProvider:
                 "Provider not connected. Call initialize() and connect() first."
             )
 
+        cache_active = self._caching_active()
+        cache_control = make_cache_control(self._cache_ttl) if cache_active else None
+
         openai_messages: List[Dict[str, Any]] = []
         if system_instruction:
-            openai_messages.append({"role": "system", "content": system_instruction})
+            openai_messages.append(
+                system_message_with_cache(system_instruction, cache_control)
+            )
         openai_messages.extend(history_to_openai(list(messages)))
 
         kwargs: Dict[str, Any] = {}
         if tools:
-            openai_tools = tool_schemas_to_openai(tools)
+            openai_tools = tool_schemas_to_openai(
+                tools, cache_control=cache_control,
+            )
             if openai_tools:
                 kwargs["tools"] = openai_tools
         if response_schema:
@@ -855,9 +923,12 @@ class OpenRouterProvider:
                             output_tokens=chunk.usage.completion_tokens or 0,
                             total_tokens=chunk.usage.total_tokens or 0,
                         )
+                        apply_cache_usage(chunk.usage, usage)
                         self._trace(
                             f"{trace_prefix}_USAGE prompt={usage.prompt_tokens} "
-                            f"output={usage.output_tokens}"
+                            f"output={usage.output_tokens} "
+                            f"cache_read={usage.cache_read_tokens or 0} "
+                            f"cache_write={usage.cache_creation_tokens or 0}"
                         )
                         if on_usage_update and usage.total_tokens > 0:
                             on_usage_update(usage)
@@ -921,6 +992,7 @@ class OpenRouterProvider:
                         output_tokens=chunk.usage.completion_tokens or 0,
                         total_tokens=chunk.usage.total_tokens or 0,
                     )
+                    apply_cache_usage(chunk.usage, usage)
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
 

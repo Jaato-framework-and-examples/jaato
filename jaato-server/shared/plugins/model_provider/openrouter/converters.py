@@ -124,11 +124,53 @@ def tool_schema_to_openai(schema: ToolSchema) -> Dict[str, Any]:
 
 def tool_schemas_to_openai(
     schemas: Optional[List[ToolSchema]],
+    *,
+    cache_control: Optional[Dict[str, str]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Convert a list of ``ToolSchema`` objects to OpenAI tool definitions."""
+    """Convert a list of ``ToolSchema`` objects to OpenAI tool definitions.
+
+    When ``cache_control`` is provided, the tools are sorted by name (so
+    the cache prefix is stable across sessions) and the dict is stamped
+    onto the **last** tool object as a sibling of ``type`` / ``function``
+    — that's the wire shape OpenRouter forwards to Anthropic/Gemini for
+    tool-catalog caching.  Sorting matters: the cache prefix invalidates
+    if tool registration order shifts between turns, so we always
+    canonicalise to alphabetical when caching.
+    """
     if not schemas:
         return None
-    return [tool_schema_to_openai(s) for s in schemas]
+    converted = [tool_schema_to_openai(s) for s in schemas]
+    if cache_control:
+        converted.sort(key=lambda t: t["function"]["name"])
+        converted[-1] = {**converted[-1], "cache_control": dict(cache_control)}
+    return converted
+
+
+def system_message_with_cache(
+    text: str,
+    cache_control: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Build a system message, optionally annotated for prompt caching.
+
+    Without ``cache_control`` this returns the standard flat OpenAI
+    shape (``{"role": "system", "content": "<text>"}``) so the wire
+    stays minimal.  With ``cache_control``, the content is promoted to
+    a content-part list with the breakpoint on the last part — that's
+    the form OpenRouter requires for explicit caching on Anthropic and
+    Gemini upstreams.
+    """
+    if not cache_control:
+        return {"role": "system", "content": text}
+    return {
+        "role": "system",
+        "content": [
+            {
+                "type": "text",
+                "text": text,
+                "cache_control": dict(cache_control),
+            }
+        ],
+    }
 
 
 # ==================== Message Conversion ====================
@@ -376,17 +418,95 @@ def extract_finish_reason(response: "ChatCompletion") -> FinishReason:
 
 
 def extract_usage(response: "ChatCompletion") -> TokenUsage:
-    """Extract token usage from an OpenAI response."""
+    """Extract token usage from an OpenAI response.
+
+    In addition to the standard prompt / completion / total counts, this
+    pulls the OpenRouter prompt-caching telemetry when present:
+
+    - ``prompt_tokens_details.cached_tokens`` — tokens served from cache
+      (90% Anthropic discount, varying for other upstreams).  Surfaced
+      via :attr:`TokenUsage.cache_read_tokens`.
+    - ``cache_creation_input_tokens`` — Anthropic-via-OpenRouter
+      passthrough indicating bytes written to cache on this turn (1.25x
+      premium for 5-minute TTL, 2x for 1-hour).  Surfaced via
+      :attr:`TokenUsage.cache_creation_tokens`.
+
+    The OpenAI SDK doesn't have typed fields for OpenRouter's extras,
+    so we use ``getattr`` with the dict-/Pydantic-aware
+    :func:`_read_usage_extra` helper instead of touching ``model_extra``
+    directly — the same accessor works on real ``CompletionUsage``
+    objects and on the ``MagicMock`` doubles tests use.
+    """
     usage = TokenUsage()
 
     if not response or not response.usage:
         return usage
 
-    usage.prompt_tokens = response.usage.prompt_tokens or 0
-    usage.output_tokens = response.usage.completion_tokens or 0
-    usage.total_tokens = response.usage.total_tokens or 0
+    raw_usage = response.usage
+    usage.prompt_tokens = getattr(raw_usage, "prompt_tokens", 0) or 0
+    usage.output_tokens = getattr(raw_usage, "completion_tokens", 0) or 0
+    usage.total_tokens = getattr(raw_usage, "total_tokens", 0) or 0
+    apply_cache_usage(raw_usage, usage)
 
     return usage
+
+
+def _read_usage_extra(raw_usage: Any, key: str) -> Optional[Any]:
+    """Read an OpenRouter-specific usage field that the OpenAI SDK
+    doesn't model with a typed attribute.
+
+    Tries (in order): direct ``getattr`` (works for ``MagicMock`` /
+    ``SimpleNamespace`` and any future SDK update that adds the field),
+    then ``model_extra`` (Pydantic's bag for unknown fields on the
+    real ``CompletionUsage``).  Returns ``None`` when neither carries
+    the key — caller treats that as "field not reported".
+    """
+    if raw_usage is None:
+        return None
+    direct = getattr(raw_usage, key, None)
+    if direct is not None:
+        return direct
+    extra = getattr(raw_usage, "model_extra", None)
+    if isinstance(extra, dict):
+        return extra.get(key)
+    return None
+
+
+def apply_cache_usage(raw_usage: Any, usage: TokenUsage) -> None:
+    """Populate the cache-related fields on ``usage`` from a raw usage object.
+
+    Mutates ``usage`` in place so the same helper works for the batch
+    path (:func:`extract_usage`) and both streaming usage updates in
+    :meth:`OpenRouterProvider._stream_response`.  Silent on missing
+    fields — older OpenRouter responses (and non-cache-capable
+    upstreams) simply leave the optional ``cache_*`` attributes as
+    ``None``.
+    """
+    if raw_usage is None:
+        return
+
+    details = getattr(raw_usage, "prompt_tokens_details", None)
+    cached_tokens: Optional[int] = None
+    if details is not None:
+        candidate = getattr(details, "cached_tokens", None)
+        if candidate is None and isinstance(details, dict):
+            candidate = details.get("cached_tokens")
+        if isinstance(candidate, int) and candidate > 0:
+            cached_tokens = candidate
+    if cached_tokens is not None:
+        usage.cache_read_tokens = cached_tokens
+
+    creation = _read_usage_extra(raw_usage, "cache_creation_input_tokens")
+    if isinstance(creation, int) and creation > 0:
+        usage.cache_creation_tokens = creation
+
+    # OpenRouter exposes cost telemetry via ``cost`` (USD) and a derived
+    # ``cache_discount`` (negative number = savings).  We forward ``cost``
+    # into the framework's ``cost_usd`` field so per-turn accounting
+    # reflects the actual gateway charge after cache savings.
+    cost = _read_usage_extra(raw_usage, "cost")
+    if isinstance(cost, (int, float)) and cost >= 0:
+        usage.cost_usd = float(cost)
 
 
 def extract_reasoning_from_response(response: "ChatCompletion") -> Optional[str]:
