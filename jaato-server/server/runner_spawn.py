@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 
 if TYPE_CHECKING:  # pragma: no cover — types only
@@ -58,6 +58,7 @@ def spawn_session_runner(
     profile_name: str,
     daemon_loop: asyncio.AbstractEventLoop,
     disable_confine: bool = False,
+    cgroup_attach: Optional[Callable[[], None]] = None,
 ) -> None:
     """Spawn the per-session runner subprocess and wire its RPC handle
     onto the JaatoServer.
@@ -81,6 +82,14 @@ def spawn_session_runner(
             profile applied.  The runner-RPC dispatch surface is
             still available; the trade-off is process isolation
             without kernel-enforced FS confinement.
+        cgroup_attach: Phase 3 §7d — optional zero-arg callable
+            forwarded to ``RunnerSpawner.spawn`` to migrate the
+            forked child into the per-session cgroup before exec.
+            Caller (the WS pre-init hook) obtains via
+            ``CgroupsManager.make_attach_callback(session_id)``
+            after provisioning the cgroup.  ``None`` means no
+            cgroup attach — the IPC session path (no cgroup
+            provisioned) passes ``None``.
 
     Raises:
         RuntimeError: when *daemon_loop* is None or the runner-RPC
@@ -112,6 +121,7 @@ def spawn_session_runner(
         workspace_path=workspace_path,
         log_path=log_path,
         disable_confine=disable_confine,
+        cgroup_attach=cgroup_attach,
     )
 
     rpc = RunnerRPCClient(

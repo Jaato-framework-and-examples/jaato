@@ -600,6 +600,240 @@ class TestRealKernel:
             os.waitpid(pid, 0)
             assert not cg.exists()
 
+    # ------------------------------------------------------------------
+    # §7d cgroup inheritance pins
+    # ------------------------------------------------------------------
+
+    def test_runner_spawn_attaches_to_session_cgroup(self, real_manager):
+        """§7d integration pin (1/3): a runner spawned with
+        ``cgroup_attach`` from CgroupsManager.make_attach_callback
+        lands in the session cgroup, not the daemon's parent
+        cgroup.
+
+        Validates the architectural pivot: instead of wiring
+        per-Popen attach_cb preexec_fn's on plugin-side
+        subprocess launchers, the runner itself is in the
+        cgroup at exec time.  Children inherit by default per
+        cgroup-v2 kernel contract.
+        """
+        from server.runner_spawner import RunnerSpawner
+
+        real_manager.provision_cgroup(
+            "spawn1", RuntimeLimits(memory_max_mb=128, pids_max=32),
+        )
+        attach_cb = real_manager.make_attach_callback("spawn1")
+        spawner = RunnerSpawner()
+
+        # The spawner refuses to fork from a confined daemon
+        # thread.  In test contexts the thread is unconfined
+        # (Linux without apparmor, or apparmor without per-thread
+        # confinement).  ``disable_confine=True`` skips the
+        # runner-side aa_change_profile step too.
+        spawned = spawner.spawn(
+            profile_name="",
+            session_id="spawn1",
+            workspace_path=None,
+            disable_confine=True,
+            cgroup_attach=attach_cb,
+        )
+        try:
+            # Read /proc/<pid>/cgroup — single-line cgroup v2
+            # format is ``0::/<path>``.  The runner's path must
+            # be the session cgroup.
+            with open(f"/proc/{spawned.pid}/cgroup") as f:
+                cgroup_line = f.read().strip()
+            expected_path = str(
+                real_manager.get_cgroup_path("spawn1")
+            )
+            # /proc/<pid>/cgroup reports the path relative to
+            # the cgroup mount (``/sys/fs/cgroup``); strip the
+            # mount prefix for comparison.
+            mount_prefix = "/sys/fs/cgroup"
+            expected_rel = expected_path
+            if expected_rel.startswith(mount_prefix):
+                expected_rel = expected_rel[len(mount_prefix):]
+            assert (
+                expected_rel in cgroup_line
+            ), (
+                f"runner pid {spawned.pid} expected in cgroup "
+                f"path {expected_rel!r}; /proc reported "
+                f"{cgroup_line!r}"
+            )
+        finally:
+            # Reap the runner.  It's blocked on read_frame from
+            # the parent socket; closing the socket triggers EOF
+            # and the runner exits cleanly.
+            try:
+                spawned.parent_socket.close()
+            except Exception:
+                pass
+            try:
+                os.waitpid(spawned.pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+            real_manager.teardown_cgroup("spawn1")
+
+    def test_runner_child_inherits_cgroup(self, real_manager):
+        """§7d integration pin (2/3): a subprocess spawned BY the
+        runner inherits the runner's cgroup placement
+        automatically — no per-Popen preexec_fn needed.
+
+        Simulates the cli plugin's subprocess-spawning path:
+        the runner is in the cgroup; ``Popen(...)`` from inside
+        the runner forks a child that the kernel places in the
+        same cgroup by inheritance.
+
+        Test shape: fork ourselves (impersonating the runner),
+        attach to the cgroup, then fork a grandchild (the
+        ``cli`` subprocess); read the grandchild's
+        /proc/<pid>/cgroup and assert it matches.
+        """
+        real_manager.provision_cgroup(
+            "inherit1", RuntimeLimits(memory_max_mb=128, pids_max=32),
+        )
+        attach_cb = real_manager.make_attach_callback("inherit1")
+        cg_path = str(real_manager.get_cgroup_path("inherit1"))
+
+        # Communicate the grandchild pid back via a pipe.
+        rfd, wfd = os.pipe()
+
+        runner_pid = os.fork()
+        if runner_pid == 0:
+            # ----- impersonate the runner -----
+            os.close(rfd)
+            try:
+                attach_cb()  # join the session cgroup
+                # Fork a "cli subprocess".
+                child_pid = os.fork()
+                if child_pid == 0:
+                    # The grandchild: write our pid back + sleep.
+                    os.write(wfd, str(os.getpid()).encode())
+                    os.close(wfd)
+                    time.sleep(2.0)
+                    os._exit(0)
+                # Runner waits for the grandchild.
+                os.close(wfd)
+                os.waitpid(child_pid, 0)
+                os._exit(0)
+            except BaseException:
+                os._exit(127)
+
+        # ----- parent: read the grandchild's pid -----
+        os.close(wfd)
+        try:
+            grandchild_pid_bytes = os.read(rfd, 64)
+            grandchild_pid = int(grandchild_pid_bytes.decode())
+
+            # The grandchild's cgroup file must match the
+            # runner's cgroup — inheritance.
+            with open(f"/proc/{grandchild_pid}/cgroup") as f:
+                grandchild_cgroup = f.read().strip()
+            mount_prefix = "/sys/fs/cgroup"
+            expected_rel = cg_path
+            if expected_rel.startswith(mount_prefix):
+                expected_rel = expected_rel[len(mount_prefix):]
+            assert (
+                expected_rel in grandchild_cgroup
+            ), (
+                f"grandchild pid {grandchild_pid} expected in "
+                f"cgroup {expected_rel!r}; /proc reported "
+                f"{grandchild_cgroup!r} — cgroup v2 inheritance "
+                f"didn't hold"
+            )
+        finally:
+            os.close(rfd)
+            try:
+                os.waitpid(runner_pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+            real_manager.teardown_cgroup("inherit1")
+
+    def test_runner_pty_grandchild_inherits_cgroup(self, real_manager):
+        """§7d integration pin (3/3): PTY-stress case — peer-
+        review v2 observation #2's "grandchild inheritance"
+        worry.
+
+        ``interactive_shell`` plugin spawns a PTY (pexpect-style
+        ``fork()`` + ``setsid()``+``ioctl(TIOCSCTTY)``); that PTY's
+        child shell spawns further commands (e.g., ``ls`` inside
+        the shell).  Three levels of inheritance:
+        runner → PTY child → grandchild command.
+
+        Test shape: simulate the chain via plain fork()'s with
+        an intermediate process.  Pin all three pids end up in
+        the same cgroup.
+
+        Note: real PTYs (``os.openpty()`` + setsid()) wouldn't
+        change cgroup membership — cgroup v2 inheritance is
+        tied to fork() / clone(), not to terminal session
+        ownership.  But the kernel contract is what we're
+        pinning; this test is the stress case for that
+        contract.
+        """
+        real_manager.provision_cgroup(
+            "pty1", RuntimeLimits(memory_max_mb=128, pids_max=64),
+        )
+        attach_cb = real_manager.make_attach_callback("pty1")
+        cg_path = str(real_manager.get_cgroup_path("pty1"))
+
+        # Pipe back the grandchild's pid (level-3 process).
+        rfd, wfd = os.pipe()
+
+        l1_pid = os.fork()
+        if l1_pid == 0:
+            # ----- level 1: the runner -----
+            os.close(rfd)
+            try:
+                attach_cb()
+                l2_pid = os.fork()
+                if l2_pid == 0:
+                    # ----- level 2: the PTY child shell -----
+                    try:
+                        l3_pid = os.fork()
+                        if l3_pid == 0:
+                            # ----- level 3: the grandchild command -----
+                            os.write(wfd, str(os.getpid()).encode())
+                            os.close(wfd)
+                            time.sleep(2.0)
+                            os._exit(0)
+                        os.close(wfd)
+                        os.waitpid(l3_pid, 0)
+                        os._exit(0)
+                    except BaseException:
+                        os._exit(127)
+                os.close(wfd)
+                os.waitpid(l2_pid, 0)
+                os._exit(0)
+            except BaseException:
+                os._exit(127)
+
+        os.close(wfd)
+        try:
+            l3_pid_bytes = os.read(rfd, 64)
+            l3_pid = int(l3_pid_bytes.decode())
+
+            with open(f"/proc/{l3_pid}/cgroup") as f:
+                l3_cgroup = f.read().strip()
+            mount_prefix = "/sys/fs/cgroup"
+            expected_rel = cg_path
+            if expected_rel.startswith(mount_prefix):
+                expected_rel = expected_rel[len(mount_prefix):]
+            assert (
+                expected_rel in l3_cgroup
+            ), (
+                f"PTY grandchild pid {l3_pid} expected in cgroup "
+                f"{expected_rel!r}; /proc reported "
+                f"{l3_cgroup!r} — three-level inheritance "
+                f"(runner → PTY → command) broke"
+            )
+        finally:
+            os.close(rfd)
+            try:
+                os.waitpid(l1_pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+            real_manager.teardown_cgroup("pty1")
+
 
 @skip_no_real_cgroup
 class TestRealKernelExpensive:

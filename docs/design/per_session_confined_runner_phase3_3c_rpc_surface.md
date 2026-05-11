@@ -1811,7 +1811,7 @@ implementation, contract pinned by tests).
 
 | Sub-step | Scope | Test pin |
 |---|---|---|
-| **7d** | `RunnerSpawner.spawn` accepts optional `cgroup_attach: Callable[[], None]` arg; SessionManager / WS handlers pass `cgroups.make_attach_callback(session_id)` at spawn time; child invokes the callback between `os.fork()` and `_exec_runner` | 3 new TestRealKernel tests (runner-spawn / child-inherit / grandchild-inherit) + ~5 unit tests for the spawn-arg plumbing |
+| **7d** | `RunnerSpawner.spawn` accepts optional `cgroup_attach: Callable[[], None]` arg; SessionManager / WS handlers pass `cgroups.make_attach_callback(session_id)` at spawn time; child invokes the callback between `os.fork()` and `_exec_runner`.  **Shipped.**  6 unit-level regression pins in `server/tests/test_runner_cgroup_attach_7d.py` (signature pins, fork-then-attach-then-exec order, WS pre-init hook provisions cgroup before spawn, IPC-style optionality, daemon-side `_cgroup_attach` field preservation per Q4).  3 integration tests in `shared/tests/test_runtime_limits_e2e.py::TestRealKernel` (runner-spawn-into-cgroup, child-inherit, PTY grandchild-inherit stress case).  WS pre-init hook reordered: cgroup-provision moved from post-init session_hook to pre-init so the attach_cb is available at spawn time.  Provisioning is idempotent — post-init hook's redundant re-provisioning is no-op'd by `mkdir(exist_ok=True)` and limit-file overwrites; the post-init hook's `set_runtime_limits(...)` call stays as a documented no-op (preserves §3.12 disk-restore fallback). |
 
 **Audit-discipline tally: 19 audits, 19 silent-regression
 catches** (today's catch: the daemon-side `_cgroup_attach`

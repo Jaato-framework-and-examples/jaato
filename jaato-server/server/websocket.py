@@ -604,9 +604,57 @@ class JaatoWSServer:
                     )
                     # profile_name stays empty → unconfined spawn
 
+            # ----- Cgroups (opt-in via host availability) -----
+            # Phase 3 §7d: provision the per-session cgroup BEFORE
+            # spawn so the forked runner can be migrated into it
+            # pre-exec.  Child processes (cli, interactive_shell
+            # PTY children) inherit by default per cgroup-v2 kernel
+            # contract.  Pre-§7d the cgroup was provisioned in the
+            # post-init session_hook and the daemon-side
+            # set_runtime_limits wired plugin-level attach_cb
+            # preexec_fn's; post-§7d the runner subprocess is
+            # already in the cgroup, so plugin-level preexec_fn's
+            # are no-ops via inheritance.
+            cgroups = ws_server._cgroups
+            cgroup_attach: Optional[Callable[[], None]] = None
+            cgroup_profile = getattr(server, "_profile", None)
+            cgroup_limits = (
+                getattr(cgroup_profile, "runtime_limits", None)
+                if cgroup_profile else None
+            )
+            if (
+                cgroup_limits is not None
+                and cgroups is not None
+                and cgroups.is_available()
+            ):
+                try:
+                    if cgroups.provision_cgroup(session_id, cgroup_limits):
+                        ws_workspace_id = os.path.basename(sess_workspace)
+                        ws_server._workspace_to_session_id[ws_workspace_id] = session_id
+                        if cgroup_limits.has_kernel_limits():
+                            logger.info(
+                                "Cgroup runtime limits applied to session "
+                                "%s pre-spawn (memory=%s pids=%s "
+                                "cpu_weight=%s)",
+                                session_id, cgroup_limits.memory_max_mb,
+                                cgroup_limits.pids_max,
+                                cgroup_limits.cpu_weight,
+                            )
+                    cgroup_attach = cgroups.make_attach_callback(session_id)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "Cgroup pre-spawn provisioning failed for "
+                        "session %s (%s: %s) — runner will spawn in the "
+                        "daemon's cgroup",
+                        session_id, type(exc).__name__, exc,
+                    )
+
             # Phase 3 §7a: spawn the runner regardless of apparmor
             # outcome.  The dispatch surface is always available;
             # confinement is layered atop iff apparmor succeeded.
+            # Phase 3 §7d: ``cgroup_attach`` (when non-None) is
+            # invoked between fork() and exec() to migrate the
+            # runner into the per-session cgroup.
             try:
                 from server.runner_spawn import (
                     spawn_session_runner,
@@ -619,6 +667,7 @@ class JaatoWSServer:
                     profile_name=profile_name,
                     daemon_loop=daemon_loop,
                     disable_confine=(profile_name == ""),
+                    cgroup_attach=cgroup_attach,
                 )
             except Exception as exc:  # noqa: BLE001 — spawn boundary
                 logger.warning(
