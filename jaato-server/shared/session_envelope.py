@@ -130,6 +130,18 @@ class SessionInitEnvelope:
     agent_params: Dict[str, str] = field(default_factory=dict)
     config_root: Optional[str] = None
     env_overrides: Dict[str, str] = field(default_factory=dict)
+    # Phase 3 post-Step-7 Path C: provider-connect args.  Carried in
+    # the envelope so the runner-side ``bootstrap_session`` can call
+    # ``runtime.connect(project, location)`` before
+    # ``runtime.create_session`` (which guards on ``_connected``).
+    # Non-Vertex providers (anthropic, openrouter, ollama, etc.)
+    # leave these as empty strings — the provider plugin's
+    # ``initialize()`` ignores them.  Vertex AI / Google GenAI
+    # sessions populate from ``PROJECT_ID`` / ``LOCATION`` env
+    # daemon-side.  Defaults preserve backward compat with earlier
+    # callers and the envelope schema_version stays unchanged.
+    project: str = ""
+    location: str = ""
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
@@ -154,6 +166,8 @@ class SessionInitEnvelope:
             "agent_params": dict(self.agent_params),
             "config_root": self.config_root,
             "env_overrides": dict(self.env_overrides),
+            "project": self.project,
+            "location": self.location,
         }
 
     @classmethod
@@ -199,6 +213,8 @@ class SessionInitEnvelope:
             agent_params=dict(d.get("agent_params") or {}),
             config_root=d.get("config_root"),
             env_overrides=dict(d.get("env_overrides") or {}),
+            project=str(d.get("project", "")),
+            location=str(d.get("location", "")),
         )
 
 

@@ -215,6 +215,33 @@ def bootstrap_session(
         )
         raise BootstrapError("runtime", str(exc)) from exc
 
+    # ---- 2b. Connect the runtime ----
+    # Phase 3 post-Step-7 Path C: ``JaatoRuntime.create_session``
+    # guards on ``self._connected`` (jaato_runtime.py:964) and
+    # raises ``RuntimeError("Runtime not connected. Call connect()
+    # first.")`` if invoked on a fresh runtime.  The envelope now
+    # carries ``project`` + ``location`` (added alongside this fix)
+    # so the runner can self-connect without daemon involvement.
+    # Non-Vertex providers tolerate empty strings; Vertex AI uses
+    # the values daemon-side read from ``PROJECT_ID`` / ``LOCATION``
+    # env.
+    #
+    # ``connect()`` is idempotent on the project/location side (just
+    # sets ``_project`` / ``_location`` / ``_provider_config`` /
+    # ``_connected = True``); no provider-network call here.  The
+    # real network connect happens inside ``create_session`` →
+    # provider plugin ``initialize()``.
+    try:
+        if hasattr(runtime, "connect") and not getattr(
+            runtime, "is_connected", False,
+        ):
+            runtime.connect(envelope.project, envelope.location)
+    except Exception as exc:  # noqa: BLE001 — boundary surface
+        logger.exception(
+            "runner-session bootstrap: runtime.connect crashed",
+        )
+        raise BootstrapError("connect", str(exc)) from exc
+
     # ---- 3. Construct + configure the session ----
     try:
         session = _build_session(runtime, envelope)

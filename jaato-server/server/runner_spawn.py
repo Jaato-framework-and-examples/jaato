@@ -225,6 +225,22 @@ def build_session_envelope(
     if not provider_name:
         provider_name = "anthropic"
 
+    # Phase 3 post-Step-7 Path C: read PROJECT_ID + LOCATION daemon-
+    # side so the envelope carries the provider-connect args the
+    # runner-side ``bootstrap_session`` needs to call
+    # ``runtime.connect(project, location)`` before
+    # ``runtime.create_session`` (which guards on ``_connected``).
+    # Non-Vertex providers tolerate empty strings; Vertex AI sessions
+    # pick up real values from env.  Mirrors the daemon-side reads
+    # at ``core.py:1550-1551``.
+    try:
+        import os as _os
+        project_val = _os.environ.get("PROJECT_ID", "") or ""
+        location_val = _os.environ.get("LOCATION", "") or ""
+    except Exception:
+        project_val = ""
+        location_val = ""
+
     return SessionInitEnvelope(
         session_id=session_id,
         workspace_path=workspace_path,
@@ -238,6 +254,8 @@ def build_session_envelope(
         agent_params={},
         config_root=getattr(server, "config_root", None),
         env_overrides=env_overrides,
+        project=project_val,
+        location=location_val,
     )
 
 
