@@ -243,6 +243,14 @@ def build_session_envelope(
         project_val = ""
         location_val = ""
 
+    # Phase 4 §D: read agent_params from the per-session JaatoServer.
+    # SessionManager._construct_and_initialize_server stashes the
+    # originating create_session.agent_params there so this builder
+    # can forward them on the wire envelope.  Pre-§D this was
+    # hard-coded to ``{}`` and any runner-side prefetch script
+    # reading ``context.agent_params`` saw an empty dict.
+    agent_params_dict = dict(getattr(server, "_agent_params", {}) or {})
+
     return SessionInitEnvelope(
         session_id=session_id,
         workspace_path=workspace_path,
@@ -254,7 +262,7 @@ def build_session_envelope(
         system_instructions=system_instructions,
         agent_id="main",
         gc=gc_dict,
-        agent_params={},
+        agent_params=agent_params_dict,
         config_root=getattr(server, "config_root", None),
         env_overrides=env_overrides,
         project=project_val,

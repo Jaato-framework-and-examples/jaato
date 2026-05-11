@@ -311,6 +311,17 @@ class BootstrapEnvelope:
     env_overrides: Dict[str, str] = field(default_factory=dict)
     config_root: Optional[str] = None
     instruction_token_cache: Optional[Any] = None
+    # Phase 4 §D: agent_params from the originating IPC ``create_session``
+    # request (or ``spawn_subagent`` fan-out).  Carried daemon-internal
+    # so ``build_session_envelope`` can forward them through the
+    # SessionInitEnvelope to the runner, where the JaatoSession applies
+    # them to its ``{{!py:...}}`` prefetch render context.  Pre-§D this
+    # field was missing and ``runner_spawn.build_session_envelope``
+    # hard-coded ``agent_params={}`` on the wire envelope — prefetch
+    # scripts reading ``context.agent_params`` on the runner saw empty
+    # dicts and emitted their "missing required keys" error block,
+    # which caused the documenter agent to hallucinate tmux pane ids.
+    agent_params: Dict[str, str] = field(default_factory=dict)
 
     # -- Session record --------------------------------------------------
     provisioned: bool = False

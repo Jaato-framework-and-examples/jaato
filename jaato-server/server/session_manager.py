@@ -1059,6 +1059,15 @@ class SessionManager:
         if envelope.config_root:
             server.config_root = envelope.config_root
 
+        # Phase 4 §D: stash agent_params transiently on the per-session
+        # JaatoServer so build_session_envelope can pick them up and
+        # forward them on the SessionInitEnvelope.  The JaatoServer is
+        # per-session (one instance per session, GC'd at session end),
+        # so this is not centralized daemon-state — it's just the
+        # per-session daemon-side handle holding session data during
+        # the envelope-build window.
+        server._agent_params = dict(envelope.agent_params or {})
+
         # Phase 4 §B: resolve workspace .env + profile.env + overrides
         # BEFORE the runner-spawn fork so secret URIs (pass://,
         # vault://, awssm://, sops://, keyring://) reach the runner
@@ -1992,6 +2001,12 @@ class SessionManager:
             env_overrides=env_overrides,
             config_root=config_root,
             instruction_token_cache=self._instruction_token_cache,
+            # Phase 4 §D: forward the originating create_session
+            # ``agent_params`` so build_session_envelope can put them
+            # on the wire envelope.  Without this, runner-side prefetch
+            # scripts (e.g. tmux_pane in the documenter harness) see
+            # empty agent_params and emit their "missing keys" error.
+            agent_params=dict(agent_params or {}),
             provisioned=provisioned,
             created_by=created_by,
             timestamp=timestamp,
