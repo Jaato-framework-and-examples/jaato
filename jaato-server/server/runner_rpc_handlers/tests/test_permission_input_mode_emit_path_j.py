@@ -241,10 +241,52 @@ async def test_input_mode_call_id_defaults_to_none_when_omitted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_input_mode_editable_metadata_is_none_path_j_b() -> None:
-    """Pin: editable_metadata is None — Path J.B backlog
-    (requires permission_plugin schema lookup; follow-up if
-    editing flow surfaces the need)."""
+async def test_input_mode_editable_metadata_propagates_from_payload() -> None:
+    """Pin: editable_metadata propagates from PromptPayload through
+    to the emitted PermissionInputModeEvent.
+
+    Phase 4 §4.2 (J.B) closure.  Pre-§4.2 this pin asserted
+    ``editable_metadata is None`` because PromptPayload didn't
+    carry the field.  Post-§4.2 the runner-side ASK relay reads
+    ``PermissionRequest.editable`` (an ``EditableContent`` already
+    resolved by the permission plugin at ``check_permission`` time,
+    plugin.py:1411-1412), converts to the canonical wire-shape
+    dict, and threads through here.
+    """
+    emitted: List[Any] = []
+    handler = PromptOperatorHandler(emitted.append)
+
+    payload = PromptPayload(
+        request_id="r-1", session_id="s-1", tool_name="todo",
+        editable_metadata={
+            "parameters": ["title", "steps"],
+            "format": "yaml",
+        },
+    )
+
+    async def _resolve() -> None:
+        await asyncio.sleep(0.02)
+        handler.resolve_response("r-1", "y")
+
+    asyncio.create_task(_resolve())
+    await handler.handle(payload.to_dict())
+
+    assert emitted[1].editable_metadata == {
+        "parameters": ["title", "steps"],
+        "format": "yaml",
+    }, (
+        "Phase 4 §4.2 regression: editable_metadata didn't propagate "
+        "from PromptPayload to PermissionInputModeEvent.  TUI's "
+        "edit-and-approve flow can't render the editable parameter "
+        "set."
+    )
+
+
+@pytest.mark.asyncio
+async def test_input_mode_editable_metadata_defaults_to_none_when_omitted() -> None:
+    """Pin: when the runner doesn't populate editable_metadata
+    (non-editable tools), PermissionInputModeEvent.editable_metadata
+    is None — preserves the Path J.B backward-compat contract."""
     emitted: List[Any] = []
     handler = PromptOperatorHandler(emitted.append)
 

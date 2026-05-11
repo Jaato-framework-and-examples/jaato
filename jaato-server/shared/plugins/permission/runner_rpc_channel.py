@@ -203,6 +203,28 @@ class RunnerRPCChannel(Channel):
             for opt in options
         ]
 
+        # Phase 4 §4.2 (J.B): convert request.editable
+        # (EditableContent | None, already resolved by the permission
+        # plugin via _get_tool_schema at check_permission time —
+        # plugin.py:1411-1412) into the canonical wire-shape dict.
+        # Mirrors the pre-§7c daemon-side hook at core.py:3062-3072.
+        # Template field NOT included — it's an editor-rendering
+        # concern that the runner consumes locally; daemon/TUI need
+        # only parameters + format for input-mode signaling.
+        editable_metadata: Optional[Dict[str, Any]] = None
+        editable = getattr(request, "editable", None)
+        if editable is not None:
+            try:
+                editable_metadata = {
+                    "parameters": list(
+                        getattr(editable, "parameters", None) or []
+                    ),
+                    "format": str(getattr(editable, "format", "yaml") or "yaml"),
+                }
+            except Exception:  # noqa: BLE001 — boundary; never fail
+                # the ASK relay because of a malformed editable.
+                editable_metadata = None
+
         payload = PromptPayload(
             request_id=request.request_id,
             session_id=session_id,
@@ -211,6 +233,7 @@ class RunnerRPCChannel(Channel):
             response_options=response_options_dicts,
             agent_id=agent_id,
             call_id=call_id,
+            editable_metadata=editable_metadata,
         )
 
         try:

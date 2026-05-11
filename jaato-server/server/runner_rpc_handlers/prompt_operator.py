@@ -158,15 +158,21 @@ class PromptOperatorHandler:
         # this emit the user's 'y' keypress is queued as a chat
         # message instead of an ASK response.
         #
-        # Phase 4 §4.1 (J.A): ``call_id`` now propagates from the
-        # runner-side ASK origin via ``PromptPayload.call_id``.
-        # TUI uses this for per-tool-block correlation when multiple
-        # tools are in flight simultaneously.
+        # Phase 4 §4.1 (J.A): ``call_id`` propagates from the runner-
+        # side ASK origin via ``PromptPayload.call_id``.  TUI uses it
+        # for per-tool-block correlation when multiple tools are in
+        # flight simultaneously.
         #
-        # Field gap documented as backlog (Path J.B): editable_metadata
-        # still requires permission_plugin reference for schema
-        # lookup; set to None.  Follow-up §4.2 if editing flow
-        # surfaces the need.
+        # Phase 4 §4.2 (J.B): ``editable_metadata`` propagates from
+        # the runner-side ASK origin via
+        # ``PromptPayload.editable_metadata``.  Runner-side already
+        # resolved the editable schema via
+        # ``PermissionRequest.editable`` (an ``EditableContent``
+        # instance from the permission plugin's
+        # ``check_permission`` flow at plugin.py:1411-1412); the
+        # runner-RPC channel converted it to the canonical wire
+        # shape (parameters + format).  Enables the TUI's edit-and-
+        # approve flow without daemon-side schema coupling.
         input_mode_event = PermissionInputModeEvent(
             agent_id=payload.agent_id,
             request_id=payload.request_id,
@@ -174,7 +180,10 @@ class PromptOperatorHandler:
             call_id=payload.call_id,
             response_options=list(payload.response_options),
             tool_args=dict(payload.tool_args) if payload.tool_args else None,
-            editable_metadata=None,
+            editable_metadata=(
+                dict(payload.editable_metadata)
+                if payload.editable_metadata is not None else None
+            ),
         )
         try:
             self._emit_event(event)
