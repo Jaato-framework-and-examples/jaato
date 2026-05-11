@@ -956,6 +956,34 @@ class RunnerRPC:
         with self._session_lock:
             self._session_host = host
 
+        # Phase 3 §7c Step 7.2: attach the runner-internal
+        # ``RunnerRPCClient`` to the runner-side registry as
+        # ``registry.runner_rpc_client``.  Runner-side plugins (the
+        # permission plugin in §3.7) detect runner-side execution
+        # context via this attribute and route ASKs through the
+        # daemon's ``client.prompt_operator`` RPC (registered
+        # daemon-side in §7c Step 7.1).  Pre-§7.2 the attribute
+        # was never assigned in production; the permission
+        # plugin's ``_get_runner_rpc_channel`` lookup always
+        # returned None and silently fell back to the in-process
+        # channel (orphaned post-seat-flip).
+        try:
+            if host.runtime is not None and getattr(
+                host.runtime, "_registry", None,
+            ) is not None:
+                from .rpc_client import RunnerRPCClient
+                runner_rpc_client = RunnerRPCClient(self)
+                setattr(
+                    host.runtime._registry,
+                    "runner_rpc_client",
+                    runner_rpc_client,
+                )
+        except Exception:  # noqa: BLE001 — best-effort wiring
+            logger.exception(
+                "session.bootstrap: failed to wire "
+                "registry.runner_rpc_client (Step 7.2)",
+            )
+
         return True, {
             "ok": True,
             "ready": host.is_ready,
