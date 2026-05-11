@@ -49,6 +49,7 @@ class _FakeJaatoServer:
         self.registry = None
         self.lifecycle_log: List[str] = []
         self.event_callbacks: List[Any] = []
+        self._session_env: dict = {}
         _FakeJaatoServer.instances.append(self)
 
     def initialize(self) -> bool:
@@ -57,6 +58,25 @@ class _FakeJaatoServer:
 
     def set_event_callback(self, cb: Any) -> None:
         self.event_callbacks.append(cb)
+
+    # Phase 4 §B: SessionManager invokes these pre-spawn so the runner
+    # fork inherits resolved secret URIs via os.environ.  The fake
+    # records them in lifecycle_log + provides a no-op _with_session_env
+    # context manager (real implementation mutates os.environ; the fake
+    # spawn doesn't fork so behaviour is irrelevant).
+    def _resolve_session_env(self) -> None:
+        self.lifecycle_log.append("resolve_session_env")
+
+    def _with_session_env(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def _noop():
+            self.lifecycle_log.append("with_session_env:enter")
+            try:
+                yield
+            finally:
+                self.lifecycle_log.append("with_session_env:exit")
+        return _noop()
 
 
 class _FakeSessionManager:
@@ -193,8 +213,10 @@ def test_subhelper_init_failure_returns_none_pair() -> None:
 
 
 def test_subhelper_lifecycle_order_matches_bootstrap_session() -> None:
-    """IPC apparmor provision → pre-init hooks → initialize.  Same
-    ordering ``_bootstrap_session`` previously had inline."""
+    """Phase 4 §B lifecycle: resolve_session_env → with_session_env
+    wrap around the inline IPC apparmor provisioning (which drives
+    the runner spawn whose fork must see resolved env in os.environ)
+    → pre-init hooks → ``server.initialize()``."""
     fake_mgr = _FakeSessionManager()
     helper = _bind_subhelper(fake_mgr)
     envelope = BootstrapEnvelope(
@@ -206,7 +228,10 @@ def test_subhelper_lifecycle_order_matches_bootstrap_session() -> None:
     server, _ = helper(envelope)
     assert server is not None
     assert server.lifecycle_log == [
+        "resolve_session_env",
+        "with_session_env:enter",
         "ipc_apparmor_provision",
+        "with_session_env:exit",
         "pre_init_hooks",
         "initialize",
     ]

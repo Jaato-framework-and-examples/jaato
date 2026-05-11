@@ -55,6 +55,7 @@ class _FakeJaatoServer:
         # Track call order so tests can assert lifecycle ordering.
         self.lifecycle_log: List[str] = []
         self.event_callbacks: List[Any] = []
+        self._session_env: dict = {}
         _FakeJaatoServer.instances.append(self)
 
     def initialize(self) -> bool:
@@ -63,6 +64,25 @@ class _FakeJaatoServer:
 
     def set_event_callback(self, cb: Any) -> None:
         self.event_callbacks.append(cb)
+
+    # Phase 4 §B: SessionManager invokes these pre-spawn so the runner
+    # fork inherits resolved secret URIs via os.environ.  The fake
+    # records them in lifecycle_log + provides a no-op _with_session_env
+    # context manager (real implementation mutates os.environ; the fake
+    # spawn doesn't fork so behaviour is irrelevant).
+    def _resolve_session_env(self) -> None:
+        self.lifecycle_log.append("resolve_session_env")
+
+    def _with_session_env(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def _noop():
+            self.lifecycle_log.append("with_session_env:enter")
+            try:
+                yield
+            finally:
+                self.lifecycle_log.append("with_session_env:exit")
+        return _noop()
 
 
 class _FakeSessionManager:
@@ -201,9 +221,18 @@ def test_jaato_server_constructed_with_envelope_fields() -> None:
 
 
 def test_pre_init_hooks_fire_before_initialize() -> None:
-    """Phase 3 §3.13 lifecycle ordering: the inline IPC apparmor
-    provisioning runs first, then pre-init hooks (WS + third-party),
-    then ``server.initialize()``."""
+    """Lifecycle ordering: Phase 4 §B pre-spawn env resolution +
+    with_session_env wrap around the inline IPC apparmor provisioning,
+    then pre-init hooks (WS + third-party), then ``server.initialize()``.
+
+    The Phase 4 §B additions are:
+    - ``resolve_session_env`` before the with_session_env wrap so
+      ``self._session_env`` is populated when ``_with_session_env``
+      reads it.
+    - ``with_session_env:enter`` + ``with_session_env:exit`` flanking
+      the inline IPC apparmor provisioning (and the runner spawn it
+      drives), so fork() inherits the resolved env via ``os.environ``.
+    """
     fake_mgr = _FakeSessionManager()
     helper = _bind_helper(fake_mgr)
     envelope = BootstrapEnvelope(
@@ -215,7 +244,10 @@ def test_pre_init_hooks_fire_before_initialize() -> None:
     server, _ = helper(envelope)
     assert server is not None
     assert server.lifecycle_log == [
+        "resolve_session_env",
+        "with_session_env:enter",
         "ipc_apparmor_provision",
+        "with_session_env:exit",
         "pre_init_hooks",
         "initialize",
     ]
