@@ -2196,6 +2196,178 @@ class SubagentPlugin:
         # close_session) sees the agent already gone.
         self._fire_termination_callbacks(agent_id, session_id)
 
+    def _dispatch_isolated_spawn(
+        self,
+        *,
+        agent_id: str,
+        profile: SubagentProfile,
+        task: str,
+        workspace_path: str,
+        agent_params: Optional[Dict[str, Any]],
+        display_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Dispatch an isolated-subagent spawn via the runner→daemon
+        RPC (Phase 4 §4.3.7).
+
+        Called from ``_execute_spawn_subagent`` when
+        ``_is_isolated_optin(agent_params)`` returns True.  Builds the
+        profile_payload from the resolved SubagentProfile (per Audit
+        5's wire shape) and calls
+        ``RunnerRPCClient.spawn_isolated_runner`` (the wrapper added
+        in §4.3.2).
+
+        Returns:
+            On RPC success (helper returned ok=True): a dict matching
+            the existing spawn_subagent success-shape so the model's
+            tool-loop sees identical UX whether default-share or
+            isolated.
+            On RPC failure (helper returned ok=False): a SubagentResult
+            error dict surfacing the stage + error message.
+            ``None`` when the runner_rpc_client isn't wired (e.g.,
+            legacy daemon-side path without runner subprocess).
+            Caller falls back to default-share executor.submit.
+        """
+        # Locate the runner-side RPC client via the registry-attribute
+        # pattern (same as references / permission plugins use).
+        registry = (
+            self._runtime.registry
+            if self._runtime is not None else None
+        )
+        rpc_client = (
+            getattr(registry, "runner_rpc_client", None)
+            if registry is not None else None
+        )
+        if rpc_client is None:
+            logger.info(
+                "_dispatch_isolated_spawn: runner_rpc_client not wired "
+                "for subagent %s — falling back to default-share path",
+                agent_id,
+            )
+            return None
+
+        # Build profile_payload per Audit 5's wire shape.  Mirror the
+        # build_inline_profile field set so daemon-side reconstruction
+        # round-trips.
+        profile_payload: Dict[str, Any] = {
+            "name": profile.name,
+            "description": profile.description,
+            "model": profile.model,
+            "provider": profile.provider,
+            "plugins": list(profile.plugins),
+            "plugin_configs": dict(profile.plugin_configs),
+            "system_instructions": profile.system_instructions,
+            "suppress_base_instructions": profile.suppress_base_instructions,
+            "max_turns": profile.max_turns,
+            "env": dict(profile.env),
+        }
+        # GC config (optional).
+        if profile.gc is not None:
+            gc_obj = profile.gc
+            gc_dict: Dict[str, Any] = {}
+            gc_type = getattr(gc_obj, "type", None)
+            if gc_type:
+                gc_dict["type"] = gc_type
+            gc_config = getattr(gc_obj, "config", None)
+            if gc_config:
+                gc_dict["config"] = dict(gc_config)
+            if gc_dict:
+                profile_payload["gc"] = gc_dict
+        # Runtime limits (optional).
+        if profile.runtime_limits is not None:
+            try:
+                if hasattr(profile.runtime_limits, "to_dict"):
+                    profile_payload["runtime_limits"] = (
+                        profile.runtime_limits.to_dict()
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "_dispatch_isolated_spawn: runtime_limits "
+                    "serialization failed; dropping",
+                )
+        # Preload annotations.
+        if profile.preloaded_plugins:
+            preload_set = set(profile.preloaded_plugins)
+            profile_payload["plugins"] = [
+                f"{name}(preload)" if name in preload_set else name
+                for name in profile_payload["plugins"]
+            ]
+
+        # Get parent session_id — confused-deputy echo per Audit 5.
+        parent_session_id = (
+            getattr(self._parent_session, "_session_id", None)
+            or getattr(self._parent_session, "session_id", None)
+            or ""
+        )
+
+        try:
+            rpc_result = rpc_client.spawn_isolated_runner(
+                parent_session_id=parent_session_id,
+                subagent_id=agent_id,
+                profile_payload=profile_payload,
+                task=task,
+                workspace_path=workspace_path,
+                agent_params=agent_params,
+                display_name=display_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "_dispatch_isolated_spawn: RPC failed for subagent %s",
+                agent_id,
+            )
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    f"isolated-runner spawn RPC failed: "
+                    f"{type(exc).__name__}: {exc}.  Caller may retry "
+                    f"with agent_params.isolated=false to use the "
+                    f"default-share path."
+                ),
+            ).to_dict()
+
+        # Branch on the helper's stage envelope.
+        if rpc_result.get("ok"):
+            # Mirror the default-share spawn-success shape so the
+            # supervisor model's tool-loop sees identical UX.
+            return {
+                "success": True,
+                "subagent_id": agent_id,
+                "status": "spawned",
+                "message": (
+                    f"Isolated subagent {agent_id} spawned and running "
+                    f"in its own runner (sub-AppArmor profile "
+                    f"{rpc_result.get('apparmor_profile', '?')!r}, "
+                    f"pid={rpc_result.get('runner_pid', '?')}).  "
+                    f"END YOUR TURN NOW. Real events will be injected "
+                    f"as the sub-runner streams output."
+                ),
+                "_telemetry": {
+                    "jaato.subagent.operation": "spawn",
+                    "jaato.subagent.id": agent_id,
+                    "jaato.subagent.profile": profile.name,
+                    "jaato.subagent.model": profile.model or "",
+                    "jaato.subagent.provider": profile.provider or "",
+                    "jaato.subagent.isolated": True,
+                    "jaato.subagent.apparmor_profile": (
+                        rpc_result.get("apparmor_profile", "")
+                    ),
+                    "jaato.subagent.cgroup_path": (
+                        rpc_result.get("cgroup_path", "")
+                    ),
+                },
+            }
+
+        # ok=False — domain failure.  Surface the stage + error.
+        return SubagentResult(
+            success=False,
+            response='',
+            error=(
+                f"isolated-runner spawn failed at "
+                f"stage={rpc_result.get('stage', '?')}: "
+                f"{rpc_result.get('error', 'no error message')}"
+            ),
+        ).to_dict()
+
     def receive_forwarded_event(
         self,
         subagent_id: str,
@@ -2411,26 +2583,11 @@ class SubagentPlugin:
         # remote-spawn block is deliberate: remote-spawn is its own form
         # of isolation (separate process on a separate host), so the
         # local isolated-runner flag is irrelevant there.
-        if _is_isolated_optin(agent_params_arg):
-            return SubagentResult(
-                success=False,
-                response='',
-                error=(
-                    "agent_params.isolated=true is a Phase 4 §4.3 opt-in "
-                    "for spawning the subagent in its own runner "
-                    "subprocess (sub-AppArmor profile "
-                    "jaato-ws-{session}//{subagent} + sub-cgroup).  The "
-                    "detection seam is wired (§4.3.1) but the "
-                    "isolated-runner spawn machinery is not yet "
-                    "implemented — tracked through §4.3.7 in "
-                    "docs/design/phase4_implementation_audits.md.  "
-                    "Workaround: omit agent_params.isolated (or set "
-                    "it to false) to use the default-share path "
-                    "where the subagent runs in the parent's runner.  "
-                    "The default-share path is the established §4.3 "
-                    "default and works end-to-end today."
-                ),
-            ).to_dict()
+        #
+        # Phase 4 §4.3.7: the actual isolated-runner routing happens
+        # AFTER profile resolution (need the resolved SubagentProfile
+        # to build profile_payload for the RPC).  See the branch
+        # near self._executor.submit below.
 
         # Resolve workspace path early — needed for tech stack detection on inline profiles
         workspace_path = self._workspace_path
@@ -2663,6 +2820,27 @@ class SubagentPlugin:
 
         # Display name: prefer custom_name over profile.name
         display_name = custom_name or profile.name
+
+        # ── Phase 4 §4.3.7 isolated-runner opt-in routing ─────────
+        # When agent_params.isolated=true, route through the
+        # daemon's _spawn_isolated_runner helper instead of the
+        # in-runtime executor.  Profile is now resolved (we have
+        # the SubagentProfile) so profile_payload can be serialized
+        # to the wire shape Audit 5 defines.
+        if _is_isolated_optin(agent_params_arg):
+            isolated_result = self._dispatch_isolated_spawn(
+                agent_id=agent_id,
+                profile=profile,
+                task=full_prompt,
+                workspace_path=parent_cwd,
+                agent_params=agent_params_arg,
+                display_name=display_name,
+            )
+            if isolated_result is not None:
+                return isolated_result
+            # ``None`` return = soft-fallback (runner_rpc_client not
+            # wired; e.g. daemon-side legacy path).  Fall through to
+            # the in-runtime executor for default-share semantics.
 
         # Submit to thread pool (always async).  ``agent_params_arg``
         # comes from the spawn_subagent tool args (a dict the

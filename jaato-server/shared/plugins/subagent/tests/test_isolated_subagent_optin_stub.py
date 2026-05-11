@@ -108,54 +108,35 @@ def _make_initialized_plugin() -> SubagentPlugin:
 
 
 class TestSpawnSubagentDetectsOptin:
-    """Integration-level fence: ``_execute_spawn_subagent`` returns a
-    synchronous error response when the opt-in is set, regardless of
-    profile / agent args.  The error message must reference Phase 4
-    §4.3 / the audit doc so callers can find the tracking work."""
+    """Post-§4.3.7: the early-stub at L2414 was removed; the
+    isolated check moved to AFTER profile resolution.  These tests
+    now exercise the no-runner-rpc-client fallback path: when the
+    parent plugin has no runner_rpc_client wired, the helper
+    returns None and the executor.submit fallback fires.
 
-    def test_isolated_true_returns_synchronous_error(self):
-        """The opt-in fires a structured ``SubagentResult.error`` —
-        not a ``NotImplementedError`` exception.  Synchronous response
-        means no thread is spawned and the caller can react immediately."""
+    The §4.3.7 routing test (TestIsolatedOptinRouting) covers the
+    happy path where runner_rpc_client IS wired."""
+
+    def test_isolated_true_with_no_runtime_falls_through(self):
+        """No runtime → no registry → no runner_rpc_client → helper
+        falls through to default-share executor.submit.  Without a
+        runtime, the executor.submit itself isn't there either, so
+        we end up with a downstream NoneType error — but the
+        §4.3.7-specific routing did NOT fire."""
         plugin = _make_initialized_plugin()
-        # Sentinel: assert the executor is never touched.
         plugin._executor = MagicMock()
-
         result = plugin._execute_spawn_subagent({
             "task": "do something",
             "agent_params": {"isolated": True},
         })
-
+        # The §4.3.7 RPC-failure error message does NOT fire because
+        # there's no runner_rpc_client to call; helper returned None.
         assert result["success"] is False
-        # Caller should be told this is Phase 4 §4.3 work-in-progress.
-        error_msg = result["error"].lower()
-        assert "isolated" in error_msg
-        assert "§4.3" in result["error"] or "4.3" in error_msg
-        assert "not yet implemented" in error_msg
-        # Pointer to the audit doc so callers can find tracking.
-        assert "phase4_implementation_audits" in result["error"]
-        # Workaround instructions must mention the default-share path.
-        assert "default-share" in error_msg or "share" in error_msg
-        # Executor was NOT touched — no thread spawned for the stub.
-        plugin._executor.submit.assert_not_called()
-
-    def test_isolated_true_short_circuits_before_workspace_resolution(self):
-        """The detection branch sits AFTER remote-spawn but BEFORE
-        workspace resolution.  This means we can return an error even
-        when no profile / runtime / workspace is configured — the stub
-        gives a clean diagnostic instead of a NoneType crash."""
-        plugin = _make_initialized_plugin()
-        # Intentionally leave _workspace_path, _runtime, _config, etc. unset.
-
-        result = plugin._execute_spawn_subagent({
-            "task": "do something",
-            "agent_params": {"isolated": True},
-        })
-
-        assert result["success"] is False
-        assert "isolated" in result["error"].lower()
-        # The error should be the §4.3.1 stub, not a downstream crash.
-        assert "not yet implemented" in result["error"].lower()
+        # Downstream error from the missing runtime path
+        # (specifically: "No plugins available to inherit" because
+        # _parent_plugins is empty for our test fixture).  Either
+        # way the §4.3.7 RPC error message is NOT in the result.
+        assert "isolated-runner spawn" not in result.get("error", "").lower()
 
 
 # ──────────────────────────────────────────────────────────────────────
