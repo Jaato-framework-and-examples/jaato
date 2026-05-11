@@ -2719,3 +2719,107 @@ H.3 — Defensive serialization: a ``threading.Lock`` (``self._async_save_lock``
 | **Pre-impl 24 (Path H, this audit)** | **fourth chain — same shape as E, different code path; Option-A deferral** |
 
 **Probe-driven methodology assessment.**  The transition from "static-audit + integration-test" (cycles 1-7) to "probe-instrumentation + integration-test" (cycles 8-10) reduced per-cycle localization time from days to one cycle.  Cycle 10 named the exact offending line.  **Phase 4+ guidance**: when integration tests surface silent failures (no errors logged), reach for probe instrumentation immediately rather than continuing static-audit iteration.  Each probe is a binary signal that bisects the call graph; 10 probes can localize most chains in one cycle.
+
+### Path I pre-implementation audit (cycle 11 — fifth chain)
+
+25th audit; fifth post-§7c chain.  Cycle 11 confirmed Path H closed Layer 8 (ToolCallStartEvent dispatch returned to ~0ms; no more save-failure errors).  The NEXT layer surfaced.
+
+**Cycle 11 verdict** (post-Path-H):
+
+| Test | Result |
+|---|---|
+| #1 Smoke session create | ✅ PASS |
+| #2 Allow-policy tool call | ⏸ N/A |
+| #3 ASK round-trip | ❌ BLOCKED — Layer 9: AgentCreatedEvent never reaches daemon |
+
+The TUI "No agents" indicator confirms the diagnosis: without ``AgentCreatedEvent`` the TUI has no agent registry; every subsequent agent-keyed event (``ToolCallStartEvent``, ``PermissionRequestedEvent``) references an unknown agent → silently discarded by the TUI.
+
+**Q1 — Why does this surface only NOW (cycle 11)?**
+
+Path F installed the ``_AgentUIHooksNotificationShim`` inside ``_handle_session_send_message`` (per-RPC-request scope).  Cycle 11's probe log shows the shim installed for ``request_id=13`` AFTER the user's message was sent — proving the per-RPC scope:
+
+| Hook timing | When fires | Shim status | Outcome |
+|---|---|---|---|
+| ``on_tool_call_start`` | DURING ``send_message`` | installed | ✅ emits notification |
+| ``on_tool_call_end`` | DURING ``send_message`` | installed | ✅ emits |
+| ``on_tool_output`` | DURING ``send_message`` | installed | ✅ emits |
+| ``on_turn_progress`` | DURING ``send_message`` | installed | ✅ emits |
+| ``on_agent_created`` | DURING bootstrap (BEFORE send_message) | **NOT installed** | ❌ silently dropped |
+
+This asymmetry was invisible to Path F's audit because the per-callback-type enumeration (cycle 7 backlog ``project_backlog_runner_ui_hooks_gap.md``) focused on **WHICH** methods are called runner-side, not **WHEN** they fire.  All 5 enumerated methods (on_tool_call_*, on_tool_output, on_turn_progress, on_agent_instruction_budget_updated) fire during send_message — so the per-RPC shim happened to catch them all.  ``on_agent_created`` was on the "no-op filler" list because it's invoked by daemon-side code (subagent plugin, JaatoClient wrapper) — but pre-§7c it was ALSO invoked at bootstrap by ``_setup_agent_hooks`` → ``set_ui_hooks()`` → daemon-side hooks fired in-process.  Post-§7c that path is dead.
+
+**Q2 — Architectural pattern: scope mismatch.**
+
+Path F's per-RPC-request shim works for events whose CALLBACK CALL-SITE lives in code paths that execute during ``send_message``.  Events whose call-site lives in code paths that execute OUTSIDE ``send_message`` (bootstrap, post-completion, idle) bypass the shim entirely.
+
+This is a class beyond per-callback-type — call it **per-callback-SCOPE**.  The cycle-7 backlog doc enumerated callback types; this audit enumerates callback scopes:
+
+| Scope | Currently bridged | Coverage |
+|---|---|---|
+| send_message (active turn) | Yes — Path F shim | ✅ |
+| bootstrap (pre-first-send_message) | No | ❌ Path I target |
+| post-completion (signal_completion → wrap-up) | Partial via on_agent_completed RPC? | ⚠ uncertain |
+| idle (between turns) | None — no scope opens | n/a |
+
+Only the bootstrap-scope gap was the cycle-11 surfaced regression.  Post-completion may be a follow-up.
+
+**Q3 — Fix options.**
+
+| Option | Approach | Pros | Cons |
+|---|---|---|---|
+| **A — Direct daemon-side emit** | Emit ``AgentCreatedEvent`` from ``_create_main_agent`` (core.py:2301).  Daemon already constructs ``AgentState`` here; just add ``self.emit(AgentCreatedEvent(...))`` after.  No runner involvement. | Smallest patch (~15 LoC).  Daemon owns session-lifecycle anyway — synthesizing the event daemon-side is architecturally natural.  No threading concerns. | Daemon-side and runner-side both manage agent state; if subagent creation fires runner-side later (different code path), this fix doesn't extend.  Single-shot. |
+| **B — Persistent shim** | Install the ui_hooks shim at runner-side session bootstrap (extend Path D's ``_configure_runtime_plugins``), persistent for the session lifetime — not per-RPC. | One mechanism covers all scopes (bootstrap + send_message + idle). | NotificationFrame requires a ``request_id`` to route via the daemon's read-loop callback registry.  Bootstrap-time has no active send_message ``request_id``.  Either (a) use the bootstrap RPC's own request_id (needs daemon-side notification handler registered for bootstrap), or (b) introduce a "session-scoped" notification channel.  Both are larger refactors. |
+| **C — Hybrid**: A for bootstrap, B deferred | Ship A for cycle-12 verification.  If post-completion / idle-scope gaps surface, ship B as a follow-up. | Smallest critical-path fix.  Defers Option B's complexity until proven necessary. | Two-mechanism architecture; could grow if more scopes surface. |
+
+**Decision: Path I = Option A (direct daemon-side emit)**, per user's "lean: Path I.A — small, surgical, doesn't touch Path F's per-RPC-shim architecture."  Subagent-creation parity (the only foreseen extension) is filed as a follow-up; cycle 11's test didn't exercise subagents.
+
+**Q4 — Fix design.**
+
+I.1 — ``_create_main_agent`` (core.py:2301) emits ``AgentCreatedEvent`` after constructing the local ``AgentState``.  Field mapping mirrors ``ServerAgentHooks.on_agent_created`` (core.py:2508-2532):
+- agent_id = self._main_agent_id
+- agent_name = display_name (computed locally)
+- agent_type = "main"
+- profile_name = self._profile.name if self._profile else None
+- parent_agent_id = None
+- created_at = agent.created_at
+
+I.2 — Update the docstring + remove the dead-letter comment "AgentCreatedEvent is NOT emitted here - it's handled by ServerAgentHooks.on_agent_created() when set_ui_hooks() is called" — that path has been dead since §7c.
+
+I.3 — Construct AgentState with the full field set (profile_name + parent_agent_id), matching what the hook would have populated.
+
+I.4 — Defensive: ``_create_main_agent`` has an existing early-return when ``self._main_agent_id in self._agents`` (hook-pre-registered case).  Pre-Path-I this branch was load-bearing because the hook always ran first.  Post-Path-I the hook never runs at bootstrap, so this branch only fires if some OTHER code path (test fixtures, ephemeral re-init) pre-registered the agent.  Keep the branch as defense.
+
+**Q5 — Tests.**
+
+| Pin | Strategy |
+|---|---|
+| ``_create_main_agent`` emits ``AgentCreatedEvent`` exactly once | spy on ``self.emit``, assert event in captured list |
+| Event payload matches the hook's payload shape | field-by-field check |
+| Pre-registered agent path (hook ran first) still skips emit | populate ``server._agents`` beforehand, assert no emit |
+| AgentState carries profile_name + parent_agent_id | direct field read |
+| AST pin: ``_create_main_agent`` body contains ``AgentCreatedEvent`` | inspect.getsource grep |
+
+### Bug-chain layers (cumulative, cycle 11)
+
+| Chain | Layer | Defect | Path | Status |
+|---|---|---|---|---|
+| Bootstrap | 1-4 | snapshot, dispatch, connect, configure_plugins | A+B+C+D | shipped |
+| Send-message | 5-6 | usage_update race, save/replay .role | E | shipped |
+| Streaming response | 7 | ui_hooks bridge (per-RPC) | F | shipped |
+| Save re-entrancy | 8 | incremental save synchronous | H | shipped |
+| **Agent-lifecycle (bootstrap scope)** | **9** | **on_agent_created fires before shim installed** | **I** | **this audit; code follows** |
+| 10+ | TBD | gated on cycle-12 verdict |
+
+### Audit-discipline tally (cycle 11)
+
+| Audit | Outcome |
+|---|---|
+| Pre-impl 1-20 (§7c+§7d arc) | 20-for-20 static-grep catches |
+| Cycle 5 / 6 / 7 / 10 / 11 | empirical chain identifications |
+| Pre-impl 21 (Path D) | bootstrap chain closure |
+| Pre-impl 22 (Path E) | send-message chain closure |
+| Pre-impl 23 (Path F) | streaming chain closure |
+| Pre-impl 24 (Path H) | save-reentrancy closure |
+| **Pre-impl 25 (Path I, this audit)** | **agent-lifecycle bootstrap-scope closure** |
+
+**Methodology refinement (cycle 11 meta-lesson).**  Path F's per-callback-TYPE audit was correct as far as it went — it enumerated WHICH methods runner-side calls.  But it missed the orthogonal axis: **WHEN** each method fires relative to the per-RPC-request scope of the shim install.  Phase 4+ guidance update: per-callback-type enumeration + per-callback-SCOPE enumeration are independent dimensions.  Both must be audited for in-process-to-RPC migrations of callback chains.
