@@ -2339,3 +2339,150 @@ The cycle-2-3-4 cadence proved one-layer-at-a-time fixes leak operator attention
 | Pre-impl 21 (this — Path D) | comprehensive remaining-chain catch | Layers 4-6 closed in one pass; no integration-test iteration spent per layer |
 
 **Methodology shift, recorded.**  Audits 1-20 ran pre-implementation against static grep epistemics; they couldn't predict cross-process async-timing interactions.  Cycles 2-4 ran post-implementation against integration tests against a real provider; each cycle paid one iteration per layer.  Audit 21 attempts a hybrid: static daemon-vs-runner sequence diff to surface layers in a single pass.  The hypothesis under test is whether the layers form a tractably-finite chain that a single audit can close.  Post-Path-D integration-test result is the verdict.
+
+### Path E pre-implementation audit (cycle 6 — second chain)
+
+22nd audit; first attempt to apply the Path D hybrid-audit methodology to a **second** post-§7c regression chain.
+
+**Cycle 6 verdict** (post-Path-D integration test):
+
+| Test | Result |
+|---|---|
+| #1 Smoke session create | ✅ PASS — Path D closed the bootstrap chain |
+| #2 Allow-policy tool call | ⏸ Not run this cycle |
+| #3 ASK round-trip | ❌ BLOCKED — 2 errors fire mid-turn; model API succeeds but TUI never renders |
+
+The bootstrap chain (Layers 1-4) IS fully closed by Path D.  Cycle 6 surfaces a **second** post-§7c chain in the **send_message-during-active-turn** code path — different code path, its own missing-mirror gaps.
+
+**Q1 — Layer 5: notification re-entrancy in usage_update handler.**
+
+The daemon-side `usage_update` notification handler at `core.py:3524-3561` synchronously calls TWO blocking RPCs back into the runner:
+
+| Line | Call | What it fetches |
+|---|---|---|
+| 3532 | `server._runner_rpc.session_get_context_limit_threadsafe()` | int (model context window size) |
+| 3539 | `server._runner_rpc.session_get_turn_accounting_threadsafe()` | list (full turn-accounting log, then `len()` for `turns`) |
+
+This handler fires **DURING** the runner's active `send_message` (it's a notification frame from the runner's own send_message stream).  The handler then makes blocking RPCs back into the same runner that's processing the original message.  Pre-§7c the same handler used in-process daemon-side calls (no race).  Per §7c step 6.6.4.5b migration, these became RPCs.  The migration introduced a new race shape: **daemon-side handlers invoked DURING active send_message now do blocking RPCs into the same runner that's processing the message** — they wait for the runner to finish its current request before serving the new one, but the original send_message hasn't returned, so deadlock-shaped timeout.
+
+**Q2 — Are there other in-band callsites of the same shape?**
+
+Grep of `session_get_context_limit_threadsafe` callsites (`core.py:2072 / 2639 / 2797 / 3532 / 3669 / 4634`):
+
+| Line | Site | In-band? | Risk |
+|---|---|---|---|
+| 2072 | `initialize()` post-init | NO (off-band, before any active turn) | none |
+| 2639 | `on_agent_context_updated` aspect callback | **YES** — fires from runner-RPC notification path | ⚠ same shape |
+| 2797 | `on_agent_turn_progress` aspect callback | **YES** — same | ⚠ same shape |
+| 3532 | `usage_update` notification handler | **YES** — primary cycle-6 catch | ❌ confirmed |
+| 3669 | `_start_model_thread` finally block | NO (post-turn, after `session_send_message_threadsafe` returns) | none |
+| 4634 | auth-completion handler | NO (off-band, fires after auth wizard) | none |
+
+Three in-band sites; not just the one cycle 6 surfaced.  Path E must close all three.
+
+`session_get_turn_accounting_threadsafe` has only ONE callsite (line 3539, inside `usage_update`); no other in-band consumers.
+
+**Q3 — Layer 6: `'dict' object has no attribute 'role'` chain.**
+
+Trace from the runner-RPC `session_get_history` wire boundary:
+
+1. Runner-side `_handle_session_get_history` at `runner/rpc.py:1174-1225` returns `{"history": [<dict>, ...]}` where each dict comes from `_serialize_message_for_wire(msg)` (`rpc.py:3800`).
+2. `_serialize_message_for_wire` for a real `Message` dataclass falls through to `dataclasses.asdict(msg)` then `_coerce_for_json` — produces:
+   ```python
+   {'role': 'user',
+    'parts': [{'text': 'hi', 'function_call': None,
+               'function_response': None, 'inline_data': None}],
+    'message_id': '...', 'model': None, 'provider': None}
+   ```
+3. Daemon-side `session_get_history_threadsafe` (`runner_rpc_client.py:1239`) returns the dict list **as-is** — documented contract is `List[Dict]`.
+4. **Consumer A — session-save**: `session_manager._save_session` at line 3080:
+   ```python
+   history = session.server._runner_rpc.session_get_history_threadsafe()
+   ...
+   state = SessionState(..., history=history, ...)
+   self._session_plugin.save(state, ...)  # → serialize_session_state(state)
+   ```
+   `serialize_session_state` at `serializer.py:224` calls `serialize_history(state.history)` → `serialize_message(m)` at `serializer.py:142`:
+   ```python
+   result = {'role': message.role.value, ...}  # CRASH: message is a dict
+   ```
+5. **Consumer B — replay**: `session_manager` at line 4599 reads dicts, then passes to `replayer(messages, ...)` → `session_replay_messages_threadsafe` at `runner_rpc_client.py:1860`:
+   ```python
+   body = {"messages": serialize_history(messages), ...}  # CRASH: messages is dicts
+   ```
+
+Two consumers, same crash, same root cause: **the runner's wire-format dicts (dataclasses.asdict shape) don't match the canonical session-serializer's expected Message-or-canonical-dict input**.
+
+The wire-shape mismatch is also separate from the canonical session serializer's tagged-union form for parts:
+- `dataclasses.asdict`: `{'parts': [{'text': 'hi', 'function_call': null, ...}]}`
+- canonical: `{'parts': [{'type': 'text', 'text': 'hi'}]}`
+
+Both shapes are JSON-friendly, but only the canonical one round-trips through `serialize_history` / `deserialize_history`.
+
+**Q4 — Are these layers tractably independent of one another?**
+
+Yes.  Layer 5 (notification race) and Layer 6 (.role serialization) share no code — they're in different files (core.py / session_manager.py respectively) and different code paths (notification handler / session-save).  Either can be fixed without affecting the other.  A single Path E commit landing both is the right shape (audit-of-record discipline: catch the chain in one pass; ship in one pass).
+
+**Q5 — Path E fix design.**
+
+**Layer 5 — three sub-fixes:**
+
+E.1 **Batch context_limit + turns into the runner-side `usage_update` notification payload.**
+The runner-side shim `_make_usage_update_notification_shim` already has access to the runner's session.  Compute `context_limit` (from `session.get_context_limit()`) and `turns` (from `len(session.turn_accounting)` or equivalent) locally and add them to the payload.  Daemon-side handler reads from payload — no in-band RPCs.  Per the user's verdict: "turn accounting changes per-turn but daemon's interest is 'current count' → could be batched into the streaming event payload, sent by runner alongside the usage update."
+
+E.2 **Cache `context_limit` on `JaatoServer` for the OTHER two in-band callsites** (`on_agent_context_updated` at 2639 + `on_agent_turn_progress` at 2797).  Per the user's verdict: "context limit is stable across the session lifetime → cache at session-init, no in-band RPC needed."  Fetch once at end of `initialize()` via the existing off-band RPC; store on `self._cached_context_limit`; in-band readers use the cache.
+
+E.3 **Invalidate the cache on `/model` command.**  The model-switch path at `core.py:4137-4148` updates `self._model_name` after a successful `/model` command result.  Different model = potentially different context window = invalidate `self._cached_context_limit`.  Next in-band read re-fetches via off-band RPC (or the next `usage_update` notification carries the new value via E.1).
+
+**Layer 6 — two sub-fixes:**
+
+E.4 **Change runner-side `_serialize_message_for_wire` to use the canonical `serialize_message`** for real `Message` instances.  Custom `to_dict()` path stays (test stubs); other dataclass fallback stays (other test fakes).  Wire format becomes canonical session-serializer format → directly round-trips through `serialize_history` / `deserialize_history`.
+
+E.5 **Make `serialize_history` idempotent on already-serialized dicts.**  Defensive: when given a list of dicts (from wire), pass through; when given a list of `Message` objects, serialize each.  Closes both consumer crashes (save + replay) without requiring callers to pre-deserialize.  Cheap one-line change to `serializer.py`.
+
+The combination is conservative: E.4 ensures the wire format is correct (canonical), E.5 makes the consumer side defensive.  Either alone would close the immediate bug; together they prevent the next regression of the same shape.
+
+**Q6 — Scope decision.**
+
+Single Path E commit covering Layers 5 + 6.  Per the Path D lesson — when integration testing surfaces a chain, audit the whole chain and ship in one commit; one-layer-at-a-time leaks operator iterations.
+
+**Rejected alternative — punt Layer 6 to backlog**: Layer 6 fires DURING normal session save (every turn touches it).  Not punt-able.
+
+**Q7 — Test coverage planning.**
+
+| Sub-fix | Pin |
+|---|---|
+| E.1 | Runner-side: shim payload includes `context_limit` + `turns`.  Daemon-side: handler reads from payload (no RPC call).  Behavioral pin: handler success against a runtime that throws on RPC. |
+| E.2 | Cache populated post-initialize.  In-band sites read from cache. |
+| E.3 | `/model` command invalidates cache. |
+| E.4 | `_serialize_message_for_wire` on real Message → canonical format.  Test stub `to_dict` path preserved. |
+| E.5 | `serialize_history` idempotent on dicts; correct on Messages. |
+
+### Bug chain layers (cumulative, cycle 6 — second chain identified)
+
+| Chain | Layer | Defect | Path | Status |
+|---|---|---|---|---|
+| Bootstrap (session-init) | 1 | snapshot wrap | A | shipped `20b16326` |
+| Bootstrap | 2 | IPC dispatch | B | shipped `c68151a8` |
+| Bootstrap | 3 | runtime.connect | C | shipped `4d9cf8b7` |
+| Bootstrap | 4 | configure_plugins + prereqs | D | shipped `00fa6d86` |
+| **Send-message** | **5** | **notification re-entrancy** | **E.1-3** | **this audit; code follows** |
+| **Send-message** | **6** | **session-save / replay .role** | **E.4-5** | **this audit; code follows** |
+
+The bootstrap chain closed in 4 layers; the send-message chain identified at 2 layers.  Whether more layers exist past 5+6 is gated on the Path E integration-test result (cycle 7).
+
+### Audit-discipline tally update
+
+| Audit | Outcome |
+|---|---|
+| Pre-impl 1-20 (§7c+§7d arc) | 20-for-20 silent-regression catches |
+| Cycle 2 (Layer 1) | post-impl catch; Path A narrow |
+| Cycle 3 (Layer 2) | post-impl catch; Path B architectural |
+| Cycle 4 (Layer 3) | post-impl catch; Path C envelope+connect |
+| Pre-impl 21 (Path D) | hybrid catch — bootstrap chain Layers 4-6 closed in one pass |
+| Cycle 5 (post-Path-D) | bootstrap chain VERIFIED CLOSED (Test #1 PASS); SECOND chain SURFACED (Test #3 FAIL) |
+| **Pre-impl 22 (Path E, this audit)** | **second hybrid attempt — send-message chain Layers 5-6 closed in one pass** |
+
+**Hypothesis status update.**  Path D's hybrid hypothesis ("a single static-diff audit can close a tractably-finite chain in one pass") was **partially validated** by cycle 5: the bootstrap chain DID close cleanly (Test #1 PASS).  But cycle 6 revealed that the §7c regression set contains MULTIPLE chains, not one.  Each chain (bootstrap, send-message, possibly others not yet surfaced) must be audited and closed independently.  The hybrid methodology scales to within-chain catches; integration tests against a real provider remain load-bearing for **between-chain** discovery.
+
+Path E refines the methodology: when a new chain surfaces, audit the entire chain in one pass before implementation (don't split layers).  Post-Path-E integration-test (cycle 7) is the verdict on whether the send-message chain is also tractably-finite.
