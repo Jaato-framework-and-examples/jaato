@@ -75,6 +75,7 @@ from jaato_sdk.plugins.base import (
     UserCommand,
 )
 from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -286,7 +287,7 @@ FRONTMATTER_ID_PATTERN = re.compile(r'^id:\s*(.+)$', re.MULTILINE)
 _GENERATED_ANNOTATION_RE = re.compile(r'^[/*#\s]*@generated\b.*$', re.MULTILINE)
 
 
-class TemplatePlugin:
+class TemplatePlugin(RunnerForwardingMixin):
     """Plugin for template-based file generation.
 
     Maintains a unified template index that maps template names to their actual
@@ -938,13 +939,17 @@ class TemplatePlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor functions for each tool."""
-        return {
+        """Return executor functions for each tool.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "renderTemplateToFile": self._execute_render_template_to_file,
             "listAvailableTemplates": self._execute_list_available,
             "listTemplateVariables": self._execute_list_template_variables,
             "validateTemplateIndex": self._execute_validate_template_index,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for template tools."""

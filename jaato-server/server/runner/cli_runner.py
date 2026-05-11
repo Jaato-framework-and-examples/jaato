@@ -190,10 +190,12 @@ def execute_cli_based_tool(
         if tool_timeout_seconds is not None:
             result["timeout_seconds"] = tool_timeout_seconds
 
-    # _telemetry stays in the result dict for backwards-compat with
-    # daemon-side enrichment.  §4.8 mentions promoting it to the
-    # envelope.telemetry field; that's a Phase 3 cleanup once all
-    # downstream consumers move off the result-dict shape.
+    # Plugins continue to write ``_telemetry`` into the result dict;
+    # the runner's ``_emit_response`` (Phase 3 §3.15) lifts it onto
+    # ``envelope.telemetry`` for the wire form.  Daemon-side
+    # ``_forward_via_runner`` reinjects on the way back so existing
+    # consumers (jaato_session.py's OTel forwarder) see the same
+    # shape they always have.
     result["_telemetry"] = {
         "jaato.cli.command": command[:200],
         "jaato.cli.returncode": r.returncode,

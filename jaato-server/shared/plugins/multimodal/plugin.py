@@ -33,6 +33,7 @@ from typing import Dict, List, Any, Callable, Optional
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from jaato_sdk.plugins.base import PromptEnrichmentResult, UserCommand
 
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -45,7 +46,7 @@ IMAGE_EXTENSIONS = {
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+\.\w+)')
 
 
-class MultimodalPlugin:
+class MultimodalPlugin(RunnerForwardingMixin):
     """Plugin that provides multimodal image viewing capabilities.
 
     This plugin:
@@ -250,8 +251,18 @@ class MultimodalPlugin:
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {'viewImage': self._execute_view_image}
+        """Return the executor mapping.
+
+        Phase 3 §3.4 wave 1: when a runner is attached
+        (``registry.runner_rpc`` set), the wrapper forwards the call
+        via ``tool.execute`` RPC; the actual file-read happens in
+        the kernel-confined runner so the workspace path stays
+        contained.  Falls through to the in-process body for
+        sessions without a runner (no-apparmor / pre-runner clients).
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            'viewImage': self._execute_view_image,
+        })
 
     def _execute_view_image(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the viewImage tool.

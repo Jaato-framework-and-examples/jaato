@@ -39,6 +39,7 @@ Configuration file (.jaato/thinking.json):
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 # Re-export ThinkingConfig from provider types (single source of truth)
 from jaato_sdk.plugins.model_provider.types import ThinkingConfig
 from .config import (

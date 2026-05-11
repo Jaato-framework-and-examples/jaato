@@ -11,6 +11,13 @@ socketpair inherited as fd 3 and per-session config in env:
 - ``JAATO_RUNNER_LOG_PATH`` — optional log-file path (else fd 1/2 left
   inherited from the daemon — see plan §5.1 for the per-workspace
   log default that the daemon's spawner sets).
+- (no env vars consumed by this entry point — the runner-side
+  session bootstrap is driven by the daemon's
+  ``session.bootstrap`` RPC; the daemon dispatches that
+  unconditionally as of Phase 3 §7c step 1.  The historical
+  ``JAATO_RUNNER_HOSTS_SESSION`` review-aid flag was removed in
+  §7c step 1 — see ``server/__main__.py`` for the
+  always-bootstrap call site.)
 
 Bootstrap order (§4.6):
 1. Read profile from env.
@@ -187,7 +194,10 @@ def main() -> None:
         **({"max_output_chars": max_output_chars} if max_output_chars is not None else {}),
         **({"tool_timeout_seconds": tool_timeout_seconds} if tool_timeout_seconds is not None else {}),
     )
-    rpc = RunnerRPC(sock, executor.execute)
+    # workspace_root is forwarded for §3.1 traceback sanitization —
+    # captured tracebacks have tenant-specific paths redacted to
+    # ``<WORKSPACE>/...`` before crossing the RPC boundary.
+    rpc = RunnerRPC(sock, executor.execute, workspace_root=workspace_root)
 
     log.info("runner ready; serving RPC on fd 3")
     try:

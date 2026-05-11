@@ -429,8 +429,11 @@ class FileSessionPlugin:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 data['description'] = description
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                # Phase 3 §3.14: atomic write so a SIGTERM mid-update
+                # can't leave the session record with truncated /
+                # corrupt JSON the loader can't parse.
+                from shared.atomic_write import atomic_write_json
+                atomic_write_json(file_path, data)
             except (json.JSONDecodeError, IOError):
                 pass
 

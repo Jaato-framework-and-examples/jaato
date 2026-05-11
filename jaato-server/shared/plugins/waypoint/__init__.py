@@ -17,12 +17,13 @@ Usage:
 # Plugin kind for discovery by PluginRegistry
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .plugin import WaypointPlugin, create_plugin
 from .models import Waypoint, RestoreResult, INITIAL_WAYPOINT_ID
 from .manager import WaypointManager
 
 __all__ = [
-    "PLUGIN_KIND",
+    "PLUGIN_KIND", "PLUGIN_TIER",
     "WaypointPlugin",
     "create_plugin",
     "Waypoint",

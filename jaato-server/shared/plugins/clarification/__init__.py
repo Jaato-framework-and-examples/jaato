@@ -10,6 +10,7 @@ more information to proceed with a task. It supports:
 
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .channels import AutoChannel, ClarificationChannel, ConsoleChannel, create_channel
 from .models import (
     Answer,
@@ -25,7 +26,7 @@ __all__ = [
     # Plugin
     "ClarificationPlugin",
     "create_plugin",
-    "PLUGIN_KIND",
+    "PLUGIN_KIND", "PLUGIN_TIER",
     # Models
     "Choice",
     "Question",

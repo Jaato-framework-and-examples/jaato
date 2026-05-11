@@ -142,6 +142,80 @@ class _FakeJaatoClient:
         return self._session
 
 
+class _FakeRunnerRPC:
+    """Phase 3 §7c step 6.6.3.6: mirrors the RPC forwards onto
+    the inner JaatoSession fake.  The daemon code now routes
+    through ``server._runner_rpc.session_X_threadsafe(...)``
+    rather than ``server._jaato.get_session().X(...)``, so the
+    test fakes need to expose the threadsafe wrappers.  Each
+    wrapper here just calls the corresponding method on the
+    inner session — preserving the existing test assertions
+    against inject_calls / replay_calls / resolve_calls / etc.
+    """
+
+    def __init__(self, session: _FakeJaatoSession) -> None:
+        self._session = session
+
+    def session_inject_prompt_threadsafe(
+        self,
+        text: str,
+        *,
+        source_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> None:
+        # source_type arrives as a string (SourceType.value) — the
+        # test session captures whatever the daemon sent.  Tests
+        # asserting against the enum need to import SourceType and
+        # compare via .value.
+        from shared.message_queue import SourceType
+        st_enum = SourceType(source_type) if source_type is not None else None
+        self._session.inject_prompt(
+            text, source_id=source_id, source_type=st_enum,
+        )
+
+    def session_replay_messages_threadsafe(
+        self,
+        messages: List[Any],
+        *,
+        replay_timeout: float = 120.0,
+        timeout: Optional[float] = None,
+    ) -> str:
+        return self._session.replay_messages(messages, timeout=replay_timeout)
+
+    def session_get_history_threadsafe(
+        self, *, timeout: Optional[float] = None,
+    ) -> List[Any]:
+        return self._session.get_history()
+
+    def session_resolve_fork_point_threadsafe(
+        self,
+        *,
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+        history: Optional[List[Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> int:
+        # When history is None, fall back to session.get_history()
+        # — matches the runner-side handler's default semantic.
+        effective_history = history if history is not None else self._session.get_history()
+        return self._session.resolve_fork_point(
+            effective_history,
+            after_message=after_message,
+            after_tool_call=after_tool_call,
+            after_timestamp=after_timestamp,
+        )
+
+    def session_set_parallel_tools_override_threadsafe(
+        self,
+        enabled: bool,
+        *,
+        timeout: Optional[float] = None,
+    ) -> None:
+        self._session._parallel_tools_override = bool(enabled)
+
+
 class _FakeJaatoServer:
     def __init__(
         self,
@@ -149,6 +223,7 @@ class _FakeJaatoServer:
         permission_plugin: Optional[_FakePermissionPlugin] = None,
     ) -> None:
         self._jaato = _FakeJaatoClient(jaato_session)
+        self._runner_rpc = _FakeRunnerRPC(jaato_session)
         self.registry = _FakeRegistry(permission_plugin)
 
     # The dispatch path also touches these — provide minimal stubs.

@@ -21,6 +21,7 @@ from .lsp_client import (
     TextEdit, WorkspaceEdit, CodeAction, Range, Position
 )
 
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -332,7 +333,7 @@ class LogCapture:
         return self._write_fd
 
 
-class LSPToolPlugin:
+class LSPToolPlugin(RunnerForwardingMixin):
     """Plugin that provides LSP (Language Server Protocol) tool execution.
 
     This plugin connects to LSP servers defined in .lsp.json and exposes
@@ -724,11 +725,17 @@ class LSPToolPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor mappings for LSP tools."""
+        """Return executor mappings for LSP tools.
+
+        Phase 3 §3.5 wave 2: forwards via runner-RPC when a runner
+        is attached so spawned LSP-server subprocesses inherit the
+        runner's AppArmor profile.  Falls through to in-process
+        otherwise.
+        """
         if not self._initialized:
             self.initialize()
 
-        return {
+        return self.wrap_executors_for_runner_forwarding({
             "lsp_goto_definition": self._exec_goto_definition,
             "lsp_find_references": self._exec_find_references,
             "lsp_hover": self._exec_hover,
@@ -739,7 +746,7 @@ class LSPToolPlugin:
             "lsp_get_code_actions": self._exec_get_code_actions,
             "lsp_apply_code_action": self._exec_apply_code_action,
             "lsp": lambda args: self.execute_user_command('lsp', args),
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         return """## CODE VALIDATION / LINTING (AUTOMATIC + MANUAL)

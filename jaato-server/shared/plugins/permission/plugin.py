@@ -29,6 +29,7 @@ from .channels import (
 )
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback, HelpLines
 from ...ui_utils import format_permission_options, format_tool_args_summary
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 # Import TYPE_CHECKING to avoid circular imports
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from ..registry import PluginRegistry
 
 
-class PermissionPlugin:
+class PermissionPlugin(RunnerForwardingMixin):
     """Plugin that provides permission control for tool execution.
 
     This plugin acts as a middleware layer that intercepts tool execution
@@ -78,6 +79,17 @@ class PermissionPlugin:
         # This ensures only one permission prompt is shown at a time when
         # multiple tools request permission concurrently (parallel execution)
         self._channel_lock = threading.Lock()
+        # Phase 3 §3.7 + peer-review M3: lock around per-session policy
+        # mutations so a cross-session ``permission.add_rule`` RPC
+        # arriving mid-ASK can't let the next call for the same tool
+        # bypass the prompt nondeterministically.  Acquired on every
+        # rule mutation (whitelist add, blacklist add, rule delete)
+        # and around the ASK-resolution "rule miss check + channel
+        # wait" critical section in :meth:`check_permission` —
+        # see the ASK_CHANNEL branch where the lock is held across a
+        # policy.check recheck plus the channel.request_permission
+        # call so cross-session mutations queue behind the prompt.
+        self._policy_lock = threading.Lock()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Workspace path for evaluator resolution and EvalContext
@@ -86,15 +98,73 @@ class PermissionPlugin:
         # on_requested: (tool_name, request_id, tool_args, response_options, call_id) -> None
         self._on_permission_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None
         self._on_permission_resolved: Optional[Callable[[str, str, bool, str], None]] = None
+        # Phase 3 §3.7 deeper: cached RunnerRPCChannel instance.  When
+        # the plugin runs runner-side, ASK decisions can't reach the
+        # connected client through ConsoleChannel / WebhookChannel —
+        # the runner is in an AppArmor-confined process with no
+        # client connection.  Instead, ``_get_channel()`` checks
+        # ``self._registry.runner_rpc_client`` and uses
+        # :class:`RunnerRPCChannel` to relay through
+        # ``client.prompt_operator``.  Resolved lazily on first ASK
+        # so init-order (set_registry vs runner_rpc_client attach)
+        # doesn't matter; cached on first hit.
+        self._runner_rpc_channel: Optional[Channel] = None
 
     def _get_channel(self) -> Optional[Channel]:
         """Get the channel for the current thread.
 
-        Returns the thread-local channel if set (for subagents),
-        otherwise returns the default channel.
+        Returns, in priority order:
+
+        1. The thread-local channel if set — used by subagents which
+           run in separate threads with their own per-thread channel.
+        2. The runner-RPC channel if a runner-side ``RunnerRPCClient``
+           is attached to the plugin registry (Phase 3 §3.7 deeper) —
+           the runner-side ASK relay through the daemon's
+           ``client.prompt_operator`` RPC primitive.
+        3. The plugin's default channel (ConsoleChannel etc.) — the
+           in-process / pre-Phase-3 path.
         """
         thread_channel = getattr(self._thread_local, 'channel', None)
-        return thread_channel if thread_channel is not None else self._channel
+        if thread_channel is not None:
+            return thread_channel
+        runner_channel = self._get_runner_rpc_channel()
+        if runner_channel is not None:
+            return runner_channel
+        return self._channel
+
+    def _get_runner_rpc_channel(self) -> Optional[Channel]:
+        """Resolve / cache the :class:`RunnerRPCChannel` for runner-side use.
+
+        Phase 3 §3.7 deeper.  Returns ``None`` when the plugin runs
+        daemon-side (no runner-RPC client attached to the registry)
+        so the caller falls back to the in-process channel.
+
+        Caches on first successful resolution: subsequent ASKs reuse
+        the same channel instance.  The cached instance is reset on
+        ``shutdown()`` so a subsequent ``initialize()`` (e.g.,
+        re-expose with new config) re-resolves cleanly.
+        """
+        if self._runner_rpc_channel is not None:
+            return self._runner_rpc_channel
+        registry = self._registry
+        if registry is None:
+            return None
+        rpc_client = getattr(registry, 'runner_rpc_client', None)
+        if rpc_client is None:
+            return None
+        prompt_operator = getattr(rpc_client, 'prompt_operator', None)
+        if prompt_operator is None:
+            return None
+        # Lazy-import to avoid a top-level dependency on the channel
+        # module (which lazy-imports PromptPayload from .types in
+        # turn — keeps the import graph DAG-shaped).
+        from .runner_rpc_channel import RunnerRPCChannel
+        self._runner_rpc_channel = RunnerRPCChannel(prompt_operator)
+        self._trace(
+            "_get_runner_rpc_channel: resolved RunnerRPCChannel "
+            "(runner-side ASK relay active)"
+        )
+        return self._runner_rpc_channel
 
     def set_registry(self, registry: 'PluginRegistry') -> None:
         """Set the plugin registry for tool-to-plugin lookups.
@@ -242,6 +312,10 @@ class PermissionPlugin:
         self._allow_all = False
         self._turn_suspended = False
         self._idle_suspended = False
+        # Phase 3 §3.7 deeper: drop the cached runner-RPC channel so a
+        # subsequent ``initialize()`` re-resolves against the (possibly
+        # different) registry's ``runner_rpc_client`` attribute.
+        self._runner_rpc_channel = None
 
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
@@ -396,12 +470,19 @@ class PermissionPlugin:
         Use this to programmatically whitelist tools that should be auto-approved,
         such as those returned by plugins' get_auto_approved_tools().
 
+        Phase 3 §3.7 + peer-review M3: acquires ``_policy_lock`` so
+        the mutation can't race with an in-flight ASK on the same
+        tool — without the lock, an operator's
+        ``permission.add_rule`` arriving mid-prompt would let the
+        next call for the tool bypass the prompt nondeterministically.
+
         Args:
             tools: List of tool names to whitelist.
         """
         if self._policy and tools:
-            for tool in tools:
-                self._policy.whitelist_tools.add(tool)
+            with self._policy_lock:
+                for tool in tools:
+                    self._policy.whitelist_tools.add(tool)
 
     # Suspension management methods
 
@@ -492,12 +573,26 @@ class PermissionPlugin:
         """Return executors for model tools and user commands.
 
         Exposure is controlled via the registry (expose_tool/unexpose_tool).
+
+        Phase 3 §3.7: forwards via runner-RPC when a runner is
+        attached.  ``askPermission`` ASK relays through
+        ``client.prompt_operator`` (§3.2.1) once the channel
+        migration lands; for now the daemon-side instance still
+        owns the channel state and the runner-side ``askPermission``
+        invocation forwards the ``_execute_ask_permission`` body
+        unchanged.
+
+        The cross-cutting ``check_permission`` method (line 1058)
+        is NOT in this dict — it's called directly by
+        ``ToolExecutor`` at every tool dispatch and stays daemon-
+        side until the seat-flip routes the model loop to the
+        runner.
         """
-        return {
+        return self.wrap_executors_for_runner_forwarding({
             "askPermission": self._execute_ask_permission,
             # User commands
             "permissions": self.execute_permissions,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the permission system."""
@@ -1260,112 +1355,159 @@ class PermissionPlugin:
                 self._log_decision(tool_name, args, "deny", "No channel configured")
                 return False, {'reason': 'No channel configured for approval', 'method': 'no_channel'}
 
-            # Serialize channel interactions to ensure only one permission prompt
-            # is shown at a time (important for parallel tool execution)
-            self._trace(f"check_permission: acquiring channel lock for {tool_name}")
-            with self._channel_lock:
-                # Re-check _allow_all after acquiring lock - another thread may have
-                # set it while we were waiting (e.g., user responded "all" to first prompt)
-                if self._allow_all:
-                    self._trace(f"check_permission: allow_all set while waiting, auto-approving {tool_name}")
-                    self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
-                    return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
-
-                # Get tool schema to check for editable content
-                tool_schema = self._get_tool_schema(tool_name)
-                editable = tool_schema.editable if tool_schema else None
-                self._trace(f"check_permission: tool_schema={tool_schema is not None}, editable={editable is not None}")
-
-                # Get permission options (with edit if tool is editable)
-                response_options = self._get_permission_options_for_tool(tool_name)
-
-                # Track current arguments (may be modified by edit)
-                current_args = args.copy()
-                original_args = args.copy()
-                was_edited = False
-
-                # Edit loop - user can edit multiple times before final decision
-                # Track the request_id of the last prompt sent to the client
-                # so that pre-validation can reference it when resolving.
-                last_prompted_request_id: str | None = None
-
-                while True:
-                    # Get custom display info from source plugin if available
-                    channel_type = channel.name if channel else "console"
-                    display_info = self._get_display_info(tool_name, current_args, channel_type)
-
-                    # Pre-validation: if the plugin already knows the operation
-                    # will fail (e.g., targeted edit anchor not found), skip the
-                    # permission prompt and let the executor return the error
-                    # directly so the model can retry.
-                    if display_info and display_info.pre_validation_error:
-                        self._trace(f"check_permission: pre-validation failed for {tool_name}: {display_info.pre_validation_error}")
-                        self._log_decision(tool_name, current_args, "allow", f"Pre-validation error (skipping prompt): {display_info.pre_validation_error}")
-                        if self._on_permission_resolved and not is_subagent_mode:
-                            # Use last_prompted_request_id so the client can
-                            # match this resolution to its pending prompt and
-                            # clear the permission input mode.
-                            self._on_permission_resolved(tool_name, last_prompted_request_id or "", True, "pre_validation")
-                        return True, {'reason': 'Pre-validation error, skipping prompt', 'method': 'pre_validation'}
-
-                    # Build context with display info
-                    request_context = dict(context) if context else {}
-                    if display_info:
-                        request_context["display_info"] = display_info
-                    # Mark as edited in context for UI display
-                    if was_edited:
-                        request_context["was_edited"] = True
-
-                    request = PermissionRequest.create(
-                        tool_name=tool_name,
-                        arguments=current_args,
-                        timeout=self._config.channel_timeout if self._config else 30,
-                        context=request_context,
-                        response_options=response_options,
-                        editable=editable,
+            # Phase 3 §3.7 + peer-review M3: hold ``_policy_lock``
+            # across the rule-recheck + channel-wait critical section
+            # so a cross-session ``permission.add_rule`` RPC (or any
+            # whitelist/blacklist mutation) can't change the policy
+            # state mid-prompt.  Without the lock, the rule-miss
+            # decision and the user's response would evaluate against
+            # different policy snapshots, leaving subsequent calls to
+            # the same tool to behave nondeterministically depending
+            # on which thread observed which snapshot.
+            #
+            # The response-side side effects (``add_session_whitelist``
+            # etc. inside ``_handle_channel_response``) run while the
+            # lock is still held, so they apply atomically with
+            # respect to other mutations as well.
+            self._trace(f"check_permission: acquiring policy lock for ASK on {tool_name}")
+            with self._policy_lock:
+                # Re-check the policy under the lock — a mutation may
+                # have landed between the original (unlocked) check
+                # above and our acquisition here.  If the policy now
+                # resolves the tool unambiguously, drop the lock and
+                # recurse to fall through ALLOW/DENY rather than
+                # prompting the user about a tool that's already
+                # decided.  The recursion sees the new policy state
+                # in its own (unlocked) check, so its decision tree
+                # lands directly in ALLOW/DENY without re-acquiring
+                # the lock.
+                recheck = self._policy.check(
+                    tool_name, args,
+                    eval_context=None if already_evaluated else eval_context,
+                )
+                policy_mutated = (
+                    recheck.decision != PermissionDecision.ASK_CHANNEL
+                )
+                if policy_mutated:
+                    self._trace(
+                        f"check_permission: policy mutated mid-ASK "
+                        f"for {tool_name}; recheck decision="
+                        f"{recheck.decision}; will recurse after "
+                        f"releasing lock"
                     )
-                    # Set additional metadata for the channel/client
-                    request.was_edited = was_edited
-                    request.original_arguments = original_args if was_edited else None
+                else:
+                    # Serialize channel interactions to ensure only one permission prompt
+                    # is shown at a time (important for parallel tool execution)
+                    self._trace(f"check_permission: acquiring channel lock for {tool_name}")
+                    with self._channel_lock:
+                        # Re-check _allow_all after acquiring lock - another thread may have
+                        # set it while we were waiting (e.g., user responded "all" to first prompt)
+                        if self._allow_all:
+                            self._trace(f"check_permission: allow_all set while waiting, auto-approving {tool_name}")
+                            self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
+                            return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
 
-                    # Emit permission requested hook with current args (client formats display)
-                    # SKIP in subagent mode
-                    if self._on_permission_requested and not is_subagent_mode:
-                        self._on_permission_requested(
-                            tool_name, request.request_id, current_args, request.response_options, call_id
-                        )
-                    last_prompted_request_id = request.request_id
+                        # Get tool schema to check for editable content
+                        tool_schema = self._get_tool_schema(tool_name)
+                        editable = tool_schema.editable if tool_schema else None
+                        self._trace(f"check_permission: tool_schema={tool_schema is not None}, editable={editable is not None}")
 
-                    response = channel.request_permission(request)
+                        # Get permission options (with edit if tool is editable)
+                        response_options = self._get_permission_options_for_tool(tool_name)
 
-                    # Handle EDIT decision - loop back after editing
-                    if response.decision == ChannelDecision.EDIT:
-                        if response.edited_arguments:
-                            current_args = response.edited_arguments
-                            was_edited = True
-                            self._trace(f"check_permission: content edited for {tool_name}")
-                        # Continue loop to re-prompt with edited content
-                        continue
+                        # Track current arguments (may be modified by edit)
+                        current_args = args.copy()
+                        original_args = args.copy()
+                        was_edited = False
 
-                    # Final decision - exit loop
-                    allowed, info = self._handle_channel_response(tool_name, current_args, response)
+                        # Edit loop - user can edit multiple times before final decision
+                        # Track the request_id of the last prompt sent to the client
+                        # so that pre-validation can reference it when resolving.
+                        last_prompted_request_id: str | None = None
 
-                    # Include edit metadata in info
-                    if was_edited:
-                        info['was_edited'] = True
-                        info['modified_args'] = current_args
-                        info['original_args'] = original_args
+                        while True:
+                            # Get custom display info from source plugin if available
+                            channel_type = channel.name if channel else "console"
+                            display_info = self._get_display_info(tool_name, current_args, channel_type)
 
-                    # Emit permission resolved hook
-                    # SKIP in subagent mode
-                    if self._on_permission_resolved and not is_subagent_mode:
-                        self._on_permission_resolved(
-                            tool_name, request.request_id, allowed,
-                            info.get('method', 'unknown'),
-                            comment=info.get('comment', ''),
-                        )
+                            # Pre-validation: if the plugin already knows the operation
+                            # will fail (e.g., targeted edit anchor not found), skip the
+                            # permission prompt and let the executor return the error
+                            # directly so the model can retry.
+                            if display_info and display_info.pre_validation_error:
+                                self._trace(f"check_permission: pre-validation failed for {tool_name}: {display_info.pre_validation_error}")
+                                self._log_decision(tool_name, current_args, "allow", f"Pre-validation error (skipping prompt): {display_info.pre_validation_error}")
+                                if self._on_permission_resolved and not is_subagent_mode:
+                                    # Use last_prompted_request_id so the client can
+                                    # match this resolution to its pending prompt and
+                                    # clear the permission input mode.
+                                    self._on_permission_resolved(tool_name, last_prompted_request_id or "", True, "pre_validation")
+                                return True, {'reason': 'Pre-validation error, skipping prompt', 'method': 'pre_validation'}
 
-                    return allowed, info
+                            # Build context with display info
+                            request_context = dict(context) if context else {}
+                            if display_info:
+                                request_context["display_info"] = display_info
+                            # Mark as edited in context for UI display
+                            if was_edited:
+                                request_context["was_edited"] = True
+
+                            request = PermissionRequest.create(
+                                tool_name=tool_name,
+                                arguments=current_args,
+                                timeout=self._config.channel_timeout if self._config else 30,
+                                context=request_context,
+                                response_options=response_options,
+                                editable=editable,
+                            )
+                            # Set additional metadata for the channel/client
+                            request.was_edited = was_edited
+                            request.original_arguments = original_args if was_edited else None
+
+                            # Emit permission requested hook with current args (client formats display)
+                            # SKIP in subagent mode
+                            if self._on_permission_requested and not is_subagent_mode:
+                                self._on_permission_requested(
+                                    tool_name, request.request_id, current_args, request.response_options, call_id
+                                )
+                            last_prompted_request_id = request.request_id
+
+                            response = channel.request_permission(request)
+
+                            # Handle EDIT decision - loop back after editing
+                            if response.decision == ChannelDecision.EDIT:
+                                if response.edited_arguments:
+                                    current_args = response.edited_arguments
+                                    was_edited = True
+                                    self._trace(f"check_permission: content edited for {tool_name}")
+                                # Continue loop to re-prompt with edited content
+                                continue
+
+                            # Final decision - exit loop
+                            allowed, info = self._handle_channel_response(tool_name, current_args, response)
+
+                            # Include edit metadata in info
+                            if was_edited:
+                                info['was_edited'] = True
+                                info['modified_args'] = current_args
+                                info['original_args'] = original_args
+
+                            # Emit permission resolved hook
+                            # SKIP in subagent mode
+                            if self._on_permission_resolved and not is_subagent_mode:
+                                self._on_permission_resolved(
+                                    tool_name, request.request_id, allowed,
+                                    info.get('method', 'unknown'),
+                                    comment=info.get('comment', ''),
+                                )
+
+                            return allowed, info
+
+            # Lock released.  ``policy_mutated`` is the only way out
+            # of the ``with`` block without an inner return — recurse
+            # so the new policy state is observed.
+            if policy_mutated:
+                return self.check_permission(tool_name, args, context, call_id)
 
         # Unknown decision type, deny by default
         return False, {'reason': 'Unknown policy decision', 'method': 'unknown'}

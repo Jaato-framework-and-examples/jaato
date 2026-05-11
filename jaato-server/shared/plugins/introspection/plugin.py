@@ -13,6 +13,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.tool_id_map import name_to_id
 from ..streaming import StreamingCapable
 
@@ -21,7 +22,7 @@ from ..streaming import StreamingCapable
 _thread_local = threading.local()
 
 
-class IntrospectionPlugin:
+class IntrospectionPlugin(RunnerForwardingMixin):
     """Plugin that provides tool discovery and introspection capabilities.
 
     This plugin exposes tools for the LLM to:
@@ -157,11 +158,15 @@ class IntrospectionPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executors for introspection tools."""
-        return {
+        """Return the executors for introspection tools.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "list_tools": self._execute_list_tools,
             "get_tool_schemas": self._execute_get_tool_schemas,
-        }
+        })
 
     def get_accessed_tools(self) -> Set[str]:
         """Get the set of tools the model has requested schemas for.

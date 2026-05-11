@@ -14,6 +14,7 @@ import threading
 import time
 
 from shared.path_utils import is_msys2_environment, normalize_path, get_display_separator
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 if TYPE_CHECKING:
     from shared.jaato_session import JaatoSession
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 _thread_local = threading.local()
 
 
-class EnvironmentPlugin:
+class EnvironmentPlugin(RunnerForwardingMixin):
     """Plugin that provides environment awareness tools.
 
     Supports querying both external environment (OS, shell, architecture)
@@ -115,10 +116,14 @@ class EnvironmentPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Any]:
-        """Map tool names to executor functions."""
-        return {
-            "get_environment": self._get_environment
-        }
+        """Map tool names to executor functions.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            "get_environment": self._get_environment,
+        })
 
     def _get_environment(self, args: Dict[str, Any]) -> str:
         """

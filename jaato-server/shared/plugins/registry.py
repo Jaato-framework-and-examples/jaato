@@ -401,7 +401,8 @@ class PluginRegistry:
     def discover(
         self,
         plugin_kind: str = "tool",
-        include_directory: bool = True
+        include_directory: bool = True,
+        tier_filter: Optional[str] = None,
     ) -> List[str]:
         """Discover plugins via entry points and optionally directory scanning.
 
@@ -420,6 +421,16 @@ class PluginRegistry:
                         Only plugins with matching PLUGIN_KIND are loaded.
             include_directory: Also scan the plugins directory for local plugins.
                              Useful during development when package isn't installed.
+            tier_filter: Optional tier restriction (Phase 3 §3.3.5).  When
+                set to ``"daemon"``, only plugins declaring
+                ``PLUGIN_TIER = "daemon"`` are loaded; ``"runner"`` loads
+                only runner-tier plugins.  When ``None`` (default), no
+                tier restriction — preserves Phase 2 behaviour where the
+                daemon discovers everything.  Plugins without a
+                ``PLUGIN_TIER`` annotation are SKIPPED when a filter is
+                set (the contract is "annotate or be excluded"); this
+                makes the partition deterministic and catches new
+                plugins landing without an explicit tier.
 
         Returns:
             List of discovered plugin names.
@@ -427,22 +438,41 @@ class PluginRegistry:
         discovered = []
 
         # First, discover via entry points (installed packages)
-        discovered.extend(self._discover_via_entry_points(plugin_kind))
+        discovered.extend(
+            self._discover_via_entry_points(plugin_kind, tier_filter=tier_filter)
+        )
 
         # Then, optionally scan the plugins directory (development mode)
         if include_directory:
-            discovered.extend(self._discover_via_directory(plugin_kind))
+            discovered.extend(
+                self._discover_via_directory(
+                    plugin_kind, tier_filter=tier_filter,
+                )
+            )
 
         # When discovering tool plugins, also discover enrichment plugins
         # so callers don't need to make a separate discover("enrichment") call
         if plugin_kind == "tool":
-            discovered.extend(self._discover_via_entry_points("enrichment"))
+            discovered.extend(
+                self._discover_via_entry_points(
+                    "enrichment", tier_filter=tier_filter,
+                )
+            )
             if include_directory:
-                discovered.extend(self._discover_via_directory("enrichment"))
+                discovered.extend(
+                    self._discover_via_directory(
+                        "enrichment", tier_filter=tier_filter,
+                    )
+                )
 
         return discovered
 
-    def _discover_via_entry_points(self, plugin_kind: str) -> List[str]:
+    def _discover_via_entry_points(
+        self,
+        plugin_kind: str,
+        *,
+        tier_filter: Optional[str] = None,
+    ) -> List[str]:
         """Discover plugins registered via entry points.
 
         External packages can register plugins by adding to the appropriate
@@ -450,6 +480,10 @@ class PluginRegistry:
 
         Args:
             plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
+            tier_filter: Optional tier restriction (Phase 3 §3.3.5).
+                When set, the loaded plugin's module-level
+                ``PLUGIN_TIER`` must match; mismatched plugins are
+                skipped (a debug trace records the skip reason).
 
         Returns:
             List of discovered plugin names.
@@ -475,7 +509,22 @@ class PluginRegistry:
                     continue
 
                 try:
+                    # Phase 3 §3.3.5: tier filter — read PLUGIN_TIER from
+                    # the entry-point's defining module.  ``ep.load()``
+                    # imports the module already; we read the attr from
+                    # the loaded factory's module.
                     create_plugin = ep.load()
+                    if tier_filter is not None:
+                        ep_module = getattr(create_plugin, "__module__", "")
+                        ep_tier = self._lookup_module_tier(ep_module)
+                        if ep_tier != tier_filter:
+                            _trace(
+                                f" Entry point '{ep.name}': PLUGIN_TIER "
+                                f"={ep_tier!r} != filter={tier_filter!r}; "
+                                f"skipping"
+                            )
+                            continue
+
                     plugin = create_plugin()
 
                     # Verify protocol implementation
@@ -504,10 +553,42 @@ class PluginRegistry:
 
         return discovered
 
+    @staticmethod
+    def _lookup_module_tier(module_name: str) -> Optional[str]:
+        """Read ``PLUGIN_TIER`` from a plugin module's package.
+
+        Most plugin entry points point at
+        ``<package>.<plugin_name>.plugin:create_plugin``; the
+        ``PLUGIN_TIER`` annotation lives on the plugin package's
+        ``__init__.py``.  We walk up to the package root by stripping
+        the trailing ``.plugin`` (or whatever submodule the factory
+        lives in).
+
+        Returns the tier string (``"daemon"`` / ``"runner"``) or
+        ``None`` if the module isn't loaded yet OR the package
+        doesn't declare a tier.
+        """
+        if not module_name:
+            return None
+        # Try the module itself first, then its parent package.
+        # ``shared.plugins.cli.plugin`` → ``shared.plugins.cli``.
+        candidates = [module_name]
+        if "." in module_name:
+            candidates.append(module_name.rsplit(".", 1)[0])
+        for candidate in candidates:
+            mod = sys.modules.get(candidate)
+            if mod is not None:
+                tier = getattr(mod, "PLUGIN_TIER", None)
+                if isinstance(tier, str):
+                    return tier
+        return None
+
     def _discover_via_directory(
         self,
         plugin_kind: str,
-        plugin_dir: Optional[Path] = None
+        plugin_dir: Optional[Path] = None,
+        *,
+        tier_filter: Optional[str] = None,
     ) -> List[str]:
         """Discover plugins by scanning the plugins directory.
 
@@ -517,6 +598,11 @@ class PluginRegistry:
         Args:
             plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
             plugin_dir: Directory to scan. Defaults to this package's directory.
+            tier_filter: Optional tier restriction (Phase 3 §3.3.5).
+                When set, the module's ``PLUGIN_TIER`` must match;
+                missing or mismatched annotations are skipped.  Read
+                directly from the imported module so the pre-§3.3.5
+                "annotate or be excluded" contract holds.
 
         Returns:
             List of discovered plugin names.
@@ -547,6 +633,16 @@ class PluginRegistry:
                 # convention shared across registries.
                 if getattr(module, 'PLUGIN_KIND', None) != plugin_kind:
                     continue
+
+                # Phase 3 §3.3.5: tier filter.
+                if tier_filter is not None:
+                    module_tier = getattr(module, 'PLUGIN_TIER', None)
+                    if module_tier != tier_filter:
+                        _trace(
+                            f" Plugin '{name}': PLUGIN_TIER={module_tier!r} "
+                            f"!= filter={tier_filter!r}; skipping"
+                        )
+                        continue
 
                 if hasattr(module, 'create_plugin'):
                     t1 = time.perf_counter()

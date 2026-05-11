@@ -78,6 +78,17 @@ class EventType(str, Enum):
     # Replaces the [SESSION_TERMINATED] string-based marker.
     SESSION_TERMINATED = "session.terminated"
 
+    # Session lifecycle: emitted on first client-attach to a session
+    # that was loaded from disk (Phase 3 §3.12 disk-restore +
+    # peer-review M5/N1).  Carries the count of pending tool calls
+    # that the daemon held during defer-and-flush so the client can
+    # surface a "this session was restored — N pending tool calls
+    # to review" prompt.  ``pending_tool_call_count == 0`` is the
+    # common case (clean restore with no in-flight work); the event
+    # still fires so clients can distinguish a fresh-attach from a
+    # restored-attach for telemetry / UX purposes.
+    SESSION_RESTORED = "session.restored"
+
     # Tool execution (Server -> Client)
     TOOL_CALL_START = "tool.call_start"
     TOOL_CALL_END = "tool.call_end"
@@ -392,6 +403,32 @@ class SessionTerminatedEvent(Event):
     session_id: str = ""
     agent_id: Optional[str] = None
     reason: str = "natural"  # "natural" | "client_request" | "stopped" | "error"
+
+
+class SessionRestoredEvent(Event):
+    """Session was loaded from disk and the first client just attached.
+
+    Phase 3 §3.12 disk-restore + peer-review M5/N1: when a session
+    is restored from disk (daemon restart / cold attach), the
+    daemon may have held in-flight tool calls during the
+    no-client window using the defer-and-flush posture (vs
+    denying outright per the pre-§3.12 behaviour).  This event
+    fires on the first client-attach so the client can surface a
+    "this session was restored — N pending tool calls to review"
+    prompt; the operator drains the queue (each held ASK relays
+    through the now-attached ``client.prompt_operator`` channel
+    as if it had just landed) and the
+    ``Session.restored_pending_attach`` flag clears.
+
+    ``pending_tool_call_count`` is 0 for clean restores with no
+    in-flight work; the event still fires in that case so clients
+    can distinguish a fresh-attach from a restored-attach for
+    telemetry / UX purposes.
+    """
+
+    type: EventType = Field(default=EventType.SESSION_RESTORED)
+    session_id: str = ""
+    pending_tool_call_count: int = 0
 
 
 class ToolCallStartEvent(Event):

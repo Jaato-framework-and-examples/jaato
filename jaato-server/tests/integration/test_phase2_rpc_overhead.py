@@ -24,7 +24,7 @@ from typing import List
 
 import pytest
 
-from server.runner_rpc import RunnerRPCClient
+from server.runner_rpc_client import RunnerRPCClient
 from server.runner_spawner import RunnerSpawner
 
 

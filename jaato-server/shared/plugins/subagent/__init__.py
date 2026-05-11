@@ -39,6 +39,7 @@ Example usage:
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .plugin import SubagentPlugin, create_plugin
 from .config import (
     SubagentConfig, SubagentProfile, SubagentResult,

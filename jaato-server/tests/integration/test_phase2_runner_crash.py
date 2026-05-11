@@ -25,7 +25,7 @@ import time
 
 import pytest
 
-from server.runner_rpc import RunnerCallError, RunnerRPCClient
+from server.runner_rpc_client import RunnerCallError, RunnerRPCClient
 from server.runner_spawner import RunnerSpawner
 
 

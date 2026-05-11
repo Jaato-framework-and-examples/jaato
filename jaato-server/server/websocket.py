@@ -516,15 +516,48 @@ class JaatoWSServer:
             server: JaatoServer,
             session_id: str,
             workspace_path: Optional[str],
+            client_id: Optional[str] = None,
         ) -> None:
-            """Provision the AppArmor profile BEFORE ``server.initialize()``
-            so prefetch scripts run inside the session's confinement
-            (server 0.6.49+).  Failure here is non-fatal — the post-init
-            hook downgrades the session to ``soft`` mode if the profile
-            wasn't loaded.
+            """Spawn the per-session runner unconditionally for
+            WS-provisioned sessions; layer apparmor confinement atop
+            iff the kernel module is available.
 
-            Server 0.6.50+: ALSO stashes the confine-context factory on
-            the server so ``configure()``'s dynamic-instructions
+            Phase 3 §7a (WS counterpart to the IPC always-spawn
+            refactor in ``SessionManager._provision_ipc_apparmor_and_spawn_runner``).
+            Pre-§7a this skipped both apparmor AND spawn when
+            apparmor was unavailable; post-§7a the spawn is
+            unconditional so the runner-RPC dispatch surface is
+            always available for the seat-flip's ``self._jaato.X``
+            migrations.
+
+            Lifecycle:
+            1. Skip when no workspace_path (no cwd target for the
+               runner).
+            2. Skip when workspace is NOT under the WS server's
+               workspace_root (IPC / user-CWD session — IPC hook
+               handles its own).
+            3. Resolve the daemon loop; skip if unavailable
+               (start() should always have captured it; defensive
+               only).
+            4. **Apparmor (opt-in via host availability)**: if the
+               WS server has an :class:`AppArmorManager` and it's
+               available, provision the per-session profile.  On
+               provisioning failure, log a warning and continue
+               unconfined.
+            5. **Spawn (unconditional)**: spawn the runner with the
+               provisioned profile (or empty + ``disable_confine=True``
+               if apparmor is unavailable / failed).  Spawn failure
+               logs a warning and the session falls back to
+               in-process tool execution.
+
+            ``client_id`` is unused by the WS gate (which keys off
+            workspace-under-WS-root rather than per-client opt-in)
+            but accepting it keeps the dispatcher's modern path
+            engaged without falling through to the legacy compat
+            branch in ``_run_pre_initialize_hooks``.
+
+            Server 0.6.50+: ALSO stashes the confine-context factory
+            on the server so ``configure()``'s dynamic-instructions
             expansion wraps prefetch scripts in
             ``apparmor_confine(profile)``.  The factory is propagated
             onto the runtime once ``initialize()`` constructs it
@@ -532,9 +565,10 @@ class JaatoWSServer:
             """
             if not workspace_path:
                 return
-            apparmor = ws_server._apparmor
-            if not apparmor or not apparmor.is_available():
-                return
+
+            # Gate: only WS-provisioned sessions (workspace under
+            # WS server's root) take this path.  Non-WS sessions
+            # (IPC / user-CWD) are handled by the IPC hook.
             try:
                 ws_workspace_root = os.path.realpath(ws_server._workspace_root)
                 sess_workspace = os.path.realpath(workspace_path)
@@ -545,19 +579,120 @@ class JaatoWSServer:
                 or sess_workspace.startswith(ws_workspace_root + os.sep)
             ):
                 return  # IPC or user-CWD session — not WS-provisioned
-            if not apparmor.provision_profile(session_id, workspace_path):
+
+            daemon_loop = ws_server._event_loop
+            if daemon_loop is None:
                 logger.warning(
-                    "AppArmor pre-init: provision_profile failed for "
-                    "session %s — post-init hook will downgrade to soft mode",
+                    "AppArmor pre-init: ws_server has no daemon loop "
+                    "captured — runner not spawned for session %s",
                     session_id,
                 )
                 return
-            # Phase 2 (confined runner): profile is loaded in the
-            # kernel above; the daemon does NOT install a confine-
-            # context onto its own threads.  configure() / prefetch
-            # run unconfined daemon-side; per-session tool execution
-            # runs in the runner subprocess, which self-confines.
-            # See docs/design/per_session_confined_runner.md §4.6.
+
+            # ----- Apparmor (opt-in via host availability) -----
+            apparmor = ws_server._apparmor
+            profile_name = ""  # empty = unconfined (disable_confine=True)
+            if apparmor is not None and apparmor.is_available():
+                if apparmor.provision_profile(session_id, workspace_path):
+                    profile_name = apparmor.get_profile_name(session_id)
+                else:
+                    logger.warning(
+                        "AppArmor pre-init: provision_profile failed for "
+                        "session %s — runner will spawn unconfined; "
+                        "post-init hook will downgrade to soft mode",
+                        session_id,
+                    )
+                    # profile_name stays empty → unconfined spawn
+
+            # ----- Cgroups (opt-in via host availability) -----
+            # Phase 3 §7d: provision the per-session cgroup BEFORE
+            # spawn so the forked runner can be migrated into it
+            # pre-exec.  Child processes (cli, interactive_shell
+            # PTY children) inherit by default per cgroup-v2 kernel
+            # contract.  Pre-§7d the cgroup was provisioned in the
+            # post-init session_hook and the daemon-side
+            # set_runtime_limits wired plugin-level attach_cb
+            # preexec_fn's; post-§7d the runner subprocess is
+            # already in the cgroup, so plugin-level preexec_fn's
+            # are no-ops via inheritance.
+            cgroups = ws_server._cgroups
+            cgroup_attach: Optional[Callable[[], None]] = None
+            cgroup_profile = getattr(server, "_profile", None)
+            cgroup_limits = (
+                getattr(cgroup_profile, "runtime_limits", None)
+                if cgroup_profile else None
+            )
+            if (
+                cgroup_limits is not None
+                and cgroups is not None
+                and cgroups.is_available()
+            ):
+                try:
+                    if cgroups.provision_cgroup(session_id, cgroup_limits):
+                        ws_workspace_id = os.path.basename(sess_workspace)
+                        ws_server._workspace_to_session_id[ws_workspace_id] = session_id
+                        if cgroup_limits.has_kernel_limits():
+                            logger.info(
+                                "Cgroup runtime limits applied to session "
+                                "%s pre-spawn (memory=%s pids=%s "
+                                "cpu_weight=%s)",
+                                session_id, cgroup_limits.memory_max_mb,
+                                cgroup_limits.pids_max,
+                                cgroup_limits.cpu_weight,
+                            )
+                    cgroup_attach = cgroups.make_attach_callback(session_id)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "Cgroup pre-spawn provisioning failed for "
+                        "session %s (%s: %s) — runner will spawn in the "
+                        "daemon's cgroup",
+                        session_id, type(exc).__name__, exc,
+                    )
+
+            # Phase 3 §7a: spawn the runner regardless of apparmor
+            # outcome.  The dispatch surface is always available;
+            # confinement is layered atop iff apparmor succeeded.
+            # Phase 3 §7d: ``cgroup_attach`` (when non-None) is
+            # invoked between fork() and exec() to migrate the
+            # runner into the per-session cgroup.
+            try:
+                from server.runner_spawn import (
+                    spawn_session_runner,
+                    dispatch_bootstrap_envelope,
+                )
+                spawn_session_runner(
+                    server=server,
+                    session_id=session_id,
+                    workspace_path=workspace_path,
+                    profile_name=profile_name,
+                    daemon_loop=daemon_loop,
+                    disable_confine=(profile_name == ""),
+                    cgroup_attach=cgroup_attach,
+                )
+            except Exception as exc:  # noqa: BLE001 — spawn boundary
+                logger.warning(
+                    "AppArmor pre-init: runner spawn failed for "
+                    "session %s (%s: %s) — falling back to in-process "
+                    "tool execution; post-init hook will downgrade to "
+                    "soft mode",
+                    session_id, type(exc).__name__, exc, exc_info=True,
+                )
+                return
+
+            # Phase 3 §7c step 2: dispatch the session.bootstrap RPC
+            # so the runner-side JaatoSession host is populated.
+            # Pre-§7c-step-2 the WS path skipped this dispatch
+            # entirely (only IPC sent the envelope), leaving every
+            # WS session with a NULL runner-side host.  Failure is
+            # logged but does not propagate — the daemon-side
+            # JaatoSession is still authoritative during the §7c
+            # rollout window.
+            dispatch_bootstrap_envelope(
+                server=server,
+                session_id=session_id,
+                workspace_path=workspace_path,
+                profile_name=profile_name,
+            )
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
             sess = sm.get_session(session_id)
@@ -1386,19 +1521,19 @@ class JaatoWSServer:
 
         # Find the session's EventBus.
         # In daemon mode: SessionManager → Session → JaatoServer → JaatoClient → session → runtime
-        # In standalone mode: self._jaato_server → JaatoClient → session → runtime
+        # Phase 3 §7c step 6.6.3.6: read event_bus directly from
+        # the daemon-side ``server._runtime`` (daemon-tier per
+        # §4.2; mirrors the migration in core.py's event_bus
+        # property at §7c step 6.2).  Eliminates the
+        # ``_jaato.get_session()._runtime.event_bus`` indirection.
         bus = None
         if self._command_router:
             sm = self._command_router._session_manager
             session_obj = sm.get_session(session_id) if hasattr(sm, 'get_session') else None
-            if session_obj and session_obj.server and session_obj.server._jaato:
-                jaato_session = session_obj.server._jaato.get_session()
-                if jaato_session:
-                    bus = jaato_session._runtime.event_bus
-        elif self._jaato_server and self._jaato_server._jaato:
-            jaato_session = self._jaato_server._jaato.get_session()
-            if jaato_session:
-                bus = jaato_session._runtime.event_bus
+            if session_obj and session_obj.server and session_obj.server._runtime:
+                bus = session_obj.server._runtime.event_bus
+        elif self._jaato_server and self._jaato_server._runtime:
+            bus = self._jaato_server._runtime.event_bus
 
         if not bus:
             await self._send_error(client_id, "Session event bus not available")
@@ -2001,15 +2136,16 @@ class JaatoWSServer:
                 if cat_name and cat_desc:
                     registry.register_category(cat_name, cat_desc)
 
-        # Refresh the runtime's tool schema list so the model sees new tools
-        if session.server and session.server._jaato:
-            runtime = session.server._jaato.get_runtime()
-            if runtime and hasattr(runtime, '_all_tool_schemas'):
-                existing = {s.name for s in runtime._all_tool_schemas}
-                for name, schema in registry._core_tools.items():
-                    if name not in existing:
-                        runtime._all_tool_schemas.append(schema)
-                logger.info("Refreshed runtime tool list for client %s", client_id)
+        # Refresh the runtime's tool schema list so the model sees new tools.
+        # Phase 3 §7c step 6.6.4.5a: read ``session.server._runtime`` directly
+        # instead of going through ``session.server._jaato.get_runtime()``.
+        runtime = session.server._runtime if session.server else None
+        if runtime and hasattr(runtime, '_all_tool_schemas'):
+            existing = {s.name for s in runtime._all_tool_schemas}
+            for name, schema in registry._core_tools.items():
+                if name not in existing:
+                    runtime._all_tool_schemas.append(schema)
+            logger.info("Refreshed runtime tool list for client %s", client_id)
 
         # Emit updated tool ID registry so clients can resolve IDs for
         # the newly-registered client-provided tools.

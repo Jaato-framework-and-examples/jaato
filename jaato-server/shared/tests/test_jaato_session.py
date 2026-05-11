@@ -996,3 +996,125 @@ class TestSetInitialHistory:
         session.set_initial_history([self._make_user_message("turn 1")])
 
         assert session._system_instruction == "you are agent X"
+
+
+class TestGetToolSchemas:
+    """Tests for ``JaatoSession.get_tool_schemas`` (Phase 3 §7c step 3b).
+
+    Public read accessor replacing daemon-side reads of the
+    private ``self._tools`` attribute.
+    """
+
+    def test_returns_empty_list_before_configure(self):
+        """Pre-configure: ``self._tools`` is None.  The accessor
+        returns ``[]`` so callers can iterate unconditionally."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        assert session._tools is None
+        assert session.get_tool_schemas() == []
+
+    def test_returns_copy_of_tools_after_configure(self):
+        """Post-configure: returns a list of the resolved schemas.
+        The returned list is a copy — callers can't mutate the
+        session's internal state by appending to the result."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        schema_a = MagicMock(name="schema_a")
+        schema_b = MagicMock(name="schema_b")
+        session._tools = [schema_a, schema_b]
+
+        result = session.get_tool_schemas()
+
+        assert result == [schema_a, schema_b]
+        # Mutating the result must not touch session state.
+        result.append(MagicMock(name="injected"))
+        assert len(session._tools) == 2
+
+    def test_returns_empty_list_when_tools_empty(self):
+        """``self._tools = []`` (post-configure with no tools) is
+        a legitimate state — the accessor returns ``[]`` (not
+        ``None``) so callers iterate cleanly."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session._tools = []
+        assert session.get_tool_schemas() == []
+
+
+class TestRestoreTurnAccounting:
+    """Tests for ``JaatoSession.restore_turn_accounting`` (Phase 3
+    §7c step 6.6.1.0).
+
+    Public surface replacing the daemon's private-attribute
+    write at ``server/session_manager.py:2558-2559``.
+    Prerequisite for the upcoming ``session.restore_turn_accounting``
+    runner-RPC handler (§7c step 6.6.1.2).
+    """
+
+    def test_replaces_existing_turn_accounting(self):
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "claude-sonnet-4-6")
+        # Seed with prior turns.
+        session._turn_accounting = [{"prompt_tokens": 100}]
+        new_turns = [{"prompt_tokens": 200}, {"prompt_tokens": 300}]
+
+        session.restore_turn_accounting(new_turns)
+
+        assert session._turn_accounting == new_turns
+
+    def test_takes_a_copy_not_aliased(self):
+        """Caller-mutation must not propagate into session state."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "claude-sonnet-4-6")
+        turns = [{"prompt_tokens": 100}]
+
+        session.restore_turn_accounting(turns)
+        turns.append({"prompt_tokens": 999})  # mutate caller's list
+
+        # Session state unchanged.
+        assert session._turn_accounting == [{"prompt_tokens": 100}]
+
+    def test_empty_list_clears(self):
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "claude-sonnet-4-6")
+        session._turn_accounting = [{"prompt_tokens": 100}]
+
+        session.restore_turn_accounting([])
+
+        assert session._turn_accounting == []
+
+
+class TestRestoreConversationBudget:
+    """Tests for ``JaatoSession.restore_conversation_budget``
+    (Phase 3 §7c step 6.6.1.0).
+
+    Public surface replacing the daemon's reach through
+    ``session.instruction_budget.restore_conversation_from_snapshot``
+    at ``server/session_manager.py:2592-2593``.  Prerequisite
+    for the upcoming ``session.restore_conversation_budget``
+    runner-RPC handler (§7c step 6.6.1.3).
+    """
+
+    def test_forwards_to_instruction_budget(self):
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "claude-sonnet-4-6")
+        mock_budget = MagicMock()
+        session._instruction_budget = mock_budget
+        snapshot = {"tokens": 500, "items": []}
+
+        session.restore_conversation_budget(snapshot)
+
+        mock_budget.restore_conversation_from_snapshot.assert_called_once_with(
+            snapshot,
+        )
+
+    def test_noops_when_no_budget(self):
+        """Pre-configure: ``self._instruction_budget`` is None.
+        Method is a clean no-op (does NOT raise) — matches the
+        daemon caller's existing ``if jaato_session.instruction_budget:``
+        guard semantics."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "claude-sonnet-4-6")
+        assert session._instruction_budget is None
+
+        # Should not raise.
+        session.restore_conversation_budget({"tokens": 500})

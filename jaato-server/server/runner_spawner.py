@@ -27,7 +27,7 @@ import socket
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ class SpawnedRunner:
     """Daemon-side handle for a spawned runner subprocess.
 
     Owned by the session's :class:`server.core.JaatoServer`; closed
-    via :meth:`server.runner_rpc.RunnerRPCClient.close` at session
+    via :meth:`server.runner_rpc_client.RunnerRPCClient.close` at session
     end (which closes the parent socket end, waits for the runner
     to exit, then SIGTERM/SIGKILL escalates per §4.6 "Death — daemon
     shutdown").
@@ -90,6 +90,7 @@ class RunnerSpawner:
         max_output_chars: Optional[int] = None,
         tool_timeout_seconds: Optional[float] = None,
         disable_confine: bool = False,
+        cgroup_attach: Optional[Callable[[], None]] = None,
     ) -> SpawnedRunner:
         """Fork+exec a runner; return the daemon-side handle.
 
@@ -110,6 +111,17 @@ class RunnerSpawner:
             disable_confine: developer escape hatch matching the
                 runner's ``JAATO_RUNNER_DISABLE_CONFINE`` env;
                 spec §5 — NOT a supported deployment.
+            cgroup_attach: Phase 3 §7d — optional zero-arg callable
+                invoked in the forked child between ``fork()`` and
+                ``exec()`` to migrate the runner's pid into the
+                per-session cgroup.  Caller obtains via
+                ``CgroupsManager.make_attach_callback(session_id)``.
+                The runner subprocess is then in the cgroup at
+                exec time; child processes (cli, interactive_shell
+                PTY children) inherit by default per cgroup-v2
+                kernel contract.  ``None`` means no cgroup attach
+                (the runner inherits the daemon's cgroup) — used
+                for IPC sessions and for hosts without cgroup v2.
 
         Raises:
             DaemonConfinementError: daemon thread is confined at the
@@ -144,6 +156,17 @@ class RunnerSpawner:
         if pid == 0:
             # ----- child -----
             try:
+                # Phase 3 §7d: migrate the forked child's pid into
+                # the per-session cgroup BEFORE exec.  cgroup
+                # membership survives exec(), so the runner — and
+                # every subprocess it spawns thereafter (cli,
+                # interactive_shell PTY, et al.) — inherits the
+                # cgroup placement.  Inheritance is a cgroup-v2
+                # kernel contract; per the §7d audit, no per-spawn
+                # /proc/<pid>/cgroup verification needed (the
+                # integration tests pin the contract).
+                if cgroup_attach is not None:
+                    cgroup_attach()
                 self._exec_runner(child_sock, parent_sock, log_path, env)
             except BaseException:  # noqa: BLE001 — child must never return
                 # Any failure pre-exec lands us here.  os._exit(127) so
@@ -155,8 +178,10 @@ class RunnerSpawner:
         # ----- parent -----
         child_sock.close()
         logger.info(
-            "RunnerSpawner: spawned pid=%d for session %s (profile=%s)",
+            "RunnerSpawner: spawned pid=%d for session %s (profile=%s, "
+            "cgroup_attach=%s)",
             pid, session_id, profile_name,
+            "yes" if cgroup_attach is not None else "no",
         )
         return SpawnedRunner(
             pid=pid,

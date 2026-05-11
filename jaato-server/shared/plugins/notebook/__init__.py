@@ -12,6 +12,7 @@ variables across multiple executions within a session.
 
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .plugin import NotebookPlugin, create_plugin
 from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
 

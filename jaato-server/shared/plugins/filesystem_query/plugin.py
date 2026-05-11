@@ -26,6 +26,7 @@ from jaato_sdk.plugins.base import UserCommand
 from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.utils.gitignore import GitignoreParser
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .config_loader import (
@@ -75,7 +76,7 @@ def _detect_workspace_root() -> Optional[str]:
     return None
 
 
-class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
+class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForwardingMixin):
     """Plugin providing filesystem query tools (glob and grep).
 
     This plugin offers read-only, auto-approved tools for exploring codebases:
@@ -416,11 +417,15 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor functions for each tool."""
-        return {
+        """Return the executor functions for each tool.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "glob_files": self._execute_glob_files,
             "grep_content": self._execute_grep_content,
-        }
+        })
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that don't require permission (read-only operations)."""

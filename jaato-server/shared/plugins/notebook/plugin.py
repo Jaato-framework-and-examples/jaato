@@ -28,6 +28,7 @@ from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGG
 from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
 from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
 from shared.ai_tool_runner import get_current_tool_output_callback
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 # Thread-local storage for per-session tool bindings state.
@@ -51,7 +52,7 @@ DEFAULT_BACKEND = "local"
 MAX_OUTPUT_LENGTH = 10000
 
 
-class NotebookPlugin(StreamingCapable):
+class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
     """Plugin for Python notebook execution with GPU support.
 
     Provides tools for:
@@ -494,15 +495,21 @@ class NotebookPlugin(StreamingCapable):
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor mappings."""
-        return {
+        """Return executor mappings.
+
+        Phase 3 §3.5 wave 2: forwards via runner-RPC when a runner
+        is attached so the spawned Python interpreter inherits the
+        runner's AppArmor profile.  Falls through to in-process
+        otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "notebook_execute": self._execute_code,
             "notebook_create": self._create_notebook,
             "notebook_variables": self._get_variables,
             "notebook_reset": self._reset_notebook,
             "notebook_list": self._list_notebooks,
             "notebook_backends": self._list_backends,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for notebook tools.

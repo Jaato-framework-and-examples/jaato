@@ -93,7 +93,7 @@ def test_stub_routes_through_rpc_when_runner_attached(
         },
     )
 
-    result = plugin._execute({"command": "echo hello"})
+    result = plugin.get_executors()["cli_based_tool"]({"command": "echo hello"})
 
     assert result["stdout"] == "hello\n"
     assert result["returncode"] == 0
@@ -124,7 +124,7 @@ def test_stub_falls_back_in_process_when_no_runner() -> None:
     # Smoke: calling _execute with no runner should reach the
     # in-process try/except block and either succeed or return an
     # error dict; neither should raise.
-    result = plugin._execute({"command": "echo hello"})
+    result = plugin.get_executors()["cli_based_tool"]({"command": "echo hello"})
     # The in-process path either returns stdout or surfaces the
     # path-validation / executable-not-found error — both are dicts.
     assert isinstance(result, dict)
@@ -151,7 +151,7 @@ def test_stub_propagates_cancelled_exception(cli_plugin_with_fake_rpc) -> None:
     )
 
     with pytest.raises(CancelledException, match="Cancelled"):
-        plugin._execute({"command": "sleep 30"})
+        plugin.get_executors()["cli_based_tool"]({"command": "sleep 30"})
 
 
 # ----------------------------------------------------------------------
@@ -178,7 +178,7 @@ def test_stub_returns_domain_failure_dict_unchanged(
         ),
     )
 
-    result = plugin._execute({"command": "no-such"})
+    result = plugin.get_executors()["cli_based_tool"]({"command": "no-such"})
     assert "not found in PATH" in result["error"]
     assert "Configure extra_paths" in result["hint"]
 
@@ -194,11 +194,11 @@ def test_stub_surfaces_rpc_transport_error_as_tool_error(
     """If the RPC call itself raises (e.g. peer dead), translate to a
     legacy error-dict so the model gets a clean message rather than
     an opaque traceback."""
-    from server.runner_rpc import RunnerCallError
+    from server.runner_rpc_client import RunnerCallError
 
     plugin, rpc = cli_plugin_with_fake_rpc
     rpc.next_raise = RunnerCallError("runner RPC closed before response arrived")
 
-    result = plugin._execute({"command": "echo hi"})
+    result = plugin.get_executors()["cli_based_tool"]({"command": "echo hi"})
     assert "runner RPC failed" in result["error"]
     assert "RunnerCallError" in result["error"]

@@ -41,6 +41,7 @@ from shared.plugins.session import (
 )
 
 from shared.instruction_token_cache import InstructionTokenCache
+from shared.session_envelope import BootstrapEnvelope
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from jaato_sdk.events import (
@@ -51,6 +52,7 @@ from jaato_sdk.events import (
     SessionInfoEvent,
     SessionDescriptionUpdatedEvent,
     SessionProfilesEvent,
+    SessionRestoredEvent,
     ContextUpdatedEvent,
     UsageBreakdown,
     AgentCreatedEvent,
@@ -105,6 +107,16 @@ class Session:
     provisioned: bool = False  # True if workspace was auto-provisioned by server
     created_by: Optional[str] = None  # Authenticated user who created the session
     sandbox_mode: Optional[str] = None  # "apparmor" or "soft" when workspace sandboxing is active
+    # Phase 3 §3.12 disk-restore + peer-review M5/N1: True when this
+    # Session was loaded from disk and is awaiting its first
+    # client-attach.  While True, ``check_permission`` ASK paths
+    # **hold** tool calls (queue the prompt rather than deny) so a
+    # session restored after a daemon restart doesn't silently fail
+    # in-flight work.  Cleared on first client attach, at which
+    # point the daemon emits ``SessionRestoredEvent`` so the client
+    # surfaces a "review pending tool calls" prompt and drains the
+    # queue.  False for fresh / never-restored sessions.
+    restored_pending_attach: bool = False
 
 
 class SessionManager:
@@ -159,6 +171,14 @@ class SessionManager:
         self._sessions: Dict[str, Session] = {}
         # Use RLock (reentrant) because initialize() may emit events during session load
         self._lock = threading.RLock()
+
+        # Path H (cycle 10): serialize concurrent async saves so
+        # parallel ToolCallStartEvents (parallel tool execution)
+        # don't trample each other.  atomic_write_json already
+        # prevents file tear; this lock gives consistent last-
+        # writer-wins ordering across concurrent _save_session_async
+        # invocations for the same session.
+        self._async_save_lock = threading.Lock()
 
         # Client to session mapping
         self._client_to_session: Dict[str, str] = {}
@@ -424,6 +444,402 @@ class SessionManager:
         """
         self._session_hooks.append(hook)
 
+    # ------------------------------------------------------------------
+    # IPC AppArmor + runner spawn (Phase 3 §3.13)
+    # ------------------------------------------------------------------
+    #
+    # Phase 2 §2.3 wired this as a pre-initialize hook in
+    # server/__main__.py.  Phase 3 §3.13 relocates the logic into the
+    # SessionManager itself so it lives next to the bootstrap helper
+    # rather than reaching across module boundaries via a hook
+    # registration: the hook indirection was a transitional step,
+    # not the design endpoint.  The helper is now invoked inline from
+    # ``_bootstrap_session`` AFTER ``JaatoServer`` construction and
+    # BEFORE ``_run_pre_initialize_hooks`` (which still fires for the
+    # WS-side pre-init hook + any third-party hooks).
+    #
+    # The AppArmorManager + daemon_loop dependencies the relocated
+    # method needs are wired at daemon startup via
+    # :meth:`set_apparmor_dependencies` (called from
+    # ``server/__main__.py``).  Tests construct a SessionManager
+    # without these dependencies; the method is a clean no-op when
+    # they're unset.
+
+    def set_apparmor_dependencies(
+        self,
+        ws_server: Any = None,
+        daemon_loop: Any = None,
+    ) -> None:
+        """Wire the IPC AppArmor + runner-spawn dependencies (§3.13).
+
+        Phase 3 §3.13.  Called once at daemon startup by
+        ``server/__main__.py:JaatoDaemon.start``.  The relocated IPC
+        apparmor logic in :meth:`_provision_ipc_apparmor_and_spawn_runner`
+        reads these to:
+
+        - Skip provisioning for sessions whose workspace lives under a
+          running WS server's root (those are handled by the WS hook,
+          not by us — avoids double-provisioning).
+        - Pass the daemon's main asyncio loop to the
+          :class:`AppArmorManager` so confined-worker mutations
+          dispatch back to the unconfined main loop, AND to the
+          :func:`spawn_session_runner` helper which runs
+          ``RunnerRPCClient.start()`` async.
+
+        Args:
+            ws_server: Optional reference to the running WS server.
+                ``None`` for IPC-only daemons.
+            daemon_loop: The daemon's main asyncio loop.  ``None`` is
+                accepted but disables apparmor provisioning (no
+                AppArmor manager can be constructed without it).
+        """
+        self._ws_server_ref = ws_server
+        self._daemon_loop = daemon_loop
+
+    def _provision_ipc_apparmor_and_spawn_runner(
+        self,
+        server: 'JaatoServer',
+        session_id: str,
+        workspace_path: Optional[str],
+        client_id: Optional[str],
+    ) -> Optional[str]:
+        """Provision IPC AppArmor (opt-in) + spawn the per-session runner.
+
+        Phase 3 §3.13 + §7a.  §3.13 relocated this from the legacy
+        pre-init hook in ``server/__main__.py``.  §7a refactored the
+        body into two composed helpers — apparmor provisioning is
+        opt-in, but the runner spawn is unconditional (every IPC
+        session with a workspace gets a runner; the runner-RPC
+        dispatch surface is always available for the seat-flip's
+        ``self._jaato.X`` migrations).
+
+        Lifecycle:
+        1. Skip when ``client_id`` is ``None`` (non-client paths
+           supply their own bootstrap; this method is IPC-only).
+        2. Skip when the session has no ``workspace_path`` — the
+           runner needs a cwd; sessions without one don't get one
+           (matches pre-§7a behavior).
+        3. Skip when the session's workspace lives under a running
+           WS server's workspace_root — the WS hook owns this
+           lane; don't double-spawn.
+        4. **Apparmor (opt-in)**: if ``client_config["apparmor"]``
+           is set, call :meth:`_provision_apparmor_for_session` to
+           load the profile.  Returns the resolved profile_name +
+           sandbox_mode (``"apparmor"`` on success, ``"soft"`` on
+           provisioning failure).
+        5. **Spawn (unconditional)**: call
+           :meth:`_spawn_session_runner_unconditional` with the
+           profile_name from step 4 (or empty + disable_confine=True
+           when no opt-in).  Spawn failure downgrades the return
+           value to ``"soft"`` (or leaves it ``None`` for the
+           no-opt-in case).
+
+        Returns:
+            The planned ``sandbox_mode`` for the Session record:
+            ``"apparmor"`` (kernel-confined, runner spawned),
+            ``"soft"`` (apparmor downgrade due to provisioning /
+            spawn failure), or ``None`` (no apparmor opt-in or
+            spawn was unconditional but unconfined — sandbox_mode
+            stays None for the runner-without-confinement case
+            since the field semantically tracks confinement, not
+            runner presence).
+        """
+        # Phase 7a: only IPC client-driven sessions.
+        # Non-client-driven bootstrap paths (loaded-from-disk,
+        # ephemeral, standalone WS) supply their own bootstrap.
+        if client_id is None:
+            return None
+
+        # Spawn requires a workspace (cwd target).  Sessions without
+        # one don't get a runner; pre-§7a behavior preserved.
+        if not workspace_path:
+            client_config = self._client_config.get(client_id, {})
+            if client_config.get("apparmor"):
+                # Surface the apparmor downgrade if the client
+                # explicitly asked.  Silent skip otherwise — most
+                # IPC sessions without workspace are short-lived
+                # / headless and don't expect a runner.
+                self._notify_apparmor(
+                    client_id, session_id,
+                    "requested but session has no workspace_path — "
+                    "running unconfined",
+                    style="warning",
+                )
+            return None
+
+        # WS-overlap precedence: WS hook handles confinement +
+        # runner spawn for sessions whose workspace is under the
+        # WS server's root.  Skip both apparmor and spawn here so
+        # we don't duplicate.
+        if self._workspace_under_ws_root(workspace_path):
+            return None
+
+        client_config = self._client_config.get(client_id, {})
+        opt_in_apparmor = bool(client_config.get("apparmor"))
+
+        # ----- Step 4: apparmor (opt-in) -----
+        profile_name = ""
+        sandbox_mode: Optional[str] = None
+        if opt_in_apparmor:
+            profile_name, sandbox_mode = self._provision_apparmor_for_session(
+                session_id=session_id,
+                workspace_path=workspace_path,
+                client_id=client_id,
+                client_config=client_config,
+            )
+            if profile_name == "" and sandbox_mode == "soft":
+                # Apparmor unavailable / provisioning failed.
+                # Continue to the unconditional spawn but the
+                # runner is unconfined — that's the §7a intent
+                # (always have a runner; confinement is layered).
+                pass
+
+        # ----- Step 5: spawn (unconditional) -----
+        spawn_ok = self._spawn_session_runner_unconditional(
+            server=server,
+            session_id=session_id,
+            workspace_path=workspace_path,
+            client_id=client_id,
+            profile_name=profile_name,
+        )
+        if not spawn_ok:
+            # Spawn failed.  If apparmor was opted-in, downgrade
+            # to "soft"; otherwise the session continues with
+            # in-process tool execution (no sandbox_mode change).
+            if opt_in_apparmor:
+                return "soft"
+            return None
+
+        # ----- Step 5b: success notification + return -----
+        if opt_in_apparmor and sandbox_mode == "apparmor":
+            config_root = client_config.get("config_root")
+            self._notify_apparmor(
+                client_id, session_id,
+                f"profile provisioned (workspace={workspace_path}, "
+                f"config_root={config_root or '(none)'}); runner spawned",
+                style="info",
+            )
+            return "apparmor"
+        if opt_in_apparmor and sandbox_mode == "soft":
+            # Apparmor opt-in but provisioning failed; runner
+            # spawned anyway (always-spawn).
+            return "soft"
+        # No apparmor opt-in: runner spawned unconfined.
+        # sandbox_mode stays None (semantically tracks confinement
+        # — there's none here, even though there IS a runner).
+        return None
+
+    def _notify_apparmor(
+        self,
+        client_id: str,
+        session_id: str,
+        message: str,
+        style: str,
+    ) -> None:
+        """Surface an apparmor-status line to the client.
+
+        Helper extracted for reuse between the apparmor-provision
+        path and the no-workspace warning path.  Routes via
+        ``_emit_to_client`` directly because at the call point the
+        Session record doesn't exist in ``_sessions`` yet (we're
+        pre-init).  Failures are swallowed — emit must not break
+        session creation.
+        """
+        from jaato_sdk.events import SystemMessageEvent
+        logger.info("[apparmor] %s", message)
+        try:
+            self._emit_to_client(client_id, SystemMessageEvent(
+                message=f"[apparmor] {message}",
+                style=style,
+            ))
+        except Exception:
+            logger.warning(
+                "Failed to emit apparmor status event for %s",
+                session_id, exc_info=True,
+            )
+
+    def _workspace_under_ws_root(self, workspace_path: str) -> bool:
+        """Return True iff *workspace_path* is under a running WS
+        server's ``_workspace_root``.
+
+        Used by ``_provision_ipc_apparmor_and_spawn_runner`` to
+        skip its work for sessions the WS hook owns — preventing
+        double-provision + double-spawn.
+        """
+        ws_server = getattr(self, "_ws_server_ref", None)
+        if ws_server is None:
+            return False
+        ws_root = getattr(ws_server, "_workspace_root", None)
+        if not ws_root:
+            return False
+        try:
+            ws_root_real = os.path.realpath(ws_root)
+            sess_real = os.path.realpath(workspace_path)
+            return (
+                sess_real == ws_root_real
+                or sess_real.startswith(ws_root_real + os.sep)
+            )
+        except OSError:
+            return False
+
+    def _provision_apparmor_for_session(
+        self,
+        session_id: str,
+        workspace_path: str,
+        client_id: str,
+        client_config: Dict[str, Any],
+    ) -> "Tuple[str, Optional[str]]":
+        """Provision the AppArmor profile for an IPC session
+        (Phase 3 §7a — opt-in only).
+
+        Caller has already checked the apparmor opt-in flag and
+        the workspace gates.  This method does only the apparmor
+        lifecycle: lazy-init manager + provision_profile.
+
+        Returns:
+            ``(profile_name, sandbox_mode)``:
+            - ``("<name>", "apparmor")`` on success.
+            - ``("", "soft")`` when AppArmor is unavailable on the
+              host or provisioning failed.  Caller should still
+              spawn the runner (with disable_confine=True) — that's
+              the §7a always-spawn intent.
+        """
+        # Lazy-init the AppArmor manager.
+        if getattr(self, "_apparmor_manager", None) is None:
+            from server.apparmor import AppArmorManager
+            daemon_loop = getattr(self, "_daemon_loop", None)
+            self._apparmor_manager = AppArmorManager(
+                workspace_root=workspace_path,
+                loop=daemon_loop,
+            )
+
+        apparmor = self._apparmor_manager
+        if not apparmor.is_available():
+            self._notify_apparmor(
+                client_id, session_id,
+                "requested but AppArmor is unavailable on this "
+                "host (non-Linux, kernel module not loaded, or "
+                "apparmor_parser missing) — running unconfined",
+                style="warning",
+            )
+            return "", "soft"
+
+        config_root = client_config.get("config_root")
+        env_file = client_config.get("env_file")
+        if not apparmor.provision_profile(
+            session_id,
+            workspace_path,
+            config_root=config_root,
+            env_file=env_file,
+        ):
+            self._notify_apparmor(
+                client_id, session_id,
+                "profile provisioning failed (see daemon log) — "
+                "running unconfined",
+                style="warning",
+            )
+            return "", "soft"
+
+        return apparmor.get_profile_name(session_id), "apparmor"
+
+    def _spawn_session_runner_unconditional(
+        self,
+        server: 'JaatoServer',
+        session_id: str,
+        workspace_path: str,
+        client_id: str,
+        profile_name: str,
+    ) -> bool:
+        """Spawn the per-session runner subprocess (Phase 3 §7a —
+        always-called for IPC sessions with a workspace).
+
+        Args:
+            server: The session's JaatoServer instance.
+            session_id: Session identifier.
+            workspace_path: Session workspace (the runner's cwd).
+            client_id: For warning notifications on failure.
+            profile_name: AppArmor profile to self-confine to.
+                Empty string ``""`` means run unconfined (no
+                apparmor opt-in or provisioning failed) — the
+                spawn helper passes ``disable_confine=True`` to
+                ``RunnerSpawner``.
+
+        Returns:
+            True on successful spawn; False on failure.  Caller
+            decides whether to downgrade ``sandbox_mode`` based on
+            the apparmor opt-in flag.
+        """
+        try:
+            from server.runner_spawn import (
+                spawn_session_runner,
+                dispatch_bootstrap_envelope,
+            )
+            spawn_session_runner(
+                server=server,
+                session_id=session_id,
+                workspace_path=workspace_path,
+                profile_name=profile_name,
+                daemon_loop=getattr(self, "_daemon_loop", None),
+                disable_confine=(profile_name == ""),
+            )
+            # Phase 3 post-Step-7 regression fix (Path B):
+            # synchronously dispatch ``session.bootstrap`` so the
+            # runner-side ``JaatoSession`` host is populated BEFORE
+            # ``server.initialize()`` runs.  Pre-fix the IPC path
+            # spawned the runner but never sent the bootstrap RPC,
+            # leaving ``RunnerRPC._session_host = None`` for the
+            # session lifetime.  Every daemon-side
+            # ``self._runner_rpc.session_X_threadsafe()`` call
+            # then raced against an unbootstrapped runner-side
+            # session — handler correctly returned
+            # ``stage="no_session"`` per the §3.3c surface
+            # defensive contract, but the wrapper raised
+            # ``RunnerCallError`` and crashed daemon-side init.
+            #
+            # The WS path has shipped this synchronous dispatch
+            # since §7c step 2 (commit 6e31d375 era) at
+            # ``websocket.py:690``.  This commit mirrors that
+            # pattern for IPC sessions, closing the structural
+            # asymmetry.
+            #
+            # Inline try/except so a bootstrap-dispatch hiccup
+            # doesn't roll back the spawn-success return — spawn
+            # already succeeded by this point.  Bootstrap-RPC
+            # failures log WARNING via ``dispatch_bootstrap_envelope``
+            # itself; the inline guard here additionally tolerates
+            # ``server.runner_rpc`` being absent (test-stub
+            # JaatoServer fakes that don't fully replicate the
+            # post-spawn attribute set).
+            try:
+                dispatch_bootstrap_envelope(
+                    server=server,
+                    session_id=session_id,
+                    workspace_path=workspace_path,
+                    profile_name=profile_name,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning(
+                    "IPC session.bootstrap dispatch failed for %s "
+                    "(%s: %s) — session will start with an "
+                    "unbootstrapped runner-side host; downstream "
+                    "session.* RPCs may race-fail until the "
+                    "runner-side bootstrap completes some other way",
+                    session_id, type(exc).__name__, exc,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001 — boundary
+            self._notify_apparmor(
+                client_id, session_id,
+                f"runner spawn failed ({type(exc).__name__}: {exc}) "
+                "— falling back to in-process tool execution; "
+                "session is NOT kernel-confined",
+                style="warning",
+            )
+            logger.exception(
+                "runner spawn failed for session %s", session_id,
+            )
+            return False
+
     def add_pre_initialize_hook(self, hook: Callable) -> None:
         """Register a callback invoked BEFORE ``server.initialize()`` runs
         (server 0.6.49+).
@@ -486,6 +902,207 @@ class SessionManager:
                 hook(server, session_id)
             except Exception as exc:
                 logger.warning("Session hook failed: %s", exc, exc_info=True)
+
+    def _bootstrap_session(
+        self,
+        envelope: 'BootstrapEnvelope',
+    ) -> Tuple[Optional[JaatoServer], Optional['Session']]:
+        """Construct + initialize a session from a BootstrapEnvelope.
+
+        Phase 3 §3.12.0.  This is the single helper every
+        session-creation path funnels through, replacing the
+        ad-hoc kwarg-bag previously inlined in each call site
+        (``_create_session_impl``, ``_load_session_impl``,
+        ``run_ephemeral_session``, ``JaatoWSServer`` standalone).
+
+        Body matches the §3.12.0 spec:
+
+        1. Construct ``JaatoServer`` from the envelope's
+           construction fields.
+        2. Push ``config_root`` onto the server BEFORE
+           ``_run_pre_initialize_hooks`` so plugins discovered
+           during ``initialize`` see the override.
+        3. Run pre-initialize hooks (legacy 3-arg + 4-arg both
+           still supported via :meth:`_run_pre_initialize_hooks`'s
+           ``inspect.signature`` introspection).
+        4. ``server.initialize()`` — return ``(None, None)`` on
+           failure (the underlying error already emitted to the
+           client).
+        5. Build the :class:`Session` record with ``sandbox_mode``
+           resolved per the priority chain:
+           a. ``envelope.sandbox_mode`` — disk-restore's pre-known
+              value (the saved Session record's mode).
+           b. Return value of
+              :meth:`_provision_ipc_apparmor_and_spawn_runner`
+              (§3.13's inline call) — apparmor opt-in result for
+              the IPC creation path.
+           c. ``None`` — no opt-in / non-confined session.
+
+           Phase 3 §3.13 removed the legacy
+           ``server._planned_sandbox_mode`` stash slot; the
+           apparmor opt-in is now read directly inside the
+           inline provisioning call (whose return value flows
+           into priority chain step (b)) rather than via a
+           transient attribute on JaatoServer.
+
+        The helper does NOT do:
+
+        - Spawn-payload validation — that's profile-resolution
+          time, before the envelope is built.
+        - Session storage / event-callback rewiring / TODO
+          configuration / client-config application — those are
+          post-bootstrap concerns the caller handles after this
+          returns.
+        - Auth-complete callback registration — caller-specific.
+
+        Args:
+            envelope: The bootstrap payload aggregating every
+                input the JaatoServer construction +
+                Session-record path needs.
+
+        Returns:
+            ``(JaatoServer, Session)`` on success;
+            ``(None, None)`` if ``server.initialize()`` failed
+            (error already reported via the in-init event sink).
+
+        Phase 3 §3.12.0 migrated the IPC path.  Phase 3 §3.12
+        disk-restore migration routes ``_load_session_impl`` through
+        the inner :meth:`_construct_and_initialize_server` helper —
+        the helper splits the JaatoServer-construction-and-init from
+        the Session-record assembly so the disk-restore path can
+        share the construction logic while building its own
+        record (with ``last_activity`` / ``user_inputs`` / etc.
+        from the saved state).  The ephemeral path follows in a
+        future commit.
+
+        An AST partition test (``test_bootstrap_partition.py``)
+        tracks remaining direct ``JaatoServer(...)`` construction
+        sites with an explicit allow-list so a contributor adding
+        a NEW path is forced to either funnel through here (or the
+        sub-helper) or extend the allow-list.
+        """
+        server, planned_sandbox = self._construct_and_initialize_server(envelope)
+        if server is None:
+            return None, None
+
+        session = Session(
+            session_id=envelope.session_id,
+            name=envelope.name,
+            server=server,
+            created_at=(
+                envelope.timestamp.isoformat()
+                if envelope.timestamp is not None
+                else datetime.now(timezone.utc).isoformat()
+            ),
+            description=envelope.description,
+            is_dirty=True,  # New session needs saving
+            workspace_path=envelope.workspace_path,
+            config_root=envelope.config_root,
+            provisioned=envelope.provisioned,
+            created_by=envelope.created_by,
+            sandbox_mode=planned_sandbox,
+        )
+
+        return server, session
+
+    def _construct_and_initialize_server(
+        self,
+        envelope: 'BootstrapEnvelope',
+    ) -> Tuple[Optional[JaatoServer], Optional[str]]:
+        """JaatoServer construction + pre-init + initialize, shared
+        across IPC and disk-restore bootstrap paths (Phase 3 §3.12).
+
+        Splits out from :meth:`_bootstrap_session` so the
+        disk-restore path (which assembles a different Session
+        record from the saved state — ``last_activity``,
+        ``user_inputs``, restored ``is_dirty``) can share the
+        construction logic without inheriting the create-session
+        Session-record shape.
+
+        Body matches the §3.12.0 spec:
+
+        1. Construct ``JaatoServer`` from envelope construction
+           fields.
+        2. Push ``config_root`` onto the server BEFORE pre-init
+           hooks so plugins see the override.
+        3. Call ``_provision_ipc_apparmor_and_spawn_runner`` (§3.13
+           inline relocation) — clean no-op when ``client_id`` is
+           ``None`` or no apparmor opt-in.
+        4. Run remaining pre-init hooks (WS + third-party).
+        5. ``server.initialize()`` — return ``(None, None)`` on
+           failure.
+        6. Resolve sandbox_mode: ``envelope.sandbox_mode`` wins
+           (disk-restore's pre-known value); else IPC method
+           result; else None.
+
+        Returns:
+            ``(JaatoServer, sandbox_mode)`` on success;
+            ``(None, None)`` on init failure.
+        """
+        server = JaatoServer(
+            env_file=envelope.env_file,
+            provider=None,  # Let env_file determine provider
+            on_event=envelope.on_event_during_init,
+            workspace_path=envelope.workspace_path,
+            session_id=envelope.session_id,
+            env_overrides=envelope.env_overrides,
+            instruction_token_cache=envelope.instruction_token_cache,
+            profile=envelope.profile,
+            system_instruction_override=envelope.system_instruction_override,
+            suppress_base_instructions=envelope.suppress_base_instructions,
+            agent_name=envelope.agent_name,
+        )
+
+        # Push config_root BEFORE initialize so plugins discovered
+        # during init see the override on their first
+        # set_config_root notification.
+        if envelope.config_root:
+            server.config_root = envelope.config_root
+
+        # Phase 3 §3.13: IPC apparmor provisioning + runner spawn
+        # used to live in a pre-initialize hook registered from
+        # ``server/__main__.py``.  The hook indirection was a
+        # transitional step from Phase 2 §2.3; Phase 3 inlines the
+        # logic here so the call site is co-located with the rest
+        # of the bootstrap helper.  The method is a clean no-op
+        # when ``client_id`` is None or the client did not opt in
+        # to apparmor; non-IPC paths continue unaffected.
+        ipc_sandbox_mode = self._provision_ipc_apparmor_and_spawn_runner(
+            server,
+            envelope.session_id,
+            envelope.workspace_path,
+            envelope.client_id,
+        )
+
+        # Pre-initialize hooks fire BEFORE initialize() — gives
+        # transports a window to provision kernel resources
+        # (AppArmor profile, cgroup) so prefetch can run inside
+        # the session's confinement instead of unconfined.  After
+        # §3.13 the IPC apparmor hook is no longer registered
+        # here (relocated to the inline call above); the WS hook
+        # and any third-party hooks continue to use this surface.
+        self._run_pre_initialize_hooks(
+            server,
+            envelope.session_id,
+            envelope.workspace_path,
+            envelope.client_id,
+        )
+
+        # Initialize.  On failure, core.py already emits a
+        # ConfigurationError event via the in-init sink — no need
+        # for a redundant SessionError here.
+        if not server.initialize():
+            return None, None
+
+        # Resolve sandbox_mode.  Priority:
+        # 1. ``envelope.sandbox_mode`` — authoritative pre-resolved
+        #    value (disk-restore's saved mode).
+        # 2. Result of inline IPC apparmor provisioning.
+        # 3. None — no opt-in / non-confined.
+        planned_sandbox = envelope.sandbox_mode
+        if planned_sandbox is None:
+            planned_sandbox = ipc_sandbox_mode
+        return server, planned_sandbox
 
     def _run_pre_initialize_hooks(
         self,
@@ -971,11 +1588,18 @@ class SessionManager:
                 })
                 session.interrupted_turn["pending_tool_calls"] = pending
                 session.is_dirty = True
-                # Incremental save to persist pending tool calls before execution
-                self._save_session(session)
+                # Path H (cycle 10): incremental save deferred off
+                # the synchronous _emit_to_session path.  Pre-Path-H
+                # this called _save_session synchronously, which made
+                # 2 blocking runner-RPCs that raced against the
+                # runner's active send_message — 35s timeout starved
+                # the permission-response window.  Async deferral
+                # keeps the recovery contract (pending_tool_calls
+                # still persisted) without blocking the emit path.
+                self._save_session_async(session)
                 logger.debug(
                     f"Updated pending tool calls for session {session.session_id}: "
-                    f"{len(pending)} call(s), saving incrementally"
+                    f"{len(pending)} call(s), saving incrementally (async)"
                 )
 
         # Remove completed tool calls from pending list
@@ -1328,47 +1952,37 @@ class SessionManager:
             profile and getattr(profile, "suppress_base_instructions", False)
         )
 
-        server = JaatoServer(
-            env_file=session_env_file,
-            provider=None,  # Let env_file determine provider
-            # During init, emit directly to requesting client (not yet attached to session)
-            on_event=lambda e: self._emit_to_client(client_id, e),
-            workspace_path=workspace_path,
+        # Phase 3 §3.12.0: route the construction +
+        # pre-init-hooks + initialize + Session-record assembly
+        # through the unified _bootstrap_session helper.  All four
+        # session-creation paths (IPC, disk-restore, ephemeral, WS)
+        # will eventually funnel through here; §3.12.0 ships only
+        # the IPC migration as the focal commit.
+        envelope = BootstrapEnvelope(
             session_id=session_id,
-            env_overrides=env_overrides,
-            instruction_token_cache=self._instruction_token_cache,
+            workspace_path=workspace_path,
+            name=name,
+            description=None,
+            client_id=client_id,
+            env_file=session_env_file,
             profile=profile,
+            agent_name=agent_name,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=effective_suppress_base,
-            agent_name=agent_name,
+            env_overrides=env_overrides,
+            config_root=config_root,
+            instruction_token_cache=self._instruction_token_cache,
+            provisioned=provisioned,
+            created_by=created_by,
+            timestamp=timestamp,
+            # During init, emit directly to requesting client (not
+            # yet attached to session).
+            on_event_during_init=lambda e: self._emit_to_client(client_id, e),
         )
-
-        # Push the resolved config_root onto the JaatoServer BEFORE
-        # ``initialize`` so plugins discovered during init see the
-        # override on their first ``set_config_root`` notification.
-        if config_root:
-            server.config_root = config_root
-
-        # Pre-initialize hooks fire BEFORE initialize() runs configure()
-        # / dynamic-instructions / prefetch scripts (server 0.6.49+).
-        # This gives transports a window to provision kernel resources
-        # (AppArmor profile, cgroup) so prefetch can run inside the
-        # session's confinement instead of unconfined.
-        #
-        # Phase 2 task 2.3 (post-rebase): the IPC AppArmor pre-init
-        # hook in server/__main__.py also spawns the per-session
-        # runner subprocess here, so plugins discovered during
-        # ``initialize()`` see ``registry.runner_rpc`` set at configure
-        # time.  ``client_id`` is forwarded so the hook can read the
-        # creator's ``ClientConfigRequest.apparmor`` opt-in.
-        self._run_pre_initialize_hooks(
-            server, session_id, workspace_path, client_id,
-        )
-
-        # Initialize the server (events go directly to requesting client).
-        # On failure, core.py already emits a detailed ConfigurationError —
-        # no need for a redundant SessionError here.
-        if not server.initialize():
+        server, session = self._bootstrap_session(envelope)
+        if server is None or session is None:
+            # server.initialize() failed; core.py already emitted a
+            # detailed ConfigurationError to the in-init sink.
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
@@ -1391,26 +2005,6 @@ class SessionManager:
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, server)
 
-        # Create session object.  The ``sandbox_mode`` may have been
-        # planned by a pre-initialize hook (Phase 2 task 2.3:
-        # the IPC apparmor hook stashes it on
-        # ``server._planned_sandbox_mode``); read it back here so the
-        # Session record reflects the kernel-level confinement state.
-        planned_sandbox = getattr(server, "_planned_sandbox_mode", None)
-        session = Session(
-            session_id=session_id,
-            name=name,
-            server=server,
-            created_at=timestamp.isoformat(),
-            description=None,
-            is_dirty=True,  # New session needs saving
-            workspace_path=workspace_path,
-            config_root=config_root,
-            provisioned=provisioned,
-            created_by=created_by,
-            sandbox_mode=planned_sandbox,
-        )
-
         # Register callback for when auth completes (if it was pending)
         def on_auth_complete():
             self._emit_to_session(session_id, self._build_session_info_event(session))
@@ -1431,14 +2025,25 @@ class SessionManager:
         # and register providers for incrementally-mutated state.  Any
         # JSON-serialisability error surfaces here at the call site
         # (set_session_state validates the value at attach time).
+        # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+        # the existing ``session.set_session_state`` RPC (§3.3c
+        # precursor) instead of reaching into the daemon-side
+        # session via ``server.get_session()``.
         if initial_session_state:
-            try:
-                jaato_session = server.get_session()
-            except RuntimeError:
-                jaato_session = None
-            if jaato_session is not None:
-                for key, value in initial_session_state.items():
-                    jaato_session.set_session_state(key, value)
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is not None:
+                forwarder = getattr(
+                    rpc, "session_set_state_threadsafe", None,
+                )
+                if callable(forwarder):
+                    for key, value in initial_session_state.items():
+                        try:
+                            forwarder(key, value, timeout=2.0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "set_session_state forward failed for "
+                                "key=%r: %s", key, exc,
+                            )
 
         # Run session hooks after the Session is stored so hooks can
         # call get_session() to modify session attributes (e.g. sandbox_mode).
@@ -1595,8 +2200,17 @@ class SessionManager:
                     session_id,
                 )
                 return ""
-            jaato_session = session_record.server.get_session()
-            jaato_session.set_initial_history(initial_history)
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side
+            # via the new ``session.set_initial_history`` RPC
+            # (§7c step 6.6.1.1, commit 3f859e3a) instead of
+            # reaching into the daemon-side session.
+            rpc = getattr(session_record.server, "_runner_rpc", None)
+            if rpc is not None:
+                forwarder = getattr(
+                    rpc, "session_set_initial_history_threadsafe", None,
+                )
+                if callable(forwarder):
+                    forwarder(initial_history, timeout=10.0)
 
         if initial_prompt:
             from jaato_sdk.events import SendMessageRequest
@@ -1649,14 +2263,29 @@ class SessionManager:
             session = self._sessions.get(target_session_id)
         if session is None:
             return False
-        try:
-            jaato_session = session.server.get_session()
-        except RuntimeError:
-            # Session record exists but no underlying JaatoSession yet.
+        # Phase 3 §7c step 6.6.3.6: forward to runner-side via the
+        # existing ``session.inject_prompt`` RPC (§7c step 6.1
+        # (3/3) at commit 14e57709).  ``SourceType`` enum
+        # serialized as its lowercase string value across the
+        # wire.
+        rpc = getattr(session.server, "_runner_rpc", None)
+        if rpc is None:
             return False
-        jaato_session.inject_prompt(
-            text, source_id=source_id, source_type=source_type
-        )
+        forwarder = getattr(rpc, "session_inject_prompt_threadsafe", None)
+        if not callable(forwarder):
+            return False
+        try:
+            forwarder(
+                text,
+                source_id=source_id,
+                source_type=(
+                    source_type.value if source_type is not None else None
+                ),
+                timeout=2.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("inject_prompt forward failed: %s", exc)
+            return False
         return True
 
     def get_session_workspace(self, session_id: str) -> Optional[str]:
@@ -1715,6 +2344,25 @@ class SessionManager:
 
         return None
 
+    def _count_pending_held_tool_calls(self, session: Session) -> int:
+        """Phase 3 §3.12 + peer-review M5/N1: return the count of
+        tool calls held by the runner-side permission plugin's
+        defer-and-flush queue for *session*.
+
+        The queue itself lives runner-side and is populated when a
+        ``check_permission`` ASK lands while
+        ``Session.restored_pending_attach`` is True (no client
+        attached).  This commit lays the daemon-side foundation —
+        the actual queue + drain logic ships in a §3.12 follow-on.
+        For now the count is always 0; the helper exists so the
+        ``SessionRestoredEvent`` field is wired end-to-end and the
+        client side has a stable contract to integrate against.
+        """
+        # TODO §3.12 follow-on: query the runner-side permission
+        # plugin via runner-RPC for the pending-call count.  Until
+        # then, return 0.
+        return 0
+
     def attach_session(
         self,
         client_id: str,
@@ -1771,8 +2419,31 @@ class SessionManager:
                 self._maybe_unload_session(current)
 
             # Attach to new session
+            #
+            # Phase 3 §3.12 + peer-review M5/N1: detect first-attach
+            # to a disk-restored session BEFORE adding the client to
+            # ``attached_clients`` so the "no client previously
+            # attached" precondition is unambiguous.  The actual
+            # SessionRestoredEvent emission happens after the lock
+            # is released (event sinks should not run under the
+            # SessionManager lock).
+            was_first_attach_to_restored = (
+                session.restored_pending_attach
+                and not session.attached_clients
+            )
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
+
+            if was_first_attach_to_restored:
+                # Clear the flag now under the lock so a parallel
+                # ``check_permission`` ASK observes the new state
+                # (defer-and-flush off, normal denial / prompt
+                # behaviour resumes).  The pending-tool-call queue
+                # drain happens in the runner-side permission plugin
+                # in a §3.12 follow-on commit; this commit lays the
+                # foundation by surfacing the count of held calls
+                # via the SessionRestoredEvent emitted below.
+                session.restored_pending_attach = False
 
             # Only set workspace if session doesn't have one yet.
             # If session already has a workspace, it keeps it - clients are warned
@@ -1782,6 +2453,20 @@ class SessionManager:
                 session.server.workspace_path = workspace_path
 
         logger.info(f"Client {client_id} attached to session {session_id}")
+
+        # M5/N1: emit SessionRestoredEvent for the first attach to a
+        # disk-restored session.  The pending-tool-call count is 0
+        # for this commit (the queue infrastructure lives in the
+        # runner-side permission plugin and lands in a §3.12 follow-
+        # on); the event still fires so the client can distinguish a
+        # fresh-attach from a restored-attach for telemetry / UX.
+        if was_first_attach_to_restored:
+            self._emit_to_client(client_id, SessionRestoredEvent(
+                session_id=session_id,
+                pending_tool_call_count=self._count_pending_held_tool_calls(
+                    session,
+                ),
+            ))
 
         # Apply client-specific config (e.g., presentation context)
         self._apply_client_config_to_server(client_id, session.server)
@@ -1898,34 +2583,41 @@ class SessionManager:
                 session_env_file = workspace_env
                 logger.debug(f"_load_session: using workspace env_file: {session_env_file}")
 
-        server = JaatoServer(
-            env_file=session_env_file,
-            provider=None,  # Let env_file determine provider
-            on_event=init_callback,
+        # Phase 3 §3.12 disk-restore migration: route the JaatoServer
+        # construction + pre-init hooks + initialize through the
+        # unified ``_construct_and_initialize_server`` sub-helper that
+        # the IPC path also uses.  The disk-restore path supplies the
+        # saved ``state.sandbox_mode`` via ``envelope.sandbox_mode``
+        # so the Session record below reflects the pre-restart value
+        # rather than re-running the apparmor opt-in lookup (which
+        # is a client-driven concept that doesn't apply to disk
+        # restore).
+        envelope = BootstrapEnvelope(
             session_id=session_id,
+            workspace_path=state.workspace_path,
+            name=state.description or f"Session {session_id}",
+            description=state.description,
+            client_id=None,  # disk-restore path; no client-driven opt-in
+            sandbox_mode=getattr(state, "sandbox_mode", None),
+            restore_state={"loaded_state": state},
+            env_file=session_env_file,
             instruction_token_cache=self._instruction_token_cache,
+            on_event_during_init=init_callback,
         )
-        logger.debug(f"_load_session: JaatoServer created, calling initialize()...")
-
-        # Pre-initialize hooks fire BEFORE initialize() so transports
-        # can provision per-session kernel resources (AppArmor profile,
-        # cgroup) before configure() runs prefetch scripts.  Server
-        # 0.6.49+; mirror of the same call site in create_session.
-        self._run_pre_initialize_hooks(
-            server, session_id, state.workspace_path,
-        )
-
         try:
-            init_result = server.initialize()
-            logger.debug(f"_load_session: initialize() returned {init_result}")
-            if not init_result:
-                logger.error(f"Failed to initialize server for session {session_id}")
-                return None
+            server, _restore_sandbox = self._construct_and_initialize_server(envelope)
         except Exception as e:
-            logger.error(f"_load_session: initialize() raised exception: {type(e).__name__}: {e}")
+            logger.error(
+                f"_load_session: initialize() raised exception: "
+                f"{type(e).__name__}: {e}"
+            )
             import traceback
             logger.error(f"_load_session: traceback:\n{traceback.format_exc()}")
             return None
+        if server is None:
+            logger.error(f"Failed to initialize server for session {session_id}")
+            return None
+        logger.debug(f"_load_session: initialize() returned True")
 
         logger.debug(f"_load_session: server initialized for {session_id}")
 
@@ -1940,9 +2632,16 @@ class SessionManager:
             session_dir = pathlib.Path(self._session_config.storage_path) / session_id
         self._configure_todo_storage(server, session_dir)
 
-        # Restore history to the server's JaatoClient
-        if state.history and server._jaato:
-            server._jaato.reset_session(state.history)
+        # Restore history to the runner-side session.
+        # Phase 3 §7c step 6.6.4.5b: route through the
+        # ``session.set_initial_history`` RPC (added §7c step 6.6.1.1)
+        # instead of ``server._jaato.reset_session(state.history)``.
+        # Semantically equivalent at this site: the runner-side session
+        # was just bootstrapped with empty history, which matches
+        # ``set_initial_history``'s "session must be idle and history
+        # must be empty" precondition.
+        if state.history and server._runner_rpc is not None:
+            server._runner_rpc.session_set_initial_history_threadsafe(state.history)
             logger.debug(f"Restored {len(state.history)} messages for session {session_id}")
 
             # Resolve the session's main agent id once — it may be the
@@ -1958,17 +2657,35 @@ class SessionManager:
             if main_agent_id in server._agents:
                 server._agents[main_agent_id].history = list(state.history)
 
-            # Restore turn accounting (reset_session clears it, so we restore after)
+            # Restore turn accounting (reset_session clears it, so we restore after).
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side
+            # via the new ``session.restore_turn_accounting``
+            # RPC (§7c step 6.6.1.2 at commit 82b8da29) instead
+            # of reaching into the daemon-side session.
             if state.turn_accounting:
-                jaato_session = server._jaato.get_session()
-                jaato_session._turn_accounting = list(state.turn_accounting)
-                logger.debug(f"Restored {len(state.turn_accounting)} turn accounting entries for session {session_id}")
+                rpc = getattr(server, "_runner_rpc", None)
+                if rpc is not None:
+                    forwarder = getattr(
+                        rpc, "session_restore_turn_accounting_threadsafe", None,
+                    )
+                    if callable(forwarder):
+                        try:
+                            forwarder(state.turn_accounting, timeout=5.0)
+                            logger.debug(f"Restored {len(state.turn_accounting)} turn accounting entries for session {session_id}")
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "restore_turn_accounting forward failed: %s",
+                                exc,
+                            )
 
-                # Update server's agent state and emit context update
+                # Update server's agent state and emit context update.
+                # Phase 3 §7c step 6.6.4.5b: route ``get_context_usage``
+                # through the runner-RPC instead of the daemon-side
+                # JaatoClient indirection.
                 if main_agent_id in server._agents:
                     main_state = server._agents[main_agent_id]
                     main_state.turn_accounting = list(state.turn_accounting)
-                    usage = server._jaato.get_context_usage()
+                    usage = server._runner_rpc.session_get_context_usage_threadsafe()
                     main_state.context_usage = {
                         'total_tokens': usage.get('total_tokens', 0),
                         'prompt_tokens': usage.get('prompt_tokens', 0),
@@ -1991,20 +2708,65 @@ class SessionManager:
                     logger.debug(f"Emitted ContextUpdatedEvent: {usage.get('percent_used', 0.0):.1f}% used")
 
         # Restore conversation budget if present (other budget sources are
-        # automatically populated during session recreation)
-        if state.budget_state and server._jaato:
-            jaato_session = server._jaato.get_session()
-            if jaato_session and jaato_session.instruction_budget:
-                jaato_session.instruction_budget.restore_conversation_from_snapshot(state.budget_state)
-                logger.debug(f"Restored conversation budget for session {session_id}")
-                # Emit budget event so clients show correct budget
-                server.emit(InstructionBudgetEvent(
-                    agent_id=jaato_session.agent_id,
-                    budget_snapshot=jaato_session.instruction_budget.snapshot(),
-                ))
+        # automatically populated during session recreation).
+        # Phase 3 §7c step 6.6.1.0: use the public
+        # JaatoSession.restore_conversation_budget() method instead
+        # of reaching through ``session.instruction_budget`` into
+        # the underlying InstructionBudget's
+        # ``restore_conversation_from_snapshot``.  The public
+        # surface is the prerequisite for the upcoming
+        # ``session.restore_conversation_budget`` runner-RPC
+        # handler (§7c step 6.6.1.3).  The method is no-op when
+        # the session's instruction_budget is None, so we drop
+        # the explicit guard.
+        # Phase 3 §7c step 6.6.3.6: forward to runner-side via the
+        # new ``session.restore_conversation_budget`` RPC (§7c step
+        # 6.6.1.3 at commit b40d2439); use the existing
+        # ``session.snapshot_instruction_budget`` (§7c step 6.1
+        # (2/3) at commit 1043bfde) for the post-restore emit.
+        if state.budget_state:
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is not None:
+                restorer = getattr(
+                    rpc, "session_restore_conversation_budget_threadsafe", None,
+                )
+                snapshotter = getattr(
+                    rpc, "session_snapshot_instruction_budget_threadsafe", None,
+                )
+                if callable(restorer):
+                    try:
+                        restorer(state.budget_state, timeout=5.0)
+                        logger.debug(
+                            f"Restored conversation budget for session {session_id}",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "restore_conversation_budget forward failed: %s",
+                            exc,
+                        )
+                if callable(snapshotter):
+                    try:
+                        snapshot = snapshotter(timeout=5.0)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "snapshot_instruction_budget forward failed: %s",
+                            exc,
+                        )
+                        snapshot = None
+                    if snapshot is not None:
+                        # Emit budget event so clients show correct budget.
+                        # ``agent_id`` is a top-level key in the snapshot
+                        # dict (per InstructionBudget.snapshot() schema).
+                        server.emit(InstructionBudgetEvent(
+                            agent_id=snapshot.get('agent_id', server.main_agent_id),
+                            budget_snapshot=snapshot,
+                        ))
 
-        # Restore subagent state if present in metadata
-        if state.metadata.get('subagents') and server._jaato:
+        # Restore subagent state if present in metadata.
+        # Phase 3 §7c step 6.6.4.5e: truthiness check pivoted from
+        # ``server._jaato`` (deleted) to ``server._runtime`` (the
+        # daemon-side canonical handle since 5d).
+        if state.metadata.get('subagents') and server._runtime is not None:
             self._restore_subagent_states(
                 session_id,
                 state.metadata['subagents'],
@@ -2053,6 +2815,13 @@ class SessionManager:
             workspace_path=state.workspace_path,
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
             provisioned=state.metadata.get('provisioned', False),
+            sandbox_mode=getattr(state, "sandbox_mode", None),
+            # Phase 3 §3.12 + peer-review M5/N1: mark this session as
+            # awaiting first client-attach.  While set, the runner-
+            # side permission plugin queues ASK prompts rather than
+            # denying them (defer-and-flush posture).  Cleared in
+            # ``attach_session`` after emitting SessionRestoredEvent.
+            restored_pending_attach=True,
         )
 
         # Restore workspace file monitor with persisted tracked state
@@ -2125,8 +2894,13 @@ class SessionManager:
                 except Exception as e:
                     logger.error(f"Failed to load subagent state {agent_file}: {e}")
 
-        # Get runtime from server's jaato client
-        runtime = server._jaato.get_runtime() if server._jaato else None
+        # Phase 3 §7c step 6.6.4.5a: read ``server._runtime`` directly
+        # instead of going through ``server._jaato.get_runtime()``.
+        # ``self._runtime`` has been the daemon-side runtime field since
+        # §7c step 4 first pass (commit 7c34f218); this site completes
+        # the pattern.  Behavior-preserving: ``_runtime`` is non-None
+        # iff ``_jaato`` was successfully connected.
+        runtime = server._runtime
         if not runtime:
             logger.warning("Cannot restore subagents: no runtime available")
             return 0
@@ -2231,19 +3005,32 @@ class SessionManager:
         # Create a TOOL message with all synthetic results
         synthetic_message = Message(role=Role.TOOL, parts=synthetic_parts)
 
-        # Inject into history based on which agent was executing
+        # Inject into history based on which agent was executing.
+        # Phase 3 §7c step 6.6.3.6: forward the synthetic message
+        # via the new ``session.append_history_message`` RPC
+        # (§7c step 6.6.3.1 at commit aa9059ec) instead of the
+        # daemon-side get-modify-reset dance.  The runner-side
+        # JaatoSession.append_history_message wraps the same
+        # get-history + append + reset_session flow internally
+        # (preserves the ``_turn_accounting`` clear semantic).
         if agent_id == 'main':
-            if server._jaato:
-                jaato_session = server._jaato.get_session()
-                if jaato_session:
-                    # Append the synthetic tool message to history using proper API
-                    current_history = jaato_session.get_history()
-                    current_history.append(synthetic_message)
-                    jaato_session.reset_session(current_history)
-                    logger.info(
-                        f"Recovered {len(pending_calls)} interrupted tool call(s) "
-                        f"for main agent in session {session_id}"
-                    )
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is not None:
+                forwarder = getattr(
+                    rpc, "session_append_history_message_threadsafe", None,
+                )
+                if callable(forwarder):
+                    try:
+                        forwarder(synthetic_message, timeout=5.0)
+                        logger.info(
+                            f"Recovered {len(pending_calls)} interrupted tool call(s) "
+                            f"for main agent in session {session_id}"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "append_history_message forward failed: %s",
+                            exc,
+                        )
         else:
             # Subagent recovery - find the subagent session
             if server.registry:
@@ -2287,6 +3074,53 @@ class SessionManager:
 
         return len(pending_calls)
 
+    def _save_session_async(self, session: Session) -> None:
+        """Defer ``_save_session(session)`` to a background daemon thread.
+
+        Path H (cycle 10).  Used by the ToolCallStartEvent branch in
+        ``_handle_turn_tracking_event`` (line 1611) to persist
+        ``pending_tool_calls`` for crash recovery WITHOUT blocking
+        the synchronous ``_emit_to_session`` path.
+
+        Pre-Path-H this site called ``_save_session(session)``
+        synchronously, which made 2 blocking runner-RPCs
+        (``session_get_history_threadsafe`` +
+        ``session_snapshot_conversation_budget_threadsafe``) that
+        raced against the runner's still-active ``send_message``.
+        After 35s timeout the save failed silently AND the 35s
+        delay starved the model loop's permission-response window.
+        Architecturally same shape as Path E's Layer 5 race.
+
+        Trade-off: the daemon-crash recovery window for IN-PROGRESS
+        tool calls is narrowed (was synchronous fsync; becomes best-
+        effort async fsync).  Recovery for COMPLETED turns is
+        unaffected — the natural-boundary save still runs
+        synchronously on the AgentStatusChangedEvent(status=done) path.
+
+        Concurrent invocations for the same session serialize via
+        ``self._async_save_lock`` so parallel ToolCallStartEvents
+        produce consistent last-writer-wins ordering.
+
+        Args:
+            session: The session to save.
+        """
+        def _do_save() -> None:
+            try:
+                with self._async_save_lock:
+                    self._save_session(session)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning(
+                    "async save for session %s failed: %s",
+                    session.session_id, exc,
+                )
+
+        thread = threading.Thread(
+            target=_do_save,
+            name=f"async-save-{session.session_id}",
+            daemon=True,
+        )
+        thread.start()
+
     def _save_session(self, session: Session) -> bool:
         """Save a session to disk.
 
@@ -2299,9 +3133,13 @@ class SessionManager:
         try:
             # Get history directly from JaatoClient to ensure we capture
             # in-progress turns (the agent state cache is only updated at turn end)
+            # Phase 3 §7c step 6.6.4.5b: fetch history via the
+            # ``session.get_history`` RPC instead of the daemon-side
+            # JaatoClient indirection.  Captures in-progress turns
+            # (the agent state cache only updates at turn end).
             history = []
-            if session.server and session.server._jaato:
-                history = session.server._jaato.get_history()
+            if session.server and session.server._runner_rpc is not None:
+                history = session.server._runner_rpc.session_get_history_threadsafe()
             turn_accounting = []
 
             if session.server:
@@ -2362,12 +3200,29 @@ class SessionManager:
                 subagent_metadata['plugin_states'] = plugin_states
 
             # Get conversation budget for persistence (other budget sources are
-            # automatically recreated when the session is restored)
+            # automatically recreated when the session is restored).
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+            # the new ``session.snapshot_conversation_budget`` RPC
+            # (§7c step 6.6.3.2 at commit abd7ec08) instead of
+            # reaching into the daemon-side session's
+            # instruction_budget.
             budget_state = None
-            if session.server and session.server._jaato:
-                jaato_session = session.server._jaato.get_session()
-                if jaato_session and jaato_session.instruction_budget:
-                    budget_state = jaato_session.instruction_budget.get_conversation_snapshot()
+            if session.server is not None:
+                rpc = getattr(session.server, "_runner_rpc", None)
+                if rpc is not None:
+                    snapshotter = getattr(
+                        rpc,
+                        "session_snapshot_conversation_budget_threadsafe",
+                        None,
+                    )
+                    if callable(snapshotter):
+                        try:
+                            budget_state = snapshotter(timeout=5.0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "snapshot_conversation_budget forward failed: %s",
+                                exc,
+                            )
 
             # Get workspace file tracking state for persistence
             workspace_files = None
@@ -2460,10 +3315,9 @@ class SessionManager:
 
         # Resolve to absolute path to avoid CWD issues
         state_path = (session_dir / "plans" / "_state.json").resolve()
-        state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(state_path, 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=2)
+            from shared.atomic_write import atomic_write_json
+            atomic_write_json(state_path, state)
             logger.debug(f"Saved TODO state: {state_path}")
         except Exception as e:
             logger.error(f"Failed to save TODO state: {e}")
@@ -2522,11 +3376,13 @@ class SessionManager:
             if not full_state:
                 continue
 
-            # Write to file
+            # Write to file (atomically — Phase 3 §3.14).  A SIGTERM
+            # mid-write would otherwise leave a corrupt subagent state
+            # file that the disk-restore path can't parse.
             agent_file = subagents_dir / f"{agent_id}.json"
             try:
-                with open(agent_file, 'w', encoding='utf-8') as f:
-                    json.dump(full_state, f, indent=2)
+                from shared.atomic_write import atomic_write_json
+                atomic_write_json(agent_file, full_state)
                 logger.debug(f"Saved subagent state: {agent_file}")
             except Exception as e:
                 logger.error(f"Failed to save subagent {agent_id}: {e}")
@@ -2629,11 +3485,11 @@ class SessionManager:
         if not matches:
             return text
 
+        # Phase 3 §7c step 6.6.4.5a: read ``server._runtime`` directly.
         prompt_plugin = None
-        if server._jaato:
-            runtime = server._jaato.get_runtime()
-            if runtime and runtime.registry:
-                prompt_plugin = runtime.registry.get_plugin("prompt_library")
+        runtime = server._runtime
+        if runtime and runtime.registry:
+            prompt_plugin = runtime.registry.get_plugin("prompt_library")
         if prompt_plugin is None or not hasattr(
             prompt_plugin, '_execute_prompt_command'
         ):
@@ -2716,12 +3572,11 @@ class SessionManager:
         if not matches:
             return text
 
-        # Get prompt library plugin
+        # Phase 3 §7c step 6.6.4.5a: read ``server._runtime`` directly.
         prompt_plugin = None
-        if server._jaato:
-            runtime = server._jaato.get_runtime()
-            if runtime and runtime.registry:
-                prompt_plugin = runtime.registry.get_plugin("prompt_library")
+        runtime = server._runtime
+        if runtime and runtime.registry:
+            prompt_plugin = runtime.registry.get_plugin("prompt_library")
 
         # Process matches in reverse to preserve positions
         result = text
@@ -3474,9 +4329,26 @@ class SessionManager:
             # The session clears the override after the turn.  None
             # leaves env-driven behaviour unchanged.
             if event.parallel_tools is not None:
-                jaato_session = server._jaato.get_session() if server._jaato else None
-                if jaato_session is not None:
-                    jaato_session._parallel_tools_override = event.parallel_tools
+                # Phase 3 §7c step 6.6.3.6: forward to runner-side
+                # via the new ``session.set_parallel_tools_override``
+                # RPC (§7c step 6.6.3.3 at commit b678ce2c) instead
+                # of the private-attr write on the daemon-side
+                # session.
+                rpc = getattr(server, "_runner_rpc", None)
+                if rpc is not None:
+                    forwarder = getattr(
+                        rpc,
+                        "session_set_parallel_tools_override_threadsafe",
+                        None,
+                    )
+                    if callable(forwarder):
+                        try:
+                            forwarder(event.parallel_tools, timeout=2.0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "set_parallel_tools_override forward failed: %s",
+                                exc,
+                            )
 
             # Track user input for command history restoration
             if event.text and event.text.strip():
@@ -3620,12 +4492,30 @@ class SessionManager:
             agent_id = event.agent_id or main_id
 
             if agent_id == main_id or agent_id == "main":
-                # Main agent budget from JaatoClient session
-                jaato_session = server._jaato.get_session() if server._jaato else None
-                if jaato_session and jaato_session.instruction_budget:
+                # Main agent budget — Phase 3 §7c step 6.6.3.6:
+                # forward to runner-side via the existing
+                # ``session.snapshot_instruction_budget`` RPC (§7c
+                # step 6.1 (2/3) at commit 1043bfde).
+                snapshot = None
+                rpc = getattr(server, "_runner_rpc", None)
+                if rpc is not None:
+                    snapshotter = getattr(
+                        rpc,
+                        "session_snapshot_instruction_budget_threadsafe",
+                        None,
+                    )
+                    if callable(snapshotter):
+                        try:
+                            snapshot = snapshotter(timeout=5.0)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "snapshot_instruction_budget forward failed: %s",
+                                exc,
+                            )
+                if snapshot is not None:
                     self._emit_to_client(client_id, InstructionBudgetEvent(
                         agent_id=agent_id,
-                        budget_snapshot=jaato_session.instruction_budget.snapshot(),
+                        budget_snapshot=snapshot,
                     ))
                 else:
                     self._emit_to_client(client_id, ErrorEvent(
@@ -3667,95 +4557,177 @@ class SessionManager:
         # See ``project_backlog_sdk_feature_parity.md``.
 
         elif isinstance(event, InjectPromptRequest):
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+            # the existing ``session.inject_prompt`` RPC (§7c step
+            # 6.1 (3/3) at commit 14e57709) instead of reaching
+            # into the daemon-side session.  The runner-side
+            # handler validates source_type itself, but we pre-
+            # validate daemon-side to surface the typed error
+            # to clients without an RPC round-trip.
             from shared.message_queue import SourceType
-            jaato_session = server._jaato.get_session() if server._jaato else None
-            if jaato_session is None:
+            try:
+                source_type = SourceType(event.source_type)
+            except ValueError:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=(
+                        f"Invalid source_type: {event.source_type!r}. "
+                        f"Valid values: {[s.value for s in SourceType]}"
+                    ),
+                    error_type="ValidationError",
+                ))
+                return
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is None:
                 self._emit_to_client(client_id, ErrorEvent(
                     error="No active JaatoSession",
                     error_type="SessionError",
                 ))
             else:
-                # Map the request's string source_type to the enum.
-                # Invalid values surface as a clear error rather than
-                # silently defaulting — the SDK should be explicit.
-                try:
-                    source_type = SourceType(event.source_type)
-                except ValueError:
-                    self._emit_to_client(client_id, ErrorEvent(
-                        error=(
-                            f"Invalid source_type: {event.source_type!r}. "
-                            f"Valid values: {[s.value for s in SourceType]}"
-                        ),
-                        error_type="ValidationError",
-                    ))
-                    return
-                jaato_session.inject_prompt(
-                    event.text,
-                    source_id=event.source_id,
-                    source_type=source_type,
+                forwarder = getattr(
+                    rpc, "session_inject_prompt_threadsafe", None,
                 )
+                if callable(forwarder):
+                    try:
+                        forwarder(
+                            event.text,
+                            source_id=event.source_id,
+                            source_type=source_type.value,
+                            timeout=5.0,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._emit_to_client(client_id, ErrorEvent(
+                            error=f"inject_prompt forward failed: {exc}",
+                            error_type="SessionError",
+                        ))
+                else:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error="No active JaatoSession",
+                        error_type="SessionError",
+                    ))
 
         elif isinstance(event, ReplayMessagesRequest):
-            jaato_session = server._jaato.get_session() if server._jaato else None
-            if jaato_session is None:
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+            # the new ``session.replay_messages`` RPC (§7c step
+            # 6.6.3.4 at commit 24ed6c0f) instead of reaching
+            # into the daemon-side session.  When ``event.messages``
+            # is None, the runner's handler falls back to the
+            # session's history — but the wrapper requires a
+            # messages list, so we read history first via the
+            # existing ``session.get_history`` RPC (§3.3c precursor).
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is None:
                 self._emit_to_client(client_id, ReplayMessagesResultEvent(
                     request_id=event.request_id,
                     error="No active JaatoSession",
                 ))
             else:
-                # Deserialise messages when supplied; fall back to the
-                # session's current history when omitted (= "continue
-                # from current state with no new user input").
-                if event.messages is None:
-                    messages = jaato_session.get_history()
+                replayer = getattr(
+                    rpc, "session_replay_messages_threadsafe", None,
+                )
+                if not callable(replayer):
+                    self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                        request_id=event.request_id,
+                        error="No active JaatoSession",
+                    ))
                 else:
-                    from shared.plugins.session.serializer import deserialize_history
-                    messages = deserialize_history(event.messages)
-                # Run in a worker thread — replay_messages blocks
-                # until the provider call completes, and we don't
-                # want to stall the dispatcher.
-                def run_replay():
-                    try:
-                        response_text = jaato_session.replay_messages(
-                            messages, timeout=event.timeout_seconds,
+                    # Resolve messages: use the request's if provided;
+                    # else fall back to the runner-side session's
+                    # current history via the existing get_history
+                    # RPC.  Deserialize daemon-side first when the
+                    # request supplied a list (the runner handler
+                    # also does this; we deserialize early to surface
+                    # malformed input as a typed daemon error).
+                    if event.messages is not None:
+                        from shared.plugins.session.serializer import deserialize_history
+                        try:
+                            messages = deserialize_history(event.messages)
+                        except Exception as exc:  # noqa: BLE001
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                error=f"deserialize failed: {exc}",
+                            ))
+                            return
+                    else:
+                        history_getter = getattr(
+                            rpc, "session_get_history_threadsafe", None,
                         )
-                        self._emit_to_client(client_id, ReplayMessagesResultEvent(
-                            request_id=event.request_id,
-                            response_text=response_text,
-                        ))
-                    except Exception as exc:
-                        self._emit_to_client(client_id, ReplayMessagesResultEvent(
-                            request_id=event.request_id,
-                            error=f"{type(exc).__name__}: {exc}",
-                        ))
-                threading.Thread(target=run_replay, daemon=True).start()
+                        if not callable(history_getter):
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                error="No active JaatoSession",
+                            ))
+                            return
+                        try:
+                            messages = history_getter(timeout=5.0)
+                        except Exception as exc:  # noqa: BLE001
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                error=f"get_history failed: {exc}",
+                            ))
+                            return
+
+                    # Run in a worker thread — replay_messages
+                    # blocks until the provider call completes.
+                    def run_replay():
+                        try:
+                            response_text = replayer(
+                                messages,
+                                replay_timeout=event.timeout_seconds,
+                                timeout=event.timeout_seconds + 60.0,
+                            )
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                response_text=response_text,
+                            ))
+                        except Exception as exc:
+                            self._emit_to_client(client_id, ReplayMessagesResultEvent(
+                                request_id=event.request_id,
+                                error=f"{type(exc).__name__}: {exc}",
+                            ))
+                    threading.Thread(target=run_replay, daemon=True).start()
 
         elif isinstance(event, ResolveForkPointRequest):
-            jaato_session = server._jaato.get_session() if server._jaato else None
-            if jaato_session is None:
+            # Phase 3 §7c step 6.6.3.6: forward to runner-side
+            # via the new ``session.resolve_fork_point`` RPC (§7c
+            # step 6.6.3.5 at commit e4eddc0e).  The runner-side
+            # handler defaults ``history`` to its own
+            # ``session.get_history()`` when omitted (matches the
+            # pre-§7c daemon-side pattern at line 4573).
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is None:
                 self._emit_to_client(client_id, ResolveForkPointResultEvent(
                     request_id=event.request_id,
                     fork_index=-1,
                     error="No active JaatoSession",
                 ))
             else:
-                try:
-                    fork_index = jaato_session.resolve_fork_point(
-                        history=jaato_session.get_history(),
-                        after_message=event.after_message,
-                        after_tool_call=event.after_tool_call,
-                        after_timestamp=event.after_timestamp,
-                    )
-                    self._emit_to_client(client_id, ResolveForkPointResultEvent(
-                        request_id=event.request_id,
-                        fork_index=fork_index,
-                    ))
-                except Exception as exc:
+                resolver = getattr(
+                    rpc, "session_resolve_fork_point_threadsafe", None,
+                )
+                if not callable(resolver):
                     self._emit_to_client(client_id, ResolveForkPointResultEvent(
                         request_id=event.request_id,
                         fork_index=-1,
-                        error=f"{type(exc).__name__}: {exc}",
+                        error="No active JaatoSession",
                     ))
+                else:
+                    try:
+                        fork_index = resolver(
+                            after_message=event.after_message,
+                            after_tool_call=event.after_tool_call,
+                            after_timestamp=event.after_timestamp,
+                            timeout=5.0,
+                        )
+                        self._emit_to_client(client_id, ResolveForkPointResultEvent(
+                            request_id=event.request_id,
+                            fork_index=fork_index,
+                        ))
+                    except Exception as exc:
+                        self._emit_to_client(client_id, ResolveForkPointResultEvent(
+                            request_id=event.request_id,
+                            fork_index=-1,
+                            error=f"{type(exc).__name__}: {exc}",
+                        ))
 
         # ─── SDK feature parity — permission policy verbs ───────────────
         # Typed verbs replacing stringly-typed CommandRequest("permissions",
@@ -3980,23 +4952,37 @@ class SessionManager:
             Summary string from the model's final response.
         """
         import json as _json
-        from server.core import JaatoServer
+        import uuid
+        from shared.plugins.subagent.config import build_inline_profile
 
         # Parse profile/config
         profile_data = _json.loads(profile_json) if profile_json else {}
         inline_data = _json.loads(inline_config_json) if inline_config_json else {}
 
-        # Determine model and plugins from profile or inline config
-        model = profile_data.get("model") or inline_data.get("model")
-        provider = profile_data.get("provider") or inline_data.get("provider")
-        plugins = profile_data.get("plugins") or inline_data.get("plugins", [])
-        system_instructions = (
-            profile_data.get("system_instructions")
-            or inline_data.get("system_instructions")
+        # Phase 3 §3.12 ephemeral migration: route through the unified
+        # ``_construct_and_initialize_server`` sub-helper.  Compose the
+        # ephemeral inputs (model/provider/plugins/system_instructions
+        # /max_turns) into a single inline ``SubagentProfile`` so the
+        # construction shape matches the IPC + disk-restore paths
+        # (env_file-driven JaatoServer construction with a profile
+        # override) rather than the pre-§3.12 broken
+        # ``JaatoServer().initialize(model=, provider_name=, tools=)``
+        # signature (the underlying ``JaatoServer.initialize`` takes
+        # no kwargs — that call would have raised TypeError; the
+        # ephemeral path was effectively unreachable in production).
+        merged: Dict[str, Any] = {}
+        for source in (profile_data, inline_data):
+            for key, value in source.items():
+                merged.setdefault(key, value)
+        profile = build_inline_profile(
+            merged,
+            name="<ephemeral>",
+            description=f"Ephemeral subagent: {agent_name}",
         )
-        max_turns = profile_data.get("max_turns") or inline_data.get("max_turns", 10)
 
-        # Save and set workspace context if provided (Phase 5)
+        # Save and set workspace context if provided (Phase 5).
+        # The env-driven workspace root + chdir survive untouched —
+        # they're a separate concern from the bootstrap helper.
         prev_cwd = None
         prev_workspace_root = None
         if workspace_path:
@@ -4006,14 +4992,29 @@ class SessionManager:
             os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
 
         try:
-            # Create a temporary JaatoServer for the ephemeral session
-            server = JaatoServer()
-            server.initialize(
-                model=model,
-                provider_name=provider,
-                tools=plugins,
-                system_instructions=system_instructions,
+            # Build the bootstrap envelope.  ``client_id=None`` because
+            # ephemeral subagent fan-out has no client-driven apparmor
+            # opt-in (per §3.12 spec; runner-sharing semantics for
+            # default-share / opt-in-isolation come with §3.11 + the
+            # seat-flip).  ``parent_runner_handle`` stays None for now
+            # — Phase 3's spec for ephemeral migration adds the
+            # parent-runner reference for shared-runner default once
+            # the seat-flip lands.
+            envelope = BootstrapEnvelope(
+                session_id=f"ephemeral-{uuid.uuid4().hex[:12]}",
+                workspace_path=workspace_path,
+                name=agent_name or "<ephemeral>",
+                description="Ephemeral subagent fan-out",
+                client_id=None,
+                profile=profile,
+                agent_name=agent_name or "main",
             )
+            server, _sandbox = self._construct_and_initialize_server(envelope)
+            if server is None:
+                # Init failure already emitted via the in-init sink;
+                # surface a minimal hint to the caller so the
+                # subagent fan-out doesn't silently swallow.
+                return "Ephemeral session initialization failed."
 
             # Set workspace path on the registry so plugins discover it
             if workspace_path and hasattr(server, 'registry') and server.registry:

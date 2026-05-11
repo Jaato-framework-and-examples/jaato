@@ -387,3 +387,144 @@ def test_malformed_json_closes_loop(rpc_pair) -> None:
     # Loop should close on its own; subsequent read returns EOF.
     raw = read_frame_sync(daemon_sock)
     assert raw is None
+
+
+# ----------------------------------------------------------------------
+# Phase 3 §3.15 — runner-side _telemetry lift onto envelope.telemetry
+#
+# When a runner-side executor returns ``(ok, {"...", "_telemetry":
+# {...}})``, the dispatcher's ``_emit_response`` strips ``_telemetry``
+# from the result dict and moves it onto ``envelope.telemetry`` — the
+# canonical wire location.  These tests pin the lift contract.
+# ----------------------------------------------------------------------
+
+
+def test_emit_response_lifts_telemetry_off_result(rpc_pair) -> None:
+    """Executor returns a result with a ``_telemetry`` dict; the
+    response envelope on the wire has that key absent from
+    ``result`` and present on ``telemetry``."""
+    daemon_sock, _rpc, state = rpc_pair
+
+    def _executor(name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        return True, {
+            "stdout": "hello",
+            "returncode": 0,
+            "_telemetry": {
+                "jaato.cli.command": "echo hello",
+                "jaato.cli.returncode": 0,
+            },
+        }
+
+    state["executor"] = _executor
+
+    _send_request(
+        daemon_sock,
+        RequestEnvelope(
+            id=10, method="tool.execute",
+            args={"name": "cli_based_tool", "args": {"command": "echo hello"}},
+        ),
+    )
+    _, resp = _read_until_response(daemon_sock, request_id=10)
+    assert resp.ok is True
+    assert isinstance(resp.result, dict)
+    assert "_telemetry" not in resp.result
+    assert resp.result["stdout"] == "hello"
+    assert resp.telemetry == {
+        "jaato.cli.command": "echo hello",
+        "jaato.cli.returncode": 0,
+    }
+
+
+def test_emit_response_no_telemetry_yields_empty_envelope_telemetry(
+    rpc_pair,
+) -> None:
+    """Executor returns a result without ``_telemetry``; the
+    envelope's ``telemetry`` field is an empty dict (the schema
+    default)."""
+    daemon_sock, _rpc, state = rpc_pair
+
+    def _executor(name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        return True, {"value": 7}
+
+    state["executor"] = _executor
+
+    _send_request(
+        daemon_sock,
+        RequestEnvelope(id=11, method="tool.execute", args={"name": "x", "args": {}}),
+    )
+    _, resp = _read_until_response(daemon_sock, request_id=11)
+    assert resp.ok is True
+    assert resp.result == {"value": 7}
+    assert resp.telemetry == {}
+
+
+def test_emit_response_lifts_telemetry_on_domain_failure(rpc_pair) -> None:
+    """Domain failures (ok=False with structured result) ALSO go
+    through ``_emit_response``; the lift still applies on that
+    path."""
+    daemon_sock, _rpc, state = rpc_pair
+
+    def _executor(name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        return False, {
+            "error": "exec not found",
+            "_telemetry": {"jaato.cli.command": "missing_cmd"},
+        }
+
+    state["executor"] = _executor
+
+    _send_request(
+        daemon_sock,
+        RequestEnvelope(id=12, method="tool.execute", args={"name": "x", "args": {}}),
+    )
+    _, resp = _read_until_response(daemon_sock, request_id=12)
+    assert resp.ok is False
+    # Domain failure: error payload is set, but the result dict
+    # (carried alongside on the runner-side path) is not propagated
+    # back via ResponseEnvelope.result on this code path — the
+    # current dispatcher synthesises an error from the result.  The
+    # lift assertion here is that `_telemetry` did NOT leak into
+    # the synthesised error message.
+    assert resp.error is not None
+    assert "_telemetry" not in resp.error.message
+
+
+def test_emit_response_non_dict_result_passes_through(rpc_pair) -> None:
+    """If the executor returns a non-dict result (e.g. a list or
+    primitive), the lift is a no-op — ``telemetry`` stays empty."""
+    daemon_sock, _rpc, state = rpc_pair
+
+    def _executor(name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        return True, [1, 2, 3]
+
+    state["executor"] = _executor
+
+    _send_request(
+        daemon_sock,
+        RequestEnvelope(id=13, method="tool.execute", args={"name": "x", "args": {}}),
+    )
+    _, resp = _read_until_response(daemon_sock, request_id=13)
+    assert resp.ok is True
+    assert resp.result == [1, 2, 3]
+    assert resp.telemetry == {}
+
+
+def test_emit_response_non_dict_telemetry_value_is_dropped(rpc_pair) -> None:
+    """Defensive: ``_telemetry`` keys with non-dict values (str,
+    int, etc.) are dropped rather than crossing the wire — the
+    schema requires ``Dict[str, Any]``.  The original (corrupt)
+    key is also stripped from the result."""
+    daemon_sock, _rpc, state = rpc_pair
+
+    def _executor(name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        return True, {"value": 1, "_telemetry": "not a dict"}
+
+    state["executor"] = _executor
+
+    _send_request(
+        daemon_sock,
+        RequestEnvelope(id=14, method="tool.execute", args={"name": "x", "args": {}}),
+    )
+    _, resp = _read_until_response(daemon_sock, request_id=14)
+    assert resp.ok is True
+    assert resp.result == {"value": 1}  # _telemetry stripped
+    assert resp.telemetry == {}  # corrupt value not propagated

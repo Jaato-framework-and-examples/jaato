@@ -12,6 +12,7 @@ for every domain.
 
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .plugin import BundlePlugin, create_plugin
 
-__all__ = ["BundlePlugin", "create_plugin", "PLUGIN_KIND"]
+__all__ = ["BundlePlugin", "create_plugin", "PLUGIN_KIND", "PLUGIN_TIER"]

@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.base import UserCommand
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -16,7 +17,7 @@ DEFAULT_MAX_RESULTS = 10
 DEFAULT_TIMEOUT = 10  # seconds
 
 
-class WebSearchPlugin:
+class WebSearchPlugin(RunnerForwardingMixin):
     """Plugin that provides web search capability using DuckDuckGo.
 
     Searches are serialized via a class-level lock because DuckDuckGo
@@ -135,8 +136,14 @@ class WebSearchPlugin:
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {'web_search': self._execute}
+        """Return the executor mapping.
+
+        Phase 3 §3.6 wave 3: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            'web_search': self._execute,
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the web search tool."""

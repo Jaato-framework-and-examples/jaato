@@ -37,12 +37,13 @@ from .types import (
     ServiceConfig,
 )
 from .validation import SchemaValidator
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 if TYPE_CHECKING:
     from .auth import AuthAttempt
 
 
-class ServiceConnectorPlugin:
+class ServiceConnectorPlugin(RunnerForwardingMixin):
     """Plugin for discovering and consuming web services.
 
     Provides tools for:
@@ -588,8 +589,12 @@ class ServiceConnectorPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {
+        """Return the executor mapping.
+
+        Phase 3 §3.6 wave 3: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "discover_service": self._execute_discover_service,
             "list_endpoints": self._execute_list_endpoints,
             "get_endpoint_schema": self._execute_get_endpoint_schema,
@@ -601,7 +606,7 @@ class ServiceConnectorPlugin:
             "configure_service_auth": self._execute_configure_service_auth,
             # User command
             "services": lambda args: self.execute_user_command("services", args),
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the service connector tools."""

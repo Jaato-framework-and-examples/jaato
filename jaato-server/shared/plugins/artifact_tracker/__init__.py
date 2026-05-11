@@ -31,6 +31,7 @@ Example usage:
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .models import (
     ArtifactType,
     ReviewStatus,

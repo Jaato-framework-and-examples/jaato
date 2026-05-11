@@ -15,6 +15,7 @@ Usage:
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "gc"
 
+PLUGIN_TIER = "daemon"
 from .plugin import TruncateGCPlugin, create_plugin
 
 __all__ = ["TruncateGCPlugin", "create_plugin"]

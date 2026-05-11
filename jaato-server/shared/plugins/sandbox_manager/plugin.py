@@ -33,6 +33,7 @@ from shared.path_utils import (
     normalize_result_path,
     normalized_equals,
 )
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -59,7 +60,7 @@ class SandboxConfig:
     denied_paths: List[SandboxPath] = field(default_factory=list)
 
 
-class SandboxManagerPlugin:
+class SandboxManagerPlugin(RunnerForwardingMixin):
     """Plugin for managing sandbox path permissions at runtime.
 
     This plugin provides user commands (not model tools) for managing
@@ -730,10 +731,14 @@ class SandboxManagerPlugin:
         return []
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executors for user commands."""
-        return {
+        """Return executors for user commands.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "sandbox": self._execute_sandbox_command,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """No system instructions needed - this is a user-only plugin."""

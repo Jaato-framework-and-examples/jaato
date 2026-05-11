@@ -249,6 +249,96 @@ class StreamFrame:
 
 
 # ----------------------------------------------------------------------
+# Notification frame (§7c step 6.6.4.1)
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class NotificationFrame:
+    """``kind: "event"`` frame for runner→daemon notifications
+    streamed alongside output frames during long-running RPCs
+    (currently :meth:`session.send_message`).
+
+    Phase 3 §7c step 6.6.4.1.  Per the §7c step 6.6.2 audit
+    (commit 9f28f96d), this is the wire-format extension the
+    audit's "stream-channel multiplex" rationale called for.
+    The existing :class:`StreamFrame` carries display output
+    chunks; this frame carries structured event notifications
+    that the daemon-side per-call handler demuxes by
+    ``event_type`` and routes to the appropriate
+    ``server.emit(<Event>)`` or other action.
+
+    Wire shape::
+
+        {
+          "id": <int>,                  # request_id of the in-flight call
+          "kind": "event",
+          "event_type": <str>,          # discriminator, e.g.
+                                        # "instruction_budget_updated"
+          "payload": <dict>             # event-type-specific data
+        }
+
+    The ``KIND_EVENT`` scaffolding has been in
+    ``envelope.py:32`` since Phase 2; the daemon's read loop
+    has dispatched ``kind == "event"`` frames as a placeholder
+    debug-log no-op (server/runner_rpc_client.py pre-§7c-
+    step-6.6.4.1).  This commit promotes that scaffolding into
+    a typed wire surface + handler-registration mechanism on
+    :class:`RunnerRPCClient`.
+
+    Used by §7c step 6.6.4.2's 7-callback collapse — the
+    runner-side ``JaatoSession`` callback hooks emit
+    notification frames; the daemon-side
+    ``session_send_message`` wrapper demuxes them.
+
+    Defensive contract: ``event_type`` must be a non-empty
+    string (no implicit defaulting); ``payload`` must be a
+    dict (may be empty for parameter-less notifications).
+    Per-event-type validation happens at the daemon-side
+    consumer, NOT at the wire boundary — keeps the protocol
+    extensible without renegotiating the wire shape per new
+    event type.
+    """
+
+    id: int
+    event_type: str
+    payload: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": KIND_EVENT,
+            "event_type": self.event_type,
+            "payload": dict(self.payload),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "NotificationFrame":
+        if d.get("kind") != KIND_EVENT:
+            raise ValueError(
+                f"NotificationFrame.from_dict: kind != 'event' "
+                f"(got {d.get('kind')!r})"
+            )
+        event_type = d.get("event_type")
+        if not isinstance(event_type, str) or not event_type:
+            raise ValueError(
+                f"NotificationFrame.from_dict: 'event_type' must be a "
+                f"non-empty str; got {event_type!r}"
+            )
+        payload = d.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"NotificationFrame.from_dict: 'payload' must be a dict "
+                f"or omitted; got {type(payload).__name__}"
+            )
+        return cls(
+            id=int(d["id"]),
+            event_type=event_type,
+            payload=dict(payload),
+        )
+
+
+# ----------------------------------------------------------------------
 # Cancel frame
 # ----------------------------------------------------------------------
 
@@ -278,3 +368,18 @@ class CancelFrame:
                 f"CancelFrame.from_dict: kind != 'cancel' (got {d.get('kind')!r})"
             )
         return cls(id=int(d["id"]))
+
+
+# ----------------------------------------------------------------------
+# Session-bootstrap envelope re-export (Phase 3 §3.3a)
+# ----------------------------------------------------------------------
+#
+# Defined in ``shared/session_envelope.py`` so both daemon and runner
+# import from a single canonical path; re-exported here so the
+# runner's import surface stays consolidated under
+# ``server.runner.envelope`` (callers don't need to know whether a
+# given envelope type is RPC-wire or session-bootstrap).
+from shared.session_envelope import (  # noqa: E402 — re-export at end
+    SESSION_ENVELOPE_VERSION,
+    SessionInitEnvelope,
+)

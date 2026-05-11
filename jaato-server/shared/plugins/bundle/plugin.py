@@ -57,6 +57,7 @@ from ..bundle_common.handler import (
 )
 from ..bundle_common.handler import registry as default_registry
 from ..bundle_common.pack import PackResult, pack_bundle_set
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from ..bundle_common.unpack import (
     UnpackError,
     UnpackMode,
@@ -94,7 +95,7 @@ def _parse_kind_id(token: str) -> Tuple[str, str]:
     return kind, entry_id
 
 
-class BundlePlugin:
+class BundlePlugin(RunnerForwardingMixin):
     """Plugin providing the top-level ``bundle`` command.
 
     Holds no domain state — every subcommand reaches into the shared
@@ -136,7 +137,11 @@ class BundlePlugin:
         return []
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        return {"bundle": self._execute_bundle_cmd}
+        # Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        # is attached; falls through to in-process otherwise.
+        return self.wrap_executors_for_runner_forwarding(
+            {"bundle": self._execute_bundle_cmd},
+        )
 
     def get_auto_approved_tools(self) -> List[str]:
         return ["bundle"]

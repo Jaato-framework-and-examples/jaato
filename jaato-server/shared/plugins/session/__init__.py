@@ -32,6 +32,7 @@ from .config_loader import load_session_config, save_session_config
 PLUGIN_KIND = "session"
 
 
+PLUGIN_TIER = "daemon"
 def create_plugin() -> 'FileSessionPlugin':
     """Factory function to create the default session plugin.
 

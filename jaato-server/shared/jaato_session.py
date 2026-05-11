@@ -327,6 +327,15 @@ class JaatoSession:
         # (sandbox_manager) only.  Plugins access this via
         # get_reference_authorizer() rather than touching the slot.
         self._reference_authorizer = None
+        # Phase 3 §7c step 6.1: bool flag mirror of the authorizer
+        # for the runner-side seat.  When the daemon-side _jaato is
+        # removed (step 6.6), the runner-side session reads this
+        # via :meth:`is_reference_authorization_enabled` and uses
+        # the ``apparmor.add_reference_fragment`` runner→daemon RPC
+        # to authorize paths.  Set via
+        # :meth:`set_reference_authorization_enabled` (called by
+        # the new ``session.set_reference_authorizer`` RPC handler).
+        self._reference_authorization_enabled: bool = False
         # The active override (passed via configure()) — None means the
         # assembled pipeline output is sent on the wire; "" means no
         # system message at all; non-empty replaces the assembly entirely.
@@ -900,6 +909,74 @@ class JaatoSession:
         """
         self._on_mid_turn_interrupt = callback
 
+    def get_auth_info(self) -> str:
+        """Return a description of the credential source the session's
+        provider is using.
+
+        Phase 3 §7c step 6.6.4.5c.1.  Public wrapper that surfaces
+        the underlying ``ModelProviderPlugin.get_auth_info()`` value
+        without daemon-side callers reaching into the private
+        ``self._provider`` attr — required for the runner-RPC seat-
+        flip where the JaatoSession lives in a separate process.
+
+        Returns a human-readable string like ``"API key from
+        ~/.jaato/zhipuai_auth.json"`` or ``"PKCE OAuth"``.  Empty
+        string when no provider is attached (pre-:meth:`configure`)
+        or the provider doesn't implement ``get_auth_info``.
+
+        Closes the missing-method gap caught by the §7c step
+        6.6.4.5c.0 audit (commit a88676ca).
+        """
+        if self._provider and hasattr(self._provider, 'get_auth_info'):
+            try:
+                return str(self._provider.get_auth_info() or "")
+            except Exception:  # noqa: BLE001 — best-effort display string
+                return ""
+        return ""
+
+    def try_completion_nudge(self, max_nudges: int) -> Tuple[bool, int]:
+        """Atomic check-and-increment for the completion-nudge guard.
+
+        Phase 3 §7c step 6.6.4.3a.  Collapses three private-state
+        reaches (``_signal_completion_called`` read,
+        ``_completion_nudges_fired`` read, ``_completion_nudges_fired``
+        increment) into one method so daemon-side callers don't need
+        direct private-attr access — required for the runner-RPC
+        seat-flip in §7c step 6.6.4.3b where the JaatoSession lives
+        in a separate process.
+
+        Decision: returns ``(True, n+1)`` when a nudge should fire
+        (agent didn't call ``signal_completion`` AND the budget isn't
+        exhausted) — also bumps the counter atomically so callers
+        don't need to do it.  Returns ``(False, current)`` otherwise
+        (no counter change).
+
+        Args:
+            max_nudges: Bound on ``_completion_nudges_fired``.
+                Caller's nudge-budget knob (the existing daemon-side
+                site uses ``MAX_COMPLETION_NUDGES = 2``).  Must be
+                non-negative; values <= 0 always yield
+                ``(False, current)``.
+
+        Returns:
+            ``(should_nudge, nudges_fired_after_this_call)``.
+            ``nudges_fired_after_this_call`` reflects the
+            post-increment value when ``should_nudge`` is True;
+            otherwise it's the unchanged current count.
+
+        Thread-safety: matches the existing private-attr access
+        pattern — the model_thread is the sole writer at the loop
+        boundary.  No additional locking added (would be a behavior
+        change).
+        """
+        if (
+            not getattr(self, "_signal_completion_called", False)
+            and getattr(self, "_completion_nudges_fired", 0) < max_nudges
+        ):
+            self._completion_nudges_fired += 1
+            return True, self._completion_nudges_fired
+        return False, getattr(self, "_completion_nudges_fired", 0)
+
     def inject_prompt(
         self,
         text: str,
@@ -1349,6 +1426,49 @@ class JaatoSession:
         layer the plugin needs to touch.
         """
         return self._reference_authorizer
+
+    def set_reference_authorization_enabled(self, enabled: bool) -> None:
+        """Set the bool flag indicating AppArmor reference-fragment
+        authorization is available for this session.
+
+        Phase 3 §7c step 6.1.  This is the **runner-side counterpart**
+        of :meth:`set_reference_authorizer`.
+
+        Pre-§7c the daemon called :meth:`set_reference_authorizer`
+        with a Python ``ReferenceAuthorizer`` instance, which the
+        daemon-side references plugin consumed via
+        :meth:`get_reference_authorizer`.  The Python object can't
+        cross the RPC boundary (it holds a daemon-side
+        ``AppArmorManager`` reference), so post-§7c the daemon
+        forwards a bool flag instead.
+
+        When the references plugin migrates runner-side, it reads
+        :meth:`is_reference_authorization_enabled` and uses the
+        existing ``apparmor.add_reference_fragment`` runner→daemon
+        RPC (Phase 3 §3.2.2) to authorize paths.  The session_id
+        for the RPC call is already known runner-side via the
+        bootstrap envelope.
+
+        Args:
+            enabled: ``True`` if the daemon-side AppArmor manager
+                successfully provisioned a profile for this session
+                (i.e. ``ReferenceAuthorizer is not None`` daemon-
+                side).  ``False`` for unconfined sessions.
+        """
+        self._reference_authorization_enabled = bool(enabled)
+
+    def is_reference_authorization_enabled(self) -> bool:
+        """Read the AppArmor reference-fragment authorization flag.
+
+        Returns ``False`` by default (pre-set, or when the daemon
+        forwards ``enabled=False``).  Used by the runner-side
+        references plugin (post-migration) to decide whether to
+        invoke the ``apparmor.add_reference_fragment`` runner→daemon
+        RPC when admitting an external reference path.
+
+        Phase 3 §7c step 6.1.
+        """
+        return getattr(self, "_reference_authorization_enabled", False)
 
     def set_parent_cancel_token(self, token: CancelToken) -> None:
         """Set a parent cancel token for cancellation propagation.
@@ -2609,6 +2729,25 @@ class JaatoSession:
                 label="Thinking",
             )
         self._emit_instruction_budget_update()
+
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Read accessor for the session's resolved tool schemas.
+
+        Returns the list of :class:`ToolSchema` instances the session
+        has activated for the current model — this is the resolved
+        subset (preloaded plugins + on-demand activations), not the
+        registry's full exposed set.
+
+        Returns an empty list when ``configure()`` hasn't run yet
+        (``self._tools is None``) — callers can iterate the result
+        unconditionally without a None check.
+
+        Phase 3 §7c step 3b: replaces daemon-side reads of the
+        private ``self._tools`` attribute (e.g. core.py's
+        ``_build_tool_id_mappings``).  Pre-§7c-step-3b the daemon
+        reached into the private list directly.
+        """
+        return list(self._tools) if self._tools else []
 
     def refresh_tools(self) -> None:
         """Refresh tools from the runtime.
@@ -7135,6 +7274,163 @@ NOTES
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn."""
         return list(self._turn_accounting)
+
+    def restore_turn_accounting(
+        self, turns: List[Dict[str, Any]],
+    ) -> None:
+        """Replace the per-turn token-usage / timing list.
+
+        Pre-§7c-step-6.6.1.0 the daemon's persistence-restore
+        path (``server/session_manager.py:2558``) reached into
+        the private ``self._turn_accounting`` attribute directly:
+
+            jaato_session._turn_accounting = list(state.turn_accounting)
+
+        That violated the same encapsulation discipline §7c step
+        3a (set_agent_identity) + step 3b (get_tool_schemas)
+        established.  This public method replaces the
+        private-attr write with a stable surface that the
+        upcoming ``session.restore_turn_accounting`` runner-RPC
+        (§7c step 6.6.1.2) can wrap.
+
+        Args:
+            turns: List of per-turn dicts from a
+                :class:`SessionState` snapshot.  Caller owns the
+                list; a shallow copy is taken to isolate
+                in-session state from caller mutation.
+        """
+        self._turn_accounting = list(turns)
+
+    def restore_conversation_budget(
+        self, snapshot: Dict[str, Any],
+    ) -> None:
+        """Restore the CONVERSATION budget entry from a saved snapshot.
+
+        Pre-§7c-step-6.6.1.0 the daemon's persistence-restore
+        path (``server/session_manager.py:2592-2593``) reached
+        through the session into the underlying
+        :class:`InstructionBudget`:
+
+            jaato_session.instruction_budget.restore_conversation_from_snapshot(
+                state.budget_state)
+
+        The :meth:`InstructionBudget.restore_conversation_from_snapshot`
+        method exists, but JaatoSession had no public wrapper.
+        This method exposes the operation as a stable
+        JaatoSession-level surface for the upcoming
+        ``session.restore_conversation_budget`` runner-RPC
+        (§7c step 6.6.1.3).
+
+        No-op when ``self._instruction_budget`` is None
+        (pre-:meth:`configure`); matches the daemon caller's
+        existing ``if jaato_session.instruction_budget:`` guard.
+
+        Args:
+            snapshot: Conversation-source snapshot dict from a
+                :class:`SessionState`'s ``budget_state``.  Format
+                is opaque here; the underlying InstructionBudget
+                method validates + reconstructs the entry tree.
+        """
+        if self._instruction_budget is None:
+            return
+        self._instruction_budget.restore_conversation_from_snapshot(snapshot)
+
+    def set_parallel_tools_override(self, enabled: bool) -> None:
+        """Stash a per-turn override for parallel-tool execution.
+
+        Pre-§7c-step-6.6.3.0 the daemon's SDK request handler
+        (``server/session_manager.py:4096``) reached into the
+        private attribute directly:
+
+            jaato_session._parallel_tools_override = event.parallel_tools
+
+        That violated the same encapsulation discipline §7c
+        step 3a / 3b / 6.1 (1/3) / 6.6.1.0 / 6.6.3.0 / 6.6.3.1 /
+        6.6.3.2 established.  This public method replaces the
+        private-attr write with a stable surface that the
+        upcoming ``session.set_parallel_tools_override``
+        runner-RPC (§7c step 6.6.3.3) can wrap.
+
+        Semantic: the override wins over ``JAATO_PARALLEL_TOOLS``
+        env-var consultation for the current turn ONLY.  The
+        session's tool-execution branch reads the override at
+        line 4886-4889 and clears it after one read — i.e. each
+        ``set_parallel_tools_override(True)`` call affects
+        exactly the next turn that consults the override.
+
+        Args:
+            enabled: True to force parallel-tool execution for the
+                next turn; False to disable.  Caller passes the
+                raw bool from the SDK request; daemon's existing
+                ``if event.parallel_tools is not None:`` guard
+                prevents passing None (no-override) through this
+                method.
+        """
+        self._parallel_tools_override = bool(enabled)
+
+    def snapshot_conversation_budget(self) -> Optional[Dict[str, Any]]:
+        """Return a serializable snapshot of the CONVERSATION budget
+        entry for persistence.
+
+        Inverse of :meth:`restore_conversation_budget` (added in
+        §7c step 6.6.1.0).  Pre-§7c-step-6.6.3.0 the daemon's
+        persistence-save path
+        (``server/session_manager.py:2986``) reached through the
+        session into the underlying :class:`InstructionBudget`:
+
+            jaato_session.instruction_budget.get_conversation_snapshot()
+
+        The :meth:`InstructionBudget.get_conversation_snapshot`
+        method exists (instruction_budget.py:390), but
+        JaatoSession had no public wrapper.  This method exposes
+        the operation as a stable JaatoSession-level surface for
+        the upcoming ``session.snapshot_conversation_budget``
+        runner-RPC (§7c step 6.6.3.2).
+
+        Returns ``None`` when ``self._instruction_budget`` is
+        None (pre-:meth:`configure`); matches the daemon caller's
+        existing ``if jaato_session.instruction_budget:`` guard
+        semantic.
+
+        Returns:
+            Conversation-source snapshot dict (JSON-native), or
+            ``None`` when budget unavailable / no conversation
+            entry exists.
+        """
+        if self._instruction_budget is None:
+            return None
+        return self._instruction_budget.get_conversation_snapshot()
+
+    def append_history_message(self, message: Message) -> None:
+        """Append a single message to the session's history.
+
+        Pre-§7c-step-6.6.3.0 the daemon's interrupted-tool-call
+        recovery path (``server/session_manager.py:2855``) did
+        the get-modify-reset dance manually:
+
+            current_history = jaato_session.get_history()
+            current_history.append(synthetic_message)
+            jaato_session.reset_session(current_history)
+
+        That worked but was awkward — three calls for one
+        operation, and `reset_session` clears
+        ``_turn_accounting`` as a side effect (which the
+        recovery path actually wants, since the interrupted
+        turn's accounting is mid-flight).  This method
+        preserves the existing semantic exactly: appends the
+        message + clears turn_accounting (via the underlying
+        ``reset_session`` call).
+
+        Phase 3 §7c step 6.6.3.0 (encapsulation cleanup,
+        prerequisite for §7c step 6.6.3.1's
+        ``session.append_history_message`` runner-RPC).
+
+        Args:
+            message: A :class:`Message` instance to append.
+        """
+        current_history = self.get_history()
+        current_history.append(message)
+        self.reset_session(current_history)
 
     def get_context_limit(self) -> int:
         """Get the context window limit for the current model."""

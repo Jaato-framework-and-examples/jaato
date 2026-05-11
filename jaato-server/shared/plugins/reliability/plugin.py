@@ -48,6 +48,7 @@ from .persistence import (
 )
 from .patterns import PatternDetector
 from .nudge import NudgeInjector, NudgeStrategy
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from .policy_config import (
     generate_default_config_safe,
     get_default_policy_config_path,
@@ -59,7 +60,7 @@ from .policy_config import (
 logger = logging.getLogger(__name__)
 
 
-class ReliabilityPlugin:
+class ReliabilityPlugin(RunnerForwardingMixin):
     """Plugin that tracks tool failures and adjusts trust dynamically.
 
     This plugin monitors tool execution results and maintains reliability
@@ -167,10 +168,14 @@ class ReliabilityPlugin:
         return []
 
     def get_executors(self) -> Dict[str, Callable]:
-        """Return executors for user commands."""
-        return {
+        """Return executors for user commands.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "reliability": self._execute_user_command,
-        }
+        })
 
     def get_auto_approved_tools(self) -> List[str]:
         """User commands don't need permission checks."""
@@ -541,6 +546,46 @@ class ReliabilityPlugin:
     def set_session_context(self, session_id: str) -> None:
         """Set session context for failure tracking."""
         self._session_id = session_id
+
+    def on_subagent_terminated(
+        self,
+        agent_id: str,
+        session_id: Optional[str],
+    ) -> None:
+        """Phase 3 §3.11 + peer-review M4: drop session-id-keyed
+        state for a finished subagent.
+
+        Auto-discovered by :meth:`SubagentPlugin.set_runtime` and
+        invoked from :meth:`SubagentPlugin._close_session_unlocked`
+        when a subagent finishes — normal completion, error
+        termination, or operator cancel.  Without this teardown,
+        a long-lived parent session accumulates unbounded
+        ``(session_id, tool_name)`` entries in
+        ``self._session_tool_successes`` from completed subagents.
+
+        Args:
+            agent_id: The subagent's identifier in
+                :class:`SubagentPlugin`'s registry (unused here).
+            session_id: The underlying JaatoSession's id — the key
+                this plugin's session-tool-success counters are
+                indexed by.  ``None`` means the subagent never had
+                a session attached; nothing to drop.
+        """
+        if not session_id:
+            return
+        # Drop every (session_id, *) entry from the success counter.
+        stale_keys = [
+            key for key in self._session_tool_successes
+            if isinstance(key, tuple) and len(key) == 2 and key[0] == session_id
+        ]
+        for key in stale_keys:
+            self._session_tool_successes.pop(key, None)
+        if stale_keys:
+            logger.debug(
+                "reliability: dropped %d session-tool-success entries "
+                "for terminated subagent session_id=%s",
+                len(stale_keys), session_id,
+            )
 
     def set_turn_index(self, turn_index: int) -> None:
         """Update current turn index."""

@@ -1144,10 +1144,23 @@ class CommandRouter:
                         # Get commands from server (with model subcommand expansion)
                         server_cmds = session.server.get_available_commands()
                         for name, description in server_cmds.items():
-                            if name == "model" and hasattr(session.server, '_jaato'):
-                                jaato = session.server._jaato
-                                if jaato and hasattr(jaato, 'get_model_completions'):
-                                    model_subs = jaato.get_model_completions([])
+                            # Phase 3 §7c step 6.6.4.5c.4: route through
+                            # runner-RPC.  Pivots the gate from ``_jaato``
+                            # to ``_runner_rpc`` and reconstructs
+                            # CommandCompletion NamedTuples daemon-side
+                            # (wrapper preserves the ``.value`` /
+                            # ``.description`` attr-access pattern).
+                            if name == "model" and getattr(
+                                session.server, '_runner_rpc', None,
+                            ) is not None:
+                                try:
+                                    model_subs = (
+                                        session.server._runner_rpc
+                                        .session_get_model_completions_threadsafe([])
+                                    )
+                                except Exception:
+                                    model_subs = []
+                                if model_subs:
                                     for sub in model_subs:
                                         commands.append({
                                             "name": f"model {sub.value}",

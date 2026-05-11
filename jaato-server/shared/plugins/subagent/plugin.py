@@ -115,6 +115,24 @@ class SubagentPlugin:
         self._subagent_counter: int = 0  # Global counter for generating unique subagent IDs (fallback)
         self._owner_counters: Dict[int, int] = {}  # owner id(session) -> per-owner counter
         self._parent_agent_id: str = "main"  # Parent agent ID for nested subagents
+        # Phase 3 §3.11 + peer-review M4: subagent-termination
+        # callbacks.  When a subagent finishes — normal completion,
+        # error, or operator cancel — registered callbacks run so
+        # plugins keying state by session-id can drop the
+        # finished subagent's entries.  Without this, a long-lived
+        # parent session accumulates unbounded reliability
+        # counters / permission state / memory entries from
+        # completed subagents.  Callbacks receive
+        # ``(agent_id, session_id)``; agent_id is the subagent's
+        # identifier in this plugin's registry, session_id is the
+        # underlying JaatoSession's id (the key plugins like
+        # reliability index by).  Plugins opt in by implementing an
+        # ``on_subagent_terminated(agent_id, session_id)`` method —
+        # ``set_runtime`` auto-registers any such plugin found in
+        # the registry.
+        self._termination_callbacks: List[
+            Callable[[str, Optional[str]], None]
+        ] = []
         # Session registry for multi-turn conversations and bidirectional communication
         # Each entry includes an 'owner_id' (id() of the parent session) for isolation.
         self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
@@ -1183,10 +1201,83 @@ class SubagentPlugin:
         instead of creating new JaatoClient instances, sharing the provider
         connection and plugin configuration.
 
+        Phase 3 §3.11 + peer-review M4: also walks the runtime's
+        plugin registry and auto-registers any plugin that
+        implements ``on_subagent_terminated(agent_id, session_id)``
+        as a termination callback.  Discovery is duck-typed so
+        plugins opt in without import-coupling to SubagentPlugin.
+
         Args:
             runtime: JaatoRuntime instance from the parent agent.
         """
         self._runtime = runtime
+        # M4: scan registry for plugins that opt in to termination
+        # notifications and stash a bound-method callback for each.
+        registry = getattr(runtime, "registry", None)
+        if registry is None:
+            return
+        list_exposed = getattr(registry, "list_exposed", None)
+        get_plugin = getattr(registry, "get_plugin", None)
+        if list_exposed is None or get_plugin is None:
+            return
+        for plugin_name in list_exposed():
+            plugin = get_plugin(plugin_name)
+            if plugin is None:
+                continue
+            handler = getattr(plugin, "on_subagent_terminated", None)
+            if callable(handler) and handler not in self._termination_callbacks:
+                self._termination_callbacks.append(handler)
+                logger.debug(
+                    "subagent: registered termination callback from "
+                    "plugin %r", plugin_name,
+                )
+
+    def register_termination_callback(
+        self,
+        callback: Callable[[str, Optional[str]], None],
+    ) -> None:
+        """Register a callback to fire when a subagent terminates.
+
+        Phase 3 §3.11 + peer-review M4.  Plugins that key state by
+        session-id (reliability counters, memory cache, permission
+        per-session policy etc.) register here so completed
+        subagents don't leak state into the parent's plugin
+        registries.
+
+        Most plugins should rely on the duck-typed auto-discovery
+        in :meth:`set_runtime` instead — implement
+        ``on_subagent_terminated(agent_id, session_id)`` and the
+        runtime hookup picks it up automatically.  This explicit
+        registration is for ad-hoc / test scenarios.
+
+        Args:
+            callback: Callable invoked with ``(agent_id, session_id)``
+                each time a subagent finishes.  ``session_id`` may
+                be ``None`` if the subagent never had a JaatoSession
+                attached (very early-failure cases).
+        """
+        if callback not in self._termination_callbacks:
+            self._termination_callbacks.append(callback)
+
+    def _fire_termination_callbacks(
+        self, agent_id: str, session_id: Optional[str],
+    ) -> None:
+        """Invoke each registered termination callback.
+
+        Failures in one callback don't block others — each runs
+        under its own try/except so a buggy plugin can't block the
+        rest of the cleanup chain.  Failures are logged at WARNING
+        level (the cleanup is best-effort).
+        """
+        for cb in list(self._termination_callbacks):
+            try:
+                cb(agent_id, session_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.warning(
+                    "subagent termination callback %r raised %s "
+                    "(agent_id=%s, session_id=%s); ignoring",
+                    cb, exc, agent_id, session_id, exc_info=True,
+                )
 
     def set_parent_session(self, session: Any) -> None:
         """Set the parent session reference for cancellation propagation.
@@ -2025,6 +2116,14 @@ class SubagentPlugin:
     def _close_session_unlocked(self, agent_id: str) -> None:
         """Close and cleanup a subagent session (caller must hold lock).
 
+        Phase 3 §3.11 + peer-review M4: fires registered termination
+        callbacks AFTER pulling the agent_id out of the active-
+        sessions registry, so plugins keying state by session-id
+        (reliability counters, memory cache, permission per-session
+        policy) can drop their entries.  Without the callbacks a
+        long-lived parent session accumulates unbounded state from
+        completed subagents.
+
         Args:
             agent_id: ID of the session to close.
         """
@@ -2032,6 +2131,20 @@ class SubagentPlugin:
             return
 
         session_info = self._active_sessions[agent_id]
+
+        # Resolve the JaatoSession's id BEFORE the dict deletion so
+        # the callback sees the same session-id the plugin registries
+        # would have indexed by.  ``session_info['session']`` is the
+        # JaatoSession instance; ``session_id`` lookup is best-effort
+        # since older session objects may not have a stable id.
+        session = session_info.get('session')
+        session_id: Optional[str] = None
+        if session is not None:
+            for attr in ("session_id", "id", "_session_id"):
+                value = getattr(session, attr, None)
+                if isinstance(value, str) and value:
+                    session_id = value
+                    break
 
         # Notify UI hooks of completion
         if self._ui_hooks:
@@ -2050,6 +2163,12 @@ class SubagentPlugin:
         # Remove from registry
         del self._active_sessions[agent_id]
         logger.info(f"Closed subagent session: {agent_id}")
+
+        # M4: fire termination callbacks so plugin registries drop
+        # their session-id-keyed entries.  Done AFTER the dict
+        # deletion so a callback re-entering this method (e.g., via
+        # close_session) sees the agent already gone.
+        self._fire_termination_callbacks(agent_id, session_id)
 
     def _execute_spawn_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spawn a subagent to handle a task.

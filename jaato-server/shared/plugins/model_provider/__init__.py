@@ -34,6 +34,7 @@ Usage:
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "model_provider"
 
+PLUGIN_TIER = "daemon"
 import logging
 import sys
 import traceback
