@@ -3038,20 +3038,6 @@ class RunnerRPC:
         if hasattr(session, "_ui_hooks"):
             originals["ui_hooks"] = session._ui_hooks
             try:
-                # Path G probe #1: log shim install with session
-                # identity + pre-install hook state so we can detect
-                # if a daemon-side pre-§7c code path already filled
-                # the slot (would mean `originals["ui_hooks"]` is
-                # non-None and our shim displaces an already-working
-                # hook).
-                logger.info(
-                    "PATH_G_PROBE_1 ui_hooks shim install: "
-                    "request_id=%s session_id=%s pre_install_hooks=%r",
-                    request_id,
-                    getattr(session, "_session_id", "<unknown>"),
-                    type(session._ui_hooks).__name__
-                    if session._ui_hooks is not None else None,
-                )
                 session._ui_hooks = _AgentUIHooksNotificationShim(
                     rpc, request_id,
                 )
@@ -3921,14 +3907,6 @@ class _AgentUIHooksNotificationShim:
     def __init__(self, rpc: Any, request_id: int) -> None:
         self._rpc = rpc
         self._request_id = request_id
-        # Path G probe #3: log shim construction so we can verify the
-        # install path actually built one (vs e.g. an early-return
-        # condition skipping the install).
-        logger.info(
-            "PATH_G_PROBE_3 ui_hooks shim constructed: "
-            "rpc=%s request_id=%s",
-            type(rpc).__name__, request_id,
-        )
 
     def on_tool_call_start(
         self,
@@ -3937,14 +3915,6 @@ class _AgentUIHooksNotificationShim:
         tool_args: "Dict[str, Any]",
         call_id: Optional[str] = None,
     ) -> None:
-        # Path G probe #2: log every shim emit BEFORE the wrapped
-        # emit_notification call so a swallowed exception inside
-        # emit_notification leaves a trace.
-        logger.info(
-            "PATH_G_PROBE_2 shim emit: event_type=tool_call_start "
-            "request_id=%s tool=%s call_id=%s",
-            self._request_id, tool_name, call_id,
-        )
         try:
             self._rpc.emit_notification(
                 request_id=self._request_id,
@@ -3972,11 +3942,6 @@ class _AgentUIHooksNotificationShim:
         show_output: Optional[bool] = None,
         show_popup: Optional[bool] = None,
     ) -> None:
-        logger.info(
-            "PATH_G_PROBE_2 shim emit: event_type=tool_call_end "
-            "request_id=%s tool=%s success=%s call_id=%s",
-            self._request_id, tool_name, success, call_id,
-        )
         try:
             self._rpc.emit_notification(
                 request_id=self._request_id,
@@ -4003,11 +3968,6 @@ class _AgentUIHooksNotificationShim:
         call_id: str,
         chunk: str,
     ) -> None:
-        logger.info(
-            "PATH_G_PROBE_2 shim emit: event_type=tool_output "
-            "request_id=%s call_id=%s chunk_len=%d",
-            self._request_id, call_id, len(chunk or ""),
-        )
         try:
             self._rpc.emit_notification(
                 request_id=self._request_id,
@@ -4032,11 +3992,6 @@ class _AgentUIHooksNotificationShim:
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
     ) -> None:
-        logger.info(
-            "PATH_G_PROBE_2 shim emit: event_type=turn_progress "
-            "request_id=%s total_tokens=%d pending=%d",
-            self._request_id, total_tokens or 0, pending_tool_calls or 0,
-        )
         try:
             self._rpc.emit_notification(
                 request_id=self._request_id,
