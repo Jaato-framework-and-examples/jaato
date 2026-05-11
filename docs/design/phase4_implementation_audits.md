@@ -155,3 +155,155 @@ first per discipline #2; code commit follows immediately.
 7. AST pin: `_setup_session_plugin` no longer wires
    `set_description_callback` (catches regression of the dead-code
    removal).
+
+---
+
+## Audit 2 — §4.7 multi-turn UX investigation (read-only)
+
+**Plan reference:** `per_session_confined_runner_phase4_plan.md` §3.7.
+
+**Trigger:** Phase 3 closure recap §"Known sub-gaps deferred
+post-cycle-13" item 3 — "cumulative 16 PermissionRequestedEvents
++ Error: 1bcd84... rendering" flagged for investigation.
+
+**Original framing** (plan §3.7):
+> Read-only investigation.  Determine if the multi-turn loop is
+> fixed by §4.1 / §4.2 OR if there's a separate gap.
+>
+> Acceptance: either (a) verified to be fixed by §4.1+§4.2 (closes
+> the investigation), or (b) audit doc filed for a separate fix
+> (promotes to §4.8 or follow-up).
+
+**Constraint at audit time:** §4.1 (J.A `call_id` propagation) is
+shipped (commit `1063c0c8`).  §4.2 (J.B `editable_metadata`) is
+NOT yet shipped.  This audit therefore answers two sub-questions:
+
+A. Does §4.1 alone account for the 16-event + UUID-error pattern?
+B. Is there a residual gap that needs §4.8?
+
+### Sub-question 1 — "cumulative 16 PermissionRequestedEvents"
+
+**Finding:** Single producer.
+
+Grep of `PermissionRequestedEvent(` across the entire server
+codebase (excluding tests) returns exactly ONE producer:
+`server/runner_rpc_handlers/prompt_operator.py:138`.  Each call to
+`PromptOperatorHandler.handle()` produces exactly one
+`PermissionRequestedEvent` (plus one companion
+`PermissionInputModeEvent` per Path J).
+
+Conclusion: **"16 PermissionRequestedEvents" = 16 distinct ASK
+round-trips**.  Normal multi-turn behavior — N tool invocations
+that need permission = N ASKs.  **Not a regression.**
+
+The cycle-13 verdict's framing ("16 prompts may suggest a UX
+degradation") was based on the assumption that some emit might
+fire multiple times per ASK.  Verification rules that out.
+
+### Sub-question 2 — "Error: 1bcd84... rendering"
+
+**Finding:** Race condition in `respond_to_permission`'s
+fall-through path.  Separate bug shape; orthogonal to J.A / J.B.
+
+Trace:
+
+1. TUI renders `ErrorEvent` via `rich_client.py:1795`:
+   ```python
+   display.add_system_message(
+       f"Error: {event.error_type}: {event.error}",
+       style="system_error_bold",
+   )
+   ```
+2. The format `Error: <type>: <msg>` produces text like
+   `Error: StateError: Unknown permission request: 1bcd84...`.
+   The cycle-13 verdict abbreviated to "Error: 1bcd84...".
+3. The producer is `core.py:4099-4102` in
+   `JaatoServer.respond_to_permission`:
+   ```python
+   # Neither path resolved — unknown request.
+   self.emit(ErrorEvent(
+       error=f"Unknown permission request: {request_id}",
+       error_type="StateError",
+   ))
+   ```
+4. This fires when `respond_to_permission(request_id, response)` is
+   called but neither resolution path matches:
+   - Path 1 (Step 7.1): `PromptOperatorHandler.resolve_response`
+     returns False (request_id not in `_pending`).
+   - Path 2 (legacy): `_pending_permission_request_id` doesn't
+     match.
+
+**Race shape:** the client's `respond_to_permission` arrives AFTER
+the request has been resolved/popped from `_pending`.  Possible
+triggers:
+
+- ASK resolved via timeout daemon-side; client's late 'y' arrives.
+- ASK resolved by an auto-allow rule on a sibling code path; client's
+  'y' arrives anyway.
+- Multiple clients attached to the same session; one resolves; the
+  others' resolves are stale.
+- TUI race between the user typing 'y' and a daemon-side
+  notification clearing the pending state.
+
+**Architectural implication:** the fall-through error treats every
+unmatched response as a hard error.  This is a strict policy that
+fires on transient races where ignoring the stale response would
+be correct.  Pre-§7c the same logic existed but the race window
+was different (in-process call → no async-resolve race).  Post-§7c
+the RPC-mediated path introduces new timing where the resolve and
+the response can race more easily.
+
+### Verdict
+
+**§4.7 close status: PARTIAL.**
+
+A. **"16 PermissionRequestedEvents"** — empirically explained;
+   not a regression.  Section 6.1 of the plan's risk register can
+   be downgraded for this specific symptom.
+
+B. **"Error: 1bcd84..."** — separate bug shape (stale-response
+   race in `respond_to_permission` fall-through).  NOT closed by
+   §4.1 (J.A is TUI-side per-tool-block correlation; doesn't touch
+   the daemon's resolve-state machine).  NOT closed by §4.2 (J.B
+   is edit-and-approve schema lookup; orthogonal).  **Candidate
+   §4.8 gap** if the race reproduces in post-§4.1+§4.2 integration
+   testing.
+
+### Recommendation
+
+1. **Do NOT promote to §4.8 immediately.**  Two reasons:
+   - §4.2 isn't shipped yet; can't verify in a clean post-§4.1+§4.2
+     state.
+   - The race may be transient (timing-specific to cycle-13's
+     execution); needs reproduction before allocating fix-cycles.
+
+2. **Add a §4.7 follow-up to the cycle-14 acceptance gate** (Phase
+   4 plan §4 acceptance gate item 1, multi-turn test): observe
+   whether the stale-response race reproduces post-§4.1+§4.2.  If
+   yes → file §4.8 (race fix: idempotent `respond_to_permission`
+   that drops stale responses without emitting ErrorEvent).  If no
+   → close the investigation entirely.
+
+3. **Tag the producer for future reference.** core.py:4099's
+   fall-through is a hard-fail policy.  Phase 4+ guidance for that
+   site: when implementing §4.8, the fix is likely demote-to-debug-
+   log (stale responses are not errors; they're normal in
+   async-resolve flows).  Preserve the error path for genuinely
+   unknown requests (e.g., request_id never registered) — distinguish
+   "stale" (was registered, now resolved) from "unknown" (never
+   registered) via a small two-bucket state in the handler.
+
+### What this audit does NOT decide
+
+- The §4.8 fix itself.  Defer to cycle-14 verdict.
+- Whether `respond_to_permission`'s fall-through error policy
+  should be loosened for OTHER non-permission paths (clarification
+  at core.py:4112/4131, reference selection at 4148).  Same shape;
+  same potential race; same future-§4.8-style fix when those
+  surface.
+
+### Tests
+
+None — this is a read-only audit per plan §3.7.  Tests will land
+with the eventual §4.8 fix (if §4.7 follow-up at cycle-14 promotes
+to §4.8).
