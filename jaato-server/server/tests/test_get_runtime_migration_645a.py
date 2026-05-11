@@ -88,20 +88,19 @@ def test_websocket_no_jaato_get_runtime_calls_remain() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_core_populator_get_runtime_call_still_present_until_5d() -> None:
+def test_core_populator_get_runtime_call_removed_after_5d() -> None:
     """Pin the construction-site populator
-    ``self._runtime = self._jaato.get_runtime()`` is NOT yet
-    deleted — it's the only place that populates
-    ``self._runtime``.  Stays until §7c step 6.6.4.5d's
-    construction refactor replaces the JaatoClient pathway with
-    direct JaatoRuntime construction.  If this test starts failing,
-    5d has landed and this pin can be deleted."""
+    ``self._runtime = self._jaato.get_runtime()`` was deleted by
+    §7c step 6.6.4.5d's construction refactor.  Daemon now
+    constructs ``JaatoRuntime`` directly inside
+    ``_run_connect_provider`` instead of aliasing from JaatoClient.
+    """
     calls = _module_calls_jaato_method(core_module, "get_runtime")
-    assert len(calls) >= 1, (
-        f"Expected ≥1 ``_jaato.get_runtime()`` call site in core.py "
-        f"(the construction-time populator at line 1565); found "
-        f"{len(calls)}.  If 5d has landed and the populator was "
-        f"refactored, delete this pin."
+    assert calls == [], (
+        f"§7c step 6.6.4.5d regression: ``_jaato.get_runtime()`` "
+        f"call re-introduced in core.py ({len(calls)} sites). "
+        f"Daemon-direct ``JaatoRuntime(...)`` construction inside "
+        f"``_run_connect_provider`` is the post-5d pattern."
     )
 
 

@@ -41,6 +41,7 @@ from dotenv import load_dotenv
 
 from shared import (
     JaatoClient,
+    JaatoRuntime,
     TokenLedger,
     PluginRegistry,
     PermissionPlugin,
@@ -1554,6 +1555,19 @@ class JaatoServer:
                     with _timer.stage("connect_provider") as _s2:
                         with self._with_session_env():
                             with _s2.sub("create_client"):
+                                # Phase 3 §7c step 6.6.4.5d: JaatoClient
+                                # construction is **transitional** — 5
+                                # unguarded daemon-side calls
+                                # (``configure_plugins_only``,
+                                # ``configure_tools`` ×2,
+                                # ``set_agent_identity``,
+                                # ``set_ui_hooks``) still operate on it.
+                                # 5e drops the JaatoClient + the
+                                # dependent calls atomically.  The
+                                # daemon-side ``self._runtime`` is now
+                                # constructed independently below
+                                # (decoupled from JaatoClient's internal
+                                # runtime).
                                 self._jaato = JaatoClient(
                                     provider_name=provider_to_use,
                                     workspace_path=self._workspace_path,
@@ -1563,13 +1577,31 @@ class JaatoServer:
                                 )
                             with _s2.sub("client_connect"):
                                 self._jaato.connect(project_id, location, model_name)
-                            # Phase 3 §7c step 4: alias the runtime onto
-                            # the daemon-side ``self._runtime`` field so
-                            # introspection sites can read it without the
-                            # ``self._jaato.get_runtime()`` indirection.
-                            # Post-step-6 (when ``_jaato`` is removed)
-                            # this becomes the canonical handle.
-                            self._runtime = self._jaato.get_runtime()
+                            # Phase 3 §7c step 6.6.4.5d: daemon-direct
+                            # JaatoRuntime construction.  Replaces the
+                            # pre-§7c-step-6.6.4.5d alias
+                            # ``self._runtime = self._jaato.get_runtime()``.
+                            # Per the 5d disposition audit (commit
+                            # 2a69f82e): JaatoRuntime.__init__ is fully
+                            # decoupled from JaatoClient (4 primitive
+                            # args, zero client references), so daemon-
+                            # direct construction is feasible without
+                            # widening.  Keeps the executor-thread scope
+                            # (~100-200ms concurrent with plugin load).
+                            with _s2.sub("create_runtime"):
+                                from pathlib import Path as _Path
+                                _ws = (
+                                    _Path(self._workspace_path)
+                                    if self._workspace_path else None
+                                )
+                                self._runtime = JaatoRuntime(
+                                    provider_name=provider_to_use,
+                                    workspace_path=_ws,
+                                    config_root=self._config_root,
+                                    instruction_token_cache=self._instruction_token_cache,
+                                )
+                            with _s2.sub("runtime_connect"):
+                                self._runtime.connect(project_id, location)
                             # Propagate the pre-init AppArmor confine-context
                             # factory onto the runtime now that it exists.
                             # Server 0.6.50+; sessions created on this
@@ -1740,6 +1772,22 @@ class JaatoServer:
                     recoverable=False,
                 ))
                 return False
+
+            # Phase 3 §7c step 6.6.4.5d: configure the daemon-direct
+            # runtime with the plugins loaded by ``_run_load_plugins``.
+            # JaatoClient also configures its own internal runtime via
+            # ``_jaato.configure_tools()`` at line 1912 — both runtimes
+            # get the same plugin/permission/ledger references (shared
+            # object identity, no duplication).  Daemon-side reads on
+            # ``self._runtime.registry`` (e.g. session_manager.py:3365's
+            # ``runtime.registry.get_plugin("prompt_library")``) work
+            # against the daemon-direct runtime post-5d.
+            if self._runtime is not None:
+                self._runtime.configure_plugins(
+                    self.registry,
+                    self.permission_plugin,
+                    self.ledger,
+                )
 
         except Exception as e:
             self._emit_init_progress("Connecting to model provider", "error", 2, total_steps,
