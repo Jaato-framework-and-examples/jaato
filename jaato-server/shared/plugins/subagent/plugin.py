@@ -2205,7 +2205,7 @@ class SubagentPlugin:
         workspace_path: str,
         agent_params: Optional[Dict[str, Any]],
         display_name: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Dispatch an isolated-subagent spawn via the runner→daemon
         RPC (Phase 4 §4.3.7).
 
@@ -2216,16 +2216,27 @@ class SubagentPlugin:
         ``RunnerRPCClient.spawn_isolated_runner`` (the wrapper added
         in §4.3.2).
 
+        Always returns a result dict — never ``None``.  The supervisor
+        explicitly opted into isolation by setting
+        ``agent_params.isolated=true``; a missing
+        ``runner_rpc_client`` (no runner subprocess wired) is a
+        configuration error that must be surfaced, NOT silently
+        downgraded to the default-share path.  Per peer-review
+        finding: "the supervisor asked for kernel-level isolation
+        and got none" was a security-violating fallback.
+
         Returns:
             On RPC success (helper returned ok=True): a dict matching
             the existing spawn_subagent success-shape so the model's
-            tool-loop sees identical UX whether default-share or
-            isolated.
-            On RPC failure (helper returned ok=False): a SubagentResult
-            error dict surfacing the stage + error message.
-            ``None`` when the runner_rpc_client isn't wired (e.g.,
-            legacy daemon-side path without runner subprocess).
-            Caller falls back to default-share executor.submit.
+            tool-loop sees identical UX (other than the
+            ``jaato.subagent.isolated`` telemetry flag).
+            On RPC failure (helper returned ok=False): a
+            SubagentResult error dict surfacing the stage + error
+            message.
+            On missing ``runner_rpc_client``: a SubagentResult error
+            dict with ``stage="rpc_unavailable"`` — caller can
+            choose to retry with ``agent_params.isolated=false`` or
+            surface to the operator.
         """
         # Locate the runner-side RPC client via the registry-attribute
         # pattern (same as references / permission plugins use).
@@ -2238,12 +2249,33 @@ class SubagentPlugin:
             if registry is not None else None
         )
         if rpc_client is None:
-            logger.info(
+            logger.error(
                 "_dispatch_isolated_spawn: runner_rpc_client not wired "
-                "for subagent %s — falling back to default-share path",
+                "for subagent %s — isolated spawn cannot proceed; "
+                "supervisor explicitly opted in via "
+                "agent_params.isolated=true",
                 agent_id,
             )
-            return None
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    "isolated-runner spawn unavailable: "
+                    "runner_rpc_client not wired on this session.  "
+                    "The supervisor requested agent_params.isolated="
+                    "true but the daemon-runner RPC channel isn't "
+                    "available — typically because the parent session "
+                    "wasn't spawned under the confined-runner path "
+                    "(no apparmor opt-in, daemon-side legacy "
+                    "execution).  Two recovery options: "
+                    "(1) re-create the parent session with apparmor "
+                    "opt-in so the runner subprocess is spawned, then "
+                    "retry; (2) retry with agent_params.isolated="
+                    "false to use the default-share path (subagent "
+                    "shares the parent's runner).  Stage: "
+                    "rpc_unavailable."
+                ),
+            ).to_dict()
 
         # Build profile_payload per Audit 5's wire shape.  Mirror the
         # build_inline_profile field set so daemon-side reconstruction
@@ -2827,8 +2859,16 @@ class SubagentPlugin:
         # in-runtime executor.  Profile is now resolved (we have
         # the SubagentProfile) so profile_payload can be serialized
         # to the wire shape Audit 5 defines.
+        #
+        # Always returns immediately — _dispatch_isolated_spawn
+        # returns a dict (success or failure envelope) for every
+        # outcome including "RPC channel unavailable".  Peer review
+        # eliminated the earlier silent-downgrade-to-default-share
+        # fallback: the supervisor asked for kernel-level isolation,
+        # so the framework must either honor it or audibly refuse —
+        # never quietly substitute.
         if _is_isolated_optin(agent_params_arg):
-            isolated_result = self._dispatch_isolated_spawn(
+            return self._dispatch_isolated_spawn(
                 agent_id=agent_id,
                 profile=profile,
                 task=full_prompt,
@@ -2836,11 +2876,6 @@ class SubagentPlugin:
                 agent_params=agent_params_arg,
                 display_name=display_name,
             )
-            if isolated_result is not None:
-                return isolated_result
-            # ``None`` return = soft-fallback (runner_rpc_client not
-            # wired; e.g. daemon-side legacy path).  Fall through to
-            # the in-runtime executor for default-share semantics.
 
         # Submit to thread pool (always async).  ``agent_params_arg``
         # comes from the spawn_subagent tool args (a dict the

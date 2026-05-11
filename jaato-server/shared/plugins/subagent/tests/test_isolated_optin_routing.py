@@ -57,7 +57,15 @@ def _make_profile(**overrides):
 
 
 class TestNoRunnerRpcClient:
-    def test_returns_none_for_caller_fallback(self):
+    """When the parent session has no runner_rpc_client wired,
+    the supervisor's isolated=true request MUST surface as an
+    error envelope — never silently downgrade to the default-share
+    path.  Per peer-review fix: ``the supervisor asked for
+    kernel-level isolation and got none`` was a security-violating
+    fallback.  The helper now surfaces ``stage=rpc_unavailable``
+    so the supervisor sees the failure."""
+
+    def test_returns_error_envelope_with_stage_rpc_unavailable(self):
         plugin = _make_plugin_with_registry(runner_rpc_client=None)
         result = plugin._dispatch_isolated_spawn(
             agent_id="agent-1",
@@ -67,7 +75,17 @@ class TestNoRunnerRpcClient:
             agent_params={"isolated": True},
             display_name="researcher",
         )
-        assert result is None  # Caller falls back.
+        # Returns a SubagentResult error dict, NOT None.
+        assert result is not None
+        assert result["success"] is False
+        assert "rpc_unavailable" in result["error"].lower()
+        # Recovery instructions surface BOTH options:
+        # re-create with apparmor opt-in, OR use default-share path.
+        error_lower = result["error"].lower()
+        assert "apparmor" in error_lower
+        assert "default-share" in error_lower
+        # No silent downgrade — supervisor sees the failure
+        # explicitly and chooses recovery.
 
 
 class TestRpcRaises:

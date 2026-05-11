@@ -1499,6 +1499,12 @@ class SessionManager:
             provider_name=provider_name,
             model_name=model_name,
             plugins=plugin_specs,
+            # Phase 4 §C (envelope schema v2): carry the full
+            # profile.plugin_configs map at the top level so
+            # auto-loaded plugins (permission, gc_*, etc.) that
+            # aren't named in ``plugins`` still receive their
+            # profile overrides on the runner side.
+            plugin_configs=plugin_configs,
             system_instructions=system_instructions,
             agent_id="main",
             gc=gc_dict,

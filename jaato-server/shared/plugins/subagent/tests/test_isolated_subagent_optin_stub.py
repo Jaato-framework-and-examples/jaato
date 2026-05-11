@@ -108,35 +108,54 @@ def _make_initialized_plugin() -> SubagentPlugin:
 
 
 class TestSpawnSubagentDetectsOptin:
-    """Post-§4.3.7: the early-stub at L2414 was removed; the
-    isolated check moved to AFTER profile resolution.  These tests
-    now exercise the no-runner-rpc-client fallback path: when the
-    parent plugin has no runner_rpc_client wired, the helper
-    returns None and the executor.submit fallback fires.
+    """Post-§4.3.7 (+ peer-review fix): the isolated check runs
+    AFTER profile resolution.  When isolated=true is detected, the
+    plugin routes through ``_dispatch_isolated_spawn`` which ALWAYS
+    returns a result dict — either success (RPC succeeded) or a
+    typed error envelope (RPC unavailable / failed / rejected).
+    Never a silent downgrade to default-share.
 
-    The §4.3.7 routing test (TestIsolatedOptinRouting) covers the
-    happy path where runner_rpc_client IS wired."""
+    These tests pin the audible-failure contract: the supervisor's
+    explicit isolation request must surface every outcome, never
+    silently substitute the default-share path."""
 
-    def test_isolated_true_with_no_runtime_falls_through(self):
-        """No runtime → no registry → no runner_rpc_client → helper
-        falls through to default-share executor.submit.  Without a
-        runtime, the executor.submit itself isn't there either, so
-        we end up with a downstream NoneType error — but the
-        §4.3.7-specific routing did NOT fire."""
+    def test_isolated_true_routes_through_dispatch_isolated_spawn(self):
+        """When isolated=true is detected and profile resolution
+        succeeds, the plugin MUST route through
+        ``_dispatch_isolated_spawn`` (returning whatever envelope
+        that helper produces) — never silently fall through to the
+        in-runtime ``executor.submit`` path.
+
+        Stubs the dispatch helper to a sentinel return so we can
+        assert the routing branch fired regardless of underlying
+        RPC outcome.  The dispatch helper's own behavior (success
+        / RPC failure / rpc_unavailable) is covered by
+        ``test_isolated_optin_routing.py`` directly.
+        """
         plugin = _make_initialized_plugin()
         plugin._executor = MagicMock()
+        # Provide a parent_plugins set so the inline-profile path
+        # succeeds and we actually reach the §4.3.7 routing branch.
+        plugin._parent_plugins = ["cli", "todo"]
+        # Stub the dispatcher so we can detect it was invoked.
+        sentinel = {
+            "success": True,
+            "subagent_id": "stub-1",
+            "status": "stub-routed",
+        }
+        plugin._dispatch_isolated_spawn = MagicMock(return_value=sentinel)
+
         result = plugin._execute_spawn_subagent({
             "task": "do something",
             "agent_params": {"isolated": True},
         })
-        # The §4.3.7 RPC-failure error message does NOT fire because
-        # there's no runner_rpc_client to call; helper returned None.
-        assert result["success"] is False
-        # Downstream error from the missing runtime path
-        # (specifically: "No plugins available to inherit" because
-        # _parent_plugins is empty for our test fixture).  Either
-        # way the §4.3.7 RPC error message is NOT in the result.
-        assert "isolated-runner spawn" not in result.get("error", "").lower()
+
+        # Dispatcher was called.
+        plugin._dispatch_isolated_spawn.assert_called_once()
+        # Its result flows back to the caller — no silent downgrade.
+        assert result == sentinel
+        # Executor NOT submitted (no fall-through to in-runtime spawn).
+        plugin._executor.submit.assert_not_called()
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -318,7 +318,7 @@ class TestRealKernelSmokeGated:
             pytest.skip("CgroupsManager.is_available() returned False")
 
         limits = RuntimeLimits(
-            memory_max_bytes=512 * 1024**2, pids_max=64,
+            memory_max_mb=512, pids_max=64,
         )
         session_id = f"jaato-test-{os.getpid()}-smoke"
         ok = mgr.provision_cgroup(session_id, limits)
