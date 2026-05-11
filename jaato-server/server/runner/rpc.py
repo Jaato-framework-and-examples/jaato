@@ -2750,6 +2750,16 @@ class RunnerRPC:
     _NOTIF_TOOL_OUTPUT = "tool_output"
     _NOTIF_TURN_PROGRESS = "turn_progress"
 
+    # Phase 4 §4.4 (Finding 2 closure): session-plugin description-
+    # callback bridges runner → daemon as a notification frame.
+    # Runner-side session plugin (now runner-tier per §4.4 sub-action
+    # A) fires ``_on_description_changed(session_id, description)``
+    # when the model invokes ``session_describe``; the shim emits
+    # this event_type; daemon-side demuxer re-emits as
+    # ``SessionDescriptionUpdatedEvent`` for the TUI's session-picker
+    # to refresh.
+    _NOTIF_DESCRIPTION_UPDATED = "description_updated"
+
     def _make_usage_update_notification_shim(
         self, request_id: int,
     ) -> Any:
@@ -3044,6 +3054,44 @@ class RunnerRPC:
             except Exception:  # noqa: BLE001
                 logger.debug("ui_hooks shim install raised")
 
+        # Phase 4 §4.4 (Finding 2 closure): install a description-
+        # callback shim on the runner-side session plugin so model-
+        # invoked ``session_describe`` calls bridge to the daemon as
+        # a ``description_updated`` NotificationFrame.  Pre-§4.4 the
+        # session plugin was daemon-tier and unreachable from the
+        # runner-side model loop; sub-action A flipped it to runner-
+        # tier so it's now loaded in the runner registry.
+        try:
+            runtime = getattr(session, "_runtime", None)
+            registry = getattr(runtime, "registry", None) if runtime else None
+            session_plugin = (
+                registry.get_plugin("session") if registry else None
+            )
+            if (
+                session_plugin is not None
+                and hasattr(session_plugin, "set_description_callback")
+            ):
+                originals["description_callback"] = getattr(
+                    session_plugin, "_on_description_changed", None,
+                )
+
+                def _desc_cb(session_id: str, description: str) -> None:
+                    try:
+                        rpc.emit_notification(
+                            request_id=request_id,
+                            event_type=rpc._NOTIF_DESCRIPTION_UPDATED,
+                            payload={
+                                "session_id": str(session_id or ""),
+                                "description": str(description or ""),
+                            },
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("description_updated notify raised")
+
+                session_plugin.set_description_callback(_desc_cb)
+        except Exception:  # noqa: BLE001
+            logger.debug("description_callback shim install raised")
+
         return originals
 
     def _restore_session_notification_callbacks(
@@ -3111,6 +3159,26 @@ class RunnerRPC:
                 session._ui_hooks = originals["ui_hooks"]
             except Exception:  # noqa: BLE001
                 logger.debug("restore ui_hooks raised")
+        # Phase 4 §4.4: restore the pre-shim description callback
+        # on the runner-side session plugin (typically None — no
+        # callback wired pre-§4.4 since the daemon-side wiring at
+        # core.py:2487 was on a different instance).
+        if "description_callback" in originals:
+            try:
+                runtime = getattr(session, "_runtime", None)
+                registry = getattr(runtime, "registry", None) if runtime else None
+                session_plugin = (
+                    registry.get_plugin("session") if registry else None
+                )
+                if (
+                    session_plugin is not None
+                    and hasattr(session_plugin, "set_description_callback")
+                ):
+                    session_plugin.set_description_callback(
+                        originals["description_callback"],
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug("restore description_callback raised")
 
     def _handle_session_shutdown(self) -> "tuple[bool, Any]":
         """Graceful runner-side session teardown.

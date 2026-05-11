@@ -2508,29 +2508,22 @@ class JaatoServer:
             # the session_plugin spec for runner-side install at bootstrap
             # time.
             #
-            # Note (6.6.4.4 audit Finding 2, deferred): the daemon-side
-            # ``set_description_callback`` below is wired on the
-            # daemon-side ``session_plugin`` instance — but the model
-            # invokes ``set_description`` runner-side, firing the
-            # runner-side instance's callback.  Daemon never sees it.
-            # This regression is pre-existing from 6.6.4.3b, not caused
-            # by 6.6.4.4.  Fix planned via a new ``description_updated``
-            # NotificationFrame event_type.
+            # Phase 4 §4.4 (Finding 2 closure): the previous deferred-fix
+            # comment-block here described the daemon-side
+            # ``set_description_callback`` wiring as "wired on the wrong
+            # instance — fix planned via NotificationFrame extension".
+            # That fix landed.  The session plugin is now runner-tier
+            # (§4.4 sub-action A); runner-side install lives in
+            # _install_session_notification_callbacks
+            # (§4.4 sub-action B); daemon-side emit lives in the
+            # ``description_updated`` demuxer branch (§4.4 sub-action C).
+            # The daemon-side callback wiring previously here has been
+            # deleted as dead code (§4.4 sub-action D).
 
             # Set session ID on plugin so it knows the current session
             if self._session_id and hasattr(session_plugin, 'set_session_id'):
                 session_plugin.set_session_id(self._session_id)
                 logger.debug(f"  _setup_session_plugin: session_id set to {self._session_id}")
-
-            # Set up callback to emit event when description changes
-            if hasattr(session_plugin, 'set_description_callback'):
-                def on_description_changed(session_id: str, description: str) -> None:
-                    self.emit(SessionDescriptionUpdatedEvent(
-                        session_id=session_id,
-                        description=description,
-                    ))
-                session_plugin.set_description_callback(on_description_changed)
-                logger.debug("  _setup_session_plugin: description callback set")
 
             if self.registry:
                 logger.debug("  _setup_session_plugin: registering session plugin with registry...")
@@ -3798,6 +3791,22 @@ class JaatoServer:
                             cache_read_tokens=payload.get("cache_read_tokens"),
                             cache_creation_tokens=payload.get("cache_creation_tokens"),
                         )
+                    return
+
+                # Phase 4 §4.4 (Finding 2 closure): bridge the runner-
+                # side session-plugin description-callback to the
+                # daemon's SessionDescriptionUpdatedEvent stream.
+                # Pre-§4.4 the daemon-side _setup_session_plugin wired
+                # this callback on a daemon-side instance whose
+                # set_description was never invoked post-§7c — the
+                # event never fired.  Runner-side install lives in
+                # _install_session_notification_callbacks (§4.4
+                # sub-action B); this is the demuxer's mirror.
+                if event_type == "description_updated":
+                    server.emit(SessionDescriptionUpdatedEvent(
+                        session_id=str(payload.get("session_id", "") or ""),
+                        description=str(payload.get("description", "") or ""),
+                    ))
                     return
 
                 # Unknown event_type — log and drop.  Forward-compat
