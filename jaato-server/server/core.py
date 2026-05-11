@@ -4658,8 +4658,39 @@ class JaatoServer:
             register_prompt_operator(
                 rpc_client.rpc_server, self._prompt_operator_handler,
             )
+            # Phase 4 §4.3.2: register the
+            # ``subagent.spawn_isolated_runner`` handler.  Stub body
+            # for now — returns "not yet implemented" with stage=spawn
+            # until §4.3.3-§4.3.7 fill in the actual spawn machinery
+            # (helper, sub-AppArmor profile, sub-cgroup, cross-runner
+            # forwarding).  Registering early so §4.3.3-§4.3.7 land
+            # against a stable surface.  Guarded by ``_session_id``
+            # because the handler's confused-deputy check requires a
+            # non-empty parent session id; bootstrap paths that don't
+            # carry a session id (very early init / test fakes that
+            # bypass ``__init__`` via ``__new__``) skip registration
+            # rather than crashing.  ``getattr`` defense mirrors the
+            # shutdown() pattern below.
+            session_id = getattr(self, "_session_id", None)
+            if session_id:
+                from server.runner_rpc_handlers.spawn_isolated_runner import (
+                    SpawnIsolatedRunnerHandler,
+                    register as register_spawn_isolated_runner,
+                )
+                self._spawn_isolated_runner_handler = (
+                    SpawnIsolatedRunnerHandler(
+                        parent_session_id=session_id,
+                    )
+                )
+                register_spawn_isolated_runner(
+                    rpc_client.rpc_server,
+                    self._spawn_isolated_runner_handler,
+                )
+            else:
+                self._spawn_isolated_runner_handler = None
         else:
             self._prompt_operator_handler = None
+            self._spawn_isolated_runner_handler = None
 
     @property
     def runner_rpc(self) -> Optional["RunnerRPCClient"]:
@@ -4692,6 +4723,24 @@ class JaatoServer:
                     "shutdown raised",
                 )
             self._prompt_operator_handler = None
+        # Phase 4 §4.3.2: tear down the spawn_isolated_runner handler.
+        # Stub body holds no in-flight state (just a closed flag) so
+        # this is a no-op beyond marking the handler closed; §4.3.6
+        # will extend ``shutdown()`` to cascade through in-flight
+        # spawn tracking.  Same ``getattr`` defense as the prompt
+        # handler for test fakes.
+        spawn_handler = getattr(
+            self, "_spawn_isolated_runner_handler", None,
+        )
+        if spawn_handler is not None:
+            try:
+                spawn_handler.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                logger.exception(
+                    "JaatoServer.shutdown: "
+                    "spawn_isolated_runner_handler shutdown raised",
+                )
+            self._spawn_isolated_runner_handler = None
         # Tear down the runner subprocess if one was spawned.  The
         # close ladder (parent EOF → wait → SIGTERM → SIGKILL) lives
         # inside ``RunnerRPCClient.close``; we run it on the daemon's
