@@ -2299,16 +2299,34 @@ class JaatoServer:
         return self._main_agent_id
 
     def _create_main_agent(self) -> None:
-        """Create the main agent entry.
+        """Create the main agent entry + emit ``AgentCreatedEvent``.
 
-        Note: This only creates the local AgentState tracking. The AgentCreatedEvent
-        is already emitted via the UI hooks when set_ui_hooks() is called on JaatoClient,
-        which triggers on_agent_created() in ServerAgentHooks.
+        Path I (cycle 11) Layer 9: emits ``AgentCreatedEvent``
+        directly from this daemon-side bootstrap path.  Pre-Path-I
+        the event was emitted via ``ServerAgentHooks.on_agent_created``
+        when ``set_ui_hooks()`` was called on the daemon-side
+        ``JaatoClient`` — a path that became dead at §7c.
 
-        The agent_id used here is ``self._main_agent_id`` — either the
-        literal ``"main"`` or the ``--agent <name>`` value supplied to
-        ``__init__``.  Hook-registered AgentState entries use the same
-        id, so the duplicate-creation guard below works in both modes.
+        Why the hook-driven path doesn't work post-§7c: the runner-
+        side ``JaatoSession._ui_hooks`` is None during bootstrap.
+        Path F installed the ``_AgentUIHooksNotificationShim``
+        inside ``_handle_session_send_message`` (per-RPC-request
+        scope) so the shim only captures callbacks DURING active
+        send_message — bootstrap-time ``on_agent_created`` calls
+        fire BEFORE the shim is installed and silently drop.
+
+        Without ``AgentCreatedEvent`` the TUI has no agent registry,
+        and every subsequent agent-keyed event
+        (``ToolCallStartEvent``, ``PermissionRequestedEvent``)
+        references an unknown agent → silently discarded.  This
+        was the cycle-11 root cause for the persistent TUI-shows-
+        nothing symptom.
+
+        The agent_id used here is ``self._main_agent_id`` — either
+        the literal ``"main"`` or the ``--agent <name>`` value
+        supplied to ``__init__``.  Hook-registered AgentState
+        entries use the same id, so the duplicate-creation guard
+        below works in both modes.
         """
         logger.debug("  _create_main_agent: creating AgentState...")
 
@@ -2324,17 +2342,32 @@ class JaatoServer:
             self._main_agent_display_name
             or (self._profile.name if self._profile else "Main Agent")
         )
+        profile_name = self._profile.name if self._profile else None
         agent = AgentState(
             agent_id=self._main_agent_id,
             name=display_name,
             agent_type="main",
+            profile_name=profile_name,
+            parent_agent_id=None,
         )
         self._agents[self._main_agent_id] = agent
         self._selected_agent_id = self._main_agent_id
         logger.debug("  _create_main_agent: agent state created")
 
-        # Note: AgentCreatedEvent is NOT emitted here - it's handled by
-        # ServerAgentHooks.on_agent_created() when set_ui_hooks() is called
+        # Path I (cycle 11) Layer 9: emit AgentCreatedEvent daemon-
+        # side at bootstrap time.  Mirrors the payload that
+        # ``ServerAgentHooks.on_agent_created`` (core.py:2508) would
+        # have emitted pre-§7c.  Bootstrap-scope event — fires
+        # BEFORE the runner's first send_message, so it can't go
+        # through the Path F per-RPC-request shim.
+        self.emit(AgentCreatedEvent(
+            agent_id=self._main_agent_id,
+            agent_name=display_name,
+            agent_type="main",
+            profile_name=profile_name,
+            parent_agent_id=None,
+            created_at=agent.created_at,
+        ))
 
     def _setup_formatter_pipeline(self) -> None:
         """Set up the formatter pipeline for server-side output formatting.
