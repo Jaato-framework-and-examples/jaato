@@ -1137,6 +1137,86 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_tool_schemas(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> "list":
+        """Read the runner-side session's resolved tool schemas.
+
+        Phase 3 §7c step 6.6.4.5c.5.  Replaces 2 daemon-side
+        reaches into ``self._jaato.get_tool_schemas()`` (core.py:1407
+        + core.py:3759).  Returns the session-resolved subset
+        (preloaded + on-demand-activated tools), NOT the runtime's
+        full registry set.
+
+        Wire shape per the 5c.5 audit: dict-shape-only (Path A);
+        ``traits`` field round-trips FrozenSet ↔ list.  Daemon
+        wrapper reconstructs ``ToolSchema`` (and nested
+        ``EditableContent``) instances on receipt so existing
+        daemon callers can read ``.name`` / ``.category`` /
+        ``.traits`` / etc. unmodified.
+
+        Raises:
+            RunnerCallError on transport failure or runner-side
+                exception (no_host / no_session / missing_method /
+                call).
+        """
+        from jaato_sdk.plugins.model_provider.types import (
+            EditableContent, ToolSchema,
+        )
+
+        result = await self._call_named(
+            "session.get_tool_schemas", {}, timeout=timeout,
+        )
+        schemas_raw = result.get("schemas", [])
+        if not isinstance(schemas_raw, list):
+            raise RunnerCallError(
+                f"session_get_tool_schemas: expected list for 'schemas', "
+                f"got {type(schemas_raw).__name__}"
+            )
+        schemas = []
+        for entry in schemas_raw:
+            if not isinstance(entry, dict):
+                continue
+            editable_raw = entry.get("editable")
+            editable = None
+            if isinstance(editable_raw, dict):
+                editable = EditableContent(
+                    parameters=list(editable_raw.get("parameters", []) or []),
+                    format=str(editable_raw.get("format", "yaml") or "yaml"),
+                    template=(
+                        str(editable_raw["template"])
+                        if editable_raw.get("template") is not None
+                        else None
+                    ),
+                )
+            traits_raw = entry.get("traits", []) or []
+            traits = frozenset(str(t) for t in traits_raw)
+            schemas.append(ToolSchema(
+                name=str(entry.get("name", "")),
+                description=str(entry.get("description", "") or ""),
+                parameters=dict(entry.get("parameters", {}) or {}),
+                category=(
+                    str(entry["category"])
+                    if entry.get("category") is not None
+                    else None
+                ),
+                discoverability=str(
+                    entry.get("discoverability", "discoverable")
+                    or "discoverable",
+                ),
+                editable=editable,
+                traits=traits,
+            ))
+        return schemas
+
+    def session_get_tool_schemas_threadsafe(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> "list":
+        return self._run_threadsafe(
+            self.session_get_tool_schemas(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_history(
         self,
         *,

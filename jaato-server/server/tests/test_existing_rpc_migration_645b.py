@@ -261,29 +261,29 @@ def test_runner_rpc_get_history_call_present() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_jaato_user_command_reads_still_present_until_5c() -> None:
-    """Pin remaining session-tier `_jaato.X` reads not yet migrated
-    by 5c sub-commits.  Tracks per-handler progress through Path D's
-    5-handler decomposition:
+def test_all_5c_session_tier_reads_migrated() -> None:
+    """Pin all 5c sub-commits closed the original audit's set of
+    session-tier `_jaato.X` reads:
 
-    - 5c.1 ✅ migrated `_jaato.auth_info` reads (commit bff782a4)
-    - 5c.2 ✅ migrated `_jaato.get_user_commands()` reads
-    - 5c.3 ✅ migrated `_jaato.execute_user_command()` reads
-    - 5c.4 ✅ migrated `_jaato.get_model_completions()` reads
-    - 5c.5 (pending) — `_jaato.get_tool_schemas()` (different
-      callsite shape: read inside `for schema in ...` and
-      conditional check)
+    - 5c.1 ✅ `_jaato.auth_info` (commit bff782a4)
+    - 5c.2 ✅ `_jaato.get_user_commands()` (commit 592cbf94)
+    - 5c.3 ✅ `_jaato.execute_user_command()` (commit 175e9220)
+    - 5c.4 ✅ `_jaato.get_model_completions()` (commit 68572a92)
+    - 5c.5 ✅ `_jaato.get_tool_schemas()` (this commit)
 
-    Update each assertion's expected count when its sub-commit lands.
-    When all 5c sub-commits land, this whole test can be deleted —
-    the only `_jaato.X` calls remaining are the construction-site
+    The remaining `_jaato.X` calls in core.py are construction-site
     + truthiness-check sites handled by 5d/5e.
     """
-    tool_schema_calls = _module_calls_jaato_method(
-        core_module, "get_tool_schemas",
-    )
-    assert len(tool_schema_calls) >= 1, (
-        f"Expected ≥1 ``_jaato.get_tool_schemas()`` call site; found "
-        f"{len(tool_schema_calls)}.  If 5c.5 has landed, delete this "
-        f"whole test file (all 5c sub-commits complete)."
-    )
+    for method_name in (
+        "get_user_commands",
+        "execute_user_command",
+        "get_model_completions",
+        "get_tool_schemas",
+    ):
+        calls = _module_calls_jaato_method(core_module, method_name)
+        assert calls == [], (
+            f"§7c step 6.6.4.5c regression: ``_jaato.{method_name}()`` "
+            f"call re-introduced in server/core.py ({len(calls)} sites). "
+            f"All 5c sub-commits should have migrated these to "
+            f"``self._runner_rpc.session_*_threadsafe()`` RPCs."
+        )

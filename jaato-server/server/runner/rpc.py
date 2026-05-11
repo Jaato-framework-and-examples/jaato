@@ -568,6 +568,24 @@ class RunnerRPC:
             # primitive fields (value, description), no callables.
             return self._handle_session_get_model_completions(env.args)
 
+        if env.method == "session.get_tool_schemas":
+            # Phase 3 §7c step 6.6.4.5c.5: read the runner-side
+            # session's resolved tool schemas (preloaded plugins +
+            # on-demand activations).  Replaces 2 daemon-side
+            # reaches: core.py:1407 (tool-ID registry) and
+            # core.py:3759 (signal_completion_in_surface filter).
+            # args = ``{}``.  Returns ``{"schemas": [<dict>, ...]}``
+            # with each entry mapping ToolSchema fields directly
+            # except for ``traits: FrozenSet[str]`` which becomes
+            # ``traits: List[str]`` on the wire.
+            # Wire shape per the 5c.5 audit decision: dict-shape-only
+            # (Path A) — pre-impl grep verified all 7 ToolSchema
+            # fields + the nested EditableContent fields are JSON-
+            # encodable.  Daemon callsites read only ``.name`` and
+            # ``.category`` (primitive str), so the migration is
+            # behavior-preserving.
+            return self._handle_session_get_tool_schemas()
+
         if env.method == "session.get_history":
             # Phase 3 §3.3c precursor: read the runner-side
             # JaatoSession's conversation history.  args = ``{}`` or
@@ -3429,6 +3447,107 @@ class RunnerRPC:
             for c in (completions or [])
         ]
         return True, {"completions": serialized}
+
+    def _handle_session_get_tool_schemas(self) -> "tuple[bool, Any]":
+        """Read the runner-side session's resolved tool schemas.
+
+        Phase 3 §7c step 6.6.4.5c.5.  Replaces 2 daemon-side
+        reaches into ``self._jaato.get_tool_schemas()``:
+        ``core.py:1407`` (tool-ID registry build) and
+        ``core.py:3759`` (``signal_completion_in_surface`` filter
+        at the completion-nudge guard).
+
+        Returns the session-resolved subset (preloaded plugins +
+        on-demand activations) — NOT the registry's full set.
+        This is why a daemon-side ``_runtime`` cache wouldn't work
+        as initially planned in §7c step 6.6.4.5's Refinement 2;
+        ``JaatoRuntime.get_tool_schemas()`` returns the full set
+        and would over-include tools the session has filtered out.
+
+        Wire shape per the 5c.5 audit decision: dict-shape-only
+        (Path A).  All 7 ToolSchema fields + nested EditableContent
+        fields are JSON-encodable; ``traits: FrozenSet[str]``
+        converts to ``traits: List[str]`` on the wire and back to
+        FrozenSet on receipt.
+
+        Per-schema dict shape::
+
+            {
+                "name": str,
+                "description": str,
+                "parameters": <json-dict>,  # JSON Schema
+                "category": str | null,
+                "discoverability": str,
+                "editable": {
+                    "parameters": List[str],
+                    "format": str,
+                    "template": str | null,
+                } | null,
+                "traits": List[str],
+            }
+
+        Returns:
+            ``(True, {"schemas": [<dict>, ...]})`` on success.
+            Empty list when the session has no tools configured.
+
+            ``(False, {"error": ..., "stage": ...})`` on
+            ``no_host`` / ``no_session`` / ``missing_method`` /
+            ``call``.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        get_method = getattr(session, "get_tool_schemas", None)
+        if not callable(get_method):
+            return False, {
+                "error": (
+                    "session.get_tool_schemas: session class lacks public "
+                    "get_tool_schemas() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            schemas = get_method()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.get_tool_schemas: get_tool_schemas raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        serialized: List[Dict[str, Any]] = []
+        for s in (schemas or []):
+            editable = getattr(s, "editable", None)
+            editable_serialized = None
+            if editable is not None:
+                editable_serialized = {
+                    "parameters": list(getattr(editable, "parameters", []) or []),
+                    "format": str(getattr(editable, "format", "yaml") or "yaml"),
+                    "template": (
+                        str(editable.template)
+                        if getattr(editable, "template", None) is not None
+                        else None
+                    ),
+                }
+            serialized.append({
+                "name": str(getattr(s, "name", "")),
+                "description": str(getattr(s, "description", "") or ""),
+                "parameters": dict(getattr(s, "parameters", {}) or {}),
+                "category": (
+                    str(s.category)
+                    if getattr(s, "category", None) is not None
+                    else None
+                ),
+                "discoverability": str(
+                    getattr(s, "discoverability", "discoverable")
+                    or "discoverable",
+                ),
+                "editable": editable_serialized,
+                # FrozenSet → list for wire safety (JSON has no set type).
+                "traits": list(getattr(s, "traits", frozenset()) or []),
+            })
+        return True, {"schemas": serialized}
 
     @property
     def session_host(self):

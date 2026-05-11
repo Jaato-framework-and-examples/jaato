@@ -1403,8 +1403,15 @@ class JaatoServer:
         """
         from shared.tool_id_map import name_to_id
         mappings: Dict[str, str] = {}
-        if self._jaato:
-            for schema in self._jaato.get_tool_schemas():
+        # Phase 3 §7c step 6.6.4.5c.5: route through runner-RPC.
+        # Daemon wrapper reconstructs ToolSchema NamedTuples so
+        # ``.name`` and ``.category`` attr access works unchanged.
+        if self._runner_rpc is not None:
+            try:
+                schemas = self._runner_rpc.session_get_tool_schemas_threadsafe()
+            except Exception:  # noqa: BLE001 — best-effort registry build
+                schemas = []
+            for schema in schemas:
                 mappings[name_to_id(schema.name)] = schema.name
                 if schema.category:
                     mappings[name_to_id(schema.category, prefix="c")] = schema.category
@@ -3755,10 +3762,19 @@ class JaatoServer:
                 # daemon-side ``JaatoClient.get_tool_schemas()``
                 # (§7c step 6.6.3.6 at commit 89f0c001), and
                 # daemon-tier filtering is unchanged.
-                tool_schemas = (
-                    server._jaato.get_tool_schemas()
-                    if server._jaato is not None else []
-                )
+                # Phase 3 §7c step 6.6.4.5c.5: route through runner-RPC.
+                # Daemon wrapper reconstructs ToolSchema NamedTuples so
+                # ``getattr(t, 'name', None)`` works unchanged.
+                if server._runner_rpc is not None:
+                    try:
+                        tool_schemas = (
+                            server._runner_rpc
+                            .session_get_tool_schemas_threadsafe()
+                        )
+                    except Exception:  # noqa: BLE001 — nudge guard is best-effort
+                        tool_schemas = []
+                else:
+                    tool_schemas = []
                 signal_completion_in_surface = any(
                     getattr(t, 'name', None) == 'signal_completion'
                     for t in tool_schemas
