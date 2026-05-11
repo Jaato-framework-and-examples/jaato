@@ -923,3 +923,212 @@ Mitigation: §4.3.3 (`_spawn_isolated_runner` daemon-side helper)
 will reuse the same `SubagentProfile` reconstruction code path that
 already exists for profile loading from disk.  §4.3.2 only needs
 the wire shape; §4.3.3 will validate parity.
+
+---
+
+## Audit 6 — §4.3.4 sub-AppArmor profile generation
+
+**Sub-step:** §4.3.4 of the §4.3 sub-track.
+
+**Original framing** (Audit 4): "AppArmor sub-profile generation:
+per-subagent profile template + provisioning hook | audit + 1".
+
+**Why this needs a pre-implementation audit:** security-sensitive
+surface — `subagent_id` becomes part of an AppArmor profile name +
+filename + an in-kernel `change_profile` target.  Mis-sanitization
+or careless cascade-teardown logic leaves orphaned profiles in the
+kernel or enables profile-name injection.
+
+### Existing AppArmor machinery (load-bearing reference points)
+
+| Component | Location | Today's role | §4.3.4 usage |
+|---|---|---|---|
+| Profile file write + `apparmor_parser -r` reload | `AppArmorManager.provision_profile()` (apparmor.py:725) | Per-parent-session at session-init time | Same pattern, new method `provision_sub_profile()` |
+| Profile file unlink + `apparmor_parser -R` unload | `_teardown_profile_impl()` (apparmor.py:835) | Per-parent-session at session-end | Same pattern, new method `teardown_sub_profile()` |
+| `tool_hat` sub-profile body builder | `_build_tool_hat_subprofile()` (apparmor.py:1312) | Inline child profile in the parent's file, entered via `change_profile -> jaato-ws-{S}//tool_hat` | Reference for sub-profile rule-set authoring |
+| Filename sanitization | `_safe_fragment_filename()` (apparmor.py:960) | Strips `[^A-Za-z0-9._-]` for reference-fragment filenames | Same regex for `subagent_id` |
+| Profile name template | `get_profile_name(session_id)` → `jaato-ws-{session_id}` (apparmor.py:1206) | The kernel-visible identifier | Sub-profile NAME: `jaato-ws-{parent}//{sub}` |
+
+### Sub-profile structure decision: standalone-with-prefix-name
+
+AppArmor supports two flavors of `//`-named profiles:
+
+1. **True "hat" sub-profiles** — declared INSIDE the parent's profile
+   file as `profile name { ... }`.  Inherit nothing; entered via
+   `change_hat` or `change_profile -> parent//hat`.  This is what
+   `tool_hat` is today.
+2. **Standalone profiles with `//` in their NAME** — declared in a
+   separate file as `profile "jaato-ws-X//Y" { ... }`.  The kernel
+   treats them as separate profiles; the `//` is purely a naming
+   convention.
+
+**§4.3.4 picks #2 (standalone-with-prefix-name).**  Rationale:
+
+- **Avoids modifying the parent's loaded profile** at runtime.  Hat-
+  based would require editing the parent's profile file + reloading,
+  which affects the running parent process.
+- **Cleaner lifecycle** — each sub-profile is a distinct file + a
+  distinct kernel-level profile.  Teardown is symmetric to the
+  parent's lifecycle.
+- **Naming preserves parent design §4.3 intent** — the kernel
+  identifier still reads `jaato-ws-{parent}//{subagent_id}`, so logs
+  and `aa-status` output show the hierarchy.
+
+Trade-off: the sub-profile is NOT structurally constrained to be a
+subset of the parent.  An attacker who controls the daemon could
+write a sub-profile with broader rules than the parent.  But the
+daemon is the trust root in our threat model (the runner is the
+LLM-driven untrusted process); same posture as today.
+
+### Profile name + filename templates
+
+| Surface | Template | Example |
+|---|---|---|
+| Kernel-visible profile name | `jaato-ws-{parent_session_id}//{subagent_id}` | `jaato-ws-S-A//agent-1` |
+| Filename (no `/` allowed) | `jaato-ws-{parent_session_id}__sub_{sanitized_subagent_id}` | `jaato-ws-S-A__sub_agent-1` |
+
+The filename matches `SessionManager._spawn_isolated_runner`'s
+`isolated_session_id` template from §4.3.3 (`{parent}__sub_{sub}`)
+— so callers can derive the filename from the isolated session id
+without re-encoding the convention.
+
+### subagent_id sanitization (CONFUSED-DEPUTY PROTECTION)
+
+`subagent_id` originates runner-side (the subagent plugin's
+`_next_agent_id` generator) but flows through the
+`profile_payload` wire shape into AppArmor profile name + filename.
+Without sanitization, a malicious runner could pass:
+
+- `subagent_id = "agent-1\nprofile jaato-ws-evil { ... }"` —
+  injection into the profile file, defining an unauthorized
+  profile.
+- `subagent_id = "../escape"` — path traversal in the filename.
+- `subagent_id = "a"*1000` — DoS via giant filenames.
+
+**Sanitization rule (§4.3.4):**
+
+1. Length cap: 64 chars max.  Reject longer.
+2. Character allow-list: `[A-Za-z0-9_-]` only.  Reject anything else.
+3. Non-empty: reject empty / whitespace-only.
+
+**Deliberately STRICT** — `_safe_fragment_filename`'s strategy
+("collapse to `_`") would let `subagent_id="a/b"` become `a_b`,
+masking a likely supervisor-side bug.  For sub-profile names we
+REJECT instead so the runner-side caller sees the error.
+
+Today's runner-side `_next_agent_id` produces `agent-N` (digits +
+hyphen) — well within the allow-list.  Future callers that want
+human-readable ids ("researcher", "executor") fit too.
+
+### Sub-profile rule-set: conservative tightening
+
+Default sub-profile body:
+
+- **Workspace allows** — same as parent base (subagent inherits
+  workspace per §4.3 invariant).  Without this the subagent
+  literally can't do work.
+- **Integrity deny rules** — same as parent base (mirrors
+  `.jaato/agents/**`, `.jaato/profiles/**`, etc. write-denies).
+- **Tool-hat-style read-denies** — same as parent's `tool_hat`
+  (mirrors `.jaato/agents/**`, etc. read-denies for
+  information-isolation between agents).
+- **Drop external-reference admit** — no `add_reference_fragment`
+  capability.  Isolated subagent can't broaden its allow-list at
+  runtime.  Phase 5+ can re-add behind a supervisor-side opt-in.
+- **Drop tool_hat sub-sub-profile** — flat profile, no further
+  nesting.  Isolated subagent doesn't need finer-grained
+  tool-execution scoping yet.
+
+§4.3.7+ supervisor-side tightening flags (e.g., `agent_params.
+isolated_workspace_subpath: "scratch"`) would narrow the workspace
+allow further.  Out of scope for §4.3.4.
+
+### Provisioning lifecycle
+
+| Event | Action | Where |
+|---|---|---|
+| Handler routes valid request to helper (§4.3.3) | Helper validates + reconstructs profile, advances to `stage=sub_profile` | `SessionManager._spawn_isolated_runner` |
+| §4.3.4: provision sub-profile | Call `AppArmorManager.provision_sub_profile(parent_session_id, sanitized_subagent_id, workspace_path)` | Inserted into helper after profile reconstruction |
+| Provision success | Helper advances to `stage=sub_cgroup` (next stage waiting on §4.3.5) | Same helper, return shape |
+| Provision failure | Return `stage=sub_profile` with kernel error | Helper short-circuits |
+| §4.3.6 sub-runner shutdown | `AppArmorManager.teardown_sub_profile(parent, sub)` | Sub-runner cleanup path |
+| Parent shutdown (§4.3.x) | Cascade: tear down all sub-profiles BEFORE the parent profile | New `_teardown_profile_impl` extension or §4.3.6 wire-up |
+
+**Cascade safety**: parent teardown's existing pre-removal worker-
+sweep doesn't know about sub-profiles.  §4.3.4 ships the
+`teardown_sub_profile` method; §4.3.6 wires the cascade into
+parent teardown when the sub-runner lifecycle is wired.
+
+### §4.3.4 commit scope
+
+1. **`AppArmorManager.provision_sub_profile`** + impl + tests.
+   - Validates `subagent_id` (allow-list, length cap, non-empty).
+   - Writes file `{profile_dir}/jaato-ws-{parent}__sub_{sub}`.
+   - Renders sub-profile body via new `_render_sub_profile()` (mirrors
+     `_render_profile` but flat + with the conservative-tightening
+     rule set above).
+   - Loads via `apparmor_parser -r`.
+
+2. **`AppArmorManager.teardown_sub_profile`** + impl + tests.
+   - Symmetric to `_teardown_profile_impl`.
+   - Worker-sweep deferred to §4.3.6 (sub-runner lifecycle not wired
+     yet).
+
+3. **Helper extension** in `SessionManager._spawn_isolated_runner`:
+   - After profile reconstruction succeeds, attempt
+     `apparmor_manager.provision_sub_profile(...)`.
+   - On success: return `stage=sub_cgroup` with `apparmor_profile`
+     name populated.
+   - On failure: return `stage=sub_profile` with kernel-error message.
+
+4. **Tests**:
+   - Sanitization: allow-list, length cap, non-empty (helper-level).
+   - Profile name + filename template pinning.
+   - Provision-success path → file written + parser invoked +
+     return value True.
+   - Provision-failure paths → bad subagent_id, kernel parser
+     failure, write failure.
+   - Teardown-success roundtrip.
+   - Helper integration: stage=sub_profile → stage=sub_cgroup
+     transition when AppArmor wired; helper returns stage=sub_profile
+     with diagnostic when not.
+
+### Scope NOT in §4.3.4
+
+- Sub-cgroup creation — §4.3.5.
+- Parent-teardown cascade wire-up — §4.3.6 (lifecycle wiring).
+- Sub-runner self-confinement at spawn time — §4.3.5+§4.3.6 (the
+  `_spawn_session_runner_unconditional(profile_name=...)` call).
+- Sub-profile rule-set customization via supervisor flags — Phase 5+.
+- Sub-profile `add_reference_fragment` support — Phase 5+ behind
+  explicit opt-in.
+
+### Phase 5 hardening surface (recorded for cleanup runway)
+
+1. **Sub-profile rule-set is daemon-trusted** — the runner can request
+   sub-profile creation; the daemon decides the rules.  Phase 5
+   should let the SUPERVISOR (parent runner's subagent plugin)
+   declare tightenings via the wire shape, with a daemon-side
+   allow-list of permitted tightening keys.
+2. **Sub-profile filename collision** — if a parent has two
+   subagents with `subagent_id="agent-1"` (sequential spawns where
+   the first finished and was torn down), the second reuses the same
+   filename.  Today this is fine because teardown happens fully.
+   Phase 5 should consider monotonic suffixing in case teardown
+   races spawn.
+3. **No sub-profile reload-on-fragment-add** — `add_reference_fragment`
+   touches the parent's profile.  Sub-runner-initiated fragments
+   would need to target the sub-profile; not wired (sub-profile has
+   no `.refs.d/` companion dir).  Acceptable for §4.3.4 since
+   sub-profile drops fragment admit anyway.
+4. **`apparmor_parser -r` reload affects only the named file** —
+   safe today, but if sub-profiles ever migrate to true hats (inside
+   parent file), reload would affect parent.  Document the constraint.
+
+### Sub-step risk register entry
+
+Risk: sub-profile-load failure mid-spawn leaves a written file
+without a kernel-loaded profile.  Mitigation: `provision_sub_profile`
+unlinks the file on `apparmor_parser` failure (mirrors
+`_provision_profile_impl`'s pattern).
+
