@@ -1,0 +1,307 @@
+# OpenRouter Provider
+
+Runs jaato against [OpenRouter](https://openrouter.ai) — a unified gateway
+exposing 300+ models from many vendors (OpenAI, Anthropic, Google, Meta,
+Mistral, DeepSeek, …) behind a single OpenAI-compatible API.
+
+Chat goes through `POST /api/v1/chat/completions`; model catalog lookups
+go through the public `GET /api/v1/models`; auth introspection uses
+`GET /api/v1/key`.
+
+---
+
+## When to use this provider
+
+| You want… | Use |
+|---|---|
+| One API key for many vendors / models | **OpenRouter** |
+| Native Anthropic auth (OAuth subscription, direct billing) | [`anthropic`](../anthropic/) |
+| Local inference (no API spend) | [`ollama`](../ollama/), [`lmstudio`](../lmstudio/) |
+| Per-request **provider routing** (price/throughput/region constraints) | OpenRouter — `routing` knob |
+| **Prompt caching** with a single profile across Claude / Gemini / GPT | OpenRouter — `cache_prompt` knob |
+
+---
+
+## Requirements
+
+- An OpenRouter API key (`sk-or-...`) from
+  <https://openrouter.ai/settings/keys>.
+- Python deps already present in jaato (`openai`, `httpx`).
+
+---
+
+## Quick start
+
+```bash
+export JAATO_OPENROUTER_API_KEY=sk-or-...
+.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
+.venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock
+# In TUI: session.new --profile openrouter   (or any profile that sets provider=openrouter)
+```
+
+Or store the key persistently:
+
+```bash
+openrouter-auth key sk-or-...
+```
+
+---
+
+## Configuration
+
+Two sources, merged at runtime — environment provides defaults, the
+session profile overrides per session.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `JAATO_OPENROUTER_API_KEY` | — | API key (`sk-or-…`) |
+| `JAATO_OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Endpoint |
+| `JAATO_OPENROUTER_MODEL` | — | Default model |
+| `JAATO_OPENROUTER_CONTEXT_LENGTH` | catalog | Context-window override |
+| `JAATO_OPENROUTER_HTTP_REFERER` | `https://github.com/Jaato-framework-and-examples/jaato` | App attribution |
+| `JAATO_OPENROUTER_APP_TITLE` | `jaato` | App attribution |
+
+### Profile `plugin_configs["openrouter"]`
+
+Four layers under `plugin_configs.openrouter` (server 0.6.23+):
+
+```yaml
+plugin_configs:
+  openrouter:
+    # Top-level — auth / identity
+    api_key: "sk-or-..."           # overrides env / stored credentials
+    http_referer: "https://..."    # HTTP-Referer header
+    app_title: "MyApp"             # X-OpenRouter-Title header
+
+    # api_params — OpenAI Chat Completions request body fields
+    api_params:
+      temperature: 0.55
+      top_p: 1.0
+      top_k: 40
+      max_tokens: 8192
+      enable_thinking: true        # extended-reasoning request + extraction
+      thinking_budget: 16384       # → reasoning.max_tokens
+      thinking_level: "high"       # → reasoning.effort (low/medium/high)
+      cache_prompt: "auto"         # "auto" (default) | true | false
+      cache_ttl: "5m"              # "5m" (default) | "1h"
+
+    # routing — OpenRouter provider routing extension, passed verbatim
+    routing:
+      sort: "price"                # price / throughput / latency
+      data_collection: "deny"
+      ignore: ["Groq"]
+      require_parameters: true
+      allow_fallbacks: true
+
+    # framework_overrides — rare escape hatches
+    framework_overrides:
+      context_length: 32768
+      base_url: "https://..."
+```
+
+| Layer | Keys | Purpose |
+|---|---|---|
+| top-level | `api_key`, `http_referer`, `app_title` | auth / identity |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl` | OpenAI Chat Completions body fields |
+| `routing` | OpenRouter [provider routing](https://openrouter.ai/docs/features/provider-routing) keys | constrains which upstream serves each request |
+| `framework_overrides` | `context_length`, `base_url` | rare escape hatches |
+
+**Backward compatibility:** every nested key is also accepted at the
+legacy flat position (`temperature:` directly under `openrouter:`,
+`provider:` instead of `routing:`) with a one-time deprecation warning
+per key. Flat-key support will be removed in a future release.
+
+---
+
+## Prompt caching
+
+OpenRouter's [prompt-caching feature](https://openrouter.ai/docs/features/prompt-caching)
+splits into two flavours depending on the upstream:
+
+- **Automatic caching** — OpenAI, DeepSeek, Grok, Moonshot, … cache
+  stable prefixes server-side without any client-side annotation.
+  Savings happen regardless.
+- **Explicit caching** — Anthropic Claude and Google Gemini Pro/Flash
+  require the client to stamp
+  `cache_control: {"type": "ephemeral"}` breakpoints onto the system
+  block and the last tool definition. **Without these, no caching
+  occurs.**
+
+This provider does both:
+
+| `cache_prompt` setting | Behaviour |
+|---|---|
+| `"auto"` (default) | Stamps breakpoints **only** when the model id matches `anthropic/*` or `google/gemini-1.5-*` / `2.5-*` / `3*`. Other models cache automatically. |
+| `true` / `"on"` | Always stamps breakpoints, regardless of model. Useful when OpenRouter adds a new explicit-cache vendor before this module learns about it. |
+| `false` / `"off"` | Never stamps. Useful for always-fresh prompts that don't benefit. |
+
+| `cache_ttl` setting | Behaviour |
+|---|---|
+| `"5m"` (default) | 5-minute ephemeral cache, 1.25× write premium (Anthropic). |
+| `"1h"` | Extended 1-hour cache, 2× write premium. Avoids mid-session cache misses on hour-long agentic runs. |
+
+### What gets cached
+
+Two breakpoints per request:
+
+1. **System block.** Converted from `content: "<text>"` to
+   `content: [{"type": "text", "text": ..., "cache_control": ...}]`.
+2. **Last tool definition.** Tools are sorted by their (hashed) wire
+   name so the cache prefix stays stable across turns; `cache_control`
+   is stamped on the last element.
+
+A third "history breakpoint" (analogous to BP3 in the
+`cache_anthropic` plugin) is intentionally out of scope — it requires
+budget-aware placement that the OpenAI-shaped wire makes awkward, and
+the two breakpoints we do place cover the highest-value cacheable
+content (large system prompts + tool catalogs).
+
+### Response-side accounting
+
+The provider always sends `usage: {"include": true}` so OpenRouter
+returns its detailed usage block. The following fields land in
+`TokenUsage`:
+
+| OpenRouter field | `TokenUsage` field |
+|---|---|
+| `prompt_tokens_details.cached_tokens` | `cache_read_tokens` |
+| `cache_creation_input_tokens` | `cache_creation_tokens` |
+| `cost` | `cost_usd` |
+
+These flow into the daemon's ledger / token-accounting telemetry, so
+savings are visible regardless of whether caching was explicit or
+automatic.
+
+### Example: Claude profile with 1-hour cache
+
+```json
+{
+  "name": "claude-cached",
+  "model": "anthropic/claude-3.5-sonnet",
+  "provider": "openrouter",
+  "plugin_configs": {
+    "openrouter": {
+      "api_params": {
+        "cache_prompt": "auto",
+        "cache_ttl": "1h"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Authentication
+
+Three sources, checked in order:
+
+1. **`api_key` in the profile** (`plugin_configs.openrouter.api_key`)
+2. **`JAATO_OPENROUTER_API_KEY`** environment variable
+3. **Stored credentials** from `openrouter-auth key <api_key>` (mode 0600)
+
+`openrouter-auth status` shows which source is active.
+
+---
+
+## Provider routing
+
+OpenRouter's killer feature: constrain which upstream serves each
+request. Composes with `model: "openrouter/auto"` (auto picks model,
+routing constrains hosts):
+
+```yaml
+routing:
+  sort: "price"            # cheapest upstream
+  data_collection: "deny"  # exclude upstreams that train on your data
+  ignore: ["Groq"]
+  require_parameters: true
+  allow_fallbacks: true
+```
+
+Any [provider routing](https://openrouter.ai/docs/features/provider-routing)
+key works (`order`, `quantizations`, …) — passed through verbatim via
+`extra_body`.
+
+---
+
+## Error types
+
+Defined in `errors.py`:
+
+| Exception | When raised |
+|---|---|
+| `APIKeyNotFoundError` | No credentials in env / profile / stored file |
+| `AuthenticationError` | API rejected the key (401) |
+| `RateLimitError` | 429 — surfaces `Retry-After` if present |
+| `ModelNotFoundError` | Model id not in OpenRouter catalog |
+| `ContextLimitError` | Prompt exceeds upstream's context window |
+| `InfrastructureError` | 5xx / connection error — retryable |
+
+`RateLimitError` and `InfrastructureError` are classified as transient
+by the reliability layer.
+
+---
+
+## Architecture
+
+```
+jaato/jaato-server/shared/plugins/model_provider/openrouter/
+├── __init__.py       # Package docstring, exports OpenRouterProvider + create_provider
+├── _lazy.py          # Lazy import of the openai SDK
+├── auth.py           # Stored-credential file handling
+├── cache.py          # Prompt-caching helpers — model detection, cache_control dict
+├── converters.py     # ToolSchema / Message ↔ OpenAI chat dict; cache_control stamping
+├── env.py            # JAATO_OPENROUTER_* env-var resolution
+├── errors.py         # APIKey / Auth / RateLimit / ModelNotFound / Context / Infra
+├── provider.py       # OpenRouterProvider — the main class
+├── tests/
+│   ├── test_auth.py
+│   ├── test_openrouter_provider.py
+│   └── test_prompt_caching.py
+└── README.md         # This file
+```
+
+### Profile → Provider wiring
+
+```
+SubagentProfile.plugin_configs["openrouter"]
+    ↓  JaatoServer._build_session_kwargs_from_profile()
+JaatoRuntime.create_session(plugin_configs=...)
+    ↓  JaatoSession.configure()
+JaatoRuntime.create_provider(plugin_configs=...)
+    ↓  merged into ProviderConfig.extra
+OpenRouterProvider.initialize(config)
+    ↓  reads four-layer namespacing (top-level / api_params / routing / framework_overrides)
+```
+
+---
+
+## Limitations
+
+- **No history breakpoint.** Only two cache breakpoints are placed
+  (system + last tool). A budget-aware history breakpoint analogous to
+  BP3 in `cache_anthropic` is deferred — OpenAI-shaped messages make
+  the placement awkward.
+- **Token counting is heuristic.** OpenRouter doesn't expose a
+  tokenizer endpoint and tokenizer choice depends on the upstream.
+  `count_tokens()` uses ~4 chars / token. For tight budget
+  enforcement, set `framework_overrides.context_length` conservatively.
+- **No structured-output schema.** `response_format: json_object` is
+  forwarded but no per-schema validation happens here — upstream
+  capabilities vary.
+- **Tool name hashing.** Tool names are hashed to `t_<8hex>` before
+  the wire to dodge strict-validator upstreams. The mapping is
+  deterministic; reverse-lookups go through `shared.tool_id_map`.
+
+---
+
+## See also
+
+- [OpenRouter docs — Prompt caching](https://openrouter.ai/docs/features/prompt-caching)
+- [OpenRouter docs — Provider routing](https://openrouter.ai/docs/features/provider-routing)
+- [`anthropic/`](../anthropic/) — native Anthropic provider (cache plugin lives there)
+- [`cache_anthropic/`](../../cache_anthropic/) — explicit-breakpoint caching for the native Anthropic provider
+- [`lmstudio/`](../lmstudio/), [`ollama/`](../ollama/) — local-inference alternatives

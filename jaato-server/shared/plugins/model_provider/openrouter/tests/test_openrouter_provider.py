@@ -422,7 +422,9 @@ class TestProviderRouting:
         provider = OpenRouterProvider()
         provider.initialize(ProviderConfig(api_key="sk-or-test"))
         assert provider._provider_routing is None
-        assert provider._build_extra_body() == {}
+        # Detailed-usage opt-in is unconditional so the response carries
+        # cached_tokens / cost regardless of which model is selected.
+        assert provider._build_extra_body() == {"usage": {"include": True}}
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_initialize_rejects_non_dict_provider(self, mock_client_class):
@@ -450,7 +452,10 @@ class TestProviderRouting:
     def test_build_extra_body_includes_provider(self):
         provider = OpenRouterProvider()
         provider._provider_routing = {"sort": "throughput"}
-        assert provider._build_extra_body() == {"provider": {"sort": "throughput"}}
+        assert provider._build_extra_body() == {
+            "provider": {"sort": "throughput"},
+            "usage": {"include": True},
+        }
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_complete_forwards_provider_routing_via_extra_body(self, mock_client_class):
@@ -472,10 +477,14 @@ class TestProviderRouting:
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
         assert call_kwargs["extra_body"] == {
             "provider": {"sort": "price", "data_collection": "deny"},
+            "usage": {"include": True},
         }
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
-    def test_complete_omits_extra_body_when_no_routing(self, mock_client_class):
+    def test_complete_always_sends_usage_opt_in(self, mock_client_class):
+        # Detailed-usage opt-in is unconditional — without it OpenRouter
+        # omits ``cost`` and ``cache_creation_input_tokens`` from the
+        # response, so the daemon's per-turn ledger would lose savings.
         fake_client = MagicMock()
         fake_client.chat.completions.create.return_value = create_mock_response(
             text="ok", finish_reason="stop"
@@ -488,7 +497,7 @@ class TestProviderRouting:
         provider.complete([Message.from_text(Role.USER, "hi")])
 
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
-        assert "extra_body" not in call_kwargs
+        assert call_kwargs["extra_body"] == {"usage": {"include": True}}
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_streaming_path_also_forwards_provider_routing(self, mock_client_class):
@@ -512,7 +521,10 @@ class TestProviderRouting:
         )
 
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["extra_body"] == {"provider": {"order": ["Fireworks"]}}
+        assert call_kwargs["extra_body"] == {
+            "provider": {"order": ["Fireworks"]},
+            "usage": {"include": True},
+        }
         # And the streaming flag must still be set on the same call.
         assert call_kwargs.get("stream") is True
 
@@ -533,7 +545,8 @@ class TestThinkingKnobs:
         provider = OpenRouterProvider()
         provider.initialize(ProviderConfig(api_key="sk-or-test"))
         assert provider._enable_thinking is False
-        assert provider._build_extra_body() == {}
+        # ``usage.include`` is always on; no ``reasoning`` block when disabled.
+        assert provider._build_extra_body() == {"usage": {"include": True}}
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_thinking_budget_emits_max_tokens(self, mock_client_class):
@@ -545,6 +558,7 @@ class TestThinkingKnobs:
         ))
         assert provider._build_extra_body() == {
             "reasoning": {"max_tokens": 8192},
+            "usage": {"include": True},
         }
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
@@ -557,6 +571,7 @@ class TestThinkingKnobs:
         ))
         assert provider._build_extra_body() == {
             "reasoning": {"effort": "high"},
+            "usage": {"include": True},
         }
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
@@ -575,6 +590,7 @@ class TestThinkingKnobs:
         ))
         assert provider._build_extra_body() == {
             "reasoning": {"effort": "medium"},
+            "usage": {"include": True},
         }
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
@@ -614,7 +630,10 @@ class TestThinkingKnobs:
         provider.complete([Message.from_text(Role.USER, "hi")])
 
         call_kwargs = fake_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["extra_body"] == {"reasoning": {"effort": "low"}}
+        assert call_kwargs["extra_body"] == {
+            "reasoning": {"effort": "low"},
+            "usage": {"include": True},
+        }
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_provider_routing_and_reasoning_compose_in_extra_body(self, mock_client_class):
@@ -632,6 +651,7 @@ class TestThinkingKnobs:
         assert body == {
             "provider": {"sort": "price"},
             "reasoning": {"max_tokens": 4096},
+            "usage": {"include": True},
         }
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
@@ -641,11 +661,12 @@ class TestThinkingKnobs:
         mock_client_class.return_value = MagicMock()
         provider = OpenRouterProvider()
         provider.initialize(ProviderConfig(api_key="sk-or-test"))
-        assert provider._build_extra_body() == {}
+        assert provider._build_extra_body() == {"usage": {"include": True}}
 
         provider.set_thinking_config(TC(enabled=True, budget=2048))
         assert provider._build_extra_body() == {
             "reasoning": {"max_tokens": 2048},
+            "usage": {"include": True},
         }
 
         provider.set_thinking_config(TC(enabled=False, budget=2048))
@@ -666,6 +687,7 @@ class TestThinkingKnobs:
         # effort still wins because thinking_level is still set.
         assert provider._build_extra_body() == {
             "reasoning": {"effort": "high"},
+            "usage": {"include": True},
         }
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
