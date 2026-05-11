@@ -27,6 +27,31 @@ plan. Promote to a feature branch / ticket when work is ready to start.
 - **Open questions**: Cache invalidation cost on Anthropic provider; detector
   scope v1 conservatism; budget-reset semantics.
 
+### Clarification + References plugins lack RunnerRPCChannel equivalents
+
+- **Design**: [docs/design/project_backlog_clarification_references_runner_rpc_gap.md](design/project_backlog_clarification_references_runner_rpc_gap.md)
+- **Status**: Pre-existing gap surfaced by §7c Step 7 disposition audit +
+  confirmed by Step 7.4 investigation.  **Latent regression** post-§7c
+  seat-flip — runner-fired clarification / references ASKs orphan
+  (no daemon-side relay).  Existing tests pass because no automated
+  test exercises the regression path.
+- **Summary**: The permission plugin ships `runner_rpc_channel.py`
+  routing ASKs through `client.prompt_operator` daemon-RPC (wired
+  end-to-end in §7c Steps 7.1+7.2+7.3).  Clarification + references
+  both run runner-side (`PLUGIN_TIER = "runner"`) but their channels
+  return the in-process queue directly — no runner-side execution
+  detection, no RPC bridge.  Same orphan pattern §7c Step 7 closed
+  for permission.
+- **Why it matters**: User-visible impact: model invokes
+  `request_clarification` → ASK fires runner-side → queue write the
+  daemon never reads → tool hangs.  Same for `selectReferences`.
+- **Likely fix shape**: Mirror permission's pattern per plugin —
+  new `types.py` + `runner_rpc_channel.py` + plugin
+  `_get_channel` extension + daemon-side handler in
+  `server/runner_rpc_handlers/`.  Plus `set_runner_rpc` registration
+  + `respond_to_*` dual-path routing extension (same pattern as
+  Step 7.3).  ~4-6 hours implementation for both plugins.
+
 ### Runner-side `_ui_hooks` is None — tool lifecycle events silently no-op
 
 - **Design**: [docs/design/project_backlog_runner_ui_hooks_gap.md](design/project_backlog_runner_ui_hooks_gap.md)
