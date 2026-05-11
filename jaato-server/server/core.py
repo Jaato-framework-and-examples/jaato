@@ -353,6 +353,16 @@ class JaatoServer:
         # (DONE / NOW / DAEMON / INTERNAL / WIRING / §7b.2 / TRUTHINESS).
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
+        # Phase 3 §7c Step 7.1: daemon-side ``client.prompt_operator``
+        # handler — relays runner-fired permission ASKs to the
+        # connected client via emit(PermissionRequestedEvent) and
+        # awaits the client's response via resolve_response (called
+        # from JaatoServer.respond_to_permission post-Step-7.3
+        # rewire).  Set in :meth:`set_runner_rpc`; torn down in
+        # :meth:`shutdown`.
+        self._prompt_operator_handler: Optional[
+            "PromptOperatorHandler"
+        ] = None
 
         # Phase 3 §7c step 4: direct daemon-side reference to the
         # ``JaatoRuntime`` (provider config + auth + plugin registry +
@@ -4313,6 +4323,29 @@ class JaatoServer:
         # registry-attribute pattern (§5.4 of the Phase 2 plan).
         if self.registry is not None and rpc_client is not None:
             setattr(self.registry, "runner_rpc", rpc_client)
+        # Phase 3 §7c Step 7.1: instantiate + register the
+        # ``client.prompt_operator`` handler.  The daemon-side
+        # infrastructure (RunnerRPCServer + bidirectional read-loop
+        # dispatch) is already wired in RunnerRPCClient — Step 7.1's
+        # missing piece is just creating + registering the handler.
+        # The handler relays runner→daemon ASKs by emitting a
+        # PermissionRequestedEvent (bound to ``self.emit``) and
+        # awaiting the matching response via :meth:`resolve_response`
+        # (called from :meth:`respond_to_permission` post-Step-7.3
+        # rewire).
+        if rpc_client is not None:
+            from server.runner_rpc_handlers.prompt_operator import (
+                PromptOperatorHandler,
+                register as register_prompt_operator,
+            )
+            self._prompt_operator_handler = PromptOperatorHandler(
+                emit_event=self.emit,
+            )
+            register_prompt_operator(
+                rpc_client.rpc_server, self._prompt_operator_handler,
+            )
+        else:
+            self._prompt_operator_handler = None
 
     @property
     def runner_rpc(self) -> Optional["RunnerRPCClient"]:
@@ -4329,6 +4362,22 @@ class JaatoServer:
             self.registry.unexpose_all()
         if self.permission_plugin:
             self.permission_plugin.shutdown()
+        # Phase 3 §7c Step 7.1: tear down the prompt-operator handler
+        # before the runner-RPC transport closes.  ``shutdown()``
+        # cancels in-flight prompts with a clean error so any
+        # runner-side awaiter sees a typed failure (not a transport
+        # disconnect).  ``getattr`` for forward-compat with tests
+        # that bypass ``__init__`` via ``JaatoServer.__new__``.
+        prompt_handler = getattr(self, "_prompt_operator_handler", None)
+        if prompt_handler is not None:
+            try:
+                prompt_handler.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                logger.exception(
+                    "JaatoServer.shutdown: prompt_operator_handler "
+                    "shutdown raised",
+                )
+            self._prompt_operator_handler = None
         # Tear down the runner subprocess if one was spawned.  The
         # close ladder (parent EOF → wait → SIGTERM → SIGKILL) lives
         # inside ``RunnerRPCClient.close``; we run it on the daemon's
