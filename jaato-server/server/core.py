@@ -3819,25 +3819,56 @@ class JaatoServer:
                               edited_arguments: Optional[Dict[str, Any]] = None) -> None:
         """Respond to a permission request.
 
+        Phase 3 §7c Step 7.3: tries two resolution paths.
+
+        1. **Runner-fired ASK (post-seat-flip)**: the runner-side
+           permission plugin's ``RunnerRPCChannel`` relayed the ASK
+           via the ``client.prompt_operator`` RPC; the daemon's
+           ``PromptOperatorHandler`` holds the pending future keyed
+           by ``request_id``.  ``resolve_response`` returns True if
+           a future was pending — typical post-§7c.
+        2. **Daemon-fired ASK (legacy / fallback)**: the daemon-side
+           channel set ``_pending_permission_request_id`` and is
+           reading from ``_channel_input_queue``.  Falls through to
+           pushing the response into the queue.
+
+        When neither path resolves, emit an "Unknown permission
+        request" ErrorEvent — the request_id doesn't match any
+        pending state.
+
         Args:
             request_id: The permission request ID.
             response: The response (y, n, a, never, etc.).
             edited_arguments: Optional edited tool arguments (when response is "e"
                 and the client handled editing locally).
         """
-        if self._pending_permission_request_id != request_id:
-            self.emit(ErrorEvent(
-                error=f"Unknown permission request: {request_id}",
-                error_type="StateError",
-            ))
+        # Path 1: try the runner-RPC handler first.
+        prompt_handler = getattr(self, "_prompt_operator_handler", None)
+        if prompt_handler is not None:
+            if prompt_handler.resolve_response(
+                request_id, response, edited_arguments=edited_arguments,
+            ):
+                # Runner-fired ASK resolved.  No need to touch the
+                # daemon-side queue or ``_pending_edited_arguments``;
+                # the runner-side permission plugin gets the
+                # PromptResponse directly from its outgoing_call
+                # await.
+                return
+
+        # Path 2: daemon-fired ASK fallback (legacy).
+        if self._pending_permission_request_id == request_id:
+            # Store edited arguments before putting response in queue so the
+            # edit_callback can retrieve them synchronously
+            if edited_arguments is not None:
+                self._pending_edited_arguments = edited_arguments
+            self._channel_input_queue.put(response)
             return
 
-        # Store edited arguments before putting response in queue so the
-        # edit_callback can retrieve them synchronously
-        if edited_arguments is not None:
-            self._pending_edited_arguments = edited_arguments
-
-        self._channel_input_queue.put(response)
+        # Neither path resolved — unknown request.
+        self.emit(ErrorEvent(
+            error=f"Unknown permission request: {request_id}",
+            error_type="StateError",
+        ))
 
     def respond_to_clarification(self, request_id: str, response: str) -> None:
         """Respond to a clarification question.
