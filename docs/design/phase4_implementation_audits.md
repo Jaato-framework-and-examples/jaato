@@ -455,3 +455,279 @@ correctness.  But the pattern matters: **§4.2 confirms the
 "runner already has the data; envelope just propagates" pattern
 that §4.4 also adopted**.  Envelope-over-references discipline
 (Phase 4 plan §5.1 lean) is now empirically validated twice.
+
+---
+
+## Audit 4 — §4.3 §3.11 isolated-subagent opt-in (scope expansion)
+
+**Plan reference:** `per_session_confined_runner_phase4_plan.md` §3.3.
+
+**Backlog reference:** Plan §3.3 cites
+`project_backlog_3_11_isolated_subagent_opt_in.md` as "shipped" —
+**this file does not exist**.  Cross-grep confirms no production
+sites for `agent_params.isolated` or `parent_runner_handle` (set
+to `None` everywhere; default-share path NOT yet wired).  The
+backlog reference is stale; first-pass audit context comes from
+Phase 3 §7d audit Q6 (per_session_confined_runner_phase3_3c_rpc_surface.md:1778)
+which explicitly punted §3.11 isolated-subagent opt-in as
+"separate work, post-§7d".
+
+**Plan's framing** (§3.3):
+> Wire `agent_params.isolated: true` to spawn a fresh runner with
+> a sub-AppArmor profile (`jaato-ws-{session_id}//{subagent_id}`)
+> + sub-cgroup.  Default-share path already shipped in Phase 3.
+>
+> Files: subagent/plugin.py (branch), session_manager.py
+> (`_spawn_isolated_runner`), apparmor.py (sub-profile generation).
+> Audit + 1-2 implementation commits.
+
+### Audit finding 1 — "Default-share path already shipped" is loose
+
+Verification of the current subagent-spawn path:
+
+- `shared/plugins/subagent/plugin.py:2674`: subagent creates its
+  session via `self._runtime.create_session(...)` (the parent
+  runner's runtime).  In-runtime, in-process — same Python process
+  as the parent runner, same AppArmor profile, same cgroup.
+- Ephemeral fan-out (`session_manager.py:5003`): constructs
+  `BootstrapEnvelope(parent_runner_handle=None, ...)`.  The
+  `parent_runner_handle` field exists on `BootstrapEnvelope`
+  (envelope.py:281) but is never populated.
+
+So "default-share" works today **by accident of in-process
+co-location** — the parent's session_manager doesn't even use
+`parent_runner_handle`.  The field was reserved for the future
+shape where a subagent could optionally OPT INTO a separate
+runner (and thus need an explicit parent-runner reference) but
+the actual default-share isn't using it.
+
+This is fine — co-located in-process sessions are the natural
+default — but it means the plan's "default-share path already
+shipped in Phase 3" is technically true via co-location, not via
+the `parent_runner_handle` plumbing.
+
+### Audit finding 2 — Subagent plugin runs RUNNER-side; can't directly call SessionManager
+
+The plan says:
+> subagent/plugin.py — branch on `agent_params.isolated`; …
+> opt-in → call `SessionManager._spawn_isolated_runner(...)`
+
+**This isn't directly callable.**  Verification:
+
+- `shared/plugins/subagent/__init__.py:42` declares
+  `PLUGIN_TIER = "runner"`.
+- Path D's `_configure_runtime_plugins` loads the subagent plugin
+  into the runner registry.
+- The model loop invokes `spawn_subagent` runner-side; the
+  `_spawn_subagent_async` thread runs runner-side; the
+  `_runtime.create_session()` call (line 2674) runs runner-side.
+
+`SessionManager` lives daemon-side.  The runner-side subagent
+plugin can't reach `SessionManager._spawn_isolated_runner` via a
+direct import — they're in different processes.
+
+To spawn an isolated runner from the runner-side subagent plugin,
+we need a **new runner→daemon RPC primitive**: e.g.,
+`client.spawn_isolated_runner(profile, agent_id, ...)`.  The
+daemon-side handler invokes `SessionManager._spawn_isolated_runner`,
+spawns the new runner, returns a runner-handle (RPC channel
+descriptor) to the calling runner.
+
+This is an architectural escalation beyond the plan's "1-2
+implementation commits" — it's a new RPC primitive class in the
+shape of §7.1's PromptOperatorHandler.
+
+### Audit finding 3 — Cross-runner forwarding semantics undefined
+
+If the isolated subagent runs in a NEW runner process, the parent
+runner needs to:
+
+- Forward the subagent's prompt INTO the new runner
+  (`session.send_message` over the sub-RPC channel?)
+- Forward the subagent's output BACK to the parent's
+  injection-queue (which the parent's model thread consumes for
+  the subagent's final-summary result)
+- Handle subagent termination (subagent finishes → tear down
+  runner + sub-profile + sub-cgroup)
+- Handle subagent failure (crash, timeout) without corrupting the
+  parent's session state
+
+None of this exists today.  Each is a non-trivial design point.
+
+### Audit finding 4 — AppArmor sub-profile generation: only `change_profile` hat exists
+
+Verification of `server/apparmor.py`:
+
+- Line 184-205: `tool_hat` sub-profile exists for **in-runner**
+  `change_profile` transitions (executor enters hat for tool
+  execution; exits back to base post-tool).
+- Line 444-489: subprocess child sub-profile work is tracked but
+  not landed (per the comment at line 444:
+  "Tracked fix: child subprofile (jaato-ws-S//child) for
+  subprocesses").
+
+So `aa-exec`-style spawning a sibling runner with a sub-profile
+`jaato-ws-{session_id}//{subagent_id}` requires:
+1. New per-subagent profile-template generation (similar to per-
+   session, but with sub-profile syntax).
+2. New `provision_profile` variant for sub-profiles.
+3. New AppArmor profile-load handshake for the sub-profile.
+
+The plan's "sub-profile generation (likely already supports
+parent_name//{child} syntax; verify)" is empirically **not yet
+supported for the spawn case**.  Only the `change_profile`
+in-process transition supports `parent//{hat}`.
+
+### Audit finding 5 — Cgroup sub-cgroup nesting: new infrastructure
+
+Phase 3 §7d shipped per-session cgroup attach at runner spawn.
+Sub-cgroup nesting per subagent requires:
+
+1. Sub-cgroup creation under the parent session's cgroup.
+2. New runner's `cgroup_attach` callable targets the sub-cgroup,
+   not the session cgroup.
+3. Cleanup on subagent termination (delete sub-cgroup).
+
+The plan §3.3 doesn't mention cgroup work explicitly but §3.11's
+scope (in parent design `per_session_confined_runner.md`) includes
+sub-cgroup isolation.
+
+### Decision: scope is materially larger than the plan estimated
+
+Conservative re-estimate:
+
+| Component | Plan estimate | Audit estimate |
+|---|---|---|
+| audit doc | 1 commit | 1 commit (this) |
+| Runner→daemon RPC primitive | (not mentioned) | 1-2 commits + audit |
+| `SessionManager._spawn_isolated_runner` helper | (1 commit) | 1 commit |
+| AppArmor sub-profile generation | (1 commit, verify) | 1-2 commits + audit |
+| Cgroup sub-cgroup attach | (not mentioned) | 1 commit + audit |
+| Cross-runner forwarding semantics | (not mentioned) | 1-2 commits + audit |
+| Subagent-plugin branch + lifecycle | (in 1 commit) | 1 commit |
+| Tests (integration + unit) | (in commits) | 1-2 commits |
+| **Total** | **2-3 commits** | **8-10 commits** |
+
+This crosses the boundary from "Phase 4 carryover task" to a
+**multi-cycle sub-track** comparable in scope to Phase 3's §7c
+seat-flip arc.
+
+### Option space + leans
+
+**Option α — Full scope, multi-cycle Phase 4 sub-track.**
+Implement the complete §3.11 vision: new RPC primitive, sub-
+profile generation, sub-cgroup nesting, cross-runner forwarding.
+Estimate: 8-10 commits across the rest of Phase 4.
+- Pros: Phase 4 closure includes full isolation primitive.
+- Cons: dominates Phase 4 budget; pushes §4.5 (perf baseline) and
+  §4.6 (idle-shutdown) into Phase 5.
+
+**Option β — Minimal opt-in stub, full implementation deferred.**
+Land just the API surface (`agent_params.isolated` field; subagent-
+plugin branch detects opt-in; opt-in path raises
+`NotImplementedError` with a clear deferral message).  Tests pin
+the opt-in detection + the explicit NotImplementedError.
+- Pros: Closes Phase 4 §4.3 with a minimum viable API contract;
+  unblocks future work without taking the full scope.
+- Cons: Users get a "feature exists but doesn't work" surface.
+  Risks misleading consumers if not clearly labeled experimental.
+
+**Option γ — Defer §4.3 entirely to Phase 5.**
+Document this audit as the deferral rationale.  Phase 4 closes at
+§4.1/§4.2/§4.4/§4.5/§4.6/§4.7 (6 of original 7 tasks).
+- Pros: Honest scope; the actual work belongs in Phase 5
+  hardening since it has security implications (sub-profile
+  generation, sub-cgroup nesting) that warrant hardening-cycle
+  treatment.
+- Cons: Phase 4 closes incomplete relative to its stated plan.
+
+### Recommendation
+
+**Lean: Option γ (defer to Phase 5).**
+
+Rationale:
+
+1. The plan's premise was wrong — the existence of
+   `project_backlog_3_11_isolated_subagent_opt_in.md` was assumed
+   but the file doesn't exist.  This is a "design phase not yet
+   done" signal, not "ready to implement".
+2. AppArmor sub-profile generation + sub-cgroup nesting are
+   security-sensitive surfaces.  They belong in Phase 5
+   (production hardening) per the parent design's phase split,
+   not Phase 4.
+3. Phase 4's natural value-density is the carryover + perf
+   baseline + idle-shutdown — not a new architectural primitive.
+4. Phase 3 audit-discipline #5 ("Inverse-virtue activations —
+   cancel proposed work when audit reveals no consumer") may apply
+   here too: no concrete consumer has asked for
+   `agent_params.isolated: true` yet; it's a designed-in
+   capability waiting for a use case.
+
+Decision deferred to user; this audit captures the option space
++ lean.
+
+### User decision (post-audit): Option α — Full scope
+
+User selected **Option α** despite the worker's lean toward γ.
+Rationale (user direction): proceed with the complete §3.11 vision
+in Phase 4.  Implication accepted: §4.5 (perf baseline) and §4.6
+(idle-shutdown) defer to Phase 5; Phase 4 closes with §4.1, §4.2,
+§4.3 (this sub-track), §4.4, §4.7.
+
+### Sub-commit decomposition (10 commits planned)
+
+Mirrors Phase 3 §7c sub-step discipline.  Each sub-step gets its
+own pre-implementation audit before code (per discipline #2), so
+sub-step count below includes both audit + code commits.
+
+| Sub-step | Scope | Commits |
+|---|---|---|
+| §4.3.0 | Audit doc (this commit) | 1 |
+| §4.3.1 | `agent_params.isolated` field plumbing + opt-in detection (stub raises `NotImplementedError`) | 1 |
+| §4.3.2 | Runner→daemon RPC primitive: `client.spawn_isolated_runner(...)` shape; daemon handler stub; runner-side client wrapper | audit + 1 |
+| §4.3.3 | `SessionManager._spawn_isolated_runner` helper reusing `_spawn_session_runner_unconditional` machinery | 1 |
+| §4.3.4 | AppArmor sub-profile generation: per-subagent profile template + provisioning hook | audit + 1 |
+| §4.3.5 | Cgroup sub-cgroup nesting: creation + attach + cleanup | audit + 1 |
+| §4.3.6 | Cross-runner forwarding semantics: prompt-forward INTO new runner; output-forward BACK to parent; termination + failure handling | audit + 1-2 |
+| §4.3.7 | Subagent-plugin opt-in branch wires the full chain; §4.3.1's `NotImplementedError` stub replaced | 1 |
+| §4.3.8 | Integration test gated on cgroup-writable host (both default-share AND opt-in flows) | 1 |
+| §4.3.9 | Closure recap addendum: §3.11 status flip + Phase 4 progress update | 1 |
+| **Total** | | **10 commits (or 14 with all audits)** |
+
+Order rationale: bottom-up — primitive infrastructure first
+(§4.3.2-§4.3.6), then the subagent-plugin opt-in branch wires them
+together (§4.3.7), then integration test (§4.3.8) verifies the
+whole chain.  §4.3.1 (stub) ships first as a tracer-bullet for the
+API surface so subsequent commits have a clear seam.
+
+### Sub-track risk register
+
+1. **Phase 5 hardening implications.** Sub-profile generation +
+   sub-cgroup nesting are security-sensitive surfaces.  Each
+   sub-step's audit MUST document the hardening implications so
+   Phase 5 has a clear cleanup runway.
+2. **Cross-runner forwarding edge cases.** §4.3.6 has the highest
+   uncertainty.  Termination semantics (parent dies mid-subagent,
+   subagent dies mid-execution, both crash, network partition)
+   need explicit per-case audit treatment.
+3. **Test-fixture-cgroup-host coverage.** Phase 3 §7d tests gated
+   on `_can_migrate_to(_find_writable_cgroup_parent())` — many CI
+   hosts can't run these.  Phase 4 §4.3 inherits this gating;
+   manual real-host verification is the load-bearing acceptance
+   gate.
+4. **No regression in default-share path.** Every §4.3 sub-step
+   touching the subagent-plugin spawn path MUST preserve the
+   default-share contract.  Regression-pin tests for the default
+   case at each sub-step boundary.
+
+### Sub-track acceptance gate (sub-§4.3 internal)
+
+§4.3 closes when:
+
+- `agent_params.isolated: true` spawns a separate runner with a
+  sub-AppArmor profile + sub-cgroup, end-to-end.
+- `agent_params.isolated: false` (or absent) uses the existing
+  in-runtime default-share path, unchanged.
+- Integration test covers both flows on a cgroup-writable host.
+- Closure recap addendum updates §3.11 status from "post-§7d
+  deferred" to "shipped via Phase 4 §4.3".
