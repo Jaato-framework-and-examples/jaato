@@ -220,7 +220,9 @@ def test_handler_routes_ask_through_emit_and_resolves() -> None:
         ask_task = asyncio.create_task(handler.handle(payload.to_dict()))
         # Yield once so the handler emits + registers its future.
         await asyncio.sleep(0)
-        assert len(srv._emitted) == 1
+        # Path J (cycle 12): handler emits 2 events per ASK
+        # (PermissionRequestedEvent + PermissionInputModeEvent).
+        assert len(srv._emitted) == 2
         emitted_event = srv._emitted[0]
         assert isinstance(emitted_event, PermissionRequestedEvent)
         assert emitted_event.request_id == "req-42"

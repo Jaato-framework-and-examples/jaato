@@ -278,7 +278,9 @@ def test_e2e_full_ask_roundtrip_through_handler_and_responder() -> None:
 
         # Yield + verify the event landed on the daemon's channel.
         await asyncio.sleep(0)
-        assert len(srv._emitted) == 1
+        # Path J (cycle 12): handler emits 2 events per ASK
+        # (PermissionRequestedEvent + PermissionInputModeEvent).
+        assert len(srv._emitted) == 2
         event = srv._emitted[0]
         assert isinstance(event, PermissionRequestedEvent)
         assert event.request_id == "req-e2e"

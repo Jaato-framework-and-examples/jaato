@@ -36,7 +36,7 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from jaato_sdk.events import PermissionRequestedEvent
+from jaato_sdk.events import PermissionInputModeEvent, PermissionRequestedEvent
 
 from shared.plugins.permission.types import PromptPayload, PromptResponse
 
@@ -48,11 +48,13 @@ logger = logging.getLogger(__name__)
 # These are passed in at construction time so the handler is testable
 # without standing up a full daemon — tests inject stubs.
 
-# Emit a PermissionRequestedEvent to the connected client(s).  The
-# real implementation calls JaatoServer.emit() (or
-# SessionManager._emit_to_session) — both end up on the client's
-# event stream.
-EmitEventFn = Callable[[PermissionRequestedEvent], None]
+# Emit an event to the connected client(s).  The real implementation
+# calls JaatoServer.emit() (or SessionManager._emit_to_session) —
+# both end up on the client's event stream.  Path J: widened from
+# ``PermissionRequestedEvent`` to ``Any`` because the handler now
+# emits TWO event types per ASK (the requested-event +
+# the input-mode-control event).
+EmitEventFn = Callable[[Any], None]
 
 
 class PromptOperatorHandler:
@@ -144,8 +146,40 @@ class PromptOperatorHandler:
             warnings=payload.warnings,
             warning_level=payload.warning_level,
         )
+        # Path J (cycle 12) Layer 10: companion control event that
+        # switches the TUI's input mode to "answer the prompt".
+        # Pre-§7c BOTH events were emitted from the daemon-side
+        # permission plugin's hook (core.py:3105) — that path is
+        # dead post-§7c since the runner-side permission plugin is
+        # the one in the loop, and its ASK arrives HERE via the
+        # PromptOperator RPC instead of via the daemon-side plugin.
+        # The TUI listens for PermissionInputModeEvent (not
+        # PermissionRequestedEvent) to enter permission mode; without
+        # this emit the user's 'y' keypress is queued as a chat
+        # message instead of an ASK response.
+        #
+        # Field gaps documented as backlog (Path J.A/B):
+        # - call_id: PromptPayload doesn't carry the tool's call_id;
+        #   set to None.  Follow-up if TUI per-tool-block correlation
+        #   surfaces the need.
+        # - editable_metadata: requires permission_plugin reference
+        #   for schema lookup; set to None.  Follow-up if editing
+        #   flow surfaces the need.
+        input_mode_event = PermissionInputModeEvent(
+            agent_id=payload.agent_id,
+            request_id=payload.request_id,
+            tool_name=payload.tool_name,
+            call_id=None,
+            response_options=list(payload.response_options),
+            tool_args=dict(payload.tool_args) if payload.tool_args else None,
+            editable_metadata=None,
+        )
         try:
             self._emit_event(event)
+            # Order matters: content event first, then the control
+            # event that switches input mode.  Matches the pre-§7c
+            # daemon-side emit order at core.py.
+            self._emit_event(input_mode_event)
         except Exception:
             self._pending.pop(payload.request_id, None)
             raise

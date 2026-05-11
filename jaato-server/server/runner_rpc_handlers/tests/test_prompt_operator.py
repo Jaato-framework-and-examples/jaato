@@ -95,10 +95,13 @@ def test_prompt_response_minimal_round_trip() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_emits_event_and_awaits_response() -> None:
-    """handle() emits a PermissionRequestedEvent and awaits resolve."""
-    emitted: List[PermissionRequestedEvent] = []
+    """handle() emits a PermissionRequestedEvent + PermissionInputModeEvent
+    (Path J cycle 12) and awaits resolve."""
+    from jaato_sdk.events import PermissionInputModeEvent
 
-    def _emit(event: PermissionRequestedEvent) -> None:
+    emitted: List[Any] = []
+
+    def _emit(event: Any) -> None:
         emitted.append(event)
 
     handler = PromptOperatorHandler(_emit)
@@ -116,7 +119,10 @@ async def test_handler_emits_event_and_awaits_response() -> None:
     asyncio.create_task(_resolve_after_a_bit())
     result = await handler.handle(payload.to_dict())
 
-    assert len(emitted) == 1
+    # Path J: handler emits 2 events per ASK (was 1 pre-Path-J).
+    assert len(emitted) == 2
+    assert isinstance(emitted[0], PermissionRequestedEvent)
+    assert isinstance(emitted[1], PermissionInputModeEvent)
     assert emitted[0].request_id == "r-1"
     assert emitted[0].tool_name == "cli"
     assert emitted[0].tool_args == {"command": "ls"}
@@ -362,7 +368,9 @@ async def test_e2e_prompt_operator_round_trip() -> None:
         await watch_task
         assert response.request_id == "e2e-1"
         assert response.response == "y"
-        assert len(emitted) == 1
+        # Path J (cycle 12): handler emits 2 events per ASK
+        # (PermissionRequestedEvent + PermissionInputModeEvent).
+        assert len(emitted) == 2
         assert emitted[0].tool_name == "cli_based_tool"
     finally:
         await _teardown(pair)
