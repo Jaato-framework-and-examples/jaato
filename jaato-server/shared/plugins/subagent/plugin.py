@@ -47,6 +47,32 @@ def _get_env_connection() -> Dict[str, str]:
     }
 
 
+def _is_isolated_optin(agent_params: Optional[Dict[str, Any]]) -> bool:
+    """Detect the §3.11 isolated-runner opt-in flag in spawn-time agent_params.
+
+    Per parent design §4.3 (``docs/design/per_session_confined_runner.md``),
+    supervisors can request that a spawned subagent run in its own runner
+    subprocess — with a fresh AppArmor sub-profile
+    (``jaato-ws-{session}//{subagent}``) and its own cgroup — by passing
+    ``agent_params={"isolated": True}`` to ``spawn_subagent``.  Without
+    the flag, subagents share the parent's runner (the §4.3 default).
+
+    Returns True only when the flag is explicitly truthy.  Any falsy
+    value (False, missing, ``None``, empty dict, empty string) returns
+    False — preserving the default-share contract bit-exact.
+
+    Phase 4 §4.3.1 status: detection seam is wired here as the
+    tracer-bullet API surface.  The actual isolated-runner spawn
+    machinery (runner→daemon RPC primitive, sub-profile generation,
+    sub-cgroup nesting, cross-runner forwarding) lands incrementally in
+    §4.3.2-§4.3.7 of the Phase 4 sub-track.  Until that arc completes,
+    a True return from this helper triggers a synchronous error response
+    from ``spawn_subagent`` — the caller is told to omit the flag or
+    set it to False and use the default-share path.
+    """
+    return bool((agent_params or {}).get("isolated", False))
+
+
 class SubagentPlugin:
     """Plugin for spawning subagents with specialized tool configurations.
 
@@ -2244,6 +2270,41 @@ class SubagentPlugin:
                 inline_config=inline_config,
                 custom_name=custom_name,
             )
+
+        # ── Isolated-runner opt-in (Phase 4 §4.3.1 stub) ───────────────
+        # Parent design §4.3 (``per_session_confined_runner.md``) defines
+        # an opt-in for spawning the subagent in its own runner
+        # subprocess with a fresh AppArmor sub-profile + sub-cgroup.  The
+        # detection seam is wired here as the tracer-bullet API surface
+        # (§4.3.1); the full machinery — runner→daemon RPC primitive,
+        # sub-profile generation, sub-cgroup nesting, cross-runner
+        # forwarding — lands incrementally in §4.3.2-§4.3.7 of the Phase
+        # 4 sub-track.  Until §4.3.7 wires the opt-in branch, a True
+        # detection returns a clear synchronous error pointing the
+        # caller back to the default-share path.  Placement after the
+        # remote-spawn block is deliberate: remote-spawn is its own form
+        # of isolation (separate process on a separate host), so the
+        # local isolated-runner flag is irrelevant there.
+        if _is_isolated_optin(agent_params_arg):
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    "agent_params.isolated=true is a Phase 4 §4.3 opt-in "
+                    "for spawning the subagent in its own runner "
+                    "subprocess (sub-AppArmor profile "
+                    "jaato-ws-{session}//{subagent} + sub-cgroup).  The "
+                    "detection seam is wired (§4.3.1) but the "
+                    "isolated-runner spawn machinery is not yet "
+                    "implemented — tracked through §4.3.7 in "
+                    "docs/design/phase4_implementation_audits.md.  "
+                    "Workaround: omit agent_params.isolated (or set "
+                    "it to false) to use the default-share path "
+                    "where the subagent runs in the parent's runner.  "
+                    "The default-share path is the established §4.3 "
+                    "default and works end-to-end today."
+                ),
+            ).to_dict()
 
         # Resolve workspace path early — needed for tech stack detection on inline profiles
         workspace_path = self._workspace_path
