@@ -364,6 +364,17 @@ class JaatoServer:
             "PromptOperatorHandler"
         ] = None
 
+        # Path E (cycle 6) §7c step 6.6.4.5b race fix: cached
+        # context_limit avoids in-band ``session_get_context_limit``
+        # RPCs from notification handlers + aspect callbacks that
+        # fire DURING the runner's active ``send_message``.  The
+        # in-band RPC raced against the runner's processing and
+        # timed out (Layer 5 of the post-§7c send-message chain).
+        # Cache populated at end of ``initialize()`` (off-band) and
+        # invalidated on ``/model`` command.  ``None`` means
+        # uninitialized — readers fall back to 0 / payload value.
+        self._cached_context_limit: Optional[int] = None
+
         # Phase 3 §7c step 4: direct daemon-side reference to the
         # ``JaatoRuntime`` (provider config + auth + plugin registry +
         # ledger).  Populated after ``connect()`` returns; aliased to
@@ -2071,6 +2082,13 @@ class JaatoServer:
                 usage.get('context_limit')
                 or self._runner_rpc.session_get_context_limit_threadsafe()
             )
+            # Path E (cycle 6) E.2: cache for in-band aspect callbacks
+            # + notification handlers that must NOT call back into the
+            # runner during active send_message (race with the
+            # runner's own message processing).  Stable across the
+            # session lifetime; invalidated on /model command.
+            if context_limit:
+                self._cached_context_limit = int(context_limit)
             self.emit(ContextUpdatedEvent(
                 agent_id=self._main_agent_id,
                 usage=self._build_usage(
@@ -2634,11 +2652,24 @@ class JaatoServer:
                         'turns': turns,
                         'percent_used': percent_used,
                     }
-                # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
-                context_limit = (
-                    server._runner_rpc.session_get_context_limit_threadsafe()
-                    if server._runner_rpc is not None else 0
-                )
+                # Path E (cycle 6) E.2: read from cache.  Pre-Path-E
+                # this site called ``session_get_context_limit_threadsafe``
+                # in-band, racing against the runner's active
+                # send_message.  Cache populated post-initialize and
+                # invalidated on /model command.  Fallback to off-band
+                # RPC only if cache miss (uninitialized — first
+                # callback before initialize completed).
+                context_limit = getattr(server, "_cached_context_limit", None) or 0
+                if context_limit == 0 and server._runner_rpc is not None:
+                    try:
+                        context_limit = (
+                            server._runner_rpc.session_get_context_limit_threadsafe()
+                        )
+                        if context_limit:
+                            server._cached_context_limit = int(context_limit)
+                    except Exception:  # noqa: BLE001 — never fail
+                        # the aspect callback because of a cache miss
+                        context_limit = 0
                 # Pull cache tokens from the most recent turn entry so the
                 # usage matches Turn{Completed,Progress}Event in expressivity.
                 # The protocol callback doesn't carry them, but we have the
@@ -2792,11 +2823,22 @@ class JaatoServer:
             def on_turn_progress(self, agent_id, total_tokens, prompt_tokens,
                                  output_tokens, percent_used, pending_tool_calls,
                                  cache_read_tokens=None, cache_creation_tokens=None):
-                # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
-                context_limit = (
-                    server._runner_rpc.session_get_context_limit_threadsafe()
-                    if server._runner_rpc is not None else 0
-                )
+                # Path E (cycle 6) E.2: read from cache.  Same race
+                # shape as on_agent_context_updated above — pre-Path-E
+                # this site called ``session_get_context_limit_threadsafe``
+                # in-band, racing against the runner's active
+                # send_message.
+                context_limit = getattr(server, "_cached_context_limit", None) or 0
+                if context_limit == 0 and server._runner_rpc is not None:
+                    try:
+                        context_limit = (
+                            server._runner_rpc.session_get_context_limit_threadsafe()
+                        )
+                        if context_limit:
+                            server._cached_context_limit = int(context_limit)
+                    except Exception:  # noqa: BLE001 — never fail
+                        # the aspect callback because of a cache miss
+                        context_limit = 0
                 server.emit(TurnProgressEvent(
                     agent_id=agent_id,
                     usage=server._build_usage(
@@ -3525,20 +3567,26 @@ class JaatoServer:
                     total_tokens = int(payload.get("total_tokens", 0))
                     if total_tokens == 0:
                         return
-                    # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
-                    if server._runner_rpc is None:
-                        return
+                    # Path E (cycle 6) E.1: context_limit + turns now
+                    # come from the runner-side shim's payload (batched
+                    # alongside the usage figures).  Pre-Path-E this
+                    # handler called back into the runner via 2
+                    # blocking RPCs DURING active send_message — a
+                    # race that timed out and dropped the
+                    # ContextUpdatedEvent (TUI never rendered the
+                    # response).  Fallback chain: payload → cached
+                    # value → 0.  ``0`` keeps the event well-formed
+                    # while signaling unknown-limit downstream.
+                    payload_limit = int(payload.get("context_limit", 0) or 0)
                     context_limit = (
-                        server._runner_rpc.session_get_context_limit_threadsafe()
+                        payload_limit
+                        or (getattr(server, "_cached_context_limit", None) or 0)
                     )
                     percent_used = (
                         (total_tokens / context_limit * 100)
                         if context_limit > 0 else 0
                     )
-                    turn_accounting = (
-                        server._runner_rpc.session_get_turn_accounting_threadsafe()
-                    )
-                    turns = len(turn_accounting)
+                    turns = int(payload.get("turns", 0) or 0)
                     server.emit(ContextUpdatedEvent(
                         agent_id=server._main_agent_id,
                         usage=server._build_usage(
@@ -4137,6 +4185,13 @@ class JaatoServer:
             if command.lower() == "model" and isinstance(result, dict):
                 if result.get("success") and result.get("current_model"):
                     self._model_name = result["current_model"]
+                    # Path E (cycle 6) E.3: invalidate cached
+                    # context_limit — different model can have a
+                    # different context window.  Next in-band reader
+                    # will re-fetch via off-band RPC, OR the next
+                    # ``usage_update`` notification will carry the
+                    # new value via E.1 batching.
+                    self._cached_context_limit = None
                     self.emit(SystemMessageEvent(
                         message=f"Model changed to: {self._model_name}",
                         style="info",

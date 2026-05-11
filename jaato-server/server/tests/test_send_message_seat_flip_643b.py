@@ -197,6 +197,11 @@ def test_usage_update_shim_emits_notification_frame() -> None:
         assert len(notes) == 1
         assert notes[0].id == 42
         assert notes[0].event_type == "usage_update"
+        # Path E (cycle 6) E.1: shim now batches context_limit +
+        # turns into the payload so the daemon-side handler doesn't
+        # need in-band RPCs back into the runner.  The _ShimSession
+        # stub doesn't expose ``get_context_limit`` /
+        # ``_turn_accounting`` — falls back to defaults (0).
         assert notes[0].payload == {
             "prompt_tokens": 100,
             "output_tokens": 50,
@@ -206,6 +211,8 @@ def test_usage_update_shim_emits_notification_frame() -> None:
             "reasoning_tokens": 5,
             "thinking_tokens": 10,
             "cost_usd": 0.0123,
+            "context_limit": 0,
+            "turns": 0,
         }
     finally:
         peer.close()
@@ -446,6 +453,9 @@ def test_demuxer_usage_update_emits_context_event() -> None:
     srv._build_usage = MagicMock(return_value=real_usage)
     handler = srv._build_send_message_notification_handler()
 
+    # Path E (cycle 6) E.1: handler now reads context_limit + turns
+    # from the payload (runner-side shim batches them).  Pre-Path-E
+    # they came from in-band ``session_get_*_threadsafe`` RPCs.
     handler("usage_update", {
         "prompt_tokens": 100,
         "output_tokens": 50,
@@ -455,6 +465,8 @@ def test_demuxer_usage_update_emits_context_event() -> None:
         "reasoning_tokens": None,
         "thinking_tokens": None,
         "cost_usd": 0.012,
+        "context_limit": 100_000,
+        "turns": 2,
     })
 
     assert len(srv._emitted_events) == 1

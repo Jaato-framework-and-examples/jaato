@@ -2746,23 +2746,60 @@ class RunnerRPC:
         """Build a per-call ``on_usage_update`` shim that emits a
         ``usage_update`` NotificationFrame.
 
-        Phase 3 §7c step 6.6.4.3b.  The daemon-side handler
-        consumes the serialized ``TokenUsage`` dict + the runner-
-        side context-limit/turns lookups it does and re-emits
-        ``ContextUpdatedEvent`` daemon-side.  The serializer runs
-        runner-side because it has the live ``TokenUsage`` object;
-        the daemon side reconstructs from primitives.
+        Phase 3 §7c step 6.6.4.3b + Path E (cycle 6).  The shim
+        bundles the serialized ``TokenUsage`` dict TOGETHER with
+        ``context_limit`` + ``turns`` count read locally from the
+        runner-side session.  Pre-Path-E the daemon-side handler
+        called BACK into the runner via 2 blocking RPCs
+        (``session_get_context_limit`` + ``session_get_turn_accounting``)
+        to compute these values — that path raced against the
+        runner's still-active ``send_message`` call and timed out.
+        Batching the values into the notification payload eliminates
+        the in-band RPCs; daemon-side handler reads from payload.
 
         Defensive: a ``TokenUsage`` instance is a dataclass with
         well-known field names (prompt_tokens, output_tokens,
         total_tokens, plus optional cache/reasoning/thinking/
         cost_usd).  ``getattr`` keeps the shim resilient to
         provider-side subclasses adding fields.
+
+        Context-limit lookup is also defensive: failures fall back
+        to ``0`` so the daemon-side handler can detect the missing-
+        value case (and either consult its cached value or omit the
+        ``context_limit`` field of ``ContextUpdatedEvent``).
         """
         rpc = self
 
         def _shim(usage: Any) -> None:
             try:
+                # Path E (cycle 6): compute context_limit + turns
+                # locally from the runner-side session so the daemon
+                # handler doesn't need to call back into the runner.
+                context_limit = 0
+                turns = 0
+                try:
+                    host = rpc._session_host
+                    sess = getattr(host, "session", None) if host else None
+                    if sess is not None:
+                        getter = getattr(sess, "get_context_limit", None)
+                        if callable(getter):
+                            context_limit = int(getter() or 0)
+                        accounting = getattr(sess, "_turn_accounting", None)
+                        if accounting is None:
+                            accounting_getter = getattr(
+                                sess, "get_turn_accounting", None,
+                            )
+                            if callable(accounting_getter):
+                                accounting = accounting_getter()
+                        if accounting is not None:
+                            turns = len(accounting)
+                except Exception:  # noqa: BLE001 — never fail the
+                    # notification shim because of an accessor crash
+                    logger.exception(
+                        "usage_update shim: context_limit/turns lookup "
+                        "crashed; emitting payload with defaults"
+                    )
+
                 payload = {
                     "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
                     "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
@@ -2774,6 +2811,9 @@ class RunnerRPC:
                     "reasoning_tokens": getattr(usage, "reasoning_tokens", None),
                     "thinking_tokens": getattr(usage, "thinking_tokens", None),
                     "cost_usd": getattr(usage, "cost_usd", None),
+                    # Path E batched values:
+                    "context_limit": context_limit,
+                    "turns": turns,
                 }
                 rpc.emit_notification(
                     request_id=request_id,
@@ -3806,11 +3846,22 @@ def _serialize_message_for_wire(msg: Any) -> Any:
 
     1. ``msg.to_dict()`` if defined — custom message types (test
        doubles, future opt-in serializers) win.
-    2. :func:`dataclasses.asdict` for plain dataclasses (the real
-       ``shared.plugins.model_provider.types.Message`` shape).  Enum
-       values are coerced to their ``.value`` form recursively so
-       JSON encoders don't choke.
-    3. Pass-through (last resort — caller's try/except will catch).
+    2. **Real ``Message`` dataclass** → canonical session
+       serializer (``shared.plugins.session.serializer.serialize_message``).
+       Path E (cycle 6).  Pre-Path-E this path used
+       ``dataclasses.asdict`` which produced a different wire shape
+       (parts as raw dataclass dump) than the canonical session
+       serializer expects (parts as tagged-union).  The mismatch
+       crashed both ``session_manager._save_session`` and the
+       replay path with ``'dict' object has no attribute 'role'``.
+       Switching to the canonical serializer makes the wire format
+       round-trip cleanly through ``serialize_history`` /
+       ``deserialize_history``.
+    3. :func:`dataclasses.asdict` for OTHER dataclasses (test fakes
+       that don't implement ``to_dict`` but aren't real Messages).
+       Preserved for backward compat with existing test stubs.
+       Enum values coerced via :func:`_coerce_for_json`.
+    4. Pass-through (last resort — caller's try/except will catch).
 
     The wire form must round-trip cleanly to ``json.dumps`` — the
     runner-side framing uses JSON throughout.
@@ -3818,6 +3869,15 @@ def _serialize_message_for_wire(msg: Any) -> Any:
     to_dict = getattr(msg, "to_dict", None)
     if callable(to_dict):
         return to_dict()
+    # Path E (cycle 6): real Message dataclass → canonical
+    # session-serializer wire format.
+    try:
+        from jaato_sdk.plugins.model_provider.types import Message
+        from shared.plugins.session.serializer import serialize_message
+        if isinstance(msg, Message):
+            return serialize_message(msg)
+    except ImportError:
+        pass
     import dataclasses
     if dataclasses.is_dataclass(msg) and not isinstance(msg, type):
         return _coerce_for_json(dataclasses.asdict(msg))

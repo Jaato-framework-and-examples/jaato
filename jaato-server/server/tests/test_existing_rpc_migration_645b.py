@@ -205,12 +205,20 @@ def test_runner_rpc_get_context_limit_calls_present() -> None:
     core_calls = _module_calls_runner_rpc_method(
         core_module, "session_get_context_limit_threadsafe",
     )
-    # 6 sites in core.py.
-    assert len(core_calls) >= 6, (
-        f"Expected ≥6 ``session_get_context_limit_threadsafe`` calls in "
-        f"server/core.py; found {len(core_calls)}.  Migration sites: "
-        f"initialize() ×1, model-thread ×3 (3 distinct sites: 2 inline-"
-        f"ternaries + demuxer + post-loop), auth-completion ×1."
+    # Path E (cycle 6): the demuxer-branch in-band RPC at the
+    # ``usage_update`` handler was REMOVED — context_limit now
+    # arrives in the notification payload (E.1).  Two aspect
+    # callbacks (on_agent_context_updated + on_turn_progress) keep
+    # their off-band RPC fallback for first-callback-before-cache-
+    # populated paths (E.2 cache-or-fetch pattern), so they still
+    # contribute callsites even though the in-band race is closed.
+    # Net: ≥5 (was ≥6 pre-Path-E).  Migration sites: initialize()
+    # ×1, model-thread ×3 (post-loop ×1 + 2 aspect callbacks ×2),
+    # auth-completion ×1.
+    assert len(core_calls) >= 5, (
+        f"Expected ≥5 ``session_get_context_limit_threadsafe`` calls in "
+        f"server/core.py; found {len(core_calls)}.  Path E removed the "
+        f"in-band demuxer-branch call (race fix); other sites preserved."
     )
 
 

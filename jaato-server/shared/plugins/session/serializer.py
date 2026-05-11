@@ -172,16 +172,37 @@ def deserialize_message(data: Dict[str, Any]) -> Message:
     )
 
 
-def serialize_history(history: List[Message]) -> List[Dict[str, Any]]:
+def serialize_history(history: List[Any]) -> List[Dict[str, Any]]:
     """Serialize a conversation history to a list of dictionaries.
 
+    Path E (cycle 6) idempotency contract: accepts either a list
+    of :class:`Message` objects (canonical input — the historical
+    contract) OR a list of already-serialized dicts (from the
+    runner-RPC ``session_get_history`` wire — produced by the
+    canonical ``serialize_message`` since Path E).  Dict elements
+    pass through unchanged; ``Message`` elements are serialized.
+    Mixed lists are tolerated.
+
+    Pre-Path-E this function crashed with ``'dict' object has no
+    attribute 'role'`` when given the wire dicts, breaking both
+    ``session_manager._save_session`` (via
+    ``serialize_session_state``) and the replay path (via
+    ``session_replay_messages_threadsafe``).  Idempotency closes
+    both crashes without requiring callers to pre-deserialize.
+
     Args:
-        history: List of Message objects.
+        history: List of Message objects OR already-serialized dicts.
 
     Returns:
         List of dictionary representations.
     """
-    return [serialize_message(m) for m in (history or [])]
+    result: List[Dict[str, Any]] = []
+    for m in (history or []):
+        if isinstance(m, dict):
+            result.append(m)
+        else:
+            result.append(serialize_message(m))
+    return result
 
 
 def deserialize_history(data: List[Dict[str, Any]]) -> List[Message]:
