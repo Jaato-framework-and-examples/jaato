@@ -1820,6 +1820,112 @@ the §3.12 disk-restore fallback path).
 
 §7d ships as a single-commit migration; no further split needed.
 
+### Step 7 disposition audit (pre-implementation, post-§7c/§7d)
+
+20th audit in the §7c+§7d arc.  Verifies the gate ("permission-
+plugin runner-side activation") is genuinely satisfied post-
+seat-flip + cgroup migration and identifies the actual scope
+of Step 7's wiring work.
+
+**Q1 — Post-§7c state of `JaatoServer.respond_to_*` methods?**
+
+All 4 still exist at `core.py:3808-3882`:
+- `respond_to_permission(request_id, response, edited_arguments)` — pushes to `_channel_input_queue`
+- `respond_to_clarification(request_id, response)` — pushes to `_channel_input_queue`
+- `respond_to_clarification_batch(request_id, answers)` — pushes multiple
+- `respond_to_reference_selection(request_id, response)` — pushes to `_channel_input_queue`
+
+The daemon-side `_channel_input_queue` is consumed by **daemon-
+side** plugin `_channel.set_callbacks(input_queue=...)` wirings
+at `core.py:3279/3291/3301` — but those are wired to
+**daemon-side plugin instances**, NOT runner-side ones.
+Post-seat-flip, the runner-side plugin is the one firing
+ASKs; the daemon-side queue is orphaned for runner-fired ASKs.
+
+**Q2 — `PromptOperatorHandler.resolve_response()` integration?**
+
+Class exists at `server/runner_rpc_handlers/prompt_operator.py:58`.
+`register()` helper exists at line 215.  Cross-grep:
+**`PromptOperatorHandler` is NEVER instantiated in production
+code** — only tests construct it.  The wiring slot is empty.
+
+**Q3 — Permission plugin's runner-side ASK path?**
+
+`permission/plugin.py:135` `_get_runner_rpc_channel()` does
+`rpc_client = getattr(registry, 'runner_rpc_client', None)`.
+Cross-grep: **`registry.runner_rpc_client` is never assigned
+in production code** — only daemon-side `setattr(self.registry,
+"runner_rpc", rpc_client)` at `core.py:4315` (different
+attribute name + daemon-side registry).  The runner-side
+permission plugin's lookup always returns None → falls back
+to the in-process `_channel` → reads from a queue no one fills
+(runner-side `_channel_input_queue` is daemon-instance-bound).
+
+**Q4 — Runner-internal `RunnerRPCClient`?**
+
+Class exists at `server/runner/rpc_client.py:48` with
+`prompt_operator()` method.  Cross-grep:
+**`RunnerRPCClient` is never instantiated** — defined but unwired.
+
+**Q5 — Daemon-side `RunnerRPCServer`?**
+
+Class exists at `server/runner_rpc_server.py:68`.  Cross-grep:
+**never instantiated** in production code.  The runner→daemon
+RPC dispatch infrastructure (apparmor fragment, prompt
+operator, telemetry publish) is defined but unwired on both
+ends.
+
+**Q6 — Clarification + References runner-RPC channels?**
+
+`shared/plugins/clarification/channels.py` and
+`shared/plugins/references/channels.py` exist as in-process
+channels.  Neither has a RunnerRPCChannel equivalent.  Only
+the permission plugin shipped a runner-RPC channel
+(`permission/runner_rpc_channel.py`); clarification + references
+remained in-process-only.
+
+**Q7 — Test coverage for ASK round-trip?**
+
+`permission/tests/test_plugin_runner_rpc_wiring.py` exists and
+tests the runner-RPC channel + plugin lookup, but with mocked
+`prompt_operator` callables — not an integration test through
+real daemon emit → client response → handler resolution.
+
+#### Step 7 audit findings
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | Step 7's original scope ("wire PromptOperatorHandler") was framed assuming only the handler-registration was missing.  Actual scope: BOTH ends of the runner→daemon RPC infrastructure are unwired. | Sub-track expands; single commit is insufficient. |
+| 2 | `PromptOperatorHandler`, `RunnerRPCServer`, and the runner-internal `RunnerRPCClient` are all defined-but-never-instantiated. | Step 7.1 instantiates the daemon-side trio; Step 7.2 instantiates the runner-internal client. |
+| 3 | `registry.runner_rpc_client` attribute on the runner-side registry is never assigned.  Permission plugin's runner-side detection always returns None. | Step 7.2 wires the assignment in the runner bootstrap. |
+| 4 | Daemon-side `respond_to_permission` writes to `_channel_input_queue` — orphaned for runner-fired ASKs.  Needs to route through `PromptOperatorHandler.resolve_response(request_id, response)` instead. | Step 7.3 rewires `respond_to_permission`. |
+| 5 | Clarification + References plugins lack RunnerRPCChannel equivalents.  Open question: are they currently fired runner-side at all, or do their ASKs only flow daemon-side via the in-process channel? | **Flag for Step 7 follow-up audit** — investigation needed before committing scope. |
+| 6 | `RunnerRPCServer` instances need to be plumbed into the `RunnerRPCClient` read loop so incoming runner→daemon RPCs get dispatched.  Today's read loop handles response/stream/event frames; needs a request-frame path too. | Step 7.1 adds the bidirectional dispatch. |
+| 7 | No e2e integration test exists for the full ASK round-trip. | Step 7.3 adds one. |
+| 8 | Audit-discipline catch: original "wire PromptOperatorHandler" framing would have missed the runner-side RPC client instantiation gap (finding #3) and the bidirectional read-loop dispatch gap (finding #6).  | Both surfaced by pre-implementation grep — confirms the discipline's value at sub-track boundaries. |
+
+#### Step 7 sub-decomposition
+
+**This is a multi-commit sub-track, not a single commit.**
+
+| Sub-commit | Scope | Test pin |
+|---|---|---|
+| **Step 7.0** | This disposition audit (no code). | 0 |
+| **Step 7.1** | Daemon-side: instantiate `RunnerRPCServer` + `PromptOperatorHandler` per session; bind handler to `JaatoServer.emit`; register handler via `register()` helper; plumb the server into the daemon-side `RunnerRPCClient` read loop's request-frame dispatch path. | ~10-15 unit + ~3 integration |
+| **Step 7.2** | Runner-side: instantiate runner-internal `RunnerRPCClient` from the bootstrap socket; attach to runner registry as `registry.runner_rpc_client`; verify the permission plugin picks it up. | ~5-8 unit |
+| **Step 7.3** | Rewire `JaatoServer.respond_to_permission` to call `PromptOperatorHandler.resolve_response(request_id, response)` instead of pushing to `_channel_input_queue` (keep queue path as fallback for daemon-fired ASKs if any remain).  Add e2e integration test for full ASK round-trip. | ~5 unit + 1 e2e |
+| **Step 7.4 (conditional)** | Clarification + References RunnerRPCChannel equivalents IF investigation confirms they're fired runner-side. | TBD |
+
+**Audit-discipline tally: 20 audits, 20 silent-regression
+catches** (today's catch: original "wire PromptOperatorHandler"
+framing missed the bidirectional RPC infrastructure gaps —
+both ends of the wire were unwired, not just the handler).
+
+Step 7 is a **deferred sub-track** per the user's earlier
+classification.  Phase 3 critical path closure does NOT depend
+on Step 7 shipping; the seat-flip (§7c) + cgroup migration
+(§7d) constitute the architectural milestone.
+
 ## 8. Test invariant for the next contributor
 
 If a daemon-side migration commits to the runner-RPC surface,
