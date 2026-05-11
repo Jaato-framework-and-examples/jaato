@@ -1292,32 +1292,64 @@ class SessionManager:
             cgroup_path or "(none)",
         )
 
-        # §4.3.6a return shape — stays at ``stage=forwarding``
-        # because the supervisor/subagent cross-runner forwarding
-        # isn't wired yet.  Diagnostic fields prove the spawn
-        # happened so §4.3.6b/c/d tests + supervisor wire-up can
-        # observe the new state.
+        # ── Phase 4 §4.3.6c — session.bootstrap + first-turn dispatch ──
+        # The sub-runner subprocess is up but its runner-side
+        # JaatoSession isn't yet — dispatch session.bootstrap so
+        # the sub-runner constructs its session host before we
+        # send the first-turn prompt.  Bootstrap failure is
+        # surfaced as a stage=forwarding error envelope; the
+        # sub-runner is left registered (caller can attempt
+        # explicit teardown).
+        envelope = self._build_isolated_envelope(
+            profile=profile,
+            isolated_session_id=isolated_session_id,
+            workspace_path=workspace_path,
+            sub_apparmor_profile=sub_profile_name,
+            agent_params=agent_params,
+        )
+        bootstrap_ok = self._dispatch_isolated_session_bootstrap(
+            sub_handle, envelope,
+        )
+        if not bootstrap_ok:
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-runner subprocess spawned but "
+                    f"session.bootstrap dispatch failed.  Sub-runner "
+                    f"will not run the task.  Sub-resources remain "
+                    f"provisioned until parent teardown (§4.3.6d "
+                    f"will add cascade)."
+                ),
+                "stage": "forwarding",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+                "apparmor_profile": sub_profile_name,
+                "cgroup_path": cgroup_path,
+                "sub_runner_pid": sub_handle.spawned.pid,
+                "sub_session_id": isolated_session_id,
+            }
+
+        # Schedule the first-turn prompt as a background task — the
+        # sub-runner runs the task; streaming output forwards back
+        # via the §4.3.6b chain.  Returns immediately so the caller
+        # (subagent plugin) can continue.
+        self._schedule_isolated_first_turn(sub_handle, task)
+
+        # §4.3.6c milestone — isolated subagent is running end-to-end.
+        # ok=True signals the supervisor that the spawn succeeded;
+        # streaming output will arrive via inject_prompt over the
+        # cross-runner chain.
         return {
-            "ok": False,
-            "error": (
-                f"sub-runner subprocess spawned successfully but "
-                f"cross-runner forwarding not yet wired (Phase 4 "
-                f"§4.3.6b-d).  Sub-AppArmor profile "
-                f"{sub_profile_name!r} active; sub-cgroup "
-                f"{cgroup_path or '(none)'!r} attached; sub-runner "
-                f"pid={sub_handle.spawned.pid}.  Without forwarding, "
-                f"the supervisor model can't see sub-runner output "
-                f"or send prompts.  Workaround for the §4.3.6 "
-                f"interim: omit agent_params.isolated to use "
-                f"default-share path.  See "
-                f"docs/design/phase4_implementation_audits.md."
-            ),
-            "stage": "forwarding",
-            "isolated_session_id": isolated_session_id,
-            "profile_name": profile.name,
+            "ok": True,
+            "session_id": isolated_session_id,
+            "subagent_id": subagent_id,
+            "runner_pid": sub_handle.spawned.pid,
             "apparmor_profile": sub_profile_name,
             "cgroup_path": cgroup_path,
-            # §4.3.6a diagnostic fields — proves spawn happened.
+            # Diagnostic fields kept for backward-compat with §4.3.6a/b
+            # test assertions + audit-trail logging.
+            "isolated_session_id": isolated_session_id,
+            "profile_name": profile.name,
             "sub_runner_pid": sub_handle.spawned.pid,
             "sub_session_id": isolated_session_id,
         }
@@ -1403,6 +1435,202 @@ class SessionManager:
             sub_apparmor_profile=sub_apparmor_profile,
             cgroup_path=cgroup_path,
         )
+
+    def _build_isolated_envelope(
+        self,
+        *,
+        profile: Any,  # SubagentProfile
+        isolated_session_id: str,
+        workspace_path: str,
+        sub_apparmor_profile: str,
+        agent_params: Optional[Dict[str, Any]],
+    ) -> Any:
+        """Build a :class:`SessionInitEnvelope` for an isolated
+        subagent's runner-side bootstrap (Phase 4 §4.3.6c).
+
+        Mirrors ``server.runner_spawn.build_session_envelope`` but
+        sources fields from the reconstructed SubagentProfile
+        directly (no daemon-side JaatoServer with ``_profile``
+        attribute — isolated subagents don't get one).
+        """
+        from shared.session_envelope import SessionInitEnvelope
+
+        provider_name = getattr(profile, "provider", None) or ""
+        model_name = getattr(profile, "model", None) or ""
+        plugins_list = list(getattr(profile, "plugins", []) or [])
+        preloaded = set(
+            getattr(profile, "preloaded_plugins", set()) or set(),
+        )
+        plugin_configs = dict(
+            getattr(profile, "plugin_configs", {}) or {},
+        )
+        plugin_specs = []
+        for name in plugins_list:
+            entry = {"name": name, "preload": name in preloaded}
+            cfg = plugin_configs.get(name)
+            if cfg:
+                entry["config"] = dict(cfg)
+            plugin_specs.append(entry)
+
+        system_instructions = getattr(profile, "system_instructions", None)
+        gc_dict = None
+        gc_obj = getattr(profile, "gc", None)
+        if gc_obj is not None:
+            gc_type = getattr(gc_obj, "type", None)
+            gc_config = getattr(gc_obj, "config", None) or {}
+            if gc_type:
+                gc_dict = {"type": gc_type, **dict(gc_config)}
+        env_overrides = dict(getattr(profile, "env", {}) or {})
+
+        if not provider_name:
+            provider_name = "anthropic"
+
+        try:
+            project_val = os.environ.get("PROJECT_ID", "") or ""
+            location_val = os.environ.get("LOCATION", "") or ""
+        except Exception:  # noqa: BLE001
+            project_val = ""
+            location_val = ""
+
+        return SessionInitEnvelope(
+            session_id=isolated_session_id,
+            workspace_path=workspace_path,
+            profile_name=sub_apparmor_profile,
+            provider_name=provider_name,
+            model_name=model_name,
+            plugins=plugin_specs,
+            system_instructions=system_instructions,
+            agent_id="main",
+            gc=gc_dict,
+            agent_params=dict(agent_params or {}),
+            config_root=None,  # Isolated subagent doesn't inherit.
+            env_overrides=env_overrides,
+            project=project_val,
+            location=location_val,
+        )
+
+    def _dispatch_isolated_session_bootstrap(
+        self,
+        sub_handle: SubRunnerHandle,
+        envelope: Any,  # SessionInitEnvelope
+        *,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Send the ``session.bootstrap`` RPC to the sub-runner so
+        its runner-side JaatoSession host is populated before the
+        first-turn prompt arrives (Phase 4 §4.3.6c).
+
+        Synchronous: blocks until the sub-runner acknowledges.
+        Returns True on success, False on failure (logged).
+        """
+        try:
+            result = sub_handle.rpc.bootstrap_session_threadsafe(
+                envelope, timeout=timeout,
+            )
+            logger.info(
+                "isolated session.bootstrap acknowledged for %s: %s",
+                sub_handle.isolated_session_id, result,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "isolated session.bootstrap failed for %s: %s",
+                sub_handle.isolated_session_id, exc,
+                exc_info=True,
+            )
+            return False
+
+    def _schedule_isolated_first_turn(
+        self,
+        sub_handle: SubRunnerHandle,
+        task: str,
+    ) -> None:
+        """Schedule the first-turn prompt dispatch as an async task
+        on the daemon loop (Phase 4 §4.3.6c).
+
+        Returns immediately — the actual ``session.send_message``
+        runs in the background.  Output streams back to the parent
+        runner via the §4.3.6b ``subagent.forward_event`` RPC chain
+        triggered by the ``on_output`` / ``on_notification``
+        callbacks registered here.
+
+        On completion: forwards final response (as event_kind=output)
+        + status=done.
+        On exception: forwards status=error with the exception message.
+        """
+        import asyncio
+
+        daemon_loop = getattr(self, "_daemon_loop", None)
+        if daemon_loop is None:
+            logger.warning(
+                "_schedule_isolated_first_turn: no daemon loop; "
+                "sub-runner %s will not receive task",
+                sub_handle.isolated_session_id,
+            )
+            self._forward_subagent_event_to_parent(
+                sub_handle, "error",
+                {"message": "no daemon loop to dispatch first-turn prompt"},
+            )
+            return
+
+        # on_output: forward streaming text chunks to parent.
+        def on_output(source: str, text: str, mode: str) -> None:
+            try:
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "output",
+                    {"text": text, "source": source},
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "on_output forwarding failed for %s",
+                    sub_handle.isolated_session_id,
+                )
+
+        # on_notification: lifecycle notifications (instruction
+        # budget, retry, etc.).  Phase 4 §4.3.6c forwards them
+        # as status events; finer-grained kinds are Phase 5+.
+        def on_notification(event_type: str, payload: Any) -> None:
+            try:
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "status",
+                    {
+                        "status": str(event_type),
+                        "payload": payload if isinstance(payload, dict) else {},
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "on_notification forwarding failed for %s",
+                    sub_handle.isolated_session_id,
+                )
+
+        async def _run_first_turn():
+            try:
+                response = await sub_handle.rpc.session_send_message(
+                    prompt=task,
+                    on_output=on_output,
+                    on_notification=on_notification,
+                )
+                # Final response — forward as terminal output.
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "output",
+                    {"text": response, "source": "final"},
+                )
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "status",
+                    {"status": "done"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "_run_first_turn: session.send_message failed for %s",
+                    sub_handle.isolated_session_id,
+                )
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "error",
+                    {"message": f"{type(exc).__name__}: {exc}"},
+                )
+
+        asyncio.run_coroutine_threadsafe(_run_first_turn(), daemon_loop)
 
     def _forward_subagent_event_to_parent(
         self,

@@ -84,6 +84,7 @@ def _make_session_manager(
     import threading
     sm._lock = threading.RLock()
     sm._isolated_sub_runners = {}
+    sm._sessions = {}  # §4.3.6c reads this in _forward_subagent_event_to_parent
     if apparmor_manager is not None:
         sm._apparmor_manager = apparmor_manager
     if cgroups_manager is not None:
@@ -382,9 +383,11 @@ class TestSubCgroupProvisioningStage:
             workspace_path="/work",
         )
 
-        assert result["stage"] == "forwarding"
+        # Post-§4.3.6c: bootstrap dispatched on MagicMock RPC returns
+        # truthy → ok=True.  cgroup_path stays empty (cgroups
+        # unavailable was the §4.3.5 branch).
+        assert result["ok"] is True
         assert result["cgroup_path"] == ""
-        # provision_cgroup NOT called (cgroups unavailable).
         cgroups.provision_cgroup.assert_not_called()
 
     def test_no_runtime_limits_advances_to_forwarding(self):
@@ -407,7 +410,8 @@ class TestSubCgroupProvisioningStage:
             workspace_path="/work",
         )
 
-        assert result["stage"] == "forwarding"
+        # Post-§4.3.6c: bootstrap MagicMock-returns truthy → ok=True.
+        assert result["ok"] is True
         assert result["cgroup_path"] == ""
         cgroups.provision_cgroup.assert_not_called()
 
@@ -442,7 +446,8 @@ class TestSubCgroupProvisioningStage:
             workspace_path="/work",
         )
 
-        assert result["stage"] == "forwarding"
+        # Post-§4.3.6c: ok=True with cgroup_path populated.
+        assert result["ok"] is True
         assert result["cgroup_path"] == cgroup_str
         # provision_cgroup invoked with the isolated_session_id.
         provision_call = cgroups.provision_cgroup.call_args
@@ -600,7 +605,14 @@ class TestSpawnInvocation:
 
     def test_spawn_success_registers_handle(self):
         """Successful spawn → handle stored in
-        ``_isolated_sub_runners`` keyed by isolated_session_id."""
+        ``_isolated_sub_runners`` keyed by isolated_session_id.
+
+        Post-§4.3.6c: bootstrap is dispatched on the registered
+        handle.  The default test handle's ``rpc`` is a MagicMock,
+        so ``bootstrap_session_threadsafe`` returns a MagicMock
+        (truthy) and ``_schedule_isolated_first_turn`` runs but
+        no-ops because ``_daemon_loop`` is unset (caller forwards
+        the error event)."""
         apparmor = _make_default_apparmor()
         handle = _make_spawn_handle(pid=12345)
         sm = _make_session_manager(
@@ -616,13 +628,46 @@ class TestSpawnInvocation:
             workspace_path="/work",
         )
 
-        assert result["stage"] == "forwarding"
-        # Diagnostic fields prove spawn happened.
+        # §4.3.6c: ok=True now (bootstrap MagicMock-returns truthy +
+        # first-turn scheduled via daemon loop or short-circuits).
+        assert result["ok"] is True
+        assert result["session_id"] == "sess-A__sub_agent-1"
+        assert result["runner_pid"] == 12345
         assert result["sub_runner_pid"] == 12345
         assert result["sub_session_id"] == "sess-A__sub_agent-1"
         # Handle registered under the isolated session id.
         assert "sess-A__sub_agent-1" in sm._isolated_sub_runners
         assert sm._isolated_sub_runners["sess-A__sub_agent-1"] is handle
+        # bootstrap_session_threadsafe was invoked.
+        handle.rpc.bootstrap_session_threadsafe.assert_called_once()
+
+    def test_spawn_success_with_bootstrap_failure_returns_forwarding(self):
+        """Bootstrap RPC raises → helper returns stage=forwarding
+        with the bootstrap-failure message; handle stays registered
+        (parent-cascade §4.3.6d will tear down)."""
+        apparmor = _make_default_apparmor()
+        handle = _make_spawn_handle(pid=12345)
+        handle.rpc.bootstrap_session_threadsafe.side_effect = RuntimeError(
+            "bootstrap boom",
+        )
+        sm = _make_session_manager(
+            apparmor_manager=apparmor,
+            spawn_returns=handle,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is False
+        assert result["stage"] == "forwarding"
+        assert "session.bootstrap dispatch failed" in result["error"]
+        # Handle still registered.
+        assert "sess-A__sub_agent-1" in sm._isolated_sub_runners
 
     def test_spawn_failure_rolls_back_apparmor_and_cgroup(self):
         """``_do_spawn_isolated_runner`` raises → rollback chain
@@ -737,3 +782,118 @@ class TestSpawnInvocation:
         assert result["stage"] == "forwarding"
         assert "spawn failed" in result["error"].lower()
         assert "daemon loop unavailable" in result["error"].lower()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# §4.3.6c bootstrap + first-turn dispatch wiring
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestBootstrapAndFirstTurnDispatch:
+    """Phase 4 §4.3.6c: after §4.3.6a spawn succeeds, the helper
+    dispatches session.bootstrap to the sub-runner + schedules the
+    first-turn prompt via session.send_message.  These tests pin
+    the wire-shape of both calls + the ok=True envelope."""
+
+    def test_bootstrap_dispatched_with_envelope(self):
+        """bootstrap_session_threadsafe invoked with a SessionInitEnvelope
+        derived from the SubagentProfile."""
+        apparmor = _make_default_apparmor()
+        handle = _make_spawn_handle()
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, spawn_returns=handle,
+        )
+
+        sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                provider="anthropic", model="claude-sonnet-4-5",
+                plugins=["cli", "todo"],
+            ),
+            task="investigate X",
+            workspace_path="/work",
+        )
+
+        handle.rpc.bootstrap_session_threadsafe.assert_called_once()
+        envelope = handle.rpc.bootstrap_session_threadsafe.call_args[0][0]
+        assert envelope.session_id == "sess-A__sub_agent-1"
+        assert envelope.workspace_path == "/work"
+        assert envelope.profile_name == "jaato-ws-sess-A//agent-1"
+        assert envelope.provider_name == "anthropic"
+        assert envelope.model_name == "claude-sonnet-4-5"
+        # plugins list rendered as plugin_specs.
+        plugin_names = [p["name"] for p in envelope.plugins]
+        assert "cli" in plugin_names
+        assert "todo" in plugin_names
+
+    def test_bootstrap_failure_returns_forwarding_envelope(self):
+        """When bootstrap raises, helper returns stage=forwarding
+        with the failure message; handle stays registered."""
+        apparmor = _make_default_apparmor()
+        handle = _make_spawn_handle()
+        handle.rpc.bootstrap_session_threadsafe.side_effect = RuntimeError(
+            "transport closed",
+        )
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, spawn_returns=handle,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is False
+        assert result["stage"] == "forwarding"
+        assert "session.bootstrap dispatch failed" in result["error"]
+        # Handle stays registered for §4.3.6d cascade teardown.
+        assert "sess-A__sub_agent-1" in sm._isolated_sub_runners
+
+    def test_envelope_provider_defaults_to_anthropic(self):
+        """When profile has no provider, envelope defaults to
+        anthropic (matches build_session_envelope's behavior)."""
+        apparmor = _make_default_apparmor()
+        handle = _make_spawn_handle()
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, spawn_returns=handle,
+        )
+        payload = _valid_payload()
+        payload.pop("provider", None)
+
+        sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=payload,
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        envelope = handle.rpc.bootstrap_session_threadsafe.call_args[0][0]
+        assert envelope.provider_name == "anthropic"
+
+    def test_first_turn_short_circuits_when_no_daemon_loop(self):
+        """Without daemon_loop, _schedule_isolated_first_turn forwards
+        an error event instead of dispatching session.send_message."""
+        apparmor = _make_default_apparmor()
+        handle = _make_spawn_handle()
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, spawn_returns=handle,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        # Helper still returns ok=True (bootstrap succeeded);
+        # first-turn dispatch logged a warning + forwarded error
+        # event.  session_send_message was NOT invoked.
+        assert result["ok"] is True
+        handle.rpc.session_send_message.assert_not_called()
