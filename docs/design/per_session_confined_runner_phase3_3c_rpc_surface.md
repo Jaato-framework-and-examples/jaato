@@ -2486,3 +2486,137 @@ The bootstrap chain closed in 4 layers; the send-message chain identified at 2 l
 **Hypothesis status update.**  Path D's hybrid hypothesis ("a single static-diff audit can close a tractably-finite chain in one pass") was **partially validated** by cycle 5: the bootstrap chain DID close cleanly (Test #1 PASS).  But cycle 6 revealed that the §7c regression set contains MULTIPLE chains, not one.  Each chain (bootstrap, send-message, possibly others not yet surfaced) must be audited and closed independently.  The hybrid methodology scales to within-chain catches; integration tests against a real provider remain load-bearing for **between-chain** discovery.
 
 Path E refines the methodology: when a new chain surfaces, audit the entire chain in one pass before implementation (don't split layers).  Post-Path-E integration-test (cycle 7) is the verdict on whether the send-message chain is also tractably-finite.
+
+### Path F pre-implementation audit (cycle 7 — third chain)
+
+23rd audit; third attempt to apply the hybrid-audit methodology to a new post-§7c regression chain.
+
+**Cycle 7 verdict** (post-Path-E integration test):
+
+| Test | Result |
+|---|---|
+| #1 Smoke session create | ✅ PASS (bootstrap chain holds) |
+| #2 Allow-policy tool call | ⏸ Not run |
+| #3 ASK round-trip | ❌ BLOCKED — Layer 7: streaming response not propagating |
+
+Path E closed the in-band notification + serialization layers (zero errors this cycle vs cycle 6's 2 errors).  But the model response itself — text chunks, tool-call requests, ASK prompts — isn't reaching the daemon.  Third chain surfaced: **streaming response delivery (runner→daemon)**.
+
+**Q1 — Audit-of-record back-reference: was this gap previously identified?**
+
+YES.  ``docs/design/project_backlog_runner_ui_hooks_gap.md`` (created during the §7c step 6.6.4.5 implementation-review audit, "Finding 3") explicitly identified:
+
+> Post-§7c step 6.6.4.3b seat-flip, the runner-side ``JaatoSession`` is the live session for the model loop and tool execution.  Its ``_ui_hooks`` attribute is **never set** — cross-grep of ``jaato-server/server/runner/`` confirms zero references to ``ui_hooks``, ``set_ui_hooks``, or ``AgentUIHooks``.
+
+The 10 documented callsites in the backlog map to 5 distinct methods:
+
+| Method | Sites (jaato_session.py) | Status post-§7c |
+|---|---|---|
+| ``on_tool_call_start`` | 5000, 5217 | silently dropped (``_ui_hooks`` None) |
+| ``on_tool_call_end`` | 5078, 5268, 5349, 5532 | silently dropped |
+| ``on_tool_output`` | 5251, 5518 | silently dropped |
+| ``on_turn_progress`` | 6909 | silently dropped |
+| ``on_agent_instruction_budget_updated`` | 2502 | covered by §7c step 6.6.4.2 ``instruction_budget_updated`` notification |
+
+The backlog doc's Open Question 1 (**"Are these events observed by anyone post-seat-flip?"**) had the wrong answer assumed: the deferral judgment guessed events might be redundant.  Cycle 7 empirically proves they are NOT redundant — the TUI depends on every one of them to render the model response.
+
+**Meta-lesson recorded (per user's cycle 7 verdict):** audit-of-record discipline catches gaps at audit time, but the **deferral judgment** can be wrong when audit time can't predict downstream visibility.  Phase 4+ lesson: when migrating in-process callback chains to RPC, audit by callback-TYPE (which method gets called) and ENUMERATE every consumer, not just by call-site.  Callsite audit + null-guarded callees = silent drop on missing migration.
+
+**Q2 — Daemon-side ``output_callback`` is a no-op.**
+
+In ``core.py:_start_model_thread`` (line 3609-3611):
+```python
+def output_callback(source: str, text: str, mode: str) -> None:
+    # Skip - output is routed through agent hooks
+    pass
+```
+
+Pre-§7c the daemon-side JaatoSession ran the model loop in-process and the daemon-side ``_ui_hooks`` (the ``ServerAgentHooks`` instance) fired ``on_agent_output`` which emitted ``AgentOutputEvent``.  The stream-frame ``output_callback`` was already a no-op pre-§7c too — the hooks did all the work.
+
+Post-§7c the runner-side session runs the loop; its ``_ui_hooks`` is None; the stream-frame still fires ``on_output`` → daemon's ``output_callback`` is still a no-op → **AgentOutputEvent never emits**.
+
+This is the **simplest** of the cycle-7 gaps: the wire infrastructure (stream frames) already works.  Only the daemon-side consumer needs to emit the event.
+
+**Q3 — Permission-ASK delivery (Step 7 wiring) — verify, not fix.**
+
+Steps 7.1-7.3 already shipped the daemon↔runner RPC for permission ASK:
+- Step 7.1 (e769034d): wired ``PromptOperatorHandler`` in ``set_runner_rpc``
+- Step 7.2 (cb656034): wired ``RunnerRPCClient`` onto ``registry`` at bootstrap
+- Step 7.3 (ad292999): ``respond_to_permission`` dual-path routing
+
+Path D's ``_configure_runtime_plugins`` doesn't touch this wiring (Step 7.2 runs in ``_handle_session_bootstrap`` AFTER ``bootstrap_session`` returns, setting ``registry.runner_rpc_client`` on Path D's freshly-constructed registry).  Verified intact.
+
+The user's cycle-7 diagnostic mentions "ASK prompts" not reaching, but that may be a downstream effect of tool-call events not firing: model issues a tool-call request → ``on_tool_call_start`` fires runner-side → ``_ui_hooks`` is None → daemon never sees the tool starting → daemon never knows to wait for permission → permission ASK appears to not arrive (it does arrive, but no UI scaffolding is present to display it).
+
+Path F closes the tool-event gap; cycle 8 will verify ASK works once the scaffolding is restored.
+
+**Q4 — Path F fix design.**
+
+Three sub-fixes, one commit:
+
+**F.1 — Daemon-side ``output_callback`` emits ``AgentOutputEvent``.**
+
+Replace the no-op with the formatter-pipeline-aware emit logic that ``ServerAgentHooks.on_agent_output`` runs at ``core.py:2501-2541``.  Stream frames already carry ``(source, text, mode)`` so no wire change needed.  Daemon's stream-frame callback at ``_start_model_thread`` becomes the source of truth for text-chunk events.
+
+**F.2 — Runner-side ``_install_ui_hooks_notification_shim``.**
+
+Construct an ``_AgentUIHooksShim`` class implementing the 4 missing ``AgentUIHooks`` methods, each emitting a ``NotificationFrame`` with a new ``event_type``:
+
+| event_type | Method | Payload shape |
+|---|---|---|
+| ``tool_call_start`` | ``on_tool_call_start`` | ``{agent_id, tool_name, tool_args, call_id}`` |
+| ``tool_call_end`` | ``on_tool_call_end`` | ``{agent_id, tool_name, success, duration_seconds, error_message?, call_id?, backgrounded, continuation_id?, show_output?, show_popup?}`` |
+| ``tool_output`` | ``on_tool_output`` | ``{agent_id, call_id, chunk}`` |
+| ``turn_progress`` | ``on_turn_progress`` | ``{agent_id, total_tokens, prompt_tokens, output_tokens, percent_used, pending_tool_calls, cache_read_tokens?, cache_creation_tokens?}`` |
+
+Install the shim via ``session.set_ui_hooks(shim)`` in ``_handle_session_send_message`` alongside the existing ``_install_session_notification_callbacks`` call.  Restore the original (likely None) on exit.
+
+**F.3 — Daemon-side demuxer extensions.**
+
+Add 4 new branches to ``_build_send_message_notification_handler`` that re-emit the corresponding events via existing ``ServerAgentHooks`` paths:
+- ``tool_call_start`` → call into hooks' ``on_tool_call_start`` → emits ``ToolCallStartEvent``
+- ``tool_call_end`` → call into hooks' ``on_tool_call_end`` → emits ``ToolCallEndEvent``
+- ``tool_output`` → call into hooks' ``on_tool_output`` → emits ``ToolOutputEvent`` (with agent-pipeline formatting)
+- ``turn_progress`` → call into hooks' ``on_turn_progress`` → emits ``TurnProgressEvent`` (uses cached context_limit from Path E)
+
+Routing through ``ServerAgentHooks`` (vs direct ``server.emit``) preserves the existing daemon-side formatting + state-mutation logic at zero divergence cost.
+
+**Q5 — Test coverage planning.**
+
+| Sub-fix | Pin |
+|---|---|
+| F.1 | ``output_callback`` emits ``AgentOutputEvent`` for ``source=model``, applies agent-pipeline formatting; filters ``<hidden>`` tags for non-model output |
+| F.2 | Runner shim is installed during send_message; emits 4 notification frame types; restored after send_message |
+| F.3 | Daemon demuxer handles 4 new event_types; emits expected SDK events |
+| AST | ``_AgentUIHooksShim`` defines all 4 methods; demuxer has all 4 branches |
+
+### Bug-chain layers (cumulative, cycle 7 — third chain confirmed)
+
+| Chain | Layer | Defect | Path | Status |
+|---|---|---|---|---|
+| Bootstrap | 1 | snapshot wrap | A | shipped `20b16326` |
+| Bootstrap | 2 | IPC dispatch | B | shipped `c68151a8` |
+| Bootstrap | 3 | runtime.connect | C | shipped `4d9cf8b7` |
+| Bootstrap | 4 | configure_plugins + prereqs | D | shipped `00fa6d86` |
+| Send-message | 5 | notification re-entrancy | E.1-3 | shipped `e66414c7` |
+| Send-message | 6 | save/replay .role | E.4-5 | shipped `e66414c7` |
+| **Streaming response** | **7** | **runner→daemon ui_hooks not bridged** | **F.1-3** | **this audit; code follows** |
+| 8+ | unknown | TBD | gated on Path F cycle-8 verdict |
+
+The streaming chain at this audit looks like 1 layer (the ui_hooks gap), encompassing 5 missing event-type bridges (4 ui_hooks notification frames + 1 stream-frame consumer).
+
+### Audit-discipline tally update
+
+| Audit | Outcome |
+|---|---|
+| Pre-impl 1-20 (§7c+§7d arc) | 20-for-20 silent-regression catches |
+| Cycles 2-4 | post-impl catches; bootstrap chain Layers 1-3 |
+| Pre-impl 21 (Path D) | hybrid catch — bootstrap chain Layer 4+ closed in one pass |
+| Cycle 5 | bootstrap chain VERIFIED CLOSED (Test #1 PASS); second chain surfaced |
+| Pre-impl 22 (Path E) | hybrid catch — send-message chain Layers 5-6 closed in one pass |
+| Cycle 6 | send-message chain shipped, but cycle 6 itself proved Path E partially closed cycle's specific errors |
+| Cycle 7 | send-message chain VERIFIED CLOSED (zero errors); third chain surfaced |
+| **Pre-impl 23 (Path F, this audit)** | **third hybrid attempt — streaming chain Layer 7 closed in one pass** |
+
+**Methodology refinement (cycle 7 meta-lesson).**  The pattern is clear: each chain in the §7c regression set was a separately-migrated subsystem (bootstrap, in-band notifications, streaming response).  When migrating in-process callback chains to RPC piecemeal, missing-mirror gaps accumulate per-subsystem.  **Phase 4+ guidance**: when planning an §7c-shaped migration, enumerate all callback PROTOCOLS (e.g. ``AgentUIHooks`` is one) and mirror each holistically.  Per-callsite audit catches what gets called; per-callback-type audit catches what should fire but doesn't.
+
+This audit IS the per-callback-type audit for ``AgentUIHooks``.  The backlog doc identified the gap at audit time but mis-judged its visibility impact.  Path F closes it.
