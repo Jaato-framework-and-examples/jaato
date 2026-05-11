@@ -172,6 +172,14 @@ class SessionManager:
         # Use RLock (reentrant) because initialize() may emit events during session load
         self._lock = threading.RLock()
 
+        # Path H (cycle 10): serialize concurrent async saves so
+        # parallel ToolCallStartEvents (parallel tool execution)
+        # don't trample each other.  atomic_write_json already
+        # prevents file tear; this lock gives consistent last-
+        # writer-wins ordering across concurrent _save_session_async
+        # invocations for the same session.
+        self._async_save_lock = threading.Lock()
+
         # Client to session mapping
         self._client_to_session: Dict[str, str] = {}
 
@@ -1607,11 +1615,18 @@ class SessionManager:
                 })
                 session.interrupted_turn["pending_tool_calls"] = pending
                 session.is_dirty = True
-                # Incremental save to persist pending tool calls before execution
-                self._save_session(session)
+                # Path H (cycle 10): incremental save deferred off
+                # the synchronous _emit_to_session path.  Pre-Path-H
+                # this called _save_session synchronously, which made
+                # 2 blocking runner-RPCs that raced against the
+                # runner's active send_message — 35s timeout starved
+                # the permission-response window.  Async deferral
+                # keeps the recovery contract (pending_tool_calls
+                # still persisted) without blocking the emit path.
+                self._save_session_async(session)
                 logger.debug(
                     f"Updated pending tool calls for session {session.session_id}: "
-                    f"{len(pending)} call(s), saving incrementally"
+                    f"{len(pending)} call(s), saving incrementally (async)"
                 )
 
         # Remove completed tool calls from pending list
@@ -3085,6 +3100,53 @@ class SessionManager:
         ))
 
         return len(pending_calls)
+
+    def _save_session_async(self, session: Session) -> None:
+        """Defer ``_save_session(session)`` to a background daemon thread.
+
+        Path H (cycle 10).  Used by the ToolCallStartEvent branch in
+        ``_handle_turn_tracking_event`` (line 1611) to persist
+        ``pending_tool_calls`` for crash recovery WITHOUT blocking
+        the synchronous ``_emit_to_session`` path.
+
+        Pre-Path-H this site called ``_save_session(session)``
+        synchronously, which made 2 blocking runner-RPCs
+        (``session_get_history_threadsafe`` +
+        ``session_snapshot_conversation_budget_threadsafe``) that
+        raced against the runner's still-active ``send_message``.
+        After 35s timeout the save failed silently AND the 35s
+        delay starved the model loop's permission-response window.
+        Architecturally same shape as Path E's Layer 5 race.
+
+        Trade-off: the daemon-crash recovery window for IN-PROGRESS
+        tool calls is narrowed (was synchronous fsync; becomes best-
+        effort async fsync).  Recovery for COMPLETED turns is
+        unaffected — the natural-boundary save still runs
+        synchronously on the AgentStatusChangedEvent(status=done) path.
+
+        Concurrent invocations for the same session serialize via
+        ``self._async_save_lock`` so parallel ToolCallStartEvents
+        produce consistent last-writer-wins ordering.
+
+        Args:
+            session: The session to save.
+        """
+        def _do_save() -> None:
+            try:
+                with self._async_save_lock:
+                    self._save_session(session)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning(
+                    "async save for session %s failed: %s",
+                    session.session_id, exc,
+                )
+
+        thread = threading.Thread(
+            target=_do_save,
+            name=f"async-save-{session.session_id}",
+            daemon=True,
+        )
+        thread.start()
 
     def _save_session(self, session: Session) -> bool:
         """Save a session to disk.
