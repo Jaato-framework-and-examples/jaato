@@ -1205,6 +1205,16 @@ class SessionManager:
     def _emit_to_client(self, client_id: str, event: Event) -> None:
         """Emit an event to a specific client."""
         logger.debug(f"_emit_to_client: {client_id} <- {type(event).__name__}")
+        # Path G probe #10: bump existing debug-level dispatch trace
+        # to INFO so cycle-10 verdict can see it in default logging
+        # config.  Logs whether the callback exists at all and the
+        # event type being forwarded.
+        logger.info(
+            "PATH_G_PROBE_10 _emit_to_client: client_id=%s type=%s "
+            "callback_set=%s",
+            client_id, type(event).__name__,
+            self._event_callback is not None,
+        )
         if self._event_callback:
             logger.debug(f"  calling event_callback")
             self._event_callback(client_id, event)
@@ -1215,6 +1225,23 @@ class SessionManager:
         """Emit an event to all clients attached to a session."""
         with self._lock:
             session = self._sessions.get(session_id)
+            # Path G probe #9: log session-level dispatch fanout.
+            # Silent absence with PROBE_8 present → server.emit's
+            # _on_event isn't bound to _emit_to_session (initialize-
+            # order bug; lambda still default-noop).
+            # Present with attached_clients_count=0 → session has
+            # no clients to deliver to (the architectural smoking
+            # gun: runner-fired events arrive after client detach
+            # or before client attach).
+            # Present with count>0 but no PROBE_10 → iteration broke.
+            logger.info(
+                "PATH_G_PROBE_9 _emit_to_session: session_id=%s "
+                "session_found=%s attached_clients_count=%d type=%s",
+                session_id,
+                session is not None,
+                len(session.attached_clients) if session else 0,
+                type(event).__name__,
+            )
             if session:
                 # Handle session description updates - update in-memory Session
                 if isinstance(event, SessionDescriptionUpdatedEvent):

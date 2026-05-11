@@ -1053,6 +1053,21 @@ class JaatoServer:
         outbound view is consistently transformed.  Empty chain = no-op,
         identical to pre-transformer behaviour.
         """
+        # Path G probe #7: log every entry to JaatoServer.emit.
+        # Cycle 9 verdict mistakenly assumed hooks lacked the emit
+        # call; verification shows they all do emit.  Probe #7 + #8
+        # confirm whether server.emit itself is being invoked AND
+        # whether _on_event dispatches successfully (silent absence
+        # of #8 means a transformer or _on_event raised).
+        logger.info(
+            "PATH_G_PROBE_7 server.emit entry: type=%s "
+            "transformers=%d on_event=%s",
+            type(event).__name__,
+            len(self._outbound_event_transformers),
+            "default-noop" if (
+                getattr(self._on_event, "__qualname__", "") == "JaatoServer.__init__.<locals>.<lambda>"
+            ) else "set",
+        )
         # Apply outbound transformer chain (seat 3 of the four-seat
         # pseudonymization design).  Runs once at the top so both the
         # bus and the client transport see the same transformed view.
@@ -1068,6 +1083,14 @@ class JaatoServer:
 
         # Forward to clients (IPC/WebSocket)
         self._on_event(event)
+        # Path G probe #8: log post-_on_event so we can detect whether
+        # _on_event raised (would skip this line) or returned normally
+        # but the event still didn't reach the client (would mean
+        # downstream — _emit_to_session / IPC write — is the gap).
+        logger.info(
+            "PATH_G_PROBE_8 server.emit dispatched: type=%s",
+            type(event).__name__,
+        )
 
     def register_outbound_event_transformer(
         self, fn: Callable[[Event], Event]
