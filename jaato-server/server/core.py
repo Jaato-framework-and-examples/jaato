@@ -3522,6 +3522,16 @@ class JaatoServer:
         server = self
 
         def _handle(event_type: str, payload: Dict[str, Any]) -> None:
+            # Path G probe #4: log every notification arriving at the
+            # daemon-side demuxer (entry).  Silent absence here means
+            # frames never crossed the wire; presence + no probe #5
+            # log means the demuxer dropped them to the unknown-event
+            # branch.
+            logger.info(
+                "PATH_G_PROBE_4 daemon notification handler: "
+                "event_type=%r payload_keys=%s",
+                event_type, sorted((payload or {}).keys()),
+            )
             try:
                 if event_type == "instruction_budget_updated":
                     snapshot = payload.get("snapshot") or {}
@@ -3665,6 +3675,15 @@ class JaatoServer:
                 # gives us direct access to the same instance.
                 if event_type == "tool_call_start":
                     hooks = server._get_ui_hooks()
+                    # Path G probe #5: log demuxer dispatch.  Silent
+                    # absence with probe #4 present = handler matched
+                    # but bailed (hooks None?  branch fell through?).
+                    logger.info(
+                        "PATH_G_PROBE_5 demuxer dispatch: "
+                        "event_type=tool_call_start hooks=%s tool=%s",
+                        type(hooks).__name__ if hooks is not None else None,
+                        payload.get("tool_name"),
+                    )
                     if hooks is not None:
                         hooks.on_tool_call_start(
                             agent_id=payload.get("agent_id") or server._main_agent_id,
@@ -3676,6 +3695,13 @@ class JaatoServer:
 
                 if event_type == "tool_call_end":
                     hooks = server._get_ui_hooks()
+                    logger.info(
+                        "PATH_G_PROBE_5 demuxer dispatch: "
+                        "event_type=tool_call_end hooks=%s tool=%s "
+                        "success=%s",
+                        type(hooks).__name__ if hooks is not None else None,
+                        payload.get("tool_name"), payload.get("success"),
+                    )
                     if hooks is not None:
                         hooks.on_tool_call_end(
                             agent_id=payload.get("agent_id") or server._main_agent_id,
@@ -3695,6 +3721,14 @@ class JaatoServer:
 
                 if event_type == "tool_output":
                     hooks = server._get_ui_hooks()
+                    logger.info(
+                        "PATH_G_PROBE_5 demuxer dispatch: "
+                        "event_type=tool_output hooks=%s call_id=%s "
+                        "chunk_len=%d",
+                        type(hooks).__name__ if hooks is not None else None,
+                        payload.get("call_id"),
+                        len(payload.get("chunk", "") or ""),
+                    )
                     if hooks is not None:
                         hooks.on_tool_output(
                             agent_id=payload.get("agent_id") or server._main_agent_id,
@@ -3705,6 +3739,13 @@ class JaatoServer:
 
                 if event_type == "turn_progress":
                     hooks = server._get_ui_hooks()
+                    logger.info(
+                        "PATH_G_PROBE_5 demuxer dispatch: "
+                        "event_type=turn_progress hooks=%s "
+                        "total_tokens=%s",
+                        type(hooks).__name__ if hooks is not None else None,
+                        payload.get("total_tokens"),
+                    )
                     if hooks is not None:
                         hooks.on_turn_progress(
                             agent_id=payload.get("agent_id") or server._main_agent_id,
@@ -3756,6 +3797,16 @@ class JaatoServer:
         server = self
 
         def output_callback(source: str, text: str, mode: str) -> None:
+            # Path G probe #6: log every stream-frame chunk arriving
+            # at the daemon-side output_callback.  Silent absence here
+            # means stream frames never reached the daemon (different
+            # gap from the ui_hooks one, but same visible symptom of
+            # "TUI shows nothing").
+            logger.info(
+                "PATH_G_PROBE_6 output_callback fired: "
+                "source=%s mode=%s chunk_len=%d",
+                source, mode, len(text or ""),
+            )
             # Path F (cycle 7): emit ``AgentOutputEvent`` for stream
             # frames the runner-side ``on_output`` produces.  Pre-§7c
             # this was a no-op because the daemon-side ``_ui_hooks``
@@ -3777,6 +3828,11 @@ class JaatoServer:
                         "output_callback on_agent_output raised "
                         "(source=%r mode=%r)", source, mode,
                     )
+            else:
+                logger.warning(
+                    "PATH_G_PROBE_6 output_callback: hooks is None "
+                    "(source=%s) — text chunk dropped", source,
+                )
 
         notification_handler = server._build_send_message_notification_handler()
 
