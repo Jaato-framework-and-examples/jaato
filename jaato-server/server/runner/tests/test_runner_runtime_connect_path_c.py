@@ -196,11 +196,19 @@ def test_build_session_envelope_empty_env_yields_empty_strings(
 
 class _StubRuntime:
     """Stand-in JaatoRuntime that tracks connect() calls + supports
-    create_session() returning a stub session."""
+    create_session() returning a stub session.
+
+    ``_registry`` set truthy so the Path D ``_configure_runtime_plugins``
+    guard skips for these Path-C-focused tests (the stub doesn't
+    implement ``configure_plugins`` and Path C tests are pinning the
+    connect call, not plugin configuration).
+    """
 
     def __init__(self) -> None:
         self.connect_calls: list = []
         self.is_connected: bool = False
+        # Sentinel: tells Path D's "already configured?" guard to skip.
+        self._registry = object()
 
     def connect(self, project: str, location: str) -> None:
         self.connect_calls.append((project, location))

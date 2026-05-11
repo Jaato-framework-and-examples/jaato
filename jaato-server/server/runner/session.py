@@ -138,6 +138,140 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
     )
 
 
+def _configure_runtime_plugins(
+    runtime: "JaatoRuntime", envelope: SessionInitEnvelope,
+) -> None:
+    """Mirror daemon-side ``_run_load_plugins`` on the runner.
+
+    Phase 3 post-Step-7 Path D.
+
+    Daemon-side ``server/core.py:1615-1777`` constructs a
+    :class:`PluginRegistry`, discovers plugins (no tier filter — the
+    daemon hosts everything), expands per-plugin configs with
+    ``workspace_path`` + ``session_id``, calls ``expose_all``,
+    broadcasts ``set_workspace_path`` / ``set_config_root``,
+    constructs a :class:`PermissionPlugin`, and finally calls
+    ``runtime.configure_plugins(registry, permission_plugin,
+    ledger)``.  All nine steps must happen runner-side before
+    ``runtime.create_session(...)`` because ``create_session`` guards
+    on both ``_connected`` (Path C) AND ``_registry`` (this Path D).
+
+    Differences from daemon-side:
+
+    1. ``registry.discover(tier_filter="runner")`` — runner-tier
+       plugins only (per §3.3.5).  Daemon-tier plugins (auth, gc_*,
+       cache_*, session, background) must NOT load runner-side; they
+       live on the daemon and any session.* RPC that needs them
+       crosses the wire.
+    2. ``ledger=None`` passed to ``configure_plugins`` — token
+       accounting is daemon-tier per §4.2.
+    3. No ``on_progress`` callback on ``expose_all`` — runner has no
+       client event sink for per-plugin init progress (the daemon's
+       ``_emit_init_progress`` doesn't apply).
+    4. ``permission_plugin`` initialized with the daemon-side default
+       policy (``defaultPolicy: "ask"``).  Profile-supplied
+       ``plugin_configs["permission"]`` overrides aren't currently in
+       the envelope (filed: backlog §3.3c.X).
+
+    Raises:
+        Any exception from registry discovery, plugin
+        initialization, or ``configure_plugins`` propagates to the
+        caller, which wraps it as ``BootstrapError("plugins", ...)``.
+    """
+    from shared.plugins.permission.plugin import PermissionPlugin
+    from shared.plugins.registry import PluginRegistry
+
+    # Step 1-2: construct + discover (runner-tier only).
+    registry = PluginRegistry(model_name=envelope.model_name)
+    registry.discover(tier_filter="runner")
+
+    # Step 3: assemble plugin_configs.  Defaults mirror daemon-side
+    # `core.py:1621-1675` for the 6 runner-tier entries.  Auth plugin
+    # entries are skipped — they're daemon-tier and the tier filter
+    # already excluded them from the registry.  Envelope-supplied
+    # per-plugin configs (resolved daemon-side from the profile) layer
+    # on top: same precedence as daemon-side which merges profile
+    # overrides into the default dict.
+    workspace_path = envelope.workspace_path
+    session_id = envelope.session_id
+    plugin_configs: dict = {
+        "todo": {
+            "reporter_type": "memory",
+            "storage_type": "memory",
+        },
+        "references": {
+            "channel_type": "queue",
+            "workspace_path": workspace_path,
+        },
+        "clarification": {
+            "channel_type": "queue",
+        },
+        "lsp": {
+            "workspace_path": workspace_path,
+            "session_id": session_id,
+        },
+        "mcp": {
+            "workspace_path": workspace_path,
+            "session_id": session_id,
+        },
+        "file_edit": {
+            "session_id": session_id,
+        },
+        "waypoint": {
+            "session_id": session_id,
+        },
+        "sandbox_manager": {
+            "session_id": session_id,
+        },
+    }
+    # Merge envelope-supplied per-plugin configs from
+    # build_session_envelope (runner_spawn.py:200-208).
+    for entry in envelope.plugins:
+        name = entry.get("name")
+        cfg = entry.get("config")
+        if isinstance(name, str) and name and isinstance(cfg, dict) and cfg:
+            existing = plugin_configs.get(name, {})
+            plugin_configs[name] = {**existing, **dict(cfg)}
+
+    # Step 4: expose_all — initializes each plugin.  No on_progress
+    # callback runner-side.
+    registry.expose_all(plugin_configs)
+
+    # Step 5 (`self.todo_plugin = ...`): N/A runner-side — no
+    # runner-resident code path needs the cached reference.
+
+    # Step 6-7: workspace + config_root broadcast.
+    if workspace_path:
+        registry.set_workspace_path(workspace_path)
+    if envelope.config_root:
+        registry.set_config_root(envelope.config_root)
+
+    # Step 8: permission plugin.  Default policy mirrors daemon-side
+    # `core.py:1712-1721` baseline; profile overrides not yet
+    # propagated through the envelope (backlog §3.3c.X).
+    permission_plugin = PermissionPlugin()
+    permission_plugin.initialize({
+        "channel_type": "queue",
+        "channel_config": {"use_colors": False},
+        "workspace_path": workspace_path,
+        "policy": {
+            "defaultPolicy": "ask",
+            "whitelist": {"tools": [], "patterns": []},
+            "blacklist": {"tools": [], "patterns": []},
+        },
+    })
+
+    # Step 9: wire onto the runtime.  ``ledger=None`` because token
+    # accounting is daemon-tier per §4.2.
+    runtime.configure_plugins(registry, permission_plugin, None)
+
+    logger.info(
+        "runner-session bootstrap: configured %d plugins runner-tier "
+        "(session_id=%s workspace=%s)",
+        len(registry._exposed), session_id, workspace_path or "(none)",
+    )
+
+
 def bootstrap_session(
     envelope: SessionInitEnvelope,
     *,
@@ -170,8 +304,8 @@ def bootstrap_session(
         BootstrapError: when the envelope fails validation or any
             stage of construction throws.  ``BootstrapError.stage``
             identifies where the failure occurred:
-            ``"validate"``, ``"runtime"``, ``"configure"``,
-            ``"unknown"``.
+            ``"validate"``, ``"runtime"``, ``"connect"`` (Path C),
+            ``"plugins"`` (Path D), ``"configure"``, ``"unknown"``.
 
     Notes on §3.3b vs §3.3c scope:
 
@@ -241,6 +375,27 @@ def bootstrap_session(
             "runner-session bootstrap: runtime.connect crashed",
         )
         raise BootstrapError("connect", str(exc)) from exc
+
+    # ---- 2c. Configure plugins on the runtime ----
+    # Phase 3 post-Step-7 Path D: ``runtime.create_session`` guards
+    # on ``self._registry`` (jaato_runtime.py:966-967) in addition to
+    # ``self._connected``.  Path C closed the _connected guard; Path
+    # D closes _registry by mirroring daemon-side
+    # ``_run_load_plugins`` (core.py:1615-1728) + the post-threadpool
+    # ``runtime.configure_plugins`` call (core.py:1773-1777) here.
+    #
+    # Skipped when the test path injects an already-configured
+    # runtime (``runtime._registry`` truthy on entry — stub runtimes
+    # in tests pre-wire their own minimal registry).  The
+    # idempotent guard mirrors the Path C connect guard.
+    if getattr(runtime, "_registry", None) is None:
+        try:
+            _configure_runtime_plugins(runtime, envelope)
+        except Exception as exc:  # noqa: BLE001 — boundary surface
+            logger.exception(
+                "runner-session bootstrap: plugin configuration crashed",
+            )
+            raise BootstrapError("plugins", str(exc)) from exc
 
     # ---- 3. Construct + configure the session ----
     try:

@@ -58,11 +58,19 @@ class _StubSession:
 
 class _StubRuntime:
     """Stand-in for JaatoRuntime; records the create_session call so
-    tests can assert the envelope flowed through correctly."""
+    tests can assert the envelope flowed through correctly.
+
+    ``_registry`` set truthy so the Path D ``_configure_runtime_plugins``
+    guard skips for these envelope-flow tests (these don't pin
+    plugin configuration; the Path D-specific tests live in
+    ``test_runner_configure_plugins_path_d.py``).
+    """
 
     def __init__(self, *, fail: Optional[BaseException] = None) -> None:
         self._fail = fail
         self.create_session_kwargs: Optional[Dict[str, Any]] = None
+        # Sentinel: tells Path D's "already configured?" guard to skip.
+        self._registry = object()
 
     def create_session(self, **kwargs: Any) -> _StubSession:
         if self._fail is not None:
