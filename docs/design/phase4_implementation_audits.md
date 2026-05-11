@@ -1132,3 +1132,246 @@ without a kernel-loaded profile.  Mitigation: `provision_sub_profile`
 unlinks the file on `apparmor_parser` failure (mirrors
 `_provision_profile_impl`'s pattern).
 
+---
+
+## Audit 7 — §4.3.5 sub-cgroup creation + attach
+
+**Sub-step:** §4.3.5 of the §4.3 sub-track.
+
+**Original framing** (Audit 4): "Cgroup sub-cgroup nesting:
+creation + attach + cleanup | audit + 1".
+
+**Why this needs a pre-implementation audit:** cgroup v2 has
+structural constraints that determined the design.  Naïve
+"nest under parent" runs into the "no internal processes" rule;
+need to settle the structure up-front so §4.3.6 forwarding
+wire-up isn't blocked.
+
+### Existing cgroup machinery (load-bearing reference points)
+
+| Component | Location | Today's role | §4.3.5 usage |
+|---|---|---|---|
+| Provision + write limits | `CgroupsManager.provision_cgroup(session_id, config)` (cgroups.py:181) | Per-session cgroup at `/sys/fs/cgroup/jaato/jaato-ws-{session_id}` | Reused as-is, called with the isolated session id |
+| Teardown via `cgroup.kill` + rmdir | `CgroupsManager.teardown_cgroup()` (cgroups.py:235) | Per-session cleanup | Reused as-is for sub-cgroup teardown |
+| Attach pid (pre-exec callback) | `CgroupsManager.make_attach_callback(session_id)` (cgroups.py:294) | Subprocess.Popen `preexec_fn` for newly-spawned runner | Reused as-is in §4.3.6 sub-runner spawn |
+| Name template | `get_cgroup_name(session_id)` → `jaato-ws-{session_id}` (cgroups.py:173) | Cgroup directory name | Same template, called with the isolated session id |
+
+### Sub-cgroup structure decision: SIBLING, not NESTED
+
+The obvious "true nesting" structure (`{parent_cgroup}/sub_{subagent}/`)
+hits a cgroup v2 hard constraint: **the "no internal processes"
+rule**.  A cgroup can either:
+
+- Have processes in `cgroup.procs`, OR
+- Have children with `cgroup.subtree_control` controllers enabled
+
+NOT both.  The parent cgroup (`/sys/fs/cgroup/jaato/jaato-ws-{parent}/`)
+already hosts the parent runner's pid.  To enable
+`cgroup.subtree_control` for child resource delegation, we'd need
+to MIGRATE the parent runner to a sub-cgroup of itself first (e.g.,
+`{parent_cgroup}/main/`) — a non-trivial restructuring that
+affects all of `provision_cgroup`'s callers.
+
+**§4.3.5 picks SIBLING structure.**  Both parent + sub cgroups live
+at `/sys/fs/cgroup/jaato/`:
+
+- Parent: `/sys/fs/cgroup/jaato/jaato-ws-{parent}/`
+- Sub:    `/sys/fs/cgroup/jaato/jaato-ws-{parent}__sub_{subagent}/`
+
+Path leaf matches §4.3.3's `isolated_session_id` + §4.3.4's
+AppArmor sub-profile filename — three identifiers, one template.
+
+**Trade-off:** sub-cgroup limits don't compose under parent's
+limits.  An isolated subagent declaring `memory.max=4G` gets 4G
+even if the parent has `memory.max=2G`.  Per §4.3 design intent
+("isolated runner" = SEPARATE confinement), this is the desired
+behavior — the supervisor explicitly opted into isolation; bounds
+are independent.
+
+**Design intent alignment:** the parent design §4.3 use case is
+"untrusted code-execution subagent inside an otherwise-trusted
+workspace".  The supervisor's bounds are about its own work, NOT
+about caging the subagent — that's what the SUB-cgroup is for.
+Sibling structure makes the supervisor/subagent bounds independent,
+which matches the threat model.
+
+**Phase 5+ "true nesting":** if a future use case needs composable
+bounds (sub-cgroup bounded by parent's bounds), the restructuring
+(`provision_cgroup` migrates the runner to `/main/`, enables
+`cgroup.subtree_control` on parent, creates child) lands as a
+single coordinated change.  Out of scope for §4.3.5.
+
+### Cgroup directory name template
+
+| Surface | Template | Example |
+|---|---|---|
+| Cgroup directory leaf | `jaato-ws-{parent_session_id}__sub_{subagent_id}` | `jaato-ws-S-A__sub_agent-1` |
+| Full cgroup path | `{cgroups_root}/jaato-ws-{parent}__sub_{subagent}/` | `/sys/fs/cgroup/jaato/jaato-ws-S-A__sub_agent-1/` |
+
+Matches AppArmor sub-profile filename from §4.3.4 + the isolated
+session id from §4.3.3 — a single template flows through all
+three subsystems.
+
+### subagent_id validation: hoisted to shared helper
+
+§4.3.4 anchored `_validate_subagent_id` on `AppArmorManager`.
+§4.3.5 needs the same validation for cgroup directory names —
+strict allow-list `[A-Za-z0-9_-]`, 64-char cap, non-empty.
+
+**Refactor:** hoist to module `server/subagent_id.py` (public
+utility, not `_private`).  Both managers + the SessionManager
+helper delegate to it.  Pure function — no state, no class.
+
+**Why refactor as part of §4.3.5:** the function is small (~25
+lines), the rules are identical, and divergence between AppArmor's
+validation and cgroup's would be a latent confused-deputy bug.
+Hoisting now is cheap; later it becomes harder.
+
+### RuntimeLimits source + missing-limits handling
+
+The sub-cgroup's limits come from
+`profile.runtime_limits` (reconstructed via `build_inline_profile`
+in `_spawn_isolated_runner`).
+
+When the SubagentProfile declares no `runtime_limits`:
+
+- Today's `provision_cgroup` skips cgroup creation entirely
+  (`config.has_kernel_limits()` is False).
+- For isolated subagents, this means: no sub-cgroup created.  The
+  sub-runner subprocess will inherit the daemon's default cgroup
+  (NOT the parent's cgroup, since sibling structure means parent
+  and sub are at the same level).
+
+**§4.3.5 behavior:**
+
+- Profile has `runtime_limits` with kernel limits → create
+  sub-cgroup.
+- Profile has no `runtime_limits` → skip cgroup creation.
+  Sub-runner inherits the daemon's default cgroup.
+
+This is a documented gap: an isolated subagent without explicit
+limits has no kernel-level resource bounding.  AppArmor isolation
+(filesystem + capabilities) still applies; cgroup isolation does
+not.
+
+**Phase 5+ hardening**: default `RuntimeLimits` for isolated
+subagents (e.g., 2 GiB memory, 128 pids).  Out of scope for §4.3.5.
+
+### Cleanup safety on partial-failure
+
+The §4.3.5 sub-step exists in the middle of a multi-stage
+provisioning chain:
+
+```
+§4.3.3: profile reconstruction
+§4.3.4: sub-AppArmor profile provision   ← can succeed
+§4.3.5: sub-cgroup provision             ← can fail HERE
+§4.3.6: sub-runner spawn + forwarding
+```
+
+If §4.3.5 fails AFTER §4.3.4 succeeded, the sub-AppArmor profile
+is loaded but the sub-runner will never spawn.  Next attempt with
+the same subagent_id would see the AppArmor sub-profile already
+loaded (idempotent re-load is fine) but it's still cleaner to
+roll back on failure.
+
+**§4.3.5 rollback:** on cgroup provision failure, call
+`apparmor_manager.teardown_sub_profile(parent, subagent)` to
+clean up the just-loaded AppArmor sub-profile.  Best-effort —
+teardown failure logs but doesn't change the §4.3.5 return shape.
+
+### Stage advance: sub_cgroup → forwarding
+
+| Outcome | Return stage |
+|---|---|
+| cgroups unavailable (no kernel cgroups v2, or `_apparmor_manager` not wired in SessionManager) | `stage=forwarding`, `cgroup_path=""` (documented gap — no cgroup isolation) |
+| Profile has no `runtime_limits` | `stage=forwarding`, `cgroup_path=""` (documented gap) |
+| `provision_cgroup` succeeded | `stage=forwarding`, `cgroup_path=<full path>` |
+| `provision_cgroup` failed | `stage=sub_cgroup`, AppArmor sub-profile torn down |
+
+Note: `stage=forwarding` is the NEXT stage (§4.3.6's body).  The
+helper's "advance past sub_cgroup" happens both on cgroup success
+AND on cgroup-not-applicable (graceful degradation).  Only kernel
+errors stop at `stage=sub_cgroup`.
+
+### §4.3.5 commit scope
+
+1. **Hoist `_validate_subagent_id`** from `AppArmorManager` to
+   `server/subagent_id.py`.  Pure-function module.  Update
+   `AppArmorManager._validate_subagent_id` to delegate (preserves
+   classmethod API for backwards compat with §4.3.4 tests).
+
+2. **Helper extension** in `SessionManager._spawn_isolated_runner`:
+   - After AppArmor sub-profile provisioning succeeds (existing
+     §4.3.4 path), resolve cgroups manager via new
+     `_resolve_cgroups_manager()` helper (mirrors
+     `_resolve_apparmor_manager`).
+   - If cgroups available + `profile.runtime_limits` has kernel
+     limits: call `cgroups_manager.provision_cgroup(
+     isolated_session_id, profile.runtime_limits)`.
+   - On success → `stage=forwarding`, `cgroup_path=<full path>`.
+   - On failure → tear down sub-AppArmor profile + return
+     `stage=sub_cgroup` with cgroup-kernel error.
+   - If cgroups unavailable OR no `runtime_limits` → `stage=forwarding`
+     with `cgroup_path=""`.
+
+3. **`SessionManager._resolve_cgroups_manager()` helper**:
+   - Returns `getattr(self, "_cgroups_manager", None)`.
+   - Mirrors `_resolve_apparmor_manager`.
+
+4. **Tests**:
+   - Hoisted validation function (existing §4.3.4 test pins still
+     pass because they exercise the public surface).
+   - Helper extension: cgroups available + has limits → stage=forwarding
+     with non-empty cgroup_path.
+   - Helper extension: cgroups available + no limits → stage=forwarding
+     with empty cgroup_path.
+   - Helper extension: cgroups unavailable → stage=forwarding with
+     empty cgroup_path.
+   - Helper extension: cgroups failure → stage=sub_cgroup + AppArmor
+     teardown invoked.
+
+### Scope NOT in §4.3.5
+
+- Sub-runner subprocess spawn — §4.3.6 (passes `cgroup_attach=...`
+  to `RunnerSpawner.spawn`).
+- Cross-runner forwarding (prompt-forward IN, output-forward OUT)
+  — §4.3.6.
+- Parent-teardown cascade for sub-AppArmor + sub-cgroup — §4.3.6
+  (lifecycle wiring).
+- Default `RuntimeLimits` for isolated subagents — Phase 5+.
+- True nested cgroup structure (parent restructure + subtree_control)
+  — Phase 5+.
+
+### Phase 5 hardening surface (recorded for cleanup runway)
+
+1. **Default `RuntimeLimits` for isolated subagents** — without
+   profile-declared limits, sub-runner has no kernel-level resource
+   bounding.  Phase 5 should add a conservative default (2 GiB / 128
+   pids / cpu.weight=100) applied when the supervisor's opt-in
+   requested isolation but didn't supply limits.
+2. **Nested-cgroup structure** — sibling structure makes parent +
+   sub bounds independent.  Use cases that need composable bounds
+   (sub bounded by parent) need the parent-restructure (`/main/`
+   sub-cgroup + `subtree_control`).  Coordinated change, not
+   incremental.
+3. **Cgroup teardown coordination with sub-runner shutdown** —
+   §4.3.6 wires this; §4.3.5 ships only the cgroup creation.
+4. **Cgroup-leak audit at session shutdown** — if a sub-runner
+   crashes before parent shutdown, the sub-cgroup may be left with
+   zombie processes.  `cgroup.kill` handles atomic termination;
+   pre-§4.3.6 rollback path covers immediate failures.  Phase 5
+   should add an audit pass at parent teardown that finds + reaps
+   any leaked sub-cgroups by name pattern.
+
+### Sub-step risk register entry
+
+Risk: cgroup-create failure mid-spawn leaves the AppArmor
+sub-profile loaded.  Mitigation: §4.3.5 rollback calls
+`teardown_sub_profile` on failure path.  Risk: rollback's own
+teardown fails — log + continue; AppArmor sub-profile remains
+loaded.  Next session attempt sees the loaded profile and
+provision_sub_profile is idempotent (re-load via apparmor_parser
+-r is fine), so no operator action needed.
+
+
