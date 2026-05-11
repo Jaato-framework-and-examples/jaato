@@ -23,10 +23,15 @@ from shared.session_envelope import SessionInitEnvelope
 # ----------------------------------------------------------------------
 
 
-def _stub_server(*, profile=None, config_root=None) -> Any:
+def _stub_server(*, profile=None, config_root=None, agent_params=None) -> Any:
     """Build a minimal JaatoServer-shaped stub.  ``_build_session_envelope``
-    only reads ``_profile`` + ``config_root`` so SimpleNamespace suffices."""
-    return SimpleNamespace(_profile=profile, config_root=config_root)
+    reads ``_profile`` + ``config_root`` + (Phase 4 §D) ``_agent_params``
+    so SimpleNamespace suffices."""
+    return SimpleNamespace(
+        _profile=profile,
+        config_root=config_root,
+        _agent_params=dict(agent_params or {}),
+    )
 
 
 def _stub_profile(**overrides: Any) -> Any:
@@ -205,25 +210,32 @@ def test_plugin_configs_attached_to_envelope_specs() -> None:
         workspace_path="/tmp/ws",
         profile_name="x",
     )
-    config_map = {p["name"]: p.get("config") for p in env.plugins}
-    assert config_map == {
+    # Phase 4 §C: plugin configs live in the top-level
+    # envelope.plugin_configs map; per-entry ``config`` key is gone.
+    assert env.plugin_configs == {
         "cli": {"max_workers": 4},
         "todo": {"storage_path": "/tmp/todos"},
     }
+    for p in env.plugins:
+        assert "config" not in p, (
+            f"plugins[i] should not carry per-entry config post-§C: {p!r}"
+        )
 
 
-def test_plugin_configs_for_unlisted_plugin_ignored() -> None:
-    """If plugin_configs has an entry for a plugin NOT in the
-    plugins list, the envelope doesn't carry it (the envelope's
-    plugin set is authoritative; orphan configs surface as a
-    profile-resolver bug, not a runner bug)."""
+def test_plugin_configs_for_unlisted_plugin_carried_through() -> None:
+    """Phase 4 §C: plugin_configs entries for plugins NOT in the
+    profile.plugins list are now carried in the envelope (closes
+    backlog §3.3c.X).  Auto-loaded plugins like ``permission`` and
+    ``gc_*`` need their profile overrides to reach the runner even
+    when they aren't named in profile.plugins."""
     profile = _stub_profile(
         provider="anthropic",
         model="m",
         plugins=["cli"],
         plugin_configs={
             "cli": {"x": 1},
-            "memory": {"orphan": True},  # not in plugins list
+            "memory": {"orphan": True},  # not in plugins list — now carried
+            "permission": {"policy": {"defaultPolicy": "allow"}},
         },
     )
     env = _build_session_envelope(
@@ -234,6 +246,12 @@ def test_plugin_configs_for_unlisted_plugin_ignored() -> None:
     )
     names_in_envelope = [p["name"] for p in env.plugins]
     assert "memory" not in names_in_envelope
+    # But its config IS in the top-level plugin_configs map.
+    assert env.plugin_configs == {
+        "cli": {"x": 1},
+        "memory": {"orphan": True},
+        "permission": {"policy": {"defaultPolicy": "allow"}},
+    }
 
 
 # ----------------------------------------------------------------------
