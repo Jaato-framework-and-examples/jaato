@@ -307,3 +307,151 @@ B. **"Error: 1bcd84..."** — separate bug shape (stale-response
 None — this is a read-only audit per plan §3.7.  Tests will land
 with the eventual §4.8 fix (if §4.7 follow-up at cycle-14 promotes
 to §4.8).
+
+---
+
+## Audit 3 — §4.2 J.B `editable_metadata` schema lookup
+
+**Plan reference:** `per_session_confined_runner_phase4_plan.md`
+§3.2 + §5.1.
+
+**Backlog reference:** Sub-gap J.B in
+`project_backlog_path_j_sub_gaps_call_id_editable_metadata.md`.
+
+**Plan's lean** (§5.1): Option A — `PromptPayload` carries
+`editable_metadata: Optional[dict]` populated at the runner-side
+ASK site.  Rationale: "matches the Phase 3 pattern of 'carry state
+in envelope, not via daemon-side references'".
+
+### Audit finding
+
+The plan's Option A description implied the runner-side ASK site
+would call `permission_plugin._get_tool_schema(tool_name)` to look
+up the editable schema.  Verification shows **the lookup is
+already done** by the time the channel sees the request:
+
+1. `shared/plugins/permission/plugin.py:1411-1412`:
+   ```python
+   tool_schema = self._get_tool_schema(tool_name)
+   editable = tool_schema.editable if tool_schema else None
+   ```
+
+2. `shared/plugins/permission/plugin.py:1461`:
+   ```python
+   request = PermissionRequest.create(
+       ...,
+       editable=editable,
+   )
+   ```
+
+3. `shared/plugins/permission/channels.py:198`:
+   ```python
+   class PermissionRequest:
+       ...
+       editable: Optional[Any] = None  # EditableContent from types.py
+   ```
+
+So **`request.editable` is already populated runner-side** with the
+`EditableContent` instance (or None).  The runner-RPC channel just
+needs to read it and convert to dict.
+
+### Decision: Option A — narrower than the plan suggested
+
+The plan said "runner has the permission plugin instance already"
+implying a schema lookup at the channel level.  In fact the lookup
+ran earlier (in `check_permission`'s flow); the channel reads the
+already-resolved `EditableContent` from the request.  This is
+**cleaner than the plan version**:
+
+- No new permission_plugin access inside the channel.
+- No new schema-lookup at the ASK relay.
+- Just a single field-read in the channel + dict conversion.
+
+### Field-mapping (pre-§7c daemon-side hook reference)
+
+`core.py:3062-3072` (the dead-letter daemon-side hook, untouched by
+this audit) shows the canonical wire shape for
+`PermissionInputModeEvent.editable_metadata`:
+
+```python
+editable_metadata = {
+    "parameters": schema.editable.parameters,
+    "format": schema.editable.format,
+}
+```
+
+Two fields: `parameters` (list of editable param names) + `format`
+(yaml/json/text/markdown).  `EditableContent.template` is NOT in
+the pre-§7c wire shape — the template is an editor-rendering
+concern that the runner consumes locally; the daemon/TUI don't
+need it for input-mode signaling.
+
+§4.2 produces the same shape for backward compat with TUI
+consumers expecting the pre-§7c contract.
+
+### Corrected scope (4 hops, parallel to §4.1)
+
+A. **`shared/plugins/permission/runner_rpc_channel.py`** — read
+   `request.editable` (Optional[EditableContent]); convert to dict
+   shape `{"parameters": list, "format": str}`; thread to
+   `PromptPayload`.  Defensive: when `request.editable` is None,
+   `editable_metadata=None`.
+
+B. **`shared/plugins/permission/types.py`** — add
+   `editable_metadata: Optional[Dict[str, Any]] = None` field to
+   `PromptPayload` + to_dict/from_dict.  Backward-compat: legacy
+   wire dicts (without the field) deserialize to None.
+
+C. **`server/runner_rpc_handlers/prompt_operator.py`** — thread
+   `payload.editable_metadata` through to
+   `PermissionInputModeEvent.editable_metadata` (currently
+   hardcoded `None` per Path J.B backlog note).
+
+D. **No daemon-side dead-code removal in scope** — the daemon-side
+   hook at `core.py:3062-3072` was already a no-op post-§7c (the
+   surrounding callback isn't wired to a live code path post-Path-J).
+   The block is dead code but its removal is independent of §4.2;
+   defer to a future "Phase 4 dead-code sweep" if needed.
+
+### Tests (6 pins, parallel to §4.1)
+
+1. `PromptPayload.editable_metadata` field default (None).
+2. `PromptPayload.to_dict` includes `editable_metadata` key.
+3. `PromptPayload` round-trip preserves populated dict.
+4. `from_dict` backward-compat (legacy wire dict → None).
+5. `RunnerRPCChannel.request_permission` reads
+   `request.editable` and threads to
+   `PromptPayload.editable_metadata` with canonical shape
+   `{"parameters": list, "format": str}`.
+6. `PromptOperatorHandler.handle` threads
+   `payload.editable_metadata` to
+   `PermissionInputModeEvent.editable_metadata` — flips the
+   existing `test_input_mode_editable_metadata_is_none_path_j_b`
+   pin from "is None" to "propagates".
+
+### Rejected: Option B (handler reference)
+
+Option B would have given `PromptOperatorHandler` a reference to
+`server.permission_plugin` for a daemon-side schema lookup.
+Rejected because:
+
+- Adds daemon-side coupling that Phase 3 explicitly avoided
+  (envelope-over-references pattern).
+- The runner already has the schema; daemon-side lookup is
+  redundant.
+- `permission_plugin._get_tool_schema` requires a registry — the
+  daemon's registry isn't tier-filtered (loads runner-tier plugins
+  too post-Path-D), but the daemon-side permission plugin instance
+  is configured with the daemon-side registry; the model loop runs
+  RUNNER-side against the runner-side registry.  Wiring two
+  registries to one handler invites drift.
+
+### Coupling note (potential interaction with §4.4)
+
+Per audit 1 (§4.4), the session plugin was flipped to runner-tier.
+The session plugin doesn't declare `editable` on any of its tool
+schemas today, so §4.4's tier-flip doesn't affect J.B's
+correctness.  But the pattern matters: **§4.2 confirms the
+"runner already has the data; envelope just propagates" pattern
+that §4.4 also adopted**.  Envelope-over-references discipline
+(Phase 4 plan §5.1 lean) is now empirically validated twice.
