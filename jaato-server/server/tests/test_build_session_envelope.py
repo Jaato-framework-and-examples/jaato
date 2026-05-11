@@ -23,10 +23,15 @@ from shared.session_envelope import SessionInitEnvelope
 # ----------------------------------------------------------------------
 
 
-def _stub_server(*, profile=None, config_root=None) -> Any:
+def _stub_server(*, profile=None, config_root=None, agent_params=None) -> Any:
     """Build a minimal JaatoServer-shaped stub.  ``_build_session_envelope``
-    only reads ``_profile`` + ``config_root`` so SimpleNamespace suffices."""
-    return SimpleNamespace(_profile=profile, config_root=config_root)
+    reads ``_profile`` + ``config_root`` + (Phase 4 §D) ``_agent_params``
+    so SimpleNamespace suffices."""
+    return SimpleNamespace(
+        _profile=profile,
+        config_root=config_root,
+        _agent_params=dict(agent_params or {}),
+    )
 
 
 def _stub_profile(**overrides: Any) -> Any:
