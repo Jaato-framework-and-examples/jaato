@@ -41,6 +41,7 @@ from shared.plugins.session import (
 )
 
 from shared.instruction_token_cache import InstructionTokenCache
+from shared.runtime_limits import RuntimeLimits, apply_isolated_defaults
 from shared.session_envelope import BootstrapEnvelope
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
@@ -1058,6 +1059,29 @@ class SessionManager:
                 "stage": "validation",
             }
 
+        # ── Phase 5 §5.1: apply isolated-subagent runtime defaults ────
+        # ``agent_params.isolated=true`` establishes the "isolation
+        # implies bounds" invariant.  Profiles that omit
+        # ``runtime_limits`` (or supply only a subset of fields) would
+        # otherwise skip cgroup provision entirely and inherit the
+        # daemon's default cgroup — the §4.3.9 item 1 hardening gap.
+        # Merge supplied limits with the conservative default
+        # (per-field; supplied wins on non-None) so the effective
+        # value below carries the safety floor regardless of profile
+        # content.  See
+        # docs/design/phase5_5_1_isolated_default_runtime_limits_audit.md.
+        effective_runtime_limits = apply_isolated_defaults(
+            profile.runtime_limits,
+        )
+        if profile.runtime_limits != effective_runtime_limits:
+            logger.info(
+                "_spawn_isolated_runner: applied isolated-subagent "
+                "runtime-limits defaults for parent=%s subagent=%s "
+                "(supplied=%s, effective=%s)",
+                parent_session_id, subagent_id,
+                profile.runtime_limits, effective_runtime_limits,
+            )
+
         # ── Stage: id generation ───────────────────────────────
         # Template ``{parent}__sub_{subagent}`` keeps the isolated
         # session id parseable + correlatable back to its parent
@@ -1147,17 +1171,23 @@ class SessionManager:
         # structure per Audit 7 (cgroup v2 "no internal processes"
         # rule + design intent).
         #
-        # Graceful degradation: cgroups unavailable OR profile has
-        # no kernel limits → skip cgroup creation, sub-runner
-        # inherits daemon's default cgroup.  Documented Phase 5+
-        # hardening gap (default RuntimeLimits for isolated
-        # subagents).  AppArmor isolation still applies.
+        # Graceful degradation: cgroups unavailable on this host →
+        # skip cgroup creation, sub-runner inherits daemon's default
+        # cgroup.  AppArmor isolation still applies.
+        #
+        # Phase 5 §5.1: ``effective_runtime_limits`` now always carries
+        # kernel-enforceable fields (memory_max_mb / pids_max /
+        # cpu_weight) via :func:`apply_isolated_defaults`, so the
+        # ``has_kernel_limits()`` predicate is True for the default.
+        # The cgroup-skip branch can only fire when ``CgroupsManager``
+        # is unavailable (kernel without cgroup v2, or daemon wired
+        # without one), which is a host-capability gap rather than a
+        # profile-content gap.
         cgroup_path = ""  # Empty = no sub-cgroup provisioned.
         cgroups_manager = self._resolve_cgroups_manager()
-        runtime_limits = profile.runtime_limits
+        runtime_limits = effective_runtime_limits
         if (cgroups_manager is not None
                 and cgroups_manager.is_available()
-                and runtime_limits is not None
                 and runtime_limits.has_kernel_limits()):
             cgroup_ok = cgroups_manager.provision_cgroup(
                 isolated_session_id, runtime_limits,
@@ -1220,8 +1250,7 @@ class SessionManager:
                 parent_session_id, subagent_id,
                 cgroups_manager is not None
                 and cgroups_manager.is_available(),
-                runtime_limits is not None
-                and runtime_limits.has_kernel_limits(),
+                runtime_limits.has_kernel_limits(),
             )
 
         # ── Stage: forwarding — spawn sub-runner subprocess ────
@@ -1247,6 +1276,7 @@ class SessionManager:
                 sub_apparmor_profile=sub_profile_name,
                 cgroup_path=cgroup_path,
                 profile=profile,
+                effective_runtime_limits=effective_runtime_limits,
                 agent_params=agent_params,
             )
         except Exception as spawn_exc:  # noqa: BLE001 — boundary
@@ -1364,6 +1394,7 @@ class SessionManager:
         sub_apparmor_profile: str,
         cgroup_path: str,
         profile: Any,  # SubagentProfile
+        effective_runtime_limits: RuntimeLimits,
         agent_params: Optional[Dict[str, Any]],
     ) -> SubRunnerHandle:
         """Spawn the sub-runner subprocess + initialize its RPC
@@ -1409,11 +1440,20 @@ class SessionManager:
                     isolated_session_id,
                 )
 
+        # Phase 5 §5.1: forward the app-layer caps via the
+        # ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` / ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS``
+        # env-passthrough already wired in :class:`RunnerSpawner`.  The
+        # runner-side cli plugin reads those env vars at startup.  Without
+        # this hookup the kernel-layer defaults would apply (via cgroup)
+        # but the application-layer defaults — tool wall-clock + output
+        # truncation — would silently no-op on the sub-runner subprocess.
         spawned = spawner.spawn(
             profile_name=sub_apparmor_profile,
             session_id=isolated_session_id,
             workspace_path=workspace_path,
             log_path=log_path,
+            max_output_chars=effective_runtime_limits.max_output_bytes,
+            tool_timeout_seconds=effective_runtime_limits.tool_timeout_seconds,
             disable_confine=False,  # Always confined for §4.3.6.
             cgroup_attach=cgroup_attach,
         )
