@@ -1374,4 +1374,176 @@ loaded.  Next session attempt sees the loaded profile and
 provision_sub_profile is idempotent (re-load via apparmor_parser
 -r is fine), so no operator action needed.
 
+---
+
+## Audit 8 — §4.3.6 cross-runner forwarding (HIGHEST UNCERTAINTY)
+
+**Sub-step:** §4.3.6 of the §4.3 sub-track.
+
+**Original framing** (Audit 4): "Cross-runner forwarding
+semantics: prompt-forward INTO new runner; output-forward BACK
+to parent; termination + failure handling | audit + 1-2".
+
+**Original risk-register entry (Audit 4 #2):** "Cross-runner
+forwarding edge cases.  §4.3.6 has the highest uncertainty.
+Termination semantics need explicit per-case audit treatment."
+
+**Why this audit is critical:** §4.3.6 is the load-bearing
+sub-commit that finally spawns the sub-runner subprocess and
+makes isolated-subagent end-to-end work.  The audit-doc-before-code
+discipline matters MOST here.
+
+### What §4.3.6 needs to land (full Option α scope)
+
+Tracing the existing default-share path
+(`SubagentPlugin._run_subagent_async` in
+`shared/plugins/subagent/plugin.py`) shows what cross-runner
+forwarding needs to preserve.  The supervisor/subagent paradigm
+relies on:
+
+| Mechanism | Default-share (today) | Isolated-runner (§4.3.6 needs) |
+|---|---|---|
+| First-turn prompt → child | In-process: `session.send_message(prompt, ...)` | Cross-runner: daemon receives `task`, dispatches to sub-runner's `JaatoSession.send_message` via `session.send_message` RPC |
+| Streaming output → parent runner | In-process: `_parent_session.inject_prompt(text, source_id, source_type=CHILD)` | Cross-runner: sub-runner emits events → daemon's EventBus → NEW daemon→parent-runner RPC → parent-runner subagent plugin calls `_parent_session.inject_prompt(...)` |
+| Lifecycle status events → parent runner | Same `inject_prompt` channel + `_ui_hooks.on_agent_status_changed` | Same path as streaming output |
+| Termination (parent dies mid-subagent) | Parent process dies → subagent thread dies in same process | Daemon detects parent runner EOF → tears down sub-runner subprocess (sub-cgroup.kill + sub-AppArmor teardown) |
+| Termination (subagent dies mid-execution) | Subagent thread exception caught by `_run_subagent_async`'s try/except | Daemon detects sub-runner socket EOF → notifies parent runner via the cross-runner forwarding RPC |
+| Subagent → supervisor send | `subagent_send` tool → `session.send_message` in-process | Same shape, but daemon→sub-runner RPC dispatch |
+| `cancel_subagent` / `close_subagent` | Stop the subagent thread | Sub-cgroup.kill + sub-AppArmor teardown |
+
+### Audit finding: §4.3.6 is substantially larger than estimated
+
+The Audit 4 estimate was "audit + 1-2 implementation commits".
+After tracing the existing default-share path's contract, the
+realistic decomposition is:
+
+**§4.3.6a — Spawn invocation + sub-server lifecycle:**
+- Build `BootstrapEnvelope` for the isolated sub-session.
+- Call `_construct_and_initialize_server(envelope)` → new
+  `JaatoServer`.
+- Call `_spawn_session_runner_unconditional(server, session_id,
+  workspace_path, client_id, profile_name=sub_profile_name)` with
+  the sub-profile name from §4.3.4.
+- Wire cgroup attach via `Popen(preexec_fn=cgroups.make_attach_callback(isolated_session_id))`
+  — `RunnerSpawner.spawn` already accepts `cgroup_attach=...`.
+- Store sub-session in `self._sessions[isolated_session_id]` so
+  it has a normal session lifecycle.
+
+**§4.3.6b — Cross-runner output forwarding (sub → parent):**
+- New RPC method `subagent.forward_event` (daemon → parent runner).
+- New daemon-side dispatcher: subscribe to sub-runner's events
+  (existing EventBus already receives them), filter for subagent
+  events, dispatch to parent runner via the new RPC.
+- Runner-side handler: receives forwarded event, finds the
+  subagent plugin's session by subagent_id, calls
+  `_parent_session.inject_prompt(...)` with the right SourceType.
+
+**§4.3.6c — Cross-runner prompt forwarding (parent → sub):**
+- First-turn prompt: daemon calls existing
+  `session.send_message` RPC on the sub-runner (already wired
+  for normal sessions).
+- Supervisor-side `subagent_send` tool: parent-runner subagent
+  plugin calls a NEW runner→daemon RPC
+  (`subagent.send_to_isolated`) which the daemon translates to
+  the sub-runner's `session.send_message`.
+
+**§4.3.6d — Parent-cascade teardown + crash handling:**
+- Wire sub-resource teardown into parent session shutdown
+  (`JaatoServer.shutdown` or `SessionManager._cleanup_session`).
+- Cascade order: sub-cgroup.kill → wait for sub-runner exit →
+  teardown_sub_profile.
+- Sub-runner crash detection: daemon-side socket EOF on the
+  sub-runner channel → notify parent runner via
+  `subagent.forward_event(ERROR, ...)` → parent-runner subagent
+  plugin's existing error path (`inject_prompt` with ERROR text)
+  fires.
+
+Estimated scope: 1500-2500 lines of code + 60-80 new tests
+across 4 commits.  Plus §4.3.7 (subagent plugin opt-in wire)
++ §4.3.8 (integration test) + §4.3.9 (closure recap) = 7 more
+commits total to finish Phase 4.
+
+### Re-decision point
+
+The §4.3.0 audit estimated 10 commits for §4.3.  After §4.3.0-§4.3.5
+shipped (10 commits actually — audit + code pairs for each
+architectural stage), the remaining work is realistically 7 more
+(§4.3.6a-d + §4.3.7 + §4.3.8 + §4.3.9), bringing the total
+sub-track to **17 commits**.
+
+This is significantly above the §4.3.0 estimate.  Three options
+mirror the §4.3.0 framing:
+
+**Option 1 — Full §4.3.6 (7 more commits):**
+Complete the original Option α vision.  Cross-runner forwarding
+end-to-end, subagent-plugin opt-in wire, integration test, closure.
+Substantial — 1500-2500 lines of code + 60-80 tests.
+
+**Option 2 — Pragmatic narrowing (3-4 more commits):**
+- §4.3.6a: spawn invocation only.  Sub-runner subprocess actually
+  spawns with sub-AppArmor + sub-cgroup.  Daemon receives
+  sub-runner events but does NOT forward to parent runner —
+  events go to PARENT CLIENT (TUI/WS) directly (user sees subagent
+  output; parent model doesn't get events injected into its
+  conversation).
+- §4.3.7 (minimal): opt-in branch wires to §4.3.6a's spawn but
+  documents the "supervisor can't react to subagent results"
+  limitation.
+- §4.3.8: integration test verifies spawn happens on cgroup-
+  writable host.
+- §4.3.9: closure recap notes "spawn + last-mile forwarding split:
+  spawn ships in Phase 4 §4.3.6a, parent-model forwarding ships
+  in Phase 5".
+
+**Option 3 — Defer §4.3.6+ entirely (1 more commit: §4.3.9 closure):**
+Close Phase 4 with §4.3.5 as the last sub-commit.  §4.3.9 closure
+recap notes "Phase 4 ships infrastructure (§4.3.0-§4.3.5);
+supervisor wire-up + integration in Phase 5".  Most conservative;
+honestly reflects what's been built (helper reaches stage=forwarding,
+sub-AppArmor + sub-cgroup machinery ready, no caller exercises it
+yet).
+
+### Recommendation
+
+User-decision required.  Worker leans toward **Option 2**:
+
+- Option 1 doubles the §4.3 sub-track size from its original
+  estimate; significant risk of incomplete work at session end.
+- Option 3 leaves the infrastructure unused — sub-AppArmor +
+  sub-cgroup machinery (§4.3.4+§4.3.5) has no caller.
+- Option 2 puts the infrastructure to real use (subprocess
+  actually spawns + runs under confinement, user sees output),
+  while honestly scoping the cross-runner forwarding to its
+  natural home (Phase 5's "isolated subagent UX" work — alongside
+  the supervisor-side limit declarations + default RuntimeLimits
+  recorded in Audits 6, 7, 7's Phase 5 hardening surfaces).
+
+User may choose differently — the audit captures the option space
+without forcing a path.
+
+### Sub-step risk register (regardless of option chosen)
+
+1. **`BootstrapEnvelope` construction** — the existing helper
+   `_construct_and_initialize_server(envelope)` expects fields
+   the isolated-subagent call site may not naturally have.
+   Need to map `profile_payload` → envelope fields carefully.
+2. **`_sessions[isolated_session_id]` lifecycle** — registering
+   the sub-session under the parent's lifecycle vs under its own.
+   Affects `session.list`, `session.shutdown` propagation,
+   workspace tracking.
+3. **Worker-pool teardown for sub-runner** — `apparmor.py`'s
+   `_teardown_profile_impl` runs a pre-removal sweep on
+   `safe_pool` executors.  Sub-runner has its own executor in
+   its subprocess; the sweep doesn't reach across processes.
+   Document this; Phase 5 hardening can extend.
+4. **Cross-runner event ordering** — sub-runner events arrive
+   at daemon out-of-order with the parent runner's events.  The
+   subagent plugin's `inject_prompt` queue can absorb this, but
+   downstream UI hooks may need explicit ordering tags.
+5. **Daemon failure mid-forwarding** — if the daemon dies between
+   sub-runner emit and parent-runner forward, the parent loses
+   the event.  Today's runner→daemon contract assumes daemon
+   death = process termination for runners too (CLAUDE.md §4.4).
+   Same posture applies here.
+
 
