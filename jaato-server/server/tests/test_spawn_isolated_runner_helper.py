@@ -50,22 +50,42 @@ def _valid_payload(**overrides):
     return base
 
 
-def _make_session_manager(apparmor_manager=None) -> SessionManager:
+def _make_session_manager(
+    apparmor_manager=None,
+    cgroups_manager=None,
+) -> SessionManager:
     """Construct a SessionManager for unit tests.
 
-    ``_spawn_isolated_runner`` reads ``_apparmor_manager`` via
-    ``_resolve_apparmor_manager``; an ``__new__`` instance without
-    the attribute returns ``None`` from the resolver, which the
-    helper translates to "AppArmor unavailable → stage=sub_profile".
+    ``_spawn_isolated_runner`` reads:
+    - ``_apparmor_manager`` via ``_resolve_apparmor_manager``
+    - ``_cgroups_manager`` via ``_resolve_cgroups_manager``
 
-    Tests that need to exercise the §4.3.4 advance to
-    ``stage=sub_cgroup`` should pass in a mocked AppArmorManager
-    via the ``apparmor_manager`` arg.
+    An ``__new__`` instance without the attributes returns ``None``
+    from the resolvers, which the helper translates to "X
+    unavailable" branches (graceful degradation per Audit 7 for
+    cgroups; hard stop at stage=sub_profile for AppArmor).
+
+    Tests that need to exercise §4.3.4+§4.3.5 advances should pass
+    in mocked managers via the kwargs.
     """
     sm = SessionManager.__new__(SessionManager)
     if apparmor_manager is not None:
         sm._apparmor_manager = apparmor_manager
+    if cgroups_manager is not None:
+        sm._cgroups_manager = cgroups_manager
     return sm
+
+
+def _make_default_apparmor():
+    """AppArmorManager mock that succeeds — used as a baseline for
+    §4.3.5 tests that focus on cgroups behavior."""
+    apparmor = MagicMock()
+    apparmor.is_available.return_value = True
+    apparmor.provision_sub_profile.return_value = (
+        True, "jaato-ws-sess-A//agent-1",
+    )
+    apparmor.teardown_sub_profile.return_value = True
+    return apparmor
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -176,17 +196,23 @@ class TestSuccessfulReconstructionUnwiredApparmor:
 
 class TestSubProfileProvisioningStage:
     """Phase 4 §4.3.4: when AppArmorManager IS wired + available,
-    the helper advances past ``stage=sub_profile`` to either
-    ``stage=sub_cgroup`` (provision success) or ``stage=sub_profile``
-    with the kernel error (provision failure)."""
+    the helper advances past ``stage=sub_profile``.  The actual
+    next-stage value depends on cgroups state (§4.3.5):
 
-    def test_provision_success_advances_to_sub_cgroup(self):
-        """Successful sub-profile provisioning → next stage signal."""
-        apparmor = MagicMock()
-        apparmor.is_available.return_value = True
-        apparmor.provision_sub_profile.return_value = (
-            True, "jaato-ws-sess-A//agent-1",
-        )
+    - cgroups unavailable / no runtime_limits → stage=forwarding
+      with cgroup_path="" (graceful degradation per Audit 7).
+    - cgroups available + has limits + provision succeeds →
+      stage=forwarding with cgroup_path populated.
+    - cgroups available + has limits + provision fails →
+      stage=sub_cgroup with AppArmor rolled back.
+
+    AppArmor failure remains stage=sub_profile.
+    """
+
+    def test_apparmor_success_no_cgroups_advances_to_forwarding(self):
+        """Sub-AppArmor success + no CgroupsManager wired →
+        stage=forwarding (graceful degradation per Audit 7)."""
+        apparmor = _make_default_apparmor()
         sm = _make_session_manager(apparmor_manager=apparmor)
 
         result = sm._spawn_isolated_runner(
@@ -198,18 +224,18 @@ class TestSubProfileProvisioningStage:
         )
 
         assert result["ok"] is False
-        assert result["stage"] == "sub_cgroup"
+        assert result["stage"] == "forwarding"
         assert result["apparmor_profile"] == "jaato-ws-sess-A//agent-1"
-        # Stage message mentions §4.3.5 (next stage).
-        assert "§4.3.5" in result["error"]
-        # Provision invoked exactly once with the expected args.
+        assert result["cgroup_path"] == ""
+        # Stage message mentions §4.3.6 (next stage).
+        assert "§4.3.6" in result["error"]
         apparmor.provision_sub_profile.assert_called_once_with(
             parent_session_id="sess-A",
             subagent_id="agent-1",
             workspace_path="/work",
         )
 
-    def test_provision_failure_returns_sub_profile_with_kernel_error(self):
+    def test_apparmor_failure_returns_sub_profile_with_kernel_error(self):
         """When AppArmor sub-profile provisioning fails, the helper
         forwards the kernel error message via the stage envelope."""
         apparmor = MagicMock()
@@ -252,6 +278,177 @@ class TestSubProfileProvisioningStage:
         assert result["stage"] == "sub_profile"
         assert "unavailable" in result["error"].lower()
         apparmor.provision_sub_profile.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# §4.3.5 sub-cgroup provisioning
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestSubCgroupProvisioningStage:
+    """Phase 4 §4.3.5: with AppArmor success + CgroupsManager wired,
+    the helper exercises the sub-cgroup creation path.
+
+    Four sub-paths per Audit 7's stage-advance table:
+    - cgroups unavailable → stage=forwarding, cgroup_path=""
+    - profile has no runtime_limits → stage=forwarding, cgroup_path=""
+    - cgroups + limits + success → stage=forwarding, cgroup_path=<path>
+    - cgroups + limits + failure → stage=sub_cgroup + AppArmor rollback
+    """
+
+    def test_cgroups_unavailable_advances_to_forwarding(self):
+        """CgroupsManager wired but is_available() returns False
+        (e.g., host without cgroup v2).  Helper skips cgroup
+        creation and advances to forwarding with empty cgroup_path."""
+        apparmor = _make_default_apparmor()
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = False
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, cgroups_manager=cgroups,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits={
+                    "memory_max_bytes": 2 * 1024**3,
+                    "pids_max": 128,
+                },
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["stage"] == "forwarding"
+        assert result["cgroup_path"] == ""
+        # provision_cgroup NOT called (cgroups unavailable).
+        cgroups.provision_cgroup.assert_not_called()
+
+    def test_no_runtime_limits_advances_to_forwarding(self):
+        """Profile has no runtime_limits → cgroup creation skipped
+        (no kernel-enforceable bounds to apply)."""
+        apparmor = _make_default_apparmor()
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = True
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, cgroups_manager=cgroups,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),  # No runtime_limits.
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["stage"] == "forwarding"
+        assert result["cgroup_path"] == ""
+        cgroups.provision_cgroup.assert_not_called()
+
+    def test_provision_success_advances_to_forwarding_with_path(self):
+        """Cgroups + has_kernel_limits + provision OK → stage=forwarding
+        with cgroup_path populated."""
+        from pathlib import Path
+        apparmor = _make_default_apparmor()
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = True
+        cgroups.provision_cgroup.return_value = True
+        cgroups.get_cgroup_path.return_value = Path(
+            "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1",
+        )
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, cgroups_manager=cgroups,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits={
+                    "memory_max_bytes": 2 * 1024**3,
+                    "pids_max": 128,
+                },
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["stage"] == "forwarding"
+        assert result["cgroup_path"] == (
+            "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1"
+        )
+        # provision_cgroup invoked with the isolated_session_id.
+        provision_call = cgroups.provision_cgroup.call_args
+        assert provision_call[0][0] == "sess-A__sub_agent-1"
+        # AppArmor NOT rolled back on success.
+        apparmor.teardown_sub_profile.assert_not_called()
+
+    def test_provision_failure_rolls_back_apparmor(self):
+        """Sub-cgroup provision failure → stage=sub_cgroup +
+        AppArmor sub-profile torn down (no orphaned kernel state)."""
+        apparmor = _make_default_apparmor()
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = True
+        cgroups.provision_cgroup.return_value = False  # Kernel failed.
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, cgroups_manager=cgroups,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits={
+                    "memory_max_bytes": 2 * 1024**3,
+                    "pids_max": 128,
+                },
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is False
+        assert result["stage"] == "sub_cgroup"
+        # AppArmor profile rolled back — apparmor_profile cleared.
+        assert result["apparmor_profile"] == ""
+        # AppArmor teardown invoked exactly once.
+        apparmor.teardown_sub_profile.assert_called_once_with(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+        )
+
+    def test_provision_failure_tolerates_apparmor_teardown_crash(self):
+        """If AppArmor rollback itself crashes, helper still returns
+        the stage=sub_cgroup envelope (no exception bubbles up)."""
+        apparmor = _make_default_apparmor()
+        apparmor.teardown_sub_profile.side_effect = RuntimeError(
+            "teardown boom",
+        )
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = True
+        cgroups.provision_cgroup.return_value = False
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, cgroups_manager=cgroups,
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits={
+                    "memory_max_bytes": 2 * 1024**3,
+                    "pids_max": 128,
+                },
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["stage"] == "sub_cgroup"
+        # Teardown was attempted even though it crashed.
+        apparmor.teardown_sub_profile.assert_called_once()
 
 
 # ──────────────────────────────────────────────────────────────────────

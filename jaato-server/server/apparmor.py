@@ -827,53 +827,22 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
     # Phase 4 §4.3.4 — sub-AppArmor profile for isolated subagents
     # ──────────────────────────────────────────────────────────────────
 
-    # subagent_id length cap.  Filenames stay readable; profile names
-    # stay below typical kernel buffers; injection scope is bounded.
-    _SUBAGENT_ID_MAX_LEN = 64
-
-    # Sanitization regex — see Audit 6 in
-    # docs/design/phase4_implementation_audits.md.  Strict allow-list:
-    # reject (not collapse) on violation so callers see the bug.
-    _SUBAGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-
     @classmethod
     def _validate_subagent_id(cls, subagent_id: Any) -> Optional[str]:
         """Validate ``subagent_id`` for use in a sub-profile name +
         filename + ``change_profile`` target.
 
-        CONFUSED-DEPUTY PROTECTION: ``subagent_id`` originates runner-
-        side but flows into kernel-visible AppArmor names.  Strict
-        validation here prevents profile-file injection (newlines),
-        filename traversal (``/``, ``..``), and DoS via giant ids.
-
-        Args:
-            subagent_id: The candidate id.  Should be a str matching
-                ``[A-Za-z0-9_-]+`` with length 1..64.
+        Phase 4 §4.3.4 anchored this on AppArmorManager.  §4.3.5
+        hoisted the body to ``server.subagent_id.validate_subagent_id``
+        so the sub-cgroup validator can share the same implementation.
+        The classmethod stays for backwards compat with existing
+        callers + tests.
 
         Returns:
             ``None`` if valid; an error message string if invalid.
-            Returning a string lets callers (sub_profile provision +
-            helper integration) surface a precise diagnostic to the
-            runner-side caller instead of crashing.
         """
-        if not isinstance(subagent_id, str):
-            return (
-                f"subagent_id must be a str, got "
-                f"{type(subagent_id).__name__}"
-            )
-        if not subagent_id:
-            return "subagent_id is empty"
-        if len(subagent_id) > cls._SUBAGENT_ID_MAX_LEN:
-            return (
-                f"subagent_id length {len(subagent_id)} exceeds cap "
-                f"of {cls._SUBAGENT_ID_MAX_LEN}"
-            )
-        if not cls._SUBAGENT_ID_PATTERN.match(subagent_id):
-            return (
-                f"subagent_id {subagent_id!r} contains characters "
-                f"outside [A-Za-z0-9_-]"
-            )
-        return None
+        from server.subagent_id import validate_subagent_id
+        return validate_subagent_id(subagent_id)
 
     @classmethod
     def get_sub_profile_name(

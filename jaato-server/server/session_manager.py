@@ -1072,34 +1072,138 @@ class SessionManager:
         sub_profile_name = sub_profile_or_err
         logger.info(
             "_spawn_isolated_runner: sub-profile provisioned for "
-            "parent=%s subagent=%s (sub_profile=%s) — waiting on "
-            "§4.3.5 sub-cgroup creation",
+            "parent=%s subagent=%s (sub_profile=%s)",
             parent_session_id, subagent_id, sub_profile_name,
         )
 
-        # ── Stage: sub_cgroup (next stage — §4.3.5) ────────────
-        # Sub-profile provisioned + kernel-loaded.  Refusing to
-        # spawn until §4.3.5 attaches a sub-cgroup keeps the
-        # security gradient monotonic (kernel confinement is
-        # ready; resource bounding isn't yet).
+        # ── Stage: sub_cgroup — provision sub-cgroup ───────────
+        # Phase 4 §4.3.5: when cgroups available + profile declares
+        # kernel-enforceable runtime_limits, create the sub-cgroup
+        # via the existing CgroupsManager.provision_cgroup API
+        # (passing isolated_session_id as session_id — the cgroup
+        # path naturally lands at jaato-ws-{parent}__sub_{subagent}/
+        # via get_cgroup_name's template).  Sibling-not-nested
+        # structure per Audit 7 (cgroup v2 "no internal processes"
+        # rule + design intent).
+        #
+        # Graceful degradation: cgroups unavailable OR profile has
+        # no kernel limits → skip cgroup creation, sub-runner
+        # inherits daemon's default cgroup.  Documented Phase 5+
+        # hardening gap (default RuntimeLimits for isolated
+        # subagents).  AppArmor isolation still applies.
+        cgroup_path = ""  # Empty = no sub-cgroup provisioned.
+        cgroups_manager = self._resolve_cgroups_manager()
+        runtime_limits = profile.runtime_limits
+        if (cgroups_manager is not None
+                and cgroups_manager.is_available()
+                and runtime_limits is not None
+                and runtime_limits.has_kernel_limits()):
+            cgroup_ok = cgroups_manager.provision_cgroup(
+                isolated_session_id, runtime_limits,
+            )
+            if not cgroup_ok:
+                # Roll back the §4.3.4 sub-AppArmor profile before
+                # returning — otherwise it remains kernel-loaded
+                # but unused, and the next provision attempt with
+                # the same subagent_id sees the loaded profile.
+                # Best-effort: teardown failure logs but doesn't
+                # change the §4.3.5 return shape.  Idempotent
+                # re-load via provision_sub_profile would succeed
+                # anyway, so a stuck-loaded profile is not blocking.
+                try:
+                    apparmor_manager.teardown_sub_profile(
+                        parent_session_id=parent_session_id,
+                        subagent_id=subagent_id,
+                    )
+                except Exception:  # noqa: BLE001 — best-effort
+                    logger.exception(
+                        "_spawn_isolated_runner: sub-AppArmor "
+                        "rollback failed after sub-cgroup provision "
+                        "failure for parent=%s subagent=%s",
+                        parent_session_id, subagent_id,
+                    )
+                logger.warning(
+                    "_spawn_isolated_runner: sub-cgroup provision "
+                    "failed for parent=%s subagent=%s "
+                    "(isolated_session_id=%s)",
+                    parent_session_id, subagent_id, isolated_session_id,
+                )
+                return {
+                    "ok": False,
+                    "error": (
+                        f"sub-cgroup provision failed for isolated "
+                        f"session {isolated_session_id!r}.  Sub-AppArmor "
+                        f"profile {sub_profile_name!r} rolled back.  "
+                        f"Workaround: omit agent_params.isolated to "
+                        f"use default-share path."
+                    ),
+                    "stage": "sub_cgroup",
+                    "isolated_session_id": isolated_session_id,
+                    "profile_name": profile.name,
+                    "apparmor_profile": "",  # Rolled back.
+                }
+            cgroup_path = str(
+                cgroups_manager.get_cgroup_path(isolated_session_id),
+            )
+            logger.info(
+                "_spawn_isolated_runner: sub-cgroup provisioned for "
+                "parent=%s subagent=%s (cgroup_path=%s)",
+                parent_session_id, subagent_id, cgroup_path,
+            )
+        else:
+            logger.info(
+                "_spawn_isolated_runner: sub-cgroup skipped for "
+                "parent=%s subagent=%s "
+                "(cgroups_available=%s, has_kernel_limits=%s) — "
+                "sub-runner will inherit default cgroup",
+                parent_session_id, subagent_id,
+                cgroups_manager is not None
+                and cgroups_manager.is_available(),
+                runtime_limits is not None
+                and runtime_limits.has_kernel_limits(),
+            )
+
+        # ── Stage: forwarding (next stage — §4.3.6) ────────────
+        # Sub-AppArmor + (optional) sub-cgroup ready.  Refusing to
+        # spawn until §4.3.6 wires cross-runner forwarding keeps
+        # the security gradient monotonic — the resources are
+        # provisioned, but actually spawning a runner subprocess
+        # without forwarding wired would leave it unable to receive
+        # the first-turn prompt and unable to send output back.
         return {
             "ok": False,
             "error": (
-                f"sub-cgroup creation + attach not yet implemented "
-                f"(Phase 4 §4.3.5).  Sub-AppArmor profile {sub_profile_name!r} "
-                f"provisioned successfully.  Would-be isolated session: "
-                f"{isolated_session_id!r}.  Workaround: omit "
-                f"agent_params.isolated to use default-share path.  "
-                f"See docs/design/phase4_implementation_audits.md.  "
-                f"NOTE: sub-profile remains loaded until "
-                f"teardown_sub_profile is called — this is expected "
-                f"intermediate state while §4.3.5+§4.3.6 land."
+                f"cross-runner forwarding not yet implemented "
+                f"(Phase 4 §4.3.6).  Sub-AppArmor profile "
+                f"{sub_profile_name!r} provisioned successfully.  "
+                f"Sub-cgroup: {cgroup_path or '(skipped — see logs)'!r}.  "
+                f"Would-be isolated session: {isolated_session_id!r}.  "
+                f"Workaround: omit agent_params.isolated to use "
+                f"default-share path.  See "
+                f"docs/design/phase4_implementation_audits.md.  "
+                f"NOTE: sub-resources remain provisioned until "
+                f"teardown is called — this is expected intermediate "
+                f"state while §4.3.6 lands."
             ),
-            "stage": "sub_cgroup",
+            "stage": "forwarding",
             "isolated_session_id": isolated_session_id,
             "profile_name": profile.name,
             "apparmor_profile": sub_profile_name,
+            "cgroup_path": cgroup_path,
         }
+
+    def _resolve_cgroups_manager(self) -> Optional[Any]:
+        """Return the daemon's :class:`CgroupsManager` instance, or
+        ``None`` if not wired.
+
+        Phase 4 §4.3.5: mirrors :meth:`_resolve_apparmor_manager`.
+        ``_cgroups_manager`` lives on session managers wired via the
+        IPC apparmor opt-in pre-init hook.  Test fakes that bypass
+        the wire-up won't have the attribute; ``getattr`` returns
+        ``None`` in that case so the helper falls back to the
+        skip-cgroup-creation branch.
+        """
+        return getattr(self, "_cgroups_manager", None)
 
     def _resolve_apparmor_manager(self) -> Optional[Any]:
         """Return the daemon's :class:`AppArmorManager` instance, or
