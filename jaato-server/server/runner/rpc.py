@@ -470,6 +470,15 @@ class RunnerRPC:
             # dispatch (Phase 4+ removes the daemon-side seat).
             return self._handle_session_bootstrap(env.args)
 
+        if env.method == "subagent.forward_event":
+            # Phase 4 §4.3.6b: daemon forwards an event from an
+            # isolated sub-runner back to this parent runner.  The
+            # handler looks up the SubagentPlugin via the live
+            # JaatoRuntime's registry and routes to its
+            # ``receive_forwarded_event`` method, which mirrors the
+            # default-share path's ``inject_prompt`` contract.
+            return self._handle_subagent_forward_event(env.args)
+
         if env.method == "session.health_check":
             # Phase 3 §3.3c precursor: read-only probe of the
             # runner-side session host's status.  Daemon uses this
@@ -894,6 +903,127 @@ class RunnerRPC:
                 _ai_tl.cancel_token = prior_token
 
         return ok, result
+
+    def _handle_subagent_forward_event(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Route a daemon-forwarded sub-runner event to the
+        SubagentPlugin (Phase 4 §4.3.6b).
+
+        Looks up the SubagentPlugin from the bootstrapped JaatoSession
+        host's runtime registry, then dispatches the event to its
+        ``receive_forwarded_event`` method.  The plugin translates
+        the event into ``inject_prompt`` on the parent session,
+        mirroring the default-share path so the parent model sees
+        isolated + in-runner subagent events identically.
+
+        Expected args:
+            subagent_id (str): The subagent id from the spawn-time
+                response.
+            event_kind (str): "output" | "status" | "error" (open
+                for forward-compat).
+            event_payload (dict): Event-kind-specific payload.
+
+        Returns:
+            ``(True, {"ok": True})`` on success.
+            ``(False, {"error": "..."})`` when no host bootstrapped,
+            no SubagentPlugin available, or the plugin rejected the
+            event.  Daemon-side caller logs but doesn't retry.
+        """
+        # Validate args.
+        subagent_id = args.get("subagent_id")
+        event_kind = args.get("event_kind")
+        event_payload = args.get("event_payload")
+        if not isinstance(subagent_id, str) or not subagent_id:
+            return False, {
+                "error": "subagent.forward_event: subagent_id required",
+            }
+        if not isinstance(event_kind, str) or not event_kind:
+            return False, {
+                "error": "subagent.forward_event: event_kind required",
+            }
+        if not isinstance(event_payload, dict):
+            return False, {
+                "error": (
+                    "subagent.forward_event: event_payload must be a dict"
+                ),
+            }
+
+        # Find the runtime's plugin registry via the bootstrapped
+        # host.  Without a host, there's no plugin to dispatch to —
+        # log + fail.
+        with self._session_lock:
+            host = self._session_host
+        if host is None or host.session is None:
+            return False, {
+                "error": (
+                    "subagent.forward_event: no session host bootstrapped"
+                ),
+            }
+
+        runtime = getattr(host, "runtime", None)
+        registry = getattr(runtime, "_registry", None) if runtime else None
+        if registry is None:
+            return False, {
+                "error": (
+                    "subagent.forward_event: no plugin registry on runtime"
+                ),
+            }
+
+        # Plugin lookup — by canonical name 'subagent'.  Test fakes
+        # may have different registry shapes; tolerate get_plugin
+        # absence + dict-style access.
+        subagent_plugin = None
+        if hasattr(registry, "get_plugin"):
+            try:
+                subagent_plugin = registry.get_plugin("subagent")
+            except Exception:  # noqa: BLE001
+                pass
+        if subagent_plugin is None and hasattr(registry, "_plugins"):
+            subagent_plugin = registry._plugins.get("subagent")  # type: ignore[attr-defined]
+        if subagent_plugin is None:
+            return False, {
+                "error": (
+                    "subagent.forward_event: SubagentPlugin not loaded"
+                ),
+            }
+
+        if not hasattr(subagent_plugin, "receive_forwarded_event"):
+            return False, {
+                "error": (
+                    "subagent.forward_event: plugin lacks "
+                    "receive_forwarded_event method (older version)"
+                ),
+            }
+
+        try:
+            result = subagent_plugin.receive_forwarded_event(
+                subagent_id=subagent_id,
+                event_kind=event_kind,
+                event_payload=event_payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "subagent.forward_event: plugin raised for "
+                "subagent_id=%s event_kind=%s",
+                subagent_id, event_kind,
+            )
+            return False, {
+                "error": (
+                    f"plugin raised: {type(exc).__name__}: {exc}"
+                ),
+            }
+
+        # Plugin returned {ok, error?}.  Propagate as the RPC response.
+        if not isinstance(result, dict):
+            return False, {
+                "error": (
+                    f"plugin returned non-dict: {type(result).__name__}"
+                ),
+            }
+        if result.get("ok"):
+            return True, result
+        return False, result
 
     def _handle_session_bootstrap(
         self, args: Dict[str, Any],

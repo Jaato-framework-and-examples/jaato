@@ -2196,6 +2196,132 @@ class SubagentPlugin:
         # close_session) sees the agent already gone.
         self._fire_termination_callbacks(agent_id, session_id)
 
+    def receive_forwarded_event(
+        self,
+        subagent_id: str,
+        event_kind: str,
+        event_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Receive a cross-runner-forwarded event from an isolated
+        sub-runner (Phase 4 §4.3.6b).
+
+        Called runner-side by the ``subagent.forward_event`` RPC
+        handler when the daemon dispatches an event from a sub-runner
+        belonging to a subagent this plugin spawned with
+        ``agent_params.isolated=true``.
+
+        Mirrors the default-share path's ``_parent_session.inject_prompt``
+        contract — translates the forwarded event into a prompt
+        injection so the parent model sees the subagent's output in
+        its conversation, identically to in-runner subagents.
+
+        Args:
+            subagent_id: The subagent id (matches the id from the
+                spawn-time response).  Used to look up the subagent's
+                entry in ``_active_sessions`` if present (isolated
+                subagents may not have a local entry — that's fine,
+                the inject still fires on the parent session).
+            event_kind: Discriminator for the event type.  Recognized
+                values:
+                - ``"output"``: streaming text from the subagent's
+                  conversation.  ``event_payload`` carries ``text``
+                  (str) and ``source`` (str, e.g. "assistant").
+                - ``"status"``: lifecycle status update (running,
+                  done, error).  ``event_payload`` carries
+                  ``status`` (str).
+                - ``"error"``: error event.  ``event_payload``
+                  carries ``message`` (str).
+                Unknown kinds log a warning and return ok=False;
+                the wire shape is open for forward-compat.
+            event_payload: Event-kind-specific payload dict.  See
+                ``event_kind`` enum above.
+
+        Returns:
+            ``{"ok": True}`` on success.  ``{"ok": False, "error":
+            "..."}`` when no parent session is wired (plugin not
+            attached to a session) or the event_kind is unrecognized.
+
+        Phase 4 §4.3.6b: this is the runner-side endpoint that the
+        daemon dispatches to after receiving an event from a sub-
+        runner.  §4.3.6c will wire the daemon-side subscription that
+        triggers this method via the first-turn ``session.send_message``
+        call's ``on_notification`` callback.
+        """
+        if self._parent_session is None:
+            logger.warning(
+                "receive_forwarded_event: no parent session wired; "
+                "dropping event for subagent_id=%s kind=%s",
+                subagent_id, event_kind,
+            )
+            return {
+                "ok": False,
+                "error": "no parent session wired in subagent plugin",
+            }
+
+        if event_kind == "output":
+            text = str(event_payload.get("text", ""))
+            source = str(event_payload.get("source", "assistant"))
+            # Mirror default-share's format so the parent model sees
+            # isolated + in-runner subagents identically.
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} source={source}]\n{text}",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            return {"ok": True}
+
+        if event_kind == "status":
+            status = str(event_payload.get("status", ""))
+            # Mirror default-share's ui-hook signal (line 3030 in this file).
+            if self._ui_hooks:
+                try:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id=subagent_id,
+                        status=status,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "receive_forwarded_event: ui_hooks callback raised",
+                    )
+            # Status events also surface as inject_prompt so the parent
+            # model sees lifecycle transitions in its conversation.
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} event={status}]",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            return {"ok": True}
+
+        if event_kind == "error":
+            message = str(event_payload.get("message", ""))
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} event=ERROR]\n"
+                f"Subagent execution failed: {message}",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            if self._ui_hooks:
+                try:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id=subagent_id,
+                        status="error",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "receive_forwarded_event: ui_hooks callback raised",
+                    )
+            return {"ok": True}
+
+        logger.warning(
+            "receive_forwarded_event: unrecognized event_kind=%r for "
+            "subagent_id=%s",
+            event_kind, subagent_id,
+        )
+        return {
+            "ok": False,
+            "error": f"unrecognized event_kind: {event_kind!r}",
+        }
+
     def _execute_spawn_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spawn a subagent to handle a task.
 

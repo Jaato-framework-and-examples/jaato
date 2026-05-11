@@ -1404,6 +1404,96 @@ class SessionManager:
             cgroup_path=cgroup_path,
         )
 
+    def _forward_subagent_event_to_parent(
+        self,
+        sub_handle: SubRunnerHandle,
+        event_kind: str,
+        event_payload: Dict[str, Any],
+        *,
+        timeout: float = 5.0,
+    ) -> bool:
+        """Forward a sub-runner event to the parent runner via the
+        ``subagent.forward_event`` RPC (Phase 4 §4.3.6b).
+
+        Looks up the parent session's runner-RPC handle (from the
+        parent's JaatoServer in ``self._sessions``) and dispatches
+        the event.  Runner-side handler routes to the SubagentPlugin's
+        ``receive_forwarded_event``, which calls ``inject_prompt``
+        on the parent session.
+
+        Args:
+            sub_handle: The sub-runner's :class:`SubRunnerHandle`.
+                Provides ``parent_session_id`` for parent lookup.
+            event_kind: ``"output"`` | ``"status"`` | ``"error"``.
+            event_payload: Event-kind-specific payload dict.
+            timeout: Wall-clock cap for the RPC.  Default 5s — the
+                runner-side handler is fast (lookup + inject_prompt
+                + return), no plugin discovery / provider connect.
+
+        Returns:
+            True when the forward succeeded; False when the parent
+            runner is unavailable / the RPC failed / the plugin
+            rejected the event.  Caller logs but doesn't retry —
+            cross-runner forwarding is best-effort (CLAUDE.md §4.4).
+
+        Phase 4 §4.3.6b: this is the daemon-side helper.  §4.3.6c
+        wires the subscription that triggers it via the first-turn
+        ``session.send_message`` call's ``on_notification`` callback.
+        """
+        with self._lock:
+            parent_session = self._sessions.get(sub_handle.parent_session_id)
+        if parent_session is None:
+            logger.warning(
+                "_forward_subagent_event_to_parent: parent session %s "
+                "not found; dropping event_kind=%s for subagent_id=%s",
+                sub_handle.parent_session_id, event_kind,
+                sub_handle.subagent_id,
+            )
+            return False
+
+        parent_runner_rpc = getattr(
+            parent_session.server, "runner_rpc", None,
+        )
+        if parent_runner_rpc is None:
+            logger.warning(
+                "_forward_subagent_event_to_parent: parent session %s "
+                "has no runner_rpc; dropping event_kind=%s for "
+                "subagent_id=%s",
+                sub_handle.parent_session_id, event_kind,
+                sub_handle.subagent_id,
+            )
+            return False
+
+        try:
+            env = parent_runner_rpc.call_threadsafe(
+                "subagent.forward_event",
+                {
+                    "subagent_id": sub_handle.subagent_id,
+                    "event_kind": event_kind,
+                    "event_payload": event_payload,
+                },
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_forward_subagent_event_to_parent: RPC failed for "
+                "subagent_id=%s event_kind=%s: %s",
+                sub_handle.subagent_id, event_kind, exc,
+            )
+            return False
+
+        if not env.ok:
+            err_msg = (
+                env.error.message if env.error else "no error message"
+            )
+            logger.warning(
+                "_forward_subagent_event_to_parent: handler rejected "
+                "subagent_id=%s event_kind=%s: %s",
+                sub_handle.subagent_id, event_kind, err_msg,
+            )
+            return False
+        return True
+
     def _rollback_isolated_resources(
         self,
         *,
