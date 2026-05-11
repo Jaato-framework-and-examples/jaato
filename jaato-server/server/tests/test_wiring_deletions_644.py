@@ -106,32 +106,30 @@ def test_no_jaato_set_session_plugin_calls_remain() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_configure_tools_calls_still_present_until_645() -> None:
-    """Pin ``self._jaato.configure_tools(...)`` is NOT yet deleted —
-    it has cascading downstream daemon-side read deps (~15 sites).
-    Per the 6.6.4.4 audit narrowing, this drops with the atomic
-    field removal in §7c step 6.6.4.5 alongside read-site migration.
-    If this test starts failing, 6.6.4.5 has landed and the audit
-    note in the design doc should be updated."""
+def test_configure_tools_calls_dropped_in_645e() -> None:
+    """Pin ``self._jaato.configure_tools(...)`` was dropped in §7c
+    step 6.6.4.5e (seat-flip moment).  Daemon-direct runtime is
+    configured via ``self._runtime.configure_plugins(...)`` (5d
+    post-threadpool-join); the JaatoClient session-creation half
+    was dead-weight post-seat-flip."""
     calls = _module_calls_jaato_method("configure_tools")
-    assert len(calls) >= 2, (
-        f"Expected ≥2 ``self._jaato.configure_tools(...)`` call sites "
-        f"(initialize + auth-completion mirror); found {len(calls)}. "
-        f"If this fails because count went to 0, 6.6.4.5 has landed "
-        f"and this pin can be deleted."
+    assert calls == [], (
+        f"§7c step 6.6.4.5e regression: "
+        f"``self._jaato.configure_tools(...)`` call re-introduced in "
+        f"server/core.py ({len(calls)} sites)."
     )
 
 
-def test_configure_plugins_only_call_still_present_until_645() -> None:
-    """Pin ``self._jaato.configure_plugins_only(...)`` is NOT yet
-    deleted — pre-auth user-command listing depends on the daemon-
-    side runtime/session it creates.  Drops with 6.6.4.5."""
+def test_configure_plugins_only_call_dropped_in_645e() -> None:
+    """Pin ``self._jaato.configure_plugins_only(...)`` was dropped
+    in §7c step 6.6.4.5e (seat-flip moment).  Daemon-direct runtime
+    is configured via ``self._runtime.configure_plugins(...)`` at
+    initialize() post-threadpool-join time."""
     calls = _module_calls_jaato_method("configure_plugins_only")
-    assert len(calls) >= 1, (
-        f"Expected ≥1 ``self._jaato.configure_plugins_only(...)`` call "
-        f"site; found {len(calls)}. "
-        f"If this fails because count went to 0, 6.6.4.5 has landed "
-        f"and this pin can be deleted."
+    assert calls == [], (
+        f"§7c step 6.6.4.5e regression: "
+        f"``self._jaato.configure_plugins_only(...)`` call re-introduced "
+        f"in server/core.py ({len(calls)} sites)."
     )
 
 

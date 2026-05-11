@@ -960,7 +960,7 @@ validated Path A's safety over Path B's helper-extraction.
 
 5d ships as a single-commit migration; no further split needed.
 Next concrete step: 5d implementation.
-| **5e** | Atomic `_jaato`-field removal + ~14 truthiness collapses + 3 deferred WIRING drops (1886/1905/4397) + drop `set_agent_identity` / `set_ui_hooks` calls (per Refinement 1's missing-method audit) | High — large diff, pure cleanup |
+| **5e** | Atomic `_jaato`-field removal + truthiness collapses + 3 deferred WIRING drops + drop `set_agent_identity` / `set_ui_hooks` calls (per Refinement 1's missing-method audit).  **Shipped — seat-flip closure.**  9 new tests in `server/tests/test_seat_flip_complete_645e.py`.  Every deletion independently justified by a prior audit (audit-cross-reference table in commit message).  Field removed from JaatoServer; `JaatoClient` import dropped; 4 truthiness-check guards collapsed to unconditional bodies; `set_reference_authorizer` daemon-side leg dropped (runner-RPC forwarder already handles it); session_manager.py's `if state.metadata.get('subagents') and server._jaato:` truthiness pivoted to `server._runtime`.  §7c step 6.6.4 closes; seat-flip complete. |
 
 **Refinement 1 — Missing-method audit for 5c (eliminated):**
 

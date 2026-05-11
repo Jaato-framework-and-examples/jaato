@@ -246,20 +246,17 @@ def test_initialize_preserves_threadpool_executor_construction() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_initialize_jaato_client_construction_still_present_until_5e() -> None:
-    """Pin JaatoClient construction is NOT yet deleted in 5d.
-    The 5 unguarded daemon-side calls (configure_plugins_only,
-    configure_tools ×2, set_agent_identity, set_ui_hooks) still
-    operate on it.  5e drops the construction + dependent calls
-    atomically.
-
-    If this test starts failing because count went to 0, 5e has
-    landed and this pin can be deleted."""
+def test_initialize_jaato_client_construction_dropped_in_5e() -> None:
+    """Pin JaatoClient construction was dropped by §7c step 6.6.4.5e's
+    seat-flip moment.  Daemon constructs JaatoRuntime directly; no
+    JaatoClient is constructed daemon-side anymore."""
     calls = _function_constructs(JaatoServer.initialize, "JaatoClient")
-    assert len(calls) >= 1, (
-        f"Expected ≥1 ``JaatoClient(...)`` construction in initialize(); "
-        f"found {len(calls)}.  If 5e has landed, delete this pin "
-        f"(JaatoClient construction was moved out / deleted)."
+    assert calls == [], (
+        f"§7c step 6.6.4.5e regression: ``JaatoClient(...)`` "
+        f"construction re-introduced in initialize() "
+        f"({len(calls)} sites).  Daemon should construct "
+        f"``JaatoRuntime`` directly; JaatoClient stays only as the "
+        f"external-SDK facade."
     )
 
 

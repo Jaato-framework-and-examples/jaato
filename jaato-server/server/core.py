@@ -40,7 +40,6 @@ if str(RICH_CLIENT) not in sys.path:
 from dotenv import load_dotenv
 
 from shared import (
-    JaatoClient,
     JaatoRuntime,
     TokenLedger,
     PluginRegistry,
@@ -307,7 +306,10 @@ class JaatoServer:
         self._session_id = session_id
 
         # Core components
-        self._jaato: Optional[JaatoClient] = None
+        # Phase 3 §7c step 6.6.4.5e: ``self._jaato`` field removed.
+        # Every dependency redirected to either ``self._runtime`` (5a,
+        # 5d) or ``self._runner_rpc`` (5b, 5c.1-5c.5).  Seat-flip
+        # complete — daemon no longer constructs JaatoClient.
         self.registry: Optional[PluginRegistry] = None
         self.permission_plugin: Optional[PermissionPlugin] = None
         self.todo_plugin: Optional[TodoPlugin] = None
@@ -764,10 +766,12 @@ class JaatoServer:
         references plugin (still active during the §7c rollout
         window) keeps using the Python authorizer object directly.
         """
-        if self._jaato is not None:
-            session = self._jaato.get_session()
-            if session is not None:
-                session.set_reference_authorizer(authorizer)
+        # Phase 3 §7c step 6.6.4.5e: daemon-side leg dropped.
+        # ``set_reference_authorizer`` is forwarded to the runner via
+        # the ``session.set_reference_authorizer`` RPC below; the
+        # runner-side references plugin (post-§3.x sub-track migration)
+        # uses the existing ``apparmor.add_reference_fragment``
+        # runner→daemon RPC to authorize paths.
         rpc = self._runner_rpc
         if rpc is not None:
             forwarder = getattr(
@@ -1546,7 +1550,14 @@ class JaatoServer:
             _plugins_error: Optional[Exception] = None
 
             def _run_connect_provider() -> None:
-                """Stage 2: Create JaatoClient and connect to provider."""
+                """Stage 2: Construct JaatoRuntime and connect to provider.
+
+                Phase 3 §7c step 6.6.4.5e: dropped the transitional
+                ``JaatoClient(...) + .connect()`` calls from this stage.
+                Daemon now constructs ``JaatoRuntime`` directly.  Keeps
+                the executor-thread scope (~100-200ms concurrent with
+                plugin load).
+                """
                 nonlocal _connect_error
                 try:
                     self._emit_init_progress(
@@ -1554,40 +1565,6 @@ class JaatoServer:
                     )
                     with _timer.stage("connect_provider") as _s2:
                         with self._with_session_env():
-                            with _s2.sub("create_client"):
-                                # Phase 3 §7c step 6.6.4.5d: JaatoClient
-                                # construction is **transitional** — 5
-                                # unguarded daemon-side calls
-                                # (``configure_plugins_only``,
-                                # ``configure_tools`` ×2,
-                                # ``set_agent_identity``,
-                                # ``set_ui_hooks``) still operate on it.
-                                # 5e drops the JaatoClient + the
-                                # dependent calls atomically.  The
-                                # daemon-side ``self._runtime`` is now
-                                # constructed independently below
-                                # (decoupled from JaatoClient's internal
-                                # runtime).
-                                self._jaato = JaatoClient(
-                                    provider_name=provider_to_use,
-                                    workspace_path=self._workspace_path,
-                                    config_root=self._config_root,
-                                    instruction_token_cache=self._instruction_token_cache,
-                                    daemon_session_id=self._session_id,
-                                )
-                            with _s2.sub("client_connect"):
-                                self._jaato.connect(project_id, location, model_name)
-                            # Phase 3 §7c step 6.6.4.5d: daemon-direct
-                            # JaatoRuntime construction.  Replaces the
-                            # pre-§7c-step-6.6.4.5d alias
-                            # ``self._runtime = self._jaato.get_runtime()``.
-                            # Per the 5d disposition audit (commit
-                            # 2a69f82e): JaatoRuntime.__init__ is fully
-                            # decoupled from JaatoClient (4 primitive
-                            # args, zero client references), so daemon-
-                            # direct construction is feasible without
-                            # widening.  Keeps the executor-thread scope
-                            # (~100-200ms concurrent with plugin load).
                             with _s2.sub("create_runtime"):
                                 from pathlib import Path as _Path
                                 _ws = (
@@ -1935,76 +1912,28 @@ class JaatoServer:
             self._trace("[auth] verify_auth completed successfully")
             self._emit_init_progress("Verifying authentication", "done", 4, total_steps)
         else:
-            # Auth pending - only configure plugins for user commands (no provider session)
-            # Skip remaining steps until auth completes
-            self._trace("[auth] Configuring plugins only (auth pending, skipping provider session)")
-            self._jaato.configure_plugins_only(self.registry, self.permission_plugin, self.ledger)
+            # Auth pending — skip remaining steps until auth completes.
+            # Phase 3 §7c step 6.6.4.5e: ``_jaato.configure_plugins_only``
+            # call dropped.  The daemon-direct runtime is already
+            # configured with plugins via ``self._runtime.configure_plugins``
+            # (5d, post-threadpool-join); the JaatoClient session-creation
+            # half of ``configure_plugins_only`` is dead-weight post-seat-
+            # flip.
+            self._trace("[auth] Auth pending — skipping provider session")
             return True
 
         # Step 5: Configure tools (only if auth is complete)
-        # Use session env and workspace context so plugins can access session-specific
-        # config and tokens are loaded from the correct location
+        # Phase 3 §7c step 6.6.4.5e: ``_jaato.configure_tools(...)`` call
+        # dropped.  Daemon-direct runtime is already configured with
+        # plugins via ``self._runtime.configure_plugins(...)`` (5d post-
+        # threadpool-join); the JaatoClient session-creation half is
+        # dead-weight post-seat-flip.  ``DynamicInstructionsError`` from
+        # dynamic-instructions expansion now surfaces from the runner-
+        # side session bootstrap via its own error-reporting path
+        # (the bootstrap RPC).
         self._emit_init_progress("Configuring tools", "running", 5, total_steps)
         with _timer.stage("configure_tools") as _s5:
             with self._with_session_env(), self._in_workspace():
-                # Build session creation kwargs from agent profile (if any)
-                session_kwargs = self._build_profile_session_kwargs()
-                # Skip the model-test network call during bootstrap to reduce
-                # startup latency.  The model will be validated on the first
-                # real message from the user.
-                _skip_test = os.environ.get(
-                    "JAATO_SKIP_MODEL_TEST", "true"
-                ).lower() in ("1", "true", "yes")
-                with _s5.sub("configure_tools_call"):
-                    try:
-                        self._jaato.configure_tools(
-                            self.registry, self.permission_plugin, self.ledger,
-                            session_kwargs=session_kwargs,
-                            skip_model_test=_skip_test,
-                        )
-                    except DynamicInstructionsError as exc:
-                        # A non-optional ``{{!py:...}}`` placeholder failed
-                        # to render — the agent would run with a hollow
-                        # prompt and fabricate.  Abort session creation
-                        # cleanly with a structured error event so the
-                        # client sees the failing placeholder + reason
-                        # instead of a session-that-started-but-is-empty.
-                        # Server 0.6.48+; load-bearing for byte-identicality
-                        # determinism (per 7:3's cascade probe v6 finding).
-                        #
-                        # Server 0.6.50.1+: ALSO log at ERROR level.  Without
-                        # this, headless-spawned sessions (reactor
-                        # ``ctx.create_session`` → ``create_headless_session``)
-                        # silently lose the failure: ErrorEvent goes to the
-                        # ``_HEADLESS_CLIENT_ID`` synthetic client which the
-                        # transport layer drops, leaving the reactor caller
-                        # with an empty session_id and no diagnostic in
-                        # the daemon log.  The logger.error guarantees a
-                        # log trail regardless of which client receives the
-                        # event (cascade v8 finding from 7:3, 2026-05-06).
-                        logger.error(
-                            "Session creation aborted: prefetch %s failed "
-                            "(%s).  Add `?` modifier to placeholder for "
-                            "best-effort semantics, or fix the script.",
-                            exc.script_ref, exc.reason,
-                        )
-                        self._emit_init_progress(
-                            "Configuring tools", "error", 5, total_steps,
-                            f"prefetch failed: {exc.script_ref}: {exc.reason}",
-                        )
-                        self.emit(ErrorEvent(
-                            error=(
-                                f"Prefetch failed: {exc.script_ref} — "
-                                f"{exc.reason}.  Mark the placeholder as "
-                                f"{{{{!py?:{exc.script_ref}}}}} (note the "
-                                f"`?`) to opt into best-effort semantics, "
-                                f"or fix the script."
-                            ),
-                            error_type="DynamicInstructionsError",
-                            recoverable=False,
-                        ))
-                        return False
-
                 # Wire formatter pipeline into runtime so output formatters can
                 # contribute system instructions (e.g., mermaid rendering hints).
                 # Phase 3 §7c step 4: read directly from ``self._runtime``.
@@ -2421,10 +2350,11 @@ class JaatoServer:
 
         Each JaatoServer has its own session plugin instance for tool operations.
         SessionManager has a separate plugin instance for persistence operations.
+
+        Phase 3 §7c step 6.6.4.5e: ``if not self._jaato: return`` guard
+        dropped (always-true branch — daemon-direct ``self._runtime``
+        is populated synchronously by ``_run_connect_provider``).
         """
-        if not self._jaato:
-            logger.debug("  _setup_session_plugin: no _jaato, returning early")
-            return
 
         try:
             logger.debug("  _setup_session_plugin: loading session config...")
@@ -2481,12 +2411,12 @@ class JaatoServer:
             pass  # Session plugin is optional
 
     def _setup_agent_hooks(self) -> None:
-        """Set up agent lifecycle hooks."""
-        logger.debug("  _setup_agent_hooks: entering...")
-        if not self._jaato:
-            logger.debug("  _setup_agent_hooks: no _jaato, returning early")
-            return
+        """Set up agent lifecycle hooks.
 
+        Phase 3 §7c step 6.6.4.5e: ``if not self._jaato: return`` guard
+        dropped (always-true branch post-seat-flip).
+        """
+        logger.debug("  _setup_agent_hooks: entering...")
         logger.debug("  _setup_agent_hooks: defining ServerAgentHooks class...")
         server = self
 
@@ -2863,25 +2793,20 @@ class JaatoServer:
         # logical identity (e.g. ``"coordinator"``) instead of the
         # default ``"main"``.
         #
-        # Phase 3 §7c step 3: previously this reached into the
-        # private attributes ``_jaato._agent_id`` / ``_jaato._agent_name``
-        # directly.  Replaced with the public
-        # :meth:`JaatoClient.set_agent_identity` setter — same
-        # behavior (agent_name is set only when display_name OR
-        # profile name is non-empty, otherwise the framework's
-        # default "Main Agent" is preserved).
-        agent_name: Optional[str] = None
-        if self._main_agent_display_name:
-            agent_name = self._main_agent_display_name
-        elif self._profile:
-            agent_name = self._profile.name
-        self._jaato.set_agent_identity(
-            agent_id=self._main_agent_id,
-            agent_name=agent_name,
-        )
-        logger.debug("  _setup_agent_hooks: calling jaato.set_ui_hooks...")
-        self._jaato.set_ui_hooks(hooks)
-        logger.debug("  _setup_agent_hooks: jaato.set_ui_hooks done")
+        # Phase 3 §7c step 6.6.4.5e: ``_jaato.set_agent_identity()`` and
+        # ``_jaato.set_ui_hooks()`` calls dropped per the §7c step
+        # 6.6.4.5c.0 missing-method audit (commit a88676ca).  Both were
+        # daemon-side JaatoClient state mutations with no meaningful
+        # runner-side propagation:
+        # - ``set_agent_identity`` only mutated JaatoClient._agent_id /
+        #   _agent_name; equivalent state already on
+        #   ``self._main_agent_id`` / ``self._main_agent_display_name``.
+        # - ``set_ui_hooks`` propagated to JaatoSession, but the runner-
+        #   side session's ``_ui_hooks`` is None (Audit Finding 3 — see
+        #   docs/design/project_backlog_runner_ui_hooks_gap.md).  The
+        #   ``AgentUIHooks`` callable object isn't serializable across
+        #   the wire anyway.  Daemon-side hooks live on JaatoServer +
+        #   subagent_plugin (registered separately below).
 
         # Register with subagent plugin
         if self.registry:
@@ -3411,13 +3336,10 @@ class JaatoServer:
             text: The message text.
             attachments: Optional list of attachments.
         """
-        if not self._jaato:
-            self.emit(ErrorEvent(
-                error="Client not initialized",
-                error_type="StateError",
-            ))
-            return
-
+        # Phase 3 §7c step 6.6.4.5e: ``if not self._jaato: emit error;
+        # return`` guard dropped (always-true branch post-seat-flip;
+        # daemon-direct ``self._runtime`` is populated synchronously by
+        # initialize()).
         if self._model_running:
             # Inject directly into the session's queue (USER source — high priority).
             #
@@ -4072,10 +3994,10 @@ class JaatoServer:
 
         Returns:
             Command result dict.
-        """
-        if not self._jaato:
-            return {"error": "Client not initialized"}
 
+        Phase 3 §7c step 6.6.4.5e: ``if not self._jaato`` guard
+        dropped (always-true branch post-seat-flip).
+        """
         # Phase 3 §7c step 6.6.4.5c.2: route through runner-RPC
         # (dict-shape-only wire format reconstructed daemon-side
         # into UserCommand NamedTuples — full ``parse_command_args``
@@ -4523,10 +4445,13 @@ class JaatoServer:
                 self._emit_init_progress("Verifying authentication", "done", 4, 6)
 
                 # Step 5: Configure tools (use session env and workspace context for plugin config)
+                # Phase 3 §7c step 6.6.4.5e: ``_jaato.configure_tools()`` call
+                # dropped (mirror of initialize() site).  Daemon-direct
+                # runtime is already configured with plugins via 5d's post-
+                # threadpool-join ``self._runtime.configure_plugins(...)``;
+                # the JaatoClient session-creation half is dead-weight.
                 self._emit_init_progress("Configuring tools", "running", 5, 6)
                 with self._with_session_env(), self._in_workspace():
-                    self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
-
                     gc_result = load_gc_from_file(workspace_root=self._workspace_path)
                 gc_threshold = None
                 gc_strategy = None

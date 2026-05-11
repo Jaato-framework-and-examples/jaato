@@ -2700,8 +2700,11 @@ class SessionManager:
                             budget_snapshot=snapshot,
                         ))
 
-        # Restore subagent state if present in metadata
-        if state.metadata.get('subagents') and server._jaato:
+        # Restore subagent state if present in metadata.
+        # Phase 3 §7c step 6.6.4.5e: truthiness check pivoted from
+        # ``server._jaato`` (deleted) to ``server._runtime`` (the
+        # daemon-side canonical handle since 5d).
+        if state.metadata.get('subagents') and server._runtime is not None:
             self._restore_subagent_states(
                 session_id,
                 state.metadata['subagents'],
