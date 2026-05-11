@@ -39,8 +39,11 @@ def _good_envelope(**overrides: Any) -> SessionInitEnvelope:
         model_name="claude-sonnet-4-6",
         plugins=[
             {"name": "signal_completion", "preload": True},
-            {"name": "cli", "preload": False, "config": {"max_workers": 4}},
+            {"name": "cli", "preload": False},
         ],
+        # Phase 4 §C: per-plugin configs now live in the top-level
+        # envelope.plugin_configs map (schema v2), not in plugins[i].config.
+        plugin_configs={"cli": {"max_workers": 4}},
         system_instructions="You are a helpful agent.",
         agent_id="main",
     )
@@ -195,8 +198,13 @@ def test_bootstrap_passes_agent_params() -> None:
 
 def test_bootstrap_with_empty_plugins_passes_none() -> None:
     """Empty plugin list flows as ``tools=None`` so the runtime
-    falls back to its default behavior (expose all)."""
-    env = _good_envelope(plugins=[])
+    falls back to its default behavior (expose all).
+
+    Phase 4 §C: plugin_configs is now a separate top-level envelope
+    field (no longer derived from plugins[i].config), so the test
+    clears it explicitly to assert the "no configs" path.
+    """
+    env = _good_envelope(plugins=[], plugin_configs={})
     runtime = _StubRuntime()
     bootstrap_session(env, runtime_factory=lambda e: runtime)
     assert runtime.create_session_kwargs["tools"] is None
