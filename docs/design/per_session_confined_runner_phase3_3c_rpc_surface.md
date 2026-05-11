@@ -835,7 +835,131 @@ wire-shape decisions per-handler reviewers will need.
 | **5c.3** | `session.execute_user_command` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4000).  Wire-shape: handle `HelpLines`-or-other non-JSON result.  **Shipped.**  21 new tests in `server/runner/tests/test_session_execute_user_command_rpc.py`.  Wire decision per the §7c step 6.6.4.5c.3 mid-implementation audit: **Path A (per-type reconstruction) bounded to 3 shapes** — pre-implementation grep killed Path B (stringify-pre-wire) by surfacing 3 daemon-side structured-access sites: `isinstance(result, HelpLines)` + `result.lines` (4073), `isinstance(result, dict)` + `result.get("success")` / `result["current_model"]` (4078), `isinstance(result, dict)` IPC-return fallback (4099).  Wire format: `{"_kind": "HelpLines", "lines": [[text, style], ...]}` / `{"_kind": "dict", "value": <json-dict>}` / `{"_kind": "str", "value": <str>}` (everything-else coerced).  Daemon wrapper reconstructs HelpLines NamedTuple instances + re-tuples the lines (wire flattens to lists; HelpLines.lines contract is `List[tuple]`). |
 | **5c.4** | `session.get_model_completions` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4224).  Wire-shape: serialize `CommandCompletion`.  **Shipped — scope expanded to 2 callsites.**  16 new tests in `server/runner/tests/test_session_get_model_completions_rpc.py`.  Mid-implementation audit caught a 5c.0 inventory miss: `command_router.py:1149` is a second daemon-side consumer of `_jaato.get_model_completions`, reads both `.value` AND `.description` for the model-subcommand-expansion autocomplete catalog.  Without 5c.4 migration of this site, model-subcommand expansion would silently stop working post-5e field removal.  Wire format mirrors 5c.2's UserCommand pattern: dict-shape-only (Path A) with daemon-side `CommandCompletion` NamedTuple reconstruction.  Audit-discipline tally: 16 audits, 16 silent-regression catches. |
 | **5c.5** | `session.get_tool_schemas` RPC + wrapper + tests + migrate 2 daemon callsites (core.py:1407, 3721).  Wire-shape: serialize `ToolSchema` with traits/nested schemas.  **Shipped — Path D finale.**  17 new tests in `server/runner/tests/test_session_get_tool_schemas_rpc.py`.  Pre-implementation grep confirmed all 7 ToolSchema fields + nested EditableContent fields are JSON-encodable; `traits: FrozenSet[str]` round-trips as `traits: List[str]` on wire and back to FrozenSet on receipt.  Daemon wrapper reconstructs ToolSchema + EditableContent dataclass instances; daemon callsites at core.py:1407 (`for schema in ... .name + .category`) and core.py:3759 (`signal_completion_in_surface` filter via `getattr(t, 'name', ...)`) work unmodified.  Both wrapped in try/except for best-effort fallback to `[]`.  All 5c sub-commits complete; Path D's 5-handler decomposition closes. |
-| **5d** | Construction refactor — daemon constructs `JaatoRuntime` directly; remove `self._jaato.get_runtime()` indirection at construction site (lines 1550-1565).  Pre-audit per Refinement 3: verify `JaatoRuntime.__init__()` signature can be called daemon-direct. | Medium — architectural pivot |
+| **5d** | Construction refactor — daemon constructs `JaatoRuntime` directly; remove `self._jaato.get_runtime()` indirection at construction site (lines 1550-1565).  Pre-audit per Refinement 3: verify `JaatoRuntime.__init__()` signature can be called daemon-direct. | Medium — architectural pivot.  **5d disposition audit decides Path A vs Path B before code lands** (see below). |
+
+#### §7c step 6.6.4.5d disposition audit (pre-implementation)
+
+Mirrors the 5c.0 audit shape per the audit-discipline pattern.
+The construction refactor is architecturally distinct from 5a-5c
+(which were all uniform RPC-handler-and-wrapper migrations); audit
+catches what mechanical-instinct would miss.
+
+**Q1 — `JaatoRuntime.__init__()` signature widening needed?**
+
+Current signature (jaato_runtime.py:228):
+
+```python
+def __init__(self, provider_name: str = "google_genai",
+             workspace_path: Optional[Path] = None,
+             config_root: Optional[str] = None,
+             instruction_token_cache: Optional[InstructionTokenCache] = None):
+```
+
+4 args, all primitives + Optional types.  Zero `JaatoClient`
+references inside `__init__` body — fields set are local
+(`_provider_name`, `_workspace_path`, `_config_root`,
+`_provider_config = None`, etc.).  No state-set-by-Client
+expectations. **Daemon-direct construction is feasible.**
+**Refinement 3 closes**: no 5d.0 prereq commit needed.
+
+**Q2 — `JaatoClient.connect()` side-effects beyond runtime
+construction + auth?**
+
+Body of `connect()` (jaato_client.py:399-438) — 5 steps:
+
+1. Resolves `model` (with `MODEL_NAME` env-var fallback).
+2. Validates `_provider_name` is set.
+3. Constructs `JaatoRuntime(provider_name, ws, config_root, instruction_token_cache)`.
+4. Calls `self._runtime.connect(project, location)` — sets the
+   provider config + `_connected = True` on the runtime.
+5. Stores `_model_name`, `_project`, `_location` on `JaatoClient`
+   for SDK-side properties (`is_connected`, `model_name`).
+
+Steps 1-2 are arg validation, replicable daemon-side trivially.
+Steps 3-4 are runtime construction + connect, directly replicable.
+**Step 5 is JaatoClient-state only — daemon doesn't need it**
+(`JaatoServer` already has `self._model_name`/`self._model_provider`
+on its own state).
+
+**Q3 — Auth flow re-wiring?**
+
+`JaatoClient.verify_auth()` is a thin wrapper over
+`JaatoRuntime.verify_auth(allow_interactive, on_message,
+provider_name, plugin_configs)`.  Auth implementation **already
+lives on JaatoRuntime** — daemon can call
+`self._runtime.verify_auth(...)` directly post-construction.
+**No auth re-wiring needed.**
+
+**Q4 — SDK consumers (Path B contract preservation)?**
+
+Cross-grep of `JaatoClient(...)` constructor calls across the
+codebase (excluding tests + docs):
+
+| Site | Disposition |
+|---|---|
+| `core.py:1557` | The daemon-side site being migrated in 5d |
+| (none else) | No other non-test production callers |
+
+Docs in plugin READMEs (`web_search`, `subagent`,
+`filesystem_query`, etc.) demonstrate `JaatoClient()` for
+**external SDK callers** — Path A doesn't touch them since
+JaatoClient itself stays in place for those external use cases.
+**JaatoClient remains the SDK facade.**
+
+**Q5 — Actual construction site (re-grep per 5c.4 inventory-miss
+lesson)?**
+
+`_run_connect_provider()` (core.py:1547-1587) runs in a
+ThreadPoolExecutor thread, concurrent with `_run_load_plugins()`
+(saves ~100-200ms during bootstrap).  4 substages:
+
+1. `create_client` — constructs `JaatoClient(...)` (line 1557)
+2. `client_connect` — `self._jaato.connect(project, location, model)` (line 1565)
+3. Implicit alias — `self._runtime = self._jaato.get_runtime()` (line 1572)
+4. `_pre_init_confine_context_factory` propagation (lines 1578-1585)
+
+**No adjacent state-setup found that requires co-migration.**
+The confine-context-factory propagation operates on `self._runtime`
+(post-alias) — unchanged by the refactor.
+
+### Path A vs Path B verdict
+
+**Path A wins.** Direct `JaatoRuntime(...)` construction
+daemon-side with `self._runtime.connect(project, location)`
+invoked separately.  Reasons:
+
+1. `JaatoRuntime.__init__` is already fully decoupled from
+   JaatoClient (zero client references in init body) — no helper
+   extraction needed.
+2. `JaatoClient.connect()` does only 5 things; 2 are runtime
+   construction + connect (cleanly replicable daemon-side); 3 are
+   JaatoClient-side state (not needed daemon-side, JaatoServer has
+   its own).
+3. `JaatoRuntime.verify_auth` exists as a runtime-tier method —
+   daemon can call it directly.
+4. SDK consumers don't touch the daemon path; JaatoClient stays
+   as the external-SDK facade.
+5. **Path B over-engineers**: extracting a `_build_runtime` helper
+   benefits only if JaatoClient and the daemon share more code,
+   but the audit shows they share only the trivial 2-step
+   "construct + connect" pattern.
+
+### Audit findings
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | `JaatoRuntime.__init__` daemon-direct-callable as-is | Refinement 3 closes; no 5d.0 prereq |
+| 2 | `JaatoClient.connect()` body decomposes cleanly: 2 runtime ops + 3 client-state stores | Daemon replicates only the 2 runtime ops |
+| 3 | Auth flow already on JaatoRuntime | Daemon calls `self._runtime.verify_auth()` directly |
+| 4 | Only 1 production callsite (core.py:1557) — JaatoClient stays SDK facade | Path A safe |
+| 5 | Concurrent ThreadPoolExecutor stage — must preserve concurrency | Swap construction inside same `_run_connect_provider` thread function |
+
+**Audit-discipline tally: 18 audits, 18 silent-regression catches.**
+Today's audit disposed Refinement 3 cleanly (no 5d.0 prereq) AND
+validated Path A's safety over Path B's helper-extraction.
+
+5d ships as a single-commit migration; no further split needed.
+Next concrete step: 5d implementation.
 | **5e** | Atomic `_jaato`-field removal + ~14 truthiness collapses + 3 deferred WIRING drops (1886/1905/4397) + drop `set_agent_identity` / `set_ui_hooks` calls (per Refinement 1's missing-method audit) | High — large diff, pure cleanup |
 
 **Refinement 1 — Missing-method audit for 5c (eliminated):**
