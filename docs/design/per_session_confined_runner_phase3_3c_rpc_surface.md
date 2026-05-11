@@ -2209,3 +2209,133 @@ this table is its design-doc-resident counterpart.
 
 - **§7a (always-spawn) impact on this audit:** if §7a lands first, every IPC + WS session has a runner regardless of apparmor opt-in.  The audit's classifications don't change (init ordering is unchanged — the runner spawns at the same step), but the PROPORTION of sessions where the migrated sites actually take the runner path goes from "apparmor-opt-in subset" to "all sessions."  This is the correctness amplification §7a delivers.
 - **§7c flag-removal sequencing:** the **TRUTHINESS** + **INTERNAL** + **WIRING** buckets all collapse during §7c (when `_jaato` field is removed).  This audit doesn't sequence those collapses; that's §7c's task.
+
+### Path D pre-implementation audit (cycle 5, integration-test driven)
+
+**Context.**  Cycles 2–4 of integration-test-driven regression
+hunting each surfaced one missing step in the runner-side bootstrap
+chain:
+
+| Cycle | Layer | Path | Commit | Defect |
+|---|---|---|---|---|
+| 2 | 1 — snapshot guard | A (narrow) | `20b16326` | `session_snapshot_instruction_budget_threadsafe` callsites unwrapped; `RunnerCallError` kills IPC handler |
+| 3 | 2 — IPC dispatch | B (architectural) | `c68151a8` | `_provision_ipc_apparmor_and_spawn_runner` spawned runner but never `dispatch_bootstrap_envelope` — runner-side `JaatoSession` host stays unpopulated |
+| 4 | 3 — provider connect | C (envelope+connect) | `4d9cf8b7` | Runner-side `bootstrap_session` constructed `JaatoRuntime` but never called `runtime.connect(...)`; `create_session` guards on `_connected` |
+
+The cycle-4 verdict diagnosed the **next** layer precisely (`runtime.create_session` also guards on `_registry` at `jaato_runtime.py:966-967` — Layer 4 = `configure_plugins` missing) but the cadence — fix one, integration test reveals next — costs an iteration per layer.  Path D's framing question:
+
+> Does the runner-side `bootstrap_session` re-implement the daemon-side `JaatoClient.connect()` + `JaatoClient.configure_tools()` + `JaatoSession` lifecycle init?  And if so, which daemon-side steps still aren't mirrored runner-side?
+
+This audit answers it in one pass.
+
+**Q1 — Daemon-side init sequence (source of truth).**
+
+`server/core.py:1615-1777` (`_run_load_plugins` + post-threadpool `configure_plugins` call) executes the following in order:
+
+| # | Daemon-side call | Where | What it accomplishes |
+|---|---|---|---|
+| 1 | `self.registry = PluginRegistry(model_name=model_name)` | `core.py:1617` | Construct empty registry seeded with model name (model-aware plugin filtering) |
+| 2 | `self.registry.discover()` | `core.py:1619` | Discover plugins via entry-points + directory scan.  **No `tier_filter`** — daemon discovers everything |
+| 3 | Build `plugin_configs` dict | `core.py:1621-1675` | Map 11 plugins to per-plugin config dicts wired with `workspace_path` + `session_id` + profile-supplied `sandbox_manager` overrides |
+| 4 | `self.registry.expose_all(plugin_configs, on_progress=...)` | `core.py:1687-1689` | Initialize each plugin with its config; threads parallel-init for `PARALLEL_INIT=True` plugins (MCP) |
+| 5 | `self.todo_plugin = self.registry.get_plugin("todo")` | `core.py:1690` | Daemon-side convenience capture for todo emission |
+| 6 | `self.registry.set_workspace_path(self._workspace_path)` | `core.py:1694` | Broadcast workspace_path to all plugins implementing the hook |
+| 7 | `self.registry.set_config_root(self._config_root)` | `core.py:1708` | Replay config_root broadcast (was no-op pre-registry) |
+| 8 | `self.permission_plugin = PermissionPlugin()` + `initialize(...)` | `core.py:1711-1728` | Construct permission plugin with profile-merged `policy` config |
+| 9 | `self._runtime.configure_plugins(self.registry, self.permission_plugin, self.ledger)` | `core.py:1773-1777` | Wire the constructed registry + permission_plugin + ledger onto the runtime |
+
+After step 9, `runtime.create_session(...)` (eventually called via `configure_tools`) succeeds because `_connected` (set by `connect` step 0) AND `_registry` (set by step 9) both pass.
+
+**Q2 — Runner-side `bootstrap_session` sequence (current, post-Path-C).**
+
+`server/runner/session.py:141-260`:
+
+| # | Runner-side call | Status |
+|---|---|---|
+| 0 | `_validate_envelope(envelope)` | ✅ present |
+| 1 | `runtime = factory(envelope)` → constructs `JaatoRuntime(provider_name, workspace_path, config_root)` | ✅ Path B-era (`_default_runtime_factory` at `session.py:112`) |
+| 2 | `runtime.connect(envelope.project, envelope.location)` | ✅ Path C (`session.py:234-243`) |
+| 3 | `_build_session(runtime, envelope)` → calls `runtime.create_session(...)` | ⚠ **FAILS at `jaato_runtime.py:966-967`** with `RuntimeError("Plugins not configured. Call configure_plugins() first.")` |
+
+The Path C fix closed the `_connected` guard.  The next guard fires immediately afterward: `_registry` is still `None` runner-side because **none of daemon-side steps 1–9 are mirrored** in `bootstrap_session`.
+
+**Q3 — Per-step disposition.**
+
+| Daemon step | Runner-side equivalent in `bootstrap_session` today | Disposition |
+|---|---|---|
+| 1. `PluginRegistry(model_name=...)` construction | **MISSING** | Add to `bootstrap_session` between Path C connect + `_build_session`.  Use `envelope.model_name`. |
+| 2. `registry.discover()` | **MISSING** | Add with `tier_filter="runner"` (per §3.3.5).  Runner-tier-only discovery is the correctness contract — daemon-tier plugins (auth, gc_*, cache_*, session, background) are excluded.  Confirmed by `PLUGIN_TIER` grep: 31 runner-tier + 12 daemon-tier plugins.  Of the 11 plugins in daemon's `plugin_configs` dict, 6 are runner-tier (`todo`, `references`, `clarification`, `lsp`, `mcp`, `file_edit`, `waypoint`, `sandbox_manager`) and 5 are daemon-tier (`anthropic_auth`, `github_auth`, `zhipuai_auth`, `antigravity_auth`, `nim_auth`) — the auth plugins **must not** load runner-side. |
+| 3. Build `plugin_configs` dict | **MISSING** | Mirror daemon's per-plugin defaults using `envelope.workspace_path` + `envelope.session_id`.  Skip the 5 auth-plugin entries (filtered by tier_filter anyway, but the config-dict entries waste a `dict.get` lookup).  Merge `envelope.plugins[].config` overrides on top — the envelope already carries per-plugin profile-resolved configs (`runner_spawn.py:200-208`). |
+| 4. `registry.expose_all(plugin_configs)` | **MISSING** | Heavy work — initializes each discovered plugin.  Failures here surface as `BootstrapError("plugins", ...)`.  Skip `on_progress` callback (daemon-side emits `_emit_init_progress` events to clients; runner has no event sink for those). |
+| 5. `self.todo_plugin = registry.get_plugin("todo")` | **N/A runner-side** | Daemon-side convenience capture for `core.py`-resident todo emission.  Runner-side has no equivalent code path needing the cached reference. |
+| 6. `registry.set_workspace_path(...)` | **MISSING** | Broadcast to plugins (CLI, LSP, MCP, file_edit, etc. all consume).  Only call if `envelope.workspace_path` is non-None (headless sessions skip). |
+| 7. `registry.set_config_root(...)` | **MISSING** | Same shape; only call if `envelope.config_root` is non-None. |
+| 8. `PermissionPlugin()` + `initialize(...)` | **MISSING** | Construct permission plugin with `policy: {defaultPolicy: "ask", whitelist/blacklist: empty}` — the daemon's default.  Profile-supplied `plugin_configs["permission"]` overrides aren't currently in the envelope; this is a **secondary gap** (see Q5 below). |
+| 9. `runtime.configure_plugins(registry, permission_plugin, ledger=None)` | **MISSING** | The Layer-4 trigger.  Ledger is daemon-side per §4.2; pass `None` runner-side.  Reliability plugin similarly daemon-side; pass `None`. |
+
+**Q4 — Are the dependencies tractable inside `bootstrap_session`?**
+
+- `PluginRegistry` import: already happens via `_default_runtime_factory` → `JaatoRuntime` → registry import chain.  Adding a direct `from shared.plugins.registry import PluginRegistry` runner-side adds zero new transitive cost.
+- `PermissionPlugin` import: ditto — already loaded as a runner-tier plugin via discovery.  Direct import `from shared.plugins.permission.plugin import PermissionPlugin` is cheap.
+- Workspace_path / session_id / model_name / config_root: all already on the envelope (`session_envelope.py:119-132`).
+- Per-plugin configs from the profile: already on `envelope.plugins[].config` (`session_envelope.py:124`); the daemon's `build_session_envelope` at `runner_spawn.py:200-208` propagates them.
+
+No new envelope fields are required for Path D Layers 4-6.  The Path C precedent (adding `project` + `location` to the envelope) does **not** repeat here.
+
+**Q5 — Secondary gap: profile-supplied permission policy override.**
+
+Daemon-side `core.py:1722-1727` merges `self._profile.plugin_configs["permission"]` over the default `permission_init_config` before calling `permission_plugin.initialize(...)`.  The envelope does **not** currently propagate this — `build_session_envelope` extracts `plugin_configs` per-plugin into `envelope.plugins[]` entries (only for plugins in `profile.plugins` list), but the permission plugin is implicit / framework-managed and likely **not in `profile.plugins`** for most profiles, so its config never reaches the envelope.
+
+**Disposition:** PUNT to backlog.  No reported regression depends on profile-overridden permission policy; the default `defaultPolicy: "ask"` is the deployed behaviour for ≥99% of sessions.  Path D ships with the daemon-side default; if a profile-driven test fails post-Path-D, a follow-up adds `permission_config: Optional[dict]` to the envelope and threads it through.  Filed: §3.3c.X "profile-supplied permission policy passthrough."
+
+**Q6 — Secondary gap: parallel init.**
+
+Daemon-side `registry.expose_all` runs `PARALLEL_INIT=True` plugins (MCP) in background threads (`registry.py:1075-1099`).  Runner-side gets this for free — `expose_all` is the same method.  No additional plumbing.
+
+**Q7 — Where does `bootstrap_session` exception-translate failures?**
+
+Existing pattern (`session.py:188-243`):
+
+- Stage `"validate"` → `BootstrapError("validate", ...)`
+- Stage `"runtime"` → `BootstrapError("runtime", ...)`
+- Stage `"connect"` → `BootstrapError("connect", ...)` (Path C)
+- Stage `"configure"` → `BootstrapError("configure", ...)`
+
+Path D introduces a new stage between `"connect"` and `"configure"`.  Naming: `"plugins"` (mirrors daemon's `_run_load_plugins` stage name).  All of steps 1-9 fold into this single try/except — granular per-step staging adds noise without operator value (a failed `expose_all` is operationally indistinguishable from a failed `configure_plugins` for triage purposes; both mean "plugin layer didn't come up").
+
+### Path D scope decision
+
+Single Path D commit covering all gaps identified above:
+
+| Sub-step | Code | LoC est |
+|---|---|---|
+| D.1 | Add `_configure_runtime_plugins(runtime, envelope)` helper in `runner/session.py` | ~45 |
+| D.2 | Call `_configure_runtime_plugins(runtime, envelope)` between Path C connect + `_build_session` | ~10 (try/except wrap) |
+| D.3 | Regression-pin tests: 6 pins (registry constructed, discover called with tier_filter="runner", plugin_configs assembled, expose_all called, set_workspace_path conditional, permission_plugin constructed, configure_plugins called) | ~120 |
+
+No envelope schema change.  No daemon-side change (envelope already carries everything needed).
+
+**Rejected alternative — split D into 5+ sub-commits (one per Layer):**
+The cycle-2-3-4 cadence proved one-layer-at-a-time fixes leak operator attention iterations.  The pieces have no semantic independence — they are a single re-implementation of the daemon's `_run_load_plugins` stage, not five separate fixes.  Bundling closes the chain in one commit and one integration-test run.
+
+### Bug chain layers (cumulative, cycle 5)
+
+| Layer | Defect | Path | Status |
+|---|---|---|---|
+| 1 | Snapshot caller wraps no_session | A | shipped (`20b16326`) |
+| 2 | IPC dispatches session.bootstrap | B | shipped (`c68151a8`) |
+| 3 | Runner connects runtime pre-create_session | C | shipped (`4d9cf8b7`) |
+| 4 | Runner constructs registry + configures plugins pre-create_session | D | **this audit; code follows** |
+| 5+ | Unknown (integration test runs post-Path-D) | TBD | gated on Path D landing |
+
+### Audit-discipline tally update
+
+| Audit | Outcome | Catch |
+|---|---|---|
+| Pre-impl 1-20 (§7c+§7d arc) | 20-for-20 silent-regression catches | as recorded above |
+| Integration-test cycle 2 (Layer 1) | regression caught; Path A narrow fix | snapshot wrap |
+| Integration-test cycle 3 (Layer 2) | regression caught; Path B architectural | IPC dispatch missing |
+| Integration-test cycle 4 (Layer 3) | regression caught; Path C envelope+connect | runtime.connect missing |
+| Pre-impl 21 (this — Path D) | comprehensive remaining-chain catch | Layers 4-6 closed in one pass; no integration-test iteration spent per layer |
+
+**Methodology shift, recorded.**  Audits 1-20 ran pre-implementation against static grep epistemics; they couldn't predict cross-process async-timing interactions.  Cycles 2-4 ran post-implementation against integration tests against a real provider; each cycle paid one iteration per layer.  Audit 21 attempts a hybrid: static daemon-vs-runner sequence diff to surface layers in a single pass.  The hypothesis under test is whether the layers form a tractably-finite chain that a single audit can close.  Post-Path-D integration-test result is the verdict.
