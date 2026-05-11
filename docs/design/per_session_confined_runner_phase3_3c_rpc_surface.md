@@ -2823,3 +2823,111 @@ I.4 — Defensive: ``_create_main_agent`` has an existing early-return when ``se
 | **Pre-impl 25 (Path I, this audit)** | **agent-lifecycle bootstrap-scope closure** |
 
 **Methodology refinement (cycle 11 meta-lesson).**  Path F's per-callback-TYPE audit was correct as far as it went — it enumerated WHICH methods runner-side calls.  But it missed the orthogonal axis: **WHEN** each method fires relative to the per-RPC-request scope of the shim install.  Phase 4+ guidance update: per-callback-type enumeration + per-callback-SCOPE enumeration are independent dimensions.  Both must be audited for in-process-to-RPC migrations of callback chains.
+
+### Path J pre-implementation audit (cycle 12 — sixth chain)
+
+26th audit; sixth post-§7c chain.  Cycle 12 verified Path I closed Layer 9 (AgentCreatedEvent now fires; TUI shows tiered_test agent indicator; ToolCallStartEvent renders).  The next layer surfaced.
+
+**Cycle 12 verdict** (post-Path-I):
+
+| Outcome | Status |
+|---|---|
+| AgentCreatedEvent fires daemon-side at bootstrap | ✅ |
+| ToolCallStartEvent renders tool block | ✅ |
+| AgentOutputEvent, AgentStatusChangedEvent, ContextUpdatedEvent | ✅ all flow |
+| **PermissionRequestedEvent dispatched daemon-side** | **✅ in <1ms (PROBE_9/10 confirm)** |
+| TUI permission-prompt block renders + input mode transitions | ❌ — Layer 10 |
+
+**User's initial diagnosis** (cycle 12 verdict): "TUI permission-prompt rendering gap (client-side)" — proposed PROBE_11 instrumentation in ``renderers/base.py:120`` ``on_permission_requested``.
+
+**Worker correction** (this audit): TUI side does NOT have a runtime ``on_permission_requested`` handler that gets invoked from the event stream.  Grep of TUI sources:
+
+| File | Refs to ``PermissionRequestedEvent`` | Refs to ``PermissionInputModeEvent`` |
+|---|---|---|
+| ``rich_client.py`` | 0 | **1 (line 1356)** |
+| ``headless_mode.py`` | 0 | **1 (line 283)** |
+| ``renderers/base.py`` | 0 (only abstract ``on_permission_requested`` method) | 0 |
+
+The TUI listens for ``PermissionInputModeEvent``, NOT ``PermissionRequestedEvent``.  Different event types.  ``PermissionRequestedEvent`` IS dispatched (PROBE_9/10 confirm) but the TUI silently ignores it — there's no handler.
+
+**Q1 — Where does ``PermissionInputModeEvent`` come from?**
+
+``core.py:3105`` — emitted from inside ``_setup_permission_hooks``'s ``on_permission_requested`` callback (line 2991), wired to ``self.permission_plugin.set_permission_hooks(...)`` (line 3144).
+
+But ``self.permission_plugin`` here is the **DAEMON-side** permission plugin instance (constructed by Path D's ``_run_load_plugins`` at core.py:1711).  Post-§7c the daemon-side permission plugin is NO LONGER the one in the model loop — the runner-side permission plugin runs alongside the runner-side session, and runner-side ASK requests cross the wire via ``PromptOperatorHandler`` (Step 7.1), NOT via the daemon-side permission plugin's hook.
+
+So the daemon-side ``on_permission_requested`` callback never fires post-§7c → ``PermissionInputModeEvent`` is never emitted → TUI never enters permission mode → user's 'y' keypress is queued as a chat message instead of an ASK response.
+
+**Q2 — Architectural pattern: same as Path I.**
+
+Pre-§7c, in-process daemon flow:
+- Runner ASK → daemon permission_plugin.callback → emits BOTH ``PermissionRequestedEvent`` AND ``PermissionInputModeEvent``.
+
+Post-§7c, RPC flow:
+- Runner ASK → PromptOperatorHandler.handle() → emits ``PermissionRequestedEvent`` ONLY.
+- Daemon-side permission_plugin's hook is wired but never invoked (no one calls it).
+
+This is the **same architectural pattern Path I closed** for ``AgentCreatedEvent``: a daemon-side emit path that pre-§7c was driven in-process by a daemon plugin became dead post-§7c.  The runner's ASK arrives at a different daemon-side entry point (``PromptOperatorHandler``) that replicates ONE of the two emits but not the other.
+
+**Q3 — Why a probe wasn't needed (cycle-12 methodology insight).**
+
+Cycle 12's "TUI rendering gap" hypothesis assumed the TUI was receiving a malformed/incomplete event.  Static grep of TUI sources for ``PermissionRequestedEvent`` returns ZERO handler matches — no TUI code processes that event type at all.  The grep alone is decisive: the TUI doesn't drop the event because of a field mismatch; the TUI doesn't HANDLE that event type, period.
+
+**Phase 4+ guidance update**: when verdict diagnoses a "rendering gap", grep the consumer side for handler registration FIRST.  Zero matches = the consumer doesn't even subscribe → bug is upstream (producer doesn't emit the event the consumer DOES handle).  This is a 5-second check that supersedes probe instrumentation.
+
+**Q4 — Fix design (Path J = Option A, mirror Path I).**
+
+Emit ``PermissionInputModeEvent`` directly from ``PromptOperatorHandler.handle()`` alongside the existing ``PermissionRequestedEvent`` emit.  Both events flow through the existing ``self._emit_event`` callback (which is bound to ``JaatoServer.emit`` or ``SessionManager._emit_to_session`` per registration).
+
+Field mapping from ``PromptPayload`` (the runner's ASK payload):
+
+| ``PermissionInputModeEvent`` field | Source |
+|---|---|
+| agent_id | payload.agent_id |
+| request_id | payload.request_id |
+| tool_name | payload.tool_name |
+| call_id | None (PromptPayload doesn't carry call_id — see Q5) |
+| response_options | payload.response_options |
+| tool_args | payload.tool_args (when edit option present) |
+| editable_metadata | None (schema lookup deferred — see Q5) |
+
+**Q5 — Known sub-gaps (Path J scope boundaries).**
+
+J.A — ``call_id`` field: ``PromptPayload`` doesn't carry the tool's ``call_id`` (the runner-side correlator).  Pre-§7c the daemon's ``_setup_permission_hooks`` callback received call_id from its in-process call chain.  Post-§7c the runner→daemon RPC payload (``PromptPayload``) lacks the field.  **Decision**: emit with ``call_id=None`` for cycle-13 verification.  If the TUI's per-tool-block correlation requires call_id, follow-up adds ``call_id: Optional[str]`` to ``PromptPayload`` + propagates from the runner-side ASK origin.
+
+J.B — ``editable_metadata`` field: the daemon-side hook (core.py:3094-3099) looks up the tool's editable schema from ``server.permission_plugin._get_tool_schema(tool_name)``.  Post-§7c the daemon-side permission_plugin instance is the one with the schema (Path D wired it).  We CAN do the schema lookup inside ``PromptOperatorHandler`` IF the handler has a reference to ``server.permission_plugin``.  **Decision**: emit with ``editable_metadata=None`` for cycle-13.  Editing flow is a follow-up if needed; the basic ASK round-trip is the cycle-13 verification target.
+
+Both sub-gaps documented as backlog items if cycle 13 surfaces them.
+
+**Q6 — Tests.**
+
+| Pin | Strategy |
+|---|---|
+| ``PromptOperatorHandler.handle`` emits TWO events: ``PermissionRequestedEvent`` + ``PermissionInputModeEvent`` | Capture emits, assert both types present |
+| Field mapping matches PromptPayload → PermissionInputModeEvent | field-by-field check |
+| Both events carry the SAME request_id (TUI correlation) | direct |
+| Event order: PermissionRequestedEvent first, PermissionInputModeEvent second | ordering pin |
+| AST: ``handle`` body references both event class names | inspect.getsource |
+
+### Bug-chain layers (cumulative, cycle 12)
+
+| Chain | Layer | Defect | Path | Status |
+|---|---|---|---|---|
+| Bootstrap | 1-4 | snapshot, dispatch, connect, configure_plugins | A+B+C+D | shipped |
+| Send-message | 5-6 | usage_update race, save/replay .role | E | shipped |
+| Streaming response | 7 | ui_hooks bridge (per-RPC) | F | shipped |
+| Save re-entrancy | 8 | incremental save synchronous | H | shipped |
+| Agent-lifecycle (bootstrap scope) | 9 | on_agent_created fires before shim | I | shipped |
+| **Permission-emit completeness** | **10** | **PromptOperatorHandler emits only RequestedEvent, missing InputModeEvent** | **J** | **this audit; code follows** |
+| 11+ | TBD | gated on cycle-13 verdict |
+
+### Audit-discipline tally (cycle 12)
+
+| Audit | Outcome |
+|---|---|
+| Pre-impl 1-20 (§7c+§7d arc) | 20-for-20 static-grep catches |
+| Cycles 5-12 | empirical chain identifications |
+| Pre-impl 21-25 (Paths D, E, F, H, I) | per-chain closure with hybrid audit |
+| **Pre-impl 26 (Path J, this audit)** | **worker-corrected diagnosis — TUI grep + producer-grep beat the user's "TUI rendering gap" hypothesis** |
+
+**Worker-correction count: 3.**  Cycle 4 (Path C: user diagnosed "Runtime not connected"; actually envelope schema gap), cycle 9 (Path G: user diagnosed "missing emit in hooks"; actually emit IS present, gap downstream), cycle 12 (Path J: user diagnosed "TUI rendering gap"; actually daemon-side missing emit).  Pattern: when integration tests surface silent failures, the user's first diagnosis is often a layer-above hypothesis; worker grep finds the actual gap one layer lower.  **Phase 4+ guidance**: verdict triage should grep the symptom layer FIRST before designing instrumentation — zero handler matches = bug is upstream.
