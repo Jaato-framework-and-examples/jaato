@@ -1998,10 +1998,31 @@ class JaatoServer:
                 # step 6.1) instead of reaching into
                 # ``self._jaato.get_session().instruction_budget.snapshot()``.
                 # ``agent_id`` is carried in the snapshot dict itself.
-                snapshot = (
-                    self._runner_rpc.session_snapshot_instruction_budget_threadsafe()
-                    if self._runner_rpc is not None else None
-                )
+                #
+                # Phase 3 post-Step-7 regression fix: defensive try/except
+                # wrap — the runner-side handler may return ``stage="no_session"``
+                # if ``session.bootstrap`` RPC hasn't completed by the
+                # time this fires (initialize-time timing race exposed by
+                # Step 7's set_runner_rpc changes).  The handler contract
+                # explicitly supports this case; the wrapper raises
+                # ``RunnerCallError`` on ``ok=False`` envelopes, so the
+                # caller must catch and treat as "snapshot not yet
+                # available — skip emit" (mirrors the
+                # ``emit_current_state`` site at core.py:1177-1185).
+                snapshot = None
+                if self._runner_rpc is not None:
+                    try:
+                        snapshot = (
+                            self._runner_rpc
+                            .session_snapshot_instruction_budget_threadsafe()
+                        )
+                    except Exception as exc:  # noqa: BLE001 — best-effort
+                        logger.debug(
+                            "initialize: snapshot_instruction_budget RPC "
+                            "failed (%s) — skipping initial budget emit "
+                            "(runner-side bootstrap may not be complete)",
+                            exc,
+                        )
                 if snapshot:
                     self.emit(InstructionBudgetEvent(
                         agent_id=snapshot.get("agent_id", "main"),
@@ -4559,10 +4580,26 @@ class JaatoServer:
                 # Phase 3 §7c step 6.6.4.5b: read budget snapshot via the
                 # ``session.snapshot_instruction_budget`` RPC (mirror of
                 # initialize() site).
-                snapshot = (
-                    self._runner_rpc.session_snapshot_instruction_budget_threadsafe()
-                    if self._runner_rpc is not None else None
-                )
+                #
+                # Phase 3 post-Step-7 regression fix: defensive try/except
+                # wrap matching the initialize() site.  Handler may return
+                # ``stage="no_session"`` during the auth-completion
+                # initialize-finishing path; wrapper raises
+                # ``RunnerCallError`` on ``ok=False``.
+                snapshot = None
+                if self._runner_rpc is not None:
+                    try:
+                        snapshot = (
+                            self._runner_rpc
+                            .session_snapshot_instruction_budget_threadsafe()
+                        )
+                    except Exception as exc:  # noqa: BLE001 — best-effort
+                        logger.debug(
+                            "auth-completion: snapshot_instruction_budget "
+                            "RPC failed (%s) — skipping initial budget "
+                            "emit (runner-side bootstrap may not be complete)",
+                            exc,
+                        )
                 if snapshot:
                     self.emit(InstructionBudgetEvent(
                         agent_id=snapshot.get("agent_id", "main"),
