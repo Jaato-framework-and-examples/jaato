@@ -201,37 +201,192 @@ class TestConfusedDeputyProtection:
 # ──────────────────────────────────────────────────────────────────────
 
 
-class TestStubReturnShape:
-    """The §4.3.2 stub returns a typed envelope so callers can
-    branch on ``ok`` and surface ``stage`` for diagnostics.  These
-    assertions pin the wire shape that §4.3.7's opt-in branch
-    will read.
+class TestUnwiredStubReturnShape:
+    """When ``set_spawn_dependencies()`` has NOT been called, the
+    handler returns a "handler not yet wired" stub envelope with
+    ``stage=spawn``.  This is the §4.3.2 surface contract — args
+    validation passed, but the daemon-side SessionManager bridge
+    isn't in place.
 
-    When §4.3.3-§4.3.7 land actual spawn logic, this suite updates
-    to assert ``ok: True`` + session_id etc.; the args-validation
-    and lifecycle suites remain valid."""
+    Typical causes: transient state during session bootstrap,
+    test harness that skips the SessionManager wire-up,
+    misconfigured spawn callback.
+
+    Phase 4 §4.3.3: this suite specifically tests the UNWIRED
+    branch.  Once a SessionManager is wired (via
+    ``set_spawn_dependencies``), the handler routes through the
+    helper — that's covered in ``TestRoutedHelperBridge``."""
 
     @pytest.mark.asyncio
-    async def test_valid_args_returns_not_implemented_envelope(self):
+    async def test_valid_args_returns_handler_not_wired_envelope(self):
         handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
         result = await handler.handle(_valid_args())
 
         assert result["ok"] is False
-        assert "not yet implemented" in result["error"].lower()
-        assert "§4.3.3-§4.3.7" in result["error"]
+        assert "handler not yet wired" in result["error"].lower()
+        assert "§4.3.3" in result["error"]
+        assert "set_spawn_dependencies" in result["error"]
         assert result["stage"] == STAGE_SPAWN
         # Workaround instruction must point to the default-share path.
         assert "default-share" in result["error"]
-        assert "isolated=" in result["error"]
+        assert "isolated" in result["error"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Routed-helper bridge (§4.3.3)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class _StubSessionManager:
+    """Records calls to ``_spawn_isolated_runner`` and returns a
+    canned envelope.  Stand-in for the daemon's SessionManager
+    in handler-level tests.
+    """
+
+    def __init__(self, canned_response):
+        self.canned_response = canned_response
+        self.calls = []
+
+    def _spawn_isolated_runner(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.canned_response
+
+
+class TestRoutedHelperBridge:
+    """Once ``set_spawn_dependencies()`` is called, the handler
+    routes valid requests through
+    ``session_manager._spawn_isolated_runner(...)`` instead of
+    returning the unwired stub.  Pins:
+
+    1. The setter stores the reference.
+    2. After the setter, ``handle()`` calls the helper with the
+       expected kwargs.
+    3. The helper's return value flows through the handler
+       unchanged.
+    4. The ``isolated`` control flag is stripped from
+       ``agent_params`` before forwarding to the helper.
+    5. The setter is idempotent.
+    """
+
+    def test_setter_stores_session_manager_reference(self):
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        assert handler._session_manager is None
+        sm = _StubSessionManager({"ok": False, "stage": "sub_profile"})
+        handler.set_spawn_dependencies(session_manager=sm)
+        assert handler._session_manager is sm
+
+    def test_setter_is_idempotent(self):
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        sm1 = _StubSessionManager({"ok": False})
+        sm2 = _StubSessionManager({"ok": False})
+        handler.set_spawn_dependencies(session_manager=sm1)
+        handler.set_spawn_dependencies(session_manager=sm2)
+        # Re-calling replaces (caller trusted — same as Phase 3
+        # handler-setter patterns).
+        assert handler._session_manager is sm2
 
     @pytest.mark.asyncio
-    async def test_stub_envelope_includes_audit_doc_pointer(self):
-        """Caller needs a pointer to the tracking doc for the
-        deferred work."""
+    async def test_handle_routes_through_helper_when_wired(self):
+        canned = {
+            "ok": False,
+            "error": "sub-profile not yet implemented",
+            "stage": "sub_profile",
+            "isolated_session_id": "sess-A__sub_agent-1",
+            "profile_name": "researcher",
+        }
+        sm = _StubSessionManager(canned)
         handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        handler.set_spawn_dependencies(session_manager=sm)
+
         result = await handler.handle(_valid_args())
 
-        assert "phase4_implementation_audits.md" in result["error"]
+        # Helper invoked exactly once.
+        assert len(sm.calls) == 1
+        call = sm.calls[0]
+        assert call["parent_session_id"] == "sess-A"
+        assert call["subagent_id"] == "agent-1"
+        assert call["profile_payload"] == {
+            "name": "researcher",
+            "model": "claude-sonnet-4-5",
+            "provider": "anthropic",
+            "plugins": ["cli", "web_search"],
+        }
+        assert call["task"] == "investigate X"
+        assert call["workspace_path"] == "/work/space"
+        # Helper's return value flows through unchanged.
+        assert result == canned
+
+    @pytest.mark.asyncio
+    async def test_handle_strips_isolated_flag_from_agent_params(self):
+        """The ``isolated`` key is a routing control flag, not
+        template data; the handler must strip it before forwarding
+        to the helper.  Otherwise the spawned subagent's dynamic-
+        instruction templates would see ``{{isolated}}`` substitute
+        to ``true``, which the subagent has no use for."""
+        sm = _StubSessionManager({"ok": False, "stage": "sub_profile"})
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        handler.set_spawn_dependencies(session_manager=sm)
+
+        await handler.handle(_valid_args(agent_params={
+            "isolated": True,
+            "case_id": "42",
+            "username": "alice",
+        }))
+
+        call = sm.calls[0]
+        # Stripped from forwarded agent_params.
+        assert "isolated" not in call["agent_params"]
+        # Other template keys preserved bit-exact.
+        assert call["agent_params"] == {"case_id": "42", "username": "alice"}
+
+    @pytest.mark.asyncio
+    async def test_handle_forwards_none_agent_params_unchanged(self):
+        """When the caller omits ``agent_params``, the handler must
+        forward ``None`` (not an empty dict) so the helper can
+        distinguish "no template params" from "empty template
+        dict"."""
+        sm = _StubSessionManager({"ok": False, "stage": "sub_profile"})
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        handler.set_spawn_dependencies(session_manager=sm)
+
+        await handler.handle(_valid_args())  # no agent_params
+
+        call = sm.calls[0]
+        assert call["agent_params"] is None
+
+    @pytest.mark.asyncio
+    async def test_handle_forwards_optional_args_through(self):
+        """Optional kwargs (display_name, parent_agent_id) flow
+        through to the helper when present."""
+        sm = _StubSessionManager({"ok": False, "stage": "sub_profile"})
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        handler.set_spawn_dependencies(session_manager=sm)
+
+        await handler.handle(_valid_args(
+            display_name="my-agent",
+            parent_agent_id="parent-7",
+        ))
+
+        call = sm.calls[0]
+        assert call["display_name"] == "my-agent"
+        assert call["parent_agent_id"] == "parent-7"
+
+    @pytest.mark.asyncio
+    async def test_validation_errors_fire_before_routing(self):
+        """Args validation happens BEFORE the routing decision;
+        bad args raise ``ValueError`` whether or not the helper
+        is wired (so misconfigured callers get the same diagnostic
+        regardless of bridge state)."""
+        sm = _StubSessionManager({"ok": True})
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        handler.set_spawn_dependencies(session_manager=sm)
+
+        # Malformed profile_payload (string instead of dict).
+        with pytest.raises(ValueError, match="profile_payload"):
+            await handler.handle(_valid_args(profile_payload="not-a-dict"))
+
+        # Helper was NOT invoked — validation rejected the request first.
+        assert sm.calls == []
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -826,6 +826,37 @@ class SessionManager:
                     "runner-side bootstrap completes some other way",
                     session_id, type(exc).__name__, exc,
                 )
+            # Phase 4 §4.3.3: wire the spawn_isolated_runner handler
+            # with this SessionManager so the §4.3.7 opt-in branch
+            # can spawn additional runners for isolated subagents.
+            # The handler itself was registered earlier inside
+            # ``JaatoServer.set_runner_rpc()`` (§4.3.2); here we
+            # bridge it to our own ``_spawn_isolated_runner`` helper
+            # by calling ``set_spawn_dependencies(self)``.  The
+            # SessionManager reference isn't available at the
+            # ``set_runner_rpc`` seam (would require widening
+            # ``spawn_session_runner``'s signature) so the wire
+            # lands here instead, where SessionManager is ``self``.
+            # Best-effort: failure to wire the bridge logs WARNING
+            # but doesn't roll back the spawn-success return — the
+            # parent session is up and the runner is healthy; the
+            # only impact is that ``agent_params.isolated=true``
+            # subagents (§4.3.7) would get the "handler not yet
+            # wired" stub envelope instead of the routed helper.
+            handler = getattr(
+                server, "_spawn_isolated_runner_handler", None,
+            )
+            if handler is not None:
+                try:
+                    handler.set_spawn_dependencies(session_manager=self)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "set_spawn_dependencies failed for session "
+                        "%s (%s: %s) — agent_params.isolated=true "
+                        "subagents will receive the handler-not-"
+                        "wired stub until next session restart",
+                        session_id, type(exc).__name__, exc,
+                    )
             return True
         except Exception as exc:  # noqa: BLE001 — boundary
             self._notify_apparmor(
@@ -839,6 +870,180 @@ class SessionManager:
                 "runner spawn failed for session %s", session_id,
             )
             return False
+
+    def _spawn_isolated_runner(
+        self,
+        *,
+        parent_session_id: str,
+        subagent_id: str,
+        profile_payload: Dict[str, Any],
+        task: str,
+        workspace_path: str,
+        agent_params: Optional[Dict[str, Any]] = None,
+        display_name: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Daemon-side helper for the isolated-subagent opt-in
+        (Phase 4 §4.3.3).
+
+        Invoked by ``SpawnIsolatedRunnerHandler.handle()`` (once
+        ``set_spawn_dependencies(self)`` has been called) when a
+        runner-side subagent plugin sends a
+        ``subagent.spawn_isolated_runner`` RPC.  Per parent design
+        §4.3, the supervisor's ``agent_params.isolated=true`` opt-in
+        is meant to spawn the subagent in its own runner subprocess
+        with a fresh AppArmor sub-profile
+        (``jaato-ws-{parent}//{subagent}``) and its own sub-cgroup.
+
+        §4.3.3 scope (THIS commit):
+
+        1. Reconstruct ``SubagentProfile`` from the wire-shape
+           ``profile_payload`` dict via ``build_inline_profile`` —
+           same path SDK inline-spec callers use, so the JSON shape
+           is identical to ``session.new`` inline specs.
+        2. Generate the isolated session id
+           (``{parent_session_id}__sub_{subagent_id}``).
+        3. Return a ``stage="sub_profile"`` envelope with would-be
+           values for diagnostic visibility — the next stage
+           (sub-AppArmor profile generation + provisioning) lands
+           in §4.3.4.
+
+        Deferred to subsequent sub-commits:
+
+        - §4.3.4: sub-AppArmor profile name generation + load.
+        - §4.3.5: sub-cgroup creation + attach.
+        - §4.3.6: cross-runner forwarding (prompt-forward INTO new
+          runner; output-forward BACK to parent).
+        - The actual ``_spawn_session_runner_unconditional(...)``
+          call lands once both §4.3.4 and §4.3.5 are wired — passing
+          ``profile_name=""`` today would spawn an unconfined
+          sub-runner, which is a worse security posture than the
+          §4.3 default-share path the §4.3.1 stub points callers
+          to.  Refusing to spawn until the sub-profile is ready
+          keeps the security gradient monotonic.
+
+        Args:
+            parent_session_id: Parent session's id.  Already echo-
+                checked daemon-side by the handler; we re-use here
+                only for the isolated session-id template.
+            subagent_id: Pre-generated subagent id from the runner-
+                side subagent plugin.
+            profile_payload: Serialized ``SubagentProfile`` as a
+                dict.  Field set mirrors ``build_inline_profile``'s
+                contract (model, provider, plugins, plugin_configs,
+                system_instructions, gc, env, runtime_limits,
+                completion_payload_schema, spawn_payload_schema,
+                completion_artifacts, model_tiers,
+                suppress_base_instructions, max_turns).
+            task: First-turn prompt for the isolated runner.  §4.3.3
+                does NOT consume this; §4.3.6's forwarding will.
+            workspace_path: Inherited from parent (§4.3 invariant).
+                Forwarded for diagnostics only in §4.3.3.
+            agent_params: Forwarded ``case_data``.  ``isolated`` key
+                already stripped daemon-side by the handler.
+            display_name: Custom display name; defaults to
+                ``profile_payload.name``.
+            parent_agent_id: For multi-hop subagent trees.
+
+        Returns:
+            Domain-failure envelope shape (parallels
+            ``SpawnIsolatedRunnerHandler.handle``'s return):
+
+                {"ok": False,
+                 "error": "<reason>",
+                 "stage": "validation" | "sub_profile" | "spawn" |
+                          "sub_cgroup" | "forwarding",
+                 # Diagnostic fields (would-be values for the next
+                 # stage to debug against — only present when the
+                 # stage advanced past the corresponding failure):
+                 "isolated_session_id": "...",
+                 "profile_name": "..."}
+
+            On full success (post-§4.3.6 readiness):
+
+                {"ok": True,
+                 "session_id": "...",
+                 "subagent_id": "...",
+                 "runner_pid": <int>,
+                 "apparmor_profile": "...",
+                 "cgroup_path": "..."}
+        """
+        # ── Stage: validation — reconstruct SubagentProfile ────
+        # ``build_inline_profile`` is the canonical "dict →
+        # SubagentProfile" path used by SDK inline-spec session
+        # creation; reuse here so the wire shape stays consistent
+        # with what session.new accepts.  This also gives the
+        # caller a precise validation-failure message if the
+        # payload is malformed (e.g., bad gc / runtime_limits dict).
+        try:
+            from shared.plugins.subagent.config import build_inline_profile
+            profile = build_inline_profile(
+                profile_payload,
+                name=profile_payload.get("name") or "<isolated>",
+                description=profile_payload.get("description") or (
+                    "Isolated subagent profile (Phase 4 §4.3 opt-in)"
+                ),
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            return {
+                "ok": False,
+                "error": (
+                    f"profile_payload reconstruction failed "
+                    f"({type(exc).__name__}: {exc}).  Expected the "
+                    f"same dict shape as session.new inline specs — "
+                    f"see shared/plugins/subagent/config.py:"
+                    f"build_inline_profile."
+                ),
+                "stage": "validation",
+            }
+
+        # ── Stage: id generation ───────────────────────────────
+        # Template ``{parent}__sub_{subagent}`` keeps the isolated
+        # session id parseable + correlatable back to its parent
+        # for log / trace inspection.  Same template used in
+        # parent design §4.3's sub-profile name
+        # (``jaato-ws-{session_id}//{subagent_id}``) so the two
+        # stay in sync — when §4.3.4 generates the sub-profile
+        # name, it can derive it from this session id.
+        isolated_session_id = f"{parent_session_id}__sub_{subagent_id}"
+
+        # ── Stage: sub_profile (next stage — §4.3.4) ───────────
+        # Stop here.  Refusing to spawn until §4.3.4 provisions a
+        # sub-AppArmor profile is intentional: the alternative
+        # would be ``profile_name=""`` (unconfined sub-runner),
+        # which weakens security relative to the §4.3 default-
+        # share path callers can use today.  Monotonic security
+        # gradient through the sub-track.
+        logger.info(
+            "_spawn_isolated_runner: validation + reconstruction "
+            "passed for parent=%s subagent=%s "
+            "(isolated_session_id=%s profile=%s) — waiting on "
+            "§4.3.4 sub-AppArmor profile generation",
+            parent_session_id, subagent_id, isolated_session_id,
+            profile.name,
+        )
+        return {
+            "ok": False,
+            "error": (
+                f"sub-AppArmor profile generation not yet "
+                f"implemented (Phase 4 §4.3.4).  Profile "
+                f"reconstruction succeeded "
+                f"(name={profile.name!r}, model={profile.model!r}, "
+                f"provider={profile.provider!r}, "
+                f"plugins={profile.plugins!r}).  Would-be isolated "
+                f"session: {isolated_session_id!r}.  Workaround: "
+                f"set agent_params.isolated=false (or omit) to use "
+                f"the default-share path (subagent runs in the "
+                f"parent's runner) — works end-to-end today.  See "
+                f"docs/design/phase4_implementation_audits.md."
+            ),
+            "stage": "sub_profile",
+            # Diagnostic fields — let the runner-side caller log
+            # would-be values for next-stage debugging when the
+            # §4.3.4 commit changes this return.
+            "isolated_session_id": isolated_session_id,
+            "profile_name": profile.name,
+        }
 
     def add_pre_initialize_hook(self, hook: Callable) -> None:
         """Register a callback invoked BEFORE ``server.initialize()`` runs

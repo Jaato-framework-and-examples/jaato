@@ -162,6 +162,48 @@ class SpawnIsolatedRunnerHandler:
             )
         self._parent_session_id = parent_session_id
         self._closed = False
+        # Phase 4 §4.3.3: spawn dependencies are wired post-construction
+        # via :meth:`set_spawn_dependencies`.  None until the daemon's
+        # ``SessionManager._spawn_session_runner_unconditional`` calls
+        # the setter after the runner subprocess + RPC channel are up.
+        # When None, ``handle()`` returns the §4.3.2 "RPC primitive not
+        # yet bridged" stub envelope.  When set, ``handle()`` routes
+        # through ``session_manager._spawn_isolated_runner(...)``.
+        self._session_manager: Optional[Any] = None
+
+    def set_spawn_dependencies(
+        self,
+        session_manager: Any,  # server.session_manager.SessionManager
+    ) -> None:
+        """Wire the SessionManager reference post-construction
+        (Phase 4 §4.3.3).
+
+        Called by ``SessionManager._spawn_session_runner_unconditional``
+        after the parent session's runner subprocess + RPC channel are
+        up (the handler is registered earlier in
+        ``JaatoServer.set_runner_rpc()``, but the SessionManager
+        reference isn't available at THAT seam — passing it would
+        require widening ``spawn_session_runner``'s signature, which
+        was kept narrow in §4.3.2).
+
+        Idempotent: re-calling with the same session_manager is a
+        no-op; re-calling with a different session_manager replaces
+        the reference (no defensive guard — the caller is trusted).
+
+        Once dependencies are set, :meth:`handle` routes valid
+        requests through ``session_manager._spawn_isolated_runner(...)``
+        instead of returning the §4.3.2 "RPC primitive not yet bridged"
+        stub.  Going from "stub" to "routed" is the §4.3.3 milestone;
+        the routed helper itself still returns ``stage=sub_profile``
+        until §4.3.4 fills in the next stage.
+
+        Args:
+            session_manager: The daemon's ``SessionManager`` instance.
+                Holds the ``_spawn_isolated_runner`` helper added in
+                §4.3.3.  Type-erased to ``Any`` to avoid a forward-
+                import cycle with ``server.session_manager``.
+        """
+        self._session_manager = session_manager
 
     async def handle(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """RPC handler entry point.
@@ -273,25 +315,64 @@ class SpawnIsolatedRunnerHandler:
 
         logger.info(
             "subagent.spawn_isolated_runner: validation passed for "
-            "parent_session=%s subagent_id=%s "
-            "(stub returns stage=spawn until §4.3.3-§4.3.7 land)",
+            "parent_session=%s subagent_id=%s (routed=%s)",
             self._parent_session_id, args["subagent_id"],
+            self._session_manager is not None,
         )
 
-        # ── Stub body ──────────────────────────────────────────
-        # Args validated; real spawn machinery follows in §4.3.3-§4.3.7.
-        # Return a typed envelope so the runner-side caller can
-        # branch on ``ok`` and surface ``stage`` for diagnostics.
+        # ── Route to SessionManager helper if dependencies wired ──
+        # Phase 4 §4.3.3: when ``set_spawn_dependencies`` has been
+        # called, hand off to the daemon's
+        # ``SessionManager._spawn_isolated_runner(...)`` helper.  The
+        # helper itself still returns ``stage=sub_profile`` today —
+        # progressing past that stage is §4.3.4's job.  Routing here
+        # in §4.3.3 means the handler→helper bridge exists and is
+        # exercised; subsequent sub-commits only need to extend the
+        # helper body, not touch the handler.
+        if self._session_manager is not None:
+            # Strip the ``isolated`` control flag from agent_params
+            # before forwarding — it's a routing flag, not template
+            # data the subagent should see.  Per Audit 5 in
+            # ``phase4_implementation_audits.md``.
+            forwarded_agent_params: Optional[Dict[str, Any]] = None
+            raw_agent_params = args.get("agent_params")
+            if raw_agent_params is not None:
+                forwarded_agent_params = {
+                    k: v for k, v in raw_agent_params.items()
+                    if k != "isolated"
+                }
+            return self._session_manager._spawn_isolated_runner(
+                parent_session_id=args["parent_session_id"],
+                subagent_id=args["subagent_id"],
+                profile_payload=args["profile_payload"],
+                task=args["task"],
+                workspace_path=args["workspace_path"],
+                agent_params=forwarded_agent_params,
+                display_name=args.get("display_name"),
+                parent_agent_id=args.get("parent_agent_id"),
+            )
+
+        # ── Unwired stub (no SessionManager reference yet) ─────
+        # Returned when ``set_spawn_dependencies`` hasn't been called
+        # — typically a transient state during session bootstrap, or
+        # a misconfigured test harness.  Distinct ``stage=spawn``
+        # message from the §4.3.4+ helper stages so operators can
+        # tell "RPC primitive not bridged" apart from "helper
+        # reached but next stage not implemented".
         return {
             "ok": False,
             "error": (
-                "isolated-runner spawn machinery not yet "
-                "implemented (Phase 4 §4.3.3-§4.3.7 in "
-                "docs/design/phase4_implementation_audits.md).  "
-                "Args validation passed.  Caller can fall back "
-                "to the default-share path (agent_params.isolated="
-                "false) which is the established §4.3 default and "
-                "works end-to-end today."
+                "subagent.spawn_isolated_runner handler not yet "
+                "wired to SessionManager (Phase 4 §4.3.3 "
+                "set_spawn_dependencies bridge missing).  This is "
+                "typically a transient state during session "
+                "bootstrap or a misconfigured test harness.  If "
+                "you see this in production, the parent session's "
+                "runner spawn may have failed to call "
+                "handler.set_spawn_dependencies(session_manager) — "
+                "see SessionManager._spawn_session_runner_unconditional.  "
+                "Workaround: omit agent_params.isolated to use the "
+                "default-share path."
             ),
             "stage": STAGE_SPAWN,
         }
