@@ -2508,29 +2508,22 @@ class JaatoServer:
             # the session_plugin spec for runner-side install at bootstrap
             # time.
             #
-            # Note (6.6.4.4 audit Finding 2, deferred): the daemon-side
-            # ``set_description_callback`` below is wired on the
-            # daemon-side ``session_plugin`` instance — but the model
-            # invokes ``set_description`` runner-side, firing the
-            # runner-side instance's callback.  Daemon never sees it.
-            # This regression is pre-existing from 6.6.4.3b, not caused
-            # by 6.6.4.4.  Fix planned via a new ``description_updated``
-            # NotificationFrame event_type.
+            # Phase 4 §4.4 (Finding 2 closure): the previous deferred-fix
+            # comment-block here described the daemon-side
+            # ``set_description_callback`` wiring as "wired on the wrong
+            # instance — fix planned via NotificationFrame extension".
+            # That fix landed.  The session plugin is now runner-tier
+            # (§4.4 sub-action A); runner-side install lives in
+            # _install_session_notification_callbacks
+            # (§4.4 sub-action B); daemon-side emit lives in the
+            # ``description_updated`` demuxer branch (§4.4 sub-action C).
+            # The daemon-side callback wiring previously here has been
+            # deleted as dead code (§4.4 sub-action D).
 
             # Set session ID on plugin so it knows the current session
             if self._session_id and hasattr(session_plugin, 'set_session_id'):
                 session_plugin.set_session_id(self._session_id)
                 logger.debug(f"  _setup_session_plugin: session_id set to {self._session_id}")
-
-            # Set up callback to emit event when description changes
-            if hasattr(session_plugin, 'set_description_callback'):
-                def on_description_changed(session_id: str, description: str) -> None:
-                    self.emit(SessionDescriptionUpdatedEvent(
-                        session_id=session_id,
-                        description=description,
-                    ))
-                session_plugin.set_description_callback(on_description_changed)
-                logger.debug("  _setup_session_plugin: description callback set")
 
             if self.registry:
                 logger.debug("  _setup_session_plugin: registering session plugin with registry...")
@@ -3800,6 +3793,22 @@ class JaatoServer:
                         )
                     return
 
+                # Phase 4 §4.4 (Finding 2 closure): bridge the runner-
+                # side session-plugin description-callback to the
+                # daemon's SessionDescriptionUpdatedEvent stream.
+                # Pre-§4.4 the daemon-side _setup_session_plugin wired
+                # this callback on a daemon-side instance whose
+                # set_description was never invoked post-§7c — the
+                # event never fired.  Runner-side install lives in
+                # _install_session_notification_callbacks (§4.4
+                # sub-action B); this is the demuxer's mirror.
+                if event_type == "description_updated":
+                    server.emit(SessionDescriptionUpdatedEvent(
+                        session_id=str(payload.get("session_id", "") or ""),
+                        description=str(payload.get("description", "") or ""),
+                    ))
+                    return
+
                 # Unknown event_type — log and drop.  Forward-compat
                 # for runner-side additions the daemon hasn't been
                 # taught about yet.
@@ -4649,8 +4658,39 @@ class JaatoServer:
             register_prompt_operator(
                 rpc_client.rpc_server, self._prompt_operator_handler,
             )
+            # Phase 4 §4.3.2: register the
+            # ``subagent.spawn_isolated_runner`` handler.  Stub body
+            # for now — returns "not yet implemented" with stage=spawn
+            # until §4.3.3-§4.3.7 fill in the actual spawn machinery
+            # (helper, sub-AppArmor profile, sub-cgroup, cross-runner
+            # forwarding).  Registering early so §4.3.3-§4.3.7 land
+            # against a stable surface.  Guarded by ``_session_id``
+            # because the handler's confused-deputy check requires a
+            # non-empty parent session id; bootstrap paths that don't
+            # carry a session id (very early init / test fakes that
+            # bypass ``__init__`` via ``__new__``) skip registration
+            # rather than crashing.  ``getattr`` defense mirrors the
+            # shutdown() pattern below.
+            session_id = getattr(self, "_session_id", None)
+            if session_id:
+                from server.runner_rpc_handlers.spawn_isolated_runner import (
+                    SpawnIsolatedRunnerHandler,
+                    register as register_spawn_isolated_runner,
+                )
+                self._spawn_isolated_runner_handler = (
+                    SpawnIsolatedRunnerHandler(
+                        parent_session_id=session_id,
+                    )
+                )
+                register_spawn_isolated_runner(
+                    rpc_client.rpc_server,
+                    self._spawn_isolated_runner_handler,
+                )
+            else:
+                self._spawn_isolated_runner_handler = None
         else:
             self._prompt_operator_handler = None
+            self._spawn_isolated_runner_handler = None
 
     @property
     def runner_rpc(self) -> Optional["RunnerRPCClient"]:
@@ -4683,6 +4723,24 @@ class JaatoServer:
                     "shutdown raised",
                 )
             self._prompt_operator_handler = None
+        # Phase 4 §4.3.2: tear down the spawn_isolated_runner handler.
+        # Stub body holds no in-flight state (just a closed flag) so
+        # this is a no-op beyond marking the handler closed; §4.3.6
+        # will extend ``shutdown()`` to cascade through in-flight
+        # spawn tracking.  Same ``getattr`` defense as the prompt
+        # handler for test fakes.
+        spawn_handler = getattr(
+            self, "_spawn_isolated_runner_handler", None,
+        )
+        if spawn_handler is not None:
+            try:
+                spawn_handler.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                logger.exception(
+                    "JaatoServer.shutdown: "
+                    "spawn_isolated_runner_handler shutdown raised",
+                )
+            self._spawn_isolated_runner_handler = None
         # Tear down the runner subprocess if one was spawned.  The
         # close ladder (parent EOF → wait → SIGTERM → SIGKILL) lives
         # inside ``RunnerRPCClient.close``; we run it on the daemon's

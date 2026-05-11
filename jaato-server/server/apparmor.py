@@ -40,7 +40,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Dict, List, Optional
+from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -822,6 +822,385 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
 
         logger.info("Loaded AppArmor profile %s", profile_name)
         return True
+
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 4 §4.3.4 — sub-AppArmor profile for isolated subagents
+    # ──────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def _validate_subagent_id(cls, subagent_id: Any) -> Optional[str]:
+        """Validate ``subagent_id`` for use in a sub-profile name +
+        filename + ``change_profile`` target.
+
+        Phase 4 §4.3.4 anchored this on AppArmorManager.  §4.3.5
+        hoisted the body to ``server.subagent_id.validate_subagent_id``
+        so the sub-cgroup validator can share the same implementation.
+        The classmethod stays for backwards compat with existing
+        callers + tests.
+
+        Returns:
+            ``None`` if valid; an error message string if invalid.
+        """
+        from server.subagent_id import validate_subagent_id
+        return validate_subagent_id(subagent_id)
+
+    @classmethod
+    def get_sub_profile_name(
+        cls, parent_session_id: str, subagent_id: str,
+    ) -> str:
+        """Return the kernel-visible sub-profile name.
+
+        Template: ``jaato-ws-{parent}//{subagent_id}``.  The ``//``
+        is a naming convention (standalone-with-prefix-name per
+        Audit 6); the kernel treats this as a separate profile, not
+        a true AppArmor hat.
+
+        Caller is responsible for validating ``subagent_id`` first via
+        :meth:`_validate_subagent_id` — this method does no checks
+        because it's also used by callers that have already validated
+        (e.g., test fixtures, log message builders).
+        """
+        return f"jaato-ws-{parent_session_id}//{subagent_id}"
+
+    @classmethod
+    def get_sub_profile_filename(
+        cls, parent_session_id: str, subagent_id: str,
+    ) -> str:
+        """Return the on-disk filename for a sub-profile.
+
+        Template: ``jaato-ws-{parent}__sub_{subagent_id}``.  Filenames
+        can't contain ``/`` (path separator), so the kernel name's
+        ``//`` is replaced with ``__sub_`` — matching the
+        ``isolated_session_id`` template
+        ``SessionManager._spawn_isolated_runner`` generates in §4.3.3.
+        Callers can derive the filename from the isolated session id
+        without re-encoding the convention.
+
+        Caller is responsible for validating ``subagent_id`` first.
+        """
+        return f"jaato-ws-{parent_session_id}__sub_{subagent_id}"
+
+    def provision_sub_profile(
+        self,
+        parent_session_id: str,
+        subagent_id: str,
+        workspace_path: str,
+    ) -> Tuple[bool, str]:
+        """Create and load an AppArmor sub-profile for an isolated
+        subagent (Phase 4 §4.3.4).
+
+        Standalone profile with a ``//``-prefixed name (per Audit 6's
+        structural decision).  Mirrors :meth:`provision_profile`'s
+        pattern: dispatches the file write + ``apparmor_parser -r``
+        reload through :meth:`_run_unconfined`.
+
+        Args:
+            parent_session_id: Parent session id.  Used in the sub-
+                profile's name + filename.  Trusted (originates from
+                the handler-bound id, not runner-supplied for this
+                method).
+            subagent_id: Subagent id.  Sanitized strictly per
+                :meth:`_validate_subagent_id` — invalid ids return
+                ``(False, error_message)`` without touching disk.
+            workspace_path: Workspace path (inherited from parent
+                per §4.3 invariant).
+
+        Returns:
+            ``(True, sub_profile_name)`` on success — sub-profile
+            loaded into kernel + file written.  The returned name is
+            the kernel-visible identifier the sub-runner will
+            ``change_profile`` to.
+
+            ``(False, error_message)`` on validation / kernel / IO
+            failure.  Error message is human-readable and suitable
+            for forwarding back to the runner-side caller via the
+            stage envelope.
+        """
+        err = self._validate_subagent_id(subagent_id)
+        if err is not None:
+            return False, f"subagent_id rejected: {err}"
+
+        return self._run_unconfined(
+            self._provision_sub_profile_impl,
+            parent_session_id, subagent_id, workspace_path,
+        )
+
+    def _provision_sub_profile_impl(
+        self,
+        parent_session_id: str,
+        subagent_id: str,
+        workspace_path: str,
+    ) -> Tuple[bool, str]:
+        """Inner body of :meth:`provision_sub_profile`.
+
+        Writes the rendered sub-profile body to
+        ``{profile_dir}/jaato-ws-{parent}__sub_{subagent}`` and loads
+        it with ``apparmor_parser -r``.  Cleans up the file on parser
+        failure (mirrors ``_provision_profile_impl``).
+        """
+        if not self.is_available():
+            return False, "AppArmor unavailable on this host"
+
+        sub_profile_name = self.get_sub_profile_name(
+            parent_session_id, subagent_id,
+        )
+        sub_profile_filename = self.get_sub_profile_filename(
+            parent_session_id, subagent_id,
+        )
+        sub_profile_path = self._profile_dir / sub_profile_filename
+        sub_profile_content = self._render_sub_profile(
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            workspace_path=workspace_path,
+        )
+
+        try:
+            sub_profile_path.write_text(sub_profile_content)
+        except OSError as exc:
+            logger.exception(
+                "Failed to write sub-profile %s", sub_profile_path,
+            )
+            return False, f"sub-profile file write failed: {exc}"
+
+        try:
+            result = subprocess.run(
+                ["sudo", "apparmor_parser", "-r",
+                 "--cache-loc", str(self._cache_dir),
+                 str(sub_profile_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                logger.error(
+                    "apparmor_parser failed for sub-profile %s: %s",
+                    sub_profile_name, result.stderr.strip(),
+                )
+                sub_profile_path.unlink(missing_ok=True)
+                return False, (
+                    f"apparmor_parser exit={result.returncode}: "
+                    f"{result.stderr.strip()}"
+                )
+        except subprocess.TimeoutExpired:
+            logger.error(
+                "apparmor_parser timed out for sub-profile %s",
+                sub_profile_name,
+            )
+            sub_profile_path.unlink(missing_ok=True)
+            return False, "apparmor_parser timed out (30s)"
+        except OSError as exc:
+            logger.exception(
+                "Failed to run apparmor_parser for sub-profile %s",
+                sub_profile_name,
+            )
+            sub_profile_path.unlink(missing_ok=True)
+            return False, f"apparmor_parser invocation failed: {exc}"
+
+        logger.info("Loaded AppArmor sub-profile %s", sub_profile_name)
+        return True, sub_profile_name
+
+    def teardown_sub_profile(
+        self,
+        parent_session_id: str,
+        subagent_id: str,
+    ) -> bool:
+        """Unload and remove an isolated-subagent sub-profile
+        (Phase 4 §4.3.4).
+
+        Symmetric to :meth:`teardown_profile`.  Worker-sweep is NOT
+        invoked here — §4.3.6 wires the sub-runner lifecycle, and at
+        that point the sub-runner's own executor will be torn down
+        separately.  Today's daemon worker pool is not confined
+        under the sub-profile (the sub-profile only confines the
+        sub-runner subprocess), so the sweep is unnecessary.
+
+        Args:
+            parent_session_id: Parent session id.
+            subagent_id: Subagent id.  Validated; invalid ids return
+                False (we still try to unlink any leftover file with
+                a sanitized name to be defensive about cleanup).
+
+        Returns:
+            True on success or "already gone"; False on failure
+            (logged, not raised).
+        """
+        err = self._validate_subagent_id(subagent_id)
+        if err is not None:
+            logger.warning(
+                "teardown_sub_profile: invalid subagent_id %r — %s",
+                subagent_id, err,
+            )
+            return False
+        return self._run_unconfined(
+            self._teardown_sub_profile_impl,
+            parent_session_id, subagent_id,
+        )
+
+    def _teardown_sub_profile_impl(
+        self,
+        parent_session_id: str,
+        subagent_id: str,
+    ) -> bool:
+        """Inner body of :meth:`teardown_sub_profile`."""
+        if not self.is_available():
+            return False
+
+        sub_profile_name = self.get_sub_profile_name(
+            parent_session_id, subagent_id,
+        )
+        sub_profile_filename = self.get_sub_profile_filename(
+            parent_session_id, subagent_id,
+        )
+        sub_profile_path = self._profile_dir / sub_profile_filename
+
+        if not sub_profile_path.exists():
+            return True  # Already gone
+
+        try:
+            subprocess.run(
+                ["sudo", "apparmor_parser", "-R",
+                 "--cache-loc", str(self._cache_dir),
+                 str(sub_profile_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            logger.exception(
+                "Failed to unload sub-profile %s", sub_profile_name,
+            )
+            # Continue to try deleting the file.
+
+        try:
+            sub_profile_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception(
+                "Failed to delete sub-profile file %s", sub_profile_path,
+            )
+            return False
+        return True
+
+    def _render_sub_profile(
+        self,
+        parent_session_id: str,
+        subagent_id: str,
+        workspace_path: str,
+    ) -> str:
+        """Render the sub-profile body for an isolated subagent.
+
+        Conservative-tightening rule set per Audit 6:
+
+        - Workspace allows mirror parent base (§4.3 invariant).
+        - Integrity-deny rules mirror parent base.
+        - Tool-hat-style read-denies mirror the parent's tool_hat
+          (information-isolation between agents).
+        - DROP fragment-admit (no add_reference_fragment from the
+          sub-runner; Phase 5+ behind explicit opt-in).
+        - DROP tool_hat sub-sub-profile (flat profile; isolated
+          subagent doesn't need finer-grained tool scoping yet).
+
+        The profile NAME is ``jaato-ws-{parent}//{subagent}``
+        (Audit 6's standalone-with-prefix-name decision).
+        """
+        sub_profile_name = self.get_sub_profile_name(
+            parent_session_id, subagent_id,
+        )
+
+        if self._premium_root:
+            premium_rules = (
+                f"{self._premium_root}/         r,\n"
+                f"  {self._premium_root}/**       r,"
+            )
+        else:
+            premium_rules = "# (no premium package installed)"
+
+        return f"""# AppArmor profile for isolated subagent
+# Generated by jaato Phase 4 §4.3.4 (sub-AppArmor profile).
+# Parent session: {parent_session_id}
+# Subagent id:    {subagent_id}
+#
+# Standalone profile with a //-prefixed name per Audit 6.
+# Loaded as a separate kernel-level profile; the sub-runner
+# self-confines to this profile via change_profile.
+
+profile "{sub_profile_name}" flags=(attach_disconnected) {{
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/python>
+
+  # ---- workspace (inherited from parent per §4.3 invariant) ----
+  {workspace_path}/   rw,
+  {workspace_path}/** rwkl,
+
+  # ---- integrity-protected write-denies (mirror parent base) ----
+  audit deny {workspace_path}/.jaato/agents/**             wlk,
+  audit deny {workspace_path}/.jaato/profiles/**           wlk,
+  audit deny {workspace_path}/.jaato/prompts/**            wlk,
+  audit deny {workspace_path}/.jaato/scripts/**            wlk,
+  audit deny {workspace_path}/.jaato/services/*/           wlk,
+  audit deny {workspace_path}/.jaato/reactors.json         wlk,
+  audit deny {workspace_path}/.jaato/completion_schemas/** wlk,
+  audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
+  audit deny {workspace_path}/.jaato/instructions/**       wlk,
+  audit deny {workspace_path}/.jaato/references/**         wlk,
+
+  # ---- read-denies on user-authored config ----
+  # Information-isolation between agents in a cascade — same as
+  # the parent's tool_hat, applied at the sub-profile level here.
+  audit deny {workspace_path}/.jaato/agents/**             r,
+  audit deny {workspace_path}/.jaato/profiles/**           r,
+  audit deny {workspace_path}/.jaato/prompts/**            r,
+  audit deny {workspace_path}/.jaato/scripts/**            r,
+  audit deny {workspace_path}/.jaato/completion_schemas/** r,
+  audit deny {workspace_path}/.jaato/spawn_schemas/**      r,
+  audit deny {workspace_path}/.jaato/instructions/**       r,
+  audit deny {workspace_path}/.jaato/reactors.json         r,
+
+  # ---- shared read-only resources ----
+  {self._venv_path}/           r,
+  {self._venv_path}/**         r,
+  {self._venv_path}/bin/*      ix,
+  {self._source_root}/         r,
+  {self._source_root}/**       r,
+  {premium_rules}
+
+  # ---- user-global jaato config (read-only) ----
+  @{{HOME}}/.jaato/agents/         r,
+  @{{HOME}}/.jaato/agents/**       r,
+  @{{HOME}}/.jaato/profiles/       r,
+  @{{HOME}}/.jaato/profiles/**     r,
+  @{{HOME}}/.jaato/prompts/        r,
+  @{{HOME}}/.jaato/prompts/**      r,
+  @{{HOME}}/.jaato/skills/         r,
+  @{{HOME}}/.jaato/skills/**       r,
+  @{{HOME}}/.jaato/keybindings.json r,
+  @{{HOME}}/.jaato/theme.json       r,
+  @{{HOME}}/.jaato/gc.json          r,
+  @{{HOME}}/.jaato/memories/       rw,
+  @{{HOME}}/.jaato/memories/**     rw,
+  @{{HOME}}/.jaato/memories.jsonl  rw,
+
+  # ---- temp files ----
+  /tmp/                     r,
+  /tmp/jaato-*              rw,
+  /tmp/jaato-*/**           rwkl,
+
+  # ---- self-introspection ----
+  /proc/*/                  r,
+  /proc/*/status            r,
+  /proc/*/stat              r,
+  /proc/*/cmdline           r,
+  /proc/*/comm              r,
+  /proc/*/fd/               r,
+  /proc/*/fd/*              r,
+
+  # ---- DROP: external-reference admit (no add_reference_fragment
+  # from sub-runner — Phase 5+ behind opt-in).
+  # ---- DROP: tool_hat sub-sub-profile (flat profile).
+  # ---- DROP: change_profile transitions (sub-runner stays in this
+  # profile for its lifetime; no further self-transitions).
+
+  # ---- signal denies (mirror parent base) ----
+  signal (receive) peer=unconfined,
+  signal (send,receive) peer="{sub_profile_name}",
+}}
+"""
 
     def teardown_profile(self, session_id: str) -> bool:
         """Unload and remove an AppArmor profile.

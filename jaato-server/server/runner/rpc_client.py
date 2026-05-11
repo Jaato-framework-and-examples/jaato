@@ -177,3 +177,115 @@ class RunnerRPCClient:
                 f"type {type(env.result).__name__}; expected dict"
             )
         return dict(env.result)
+
+    # --------------------- spawn_isolated_runner -----------------------
+
+    def spawn_isolated_runner(
+        self,
+        *,
+        parent_session_id: str,
+        subagent_id: str,
+        profile_payload: Dict[str, Any],
+        task: str,
+        workspace_path: str,
+        agent_params: Optional[Dict[str, Any]] = None,
+        display_name: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Ask the daemon to spawn an isolated runner subprocess for
+        a subagent (Phase 4 §4.3.2).
+
+        The eventual consumer is the runner-side subagent plugin's
+        ``agent_params.isolated=true`` opt-in branch (§4.3.7).  Until
+        that branch is wired, this wrapper is registered but not
+        called in production — exists so §4.3.3-§4.3.6 can land
+        their respective machinery against a stable surface.
+
+        Args:
+            parent_session_id: The current (parent) session's id.
+                Echoed in the request for confused-deputy sanity
+                check; the daemon-side handler is bound to its own
+                authoritative copy and rejects mismatches.
+            subagent_id: Pre-generated subagent id from the runner-
+                side subagent plugin (today's ``_next_agent_id``).
+            profile_payload: Serialized ``SubagentProfile`` as a
+                dict — see Audit 5 in
+                ``docs/design/phase4_implementation_audits.md`` for
+                the field list (model, provider, plugins,
+                plugin_configs, system_instructions, etc.).
+            task: First-turn prompt for the isolated runner.
+            workspace_path: Inherited from parent (§4.3 invariant).
+            agent_params: Forwarded case data for ``{{name}}``
+                substitution / ``RenderContext.agent_params``.  The
+                ``isolated`` key is stripped daemon-side (control
+                flag, not template data).  Optional.
+            display_name: Custom display name; defaults to
+                ``profile_payload.name``.  Optional.
+            parent_agent_id: For multi-hop subagent trees (a
+                subagent spawning another isolated subagent).
+                Optional.
+            timeout: Wall-clock cap on the spawn RPC.  Spawning a
+                runner subprocess can take ~50-200ms (fork +
+                AppArmor change_profile + plugin discovery).  60s
+                is a reasonable default; ``None`` waits
+                indefinitely.
+
+        Returns:
+            On success (post-§4.3.7 readiness):
+                ``{"ok": True, "session_id": "...", "subagent_id":
+                "...", "runner_pid": <int>, "apparmor_profile":
+                "...", "cgroup_path": "..."}``.
+
+            On domain failure (validation reject, spawn failure,
+            sub-profile / sub-cgroup / forwarding failure):
+                ``{"ok": False, "error": "...", "stage": "..."}``
+                where ``stage`` is one of ``validation`` /
+                ``sub_profile`` / ``spawn`` / ``sub_cgroup`` /
+                ``forwarding``.  Caller branches on ``ok`` and
+                surfaces ``stage`` for precise diagnostics.
+
+            Phase 4 §4.3.2 stub status: any request with valid args
+            returns ``{"ok": False, "error": "...not yet
+            implemented...", "stage": "spawn"}`` until the §4.3.3-
+            §4.3.7 sub-commits land.
+
+        Raises:
+            RunnerRPCError: transport-level failure (channel closed,
+                handler crashed, malformed envelope).  Domain
+                failures (handler returned ``ok=False``) are NOT
+                raised — they return as the success-path dict so
+                callers can inspect ``stage``.
+        """
+        args: Dict[str, Any] = {
+            "parent_session_id": parent_session_id,
+            "subagent_id": subagent_id,
+            "profile_payload": profile_payload,
+            "task": task,
+            "workspace_path": workspace_path,
+        }
+        if agent_params is not None:
+            args["agent_params"] = agent_params
+        if display_name is not None:
+            args["display_name"] = display_name
+        if parent_agent_id is not None:
+            args["parent_agent_id"] = parent_agent_id
+
+        env = self._rpc.outgoing_call(
+            "subagent.spawn_isolated_runner",
+            args,
+            timeout=timeout,
+        )
+        if not env.ok or env.error is not None:
+            err_type = env.error.type if env.error else "UnknownError"
+            err_msg = env.error.message if env.error else "no error message"
+            raise RunnerRPCError(
+                f"subagent.spawn_isolated_runner failed: "
+                f"{err_type}: {err_msg}"
+            )
+        if not isinstance(env.result, dict):
+            raise RunnerRPCError(
+                f"subagent.spawn_isolated_runner: unexpected result "
+                f"type {type(env.result).__name__}; expected dict"
+            )
+        return dict(env.result)

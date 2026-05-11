@@ -119,6 +119,58 @@ class Session:
     restored_pending_attach: bool = False
 
 
+@dataclass
+class SubRunnerHandle:
+    """Daemon-side bookkeeping for an isolated-subagent sub-runner
+    (Phase 4 §4.3.6a).
+
+    Holds the RPC client + spawned subprocess handle for a sub-runner
+    spawned by the §4.3 isolated-subagent opt-in.  Distinct from
+    ``Session`` (which tracks top-level user-visible sessions) — these
+    handles live in their own dict keyed by isolated_session_id, off
+    the parent session's lifecycle.
+
+    Lifecycle (each §4.3.6 sub-commit advances):
+    - §4.3.6a: created when the helper's spawn invocation succeeds.
+    - §4.3.6b: cross-runner output forwarding subscribes by handle.
+    - §4.3.6c: cross-runner prompt forwarding dispatches via ``rpc``.
+    - §4.3.6d: parent-cascade teardown reads + cleans up.
+
+    Fields:
+        parent_session_id: The session that owns this isolated
+            subagent.  Used for parent-cascade teardown lookups.
+        subagent_id: Pre-generated id from the runner-side subagent
+            plugin.  Combined with ``parent_session_id`` to derive
+            the isolated_session_id, sub-AppArmor profile name, and
+            sub-cgroup path.
+        isolated_session_id: ``{parent}__sub_{subagent}`` — used as
+            the session_id for daemon-side RPC + kernel-resource
+            names.
+        rpc: The :class:`RunnerRPCClient` started against the
+            sub-runner's parent socket.  Daemon talks to the
+            sub-runner via this handle.
+        spawned: The :class:`SpawnedRunner` (pid + socket pair).
+            Held for teardown.
+        sub_apparmor_profile: The kernel-visible sub-profile name
+            (``jaato-ws-{parent}//{subagent}``).  Empty when
+            unconfined fallback was taken (not the normal path).
+        cgroup_path: Absolute path to the sub-cgroup directory.
+            Empty when no cgroup was created (no runtime_limits or
+            cgroups unavailable).
+        created_at: Timestamp for diagnostics + leak detection.
+    """
+    parent_session_id: str
+    subagent_id: str
+    isolated_session_id: str
+    rpc: Any  # server.runner_rpc_client.RunnerRPCClient
+    spawned: Any  # server.runner_spawner.SpawnedRunner
+    sub_apparmor_profile: str
+    cgroup_path: str
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+
 class SessionManager:
     """Manages multiple named sessions with persistence.
 
@@ -171,6 +223,15 @@ class SessionManager:
         self._sessions: Dict[str, Session] = {}
         # Use RLock (reentrant) because initialize() may emit events during session load
         self._lock = threading.RLock()
+
+        # Phase 4 §4.3.6a: bookkeeping for isolated-subagent sub-runners.
+        # Keyed by isolated_session_id (``{parent}__sub_{subagent}``).
+        # Distinct from ``_sessions`` — these are off the top-level
+        # session lifecycle and are owned by the parent session for
+        # parent-cascade teardown.  Guarded by ``_lock`` (same as
+        # ``_sessions``) — both dicts are mutated together at
+        # parent-shutdown time.
+        self._isolated_sub_runners: Dict[str, SubRunnerHandle] = {}
 
         # Path H (cycle 10): serialize concurrent async saves so
         # parallel ToolCallStartEvents (parallel tool execution)
@@ -826,6 +887,37 @@ class SessionManager:
                     "runner-side bootstrap completes some other way",
                     session_id, type(exc).__name__, exc,
                 )
+            # Phase 4 §4.3.3: wire the spawn_isolated_runner handler
+            # with this SessionManager so the §4.3.7 opt-in branch
+            # can spawn additional runners for isolated subagents.
+            # The handler itself was registered earlier inside
+            # ``JaatoServer.set_runner_rpc()`` (§4.3.2); here we
+            # bridge it to our own ``_spawn_isolated_runner`` helper
+            # by calling ``set_spawn_dependencies(self)``.  The
+            # SessionManager reference isn't available at the
+            # ``set_runner_rpc`` seam (would require widening
+            # ``spawn_session_runner``'s signature) so the wire
+            # lands here instead, where SessionManager is ``self``.
+            # Best-effort: failure to wire the bridge logs WARNING
+            # but doesn't roll back the spawn-success return — the
+            # parent session is up and the runner is healthy; the
+            # only impact is that ``agent_params.isolated=true``
+            # subagents (§4.3.7) would get the "handler not yet
+            # wired" stub envelope instead of the routed helper.
+            handler = getattr(
+                server, "_spawn_isolated_runner_handler", None,
+            )
+            if handler is not None:
+                try:
+                    handler.set_spawn_dependencies(session_manager=self)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "set_spawn_dependencies failed for session "
+                        "%s (%s: %s) — agent_params.isolated=true "
+                        "subagents will receive the handler-not-"
+                        "wired stub until next session restart",
+                        session_id, type(exc).__name__, exc,
+                    )
             return True
         except Exception as exc:  # noqa: BLE001 — boundary
             self._notify_apparmor(
@@ -839,6 +931,988 @@ class SessionManager:
                 "runner spawn failed for session %s", session_id,
             )
             return False
+
+    def _spawn_isolated_runner(
+        self,
+        *,
+        parent_session_id: str,
+        subagent_id: str,
+        profile_payload: Dict[str, Any],
+        task: str,
+        workspace_path: str,
+        agent_params: Optional[Dict[str, Any]] = None,
+        display_name: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Daemon-side helper for the isolated-subagent opt-in
+        (Phase 4 §4.3.3).
+
+        Invoked by ``SpawnIsolatedRunnerHandler.handle()`` (once
+        ``set_spawn_dependencies(self)`` has been called) when a
+        runner-side subagent plugin sends a
+        ``subagent.spawn_isolated_runner`` RPC.  Per parent design
+        §4.3, the supervisor's ``agent_params.isolated=true`` opt-in
+        is meant to spawn the subagent in its own runner subprocess
+        with a fresh AppArmor sub-profile
+        (``jaato-ws-{parent}//{subagent}``) and its own sub-cgroup.
+
+        §4.3.3 scope (THIS commit):
+
+        1. Reconstruct ``SubagentProfile`` from the wire-shape
+           ``profile_payload`` dict via ``build_inline_profile`` —
+           same path SDK inline-spec callers use, so the JSON shape
+           is identical to ``session.new`` inline specs.
+        2. Generate the isolated session id
+           (``{parent_session_id}__sub_{subagent_id}``).
+        3. Return a ``stage="sub_profile"`` envelope with would-be
+           values for diagnostic visibility — the next stage
+           (sub-AppArmor profile generation + provisioning) lands
+           in §4.3.4.
+
+        Deferred to subsequent sub-commits:
+
+        - §4.3.4: sub-AppArmor profile name generation + load.
+        - §4.3.5: sub-cgroup creation + attach.
+        - §4.3.6: cross-runner forwarding (prompt-forward INTO new
+          runner; output-forward BACK to parent).
+        - The actual ``_spawn_session_runner_unconditional(...)``
+          call lands once both §4.3.4 and §4.3.5 are wired — passing
+          ``profile_name=""`` today would spawn an unconfined
+          sub-runner, which is a worse security posture than the
+          §4.3 default-share path the §4.3.1 stub points callers
+          to.  Refusing to spawn until the sub-profile is ready
+          keeps the security gradient monotonic.
+
+        Args:
+            parent_session_id: Parent session's id.  Already echo-
+                checked daemon-side by the handler; we re-use here
+                only for the isolated session-id template.
+            subagent_id: Pre-generated subagent id from the runner-
+                side subagent plugin.
+            profile_payload: Serialized ``SubagentProfile`` as a
+                dict.  Field set mirrors ``build_inline_profile``'s
+                contract (model, provider, plugins, plugin_configs,
+                system_instructions, gc, env, runtime_limits,
+                completion_payload_schema, spawn_payload_schema,
+                completion_artifacts, model_tiers,
+                suppress_base_instructions, max_turns).
+            task: First-turn prompt for the isolated runner.  §4.3.3
+                does NOT consume this; §4.3.6's forwarding will.
+            workspace_path: Inherited from parent (§4.3 invariant).
+                Forwarded for diagnostics only in §4.3.3.
+            agent_params: Forwarded ``case_data``.  ``isolated`` key
+                already stripped daemon-side by the handler.
+            display_name: Custom display name; defaults to
+                ``profile_payload.name``.
+            parent_agent_id: For multi-hop subagent trees.
+
+        Returns:
+            Domain-failure envelope shape (parallels
+            ``SpawnIsolatedRunnerHandler.handle``'s return):
+
+                {"ok": False,
+                 "error": "<reason>",
+                 "stage": "validation" | "sub_profile" | "spawn" |
+                          "sub_cgroup" | "forwarding",
+                 # Diagnostic fields (would-be values for the next
+                 # stage to debug against — only present when the
+                 # stage advanced past the corresponding failure):
+                 "isolated_session_id": "...",
+                 "profile_name": "..."}
+
+            On full success (post-§4.3.6 readiness):
+
+                {"ok": True,
+                 "session_id": "...",
+                 "subagent_id": "...",
+                 "runner_pid": <int>,
+                 "apparmor_profile": "...",
+                 "cgroup_path": "..."}
+        """
+        # ── Stage: validation — reconstruct SubagentProfile ────
+        # ``build_inline_profile`` is the canonical "dict →
+        # SubagentProfile" path used by SDK inline-spec session
+        # creation; reuse here so the wire shape stays consistent
+        # with what session.new accepts.  This also gives the
+        # caller a precise validation-failure message if the
+        # payload is malformed (e.g., bad gc / runtime_limits dict).
+        try:
+            from shared.plugins.subagent.config import build_inline_profile
+            profile = build_inline_profile(
+                profile_payload,
+                name=profile_payload.get("name") or "<isolated>",
+                description=profile_payload.get("description") or (
+                    "Isolated subagent profile (Phase 4 §4.3 opt-in)"
+                ),
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            return {
+                "ok": False,
+                "error": (
+                    f"profile_payload reconstruction failed "
+                    f"({type(exc).__name__}: {exc}).  Expected the "
+                    f"same dict shape as session.new inline specs — "
+                    f"see shared/plugins/subagent/config.py:"
+                    f"build_inline_profile."
+                ),
+                "stage": "validation",
+            }
+
+        # ── Stage: id generation ───────────────────────────────
+        # Template ``{parent}__sub_{subagent}`` keeps the isolated
+        # session id parseable + correlatable back to its parent
+        # for log / trace inspection.  Same template used in
+        # parent design §4.3's sub-profile name
+        # (``jaato-ws-{session_id}//{subagent_id}``) so the two
+        # stay in sync — when §4.3.4 generates the sub-profile
+        # name, it can derive it from this session id.
+        isolated_session_id = f"{parent_session_id}__sub_{subagent_id}"
+
+        # ── Stage: sub_profile (next stage — §4.3.4) ───────────
+        # Stop here.  Refusing to spawn until §4.3.4 provisions a
+        # sub-AppArmor profile is intentional: the alternative
+        # would be ``profile_name=""`` (unconfined sub-runner),
+        # which weakens security relative to the §4.3 default-
+        # share path callers can use today.  Monotonic security
+        # gradient through the sub-track.
+        # ── Stage: sub_profile — provision sub-AppArmor profile ──
+        # Phase 4 §4.3.4: ask the daemon's AppArmorManager to write
+        # + load a sub-profile named ``jaato-ws-{parent}//{subagent}``.
+        # Standalone-with-prefix-name (not a true hat) per Audit 6.
+        # When AppArmor isn't available (host doesn't support it, or
+        # AppArmorManager isn't wired into this SessionManager
+        # instance), we treat the sub-profile as absent and return
+        # ``stage=sub_profile`` — the isolated-runner spawn requires
+        # kernel confinement.
+        apparmor_manager = self._resolve_apparmor_manager()
+        if apparmor_manager is None or not apparmor_manager.is_available():
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-AppArmor profile cannot be provisioned: "
+                    f"AppArmorManager unavailable on this host.  "
+                    f"Isolated-runner spawn requires kernel-level "
+                    f"confinement.  Profile reconstruction succeeded "
+                    f"(name={profile.name!r}, model={profile.model!r}).  "
+                    f"Would-be isolated session: {isolated_session_id!r}.  "
+                    f"Workaround: set agent_params.isolated=false (or "
+                    f"omit) to use the default-share path (subagent "
+                    f"runs in the parent's runner) — works end-to-end "
+                    f"today.  See docs/design/phase4_implementation_audits.md."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }
+
+        ok, sub_profile_or_err = apparmor_manager.provision_sub_profile(
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            workspace_path=workspace_path,
+        )
+        if not ok:
+            logger.warning(
+                "_spawn_isolated_runner: sub-profile provision failed "
+                "for parent=%s subagent=%s: %s",
+                parent_session_id, subagent_id, sub_profile_or_err,
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-AppArmor profile provision failed: "
+                    f"{sub_profile_or_err}.  Profile reconstruction "
+                    f"succeeded (name={profile.name!r}).  Would-be "
+                    f"isolated session: {isolated_session_id!r}.  "
+                    f"Workaround: omit agent_params.isolated."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }
+
+        sub_profile_name = sub_profile_or_err
+        logger.info(
+            "_spawn_isolated_runner: sub-profile provisioned for "
+            "parent=%s subagent=%s (sub_profile=%s)",
+            parent_session_id, subagent_id, sub_profile_name,
+        )
+
+        # ── Stage: sub_cgroup — provision sub-cgroup ───────────
+        # Phase 4 §4.3.5: when cgroups available + profile declares
+        # kernel-enforceable runtime_limits, create the sub-cgroup
+        # via the existing CgroupsManager.provision_cgroup API
+        # (passing isolated_session_id as session_id — the cgroup
+        # path naturally lands at jaato-ws-{parent}__sub_{subagent}/
+        # via get_cgroup_name's template).  Sibling-not-nested
+        # structure per Audit 7 (cgroup v2 "no internal processes"
+        # rule + design intent).
+        #
+        # Graceful degradation: cgroups unavailable OR profile has
+        # no kernel limits → skip cgroup creation, sub-runner
+        # inherits daemon's default cgroup.  Documented Phase 5+
+        # hardening gap (default RuntimeLimits for isolated
+        # subagents).  AppArmor isolation still applies.
+        cgroup_path = ""  # Empty = no sub-cgroup provisioned.
+        cgroups_manager = self._resolve_cgroups_manager()
+        runtime_limits = profile.runtime_limits
+        if (cgroups_manager is not None
+                and cgroups_manager.is_available()
+                and runtime_limits is not None
+                and runtime_limits.has_kernel_limits()):
+            cgroup_ok = cgroups_manager.provision_cgroup(
+                isolated_session_id, runtime_limits,
+            )
+            if not cgroup_ok:
+                # Roll back the §4.3.4 sub-AppArmor profile before
+                # returning — otherwise it remains kernel-loaded
+                # but unused, and the next provision attempt with
+                # the same subagent_id sees the loaded profile.
+                # Best-effort: teardown failure logs but doesn't
+                # change the §4.3.5 return shape.  Idempotent
+                # re-load via provision_sub_profile would succeed
+                # anyway, so a stuck-loaded profile is not blocking.
+                try:
+                    apparmor_manager.teardown_sub_profile(
+                        parent_session_id=parent_session_id,
+                        subagent_id=subagent_id,
+                    )
+                except Exception:  # noqa: BLE001 — best-effort
+                    logger.exception(
+                        "_spawn_isolated_runner: sub-AppArmor "
+                        "rollback failed after sub-cgroup provision "
+                        "failure for parent=%s subagent=%s",
+                        parent_session_id, subagent_id,
+                    )
+                logger.warning(
+                    "_spawn_isolated_runner: sub-cgroup provision "
+                    "failed for parent=%s subagent=%s "
+                    "(isolated_session_id=%s)",
+                    parent_session_id, subagent_id, isolated_session_id,
+                )
+                return {
+                    "ok": False,
+                    "error": (
+                        f"sub-cgroup provision failed for isolated "
+                        f"session {isolated_session_id!r}.  Sub-AppArmor "
+                        f"profile {sub_profile_name!r} rolled back.  "
+                        f"Workaround: omit agent_params.isolated to "
+                        f"use default-share path."
+                    ),
+                    "stage": "sub_cgroup",
+                    "isolated_session_id": isolated_session_id,
+                    "profile_name": profile.name,
+                    "apparmor_profile": "",  # Rolled back.
+                }
+            cgroup_path = str(
+                cgroups_manager.get_cgroup_path(isolated_session_id),
+            )
+            logger.info(
+                "_spawn_isolated_runner: sub-cgroup provisioned for "
+                "parent=%s subagent=%s (cgroup_path=%s)",
+                parent_session_id, subagent_id, cgroup_path,
+            )
+        else:
+            logger.info(
+                "_spawn_isolated_runner: sub-cgroup skipped for "
+                "parent=%s subagent=%s "
+                "(cgroups_available=%s, has_kernel_limits=%s) — "
+                "sub-runner will inherit default cgroup",
+                parent_session_id, subagent_id,
+                cgroups_manager is not None
+                and cgroups_manager.is_available(),
+                runtime_limits is not None
+                and runtime_limits.has_kernel_limits(),
+            )
+
+        # ── Stage: forwarding — spawn sub-runner subprocess ────
+        # Phase 4 §4.3.6a: actually spawn the sub-runner with the
+        # provisioned sub-AppArmor profile + (optional) sub-cgroup
+        # attach.  Sub-runner self-confines via ``change_profile``
+        # on spawn; pre-exec preexec_fn migrates into the sub-cgroup.
+        #
+        # Stays at ``stage=forwarding`` because cross-runner event
+        # forwarding (sub→parent_runner) is §4.3.6b's job and the
+        # first-turn prompt dispatch is §4.3.6c's job.  §4.3.6a
+        # only proves the spawn happens + handle is bookkept.
+        #
+        # On spawn failure: roll back sub-cgroup + sub-AppArmor in
+        # order to keep kernel state consistent (no orphaned
+        # profile/cgroup if the subprocess never starts).
+        try:
+            sub_handle = self._do_spawn_isolated_runner(
+                parent_session_id=parent_session_id,
+                subagent_id=subagent_id,
+                isolated_session_id=isolated_session_id,
+                workspace_path=workspace_path,
+                sub_apparmor_profile=sub_profile_name,
+                cgroup_path=cgroup_path,
+                profile=profile,
+                agent_params=agent_params,
+            )
+        except Exception as spawn_exc:  # noqa: BLE001 — boundary
+            logger.warning(
+                "_spawn_isolated_runner: subprocess spawn failed "
+                "for parent=%s subagent=%s: %s",
+                parent_session_id, subagent_id, spawn_exc,
+                exc_info=True,
+            )
+            # Rollback chain — cgroup then AppArmor.  Best-effort;
+            # rollback failures log but don't change return shape.
+            self._rollback_isolated_resources(
+                parent_session_id=parent_session_id,
+                subagent_id=subagent_id,
+                isolated_session_id=isolated_session_id,
+                cgroup_path=cgroup_path,
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-runner subprocess spawn failed: "
+                    f"{type(spawn_exc).__name__}: {spawn_exc}.  "
+                    f"Sub-cgroup + sub-AppArmor profile rolled back.  "
+                    f"Workaround: omit agent_params.isolated to use "
+                    f"default-share path."
+                ),
+                "stage": "forwarding",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+                "apparmor_profile": "",  # Rolled back.
+                "cgroup_path": "",       # Rolled back.
+            }
+
+        # Register the handle so §4.3.6b/c/d can find it by id.
+        with self._lock:
+            self._isolated_sub_runners[isolated_session_id] = sub_handle
+        logger.info(
+            "_spawn_isolated_runner: sub-runner spawned for "
+            "parent=%s subagent=%s (isolated_session_id=%s "
+            "pid=%d sub_profile=%s cgroup=%s)",
+            parent_session_id, subagent_id, isolated_session_id,
+            sub_handle.spawned.pid, sub_profile_name,
+            cgroup_path or "(none)",
+        )
+
+        # ── Phase 4 §4.3.6c — session.bootstrap + first-turn dispatch ──
+        # The sub-runner subprocess is up but its runner-side
+        # JaatoSession isn't yet — dispatch session.bootstrap so
+        # the sub-runner constructs its session host before we
+        # send the first-turn prompt.  Bootstrap failure is
+        # surfaced as a stage=forwarding error envelope; the
+        # sub-runner is left registered (caller can attempt
+        # explicit teardown).
+        envelope = self._build_isolated_envelope(
+            profile=profile,
+            isolated_session_id=isolated_session_id,
+            workspace_path=workspace_path,
+            sub_apparmor_profile=sub_profile_name,
+            agent_params=agent_params,
+        )
+        bootstrap_ok = self._dispatch_isolated_session_bootstrap(
+            sub_handle, envelope,
+        )
+        if not bootstrap_ok:
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-runner subprocess spawned but "
+                    f"session.bootstrap dispatch failed.  Sub-runner "
+                    f"will not run the task.  Sub-resources remain "
+                    f"provisioned until parent teardown (§4.3.6d "
+                    f"will add cascade)."
+                ),
+                "stage": "forwarding",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+                "apparmor_profile": sub_profile_name,
+                "cgroup_path": cgroup_path,
+                "sub_runner_pid": sub_handle.spawned.pid,
+                "sub_session_id": isolated_session_id,
+            }
+
+        # Schedule the first-turn prompt as a background task — the
+        # sub-runner runs the task; streaming output forwards back
+        # via the §4.3.6b chain.  Returns immediately so the caller
+        # (subagent plugin) can continue.
+        self._schedule_isolated_first_turn(sub_handle, task)
+
+        # §4.3.6c milestone — isolated subagent is running end-to-end.
+        # ok=True signals the supervisor that the spawn succeeded;
+        # streaming output will arrive via inject_prompt over the
+        # cross-runner chain.
+        return {
+            "ok": True,
+            "session_id": isolated_session_id,
+            "subagent_id": subagent_id,
+            "runner_pid": sub_handle.spawned.pid,
+            "apparmor_profile": sub_profile_name,
+            "cgroup_path": cgroup_path,
+            # Diagnostic fields kept for backward-compat with §4.3.6a/b
+            # test assertions + audit-trail logging.
+            "isolated_session_id": isolated_session_id,
+            "profile_name": profile.name,
+            "sub_runner_pid": sub_handle.spawned.pid,
+            "sub_session_id": isolated_session_id,
+        }
+
+    def _do_spawn_isolated_runner(
+        self,
+        *,
+        parent_session_id: str,
+        subagent_id: str,
+        isolated_session_id: str,
+        workspace_path: str,
+        sub_apparmor_profile: str,
+        cgroup_path: str,
+        profile: Any,  # SubagentProfile
+        agent_params: Optional[Dict[str, Any]],
+    ) -> SubRunnerHandle:
+        """Spawn the sub-runner subprocess + initialize its RPC
+        channel (Phase 4 §4.3.6a).
+
+        Mirrors ``runner_spawn.spawn_session_runner`` but for the
+        isolated-subagent path: the daemon doesn't have a full
+        JaatoServer for the sub-session (and doesn't need one — the
+        runner-side JaatoSession holds all the state).  We hold the
+        spawn handles on a :class:`SubRunnerHandle` instead.
+
+        Raises any exception from the spawn / RPC start path; caller
+        catches + rolls back kernel resources.
+        """
+        import asyncio
+        from server.runner_rpc_client import RunnerRPCClient
+        from server.runner_spawner import RunnerSpawner
+
+        daemon_loop = getattr(self, "_daemon_loop", None)
+        if daemon_loop is None:
+            raise RuntimeError(
+                "_do_spawn_isolated_runner: daemon loop unavailable; "
+                "cannot start RunnerRPCClient"
+            )
+
+        spawner = RunnerSpawner()
+        log_path: Optional[str] = None
+        if workspace_path:
+            log_dir = os.path.join(workspace_path, ".jaato", "logs")
+            log_path = os.path.join(
+                log_dir, f"runner-{isolated_session_id}.log",
+            )
+
+        # Cgroup attach: when §4.3.5 provisioned a sub-cgroup, build
+        # the preexec_fn that migrates the forked child in.  When no
+        # cgroup, pass ``None`` — sub-runner inherits daemon's
+        # default cgroup (the documented Phase 5+ hardening gap).
+        cgroup_attach = None
+        if cgroup_path:
+            cgroups_manager = self._resolve_cgroups_manager()
+            if cgroups_manager is not None:
+                cgroup_attach = cgroups_manager.make_attach_callback(
+                    isolated_session_id,
+                )
+
+        spawned = spawner.spawn(
+            profile_name=sub_apparmor_profile,
+            session_id=isolated_session_id,
+            workspace_path=workspace_path,
+            log_path=log_path,
+            disable_confine=False,  # Always confined for §4.3.6.
+            cgroup_attach=cgroup_attach,
+        )
+
+        rpc = RunnerRPCClient(
+            spawned.parent_socket,
+            runner_pid=spawned.pid,
+            loop=daemon_loop,
+        )
+        fut = asyncio.run_coroutine_threadsafe(rpc.start(), daemon_loop)
+        fut.result(timeout=10.0)
+
+        return SubRunnerHandle(
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            isolated_session_id=isolated_session_id,
+            rpc=rpc,
+            spawned=spawned,
+            sub_apparmor_profile=sub_apparmor_profile,
+            cgroup_path=cgroup_path,
+        )
+
+    def _build_isolated_envelope(
+        self,
+        *,
+        profile: Any,  # SubagentProfile
+        isolated_session_id: str,
+        workspace_path: str,
+        sub_apparmor_profile: str,
+        agent_params: Optional[Dict[str, Any]],
+    ) -> Any:
+        """Build a :class:`SessionInitEnvelope` for an isolated
+        subagent's runner-side bootstrap (Phase 4 §4.3.6c).
+
+        Mirrors ``server.runner_spawn.build_session_envelope`` but
+        sources fields from the reconstructed SubagentProfile
+        directly (no daemon-side JaatoServer with ``_profile``
+        attribute — isolated subagents don't get one).
+        """
+        from shared.session_envelope import SessionInitEnvelope
+
+        provider_name = getattr(profile, "provider", None) or ""
+        model_name = getattr(profile, "model", None) or ""
+        plugins_list = list(getattr(profile, "plugins", []) or [])
+        preloaded = set(
+            getattr(profile, "preloaded_plugins", set()) or set(),
+        )
+        plugin_configs = dict(
+            getattr(profile, "plugin_configs", {}) or {},
+        )
+        plugin_specs = []
+        for name in plugins_list:
+            entry = {"name": name, "preload": name in preloaded}
+            cfg = plugin_configs.get(name)
+            if cfg:
+                entry["config"] = dict(cfg)
+            plugin_specs.append(entry)
+
+        system_instructions = getattr(profile, "system_instructions", None)
+        gc_dict = None
+        gc_obj = getattr(profile, "gc", None)
+        if gc_obj is not None:
+            gc_type = getattr(gc_obj, "type", None)
+            gc_config = getattr(gc_obj, "config", None) or {}
+            if gc_type:
+                gc_dict = {"type": gc_type, **dict(gc_config)}
+        env_overrides = dict(getattr(profile, "env", {}) or {})
+
+        if not provider_name:
+            provider_name = "anthropic"
+
+        try:
+            project_val = os.environ.get("PROJECT_ID", "") or ""
+            location_val = os.environ.get("LOCATION", "") or ""
+        except Exception:  # noqa: BLE001
+            project_val = ""
+            location_val = ""
+
+        return SessionInitEnvelope(
+            session_id=isolated_session_id,
+            workspace_path=workspace_path,
+            profile_name=sub_apparmor_profile,
+            provider_name=provider_name,
+            model_name=model_name,
+            plugins=plugin_specs,
+            # Phase 4 §C (envelope schema v2): carry the full
+            # profile.plugin_configs map at the top level so
+            # auto-loaded plugins (permission, gc_*, etc.) that
+            # aren't named in ``plugins`` still receive their
+            # profile overrides on the runner side.
+            plugin_configs=plugin_configs,
+            system_instructions=system_instructions,
+            agent_id="main",
+            gc=gc_dict,
+            agent_params=dict(agent_params or {}),
+            config_root=None,  # Isolated subagent doesn't inherit.
+            env_overrides=env_overrides,
+            project=project_val,
+            location=location_val,
+        )
+
+    def _dispatch_isolated_session_bootstrap(
+        self,
+        sub_handle: SubRunnerHandle,
+        envelope: Any,  # SessionInitEnvelope
+        *,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Send the ``session.bootstrap`` RPC to the sub-runner so
+        its runner-side JaatoSession host is populated before the
+        first-turn prompt arrives (Phase 4 §4.3.6c).
+
+        Synchronous: blocks until the sub-runner acknowledges.
+        Returns True on success, False on failure (logged).
+        """
+        try:
+            result = sub_handle.rpc.bootstrap_session_threadsafe(
+                envelope, timeout=timeout,
+            )
+            logger.info(
+                "isolated session.bootstrap acknowledged for %s: %s",
+                sub_handle.isolated_session_id, result,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "isolated session.bootstrap failed for %s: %s",
+                sub_handle.isolated_session_id, exc,
+                exc_info=True,
+            )
+            return False
+
+    def _schedule_isolated_first_turn(
+        self,
+        sub_handle: SubRunnerHandle,
+        task: str,
+    ) -> None:
+        """Schedule the first-turn prompt dispatch as an async task
+        on the daemon loop (Phase 4 §4.3.6c).
+
+        Returns immediately — the actual ``session.send_message``
+        runs in the background.  Output streams back to the parent
+        runner via the §4.3.6b ``subagent.forward_event`` RPC chain
+        triggered by the ``on_output`` / ``on_notification``
+        callbacks registered here.
+
+        On completion: forwards final response (as event_kind=output)
+        + status=done.
+        On exception: forwards status=error with the exception message.
+        """
+        import asyncio
+
+        daemon_loop = getattr(self, "_daemon_loop", None)
+        if daemon_loop is None:
+            logger.warning(
+                "_schedule_isolated_first_turn: no daemon loop; "
+                "sub-runner %s will not receive task",
+                sub_handle.isolated_session_id,
+            )
+            self._forward_subagent_event_to_parent(
+                sub_handle, "error",
+                {"message": "no daemon loop to dispatch first-turn prompt"},
+            )
+            return
+
+        # on_output: forward streaming text chunks to parent.
+        def on_output(source: str, text: str, mode: str) -> None:
+            try:
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "output",
+                    {"text": text, "source": source},
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "on_output forwarding failed for %s",
+                    sub_handle.isolated_session_id,
+                )
+
+        # on_notification: lifecycle notifications (instruction
+        # budget, retry, etc.).  Phase 4 §4.3.6c forwards them
+        # as status events; finer-grained kinds are Phase 5+.
+        def on_notification(event_type: str, payload: Any) -> None:
+            try:
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "status",
+                    {
+                        "status": str(event_type),
+                        "payload": payload if isinstance(payload, dict) else {},
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "on_notification forwarding failed for %s",
+                    sub_handle.isolated_session_id,
+                )
+
+        async def _run_first_turn():
+            try:
+                response = await sub_handle.rpc.session_send_message(
+                    prompt=task,
+                    on_output=on_output,
+                    on_notification=on_notification,
+                )
+                # Final response — forward as terminal output.
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "output",
+                    {"text": response, "source": "final"},
+                )
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "status",
+                    {"status": "done"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "_run_first_turn: session.send_message failed for %s",
+                    sub_handle.isolated_session_id,
+                )
+                self._forward_subagent_event_to_parent(
+                    sub_handle, "error",
+                    {"message": f"{type(exc).__name__}: {exc}"},
+                )
+
+        asyncio.run_coroutine_threadsafe(_run_first_turn(), daemon_loop)
+
+    def _forward_subagent_event_to_parent(
+        self,
+        sub_handle: SubRunnerHandle,
+        event_kind: str,
+        event_payload: Dict[str, Any],
+        *,
+        timeout: float = 5.0,
+    ) -> bool:
+        """Forward a sub-runner event to the parent runner via the
+        ``subagent.forward_event`` RPC (Phase 4 §4.3.6b).
+
+        Looks up the parent session's runner-RPC handle (from the
+        parent's JaatoServer in ``self._sessions``) and dispatches
+        the event.  Runner-side handler routes to the SubagentPlugin's
+        ``receive_forwarded_event``, which calls ``inject_prompt``
+        on the parent session.
+
+        Args:
+            sub_handle: The sub-runner's :class:`SubRunnerHandle`.
+                Provides ``parent_session_id`` for parent lookup.
+            event_kind: ``"output"`` | ``"status"`` | ``"error"``.
+            event_payload: Event-kind-specific payload dict.
+            timeout: Wall-clock cap for the RPC.  Default 5s — the
+                runner-side handler is fast (lookup + inject_prompt
+                + return), no plugin discovery / provider connect.
+
+        Returns:
+            True when the forward succeeded; False when the parent
+            runner is unavailable / the RPC failed / the plugin
+            rejected the event.  Caller logs but doesn't retry —
+            cross-runner forwarding is best-effort (CLAUDE.md §4.4).
+
+        Phase 4 §4.3.6b: this is the daemon-side helper.  §4.3.6c
+        wires the subscription that triggers it via the first-turn
+        ``session.send_message`` call's ``on_notification`` callback.
+        """
+        with self._lock:
+            parent_session = self._sessions.get(sub_handle.parent_session_id)
+        if parent_session is None:
+            logger.warning(
+                "_forward_subagent_event_to_parent: parent session %s "
+                "not found; dropping event_kind=%s for subagent_id=%s",
+                sub_handle.parent_session_id, event_kind,
+                sub_handle.subagent_id,
+            )
+            return False
+
+        parent_runner_rpc = getattr(
+            parent_session.server, "runner_rpc", None,
+        )
+        if parent_runner_rpc is None:
+            logger.warning(
+                "_forward_subagent_event_to_parent: parent session %s "
+                "has no runner_rpc; dropping event_kind=%s for "
+                "subagent_id=%s",
+                sub_handle.parent_session_id, event_kind,
+                sub_handle.subagent_id,
+            )
+            return False
+
+        try:
+            env = parent_runner_rpc.call_threadsafe(
+                "subagent.forward_event",
+                {
+                    "subagent_id": sub_handle.subagent_id,
+                    "event_kind": event_kind,
+                    "event_payload": event_payload,
+                },
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_forward_subagent_event_to_parent: RPC failed for "
+                "subagent_id=%s event_kind=%s: %s",
+                sub_handle.subagent_id, event_kind, exc,
+            )
+            return False
+
+        if not env.ok:
+            err_msg = (
+                env.error.message if env.error else "no error message"
+            )
+            logger.warning(
+                "_forward_subagent_event_to_parent: handler rejected "
+                "subagent_id=%s event_kind=%s: %s",
+                sub_handle.subagent_id, event_kind, err_msg,
+            )
+            return False
+        return True
+
+    def _cascade_teardown_isolated_subagents(
+        self,
+        parent_session_id: str,
+    ) -> int:
+        """Tear down every isolated sub-runner owned by a parent
+        session (Phase 4 §4.3.6d).
+
+        Called when a parent session is unloaded or shut down.
+        Iterates ``_isolated_sub_runners`` filtering by
+        ``parent_session_id``; for each handle:
+          1. Close the sub-runner's RPC client (sends EOF, waits
+             for the sub-runner subprocess to exit).
+          2. Tear down the sub-cgroup (``cgroup.kill`` atomic
+             termination, then rmdir).
+          3. Tear down the sub-AppArmor profile (``apparmor_parser -R``).
+          4. Remove the handle from ``_isolated_sub_runners``.
+
+        Best-effort throughout — each step wrapped in try/except so
+        a single teardown failure doesn't strand the others.  Returns
+        the count of handles torn down for logging / metrics.
+
+        Args:
+            parent_session_id: Parent session whose isolated
+                sub-runners should be torn down.
+
+        Returns:
+            Number of handles processed (whether or not each
+            individual teardown step succeeded).
+        """
+        import asyncio
+
+        with self._lock:
+            owned_handles = [
+                handle for handle in self._isolated_sub_runners.values()
+                if handle.parent_session_id == parent_session_id
+            ]
+
+        if not owned_handles:
+            return 0
+
+        logger.info(
+            "_cascade_teardown_isolated_subagents: tearing down "
+            "%d sub-runner(s) for parent_session=%s",
+            len(owned_handles), parent_session_id,
+        )
+
+        for handle in owned_handles:
+            # 1. Close RPC client (signals EOF; sub-runner exits).
+            try:
+                daemon_loop = getattr(self, "_daemon_loop", None)
+                if daemon_loop is not None and hasattr(handle.rpc, "close"):
+                    fut = asyncio.run_coroutine_threadsafe(
+                        handle.rpc.close(), daemon_loop,
+                    )
+                    try:
+                        fut.result(timeout=5.0)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "cascade teardown: RPC close timed out "
+                            "for %s — continuing",
+                            handle.isolated_session_id,
+                        )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "cascade teardown: RPC close failed for %s",
+                    handle.isolated_session_id,
+                )
+
+            # 2. Tear down sub-cgroup (if one was provisioned).
+            if handle.cgroup_path:
+                try:
+                    cgroups_manager = self._resolve_cgroups_manager()
+                    if cgroups_manager is not None:
+                        cgroups_manager.teardown_cgroup(
+                            handle.isolated_session_id,
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "cascade teardown: sub-cgroup teardown "
+                        "failed for %s",
+                        handle.isolated_session_id,
+                    )
+
+            # 3. Tear down sub-AppArmor profile (if one was loaded).
+            if handle.sub_apparmor_profile:
+                try:
+                    apparmor_manager = self._resolve_apparmor_manager()
+                    if apparmor_manager is not None:
+                        apparmor_manager.teardown_sub_profile(
+                            parent_session_id=handle.parent_session_id,
+                            subagent_id=handle.subagent_id,
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "cascade teardown: sub-AppArmor teardown "
+                        "failed for %s",
+                        handle.isolated_session_id,
+                    )
+
+            # 4. Remove from registry.
+            with self._lock:
+                self._isolated_sub_runners.pop(
+                    handle.isolated_session_id, None,
+                )
+            logger.info(
+                "cascade teardown: completed for %s",
+                handle.isolated_session_id,
+            )
+
+        return len(owned_handles)
+
+    def _rollback_isolated_resources(
+        self,
+        *,
+        parent_session_id: str,
+        subagent_id: str,
+        isolated_session_id: str,
+        cgroup_path: str,
+    ) -> None:
+        """Tear down sub-cgroup + sub-AppArmor on §4.3.6a spawn
+        failure (Phase 4 §4.3.6a).
+
+        Best-effort: each teardown wrapped in try/except.  Rollback
+        failures log but don't propagate — the helper's return
+        shape is what matters to callers.
+        """
+        # Cgroup first (innermost resource).
+        if cgroup_path:
+            try:
+                cgroups_manager = self._resolve_cgroups_manager()
+                if cgroups_manager is not None:
+                    cgroups_manager.teardown_cgroup(isolated_session_id)
+            except Exception:  # noqa: BLE001 — best-effort
+                logger.exception(
+                    "_rollback_isolated_resources: sub-cgroup "
+                    "teardown failed for parent=%s subagent=%s",
+                    parent_session_id, subagent_id,
+                )
+
+        # AppArmor next.
+        try:
+            apparmor_manager = self._resolve_apparmor_manager()
+            if apparmor_manager is not None:
+                apparmor_manager.teardown_sub_profile(
+                    parent_session_id=parent_session_id,
+                    subagent_id=subagent_id,
+                )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.exception(
+                "_rollback_isolated_resources: sub-AppArmor "
+                "teardown failed for parent=%s subagent=%s",
+                parent_session_id, subagent_id,
+            )
+
+    def _resolve_cgroups_manager(self) -> Optional[Any]:
+        """Return the daemon's :class:`CgroupsManager` instance, or
+        ``None`` if not wired.
+
+        Phase 4 §4.3.5: mirrors :meth:`_resolve_apparmor_manager`.
+        ``_cgroups_manager`` lives on session managers wired via the
+        IPC apparmor opt-in pre-init hook.  Test fakes that bypass
+        the wire-up won't have the attribute; ``getattr`` returns
+        ``None`` in that case so the helper falls back to the
+        skip-cgroup-creation branch.
+        """
+        return getattr(self, "_cgroups_manager", None)
+
+    def _resolve_apparmor_manager(self) -> Optional[Any]:
+        """Return the daemon's :class:`AppArmorManager` instance, or
+        ``None`` if not wired.
+
+        Phase 4 §4.3.4: ``_spawn_isolated_runner`` needs the
+        AppArmorManager to provision sub-profiles.  The manager
+        instance lives at ``self._apparmor_manager`` on session
+        managers wired via the IPC AppArmor opt-in path (set in the
+        pre-initialize hook).  Test fakes that bypass the wire-up
+        (``SessionManager.__new__`` without the hook) won't have the
+        attribute; ``getattr`` returns ``None`` in that case so the
+        helper falls back to the unavailable-message branch.
+
+        Returns:
+            The wired :class:`AppArmorManager`, or ``None`` if
+            unavailable (test fake, host without AppArmor, etc.).
+        """
+        return getattr(self, "_apparmor_manager", None)
 
     def add_pre_initialize_hook(self, hook: Callable) -> None:
         """Register a callback invoked BEFORE ``server.initialize()`` runs
@@ -3459,6 +4533,28 @@ class SessionManager:
 
         # Stop workspace monitor
         self._stop_workspace_monitor(session_id)
+
+        # Phase 4 §4.3.6d: cascade-teardown any isolated subagents
+        # owned by this parent.  Must run BEFORE the parent's
+        # server.shutdown() so we have a chance to close sub-runner
+        # RPCs cleanly; running after shutdown leaves orphaned
+        # processes that the daemon loses track of.
+        try:
+            n_torn_down = self._cascade_teardown_isolated_subagents(
+                parent_session_id=session_id,
+            )
+            if n_torn_down > 0:
+                logger.info(
+                    "Unload: cascade-teardown completed for %d isolated "
+                    "subagent(s) of session %s",
+                    n_torn_down, session_id,
+                )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.exception(
+                "Unload: cascade-teardown raised for session %s — "
+                "continuing with server.shutdown",
+                session_id,
+            )
 
         # Shutdown server and remove from memory
         session.server.shutdown()

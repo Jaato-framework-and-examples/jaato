@@ -177,9 +177,19 @@ class RunnerRPCChannel(Channel):
         # the Channel ABC unchanged.
         session_id = ""
         agent_id = ""
+        call_id: Optional[str] = None
         if isinstance(request.context, dict):
             session_id = str(request.context.get("session_id", "") or "")
             agent_id = str(request.context.get("agent_id", "") or "")
+            # Phase 4 §4.1 (J.A): tool-call correlator threaded via
+            # context dict (same channel-ABC-stable pattern as
+            # session_id/agent_id).  The runner-side permission
+            # plugin populates this when a permission check fires
+            # from inside an active tool call.  None for ASKs not
+            # bound to a specific call.
+            ctx_call_id = request.context.get("call_id")
+            if isinstance(ctx_call_id, str) and ctx_call_id:
+                call_id = ctx_call_id
 
         # Choose the response-options list the daemon-side handler
         # will advertise to the connected client.
@@ -193,6 +203,28 @@ class RunnerRPCChannel(Channel):
             for opt in options
         ]
 
+        # Phase 4 §4.2 (J.B): convert request.editable
+        # (EditableContent | None, already resolved by the permission
+        # plugin via _get_tool_schema at check_permission time —
+        # plugin.py:1411-1412) into the canonical wire-shape dict.
+        # Mirrors the pre-§7c daemon-side hook at core.py:3062-3072.
+        # Template field NOT included — it's an editor-rendering
+        # concern that the runner consumes locally; daemon/TUI need
+        # only parameters + format for input-mode signaling.
+        editable_metadata: Optional[Dict[str, Any]] = None
+        editable = getattr(request, "editable", None)
+        if editable is not None:
+            try:
+                editable_metadata = {
+                    "parameters": list(
+                        getattr(editable, "parameters", None) or []
+                    ),
+                    "format": str(getattr(editable, "format", "yaml") or "yaml"),
+                }
+            except Exception:  # noqa: BLE001 — boundary; never fail
+                # the ASK relay because of a malformed editable.
+                editable_metadata = None
+
         payload = PromptPayload(
             request_id=request.request_id,
             session_id=session_id,
@@ -200,6 +232,8 @@ class RunnerRPCChannel(Channel):
             tool_args=dict(request.arguments),
             response_options=response_options_dicts,
             agent_id=agent_id,
+            call_id=call_id,
+            editable_metadata=editable_metadata,
         )
 
         try:

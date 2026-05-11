@@ -137,7 +137,22 @@ Three backlog entries captured during the §7c+§7d arc:
 - [Daemon-side description-callback hook is silently broken post-6.6.4.3b](project_backlog_description_callback_gap.md)
   (§6.6.4.4 audit Finding 2)
 - §3.11 isolated-subagent opt-in (deferred per §7d Q6) — entry in
-  [`project-backlog.md`](../project-backlog.md)
+  [`project-backlog.md`](../project-backlog.md).
+  **UPDATE (Phase 4 §4.3, 2026-05-11): SHIPPED.**  17-commit
+  sub-track (§4.3.0-§4.3.9) implemented the full opt-in:
+  `agent_params.isolated=true` now spawns the subagent in its
+  own runner subprocess with sub-AppArmor profile
+  (`jaato-ws-{parent}//{subagent}`) + sub-cgroup
+  (`/sys/fs/cgroup/jaato/jaato-ws-{parent}__sub_{subagent}/`).
+  Output forwards back via the `subagent.forward_event` RPC chain
+  so the parent model sees streaming events in its conversation
+  identically to in-runner subagents.  Parent-cascade teardown on
+  session unload reverses all kernel-resource provisioning.  See
+  [Phase 4 implementation audits](phase4_implementation_audits.md)
+  Audits 4-8 for the architectural decisions; see Phase 5 hardening
+  surfaces recorded in those audits for the follow-on work
+  (default RuntimeLimits, nested cgroup structure, sub-runner
+  crash detection, supervisor-declared tightening flags).
 
 ### Test count progression
 

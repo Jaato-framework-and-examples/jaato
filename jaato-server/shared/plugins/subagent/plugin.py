@@ -47,6 +47,32 @@ def _get_env_connection() -> Dict[str, str]:
     }
 
 
+def _is_isolated_optin(agent_params: Optional[Dict[str, Any]]) -> bool:
+    """Detect the §3.11 isolated-runner opt-in flag in spawn-time agent_params.
+
+    Per parent design §4.3 (``docs/design/per_session_confined_runner.md``),
+    supervisors can request that a spawned subagent run in its own runner
+    subprocess — with a fresh AppArmor sub-profile
+    (``jaato-ws-{session}//{subagent}``) and its own cgroup — by passing
+    ``agent_params={"isolated": True}`` to ``spawn_subagent``.  Without
+    the flag, subagents share the parent's runner (the §4.3 default).
+
+    Returns True only when the flag is explicitly truthy.  Any falsy
+    value (False, missing, ``None``, empty dict, empty string) returns
+    False — preserving the default-share contract bit-exact.
+
+    Phase 4 §4.3.1 status: detection seam is wired here as the
+    tracer-bullet API surface.  The actual isolated-runner spawn
+    machinery (runner→daemon RPC primitive, sub-profile generation,
+    sub-cgroup nesting, cross-runner forwarding) lands incrementally in
+    §4.3.2-§4.3.7 of the Phase 4 sub-track.  Until that arc completes,
+    a True return from this helper triggers a synchronous error response
+    from ``spawn_subagent`` — the caller is told to omit the flag or
+    set it to False and use the default-share path.
+    """
+    return bool((agent_params or {}).get("isolated", False))
+
+
 class SubagentPlugin:
     """Plugin for spawning subagents with specialized tool configurations.
 
@@ -2170,6 +2196,336 @@ class SubagentPlugin:
         # close_session) sees the agent already gone.
         self._fire_termination_callbacks(agent_id, session_id)
 
+    def _dispatch_isolated_spawn(
+        self,
+        *,
+        agent_id: str,
+        profile: SubagentProfile,
+        task: str,
+        workspace_path: str,
+        agent_params: Optional[Dict[str, Any]],
+        display_name: str,
+    ) -> Dict[str, Any]:
+        """Dispatch an isolated-subagent spawn via the runner→daemon
+        RPC (Phase 4 §4.3.7).
+
+        Called from ``_execute_spawn_subagent`` when
+        ``_is_isolated_optin(agent_params)`` returns True.  Builds the
+        profile_payload from the resolved SubagentProfile (per Audit
+        5's wire shape) and calls
+        ``RunnerRPCClient.spawn_isolated_runner`` (the wrapper added
+        in §4.3.2).
+
+        Always returns a result dict — never ``None``.  The supervisor
+        explicitly opted into isolation by setting
+        ``agent_params.isolated=true``; a missing
+        ``runner_rpc_client`` (no runner subprocess wired) is a
+        configuration error that must be surfaced, NOT silently
+        downgraded to the default-share path.  Per peer-review
+        finding: "the supervisor asked for kernel-level isolation
+        and got none" was a security-violating fallback.
+
+        Returns:
+            On RPC success (helper returned ok=True): a dict matching
+            the existing spawn_subagent success-shape so the model's
+            tool-loop sees identical UX (other than the
+            ``jaato.subagent.isolated`` telemetry flag).
+            On RPC failure (helper returned ok=False): a
+            SubagentResult error dict surfacing the stage + error
+            message.
+            On missing ``runner_rpc_client``: a SubagentResult error
+            dict with ``stage="rpc_unavailable"`` — caller can
+            choose to retry with ``agent_params.isolated=false`` or
+            surface to the operator.
+        """
+        # Locate the runner-side RPC client via the registry-attribute
+        # pattern (same as references / permission plugins use).
+        registry = (
+            self._runtime.registry
+            if self._runtime is not None else None
+        )
+        rpc_client = (
+            getattr(registry, "runner_rpc_client", None)
+            if registry is not None else None
+        )
+        if rpc_client is None:
+            logger.error(
+                "_dispatch_isolated_spawn: runner_rpc_client not wired "
+                "for subagent %s — isolated spawn cannot proceed; "
+                "supervisor explicitly opted in via "
+                "agent_params.isolated=true",
+                agent_id,
+            )
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    "isolated-runner spawn unavailable: "
+                    "runner_rpc_client not wired on this session.  "
+                    "The supervisor requested agent_params.isolated="
+                    "true but the daemon-runner RPC channel isn't "
+                    "available — typically because the parent session "
+                    "wasn't spawned under the confined-runner path "
+                    "(no apparmor opt-in, daemon-side legacy "
+                    "execution).  Two recovery options: "
+                    "(1) re-create the parent session with apparmor "
+                    "opt-in so the runner subprocess is spawned, then "
+                    "retry; (2) retry with agent_params.isolated="
+                    "false to use the default-share path (subagent "
+                    "shares the parent's runner).  Stage: "
+                    "rpc_unavailable."
+                ),
+            ).to_dict()
+
+        # Build profile_payload per Audit 5's wire shape.  Mirror the
+        # build_inline_profile field set so daemon-side reconstruction
+        # round-trips.
+        profile_payload: Dict[str, Any] = {
+            "name": profile.name,
+            "description": profile.description,
+            "model": profile.model,
+            "provider": profile.provider,
+            "plugins": list(profile.plugins),
+            "plugin_configs": dict(profile.plugin_configs),
+            "system_instructions": profile.system_instructions,
+            "suppress_base_instructions": profile.suppress_base_instructions,
+            "max_turns": profile.max_turns,
+            "env": dict(profile.env),
+        }
+        # GC config (optional).
+        if profile.gc is not None:
+            gc_obj = profile.gc
+            gc_dict: Dict[str, Any] = {}
+            gc_type = getattr(gc_obj, "type", None)
+            if gc_type:
+                gc_dict["type"] = gc_type
+            gc_config = getattr(gc_obj, "config", None)
+            if gc_config:
+                gc_dict["config"] = dict(gc_config)
+            if gc_dict:
+                profile_payload["gc"] = gc_dict
+        # Runtime limits (optional).
+        if profile.runtime_limits is not None:
+            try:
+                if hasattr(profile.runtime_limits, "to_dict"):
+                    profile_payload["runtime_limits"] = (
+                        profile.runtime_limits.to_dict()
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "_dispatch_isolated_spawn: runtime_limits "
+                    "serialization failed; dropping",
+                )
+        # Preload annotations.
+        if profile.preloaded_plugins:
+            preload_set = set(profile.preloaded_plugins)
+            profile_payload["plugins"] = [
+                f"{name}(preload)" if name in preload_set else name
+                for name in profile_payload["plugins"]
+            ]
+
+        # Get parent session_id — confused-deputy echo per Audit 5.
+        parent_session_id = (
+            getattr(self._parent_session, "_session_id", None)
+            or getattr(self._parent_session, "session_id", None)
+            or ""
+        )
+
+        try:
+            rpc_result = rpc_client.spawn_isolated_runner(
+                parent_session_id=parent_session_id,
+                subagent_id=agent_id,
+                profile_payload=profile_payload,
+                task=task,
+                workspace_path=workspace_path,
+                agent_params=agent_params,
+                display_name=display_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "_dispatch_isolated_spawn: RPC failed for subagent %s",
+                agent_id,
+            )
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    f"isolated-runner spawn RPC failed: "
+                    f"{type(exc).__name__}: {exc}.  Caller may retry "
+                    f"with agent_params.isolated=false to use the "
+                    f"default-share path."
+                ),
+            ).to_dict()
+
+        # Branch on the helper's stage envelope.
+        if rpc_result.get("ok"):
+            # Mirror the default-share spawn-success shape so the
+            # supervisor model's tool-loop sees identical UX.
+            return {
+                "success": True,
+                "subagent_id": agent_id,
+                "status": "spawned",
+                "message": (
+                    f"Isolated subagent {agent_id} spawned and running "
+                    f"in its own runner (sub-AppArmor profile "
+                    f"{rpc_result.get('apparmor_profile', '?')!r}, "
+                    f"pid={rpc_result.get('runner_pid', '?')}).  "
+                    f"END YOUR TURN NOW. Real events will be injected "
+                    f"as the sub-runner streams output."
+                ),
+                "_telemetry": {
+                    "jaato.subagent.operation": "spawn",
+                    "jaato.subagent.id": agent_id,
+                    "jaato.subagent.profile": profile.name,
+                    "jaato.subagent.model": profile.model or "",
+                    "jaato.subagent.provider": profile.provider or "",
+                    "jaato.subagent.isolated": True,
+                    "jaato.subagent.apparmor_profile": (
+                        rpc_result.get("apparmor_profile", "")
+                    ),
+                    "jaato.subagent.cgroup_path": (
+                        rpc_result.get("cgroup_path", "")
+                    ),
+                },
+            }
+
+        # ok=False — domain failure.  Surface the stage + error.
+        return SubagentResult(
+            success=False,
+            response='',
+            error=(
+                f"isolated-runner spawn failed at "
+                f"stage={rpc_result.get('stage', '?')}: "
+                f"{rpc_result.get('error', 'no error message')}"
+            ),
+        ).to_dict()
+
+    def receive_forwarded_event(
+        self,
+        subagent_id: str,
+        event_kind: str,
+        event_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Receive a cross-runner-forwarded event from an isolated
+        sub-runner (Phase 4 §4.3.6b).
+
+        Called runner-side by the ``subagent.forward_event`` RPC
+        handler when the daemon dispatches an event from a sub-runner
+        belonging to a subagent this plugin spawned with
+        ``agent_params.isolated=true``.
+
+        Mirrors the default-share path's ``_parent_session.inject_prompt``
+        contract — translates the forwarded event into a prompt
+        injection so the parent model sees the subagent's output in
+        its conversation, identically to in-runner subagents.
+
+        Args:
+            subagent_id: The subagent id (matches the id from the
+                spawn-time response).  Used to look up the subagent's
+                entry in ``_active_sessions`` if present (isolated
+                subagents may not have a local entry — that's fine,
+                the inject still fires on the parent session).
+            event_kind: Discriminator for the event type.  Recognized
+                values:
+                - ``"output"``: streaming text from the subagent's
+                  conversation.  ``event_payload`` carries ``text``
+                  (str) and ``source`` (str, e.g. "assistant").
+                - ``"status"``: lifecycle status update (running,
+                  done, error).  ``event_payload`` carries
+                  ``status`` (str).
+                - ``"error"``: error event.  ``event_payload``
+                  carries ``message`` (str).
+                Unknown kinds log a warning and return ok=False;
+                the wire shape is open for forward-compat.
+            event_payload: Event-kind-specific payload dict.  See
+                ``event_kind`` enum above.
+
+        Returns:
+            ``{"ok": True}`` on success.  ``{"ok": False, "error":
+            "..."}`` when no parent session is wired (plugin not
+            attached to a session) or the event_kind is unrecognized.
+
+        Phase 4 §4.3.6b: this is the runner-side endpoint that the
+        daemon dispatches to after receiving an event from a sub-
+        runner.  §4.3.6c will wire the daemon-side subscription that
+        triggers this method via the first-turn ``session.send_message``
+        call's ``on_notification`` callback.
+        """
+        if self._parent_session is None:
+            logger.warning(
+                "receive_forwarded_event: no parent session wired; "
+                "dropping event for subagent_id=%s kind=%s",
+                subagent_id, event_kind,
+            )
+            return {
+                "ok": False,
+                "error": "no parent session wired in subagent plugin",
+            }
+
+        if event_kind == "output":
+            text = str(event_payload.get("text", ""))
+            source = str(event_payload.get("source", "assistant"))
+            # Mirror default-share's format so the parent model sees
+            # isolated + in-runner subagents identically.
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} source={source}]\n{text}",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            return {"ok": True}
+
+        if event_kind == "status":
+            status = str(event_payload.get("status", ""))
+            # Mirror default-share's ui-hook signal (line 3030 in this file).
+            if self._ui_hooks:
+                try:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id=subagent_id,
+                        status=status,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "receive_forwarded_event: ui_hooks callback raised",
+                    )
+            # Status events also surface as inject_prompt so the parent
+            # model sees lifecycle transitions in its conversation.
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} event={status}]",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            return {"ok": True}
+
+        if event_kind == "error":
+            message = str(event_payload.get("message", ""))
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} event=ERROR]\n"
+                f"Subagent execution failed: {message}",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            if self._ui_hooks:
+                try:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id=subagent_id,
+                        status="error",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "receive_forwarded_event: ui_hooks callback raised",
+                    )
+            return {"ok": True}
+
+        logger.warning(
+            "receive_forwarded_event: unrecognized event_kind=%r for "
+            "subagent_id=%s",
+            event_kind, subagent_id,
+        )
+        return {
+            "ok": False,
+            "error": f"unrecognized event_kind: {event_kind!r}",
+        }
+
     def _execute_spawn_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spawn a subagent to handle a task.
 
@@ -2244,6 +2600,26 @@ class SubagentPlugin:
                 inline_config=inline_config,
                 custom_name=custom_name,
             )
+
+        # ── Isolated-runner opt-in (Phase 4 §4.3.1 stub) ───────────────
+        # Parent design §4.3 (``per_session_confined_runner.md``) defines
+        # an opt-in for spawning the subagent in its own runner
+        # subprocess with a fresh AppArmor sub-profile + sub-cgroup.  The
+        # detection seam is wired here as the tracer-bullet API surface
+        # (§4.3.1); the full machinery — runner→daemon RPC primitive,
+        # sub-profile generation, sub-cgroup nesting, cross-runner
+        # forwarding — lands incrementally in §4.3.2-§4.3.7 of the Phase
+        # 4 sub-track.  Until §4.3.7 wires the opt-in branch, a True
+        # detection returns a clear synchronous error pointing the
+        # caller back to the default-share path.  Placement after the
+        # remote-spawn block is deliberate: remote-spawn is its own form
+        # of isolation (separate process on a separate host), so the
+        # local isolated-runner flag is irrelevant there.
+        #
+        # Phase 4 §4.3.7: the actual isolated-runner routing happens
+        # AFTER profile resolution (need the resolved SubagentProfile
+        # to build profile_payload for the RPC).  See the branch
+        # near self._executor.submit below.
 
         # Resolve workspace path early — needed for tech stack detection on inline profiles
         workspace_path = self._workspace_path
@@ -2476,6 +2852,30 @@ class SubagentPlugin:
 
         # Display name: prefer custom_name over profile.name
         display_name = custom_name or profile.name
+
+        # ── Phase 4 §4.3.7 isolated-runner opt-in routing ─────────
+        # When agent_params.isolated=true, route through the
+        # daemon's _spawn_isolated_runner helper instead of the
+        # in-runtime executor.  Profile is now resolved (we have
+        # the SubagentProfile) so profile_payload can be serialized
+        # to the wire shape Audit 5 defines.
+        #
+        # Always returns immediately — _dispatch_isolated_spawn
+        # returns a dict (success or failure envelope) for every
+        # outcome including "RPC channel unavailable".  Peer review
+        # eliminated the earlier silent-downgrade-to-default-share
+        # fallback: the supervisor asked for kernel-level isolation,
+        # so the framework must either honor it or audibly refuse —
+        # never quietly substitute.
+        if _is_isolated_optin(agent_params_arg):
+            return self._dispatch_isolated_spawn(
+                agent_id=agent_id,
+                profile=profile,
+                task=full_prompt,
+                workspace_path=parent_cwd,
+                agent_params=agent_params_arg,
+                display_name=display_name,
+            )
 
         # Submit to thread pool (always async).  ``agent_params_arg``
         # comes from the spawn_subagent tool args (a dict the

@@ -63,6 +63,29 @@ class PromptPayload:
         warning_level: ``"info"`` / ``"warning"`` / ``"error"``.
         agent_id: Agent identifier (for cascade workloads where
             multiple agents hit the same client).
+        call_id: Tool-call correlator (Phase 4 §4.1 / J.A).  When the
+            ASK fires from inside a tool's permission check, the
+            runner's permission plugin propagates the active
+            ``call_id`` here so the daemon's
+            ``PromptOperatorHandler`` can include it in the emitted
+            :class:`PermissionInputModeEvent` — letting the TUI
+            correlate the permission prompt to its per-tool-block
+            display widget.  ``None`` for ASKs not bound to a
+            specific tool call (currently no such site exists; the
+            field is ``Optional`` to preserve forward-compat with
+            future operator-prompt channels).
+        editable_metadata: Edit-and-approve schema dict (Phase 4
+            §4.2 / J.B).  Populated by the runner-side ASK relay
+            from ``PermissionRequest.editable`` (an
+            ``EditableContent`` instance the permission plugin
+            resolved at ``check_permission`` time).  Canonical wire
+            shape mirrors the pre-§7c daemon-side hook
+            (``core.py:3062-3072``): ``{"parameters": List[str],
+            "format": str}``.  ``None`` for non-editable tools.
+            The daemon's ``PromptOperatorHandler`` threads this
+            through to ``PermissionInputModeEvent.editable_metadata``
+            so the TUI's "edit and approve" flow can render the
+            editable parameter set.
     """
 
     request_id: str
@@ -75,6 +98,8 @@ class PromptPayload:
     warnings: Optional[str] = None
     warning_level: Optional[str] = None
     agent_id: str = ""
+    call_id: Optional[str] = None
+    editable_metadata: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -88,10 +113,16 @@ class PromptPayload:
             "warnings": self.warnings,
             "warning_level": self.warning_level,
             "agent_id": self.agent_id,
+            "call_id": self.call_id,
+            "editable_metadata": (
+                dict(self.editable_metadata)
+                if self.editable_metadata is not None else None
+            ),
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "PromptPayload":
+        editable_md = d.get("editable_metadata")
         return cls(
             request_id=str(d.get("request_id", "")),
             session_id=str(d.get("session_id", "")),
@@ -103,6 +134,14 @@ class PromptPayload:
             warnings=d.get("warnings"),
             warning_level=d.get("warning_level"),
             agent_id=str(d.get("agent_id", "")),
+            # Path 4 §4.1: backward-compat — older runners that
+            # don't populate call_id deserialize to None.
+            call_id=d.get("call_id"),
+            # Phase 4 §4.2: backward-compat — older runners that
+            # don't populate editable_metadata deserialize to None.
+            editable_metadata=(
+                dict(editable_md) if isinstance(editable_md, dict) else None
+            ),
         )
 
 
