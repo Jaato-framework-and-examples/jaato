@@ -1546,4 +1546,165 @@ without forcing a path.
    death = process termination for runners too (CLAUDE.md §4.4).
    Same posture applies here.
 
+---
+
+## §4.3.9 — Sub-track closure recap
+
+**Sub-step:** §4.3.9 of the §4.3 sub-track (final commit).
+
+**Purpose:** consolidate the §4.3 arc, flip the §3.11 status
+marker in `phase3_closure_recap.md`, and record the Phase 5
+hardening surfaces in one place for the follow-on planning.
+
+### What shipped — 17 commits
+
+| # | Commit | What landed |
+|---|---|---|
+| §4.3.0 | `c71a516e` | Audit doc + Option α decision + 10-commit decomposition (later expanded) |
+| §4.3.1 | `bb635ef3` | `agent_params.isolated` detection + 13 tests |
+| §4.3.2 audit | `21d108ee` | Wire-shape audit (RPC primitive) |
+| §4.3.2 code | `02591401` | Handler + wrapper + registration + 32 tests |
+| §4.3.3 | `e0f1b7b9` (rebased) | `_spawn_isolated_runner` helper + handler bridge + 16 tests |
+| §4.3.4 audit | `f87e619f` | Sub-AppArmor profile audit |
+| §4.3.4 code | `df794c71` | `provision_sub_profile` + `teardown_sub_profile` + 43 tests |
+| §4.3.5 audit | `e34f74ae` | Sub-cgroup audit (sibling-not-nested decision) |
+| §4.3.5 code | `f67f8b4d` | Cgroup wire + validation hoist + AppArmor rollback + 26 tests |
+| §4.3.6 audit | `24344f33` | Cross-runner forwarding scope re-decision |
+| §4.3.6a | `797a9edb` | Sub-runner subprocess spawn + handle bookkeeping |
+| §4.3.6b | `212aefea` | Forwarding scaffolding (RPC chain) |
+| §4.3.6c | `f1c65c03` | Bootstrap + first-turn dispatch (end-to-end runs) |
+| §4.3.6d | `bb87e79c` | Parent-cascade teardown |
+| §4.3.7 | `8f9c311c` | SubagentPlugin opt-in routes via RPC |
+| §4.3.8 | `4ea8f326` | Integration test (mocked + real-kernel gated) |
+| §4.3.9 | (this commit) | Closure recap + §3.11 status flip |
+
+### What this means for users
+
+Before §4.3: `agent_params.isolated=true` returned a synchronous
+"not yet implemented" error (the §4.3.1 stub).
+
+After §4.3.9: `agent_params.isolated=true` spawns the subagent in
+its own runner subprocess with:
+
+- A fresh AppArmor sub-profile (`jaato-ws-{parent}//{subagent}`)
+  that mirrors the parent's workspace allows + integrity denies +
+  tool-hat read-denies, with `add_reference_fragment` dropped
+  (no runtime expansion of access).
+- A sub-cgroup at `/sys/fs/cgroup/jaato/jaato-ws-{parent}__sub_{subagent}/`
+  with `RuntimeLimits` from the SubagentProfile when declared.
+  Sibling-not-nested per Audit 7 — sub-runner's bounds are
+  independent of parent's.
+- Cross-runner output forwarding: streaming events from the
+  sub-runner flow back to the parent runner's SubagentPlugin via
+  the `subagent.forward_event` RPC, which calls `inject_prompt`
+  on the parent session.  The supervisor model sees isolated
+  subagent output identically to in-runner subagents.
+- Parent-cascade teardown: when the parent session unloads,
+  every isolated subagent it spawned is cleaned up — RPC close +
+  sub-cgroup teardown + sub-AppArmor teardown.
+
+### Scope decisions documented across the audits
+
+| Decision | Where | Rationale |
+|---|---|---|
+| Standalone profile name (not true AppArmor hat) | Audit 6 | Avoid modifying parent's loaded profile; cleaner per-sub-runner lifecycle |
+| Sibling cgroup structure (not nested) | Audit 7 | Cgroup v2 "no internal processes" rule + design intent (sub-runner bounds independent of parent's) |
+| Strict subagent_id allow-list (REJECT not collapse) | Audit 6 | Confused-deputy protection — masks fewer bugs than `_safe_fragment_filename` |
+| Single shared `validate_subagent_id` helper | Audit 7 | Prevent rule divergence between AppArmor + cgroup validators |
+| Stepwise security gradient (monotonic) | Audits 4, 7 | Each sub-commit preserves or improves the kernel-confinement posture; never regresses, even transiently |
+| Best-effort rollback on partial failure | Audits 7, 8 | Kernel state stays consistent — no orphaned profile/cgroup if a downstream step fails |
+| Cross-runner forwarding via existing RPC infrastructure | Audit 8 | Reuse Phase 3 §3.2 pattern (named-method wrappers + dispatch-method branches); no new infra needed |
+
+### Phase 5 hardening surfaces (consolidated from Audits 6-8)
+
+These are the load-bearing follow-on items that intentionally
+shipped as gaps in §4.3.  Phase 5 should pick them up:
+
+1. **Default `RuntimeLimits` for isolated subagents.**  Profiles
+   without `runtime_limits` skip cgroup creation — sub-runner
+   inherits daemon's default cgroup, weakening resource isolation.
+   Phase 5: conservative default (e.g., 2 GiB / 128 pids / cpu.weight=100)
+   applied when supervisor opted into isolation but didn't supply
+   limits.
+2. **Nested cgroup structure for composable bounds.**  Sibling
+   structure makes parent + sub bounds independent.  Use cases
+   needing "sub bounded by parent's bounds" need the parent
+   restructure (`/main/` sub-cgroup + `subtree_control`).
+   Coordinated change, not incremental.
+3. **Sub-runner crash detection.**  Socket EOF on the sub-runner's
+   RPC channel should notify the parent runner via
+   `subagent.forward_event(kind="error", ...)`.  Today's posture:
+   crashes surface as `session.send_message` RuntimeError caught
+   in §4.3.6c's `_run_first_turn`, which forwards `status=error`
+   to parent.  More robust detection (heartbeat / explicit EOF
+   handler) lands in Phase 5.
+4. **Cgroup-leak audit at session shutdown.**  If a sub-runner
+   crashes before parent shutdown, the sub-cgroup may be left
+   with zombie processes.  Phase 5: audit pass at parent teardown
+   that finds + reaps orphaned sub-cgroups by name pattern.
+5. **Supervisor-declared sub-profile tightening flags.**  Today
+   the daemon decides the sub-profile rules.  Phase 5: let the
+   supervisor declare tightenings via wire shape
+   (e.g., `agent_params.isolated_workspace_subpath: "scratch"`)
+   with daemon-side allow-list of permitted keys.
+6. **`subagent_send` / `cancel_subagent` / `close_subagent` tool
+   rewire for isolated handles.**  Today's posture: parent-cascade
+   teardown handles cleanup; cancel/close on isolated subagents
+   currently behave as default-share (no-op for the isolated
+   sub-runner).  Phase 5: route these tools through the same
+   daemon RPC infrastructure.
+7. **Sub-profile `add_reference_fragment` support.**  Sub-profile
+   drops fragment-admit today.  Phase 5: behind explicit opt-in,
+   re-add with allow-list of permitted paths.
+8. **Filename collision on rapid sequential spawn.**  Two subagents
+   with the same id (sequential, first torn down) reuse the same
+   filename.  Today fine because teardown happens fully.  Phase 5:
+   monotonic suffix in case teardown races spawn.
+9. **Cross-runner event ordering tags.**  Sub-runner events arrive
+   out-of-order with parent runner's events.  Phase 5: explicit
+   sequence numbers so UI consumers can reconcile.
+10. **`profile_payload` allow-list / typed model.**  Daemon-side
+    handler accepts free-form dict; Phase 5 should add an allow-list
+    or pydantic model to reject unknown fields.
+
+### Cumulative test count for §4.3
+
+Net test additions across the sub-track: **~150 new tests**
+(spread across 9 test files in
+`server/runner_rpc_handlers/tests/`, `server/runner/tests/`,
+`server/tests/`, `shared/tests/`, and
+`shared/plugins/subagent/tests/`).
+
+All §4.3 commits maintain the **zero new regression failures**
+contract — the only failing tests are pre-existing failures from
+unrelated paths (test_server_version, test_session_env_audit,
+test_validate_profile icon validation, etc.) documented earlier
+in the audit trail.
+
+### Manual real-host verification (recommended for production rollout)
+
+The §4.3.8 integration test exercises the helper chain with mocks.
+Before production rollout of `agent_params.isolated=true`,
+operators should run a manual real-host check on a cgroup-v2 +
+AppArmor-enabled Linux host:
+
+1. Spawn a top-level session under apparmor opt-in.
+2. From the supervisor, invoke `spawn_subagent(..., agent_params={"isolated": true})`.
+3. Verify via `aa-status` that `jaato-ws-{parent}//{subagent}` appears as a loaded profile.
+4. Verify via `ls /sys/fs/cgroup/jaato/` that `jaato-ws-{parent}__sub_{subagent}` exists.
+5. Watch the subagent run; verify streaming output appears in the
+   supervisor's conversation (via `inject_prompt`).
+6. Unload the parent session.
+7. Verify the sub-profile is unloaded (`aa-status` no longer lists
+   it) and the sub-cgroup is gone.
+
+Operator playbook + diagnostic queries for each step belong in
+the [AppArmor setup guide](../apparmor-setup.md) extension — that
+documentation work is out of scope for §4.3.9 but flagged for
+Phase 5.
+
+---
+
+§4.3 sub-track CLOSED.
+
 
