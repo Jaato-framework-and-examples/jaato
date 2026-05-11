@@ -1059,6 +1059,19 @@ class SessionManager:
         if envelope.config_root:
             server.config_root = envelope.config_root
 
+        # Phase 4 §B: resolve workspace .env + profile.env + overrides
+        # BEFORE the runner-spawn fork so secret URIs (pass://,
+        # vault://, awssm://, sops://, keyring://) reach the runner
+        # subprocess via inherited os.environ.  Pre-fix the resolution
+        # ran inside server.initialize() step 1 which fires AFTER the
+        # spawn — the fork inherited unresolved literal URIs, and the
+        # runner-side resolver wasn't always able to re-resolve (entry-
+        # point registration timing + GPG-agent priming concerns).
+        # Resolving daemon-side is reliable: the daemon process has
+        # premium's secret resolvers entry-point-discovered at startup
+        # and the GPG-agent socket has been primed by the operator.
+        server._resolve_session_env()
+
         # Phase 3 §3.13: IPC apparmor provisioning + runner spawn
         # used to live in a pre-initialize hook registered from
         # ``server/__main__.py``.  The hook indirection was a
@@ -1067,12 +1080,19 @@ class SessionManager:
         # of the bootstrap helper.  The method is a clean no-op
         # when ``client_id`` is None or the client did not opt in
         # to apparmor; non-IPC paths continue unaffected.
-        ipc_sandbox_mode = self._provision_ipc_apparmor_and_spawn_runner(
-            server,
-            envelope.session_id,
-            envelope.workspace_path,
-            envelope.client_id,
-        )
+        #
+        # Phase 4 §B: wrapped in _with_session_env so the spawn's
+        # fork() inherits the resolved env via os.environ.  See
+        # docs/design/phase4_env_propagation_audit.md for the bug
+        # this closes (workspace .env pass:// URIs not reaching the
+        # runner post-§7c seat-flip).
+        with server._with_session_env():
+            ipc_sandbox_mode = self._provision_ipc_apparmor_and_spawn_runner(
+                server,
+                envelope.session_id,
+                envelope.workspace_path,
+                envelope.client_id,
+            )
 
         # Pre-initialize hooks fire BEFORE initialize() — gives
         # transports a window to provision kernel resources

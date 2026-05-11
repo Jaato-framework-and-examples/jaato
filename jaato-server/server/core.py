@@ -469,6 +469,11 @@ class JaatoServer:
         # These are loaded from the session's .env file and NOT applied to
         # global os.environ, keeping each session's configuration isolated.
         self._session_env: Dict[str, str] = {}
+        # Phase 4 §B: idempotency flag for _resolve_session_env so the
+        # SessionManager can call it pre-spawn (giving the runner-fork
+        # access to resolved secret URIs via inherited os.environ)
+        # without forcing initialize() step 1 to re-do the work.
+        self._session_env_resolved: bool = False
 
         # Formatter pipeline for server-side output formatting
         # Initialized in _setup_formatter_pipeline() after registry is available
@@ -884,6 +889,61 @@ class JaatoServer:
             reset_workspace_root(ws_token)
             if cr_token is not None:
                 reset_config_root(cr_token)
+
+    def _resolve_session_env(self) -> None:
+        """Populate ``self._session_env`` from env_file + profile.env + overrides.
+
+        Idempotent — returns immediately on second call.  Designed so
+        :class:`SessionManager` can invoke it BEFORE the runner-spawn
+        fork in ``_construct_and_initialize_server``, then wrap the
+        spawn in :meth:`_with_session_env` so the resolved values reach
+        the runner subprocess via inherited ``os.environ``.
+
+        Phase 4 §B fix for the §7c env-propagation gap.  Pre-fix the
+        env resolution lived inline at the top of :meth:`initialize`
+        step 1, which runs AFTER the spawn (the spawn is wired through
+        ``SessionManager._provision_ipc_apparmor_and_spawn_runner``
+        which fires before ``server.initialize()``).  As a result,
+        workspace `.env` values like
+        ``JAATO_OPENROUTER_API_KEY=pass://jaato/openrouter/api-key``
+        stayed unresolved in the daemon's ``os.environ`` at fork-time,
+        and the runner subprocess inherited the literal `pass://` URI
+        without the runtime resolver state that would let it resolve
+        the value itself.
+
+        After this method runs daemon-side, ``self._session_env``
+        contains the fully-resolved env.  The runner-side
+        ``JaatoServer.initialize()`` will call this method again; the
+        idempotency flag makes that a cheap no-op (preserves the
+        ``self._session_env`` populated by the daemon, which transited
+        the envelope via ``env_overrides`` *and* via ``os.environ``
+        inheritance).
+        """
+        if self._session_env_resolved:
+            return
+
+        from dotenv import dotenv_values
+        from shared.plugins.subagent.config import expand_variables
+
+        raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
+        raw_filtered = {k: v for k, v in raw_session_env.items() if v is not None}
+        # Run .env values through expand_variables — ${VAR} cross-references
+        # within .env resolve against sibling entries; secret URIs
+        # (pass://, vault://, awssm://, sops://, keyring://) resolve via
+        # the registered SecretResolver.
+        self._session_env = expand_variables(raw_filtered, context=raw_filtered)
+
+        # Profile env: block — higher precedence than .env, supports
+        # ${VAR} expansion and secret URI resolution.
+        if self._profile and self._profile.env:
+            expanded_env = expand_variables(self._profile.env)
+            self._session_env.update(expanded_env)
+
+        # Highest precedence — post-auth wizard overrides everything.
+        if self._env_overrides:
+            self._session_env.update(self._env_overrides)
+
+        self._session_env_resolved = True
 
     @contextlib.contextmanager
     def _with_session_env(self):
@@ -1511,32 +1571,17 @@ class JaatoServer:
         # Read session's env file into session-specific storage (NOT global os.environ)
         # This keeps each session's configuration isolated from other sessions.
         with _timer.stage("load_config") as _s1:
-            from dotenv import dotenv_values
-            from shared.plugins.subagent.config import expand_variables
+            # Phase 4 §B: env resolution hoisted into _resolve_session_env
+            # so SessionManager can call it pre-spawn (giving the runner
+            # subprocess access to resolved secret URIs via inherited
+            # os.environ).  The method is idempotent — daemon-side
+            # pre-spawn call populates self._session_env; this call is a
+            # no-op when reached for the second time.  When initialize()
+            # runs without a pre-spawn call (test paths, headless flows
+            # bypassing SessionManager), this is the first call and does
+            # the actual resolution work.
             with _s1.sub("dotenv_values"):
-                raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
-            # Filter out None values to a plain dict for expansion.
-            raw_filtered = {k: v for k, v in raw_session_env.items() if v is not None}
-            # Run .env values through expand_variables — same expansion
-            # the profile env: block gets below.  ${VAR} cross-references
-            # within .env resolve against sibling entries; secret URIs
-            # (pass://, vault://, awssm://, sops://, keyring://) resolve
-            # via the registered SecretResolver.  Mirrors the profile.env
-            # handling at the next block, closing the asymmetry where
-            # workspace credentials in .env couldn't use pass:// while
-            # the same key in profile env: could.
-            self._session_env = expand_variables(raw_filtered, context=raw_filtered)
-
-            # Apply profile environment variables (higher precedence than .env file).
-            # Values support ${VAR} expansion and secret URI resolution.
-            if self._profile and self._profile.env:
-                expanded_env = expand_variables(self._profile.env)
-                self._session_env.update(expanded_env)
-
-            # Apply overrides (e.g., provider/model from post-auth wizard)
-            # Highest precedence — auth wizard results override everything.
-            if self._env_overrides:
-                self._session_env.update(self._env_overrides)
+                self._resolve_session_env()
 
             def get_config(key: str) -> Optional[str]:
                 """Get config value from session env only (no os.environ fallback)."""
