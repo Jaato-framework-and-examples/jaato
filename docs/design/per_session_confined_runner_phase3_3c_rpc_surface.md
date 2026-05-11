@@ -2620,3 +2620,102 @@ The streaming chain at this audit looks like 1 layer (the ui_hooks gap), encompa
 **Methodology refinement (cycle 7 meta-lesson).**  The pattern is clear: each chain in the §7c regression set was a separately-migrated subsystem (bootstrap, in-band notifications, streaming response).  When migrating in-process callback chains to RPC piecemeal, missing-mirror gaps accumulate per-subsystem.  **Phase 4+ guidance**: when planning an §7c-shaped migration, enumerate all callback PROTOCOLS (e.g. ``AgentUIHooks`` is one) and mirror each holistically.  Per-callsite audit catches what gets called; per-callback-type audit catches what should fire but doesn't.
 
 This audit IS the per-callback-type audit for ``AgentUIHooks``.  The backlog doc identified the gap at audit time but mis-judged its visibility impact.  Path F closes it.
+
+### Path H pre-implementation audit (cycle 10 — fourth chain)
+
+24th audit; fourth post-§7c chain, surfaced by probe-driven cycle 10.
+
+**Cycle 8/9/10 verdict progression** (probe-driven localization):
+
+Cycle 8 verdict: Path F's wiring inventory verified present; empirically zero events propagate AND zero errors logged.  Silent failure shape incompatible with the documented wire path.
+
+Cycle 9 (post-Path-G 6-probe instrumentation): all 6 probes fire.  Initial user diagnosis: "missing emit inside ``ServerAgentHooks.on_tool_call_start`` body".  WORKER CORRECTION (commit ``7687cb8f``): verification of ``core.py:2485-2860`` shows all 12 hooks already call ``server.emit(...)``.  Diagnosis was wrong; gap is DOWNSTREAM of ``server.emit``.
+
+Cycle 10 (post-Path-G+ 4-probe extension into ``server.emit`` / ``_emit_to_session`` / ``_emit_to_client``): exact localization — **Layer 8: session-save re-entrancy deadlock during ToolCallStartEvent emission**.
+
+**Q1 — Layer 8 trace (the precise chain).**
+
+When a ``ToolCallStartEvent`` enters ``_emit_to_session`` (probe #9 fires):
+
+1. ``session_manager.py:1254`` — ``_handle_turn_tracking_event(session, event)`` invoked synchronously inside the ``with self._lock`` block.
+2. ``session_manager.py:1599-1611`` — for ``ToolCallStartEvent``, append to ``session.interrupted_turn["pending_tool_calls"]``, then ``self._save_session(session)`` **synchronously**.
+3. ``session_manager.py:3080`` — ``_save_session`` calls ``session.server._runner_rpc.session_get_history_threadsafe()`` to capture in-progress history.
+4. ``session_manager.py:3158`` — and ``session_snapshot_conversation_budget_threadsafe(timeout=5.0)`` for budget state.
+5. Both blocking RPCs schedule onto the runner's asyncio loop → runner dispatcher worker → runner-side handler.
+6. Runner's send_message is in flight on a different worker thread.  Histortically these should dispatch concurrently (8-worker pool), but observed 35s timeout suggests either a serialization point (session-internal lock between get_history + send_message append) or a contention path not yet narrowed.
+7. After 35s, RPC fails with empty exception; save error logged + swallowed at ``_save_session`` line 3201.
+8. ``_emit_to_session`` finally returns; probe #10 fires.
+9. PermissionRequestedEvent eventually flows through normally — but **the 35s delay starves the model loop's permission-response window**, so the entire tool call fails silently.
+
+**Q2 — Architectural shape: same as Path E Layer 5.**
+
+Path E (cycle 6) closed the ``usage_update`` notification handler's re-entrancy by:
+- E.1: batching ``context_limit`` + ``turns`` into the runner-side payload (eliminating one in-band RPC class)
+- E.2/E.3: caching ``context_limit`` daemon-side for the OTHER in-band sites (with ``/model`` invalidation)
+
+Path H is the same root cause at a different code path: **a daemon-side handler invoked from the runner-RPC notification path makes blocking RPCs back into the same runner that's still processing the original request**.  The §7c migration mirrored the callback invocation but did NOT audit what those callbacks did during the in-process era — and the daemon-side ``_save_session`` was load-bearingly call-back-driven.
+
+**Q3 — Why ``_save_session`` calls runner-RPC at all (pre-§7c context).**
+
+Pre-§7c, ``session.server._jaato.get_history()`` was an in-process method call against the daemon-side JaatoSession.  No race because the model loop and the save thread shared the same Python GIL (and presumably some session-level lock).  Post-§7c the session is runner-side; the equivalent call became ``session.server._runner_rpc.session_get_history_threadsafe()`` — same signature, different threading model.  The migration was correct AT THE CALL-SITE level (single replacement), but missed the architectural implication: **synchronous in-process calls became potentially-blocking cross-process calls**.  When the cross-process call fires DURING the runner's active turn, it serializes against the runner's own work.
+
+**Q4 — Fix options.**
+
+| Option | Approach | Pros | Cons |
+|---|---|---|---|
+| **A — Defer the save** | Spawn a daemon thread to run ``_save_session(session)`` from line 1611.  Returns immediately; save completes asynchronously. | Minimal code change; matches Path E's deferral pattern; full save semantics preserved. | Save still makes runner-RPCs; the 35s timeout still happens (just in background, off-critical-path).  Daemon-crash window: if daemon crashes BEFORE the async save completes, pending_tool_calls for this turn are lost. |
+| **B — Cache history daemon-side** | Maintain a daemon-side mirror of history; save reads from cache, no runner-RPC. | No runner-RPC race; save is fast (purely local I/O). | High complexity: history-mirror maintenance across model-thread + tool-output paths; risk of drift.  Defers to a future architectural refactor; out of scope for the §7c bug-fix arc. |
+| **C — Split save** | Write only the small daemon-side ``interrupted_turn`` dict to a separate file (``<session_id>/interrupted_turn.json``).  No runner-RPC.  Full session.json saved on natural boundaries. | No runner-RPC race; bounded write cost. | 2-file persistence; restore-time merge logic; more code. |
+
+**Decision: Path H = Option A (defer)**.  Smallest code change, fastest to ship, matches the Path E deferral discipline most closely.  Trade-off accepted: the daemon-crash recovery window for *in-progress* tool calls is narrowed (was: synchronous fsync before tool execute; becomes: best-effort async fsync).  The recovery for *completed* turns is unaffected.
+
+Option B is the architectural ideal but out of scope for the bug-fix arc; filed as a follow-up.
+
+Option C is appealing but adds 2-file restore complexity; reserved if Option A proves insufficient.
+
+**Q5 — Fix design.**
+
+H.1 — Add ``SessionManager._save_session_async(session)`` helper that spawns a daemon thread running ``_save_session(session)``.  Thread is short-lived; daemon=True so it doesn't block daemon shutdown.
+
+H.2 — Change ``session_manager.py:1611`` from ``self._save_session(session)`` to ``self._save_session_async(session)``.
+
+H.3 — Defensive serialization: a ``threading.Lock`` (``self._async_save_lock``) so concurrent ToolCallStartEvents (rare but possible during parallel tool execution) don't trample each other.  Atomic_write_json already prevents file tear; the lock just gives consistent ordering of last-writer-wins.
+
+**Q6 — Tests.**
+
+| Pin | Strategy |
+|---|---|
+| H.1: ``_save_session_async`` exists + spawns daemon thread | direct method-level test |
+| H.2: ``_handle_turn_tracking_event`` for ToolCallStartEvent calls ``_save_session_async`` (not ``_save_session``) | mock + spy |
+| Behavioral: ``_emit_to_session`` for ToolCallStartEvent does NOT block on runner-RPC | mock RPC that hangs; assert ``_emit_to_session`` returns in <100ms |
+| AST: ``_handle_turn_tracking_event`` source references ``_save_session_async`` for the ToolCallStartEvent branch | inspect.getsource + grep |
+
+### Bug-chain layers (cumulative, cycle 10)
+
+| Chain | Layer | Defect | Path | Status |
+|---|---|---|---|---|
+| Bootstrap | 1-4 | snapshot, dispatch, connect, configure_plugins | A+B+C+D | shipped |
+| Send-message | 5 | usage_update notification re-entrancy | E.1-3 | shipped |
+| Send-message | 6 | session-save/replay .role wire-format | E.4-5 | shipped |
+| Streaming response | 7 | ui_hooks bridge | F.1-3 | shipped |
+| **Save re-entrancy** | **8** | **incremental save re-enters during tool-call** | **H** | **this audit; code follows** |
+| 9+ | TBD | gated on Path H cycle-11 verdict |
+
+### Audit-discipline tally (cycle 10)
+
+| Audit | Outcome |
+|---|---|
+| Pre-impl 1-20 (§7c+§7d arc) | 20-for-20 static-grep catches |
+| Cycles 2-4 | post-impl catches; bootstrap chain |
+| Pre-impl 21 (Path D) | hybrid bootstrap-chain closure |
+| Cycle 5 | bootstrap VERIFIED CLOSED |
+| Pre-impl 22 (Path E) | hybrid send-message-chain closure |
+| Cycle 6 | send-message VERIFIED CLOSED |
+| Pre-impl 23 (Path F) | hybrid streaming-chain closure |
+| Cycle 7 | streaming VERIFIED CLOSED |
+| Cycle 8 (probe install) | localization shifted from static-audit to probe-driven |
+| Cycle 9 (probe verdict + worker correction) | "missing emit" diagnosis disproven; gap moved downstream |
+| Cycle 10 (extended probe verdict) | EXACT line localized: ``session_manager.py:1611`` |
+| **Pre-impl 24 (Path H, this audit)** | **fourth chain — same shape as E, different code path; Option-A deferral** |
+
+**Probe-driven methodology assessment.**  The transition from "static-audit + integration-test" (cycles 1-7) to "probe-instrumentation + integration-test" (cycles 8-10) reduced per-cycle localization time from days to one cycle.  Cycle 10 named the exact offending line.  **Phase 4+ guidance**: when integration tests surface silent failures (no errors logged), reach for probe instrumentation immediately rather than continuing static-audit iteration.  Each probe is a binary signal that bisects the call graph; 10 probes can localize most chains in one cycle.
