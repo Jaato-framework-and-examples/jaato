@@ -1014,36 +1014,111 @@ class SessionManager:
         # which weakens security relative to the §4.3 default-
         # share path callers can use today.  Monotonic security
         # gradient through the sub-track.
-        logger.info(
-            "_spawn_isolated_runner: validation + reconstruction "
-            "passed for parent=%s subagent=%s "
-            "(isolated_session_id=%s profile=%s) — waiting on "
-            "§4.3.4 sub-AppArmor profile generation",
-            parent_session_id, subagent_id, isolated_session_id,
-            profile.name,
+        # ── Stage: sub_profile — provision sub-AppArmor profile ──
+        # Phase 4 §4.3.4: ask the daemon's AppArmorManager to write
+        # + load a sub-profile named ``jaato-ws-{parent}//{subagent}``.
+        # Standalone-with-prefix-name (not a true hat) per Audit 6.
+        # When AppArmor isn't available (host doesn't support it, or
+        # AppArmorManager isn't wired into this SessionManager
+        # instance), we treat the sub-profile as absent and return
+        # ``stage=sub_profile`` — the isolated-runner spawn requires
+        # kernel confinement.
+        apparmor_manager = self._resolve_apparmor_manager()
+        if apparmor_manager is None or not apparmor_manager.is_available():
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-AppArmor profile cannot be provisioned: "
+                    f"AppArmorManager unavailable on this host.  "
+                    f"Isolated-runner spawn requires kernel-level "
+                    f"confinement.  Profile reconstruction succeeded "
+                    f"(name={profile.name!r}, model={profile.model!r}).  "
+                    f"Would-be isolated session: {isolated_session_id!r}.  "
+                    f"Workaround: set agent_params.isolated=false (or "
+                    f"omit) to use the default-share path (subagent "
+                    f"runs in the parent's runner) — works end-to-end "
+                    f"today.  See docs/design/phase4_implementation_audits.md."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }
+
+        ok, sub_profile_or_err = apparmor_manager.provision_sub_profile(
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            workspace_path=workspace_path,
         )
+        if not ok:
+            logger.warning(
+                "_spawn_isolated_runner: sub-profile provision failed "
+                "for parent=%s subagent=%s: %s",
+                parent_session_id, subagent_id, sub_profile_or_err,
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"sub-AppArmor profile provision failed: "
+                    f"{sub_profile_or_err}.  Profile reconstruction "
+                    f"succeeded (name={profile.name!r}).  Would-be "
+                    f"isolated session: {isolated_session_id!r}.  "
+                    f"Workaround: omit agent_params.isolated."
+                ),
+                "stage": "sub_profile",
+                "isolated_session_id": isolated_session_id,
+                "profile_name": profile.name,
+            }
+
+        sub_profile_name = sub_profile_or_err
+        logger.info(
+            "_spawn_isolated_runner: sub-profile provisioned for "
+            "parent=%s subagent=%s (sub_profile=%s) — waiting on "
+            "§4.3.5 sub-cgroup creation",
+            parent_session_id, subagent_id, sub_profile_name,
+        )
+
+        # ── Stage: sub_cgroup (next stage — §4.3.5) ────────────
+        # Sub-profile provisioned + kernel-loaded.  Refusing to
+        # spawn until §4.3.5 attaches a sub-cgroup keeps the
+        # security gradient monotonic (kernel confinement is
+        # ready; resource bounding isn't yet).
         return {
             "ok": False,
             "error": (
-                f"sub-AppArmor profile generation not yet "
-                f"implemented (Phase 4 §4.3.4).  Profile "
-                f"reconstruction succeeded "
-                f"(name={profile.name!r}, model={profile.model!r}, "
-                f"provider={profile.provider!r}, "
-                f"plugins={profile.plugins!r}).  Would-be isolated "
-                f"session: {isolated_session_id!r}.  Workaround: "
-                f"set agent_params.isolated=false (or omit) to use "
-                f"the default-share path (subagent runs in the "
-                f"parent's runner) — works end-to-end today.  See "
-                f"docs/design/phase4_implementation_audits.md."
+                f"sub-cgroup creation + attach not yet implemented "
+                f"(Phase 4 §4.3.5).  Sub-AppArmor profile {sub_profile_name!r} "
+                f"provisioned successfully.  Would-be isolated session: "
+                f"{isolated_session_id!r}.  Workaround: omit "
+                f"agent_params.isolated to use default-share path.  "
+                f"See docs/design/phase4_implementation_audits.md.  "
+                f"NOTE: sub-profile remains loaded until "
+                f"teardown_sub_profile is called — this is expected "
+                f"intermediate state while §4.3.5+§4.3.6 land."
             ),
-            "stage": "sub_profile",
-            # Diagnostic fields — let the runner-side caller log
-            # would-be values for next-stage debugging when the
-            # §4.3.4 commit changes this return.
+            "stage": "sub_cgroup",
             "isolated_session_id": isolated_session_id,
             "profile_name": profile.name,
+            "apparmor_profile": sub_profile_name,
         }
+
+    def _resolve_apparmor_manager(self) -> Optional[Any]:
+        """Return the daemon's :class:`AppArmorManager` instance, or
+        ``None`` if not wired.
+
+        Phase 4 §4.3.4: ``_spawn_isolated_runner`` needs the
+        AppArmorManager to provision sub-profiles.  The manager
+        instance lives at ``self._apparmor_manager`` on session
+        managers wired via the IPC AppArmor opt-in path (set in the
+        pre-initialize hook).  Test fakes that bypass the wire-up
+        (``SessionManager.__new__`` without the hook) won't have the
+        attribute; ``getattr`` returns ``None`` in that case so the
+        helper falls back to the unavailable-message branch.
+
+        Returns:
+            The wired :class:`AppArmorManager`, or ``None`` if
+            unavailable (test fake, host without AppArmor, etc.).
+        """
+        return getattr(self, "_apparmor_manager", None)
 
     def add_pre_initialize_hook(self, hook: Callable) -> None:
         """Register a callback invoked BEFORE ``server.initialize()`` runs

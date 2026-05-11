@@ -50,13 +50,21 @@ def _valid_payload(**overrides):
     return base
 
 
-def _make_session_manager() -> SessionManager:
+def _make_session_manager(apparmor_manager=None) -> SessionManager:
     """Construct a SessionManager for unit tests.
 
-    ``_spawn_isolated_runner`` is a pure helper — doesn't touch
-    other SessionManager state — so a constructor-bypassing
-    ``__new__`` instance suffices."""
+    ``_spawn_isolated_runner`` reads ``_apparmor_manager`` via
+    ``_resolve_apparmor_manager``; an ``__new__`` instance without
+    the attribute returns ``None`` from the resolver, which the
+    helper translates to "AppArmor unavailable → stage=sub_profile".
+
+    Tests that need to exercise the §4.3.4 advance to
+    ``stage=sub_cgroup`` should pass in a mocked AppArmorManager
+    via the ``apparmor_manager`` arg.
+    """
     sm = SessionManager.__new__(SessionManager)
+    if apparmor_manager is not None:
+        sm._apparmor_manager = apparmor_manager
     return sm
 
 
@@ -113,13 +121,15 @@ class TestValidationFailures:
 # ──────────────────────────────────────────────────────────────────────
 
 
-class TestSuccessfulReconstruction:
-    """Valid profile_payload → reconstruction succeeds → returns
-    ``stage=sub_profile`` (next stage waiting on §4.3.4).  This is
-    the §4.3.3 milestone return shape."""
+class TestSuccessfulReconstructionUnwiredApparmor:
+    """When the SessionManager has NO AppArmorManager wired (test
+    fake or host without AppArmor), reconstruction succeeds but
+    the helper returns ``stage=sub_profile`` with "AppArmor
+    unavailable" message — kernel confinement is a hard
+    requirement for isolated-runner spawn."""
 
     def test_minimal_payload_returns_sub_profile_stage(self):
-        sm = _make_session_manager()
+        sm = _make_session_manager()  # no AppArmorManager
         result = sm._spawn_isolated_runner(
             parent_session_id="sess-A",
             subagent_id="agent-1",
@@ -129,15 +139,13 @@ class TestSuccessfulReconstruction:
         )
         assert result["ok"] is False
         assert result["stage"] == "sub_profile"
-        # Stage message must mention §4.3.4 (next stage).
-        assert "§4.3.4" in result["error"]
-        # And the audit doc for tracking.
+        assert "AppArmor" in result["error"]
+        assert "unavailable" in result["error"].lower()
         assert "phase4_implementation_audits" in result["error"]
 
     def test_diagnostic_fields_present_on_sub_profile_envelope(self):
         """Caller (the runner-side RPC wrapper) needs the would-be
-        session_id and profile_name for diagnostics when next-stage
-        debugging or when surfacing the stub to the operator."""
+        session_id and profile_name for diagnostics."""
         sm = _make_session_manager()
         result = sm._spawn_isolated_runner(
             parent_session_id="sess-A",
@@ -148,7 +156,6 @@ class TestSuccessfulReconstruction:
         )
         assert "isolated_session_id" in result
         assert "profile_name" in result
-        # Profile name is whatever the payload declared.
         assert result["profile_name"] == "my-researcher"
 
     def test_minimal_payload_without_name_uses_placeholder(self):
@@ -165,6 +172,86 @@ class TestSuccessfulReconstruction:
             workspace_path="/work",
         )
         assert result["profile_name"] == "<isolated>"
+
+
+class TestSubProfileProvisioningStage:
+    """Phase 4 §4.3.4: when AppArmorManager IS wired + available,
+    the helper advances past ``stage=sub_profile`` to either
+    ``stage=sub_cgroup`` (provision success) or ``stage=sub_profile``
+    with the kernel error (provision failure)."""
+
+    def test_provision_success_advances_to_sub_cgroup(self):
+        """Successful sub-profile provisioning → next stage signal."""
+        apparmor = MagicMock()
+        apparmor.is_available.return_value = True
+        apparmor.provision_sub_profile.return_value = (
+            True, "jaato-ws-sess-A//agent-1",
+        )
+        sm = _make_session_manager(apparmor_manager=apparmor)
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is False
+        assert result["stage"] == "sub_cgroup"
+        assert result["apparmor_profile"] == "jaato-ws-sess-A//agent-1"
+        # Stage message mentions §4.3.5 (next stage).
+        assert "§4.3.5" in result["error"]
+        # Provision invoked exactly once with the expected args.
+        apparmor.provision_sub_profile.assert_called_once_with(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/work",
+        )
+
+    def test_provision_failure_returns_sub_profile_with_kernel_error(self):
+        """When AppArmor sub-profile provisioning fails, the helper
+        forwards the kernel error message via the stage envelope."""
+        apparmor = MagicMock()
+        apparmor.is_available.return_value = True
+        apparmor.provision_sub_profile.return_value = (
+            False, "apparmor_parser exit=1: profile syntax error",
+        )
+        sm = _make_session_manager(apparmor_manager=apparmor)
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is False
+        assert result["stage"] == "sub_profile"
+        assert "apparmor_parser exit=1" in result["error"]
+        assert "syntax error" in result["error"]
+
+    def test_apparmor_unavailable_returns_sub_profile_stage(self):
+        """When AppArmorManager.is_available() is False, the helper
+        skips the provision call and returns ``stage=sub_profile``
+        with the unavailable message."""
+        apparmor = MagicMock()
+        apparmor.is_available.return_value = False
+        sm = _make_session_manager(apparmor_manager=apparmor)
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is False
+        assert result["stage"] == "sub_profile"
+        assert "unavailable" in result["error"].lower()
+        apparmor.provision_sub_profile.assert_not_called()
 
 
 # ──────────────────────────────────────────────────────────────────────
