@@ -86,6 +86,7 @@ from .converters import (
     get_original_tool_name,
     history_to_openai,
     map_finish_reason,
+    read_chunk_error,
     response_from_openai,
     serialize_history as _serialize_history,
     system_message_with_cache,
@@ -128,6 +129,50 @@ REASONING_CAPABLE_HINTS = (
     "thinking",
     "reasoner",
 )
+
+
+# OpenRouter sets ``X-Generation-Id`` on every chat / completions
+# response (see https://openrouter.ai/docs/api/reference/streaming
+# "Additional Information").  Capture is best-effort: both the OpenAI
+# SDK's batch response and ``Stream`` wrapper expose the underlying
+# httpx response, but the exact attribute path has shifted across
+# SDK versions.  This helper tries the documented paths and returns
+# ``None`` quietly when none are available — never an exception, since
+# the ID is observability-only.
+_GENERATION_ID_HEADERS = ("x-generation-id", "X-Generation-Id")
+
+
+def _extract_generation_id(response_or_stream: Any) -> Optional[str]:
+    """Return the value of OpenRouter's ``X-Generation-Id`` header, if any.
+
+    Looks at the object's ``response`` attribute (Stream wrapper),
+    then ``_raw_response`` (newer SDK), then the object itself (batch
+    response), trying common header accessor shapes (``.headers``
+    mapping or dict).  Never raises.
+    """
+    if response_or_stream is None:
+        return None
+    for attr in ("response", "_raw_response", None):
+        target = (
+            getattr(response_or_stream, attr, None) if attr else response_or_stream
+        )
+        if target is None:
+            continue
+        headers = getattr(target, "headers", None)
+        if headers is None:
+            continue
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            for key in _GENERATION_ID_HEADERS:
+                value = getter(key)
+                if isinstance(value, str) and value:
+                    return value
+        elif isinstance(headers, dict):
+            for key in _GENERATION_ID_HEADERS:
+                value = headers.get(key)
+                if isinstance(value, str) and value:
+                    return value
+    return None
 
 
 class OpenRouterProvider:
@@ -223,6 +268,14 @@ class OpenRouterProvider:
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
         self._agent_id: str = "main"
+
+        # OpenRouter returns ``X-Generation-Id`` on every chat / completions
+        # response (see https://openrouter.ai/docs/api/reference/streaming
+        # "Additional Information").  Capturing the most recent one lets
+        # operators correlate trace logs and ledger entries with
+        # OpenRouter's dashboard / support tickets.  Updated by both
+        # batch and streaming paths; cleared on shutdown.
+        self._last_generation_id: Optional[str] = None
 
     # ==================== Agent Context / Tracing ====================
 
@@ -561,6 +614,7 @@ class OpenRouterProvider:
             self._client.close()
         self._client = None
         self._model_name = None
+        self._last_generation_id = None
 
     def get_auth_info(self) -> str:
         """Return a short description of the credential source used."""
@@ -823,6 +877,10 @@ class OpenRouterProvider:
                     **kwargs,
                 )
                 provider_response = response_from_openai(response)
+                gen_id = _extract_generation_id(response)
+                if gen_id:
+                    self._last_generation_id = gen_id
+                    self._trace(f"COMPLETE_GENERATION_ID {gen_id}")
 
             # Mirror the streaming-path gate: if reasoning isn't
             # enabled for this session, drop any reasoning content
@@ -900,6 +958,7 @@ class OpenRouterProvider:
                     function_calls.append(fc)
             tool_call_accumulators.clear()
 
+        response_stream = None
         try:
             self._trace(f"{trace_prefix}_START")
             chunk_count = 0
@@ -909,12 +968,38 @@ class OpenRouterProvider:
                 **kwargs,
             )
 
+            # Capture OpenRouter's generation ID for log correlation
+            # (header is set on the response that the stream wraps).
+            gen_id = _extract_generation_id(response_stream)
+            if gen_id:
+                self._last_generation_id = gen_id
+                self._trace(f"{trace_prefix}_GENERATION_ID {gen_id}")
+
             for chunk in response_stream:
                 if cancel_token and cancel_token.is_cancelled:
                     self._trace(f"{trace_prefix}_CANCELLED after {chunk_count} chunks")
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
+
+                # Mid-stream error per OpenRouter's streaming spec: a
+                # top-level ``error`` field arrives in a chunk alongside
+                # a sentinel choice with ``finish_reason: "error"``.
+                # Raise so retry/error-handling layers see it rather
+                # than silently truncating the response.
+                chunk_error = read_chunk_error(chunk)
+                if chunk_error is not None:
+                    msg = chunk_error.get("message") or "Upstream provider error"
+                    code = chunk_error.get("code")
+                    self._trace(
+                        f"{trace_prefix}_MID_STREAM_ERROR code={code!r} msg={msg!r}"
+                    )
+                    raise InfrastructureError(
+                        status_code=0,
+                        original_error=(
+                            f"{code}: {msg}" if code is not None else str(msg)
+                        ),
+                    )
 
                 if not chunk.choices:
                     if chunk.usage:
@@ -1008,6 +1093,24 @@ class OpenRouterProvider:
                 finish_reason = FinishReason.CANCELLED
             else:
                 raise
+        finally:
+            # Close the underlying HTTP connection.  Per the OpenRouter
+            # streaming spec ("Stream Cancellation"), aborting the
+            # connection immediately stops upstream model processing
+            # and billing on supported providers (OpenAI, Anthropic,
+            # DeepSeek, Together, ...).  Without this close, a cancelled
+            # turn keeps the upstream generating until the SDK ``Stream``
+            # object is garbage-collected — which on cancellation can
+            # mean billing for the entire response the user no longer
+            # wants.
+            if response_stream is not None:
+                try:
+                    response_stream.close()
+                except Exception as close_exc:  # pragma: no cover - best effort
+                    self._trace(
+                        f"{trace_prefix}_CLOSE_ERROR "
+                        f"{type(close_exc).__name__}: {close_exc}"
+                    )
 
         flush_text_block()
         flush_tool_calls()
@@ -1112,6 +1215,16 @@ class OpenRouterProvider:
     def get_token_usage(self) -> TokenUsage:
         """Return token usage from the last response."""
         return self._last_usage
+
+    def get_last_generation_id(self) -> Optional[str]:
+        """Return OpenRouter's ``X-Generation-Id`` from the most recent call.
+
+        Useful for log correlation, support tickets, and ledger
+        annotations — OpenRouter's dashboard indexes individual calls
+        by this ID.  ``None`` if no call has been made or the upstream
+        didn't expose the header (older SDK versions / unusual paths).
+        """
+        return self._last_generation_id
 
     # ==================== Serialization ====================
 

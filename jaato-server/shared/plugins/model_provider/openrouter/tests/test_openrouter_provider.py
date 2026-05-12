@@ -5,12 +5,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from types import SimpleNamespace
+
 from ..converters import (
     deserialize_history,
     get_original_tool_name,
     map_finish_reason,
     message_from_openai,
     message_to_openai,
+    read_chunk_error,
     response_from_openai,
     sanitize_tool_name,
     serialize_history,
@@ -32,6 +35,7 @@ from ..errors import (
     InfrastructureError,
     RateLimitError,
 )
+from ..provider import _extract_generation_id
 from ..provider import OpenRouterProvider, create_provider
 from shared.plugins.model_provider.base import ProviderConfig
 from jaato_sdk.plugins.model_provider.types import (
@@ -279,6 +283,61 @@ class TestFinishReasonMapping:
 
     def test_none(self):
         assert map_finish_reason(None) == FinishReason.UNKNOWN
+
+    def test_error(self):
+        # OpenRouter mid-stream error per
+        # https://openrouter.ai/docs/api/reference/streaming
+        # ("Errors After Tokens Have Been Sent") — finish_reason="error"
+        # accompanies the unified error chunk and must map to the
+        # framework's ERROR outcome.
+        assert map_finish_reason("error") == FinishReason.ERROR
+
+
+class TestReadChunkError:
+    """Tests for the OpenRouter mid-stream error extractor.
+
+    The streaming spec puts the error payload at the top level of the
+    chunk alongside ``choices``.  The OpenAI SDK doesn't model the
+    field, so it lands in ``model_extra`` on real responses; tests
+    typically attach it as a plain attribute or dict on a namespace.
+    """
+
+    def test_none_chunk(self):
+        assert read_chunk_error(None) is None
+
+    def test_chunk_without_error(self):
+        chunk = SimpleNamespace(choices=[])
+        assert read_chunk_error(chunk) is None
+
+    def test_chunk_error_as_dict(self):
+        chunk = SimpleNamespace(
+            error={"code": "server_error", "message": "Provider disconnected"},
+            choices=[],
+        )
+        result = read_chunk_error(chunk)
+        assert result == {"code": "server_error", "message": "Provider disconnected"}
+
+    def test_chunk_error_as_object(self):
+        err_obj = SimpleNamespace(code="rate_limit", message="too many")
+        chunk = SimpleNamespace(error=err_obj, choices=[])
+        result = read_chunk_error(chunk)
+        assert result == {"code": "rate_limit", "message": "too many"}
+
+    def test_chunk_error_in_model_extra(self):
+        chunk = SimpleNamespace(
+            model_extra={"error": {"code": "bad_gateway", "message": "502"}},
+            choices=[],
+        )
+        assert read_chunk_error(chunk) == {"code": "bad_gateway", "message": "502"}
+
+    def test_magicmock_chunk_without_explicit_error(self):
+        # MagicMock auto-generates child mocks for every attribute access,
+        # so a naive ``getattr(chunk, "error", None)`` would always look
+        # truthy.  read_chunk_error must NOT be fooled into reporting an
+        # error when the test didn't explicitly set one.
+        chunk = MagicMock()
+        # Don't set ``error`` — MagicMock will auto-vivify it.
+        assert read_chunk_error(chunk) is None
 
 
 class TestSerialization:
@@ -1020,7 +1079,253 @@ class TestShutdown:
         provider = OpenRouterProvider()
         provider._client = MagicMock()
         provider._model_name = "openai/gpt-4o"
+        provider._last_generation_id = "gen-abc123"
 
         provider.shutdown()
         assert provider._client is None
         assert provider._model_name is None
+        assert provider._last_generation_id is None
+
+
+# ==================== Streaming Spec Compliance ====================
+
+
+def _make_chunk(
+    *,
+    content=None,
+    finish_reason=None,
+    tool_calls=None,
+    reasoning=None,
+    error=None,
+    usage=None,
+):
+    """Build a streaming chunk that looks like the OpenAI SDK's
+    ``ChatCompletionChunk`` for the bits ``_stream_response`` reads.
+
+    Errors and choice deltas are kept faithful to OpenRouter's
+    streaming spec:
+    https://openrouter.ai/docs/api/reference/streaming
+    """
+    chunk = MagicMock()
+    if error is not None:
+        chunk.error = error
+    else:
+        # Don't let MagicMock auto-vivify ``error`` into a child mock —
+        # read_chunk_error's MagicMock-resistance test depends on the
+        # absence being detectable, but production code path tolerates
+        # either shape.  Setting to None is unambiguous.
+        chunk.error = None
+    chunk.model_extra = None
+
+    if content is None and finish_reason is None and tool_calls is None and reasoning is None:
+        chunk.choices = []
+    else:
+        choice = MagicMock()
+        choice.finish_reason = finish_reason
+        delta = MagicMock()
+        delta.content = content
+        delta.tool_calls = tool_calls
+        delta.reasoning = reasoning
+        delta.reasoning_content = None
+        choice.delta = delta
+        chunk.choices = [choice]
+
+    if usage is not None:
+        chunk.usage = usage
+    else:
+        chunk.usage = None
+    return chunk
+
+
+def _make_stream(chunks, *, headers=None):
+    """Build a fake OpenAI ``Stream`` that yields ``chunks`` and tracks
+    ``close()`` calls.  Optional ``headers`` populate ``.response.headers``
+    so ``_extract_generation_id`` has something to read.
+    """
+    stream = MagicMock()
+    stream.__iter__ = lambda self: iter(chunks)
+    stream.close = MagicMock()
+    if headers is not None:
+        stream.response = SimpleNamespace(headers=headers)
+    else:
+        stream.response = None
+    return stream
+
+
+def _build_provider_for_streaming():
+    """Construct an initialized provider with a fake OpenAI client."""
+    provider = OpenRouterProvider()
+    provider._client = MagicMock()
+    provider._model_name = "openai/gpt-4o"
+    provider._enable_thinking = False
+    return provider
+
+
+class TestStreamCancellationClosesConnection:
+    """When the cancel token fires mid-stream, the SDK ``Stream`` must
+    be ``.close()``d so the underlying HTTP connection is aborted.
+
+    Per https://openrouter.ai/docs/api/reference/streaming
+    ("Stream Cancellation"): aborting the connection is what stops
+    upstream model processing and billing on supported providers.
+    """
+
+    def test_cancel_closes_stream(self):
+        from jaato_sdk.plugins.model_provider.types import CancelToken
+
+        provider = _build_provider_for_streaming()
+
+        # Stream of three text chunks; cancel fires before chunk 2.
+        cancel = CancelToken()
+        chunks = [
+            _make_chunk(content="hello "),
+            _make_chunk(content="world"),
+            _make_chunk(content="!"),
+        ]
+
+        def fake_create(**kwargs):
+            return _make_stream(chunks)
+
+        provider._client.chat.completions.create = fake_create
+        stream_ref = {}
+
+        # Wrap fake_create to capture the stream so we can assert close().
+        def capture_create(**kwargs):
+            s = _make_stream(chunks)
+            stream_ref["stream"] = s
+            return s
+
+        provider._client.chat.completions.create = capture_create
+
+        collected = []
+
+        def on_chunk(text: str) -> None:
+            collected.append(text)
+            # Trip cancellation after the first chunk.
+            if len(collected) == 1:
+                cancel.cancel()
+
+        result = provider._stream_response(
+            messages=[],
+            kwargs={},
+            on_chunk=on_chunk,
+            cancel_token=cancel,
+        )
+
+        assert result.finish_reason == FinishReason.CANCELLED
+        # Either we broke after the first chunk or the second
+        # arrived too — at least one chunk must have been delivered.
+        assert collected == ["hello "] or collected == ["hello ", "world"]
+        stream_ref["stream"].close.assert_called_once()
+
+    def test_close_called_on_normal_completion(self):
+        provider = _build_provider_for_streaming()
+        chunks = [
+            _make_chunk(content="hi"),
+            _make_chunk(finish_reason="stop"),
+        ]
+        captured = {}
+
+        def capture_create(**kwargs):
+            s = _make_stream(chunks)
+            captured["stream"] = s
+            return s
+
+        provider._client.chat.completions.create = capture_create
+
+        provider._stream_response(
+            messages=[],
+            kwargs={},
+            on_chunk=lambda _t: None,
+        )
+
+        captured["stream"].close.assert_called_once()
+
+
+class TestStreamMidStreamError:
+    """OpenRouter's mid-stream error spec: a chunk arrives with a
+    top-level ``error`` field after some content has been streamed.
+
+    The provider must raise an exception so retry / error-handling
+    layers see the failure instead of treating it as a clean truncation.
+    """
+
+    def test_mid_stream_error_chunk_raises_infrastructure_error(self):
+        provider = _build_provider_for_streaming()
+        chunks = [
+            _make_chunk(content="partial "),
+            _make_chunk(
+                error={"code": "server_error", "message": "Provider disconnected"},
+                content="",
+                finish_reason="error",
+            ),
+        ]
+        captured = {}
+
+        def capture_create(**kwargs):
+            s = _make_stream(chunks)
+            captured["stream"] = s
+            return s
+
+        provider._client.chat.completions.create = capture_create
+
+        with pytest.raises(InfrastructureError) as exc_info:
+            provider._stream_response(
+                messages=[],
+                kwargs={},
+                on_chunk=lambda _t: None,
+            )
+
+        # The error message and code should both survive into the
+        # raised exception so operators can see what OpenRouter said.
+        assert "Provider disconnected" in str(exc_info.value)
+        assert "server_error" in str(exc_info.value)
+        # And the connection still gets closed.
+        captured["stream"].close.assert_called_once()
+
+
+class TestExtractGenerationId:
+    """OpenRouter returns ``X-Generation-Id`` on every chat / completions
+    response (header is set on both batch and streaming wrappers).
+    """
+
+    def test_extracts_from_headers_get(self):
+        target = SimpleNamespace(
+            headers=SimpleNamespace(get=lambda k: "gen-xyz" if k.lower() == "x-generation-id" else None)
+        )
+        # When the SDK wraps with a ``.response`` attribute (streams):
+        stream = SimpleNamespace(response=target)
+        assert _extract_generation_id(stream) == "gen-xyz"
+
+    def test_extracts_from_dict_headers(self):
+        batch = SimpleNamespace(headers={"x-generation-id": "gen-batch-1"})
+        assert _extract_generation_id(batch) == "gen-batch-1"
+
+    def test_returns_none_when_absent(self):
+        target = SimpleNamespace(headers=SimpleNamespace(get=lambda k: None))
+        stream = SimpleNamespace(response=target)
+        assert _extract_generation_id(stream) is None
+
+    def test_never_raises(self):
+        # Defensive: even on a wildly wrong shape, never raise.
+        assert _extract_generation_id(None) is None
+        assert _extract_generation_id(SimpleNamespace()) is None
+        assert _extract_generation_id(SimpleNamespace(response=SimpleNamespace())) is None
+
+    def test_stream_path_records_generation_id_on_provider(self):
+        provider = _build_provider_for_streaming()
+        chunks = [_make_chunk(content="hi"), _make_chunk(finish_reason="stop")]
+        headers = SimpleNamespace(get=lambda k: "gen-stream-42" if k.lower() == "x-generation-id" else None)
+
+        def capture_create(**kwargs):
+            return _make_stream(chunks, headers=headers)
+
+        provider._client.chat.completions.create = capture_create
+
+        provider._stream_response(
+            messages=[],
+            kwargs={},
+            on_chunk=lambda _t: None,
+        )
+
+        assert provider.get_last_generation_id() == "gen-stream-42"
