@@ -3829,6 +3829,92 @@ class JaatoServer:
                         )
                     return
 
+                # Path F sweep (2026-05-12): wire the remaining 6
+                # ``ServerAgentHooks`` methods that the original
+                # Path F audit misclassified as "covered daemon-
+                # side".  Each branch unpacks the payload and
+                # forwards to the daemon-side hook (which fires the
+                # corresponding SDK event into the event-bus +
+                # reactor engine).
+                if event_type == "agent_created":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_agent_created(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            agent_name=payload.get("agent_name", "") or "",
+                            agent_type=payload.get("agent_type", "") or "",
+                            profile_name=payload.get("profile_name"),
+                            parent_agent_id=payload.get("parent_agent_id"),
+                            created_at=payload.get("created_at"),
+                        )
+                    return
+
+                if event_type == "agent_status_changed":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_agent_status_changed(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            status=payload.get("status", "") or "",
+                            error=payload.get("error"),
+                        )
+                    return
+
+                if event_type == "agent_turn_completed":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_agent_turn_completed(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            turn_number=int(payload.get("turn_number", 0) or 0),
+                            prompt_tokens=int(payload.get("prompt_tokens", 0) or 0),
+                            output_tokens=int(payload.get("output_tokens", 0) or 0),
+                            total_tokens=int(payload.get("total_tokens", 0) or 0),
+                            duration_seconds=float(
+                                payload.get("duration_seconds", 0.0) or 0.0
+                            ),
+                            function_calls=int(payload.get("function_calls", 0) or 0),
+                            cache_read_tokens=payload.get("cache_read_tokens"),
+                            cache_creation_tokens=payload.get("cache_creation_tokens"),
+                        )
+                    return
+
+                if event_type == "agent_context_updated":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_agent_context_updated(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            total_tokens=int(payload.get("total_tokens", 0) or 0),
+                            prompt_tokens=int(payload.get("prompt_tokens", 0) or 0),
+                            output_tokens=int(payload.get("output_tokens", 0) or 0),
+                            turns=int(payload.get("turns", 0) or 0),
+                            percent_used=float(
+                                payload.get("percent_used", 0.0) or 0.0
+                            ),
+                        )
+                    return
+
+                if event_type == "agent_gc_config":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_agent_gc_config(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            threshold=float(payload.get("threshold", 0.0) or 0.0),
+                            strategy=payload.get("strategy", "") or "",
+                            target_percent=payload.get("target_percent"),
+                            continuous_mode=bool(
+                                payload.get("continuous_mode", False)
+                            ),
+                        )
+                    return
+
+                if event_type == "agent_history_updated":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_agent_history_updated(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            history=payload.get("history"),
+                        )
+                    return
+
                 # Phase 4 §4.4 (Finding 2 closure): bridge the runner-
                 # side session-plugin description-callback to the
                 # daemon's SessionDescriptionUpdatedEvent stream.
