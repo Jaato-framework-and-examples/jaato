@@ -1772,20 +1772,43 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             env_file_rule = "# (no client-supplied env_file)"
 
         # Inline extension-supplied fragments at render time.  Reads
-        # every ``*.rules`` file under ``~/.jaato/apparmor-fragments/``
-        # and concatenates the contents below the header in
-        # PROFILE_TEMPLATE.  Each fragment's content is wrapped with a
-        # ``# === <filename> ===`` comment so kernel denials can be
-        # traced back to the originating extension when debugging
-        # ``dmesg | grep apparmor`` output.
-        fragments_dir = (
-            Path("~/.jaato/apparmor-fragments").expanduser().resolve()
-        )
-        extension_fragments_inline = (
-            "  # (no extension fragments)"
-        )
-        if fragments_dir.is_dir():
-            chunks: List[str] = []
+        # every ``*.rules`` file under the user-tier
+        # (``~/.jaato/apparmor-fragments/``) AND the workspace-tier
+        # (``<workspace>/.jaato/apparmor-fragments/``) and
+        # concatenates the contents below the header in
+        # PROFILE_TEMPLATE.  Each fragment's content is wrapped with
+        # a ``# === <tier>/<filename> ===`` comment so kernel
+        # denials can be traced back to the originating extension
+        # when debugging ``dmesg | grep apparmor`` output.
+        #
+        # Tier ordering: user-tier fragments are inlined first, then
+        # workspace-tier.  Order does not affect AppArmor semantics
+        # (allow rules union, deny rules union, deny wins over allow
+        # at equal specificity), but matches the rest of jaato's
+        # tier discipline (``agents/``, ``profiles/``, ``services/``,
+        # ``openers.json``: workspace-tier-first → user-tier
+        # fallback for reads; for AppArmor we compose both since
+        # there's no fallback semantics — both contribute rules).
+        #
+        # Workspace-tier discovery: a fragment file at
+        # ``<workspace>/.jaato/apparmor-fragments/foo.rules`` only
+        # applies to sessions on that workspace, so workspace-
+        # specific paths (e.g., test fixtures outside the standard
+        # workspace tree) can live with the repo instead of
+        # polluting every session's confinement under that user.
+        chunks: List[str] = []
+        for tier_label, fragments_dir in (
+            (
+                "user",
+                Path("~/.jaato/apparmor-fragments").expanduser().resolve(),
+            ),
+            (
+                "workspace",
+                (Path(workspace_path) / ".jaato" / "apparmor-fragments").resolve(),
+            ),
+        ):
+            if not fragments_dir.is_dir():
+                continue
             for path in sorted(fragments_dir.glob("*.rules")):
                 try:
                     body = path.read_text(encoding="utf-8")
@@ -1802,9 +1825,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
                     f"  {line.rstrip()}" if line.strip() else ""
                     for line in body.splitlines()
                 )
-                chunks.append(f"  # === {path.name} ===\n{indented}")
-            if chunks:
-                extension_fragments_inline = "\n\n".join(chunks)
+                chunks.append(
+                    f"  # === {tier_label}/{path.name} ===\n{indented}"
+                )
+        extension_fragments_inline = (
+            "\n\n".join(chunks) if chunks else "  # (no extension fragments)"
+        )
 
         # Build the tool_hat sub-profile body (server 0.6.55+).
         # AppArmor sub-profiles do NOT inherit base rules — every allow

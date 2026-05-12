@@ -931,6 +931,143 @@ class TestTeardownProfile:
         assert manager.teardown_profile("s1") is False
 
 
+class TestExtensionFragmentTierDiscovery:
+    """``_render_profile`` discovers extension fragments from TWO
+    tiers and composes both into the rendered profile body:
+
+    - **user-tier** at ``~/.jaato/apparmor-fragments/*.rules`` —
+      survives across workspaces, used by jaato-premium's reactor
+      framework and other cross-workspace extensions.
+    - **workspace-tier** at
+      ``<workspace>/.jaato/apparmor-fragments/*.rules`` — scoped
+      to the workspace, lives with the repo, version-controlled
+      with its branches.
+
+    Tier ordering matches the rest of jaato's tier discipline
+    (workspace-tier composed AFTER user-tier in the rendered
+    output for provenance clarity; AppArmor unions allow / unions
+    deny semantics make the order semantically irrelevant)."""
+
+    def _patch_user_tier_to_tmp(self, monkeypatch, tmp_path):
+        """Redirect ``Path('~/...').expanduser()`` to a temp dir so
+        the test doesn't read the developer's real
+        ``~/.jaato/apparmor-fragments/`` (which jaato-premium may
+        have populated during daemon-startup)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        return tmp_path / ".jaato" / "apparmor-fragments"
+
+    def test_workspace_tier_fragment_inlined(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """Pin: a fragment at
+        ``<workspace>/.jaato/apparmor-fragments/foo.rules`` lands
+        in the rendered profile, wrapped with a
+        ``# === workspace/foo.rules ===`` provenance comment."""
+        self._patch_user_tier_to_tmp(monkeypatch, tmp_path)
+        workspace = tmp_path / "workspace"
+        ws_fragments = workspace / ".jaato" / "apparmor-fragments"
+        ws_fragments.mkdir(parents=True)
+        (ws_fragments / "kb-fixtures.rules").write_text(
+            "/repo/fixtures/** r,\n"
+        )
+
+        rendered = manager._render_profile("sess1", str(workspace))
+
+        assert "# === workspace/kb-fixtures.rules ===" in rendered, (
+            "workspace-tier fragment must carry the workspace/ "
+            "provenance label"
+        )
+        assert "/repo/fixtures/** r," in rendered, (
+            "workspace-tier fragment body must be inlined"
+        )
+
+    def test_user_and_workspace_tier_both_compose(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """Pin: when fragments exist in BOTH tiers, both are
+        inlined into the rendered profile with distinct
+        provenance comments.  Order: user-tier first, workspace-
+        tier second (matches the comment header convention; the
+        AppArmor parser's union semantics make the order
+        semantically irrelevant)."""
+        user_fragments = self._patch_user_tier_to_tmp(
+            monkeypatch, tmp_path,
+        )
+        user_fragments.mkdir(parents=True)
+        (user_fragments / "premium-reactor.rules").write_text(
+            "@{HOME}/.jaato/reactors/** r,\n"
+        )
+
+        workspace = tmp_path / "workspace"
+        ws_fragments = workspace / ".jaato" / "apparmor-fragments"
+        ws_fragments.mkdir(parents=True)
+        (ws_fragments / "kb-fixtures.rules").write_text(
+            "/repo/fixtures/** r,\n"
+        )
+
+        rendered = manager._render_profile("sess1", str(workspace))
+
+        assert "# === user/premium-reactor.rules ===" in rendered
+        assert "# === workspace/kb-fixtures.rules ===" in rendered
+        # User-tier appears BEFORE workspace-tier in the rendered
+        # output — order is by tier-iteration order, not by file
+        # name.
+        user_pos = rendered.find("# === user/premium-reactor.rules ===")
+        ws_pos = rendered.find("# === workspace/kb-fixtures.rules ===")
+        assert 0 < user_pos < ws_pos, (
+            f"expected user-tier before workspace-tier in render; "
+            f"got user_pos={user_pos}, ws_pos={ws_pos}"
+        )
+
+    def test_missing_workspace_fragments_dir_silently_ok(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """Pin: when a workspace has no
+        ``.jaato/apparmor-fragments/`` directory at all (the
+        typical case for most workspaces), render proceeds
+        normally with whatever user-tier fragments exist.  No
+        ``OSError`` raised, no log spam."""
+        self._patch_user_tier_to_tmp(monkeypatch, tmp_path)
+        workspace = tmp_path / "workspace-without-fragments"
+        workspace.mkdir()
+        # No .jaato/apparmor-fragments/ subdir created.
+
+        rendered = manager._render_profile("sess1", str(workspace))
+
+        # The (no extension fragments) placeholder should appear
+        # when neither tier has anything.
+        assert "(no extension fragments)" in rendered
+
+    def test_user_only_tier_back_compat(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """Pin: when only the user-tier has fragments (the
+        pre-workspace-tier world — premium's only consumer
+        today), the rendered profile is identical to the
+        pre-change behavior: user fragment inlined, no
+        workspace-tier provenance line.
+
+        Back-compat invariant: existing user-tier installations
+        keep working exactly as before."""
+        user_fragments = self._patch_user_tier_to_tmp(
+            monkeypatch, tmp_path,
+        )
+        user_fragments.mkdir(parents=True)
+        (user_fragments / "premium-reactor.rules").write_text(
+            "@{HOME}/.jaato/reactors/** r,\n"
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()  # No .jaato/apparmor-fragments/ here.
+
+        rendered = manager._render_profile("sess1", str(workspace))
+
+        assert "# === user/premium-reactor.rules ===" in rendered
+        assert "# === workspace/" not in rendered, (
+            "no workspace-tier fragments → no workspace/ comments"
+        )
+
+
 class TestProfileTemplateIncludesRefsDir:
     """The base profile must reference the per-session refs.d directory
     via ``include if exists`` so add_reference_fragment() can splice
