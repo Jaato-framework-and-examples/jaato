@@ -62,6 +62,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from server.runner_rpc_handlers.profile_payload_schema import (
+    validate_profile_payload,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +281,22 @@ class SpawnIsolatedRunnerHandler:
                 "subagent.spawn_isolated_runner: profile_payload "
                 "must be a dict"
             )
+        # Phase 5 §5.8: typed allow-list validation of the
+        # profile_payload contents.  Rejects unknown top-level
+        # keys, wrong nested types, and oversized fields BEFORE
+        # any spawn machinery runs.  The runner→daemon RPC is
+        # the trust boundary in Phase 4/5's threat model — the
+        # runner is confined by AppArmor + cgroup, the daemon is
+        # not, so field-level validation here is defense-in-
+        # depth against a buggy/compromised runner.  See
+        # docs/design/phase5_5_8_profile_payload_typed_model_audit.md.
+        try:
+            validate_profile_payload(args["profile_payload"])
+        except ValueError as exc:
+            raise ValueError(
+                f"subagent.spawn_isolated_runner: "
+                f"profile_payload validation failed: {exc}"
+            ) from exc
         if not isinstance(args["task"], str):
             raise ValueError(
                 "subagent.spawn_isolated_runner: task must be a str"
