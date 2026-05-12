@@ -2893,6 +2893,22 @@ class RunnerRPC:
     _NOTIF_AGENT_COMPLETED = "agent_completed"
     _NOTIF_SESSION_QUIESCENT = "session_quiescent"
 
+    # Path F sweep (2026-05-12 follow-up to the
+    # ``agent_completed`` / ``session_quiescent`` fix): close the
+    # remaining 6 runner-side ``ServerAgentHooks`` methods that the
+    # original Path F audit incorrectly classified as
+    # "covered daemon-side".  All 6 are called from runner-tier
+    # code paths (the subagent plugin lives in runner-tier per
+    # ``PLUGIN_TIER = "runner"`` and JaatoClient lives runner-side
+    # post-§7c) so their ``self._ui_hooks.on_X`` calls were dropping
+    # on the shim's no-op stubs pre-fix.
+    _NOTIF_AGENT_CREATED = "agent_created"
+    _NOTIF_AGENT_STATUS_CHANGED = "agent_status_changed"
+    _NOTIF_AGENT_TURN_COMPLETED = "agent_turn_completed"
+    _NOTIF_AGENT_CONTEXT_UPDATED = "agent_context_updated"
+    _NOTIF_AGENT_GC_CONFIG = "agent_gc_config"
+    _NOTIF_AGENT_HISTORY_UPDATED = "agent_history_updated"
+
     # Phase 4 §4.4 (Finding 2 closure): session-plugin description-
     # callback bridges runner → daemon as a notification frame.
     # Runner-side session plugin (now runner-tier per §4.4 sub-action
@@ -4097,23 +4113,26 @@ class _AgentUIHooksNotificationShim:
     ``_build_send_message_notification_handler`` demuxes by
     ``event_type`` and re-emits via ``ServerAgentHooks``.
 
-    Methods not listed are no-ops — the daemon-side already covers
-    the other ``AgentUIHooks`` methods via different paths:
-    - ``on_agent_created`` / ``on_agent_status_changed`` /
-      ``on_agent_turn_completed`` / ``on_agent_context_updated`` /
-      ``on_agent_gc_config`` / ``on_agent_history_updated``: invoked
-      by daemon-side code (subagent plugin, JaatoClient wrapper)
-      against daemon-side ``ServerAgentHooks`` directly.
-    - ``on_agent_completed`` / ``on_session_quiescent``: emitted
-      across the wire via NotificationFrames (2026-05-12 fix —
-      pre-fix these were ``pass`` no-ops on the assumption that
-      they were called daemon-side, which was true pre-§7c when
-      ``lifecycle_tools.py`` lived in the daemon process but FALSE
-      post-§7c when the module moved into the runner subprocess.
-      ``lifecycle_tools._execute_signal_completion`` and
-      ``JaatoSession``'s quiescence hook both call the runner-side
-      shim; the daemon-side ``ServerAgentHooks`` cannot be reached
-      without crossing the wire).
+    All eight ``AgentUIHooks`` methods that have runner-side callers
+    (``on_agent_completed`` / ``on_session_quiescent`` /
+    ``on_agent_created`` / ``on_agent_status_changed`` /
+    ``on_agent_turn_completed`` / ``on_agent_context_updated`` /
+    ``on_agent_gc_config`` / ``on_agent_history_updated``) emit
+    NotificationFrames here.
+
+    Audit history: pre-§7c these methods were "covered daemon-side"
+    because their callers (``lifecycle_tools._execute_signal_completion``,
+    ``subagent`` plugin, ``JaatoClient`` wrapper) all ran in the
+    daemon process where ``ServerAgentHooks`` lives.  Post-§7c the
+    runner subprocess hosts the subagent plugin (PLUGIN_TIER =
+    "runner") and JaatoClient, so every ``self._ui_hooks.on_X`` call
+    on the runner side hits this shim — pre-fix the shim was ``pass``
+    no-op for all 8 methods, silently dropping the events before they
+    could reach the daemon-side reactor engine + event-bus subscribers.
+
+    The remaining methods (``on_agent_output``) use a different path
+    (``on_output`` kwarg threading through the stream callback chain,
+    not the ui_hooks slot) and are intentionally no-ops here.
     - ``on_agent_instruction_budget_updated``: already covered by
       the §7c step 6.6.4.2 ``instruction_budget_updated``
       notification frame.
@@ -4236,8 +4255,45 @@ class _AgentUIHooksNotificationShim:
     # the shim duck-type-compatible with AgentUIHooks consumers
     # that might iterate or hasattr-check.
 
-    def on_agent_created(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def on_agent_created(
+        self,
+        agent_id: str,
+        agent_name: str = "",
+        agent_type: str = "",
+        profile_name: Optional[str] = None,
+        parent_agent_id: Optional[str] = None,
+        created_at: Any = None,
+        **_kwargs: Any,
+    ) -> None:
+        """Forward ``on_agent_created`` across the wire.
+
+        Called by the subagent plugin (PLUGIN_TIER="runner") when a
+        new subagent session is provisioned.  Daemon-side
+        ``ServerAgentHooks.on_agent_created`` populates
+        ``server._agents`` and fires ``AgentCreatedEvent``.
+        """
+        try:
+            created_at_str: Optional[str]
+            if created_at is None:
+                created_at_str = None
+            elif hasattr(created_at, "isoformat"):
+                created_at_str = created_at.isoformat()
+            else:
+                created_at_str = str(created_at)
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_AGENT_CREATED,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "agent_name": str(agent_name or ""),
+                    "agent_type": str(agent_type or ""),
+                    "profile_name": profile_name,
+                    "parent_agent_id": parent_agent_id,
+                    "created_at": created_at_str,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("agent_created notify raised")
 
     def on_agent_output(self, *args: Any, **kwargs: Any) -> None:
         # Runner-side session uses the ``on_output`` kwarg path
@@ -4245,8 +4301,32 @@ class _AgentUIHooksNotificationShim:
         # daemon-side at _start_model_thread's output_callback.
         pass
 
-    def on_agent_status_changed(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def on_agent_status_changed(
+        self,
+        agent_id: str,
+        status: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """Forward ``on_agent_status_changed`` across the wire.
+
+        Called from runner-side subagent plugin status transitions
+        (idle / active / cancelled / errored).  Daemon-side
+        ``ServerAgentHooks.on_agent_status_changed`` mutates
+        ``server._agents[agent_id].status`` and fires
+        ``AgentStatusChangedEvent``.
+        """
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_AGENT_STATUS_CHANGED,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "status": str(status or ""),
+                    "error": error,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("agent_status_changed notify raised")
 
     def on_agent_completed(
         self,
@@ -4323,17 +4403,130 @@ class _AgentUIHooksNotificationShim:
         except Exception:  # noqa: BLE001
             logger.exception("session_quiescent notify raised")
 
-    def on_agent_turn_completed(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def on_agent_turn_completed(
+        self,
+        agent_id: str,
+        turn_number: int,
+        prompt_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+        duration_seconds: float,
+        function_calls: int,
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
+    ) -> None:
+        """Forward ``on_agent_turn_completed`` across the wire.
 
-    def on_agent_context_updated(self, *args: Any, **kwargs: Any) -> None:
-        pass
+        Daemon-side ``ServerAgentHooks.on_agent_turn_completed``
+        appends turn-accounting + fires ``TurnCompletedEvent`` for
+        TUI per-turn timing / token-cost display.
+        """
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_AGENT_TURN_COMPLETED,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "turn_number": int(turn_number or 0),
+                    "prompt_tokens": int(prompt_tokens or 0),
+                    "output_tokens": int(output_tokens or 0),
+                    "total_tokens": int(total_tokens or 0),
+                    "duration_seconds": float(duration_seconds or 0.0),
+                    "function_calls": int(function_calls or 0),
+                    "cache_read_tokens": cache_read_tokens,
+                    "cache_creation_tokens": cache_creation_tokens,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("agent_turn_completed notify raised")
 
-    def on_agent_gc_config(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def on_agent_context_updated(
+        self,
+        agent_id: str,
+        total_tokens: int,
+        prompt_tokens: int,
+        output_tokens: int,
+        turns: int,
+        percent_used: float,
+    ) -> None:
+        """Forward ``on_agent_context_updated`` across the wire.
 
-    def on_agent_history_updated(self, *args: Any, **kwargs: Any) -> None:
-        pass
+        Daemon-side ``ServerAgentHooks.on_agent_context_updated``
+        mutates context_usage on ``server._agents`` + fires
+        ``ContextUpdatedEvent`` (the event TUI uses to render the
+        usage bar).
+        """
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_AGENT_CONTEXT_UPDATED,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "total_tokens": int(total_tokens or 0),
+                    "prompt_tokens": int(prompt_tokens or 0),
+                    "output_tokens": int(output_tokens or 0),
+                    "turns": int(turns or 0),
+                    "percent_used": float(percent_used or 0.0),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("agent_context_updated notify raised")
+
+    def on_agent_gc_config(
+        self,
+        agent_id: str,
+        threshold: float,
+        strategy: str,
+        target_percent: Optional[float] = None,
+        continuous_mode: bool = False,
+    ) -> None:
+        """Forward ``on_agent_gc_config`` across the wire.
+
+        Daemon-side ``ServerAgentHooks.on_agent_gc_config`` stores
+        GC config on agent state + fires ``GCConfigEvent``.
+        """
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_AGENT_GC_CONFIG,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "threshold": float(threshold or 0.0),
+                    "strategy": str(strategy or ""),
+                    "target_percent": target_percent,
+                    "continuous_mode": bool(continuous_mode),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("agent_gc_config notify raised")
+
+    def on_agent_history_updated(
+        self,
+        agent_id: str,
+        history: Any,
+    ) -> None:
+        """Forward ``on_agent_history_updated`` across the wire.
+
+        Daemon-side ``ServerAgentHooks.on_agent_history_updated``
+        stores the snapshot under ``server._agents[agent_id].history``
+        for the persist/restore + session-inspector paths.
+
+        ``history`` is an opaque snapshot — passed through to the
+        daemon verbatim.  Pydantic JSON serialization happens at
+        ``emit_notification`` time; the daemon-side demuxer just
+        forwards the deserialized payload.
+        """
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_AGENT_HISTORY_UPDATED,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "history": history,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("agent_history_updated notify raised")
 
     def on_agent_instruction_budget_updated(self, *args: Any, **kwargs: Any) -> None:
         # Covered by §7c step 6.6.4.2 instruction_budget_updated
