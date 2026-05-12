@@ -123,6 +123,16 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         # cap override, no wall-clock timeout".
         self._cgroup_attach = None
         self._runtime_limits = None
+        # Phase 5 §5.10c: AppArmor child-profile transition callback
+        # installed via set_apparmor_child_transition_callback().  When
+        # set, the cli plugin's Popen preexec_fn writes
+        # ``changeprofile <profile>//child`` to /proc/self/attr/current
+        # between fork() and exec() so the spawned subprocess lands in
+        # the per-session ``//child`` sub-profile (which drops the
+        # escape-vector rules).  None until the executor calls — same
+        # contract as _cgroup_attach.  See
+        # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Note: tool output callback is managed by BackgroundCapableMixin
@@ -292,6 +302,78 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
             f"set_runtime_limits: attach={attach_callback is not None} "
             f"limits={limits!r}"
         )
+
+    def set_apparmor_child_transition_callback(
+        self,
+        callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Install the AppArmor child-profile transition callback
+        (Phase 5 §5.10c).
+
+        Forwarded by
+        ``ToolExecutor.set_apparmor_child_transition_callback`` at
+        runner-side bootstrap.  When set, the cli plugin's
+        ``subprocess.Popen`` ``preexec_fn`` composes this callback
+        with the cgroup-attach callback: AppArmor transition FIRST,
+        then cgroup attach, then exec.  Order matters — the new
+        ``//child`` profile must apply during the cgroup write
+        (cgroup writes are allowed in ``//child``, but future
+        tightening shouldn't surprise us).
+
+        Closes the verified escape at ``apparmor.py:413-449``: a
+        process in ``//child`` cannot write ``changeprofile`` to
+        ``/proc/self/attr/current`` (kernel rejects with EACCES).
+        Model-controlled subprocess content can no longer escape the
+        per-session profile.
+
+        Argument may be ``None`` when the runner isn't AppArmor-
+        confined (JAATO_RUNNER_DISABLE_CONFINE=1 or daemon-side
+        legacy paths) — Popen falls back to cgroup-only preexec_fn.
+        """
+        self._apparmor_child_transition = callback
+        self._trace(
+            f"set_apparmor_child_transition_callback: "
+            f"transition={callback is not None}"
+        )
+
+    def _build_subprocess_preexec_fn(
+        self,
+    ) -> Optional[Callable[[], None]]:
+        """Phase 5 §5.10c: compose the apparmor + cgroup preexec_fn.
+
+        Returns the appropriate callable for ``Popen(preexec_fn=...)``:
+
+        - When BOTH apparmor transition AND cgroup attach are set:
+          returns a composite that runs apparmor first, then cgroup.
+        - When only one is set: returns just that one.
+        - When neither is set: returns ``None`` (Popen with no
+          preexec_fn — today's pre-§5.10 behavior).
+
+        Apparmor-first ordering matches §6.1 of the audit doc — the
+        new profile applies during the cgroup write.  Both writes
+        succeed today on either profile; ordering is defensive
+        against future tightening.
+
+        Both callbacks fail-closed: any exception propagates as a
+        Popen spawn failure.  A failed apparmor transition would
+        leave the child in the parent profile with the escape rules
+        intact — exactly the gap §5.10 closes — so spawn failure is
+        the correct posture.
+        """
+        apparmor_cb = self._apparmor_child_transition
+        cgroup_cb = self._cgroup_attach
+        if apparmor_cb is None and cgroup_cb is None:
+            return None
+        if apparmor_cb is None:
+            return cgroup_cb
+        if cgroup_cb is None:
+            return apparmor_cb
+
+        def _composite() -> None:
+            apparmor_cb()
+            cgroup_cb()
+
+        return _composite
 
     def shutdown(self) -> None:
         """Shutdown the CLI plugin."""
@@ -659,11 +741,19 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Start process with pipes.
             # AppArmor confinement (if any) is inherited from the parent
             # thread via fork+exec — see ToolExecutor.set_apparmor_context.
-            # Cgroup attach (if any) runs as preexec_fn — writes the
-            # forked child's PID to cgroup.procs between fork() and exec(),
-            # so the new program comes up under the session's
-            # memory.max / pids.max / cpu.weight.  See
-            # server.cgroups.CgroupsManager.make_attach_callback.
+            # Phase 5 §5.10c — preexec_fn composes two callbacks that
+            # run between fork() and exec():
+            #   1. AppArmor child-profile transition (writes
+            #      ``changeprofile <session>//child`` to
+            #      /proc/self/attr/current).  The forked child enters
+            #      the ``//child`` sub-profile which drops the escape-
+            #      vector rules — model-controlled subprocess content
+            #      can't write to attr/current anymore.
+            #   2. Cgroup attach (writes the forked child's PID to
+            #      cgroup.procs), so the new program comes up under
+            #      the session's memory.max / pids.max / cpu.weight.
+            # Either callback may be None; the composite handles
+            # all four (none, apparmor-only, cgroup-only, both).
             cmd = command if use_shell else argv
 
             proc = subprocess.Popen(
@@ -673,7 +763,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 env=env,
                 shell=use_shell,
                 cwd=self._workspace_root,
-                preexec_fn=self._cgroup_attach,
+                preexec_fn=self._build_subprocess_preexec_fn(),
             )
 
             # Collect output while streaming to callbacks
@@ -1128,7 +1218,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 extra_env=extra_env,
                 on_stdout_line=effective_callback,
                 check_cancel=True,
-                preexec_fn=self._cgroup_attach,
+                preexec_fn=self._build_subprocess_preexec_fn(),
             )
 
             # Executable-not-found is surfaced as an error dict so the

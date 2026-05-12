@@ -211,6 +211,26 @@ class ToolExecutor:
         self._cgroup_attach: Optional[Callable[[], None]] = None
         self._runtime_limits: Optional['RuntimeLimits'] = None
 
+        # Phase 5 §5.10c: AppArmor child-profile transition callback
+        # for subprocess-spawning plugins (cli, interactive_shell).
+        # Zero-arg callable suitable for ``Popen(preexec_fn=...)`` that
+        # writes ``changeprofile {profile}//child`` to
+        # /proc/self/attr/current between fork() and exec(), so the
+        # forked child enters the per-session ``//child`` sub-profile
+        # before the new program starts.  ``//child`` drops the three
+        # escape-vector rules the parent keeps for
+        # ``apparmor_confine.__exit__`` — closes the verified escape at
+        # apparmor.py:413-449.  ``None`` when the runner isn't confined
+        # (e.g. JAATO_RUNNER_DISABLE_CONFINE=1, or daemon-side legacy
+        # paths that never installed a session profile).
+        #
+        # Forwarded to plugins through the same channel as
+        # ``_cgroup_attach`` (plugins that implement
+        # ``set_apparmor_child_transition_callback`` get the callable;
+        # the rest stay unchanged).  See
+        # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
+
         # Zero-arg event-snapshot callable for cgroup.events (oom_kill,
         # populated, ...).  Used by ``execute()`` to take before/after
         # snapshots around each tool call and inject deltas into the
@@ -428,6 +448,61 @@ class ToolExecutor:
                 plugin = self._registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'set_runtime_limits'):
                     plugin.set_runtime_limits(attach_callback, limits)
+
+    def set_apparmor_child_transition_callback(
+        self,
+        callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Install the AppArmor child-profile transition callback
+        (Phase 5 §5.10c).
+
+        Called once at runner-side bootstrap with a zero-arg callable
+        built by
+        :func:`server.apparmor.make_child_transition_callback`.  The
+        callable writes ``changeprofile <session>//child`` to
+        /proc/self/attr/current, suitable for use as
+        ``Popen(preexec_fn=...)`` — runs between fork() and exec()
+        so the forked child enters the per-session ``//child``
+        sub-profile before the new program starts.
+
+        Forwarded to plugins that implement
+        ``set_apparmor_child_transition_callback`` (cli,
+        interactive_shell) via the same mechanism as
+        :meth:`set_runtime_limits`'s forwarding loop.  Plugins that
+        don't implement the method (file_edit, todo, etc.) stay
+        unaffected — only subprocess-spawning plugins care.
+
+        Args:
+            callback: Zero-arg ``preexec_fn``-style callable, or
+                ``None`` when the runner isn't AppArmor-confined
+                (e.g., JAATO_RUNNER_DISABLE_CONFINE=1 or a daemon-
+                side legacy path).  ``None`` is forwarded too — a
+                plugin that previously had a callback installed
+                gets it cleared.
+        """
+        self._apparmor_child_transition = callback
+
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(
+                    plugin, "set_apparmor_child_transition_callback",
+                ):
+                    plugin.set_apparmor_child_transition_callback(callback)
+
+    def get_apparmor_child_transition_callback(
+        self,
+    ) -> Optional[Callable[[], None]]:
+        """Return the AppArmor child-profile transition callback, or
+        ``None`` if not set.
+
+        Companion of :meth:`get_cgroup_attach`.  Subprocess-launching
+        plugins compose this with the cgroup attach in their
+        ``preexec_fn`` — AppArmor transition first, then cgroup
+        attach, then exec (the new profile must apply during the
+        cgroup write).
+        """
+        return self._apparmor_child_transition
 
     def get_cgroup_attach(self) -> Optional[Callable[[], None]]:
         """Return the cgroup-attach callable, or ``None`` if not set.
