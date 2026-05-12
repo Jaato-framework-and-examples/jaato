@@ -457,13 +457,27 @@ class JaatoDaemon:
             from server.websocket import load_tls_context
             ws_ssl_ctx = load_tls_context()
 
-            self._ws_server = JaatoWSServer(
+            # ``JAATO_CGROUPS_ROOT`` env var overrides the default
+            # ``/sys/fs/cgroup/jaato`` parent cgroup directory.  Useful
+            # on hosts where the jaato cgroup tree is at a different
+            # path (e.g., a dev host with subtree_control delegated
+            # under ``/sys/fs/cgroup/jaato-test``).  Defaults to the
+            # ``JaatoWSServer.cgroups_root`` default when unset.
+            ws_server_kwargs = dict(
                 host=host,
                 port=port,
                 workspace_root=_default_ws_root,
                 ssl_context=ws_ssl_ctx,
                 required_token=self._ws_token,
             )
+            _cgroups_root_env = os.environ.get("JAATO_CGROUPS_ROOT", "").strip()
+            if _cgroups_root_env:
+                ws_server_kwargs["cgroups_root"] = _cgroups_root_env
+                logger.info(
+                    "JAATO_CGROUPS_ROOT=%s — using non-default cgroup parent",
+                    _cgroups_root_env,
+                )
+            self._ws_server = JaatoWSServer(**ws_server_kwargs)
             ws_adapter = self._ws_server.get_event_sink_adapter()
             ws_adapter.bind_loop(asyncio.get_running_loop())
             composite_sink.add_sink(ws_adapter)
