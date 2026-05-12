@@ -119,7 +119,7 @@ Two items from §4.3.9 plus two memory-backlog items:
 |------|--------|
 | §5.8  | §4.3.9 item 10 — `profile_payload` typed model / allow-list |
 | §5.9  | §4.3.9 item 5 — Supervisor-declared sub-profile tightening flags |
-| §5.10 | memory `project_backlog_apparmor_child_subprofile` — AppArmor escape-vector closure (in-process denylist landed Phase 4; subprocess-side needs child subprofile) |
+| §5.10 | memory `project_backlog_apparmor_child_subprofile` — AppArmor escape-vector closure (in-process denylist landed Phase 4; subprocess-side needs child subprofile).  §5.10a (template) + §5.10b (transition callback) shipped without real-host gate; §5.10c (cli wire-up), §5.10d (interactive_shell), §5.10e (sub-runner //child) await operator real-host signoff per audit-discipline #3. |
 | §5.11 | memory `project_backlog_per_session_egress_allowlist` — Per-session network-egress allowlist (closes the host-filter hole AppArmor can't reach) |
 
 **Shared audit context:** all four close confused-deputy surfaces

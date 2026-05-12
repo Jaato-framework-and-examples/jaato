@@ -96,10 +96,14 @@ The fix:
    `change_profile` anywhere.  The subprocess is locked into
    `//child` for its lifetime.
 
-2. **Add `change_profile -> jaato-ws-{session_id}//child` to the
-   base profile + tool_hat sub-profile.**  The PARENT profile
-   already has `/proc/self/attr/current w`; we just need the
-   kernel-level authorization for the specific target name.
+2. **No explicit `change_profile -> //child` rule needed.**  AppArmor
+   implicitly authorizes transitions to inline-declared sub-profiles
+   from their parent (same mechanism the existing `//tool_hat`
+   transition relies on — the base profile has no
+   `change_profile -> jaato-ws-X//tool_hat` rule, only
+   `change_profile -> unconfined`, yet `apparmor_confine` enters
+   `//tool_hat` successfully).  Declaring `profile child { ... }`
+   inline inside the parent suffices.
 
 3. **Wire subprocess-spawning plugins to transition into `//child`
    between fork() and exec()** via a `preexec_fn` that writes
@@ -150,10 +154,10 @@ regardless of what the model asks to exec.
 
 - New `//child` sub-profile in
   `apparmor.py:AppArmorManager._build_profile` template (mirrors
-  `tool_hat`'s body minus the three escape rules).
-- `change_profile -> jaato-ws-{session_id}//child` rule added to
-  base profile + tool_hat sub-profile (kernel-level authorization
-  for the transition target).
+  `tool_hat`'s body minus the three escape rules).  Inline
+  declaration inside the parent profile is sufficient — no
+  explicit `change_profile -> //child` rule needed (same mechanism
+  as the existing `//tool_hat` transition).
 - New `AppArmorManager.make_child_transition_callback(profile_name)`
   returning a zero-arg `preexec_fn`-style callable that writes
   `changeprofile {profile_name}//child` to
