@@ -913,6 +913,7 @@ class JaatoRuntime:
         tier_config: Optional['ModelTierConfig'] = None,
         agent_params: Optional[Dict[str, Any]] = None,
         completion_artifacts: Optional[List[Any]] = None,
+        agent_id: str = "main",
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -971,7 +972,9 @@ class JaatoRuntime:
 
         # Create session with runtime reference and optional provider override
         t0 = time.perf_counter()
-        session = JaatoSession(self, model, provider_name=provider_name)
+        session = JaatoSession(
+            self, model, provider_name=provider_name, agent_id=agent_id,
+        )
         # Propagate the AppArmor confine-context factory so the session's
         # configure() can wrap dynamic-instructions expansion in the
         # session's confinement (server 0.6.50+).  None means no

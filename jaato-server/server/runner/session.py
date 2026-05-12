@@ -601,4 +601,11 @@ def _build_session(
         completion_artifacts=(
             envelope.completion_artifacts or None
         ),
+        # Thread the envelope's resolved agent_id into the runner-
+        # side JaatoSession so AgentCompletedEvent.agent_id carries
+        # the daemon's ``--agent <name>`` resolution (the envelope
+        # carries it correctly post PR #79; pre-thread it was
+        # silently discarded here because create_session didn't
+        # accept the kwarg).
+        agent_id=envelope.agent_id,
     )

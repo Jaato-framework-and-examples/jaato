@@ -201,7 +201,8 @@ class JaatoSession:
         self,
         runtime: 'JaatoRuntime',
         model: str,
-        provider_name: Optional[str] = None
+        provider_name: Optional[str] = None,
+        agent_id: str = "main",
     ):
         """Initialize a session.
 
@@ -212,6 +213,16 @@ class JaatoSession:
             model: Model name to use for this session.
             provider_name: Optional provider override for cross-provider sessions.
                           If specified, uses a different AI provider than the runtime default.
+            agent_id: Logical agent identifier (e.g. ``"main"``,
+                ``"discovery"``, ``"coordinator"``).  Sets
+                ``self._agent_id`` at construction time so consumers
+                that key on agent identity (``AgentCompletedEvent``,
+                reactor where-clauses, telemetry spans) see the
+                correct value.  Defaults to ``"main"`` for backward
+                compat with callers that don't yet thread the field.
+                Post-construction the only mutator is
+                :meth:`set_ui_hooks` (overwrites with the daemon's
+                resolved id when ui_hooks attach).
         """
         self._runtime = runtime
         self._model_name = model
@@ -380,7 +391,16 @@ class JaatoSession:
 
         # UI hooks for agent lifecycle events
         self._ui_hooks: Optional['AgentUIHooks'] = None
-        self._agent_id: str = "main"  # Unique ID for this agent
+        # Logical agent identifier — sourced from the constructor
+        # arg so the envelope's resolved agent_id (``"discovery"``,
+        # ``"coordinator"``, ...) lands at construction.  Previously
+        # hardcoded ``"main"`` here and only mutated by
+        # ``set_ui_hooks``, but the runner-side bootstrap bypasses
+        # ``set_ui_hooks`` (installs a notification-shim via direct
+        # attribute write at rpc.py:3178-3185).  Result pre-fix: every
+        # runner-side session carried ``_agent_id="main"`` regardless
+        # of the daemon's ``--agent <name>`` resolution.
+        self._agent_id: str = agent_id
         self._daemon_session_id: Optional[str] = None  # Session manager ID for telemetry correlation
 
         # Retry notification callback (client-configurable)
