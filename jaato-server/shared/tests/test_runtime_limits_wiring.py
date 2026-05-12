@@ -436,3 +436,124 @@ class TestCliPluginPreexecComposition:
         plugin.set_apparmor_child_transition_callback(lambda: None)
         plugin.set_apparmor_child_transition_callback(None)
         assert plugin._apparmor_child_transition is None
+
+
+class TestInteractiveShellPluginPreexecComposition:
+    """Phase 5 §5.10d: mirror of TestCliPluginPreexecComposition for
+    the interactive_shell plugin.  Same four-case ladder, same
+    apparmor-first ordering, same fail-closed semantics — pinned
+    here so the two plugins can't drift apart silently."""
+
+    def _make_shell_plugin(self):
+        from shared.plugins.interactive_shell.plugin import (
+            InteractiveShellPlugin,
+        )
+        return InteractiveShellPlugin()
+
+    def test_both_none_returns_none(self):
+        plugin = self._make_shell_plugin()
+        assert plugin._build_subprocess_preexec_fn() is None
+
+    def test_only_cgroup_returns_cgroup_directly(self):
+        plugin = self._make_shell_plugin()
+        cgroup_cb = lambda: None
+        plugin.set_runtime_limits(cgroup_cb, None)
+        assert plugin._build_subprocess_preexec_fn() is cgroup_cb
+
+    def test_only_apparmor_returns_apparmor_directly(self):
+        plugin = self._make_shell_plugin()
+        apparmor_cb = lambda: None
+        plugin.set_apparmor_child_transition_callback(apparmor_cb)
+        assert plugin._build_subprocess_preexec_fn() is apparmor_cb
+
+    def test_both_compose_apparmor_first(self):
+        plugin = self._make_shell_plugin()
+        call_order = []
+
+        def apparmor_cb():
+            call_order.append("apparmor")
+
+        def cgroup_cb():
+            call_order.append("cgroup")
+
+        plugin.set_runtime_limits(cgroup_cb, None)
+        plugin.set_apparmor_child_transition_callback(apparmor_cb)
+
+        composite = plugin._build_subprocess_preexec_fn()
+        assert composite is not None
+        composite()
+        assert call_order == ["apparmor", "cgroup"]
+
+    def test_apparmor_failure_propagates(self):
+        """Fail-closed: PTY spawn must surface the failure so the
+        ShellSession constructor raises and the caller sees a
+        spawn error rather than a half-started session that
+        silently lost confinement."""
+        plugin = self._make_shell_plugin()
+
+        def apparmor_cb():
+            raise OSError("EACCES")
+
+        def cgroup_cb():
+            raise AssertionError("cgroup ran after apparmor failed")
+
+        plugin.set_runtime_limits(cgroup_cb, None)
+        plugin.set_apparmor_child_transition_callback(apparmor_cb)
+
+        composite = plugin._build_subprocess_preexec_fn()
+        try:
+            composite()
+        except OSError as exc:
+            assert "EACCES" in str(exc)
+        else:
+            raise AssertionError(
+                "apparmor failure must propagate (fail-closed)",
+            )
+
+    def test_set_apparmor_callback_accepts_none(self):
+        plugin = self._make_shell_plugin()
+        plugin.set_apparmor_child_transition_callback(lambda: None)
+        plugin.set_apparmor_child_transition_callback(None)
+        assert plugin._apparmor_child_transition is None
+
+
+class TestPluginPairKeepsSameContract:
+    """Pin: the cli + interactive_shell plugins implement the
+    §5.10c/d preexec_fn contract identically.  A future refactor
+    that drifts one plugin's composition order or short-circuit
+    ladder away from the other should fail loudly here, not in
+    subtle real-host behavior."""
+
+    def test_both_plugins_implement_setter(self):
+        from shared.plugins.cli.plugin import CLIToolPlugin
+        from shared.plugins.interactive_shell.plugin import (
+            InteractiveShellPlugin,
+        )
+        cli = CLIToolPlugin()
+        shell = InteractiveShellPlugin()
+        assert hasattr(cli, "set_apparmor_child_transition_callback")
+        assert hasattr(shell, "set_apparmor_child_transition_callback")
+
+    def test_both_plugins_compose_apparmor_first(self):
+        """If a refactor accidentally swaps the order in one plugin,
+        this test fires — pinning the §6.1 audit-doc ordering
+        decision across both surfaces."""
+        from shared.plugins.cli.plugin import CLIToolPlugin
+        from shared.plugins.interactive_shell.plugin import (
+            InteractiveShellPlugin,
+        )
+        for plugin_cls in (CLIToolPlugin, InteractiveShellPlugin):
+            plugin = plugin_cls()
+            call_order = []
+            plugin.set_runtime_limits(
+                lambda: call_order.append("cgroup"), None,
+            )
+            plugin.set_apparmor_child_transition_callback(
+                lambda: call_order.append("apparmor"),
+            )
+            plugin._build_subprocess_preexec_fn()()
+            assert call_order == ["apparmor", "cgroup"], (
+                f"{plugin_cls.__name__}: composition order broken "
+                f"({call_order!r}); §6.1 of the §5.10 audit pins "
+                f"apparmor-first"
+            )
