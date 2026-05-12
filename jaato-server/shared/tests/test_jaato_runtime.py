@@ -165,6 +165,66 @@ class TestJaatoRuntimeCreateSession:
         assert session.runtime == runtime
 
 
+    @patch('shared.jaato_runtime.load_provider')
+    def test_create_session_threads_agent_id(self, mock_load_provider):
+        """Pin: ``runtime.create_session(agent_id=...)`` threads the
+        value into ``JaatoSession.__init__`` so the resulting
+        session's ``_agent_id`` reflects the daemon-resolved agent
+        identity (``--agent <name>``).
+
+        Regression context: pre-thread (PR #79 + this PR), the
+        runner-side ``bootstrap_session`` correctly built an
+        envelope with ``envelope.agent_id == "discovery"`` but the
+        kwarg never reached ``JaatoSession.__init__`` — the session
+        kept the default ``"main"``.  Downstream
+        ``AgentCompletedEvent.agent_id == "main"`` broke reactor
+        rules keying on logical agent identity."""
+        runtime = JaatoRuntime()
+        runtime.connect("my-project", "us-central1")
+
+        mock_registry = MagicMock()
+        mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_enabled_executors.return_value = {}
+        mock_registry.get_system_instructions.return_value = None
+        mock_registry.get_auto_approved_tools.return_value = []
+        mock_registry.get_plugin.return_value = None
+        mock_load_provider.return_value = MagicMock()
+
+        runtime.configure_plugins(mock_registry)
+        session = runtime.create_session(
+            "gemini-2.5-flash", agent_id="discovery",
+        )
+
+        assert session.agent_id == "discovery", (
+            f"runtime.create_session must thread agent_id into the "
+            f"resulting JaatoSession; got {session.agent_id!r}"
+        )
+
+    @patch('shared.jaato_runtime.load_provider')
+    def test_create_session_defaults_agent_id_to_main(
+        self, mock_load_provider,
+    ):
+        """Pin: omitting ``agent_id`` from
+        ``runtime.create_session`` falls back to ``"main"`` —
+        preserves backward compat with callers that don't yet
+        thread the field (most daemon-side legacy paths)."""
+        runtime = JaatoRuntime()
+        runtime.connect("my-project", "us-central1")
+
+        mock_registry = MagicMock()
+        mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_enabled_executors.return_value = {}
+        mock_registry.get_system_instructions.return_value = None
+        mock_registry.get_auto_approved_tools.return_value = []
+        mock_registry.get_plugin.return_value = None
+        mock_load_provider.return_value = MagicMock()
+
+        runtime.configure_plugins(mock_registry)
+        session = runtime.create_session("gemini-2.5-flash")
+
+        assert session.agent_id == "main"
+
+
 class TestJaatoRuntimeCreateProvider:
     """Tests for JaatoRuntime.create_provider()."""
 
