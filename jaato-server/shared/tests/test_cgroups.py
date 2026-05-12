@@ -477,3 +477,104 @@ class TestMakeAttachCallback:
         cb()
         procs = manager.get_cgroup_path("s1") / "cgroup.procs"
         assert procs.read_text() == str(os.getpid())
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 §5.3 — orphan sub-cgroup scanner
+# ---------------------------------------------------------------------------
+
+
+class TestListOrphanSubCgroups:
+    """Phase 5 §5.3: name-pattern scan that finds sub-cgroups whose
+    directories exist on disk but aren't in the caller's known-set.
+
+    Used by ``SessionManager._cascade_teardown_isolated_subagents`` to
+    catch sub-cgroups left behind by rollback failures or mid-spawn
+    crashes — the §4.3.9 item 4 hardening gap."""
+
+    def test_empty_when_no_matching_dirs(self, manager):
+        manager._available = True
+        result = manager.list_orphan_sub_cgroups(
+            "parent-A", known_isolated_session_ids=set(),
+        )
+        assert result == []
+
+    def test_returns_dirs_matching_pattern_not_in_known_set(
+        self, manager, fake_cgroup_root,
+    ):
+        manager._available = True
+        # Build three sub-cgroup dirs for parent-A; mark one as known.
+        for subagent in ("X", "Y", "Z"):
+            (fake_cgroup_root / f"jaato-ws-parent-A__sub_{subagent}").mkdir()
+
+        result = manager.list_orphan_sub_cgroups(
+            "parent-A",
+            known_isolated_session_ids={"parent-A__sub_X"},
+        )
+        # X is known; Y and Z are orphans.
+        assert sorted(result) == ["parent-A__sub_Y", "parent-A__sub_Z"]
+
+    def test_ignores_other_parents(self, manager, fake_cgroup_root):
+        """A scan for parent A must not return sub-cgroups belonging
+        to parent B — confused-deputy protection."""
+        manager._available = True
+        (fake_cgroup_root / "jaato-ws-parent-A__sub_X").mkdir()
+        (fake_cgroup_root / "jaato-ws-parent-B__sub_Y").mkdir()
+
+        result_a = manager.list_orphan_sub_cgroups(
+            "parent-A", known_isolated_session_ids=set(),
+        )
+        result_b = manager.list_orphan_sub_cgroups(
+            "parent-B", known_isolated_session_ids=set(),
+        )
+        assert result_a == ["parent-A__sub_X"]
+        assert result_b == ["parent-B__sub_Y"]
+
+    def test_ignores_parent_cgroup_dir_itself(
+        self, manager, fake_cgroup_root,
+    ):
+        """The parent's own cgroup (``jaato-ws-parent-A``) is NOT a
+        sub-cgroup and must not be returned even when nothing is
+        known."""
+        manager._available = True
+        (fake_cgroup_root / "jaato-ws-parent-A").mkdir()
+        (fake_cgroup_root / "jaato-ws-parent-A__sub_X").mkdir()
+
+        result = manager.list_orphan_sub_cgroups(
+            "parent-A", known_isolated_session_ids=set(),
+        )
+        # Only the __sub_ entry — the parent dir doesn't match the
+        # leaf-prefix pattern.
+        assert result == ["parent-A__sub_X"]
+
+    def test_silent_when_cgroups_unavailable(self, manager):
+        manager._available = False
+        result = manager.list_orphan_sub_cgroups(
+            "parent-A", known_isolated_session_ids=set(),
+        )
+        assert result == []
+
+    def test_tolerates_non_directory_entries(
+        self, manager, fake_cgroup_root,
+    ):
+        """A regular file matching the pattern (defensive: shouldn't
+        happen on a real cgroup-fs, but protects against odd hosts)
+        is skipped — only directories count."""
+        manager._available = True
+        (fake_cgroup_root / "jaato-ws-parent-A__sub_X").mkdir()
+        (fake_cgroup_root / "jaato-ws-parent-A__sub_FILE").write_text("x")
+
+        result = manager.list_orphan_sub_cgroups(
+            "parent-A", known_isolated_session_ids=set(),
+        )
+        assert result == ["parent-A__sub_X"]
+
+    def test_returns_empty_when_root_missing(self, tmp_path):
+        """Root directory absent (host without cgroup root provisioned)
+        → empty list, no exception."""
+        mgr = CgroupsManager(root=str(tmp_path / "nonexistent"))
+        mgr._available = True  # Force past is_available() short-circuit.
+        result = mgr.list_orphan_sub_cgroups(
+            "parent-A", known_isolated_session_ids=set(),
+        )
+        assert result == []

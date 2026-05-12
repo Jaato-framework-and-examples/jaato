@@ -1648,10 +1648,22 @@ shipped as gaps in §4.3.  Phase 5 should pick them up:
    in §4.3.6c's `_run_first_turn`, which forwards `status=error`
    to parent.  More robust detection (heartbeat / explicit EOF
    handler) lands in Phase 5.
-4. **Cgroup-leak audit at session shutdown.**  If a sub-runner
-   crashes before parent shutdown, the sub-cgroup may be left
-   with zombie processes.  Phase 5: audit pass at parent teardown
-   that finds + reaps orphaned sub-cgroups by name pattern.
+4. **Cgroup-leak audit at session shutdown.**  *SHIPPED as Phase 5
+   §5.3.*  Pre-§5.3 a sub-runner that crashed (or rolled back with
+   a failed teardown) could leave its sub-cgroup directory behind
+   with zombie processes — the cascade-teardown walked only the
+   in-memory `_isolated_sub_runners` handles.  §5.3 adds
+   `CgroupsManager.list_orphan_sub_cgroups(parent_session_id,
+   known_isolated_session_ids)` — a name-pattern scan
+   (`jaato-ws-{parent}__sub_*`) that returns ids whose dirs exist
+   on disk but aren't in the known set.
+   `_cascade_teardown_isolated_subagents` calls the scanner after
+   the known-handles loop and reaps each orphan via the existing
+   `teardown_cgroup` path.  Runs at every parent teardown
+   (including when no known handles existed) so crashes that race
+   handle-registration are still caught.  WARNING log per orphan
+   reaped.  Audit:
+   `docs/design/phase5_5_3_cgroup_leak_audit_audit.md`.
 5. **Supervisor-declared sub-profile tightening flags.**  Today
    the daemon decides the sub-profile rules.  Phase 5: let the
    supervisor declare tightenings via wire shape

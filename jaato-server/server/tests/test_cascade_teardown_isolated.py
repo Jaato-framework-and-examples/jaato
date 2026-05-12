@@ -182,3 +182,146 @@ class TestPartialResources:
         apparmor.teardown_sub_profile.assert_not_called()
         # Cgroup still torn down.
         cgroups.teardown_cgroup.assert_called_once()
+
+
+class TestOrphanSubCgroupReap:
+    """Phase 5 §5.3: after the known-handles loop, the cascade scans
+    for sub-cgroups whose directories exist on disk but aren't in the
+    just-torn-down set, and reaps them via ``teardown_cgroup``.
+
+    Catches kernel state left behind by rollback failures or
+    mid-spawn crashes — the §4.3.9 item 4 gap."""
+
+    def test_orphans_returned_by_scanner_are_torn_down(self):
+        """Scanner returns 2 orphans → ``teardown_cgroup`` is called
+        for each in addition to the known handle."""
+        apparmor = MagicMock()
+        cgroups = MagicMock()
+        cgroups.list_orphan_sub_cgroups.return_value = [
+            "sess-A__sub_orphan1",
+            "sess-A__sub_orphan2",
+        ]
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, cgroups_manager=cgroups,
+        )
+        _register_handle(sm, subagent_id="known")
+
+        count = sm._cascade_teardown_isolated_subagents("sess-A")
+
+        # Return value pins the count of HANDLES, not orphans.
+        assert count == 1
+        # Scanner consulted with the known-set the cascade just
+        # processed (the single known handle's isolated_session_id).
+        scan_call = cgroups.list_orphan_sub_cgroups.call_args
+        assert scan_call.args[0] == "sess-A"
+        assert scan_call.args[1] == {"sess-A__sub_known"}
+        # teardown_cgroup called for known + each orphan.
+        torn = [c.args[0] for c in cgroups.teardown_cgroup.call_args_list]
+        assert sorted(torn) == [
+            "sess-A__sub_known",
+            "sess-A__sub_orphan1",
+            "sess-A__sub_orphan2",
+        ]
+
+    def test_scanner_runs_even_when_no_known_handles(self):
+        """Empty registry → cascade returns 0; but the orphan scan
+        STILL runs.  The ledger contract is "audit pass at every
+        parent teardown" — a crash that never registered a handle
+        can leave kernel state behind, and that's exactly what the
+        scan catches.  Phase 5 §5.3 removed the pre-§5.3 short-
+        circuit on empty handles for this reason."""
+        cgroups = MagicMock()
+        cgroups.list_orphan_sub_cgroups.return_value = []
+        sm = _make_session_manager(cgroups_manager=cgroups)
+
+        count = sm._cascade_teardown_isolated_subagents("sess-A")
+
+        assert count == 0
+        # Scanner consulted with the empty known-set.
+        cgroups.list_orphan_sub_cgroups.assert_called_once()
+        scan_call = cgroups.list_orphan_sub_cgroups.call_args
+        assert scan_call.args[0] == "sess-A"
+        assert scan_call.args[1] == set()
+
+    def test_scanner_finds_and_reaps_orphan_without_any_known_handle(self):
+        """Pure orphan scenario: handle registration crashed before
+        the cascade was invoked.  Scanner finds the leftover cgroup
+        and reaps it; cascade returns 0 (no HANDLES torn down)."""
+        cgroups = MagicMock()
+        cgroups.list_orphan_sub_cgroups.return_value = [
+            "sess-A__sub_crashed",
+        ]
+        sm = _make_session_manager(cgroups_manager=cgroups)
+
+        count = sm._cascade_teardown_isolated_subagents("sess-A")
+
+        assert count == 0
+        cgroups.teardown_cgroup.assert_called_once_with(
+            "sess-A__sub_crashed",
+        )
+
+    def test_orphan_teardown_failure_does_not_block_cascade_return(self):
+        """An orphan reap that raises must not prevent the cascade
+        from returning the known-handle count."""
+        apparmor = MagicMock()
+        cgroups = MagicMock()
+        cgroups.list_orphan_sub_cgroups.return_value = [
+            "sess-A__sub_orphan",
+        ]
+        # First call (known handle) succeeds; second (orphan) raises.
+        cgroups.teardown_cgroup.side_effect = [
+            True, RuntimeError("kill failed"),
+        ]
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, cgroups_manager=cgroups,
+        )
+        _register_handle(sm, subagent_id="known")
+
+        count = sm._cascade_teardown_isolated_subagents("sess-A")
+
+        assert count == 1
+        # Both teardown calls attempted.
+        assert cgroups.teardown_cgroup.call_count == 2
+
+    def test_scanner_failure_does_not_block_cascade_return(self):
+        """If the scanner itself raises (e.g., FS error), cascade still
+        returns the known-handle count."""
+        apparmor = MagicMock()
+        cgroups = MagicMock()
+        cgroups.list_orphan_sub_cgroups.side_effect = OSError(
+            "permission denied",
+        )
+        sm = _make_session_manager(
+            apparmor_manager=apparmor, cgroups_manager=cgroups,
+        )
+        _register_handle(sm, subagent_id="known")
+
+        count = sm._cascade_teardown_isolated_subagents("sess-A")
+
+        assert count == 1
+        # Known handle was torn down before the orphan scan.
+        cgroups.teardown_cgroup.assert_called_once_with("sess-A__sub_known")
+
+    def test_warning_logged_per_orphan(self, caplog):
+        """An operator running with WARNING-level logging sees one
+        line per orphan so reliability incidents can be correlated."""
+        import logging
+        cgroups = MagicMock()
+        cgroups.list_orphan_sub_cgroups.return_value = [
+            "sess-A__sub_orphan1",
+        ]
+        sm = _make_session_manager(cgroups_manager=cgroups)
+        _register_handle(sm, subagent_id="known")
+
+        with caplog.at_level(logging.WARNING):
+            sm._cascade_teardown_isolated_subagents("sess-A")
+
+        warning_messages = [
+            r.message for r in caplog.records
+            if r.levelno >= logging.WARNING
+        ]
+        assert any(
+            "orphaned sub-cgroup" in m
+            and "sess-A__sub_orphan1" in m
+            for m in warning_messages
+        ), f"missing orphan WARNING; got {warning_messages!r}"

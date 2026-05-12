@@ -85,7 +85,7 @@ surfaced during §5.1 work:
 |------|-------------------|
 | §5.1 | §4.3.9 item 1 — Default `RuntimeLimits` for isolated subagents (shipped) |
 | §5.2 | §4.3.9 item 2 — Nested cgroup structure (parent-bounded sub) — **deferred to Phase 6; visibility-only instrumentation shipped** (`phase5_5_2_nested_cgroup_deferral_audit.md`) |
-| §5.3 | §4.3.9 item 4 — Cgroup-leak audit at session shutdown |
+| §5.3 | §4.3.9 item 4 — Cgroup-leak audit at session shutdown (shipped) |
 | §5.1b | §4.3.9 item 11 — Mainline `RuntimeLimits` app-layer passthrough to runner (shipped) |
 
 **Shared audit context:** all four touch the runtime-limits wiring

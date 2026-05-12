@@ -263,6 +263,82 @@ class CgroupsManager:
         logger.info("Removed cgroup %s", cg_path)
         return True
 
+    def list_orphan_sub_cgroups(
+        self,
+        parent_session_id: str,
+        known_isolated_session_ids: "set[str]",
+    ) -> "list[str]":
+        """Phase 5 §5.3: scan for orphaned isolated-subagent cgroups.
+
+        Returns the isolated-session-ids whose cgroup directories exist
+        under :attr:`_root` matching the
+        ``jaato-ws-{parent_session_id}__sub_*`` template but aren't in
+        the caller's *known_isolated_session_ids* set.  These are
+        produced by sub-runner spawn rollback that failed mid-teardown
+        or sub-runner crashes that left kernel state behind without a
+        corresponding live handle in
+        ``SessionManager._isolated_sub_runners``.
+
+        The scanner does not reap — it returns ids, and the caller
+        passes them back through :meth:`teardown_cgroup` (single code
+        path for reap-by-id whether the source is a known handle or an
+        orphan scan).
+
+        Graceful degradation: returns an empty list when cgroups are
+        unavailable, the root directory doesn't exist, or the scan
+        fails — leak audit is observability + cleanup, not a
+        correctness contract.
+
+        Args:
+            parent_session_id: Parent session whose orphan sub-cgroups
+                to find.  Used to scope the name-pattern match.
+            known_isolated_session_ids: Set of isolated-session-ids the
+                caller already knows about (from
+                ``_isolated_sub_runners``).  Cgroups matching the
+                pattern but NOT in this set are returned as orphans.
+
+        Returns:
+            List of isolated-session-ids (strings of the form
+            ``{parent_session_id}__sub_{subagent_id}``) whose cgroups
+            exist on disk but aren't in *known_isolated_session_ids*.
+            Empty list when cgroups unavailable, root missing, or scan
+            fails.
+        """
+        if not self.is_available():
+            return []
+        if not self._root.exists():
+            return []
+
+        # Audit 7's sub-cgroup template:
+        # ``jaato-ws-{parent_session_id}__sub_{subagent_id}``.  The
+        # leaf prefix is constant; we scan for ``jaato-ws-{parent}__sub_``
+        # and split out the suffix to reconstruct the isolated-session-id.
+        leaf_prefix = f"jaato-ws-{parent_session_id}__sub_"
+        orphans: list[str] = []
+        try:
+            entries = list(self._root.iterdir())
+        except OSError as exc:
+            logger.warning(
+                "list_orphan_sub_cgroups: failed to scan %s: %s",
+                self._root, exc,
+            )
+            return []
+
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if not name.startswith(leaf_prefix):
+                continue
+            subagent_id = name[len(leaf_prefix):]
+            if not subagent_id:
+                continue  # Defensive: malformed name with empty suffix.
+            isolated_session_id = f"{parent_session_id}__sub_{subagent_id}"
+            if isolated_session_id in known_isolated_session_ids:
+                continue
+            orphans.append(isolated_session_id)
+        return orphans
+
     # ------------------------------------------------------------------
     # Attach
     # ------------------------------------------------------------------
