@@ -133,6 +133,49 @@ class TestTypeValidation:
         with pytest.raises(ValueError, match="profile_payload must be a dict"):
             await handler.handle(_valid_args(profile_payload="not-a-dict"))
 
+    # Phase 5 §5.8 — typed validator integration pins.
+    @pytest.mark.asyncio
+    async def test_profile_payload_unknown_key_rejected_at_handler(self):
+        """§5.8 wire-up: an unknown top-level key in
+        profile_payload surfaces as a ValueError with the
+        handler-method-name prefix.  Pins the
+        SpawnIsolatedRunnerHandler ↔ validate_profile_payload
+        bridge added by §5.8."""
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        bad_payload = {
+            "name": "researcher",
+            "model": "claude-sonnet-4-5",
+            "ssrf_target": "http://internal-mgmt-api",  # unknown
+        }
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"subagent\.spawn_isolated_runner: profile_payload "
+                r"validation failed: .*ssrf_target"
+            ),
+        ):
+            await handler.handle(_valid_args(profile_payload=bad_payload))
+
+    @pytest.mark.asyncio
+    async def test_profile_payload_validator_runs_before_routing(self):
+        """§5.8 pin: validator runs at the handler boundary,
+        BEFORE the routed dispatch to SessionManager helper.
+
+        A handler with ``_session_manager`` left None would
+        otherwise return the §4.3.2 "unwired stub" envelope.
+        §5.8's validator fires first so an invalid payload never
+        reaches the routing decision — important because the
+        spawn-machinery path is what allocates AppArmor sub-
+        profiles / sub-cgroups, and we want validation to gate
+        BEFORE any resource provisioning."""
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        assert handler._session_manager is None  # unwired
+        bad_payload = {"name": "x", "unexpected": "y"}
+        with pytest.raises(
+            ValueError, match="profile_payload validation failed",
+        ):
+            await handler.handle(_valid_args(profile_payload=bad_payload))
+
     @pytest.mark.asyncio
     async def test_non_str_task_raises(self):
         handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
