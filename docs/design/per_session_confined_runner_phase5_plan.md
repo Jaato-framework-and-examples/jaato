@@ -84,7 +84,7 @@ surfaced during §5.1 work:
 | Plan | Audit ledger item |
 |------|-------------------|
 | §5.1 | §4.3.9 item 1 — Default `RuntimeLimits` for isolated subagents (shipped) |
-| §5.2 | §4.3.9 item 2 — Nested cgroup structure (parent-bounded sub) |
+| §5.2 | §4.3.9 item 2 — Nested cgroup structure (parent-bounded sub) — **deferred to Phase 6; visibility-only instrumentation shipped** (`phase5_5_2_nested_cgroup_deferral_audit.md`) |
 | §5.3 | §4.3.9 item 4 — Cgroup-leak audit at session shutdown |
 | §5.1b | §4.3.9 item 11 — Mainline `RuntimeLimits` app-layer passthrough to runner (shipped) |
 
@@ -261,6 +261,15 @@ explicitly:
 - Cross-platform runner via platform-specific sandbox primitives.
 - Multi-tenant acceptance gate (parent §6.4) — per-operator
   policy store, capability-based fragment loading.
+- **Nested cgroup layout** (§4.3.9 item 2 — deferred from Phase 5
+  §5.2).  Today's sibling structure means sub cgroups don't
+  compose under parent's bounds.  True nesting (`/main/`
+  sub-cgroup + `subtree_control`) requires parent-runner PID
+  migration + dual code paths through `CgroupsManager`; ship
+  when a multi-tenant deployment files a request for parent-
+  bounded composition.  Phase 5 §5.2 shipped visibility-only
+  instrumentation so operators can see where nesting WOULD
+  have mattered.
 - **`max_output_bytes` / `max_output_chars` naming consistency.**
   `RuntimeLimits.max_output_bytes` (the profile field) maps to
   `RunnerSpawner.spawn(max_output_chars=...)` → env var

@@ -1631,6 +1631,16 @@ shipped as gaps in §4.3.  Phase 5 should pick them up:
    needing "sub bounded by parent's bounds" need the parent
    restructure (`/main/` sub-cgroup + `subtree_control`).
    Coordinated change, not incremental.
+   *Status: Phase 6 deferred (Phase 5 §5.2 audit).* No use case
+   for parent-bounded composition has been filed yet; the 150–
+   200 LoC restructure is non-trivial and the §4.3.5 hedge
+   ("coordinated change, not incremental") is load-bearing.
+   Phase 5 §5.2 ships visibility-only instrumentation instead:
+   when a sub-cgroup is provisioned with a kernel-enforced cap
+   that exceeds the parent's, the daemon logs `INFO` so
+   operators see where a Phase 6 nested-layout migration WOULD
+   have changed behavior.  See
+   `docs/design/phase5_5_2_nested_cgroup_deferral_audit.md`.
 3. **Sub-runner crash detection.**  Socket EOF on the sub-runner's
    RPC channel should notify the parent runner via
    `subagent.forward_event(kind="error", ...)`.  Today's posture:

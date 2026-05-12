@@ -1089,3 +1089,155 @@ class TestBootstrapAndFirstTurnDispatch:
         # event.  session_send_message was NOT invoked.
         assert result["ok"] is True
         handle.rpc.session_send_message.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 5 §5.2 — nesting-visibility instrumentation
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _inject_parent_session(sm, parent_session_id: str, parent_limits):
+    """Inject a parent session into ``sm._sessions`` so
+    ``_log_nesting_visibility`` can look up the parent's runtime_limits.
+
+    Builds the minimum attribute chain
+    ``session.server._profile.runtime_limits``.  ``parent_limits``
+    can be a ``RuntimeLimits`` instance OR ``None`` (to exercise the
+    no-parent-limits branch)."""
+    from types import SimpleNamespace
+    profile = SimpleNamespace(runtime_limits=parent_limits)
+    server = SimpleNamespace(_profile=profile)
+    session = SimpleNamespace(server=server)
+    sm._sessions[parent_session_id] = session
+
+
+class TestNestingVisibilityInstrumentation:
+    """Phase 5 §5.2: sibling cgroup structure (per §4.3.5) means sub
+    bounds don't compose under parent's.  Helper logs INFO when sub's
+    kernel-enforced cap exceeds parent's so operators see where a
+    Phase 6 nested-layout migration WOULD change behavior.  Pure
+    observability — no production code path moves."""
+
+    def _spawn_isolated(self, sm, sub_runtime_limits):
+        """Run the helper through a successful sub-cgroup provision
+        with the supplied sub-side runtime_limits."""
+        from pathlib import Path
+        cgroup_str = (
+            "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1"
+        )
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = True
+        cgroups.provision_cgroup.return_value = True
+        cgroups.get_cgroup_path.return_value = Path(cgroup_str)
+        sm._cgroups_manager = cgroups
+        sm._apparmor_manager = _make_default_apparmor()
+        sm._do_spawn_isolated_runner = (  # type: ignore[method-assign]
+            lambda **kw: _make_spawn_handle(cgroup_path=cgroup_str)
+        )
+        return sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits=sub_runtime_limits,
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+    def test_nesting_visibility_logs_when_sub_exceeds_parent_memory(
+        self, caplog,
+    ):
+        """Parent has runtime_limits.memory_max_mb=2048; sub is
+        provisioned with memory_max_mb=4096.  Helper logs INFO
+        naming both values and the field — operators see where
+        Phase 6 nesting would have capped at parent's bound."""
+        from shared.runtime_limits import RuntimeLimits
+        sm = _make_session_manager()
+        _inject_parent_session(
+            sm, "sess-A",
+            RuntimeLimits(memory_max_mb=2048, pids_max=512),
+        )
+        with caplog.at_level("INFO", logger="server.session_manager"):
+            result = self._spawn_isolated(
+                sm,
+                sub_runtime_limits={
+                    "memory_max_mb": 4096,
+                    "pids_max": 128,
+                },
+            )
+
+        assert result["ok"] is True
+        visibility = [
+            r for r in caplog.records
+            if "nesting-visibility" in r.getMessage()
+        ]
+        assert len(visibility) == 1
+        msg = visibility[0].getMessage()
+        assert "EXCEED" in msg
+        assert "memory_max_mb" in msg
+        assert "sub=4096" in msg
+        assert "parent=2048" in msg
+        # pids_max sub (128) is below parent (512) → not in the log
+        assert "pids_max" not in msg
+
+    def test_nesting_visibility_logs_when_parent_has_no_limits(
+        self, caplog,
+    ):
+        """Parent has no kernel runtime_limits (profile omits
+        runtime_limits, or runtime_limits is None).  Helper logs
+        INFO with the no-parent-limits explanation so operators
+        see this nesting case wouldn't have constrained anything
+        anyway."""
+        sm = _make_session_manager()
+        _inject_parent_session(sm, "sess-A", parent_limits=None)
+        with caplog.at_level("INFO", logger="server.session_manager"):
+            result = self._spawn_isolated(
+                sm,
+                sub_runtime_limits={
+                    "memory_max_mb": 2048,
+                    "pids_max": 128,
+                },
+            )
+
+        assert result["ok"] is True
+        visibility = [
+            r for r in caplog.records
+            if "nesting-visibility" in r.getMessage()
+        ]
+        assert len(visibility) == 1
+        msg = visibility[0].getMessage()
+        assert "no kernel runtime_limits" in msg
+        assert "Phase 6 nested layout would have nothing to cap" in msg
+        # Sub's declared values are surfaced for the operator
+        assert "sub.memory_max_mb=2048" in msg
+        assert "sub.pids_max=128" in msg
+
+    def test_nesting_visibility_silent_when_sub_within_parent(
+        self, caplog,
+    ):
+        """Parent has memory_max_mb=4096 + pids_max=512; sub has
+        2 GiB / 128 pids — both within parent's bounds.  Helper
+        looks up parent, compares per-field, finds nothing
+        exceeded, and stays silent.  Phase 6 nesting wouldn't
+        change behavior for this case."""
+        from shared.runtime_limits import RuntimeLimits
+        sm = _make_session_manager()
+        _inject_parent_session(
+            sm, "sess-A",
+            RuntimeLimits(memory_max_mb=4096, pids_max=512),
+        )
+        with caplog.at_level("INFO", logger="server.session_manager"):
+            result = self._spawn_isolated(
+                sm,
+                sub_runtime_limits={
+                    "memory_max_mb": 2048,
+                    "pids_max": 128,
+                },
+            )
+
+        assert result["ok"] is True
+        visibility = [
+            r for r in caplog.records
+            if "nesting-visibility" in r.getMessage()
+        ]
+        assert len(visibility) == 0
