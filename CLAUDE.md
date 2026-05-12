@@ -604,8 +604,9 @@ Available models include Llama 3.3/3.1, DeepSeek-R1, Nemotron, and other NIM cat
 | `JAATO_OPENROUTER_BASE_URL` | Endpoint (default: `https://openrouter.ai/api/v1`) |
 | `JAATO_OPENROUTER_MODEL` | Default model name |
 | `JAATO_OPENROUTER_CONTEXT_LENGTH` | Override context window size |
-| `JAATO_OPENROUTER_HTTP_REFERER` | App-attribution: `HTTP-Referer` header for OpenRouter rankings |
-| `JAATO_OPENROUTER_APP_TITLE` | App-attribution: `X-OpenRouter-Title` header for OpenRouter rankings |
+| `JAATO_OPENROUTER_HTTP_REFERER` | App-attribution: `HTTP-Referer` header (required for OpenRouter app rankings) |
+| `JAATO_OPENROUTER_APP_TITLE` | App-attribution: `X-OpenRouter-Title` header (display name) |
+| `JAATO_OPENROUTER_APP_CATEGORIES` | App-attribution: `X-OpenRouter-Categories` header (comma-separated; default `cli-agent`) |
 
 **Authentication Options (in priority order):**
 1. **Environment variable**: Set `JAATO_OPENROUTER_API_KEY`
@@ -632,6 +633,12 @@ plugin_configs:
     api_key: "sk-or-..."           # overrides env / stored credentials
     http_referer: "https://..."    # HTTP-Referer header for app rankings
     app_title: "MyApp"             # X-OpenRouter-Title header
+    app_categories: ["cli-agent"]  # X-OpenRouter-Categories header
+                                   # (marketplace categories for jaato's
+                                   # placement in OpenRouter rankings;
+                                   # default ["cli-agent"], pass [] to
+                                   # opt out of category attribution).
+                                   # See https://openrouter.ai/docs/app-attribution
     extra_headers:                 # arbitrary additional headers (str→str)
       x-anthropic-beta: "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
                                    # OpenRouter forwards supported beta
@@ -691,7 +698,7 @@ plugin_configs:
 
 | Layer | Keys | Purpose |
 |-------|------|---------|
-| top-level | `api_key`, `http_referer`, `app_title`, `extra_headers` | auth / identity. `extra_headers` (`Dict[str,str]`) is the hook for OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) — Anthropic `x-anthropic-beta` is the canonical case (`fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`, `structured-outputs-2025-11-13`). Merged into the OpenAI client's `default_headers`; profile values win on key collisions. |
+| top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `app_categories` (`List[str]`) is jaato's hook into [OpenRouter's app marketplace](https://openrouter.ai/docs/app-attribution) — emitted as the `X-OpenRouter-Categories` header. Default is `["cli-agent"]` (jaato is a terminal-driven agentic tool orchestrator); pass `[]` to opt out of category attribution entirely. Validated strictly: lowercase hyphen-separated slugs, ≤30 chars each, ≤5 entries; unrecognized categories are silently dropped server-side. `extra_headers` (`Dict[str,str]`) is the hook for OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) — Anthropic `x-anthropic-beta` is the canonical case (`fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`, `structured-outputs-2025-11-13`). Both merge into the OpenAI client's `default_headers`; profile values win on key collisions. |
 | `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. |
 | `routing` | any [provider routing](https://openrouter.ai/docs/features/provider-routing) key (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `ignore`, `only`, `quantizations`, `sort` (string or `{by, partition}`), `zdr`, `enforce_distillable_text`, `max_price`, `preferred_min_throughput`, `preferred_max_latency`, ...) | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts) and `api_params.models` (cross-model fallback list, routing constrains providers across all of them). Opaque pass-through — new routing keys land automatically. |
 | `framework_overrides` | `context_length`, `base_url` | rare escape hatches; normally context length is discovered from the OpenRouter catalog at connect time. |

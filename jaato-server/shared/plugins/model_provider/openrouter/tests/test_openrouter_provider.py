@@ -20,11 +20,14 @@ from ..converters import (
     tool_schema_to_openai,
 )
 from ..env import (
+    DEFAULT_APP_CATEGORIES,
     DEFAULT_BASE_URL,
     DEFAULT_CONTEXT_LENGTH,
+    HEADER_APP_CATEGORIES,
     HEADER_APP_TITLE,
     HEADER_HTTP_REFERER,
     resolve_api_key,
+    resolve_app_categories,
     resolve_app_title,
     resolve_base_url,
     resolve_context_length,
@@ -149,10 +152,40 @@ class TestEnvironment:
         with patch.dict("os.environ", {"JAATO_OPENROUTER_APP_TITLE": "MyApp"}):
             assert resolve_app_title() == "MyApp"
 
+    def test_resolve_app_categories_default(self):
+        with patch.dict("os.environ", {}, clear=True):
+            # Default puts jaato into the cli-agent category — the
+            # natural fit per https://openrouter.ai/docs/app-attribution.
+            assert resolve_app_categories() == list(DEFAULT_APP_CATEGORIES)
+            assert "cli-agent" in resolve_app_categories()
+
+    def test_resolve_app_categories_from_env_single(self):
+        with patch.dict(
+            "os.environ", {"JAATO_OPENROUTER_APP_CATEGORIES": "writing-assistant"}
+        ):
+            assert resolve_app_categories() == ["writing-assistant"]
+
+    def test_resolve_app_categories_from_env_csv(self):
+        with patch.dict(
+            "os.environ",
+            {"JAATO_OPENROUTER_APP_CATEGORIES": "cli-agent, programming-app"},
+        ):
+            # Whitespace around entries is stripped.
+            assert resolve_app_categories() == ["cli-agent", "programming-app"]
+
+    def test_resolve_app_categories_env_empty_string_means_no_categories(self):
+        with patch.dict(
+            "os.environ", {"JAATO_OPENROUTER_APP_CATEGORIES": ""}
+        ):
+            # An empty env var is an explicit "no categories" opt-out,
+            # distinct from "unset → defaults" semantics.
+            assert resolve_app_categories() == []
+
     def test_attribution_header_names(self):
         # Verify we use the OpenRouter-canonical header names.
         assert HEADER_HTTP_REFERER == "HTTP-Referer"
         assert HEADER_APP_TITLE == "X-OpenRouter-Title"
+        assert HEADER_APP_CATEGORIES == "X-OpenRouter-Categories"
 
 
 # ==================== Converter Tests ====================
@@ -544,6 +577,135 @@ class TestExtraHeaders:
             provider.initialize(ProviderConfig(
                 api_key="sk-or-test",
                 extra={"extra_headers": {"x-foo": 123}},
+            ))
+
+
+class TestAppCategories:
+    """Tests for the ``X-OpenRouter-Categories`` attribution header.
+
+    See https://openrouter.ai/docs/app-attribution.  Jaato defaults to
+    the ``cli-agent`` category; a profile can override or opt out.
+    """
+
+    def _capture_client_kwargs(self):
+        captured = {}
+
+        def fake_client_class(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        return captured, fake_client_class
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_default_sends_cli_agent_category(self, mock_client_class):
+        captured, fake = self._capture_client_kwargs()
+        mock_client_class.return_value = fake
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+
+        headers = captured.get("default_headers") or {}
+        assert headers.get(HEADER_APP_CATEGORIES) == "cli-agent"
+        assert provider._app_categories == ["cli-agent"]
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    @patch.dict(
+        "os.environ",
+        {"JAATO_OPENROUTER_APP_CATEGORIES": "cli-agent,programming-app"},
+        clear=True,
+    )
+    def test_env_var_overrides_default(self, mock_client_class):
+        captured, fake = self._capture_client_kwargs()
+        mock_client_class.return_value = fake
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        headers = captured.get("default_headers") or {}
+        assert headers.get(HEADER_APP_CATEGORIES) == "cli-agent,programming-app"
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_profile_overrides_default(self, mock_client_class):
+        captured, fake = self._capture_client_kwargs()
+        mock_client_class.return_value = fake
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"app_categories": ["personal-agent", "writing-assistant"]},
+        ))
+        headers = captured.get("default_headers") or {}
+        assert (
+            headers.get(HEADER_APP_CATEGORIES)
+            == "personal-agent,writing-assistant"
+        )
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_empty_list_opts_out_of_categories(self, mock_client_class):
+        # An explicit empty list opts out of the header entirely —
+        # distinct from "no profile setting → defaults".
+        captured, fake = self._capture_client_kwargs()
+        mock_client_class.return_value = fake
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"app_categories": []},
+        ))
+        headers = captured.get("default_headers") or {}
+        assert HEADER_APP_CATEGORIES not in headers
+        assert provider._app_categories == []
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_rejects_non_list(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(TypeError, match="app_categories"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"app_categories": "cli-agent"},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_rejects_uppercase_entry(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(ValueError, match="lowercase"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"app_categories": ["CLI-AGENT"]},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_rejects_too_long_entry(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(ValueError, match="30 characters"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"app_categories": ["a" * 31]},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_rejects_too_many_entries(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(ValueError, match="at most 5"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"app_categories": ["a", "b", "c", "d", "e", "f"]},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_rejects_leading_hyphen(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(ValueError, match="lowercase"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"app_categories": ["-bad"]},
             ))
 
 

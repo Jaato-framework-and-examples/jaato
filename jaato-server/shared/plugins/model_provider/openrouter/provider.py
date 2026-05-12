@@ -21,13 +21,17 @@ Authentication
 Optional attribution
 --------------------
 
-OpenRouter exposes app-level rankings when integrators send two
-optional headers:
+OpenRouter exposes app-level rankings when integrators send the
+attribution headers documented at
+https://openrouter.ai/docs/app-attribution:
 
-- ``HTTP-Referer``        — site URL
-- ``X-OpenRouter-Title``  — site / app title
+- ``HTTP-Referer``              — site URL (required for app rankings)
+- ``X-OpenRouter-Title``        — site / app display name
+- ``X-OpenRouter-Categories``   — comma-separated marketplace categories
+                                  (e.g. ``cli-agent``)
 
-Both are defaulted but can be overridden via env vars.
+All three are defaulted (jaato itself attributes as ``cli-agent``);
+each can be overridden per-profile or via env vars.
 
 Environment variables
 ---------------------
@@ -38,6 +42,7 @@ Environment variables
     JAATO_OPENROUTER_CONTEXT_LENGTH Override context window
     JAATO_OPENROUTER_HTTP_REFERER   Attribution: site URL
     JAATO_OPENROUTER_APP_TITLE      Attribution: app title
+    JAATO_OPENROUTER_APP_CATEGORIES Attribution: comma-separated categories
 """
 
 from __future__ import annotations
@@ -95,10 +100,14 @@ from .converters import (
 from .env import (
     DEFAULT_BASE_URL,
     DEFAULT_CONTEXT_LENGTH,
+    HEADER_APP_CATEGORIES,
     HEADER_APP_TITLE,
     HEADER_HTTP_REFERER,
+    MAX_CATEGORIES_PER_REQUEST,
+    MAX_CATEGORY_LENGTH,
     get_checked_credential_locations,
     resolve_api_key,
+    resolve_app_categories,
     resolve_app_title,
     resolve_base_url,
     resolve_context_length,
@@ -129,6 +138,58 @@ REASONING_CAPABLE_HINTS = (
     "thinking",
     "reasoner",
 )
+
+
+# Format check for OpenRouter's marketplace category slugs: lowercase
+# letters, digits, hyphens.  OpenRouter additionally requires
+# recognized values from a curated taxonomy, but unrecognized strings
+# are silently dropped server-side — so the regex covers wire shape
+# only.  See https://openrouter.ai/docs/app-attribution.
+_CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _validate_categories(categories: List[str]) -> List[str]:
+    """Validate marketplace categories against OpenRouter's documented rules.
+
+    Returns the input list unchanged on success.  Raises ``TypeError``
+    on shape errors and ``ValueError`` on format violations — both
+    chosen to fail loud so a typo in a profile doesn't silently send
+    a header OpenRouter drops on the floor.
+
+    Validates:
+      * Each entry is a non-empty lowercase string matching
+        ``[a-z0-9-]+`` (no leading hyphen).
+      * Each entry is ≤ :data:`MAX_CATEGORY_LENGTH` characters.
+      * The list contains ≤ :data:`MAX_CATEGORIES_PER_REQUEST` entries.
+    """
+    if not isinstance(categories, list):
+        raise TypeError(
+            f"OpenRouter app_categories must be a list, "
+            f"got {type(categories).__name__}"
+        )
+    if len(categories) > MAX_CATEGORIES_PER_REQUEST:
+        raise ValueError(
+            f"OpenRouter accepts at most {MAX_CATEGORIES_PER_REQUEST} "
+            f"app_categories per request, got {len(categories)}"
+        )
+    for entry in categories:
+        if not isinstance(entry, str):
+            raise TypeError(
+                f"OpenRouter app_categories entries must be strings, "
+                f"got {type(entry).__name__}: {entry!r}"
+            )
+        if len(entry) > MAX_CATEGORY_LENGTH:
+            raise ValueError(
+                f"OpenRouter app_categories entries must be ≤ "
+                f"{MAX_CATEGORY_LENGTH} characters; {entry!r} is "
+                f"{len(entry)} characters"
+            )
+        if not _CATEGORY_RE.match(entry):
+            raise ValueError(
+                f"OpenRouter app_categories entries must be lowercase "
+                f"hyphen-separated slugs matching [a-z0-9-]+; got {entry!r}"
+            )
+    return categories
 
 
 # OpenRouter sets ``X-Generation-Id`` on every chat / completions
@@ -202,6 +263,15 @@ class OpenRouterProvider:
         self._base_url: str = DEFAULT_BASE_URL
         self._http_referer: str = ""
         self._app_title: str = ""
+
+        # Marketplace categories for OpenRouter's app rankings — emitted
+        # as the ``X-OpenRouter-Categories`` header (comma-separated).
+        # Empty list means the header is omitted entirely.  Validated
+        # at initialize() against OpenRouter's documented format
+        # (lowercase, hyphen-separated, ≤30 chars, ≤5 per request);
+        # unrecognized categories are silently dropped server-side.
+        # See https://openrouter.ai/docs/app-attribution.
+        self._app_categories: List[str] = []
 
         # Arbitrary additional HTTP headers stamped on every request via
         # the OpenAI client's ``default_headers``.  Profile-only knob;
@@ -341,6 +411,15 @@ class OpenRouterProvider:
 
         - **Top-level** (auth / identity):
             - ``api_key``, ``http_referer``, ``app_title``
+            - ``app_categories`` (``List[str]``) — OpenRouter
+              marketplace categories for app rankings (emitted as the
+              ``X-OpenRouter-Categories`` header).  See
+              https://openrouter.ai/docs/app-attribution for the
+              taxonomy.  Defaults to :data:`DEFAULT_APP_CATEGORIES`
+              (``["cli-agent"]`` for jaato); pass ``[]`` to opt out of
+              category attribution entirely.  Validated strictly:
+              lowercase hyphen-separated slugs, ≤30 chars each, ≤5
+              entries per request.
             - ``extra_headers`` (``Dict[str, str]``) — additional HTTP
               headers stamped on every request via the OpenAI client's
               ``default_headers``.  Used for OpenRouter's
@@ -406,7 +485,7 @@ class OpenRouterProvider:
         #
         #   plugin_configs.openrouter:
         #     <top-level>           # auth / identity (api_key, http_referer,
-        #                           #   app_title, extra_headers)
+        #                           #   app_title, app_categories, extra_headers)
         #     api_params:           # OpenAI Chat Completions request body params
         #       temperature, top_p, top_k, max_tokens, models (fallback list)
         #       enable_thinking, thinking_budget, thinking_level
@@ -454,6 +533,23 @@ class OpenRouterProvider:
         self._app_title = (
             config.extra.get("app_title") or resolve_app_title()
         )
+
+        # Marketplace categories — profile takes precedence over env
+        # (and env is parsed from a comma-separated string).  Both
+        # paths share the same validation: format violations raise
+        # immediately so a typo can't silently invalidate the header.
+        # Pass an explicit empty list to opt out of category attribution
+        # entirely without touching DEFAULT_APP_CATEGORIES.
+        categories_extra = config.extra.get("app_categories")
+        if categories_extra is None:
+            self._app_categories = _validate_categories(resolve_app_categories())
+        else:
+            if not isinstance(categories_extra, (list, tuple)):
+                raise TypeError(
+                    "OpenRouter 'app_categories' config must be a list of "
+                    f"strings, got {type(categories_extra).__name__}"
+                )
+            self._app_categories = _validate_categories(list(categories_extra))
 
         # Top-level: arbitrary HTTP headers (e.g. ``x-anthropic-beta``).
         # Profile-only; no env-var fallback because headers don't compose
@@ -609,6 +705,7 @@ class OpenRouterProvider:
         self._trace(
             f"[INIT] client created, base_url={self._base_url}, "
             f"referer={self._http_referer!r}, title={self._app_title!r}, "
+            f"categories={self._app_categories!r}, "
             f"provider_routing={'configured' if self._provider_routing else 'none'}"
         )
 
@@ -628,6 +725,8 @@ class OpenRouterProvider:
             default_headers[HEADER_HTTP_REFERER] = self._http_referer
         if self._app_title:
             default_headers[HEADER_APP_TITLE] = self._app_title
+        if self._app_categories:
+            default_headers[HEADER_APP_CATEGORIES] = ",".join(self._app_categories)
         if self._extra_headers:
             default_headers.update(self._extra_headers)
 
