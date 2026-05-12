@@ -264,6 +264,9 @@ class TestSubProfileProvisioningStage:
             parent_session_id="sess-A",
             subagent_id="agent-1",
             workspace_path="/work",
+            # Phase 5 §5.9: tightenings kwarg, default None when
+            # the caller doesn't supply sub_profile_tightenings.
+            tightenings=None,
         )
         apparmor.teardown_sub_profile.assert_called_once_with(
             parent_session_id="sess-A",
