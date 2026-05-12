@@ -430,48 +430,72 @@ def bootstrap_session(
     # the existing cgroup-attach in their Popen preexec_fn so model-
     # controlled subprocesses land in //child (drops escape rules).
     #
-    # When JAATO_RUNNER_PROFILE is empty (developer escape hatch:
-    # JAATO_RUNNER_DISABLE_CONFINE=1), no callback is installed —
-    # subprocesses fall back to today's pre-§5.10c behavior.
+    # Audible-failure contract (per peer review of e805e4d0, same
+    # rule that fixed Phase 4 §4.3 PR #57 silent-isolation-downgrade):
     #
-    # Best-effort: install failure logs WARNING but doesn't roll back
-    # the session.  Pre-§5.10c was None-callback behavior anyway; if
-    # the install fails, we degrade to that.  See
-    # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
-    try:
-        runner_profile = os.environ.get("JAATO_RUNNER_PROFILE", "").strip()
-        if runner_profile:
+    # - JAATO_RUNNER_PROFILE empty → operator opted out of kernel
+    #   confinement (JAATO_RUNNER_DISABLE_CONFINE=1).  Skip the
+    #   install silently with an INFO log.  No escape vector to close
+    #   when the runner itself is unconfined.
+    # - JAATO_RUNNER_PROFILE set → operator opted INTO kernel
+    #   confinement.  Install MUST succeed or bootstrap MUST fail
+    #   audibly via BootstrapError.  A silent install failure would
+    #   leave the session running with no //child transition — model-
+    #   controlled subprocesses retain the escape primitive, exactly
+    #   the gap §5.10 closes.  Caller (the daemon side) classifies
+    #   BootstrapError and surfaces a visible failure to the
+    #   supervisor instead of a deceptive "session ready" return.
+    #
+    # See docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+    runner_profile = os.environ.get("JAATO_RUNNER_PROFILE", "").strip()
+    if runner_profile:
+        try:
             from server.apparmor import make_child_transition_callback
             child_cb = make_child_transition_callback(runner_profile)
             executor = getattr(session, "_executor", None)
-            if executor is not None and hasattr(
+            if executor is None or not hasattr(
                 executor, "set_apparmor_child_transition_callback",
             ):
-                executor.set_apparmor_child_transition_callback(child_cb)
-                logger.info(
-                    "runner-session bootstrap: installed AppArmor "
-                    "//child transition callback for profile=%s",
-                    runner_profile,
+                raise BootstrapError(
+                    "configure",
+                    "AppArmor //child transition install failed: "
+                    "session has no executor with "
+                    "set_apparmor_child_transition_callback.  "
+                    "JAATO_RUNNER_PROFILE is set "
+                    f"({runner_profile!r}) so the operator opted "
+                    "into kernel confinement — failing audibly "
+                    "rather than running with the escape vector "
+                    "open.  Operator escape hatch: "
+                    "JAATO_RUNNER_DISABLE_CONFINE=1.",
                 )
-            else:
-                logger.warning(
-                    "runner-session bootstrap: session has no executor "
-                    "with set_apparmor_child_transition_callback — "
-                    "subprocess spawn will use today's behavior "
-                    "(no //child transition)",
-                )
-        else:
+            executor.set_apparmor_child_transition_callback(child_cb)
             logger.info(
-                "runner-session bootstrap: JAATO_RUNNER_PROFILE empty; "
-                "skipping AppArmor //child transition callback "
-                "install (runner is unconfined)",
+                "runner-session bootstrap: installed AppArmor "
+                "//child transition callback for profile=%s",
+                runner_profile,
             )
-    except Exception:  # noqa: BLE001 — best-effort
-        logger.exception(
-            "runner-session bootstrap: failed to install AppArmor "
-            "//child transition callback; subprocess spawn falls back "
-            "to pre-§5.10c behavior (escape vector remains open for "
-            "this session)",
+        except BootstrapError:
+            raise  # already classified
+        except Exception as exc:  # noqa: BLE001 — boundary surface
+            logger.exception(
+                "runner-session bootstrap: AppArmor //child "
+                "transition install crashed for profile=%s",
+                runner_profile,
+            )
+            raise BootstrapError(
+                "configure",
+                f"AppArmor //child transition install crashed: "
+                f"{type(exc).__name__}: {exc}.  JAATO_RUNNER_PROFILE "
+                f"is set ({runner_profile!r}) so the operator opted "
+                "into kernel confinement — failing audibly rather "
+                "than running with the escape vector open.  Operator "
+                "escape hatch: JAATO_RUNNER_DISABLE_CONFINE=1.",
+            ) from exc
+    else:
+        logger.info(
+            "runner-session bootstrap: JAATO_RUNNER_PROFILE empty; "
+            "skipping AppArmor //child transition callback "
+            "install (runner is unconfined)",
         )
 
     logger.info(
