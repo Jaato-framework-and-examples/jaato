@@ -448,6 +448,191 @@ class TestAuthentication:
         assert headers.get(HEADER_APP_TITLE) == "Example App"
 
 
+class TestExtraHeaders:
+    """Tests for the ``extra_headers`` profile knob.
+
+    Primary use case is OpenRouter's provider-specific beta header
+    passthrough (e.g. ``x-anthropic-beta: interleaved-thinking-2025-05-14``).
+    See https://openrouter.ai/docs/features/provider-routing
+    "Provider-Specific Headers".
+    """
+
+    def _capture_client_kwargs(self):
+        captured = {}
+
+        def fake_client_class(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        return captured, fake_client_class
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_extra_headers_merged_into_default_headers(self, mock_client_class):
+        captured, fake = self._capture_client_kwargs()
+        mock_client_class.return_value = fake
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={
+                "extra_headers": {
+                    "x-anthropic-beta": (
+                        "fine-grained-tool-streaming-2025-05-14,"
+                        "interleaved-thinking-2025-05-14"
+                    ),
+                },
+            },
+        ))
+
+        headers = captured.get("default_headers") or {}
+        assert headers.get("x-anthropic-beta") == (
+            "fine-grained-tool-streaming-2025-05-14,"
+            "interleaved-thinking-2025-05-14"
+        )
+        assert provider._extra_headers == {
+            "x-anthropic-beta": (
+                "fine-grained-tool-streaming-2025-05-14,"
+                "interleaved-thinking-2025-05-14"
+            ),
+        }
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_extra_headers_can_override_attribution(self, mock_client_class):
+        # Profile values must win on key collisions so a profile can
+        # set a different app title without touching framework defaults.
+        captured, fake = self._capture_client_kwargs()
+        mock_client_class.return_value = fake
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={
+                "http_referer": "https://framework.example",
+                "extra_headers": {HEADER_HTTP_REFERER: "https://profile.example"},
+            },
+        ))
+        headers = captured.get("default_headers") or {}
+        assert headers.get(HEADER_HTTP_REFERER) == "https://profile.example"
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_extra_headers_absent_means_no_extras(self, mock_client_class):
+        captured, fake = self._capture_client_kwargs()
+        mock_client_class.return_value = fake
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        # Default headers should only contain framework attribution (or
+        # nothing at all if env vars aren't set).
+        headers = captured.get("default_headers") or {}
+        assert "x-anthropic-beta" not in headers
+        assert provider._extra_headers == {}
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_extra_headers_rejects_non_dict(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(TypeError, match="extra_headers"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"extra_headers": "x-anthropic-beta: foo"},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_extra_headers_rejects_non_string_values(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(TypeError, match="str→str"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"extra_headers": {"x-foo": 123}},
+            ))
+
+
+class TestModelsFallback:
+    """Tests for the ``api_params.models`` cross-model fallback list.
+
+    OpenRouter walks each candidate in order when the primary ``model``
+    fails (outage / context-limit / safety).  Required to take
+    advantage of ``routing.sort = {by: ..., partition: "none"}``.
+    """
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_models_stored_and_forwarded_via_extra_body(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={
+                "api_params": {
+                    "models": [
+                        "anthropic/claude-sonnet-4.5",
+                        "openai/gpt-5-mini",
+                        "google/gemini-3-flash-preview",
+                    ],
+                },
+            },
+        ))
+        assert provider._models_fallback == [
+            "anthropic/claude-sonnet-4.5",
+            "openai/gpt-5-mini",
+            "google/gemini-3-flash-preview",
+        ]
+        body = provider._build_extra_body()
+        assert body.get("models") == [
+            "anthropic/claude-sonnet-4.5",
+            "openai/gpt-5-mini",
+            "google/gemini-3-flash-preview",
+        ]
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_models_default_empty_omits_field(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        assert provider._models_fallback == []
+        body = provider._build_extra_body()
+        # The field must NOT be present when unset — sending an empty
+        # list would tell OpenRouter "no fallbacks allowed" rather than
+        # "use defaults".
+        assert "models" not in body
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_models_extra_body_uses_fresh_list_per_call(self, mock_client_class):
+        # Guard against accidental in-flight mutation: each call to
+        # _build_extra_body() must return a list that's independent
+        # from the provider's stored fallback list.
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"models": ["a", "b"]}},
+        ))
+        body = provider._build_extra_body()
+        body["models"].append("c")
+        assert provider._models_fallback == ["a", "b"]
+        body2 = provider._build_extra_body()
+        assert body2["models"] == ["a", "b"]
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_models_rejects_non_list(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(TypeError, match="models"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"api_params": {"models": "openai/gpt-5-mini"}},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_models_rejects_non_string_entries(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(TypeError, match="non-empty"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"api_params": {"models": ["openai/gpt-5-mini", ""]}},
+            ))
+
+
 class TestProviderRouting:
     """Tests for the ``provider`` request-routing dict.
 

@@ -203,6 +203,29 @@ class OpenRouterProvider:
         self._http_referer: str = ""
         self._app_title: str = ""
 
+        # Arbitrary additional HTTP headers stamped on every request via
+        # the OpenAI client's ``default_headers``.  Profile-only knob;
+        # primary use is OpenRouter's provider-specific beta header
+        # passthrough (e.g. ``x-anthropic-beta: fine-grained-tool-streaming-2025-05-14``,
+        # ``interleaved-thinking-2025-05-14``, ``structured-outputs-2025-11-13``).
+        # See https://openrouter.ai/docs/features/provider-routing
+        # "Provider-Specific Headers".  Merged into the headers OpenRouter
+        # already gets (``HTTP-Referer`` / ``X-OpenRouter-Title`` / ``Authorization``)
+        # — user values win on key collisions.
+        self._extra_headers: Dict[str, str] = {}
+
+        # Cross-model fallback list — OpenRouter's request-level
+        # ``models`` body field (sibling of ``model`` / ``messages``).
+        # When set, OpenRouter tries each candidate in order on
+        # outage / context-limit / safety failures of the primary.
+        # Distinct from ``routing.order`` (which constrains *providers*
+        # for a single model) and from any framework-level model
+        # fallback (which is profile-scoped, not per-request).
+        # Required by routing's ``partition: "none"`` examples
+        # (see https://openrouter.ai/docs/features/provider-routing
+        # "Advanced Sorting with Partition" / Use Cases 1-3).
+        self._models_fallback: List[str] = []
+
         # Per-call accounting (NOT conversation state)
         self._last_usage: TokenUsage = TokenUsage()
         self._context_length: int = 0
@@ -318,8 +341,23 @@ class OpenRouterProvider:
 
         - **Top-level** (auth / identity):
             - ``api_key``, ``http_referer``, ``app_title``
+            - ``extra_headers`` (``Dict[str, str]``) — additional HTTP
+              headers stamped on every request via the OpenAI client's
+              ``default_headers``.  Used for OpenRouter's
+              provider-specific beta-header passthrough:
+              ``x-anthropic-beta: fine-grained-tool-streaming-2025-05-14``,
+              ``interleaved-thinking-2025-05-14``,
+              ``structured-outputs-2025-11-13``, etc.  See
+              https://openrouter.ai/docs/features/provider-routing
+              "Provider-Specific Headers".
         - ``api_params`` (OpenAI Chat Completions request body fields):
             - ``temperature``, ``top_p``, ``top_k``, ``max_tokens``
+            - ``models`` (``List[str]``) — OpenRouter's request-level
+              cross-model fallback list (sibling of ``model`` in the
+              request body).  OpenRouter walks each candidate on
+              outage / context-limit / safety failures.  Pairs with
+              ``routing.sort = {by: ..., partition: "none"}`` to find
+              the best provider across all candidate models.
             - ``enable_thinking``, ``thinking_budget``, ``thinking_level``
             - ``cache_prompt`` (``"auto"`` / True / False; default
               ``"auto"`` enables explicit caching only for upstreams
@@ -330,10 +368,15 @@ class OpenRouterProvider:
               extended-TTL variant)
         - ``routing`` (OpenRouter ``provider`` extension — a dict
           forwarded verbatim via ``extra_body`` on every request):
-            - ``order``, ``allow_fallbacks``, ``require_parameters``,
-              ``data_collection``, ``ignore``, ``quantizations``,
-              ``sort``, ... (see
-              https://openrouter.ai/docs/features/provider-routing)
+            - Common keys: ``order``, ``allow_fallbacks``,
+              ``require_parameters``, ``data_collection``, ``ignore``,
+              ``only``, ``quantizations``, ``sort`` (string or
+              ``{by, partition}`` object), ``max_price``, ``zdr``,
+              ``enforce_distillable_text``, ``preferred_min_throughput``,
+              ``preferred_max_latency`` (number or ``{p50, p75, p90, p99}``)
+            - Any new OpenRouter routing key works without code changes
+              — the dict is opaque pass-through.  See
+              https://openrouter.ai/docs/features/provider-routing
         - ``framework_overrides`` (rare escape hatches):
             - ``context_length``, ``base_url``
 
@@ -362,11 +405,14 @@ class OpenRouterProvider:
         # ``project_backlog_provider_config_namespacing``):
         #
         #   plugin_configs.openrouter:
-        #     <top-level>           # auth / identity (api_key, http_referer, app_title)
+        #     <top-level>           # auth / identity (api_key, http_referer,
+        #                           #   app_title, extra_headers)
         #     api_params:           # OpenAI Chat Completions request body params
-        #       temperature, top_p, top_k, max_tokens
+        #       temperature, top_p, top_k, max_tokens, models (fallback list)
         #       enable_thinking, thinking_budget, thinking_level
-        #     routing:              # OpenRouter `provider` extension (sort/ignore/order/...)
+        #       cache_prompt, cache_ttl
+        #     routing:              # OpenRouter `provider` extension (sort/ignore/
+        #                           #   order/only/zdr/preferred_min_throughput/...)
         #     framework_overrides:  # rare escape hatches (context_length, base_url)
         #
         # Backward compatibility: every nested key is also read from the
@@ -408,6 +454,29 @@ class OpenRouterProvider:
         self._app_title = (
             config.extra.get("app_title") or resolve_app_title()
         )
+
+        # Top-level: arbitrary HTTP headers (e.g. ``x-anthropic-beta``).
+        # Profile-only; no env-var fallback because headers don't compose
+        # well with environment configuration (would mask per-profile
+        # intent).  Validated strictly so a typo (``"x-anthropic-beta"``
+        # as a string instead of a dict) fails loud rather than being
+        # silently dropped on the floor.
+        extra_headers_extra = config.extra.get("extra_headers")
+        if extra_headers_extra is not None:
+            if not isinstance(extra_headers_extra, dict):
+                raise TypeError(
+                    "OpenRouter 'extra_headers' config must be a dict of "
+                    f"str→str, got {type(extra_headers_extra).__name__}"
+                )
+            normalised: Dict[str, str] = {}
+            for k, v in extra_headers_extra.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise TypeError(
+                        "OpenRouter 'extra_headers' entries must be str→str; "
+                        f"got {type(k).__name__} -> {type(v).__name__}"
+                    )
+                normalised[k] = v
+            self._extra_headers = normalised
 
         # framework_overrides: rare escape hatches.  Normally
         # context_length is discovered from the OpenRouter catalog at
@@ -459,6 +528,29 @@ class OpenRouterProvider:
         # Some upstreams reject requests without explicit per-model
         # temperature / top_p values; per-profile configuration of
         # these is the principled way to express model-specific tuning.
+
+        # Cross-model fallback list (OpenRouter's ``models`` body field).
+        # Stored as a clean list of strings so ``_build_extra_body``
+        # can forward it verbatim.  Validated strictly — silently
+        # accepting a non-list would mask profile typos and result
+        # in OpenRouter ignoring the fallback.
+        models_extra = _knob("models", layer=api_params)
+        if models_extra is not None:
+            if not isinstance(models_extra, (list, tuple)):
+                raise TypeError(
+                    "OpenRouter 'models' (cross-model fallback list) must be "
+                    f"a list of strings, got {type(models_extra).__name__}"
+                )
+            cleaned_models: List[str] = []
+            for entry in models_extra:
+                if not isinstance(entry, str) or not entry.strip():
+                    raise TypeError(
+                        "OpenRouter 'models' entries must be non-empty "
+                        f"strings, got {entry!r}"
+                    )
+                cleaned_models.append(entry)
+            self._models_fallback = cleaned_models
+
         temp_extra = _knob("temperature", layer=api_params)
         if temp_extra is not None:
             self._temperature = float(temp_extra)
@@ -524,7 +616,11 @@ class OpenRouterProvider:
         """Build the OpenAI client configured for OpenRouter.
 
         Sets the optional attribution headers via ``default_headers``
-        so every request automatically includes them.
+        so every request automatically includes them.  Profile-supplied
+        ``extra_headers`` (e.g. ``x-anthropic-beta``) are merged in
+        after the framework defaults — profile values win on key
+        collisions, so a profile can override the attribution headers
+        if needed, but normally just adds new ones (beta opt-ins).
         """
         client_class = get_openai_client_class()
         default_headers: Dict[str, str] = {}
@@ -532,6 +628,8 @@ class OpenRouterProvider:
             default_headers[HEADER_HTTP_REFERER] = self._http_referer
         if self._app_title:
             default_headers[HEADER_APP_TITLE] = self._app_title
+        if self._extra_headers:
+            default_headers.update(self._extra_headers)
 
         return client_class(
             base_url=self._base_url,
@@ -782,6 +880,13 @@ class OpenRouterProvider:
         body: Dict[str, Any] = {}
         if self._provider_routing:
             body["provider"] = self._provider_routing
+        if self._models_fallback:
+            # Cross-model fallback list — sibling of ``model`` in the
+            # request body.  OpenRouter walks this list on outage /
+            # context-limit / safety failures of the primary ``model``.
+            # Forwarded as a fresh list so later mutations of
+            # ``self._models_fallback`` don't bleed into in-flight requests.
+            body["models"] = list(self._models_fallback)
         if self._enable_thinking:
             reasoning: Dict[str, Any] = {}
             if self._thinking_level:
