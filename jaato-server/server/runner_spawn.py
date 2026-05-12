@@ -115,11 +115,38 @@ def spawn_session_runner(
         log_dir = os.path.join(workspace_path, ".jaato", "logs")
         log_path = os.path.join(log_dir, f"runner-{session_id}.log")
 
+    # Phase 5 §5.1b: forward the app-layer ``RuntimeLimits`` fields
+    # via ``RunnerSpawner.spawn``'s ``max_output_chars`` /
+    # ``tool_timeout_seconds`` kwargs.  The spawner translates them
+    # into the ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
+    # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars the runner-side
+    # cli plugin reads at startup.  Source of truth is
+    # ``server._profile.runtime_limits`` — same field the WS path
+    # consults for cgroup provision (see
+    # ``server/websocket.py:620-624``).  No defaulting on the
+    # mainline path: a profile that omits ``runtime_limits`` keeps
+    # the runner's compile-time defaults (§5.1's
+    # ``apply_isolated_defaults`` is specific to
+    # ``agent_params.isolated=true``).  See
+    # docs/design/phase5_5_1b_mainline_runtime_limits_passthrough_audit.md.
+    profile = getattr(server, "_profile", None)
+    runtime_limits = getattr(profile, "runtime_limits", None) if profile else None
+    max_output_chars = (
+        runtime_limits.max_output_bytes
+        if runtime_limits is not None else None
+    )
+    tool_timeout_seconds = (
+        runtime_limits.tool_timeout_seconds
+        if runtime_limits is not None else None
+    )
+
     spawned = spawner.spawn(
         profile_name=profile_name,
         session_id=session_id,
         workspace_path=workspace_path,
         log_path=log_path,
+        max_output_chars=max_output_chars,
+        tool_timeout_seconds=tool_timeout_seconds,
         disable_confine=disable_confine,
         cgroup_attach=cgroup_attach,
     )

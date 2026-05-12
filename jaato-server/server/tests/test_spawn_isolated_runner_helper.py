@@ -390,16 +390,31 @@ class TestSubCgroupProvisioningStage:
         assert result["cgroup_path"] == ""
         cgroups.provision_cgroup.assert_not_called()
 
-    def test_no_runtime_limits_advances_to_forwarding(self):
-        """Profile has no runtime_limits → cgroup creation skipped
-        (no kernel-enforceable bounds to apply)."""
+    def test_no_runtime_limits_provisions_cgroup_with_defaults(self):
+        """Phase 5 §5.1: profile without ``runtime_limits`` triggers
+        the isolated-subagent default (2 GiB / 128 pids / cpu_weight=100).
+
+        Pre-§5.1 this test pinned the security-violating fallback
+        ("skipped cgroup creation when profile omits runtime_limits");
+        §5.1 closes the gap so cgroup provision is unconditional on
+        cgroups-availability.  ``CgroupsManager.provision_cgroup`` is
+        now invoked with the merged-default RuntimeLimits."""
+        from pathlib import Path
+        from shared.runtime_limits import (
+            ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS,
+        )
         apparmor = _make_default_apparmor()
         cgroups = MagicMock()
         cgroups.is_available.return_value = True
+        cgroups.provision_cgroup.return_value = True
+        cgroups.get_cgroup_path.return_value = Path(
+            "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1",
+        )
+        cgroup_str = "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1"
         sm = _make_session_manager(
             apparmor_manager=apparmor,
             cgroups_manager=cgroups,
-            spawn_returns=_make_spawn_handle(cgroup_path=""),
+            spawn_returns=_make_spawn_handle(cgroup_path=cgroup_str),
         )
 
         result = sm._spawn_isolated_runner(
@@ -410,10 +425,18 @@ class TestSubCgroupProvisioningStage:
             workspace_path="/work",
         )
 
-        # Post-§4.3.6c: bootstrap MagicMock-returns truthy → ok=True.
         assert result["ok"] is True
-        assert result["cgroup_path"] == ""
-        cgroups.provision_cgroup.assert_not_called()
+        assert result["cgroup_path"] == cgroup_str
+        # Default applied: provision_cgroup called with the default
+        # RuntimeLimits.  We don't pin every field — only that the
+        # call happened with a non-None RuntimeLimits whose values
+        # match the documented default.
+        cgroups.provision_cgroup.assert_called_once()
+        provision_args = cgroups.provision_cgroup.call_args
+        passed_limits = provision_args[0][1]
+        assert (
+            passed_limits == ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
+        )
 
     def test_provision_success_advances_to_forwarding_with_path(self):
         """Cgroups + has_kernel_limits + provision OK → stage=forwarding
@@ -519,6 +542,175 @@ class TestSubCgroupProvisioningStage:
         assert result["stage"] == "sub_cgroup"
         # Teardown was attempted even though it crashed.
         apparmor.teardown_sub_profile.assert_called_once()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 5 §5.1 — isolated-subagent default RuntimeLimits
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestIsolatedDefaultRuntimeLimits:
+    """Phase 5 §5.1: spawning an isolated subagent merges the profile's
+    ``runtime_limits`` with :data:`ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS`
+    so the isolation-implies-bounds invariant holds even when the
+    profile omits the field.
+
+    Property pinned per assertion (never the implementation):
+    - cgroup provision sees the merged limits.
+    - spawn-side ``RunnerSpawner.spawn`` call receives the app-layer
+      defaults via ``max_output_chars`` + ``tool_timeout_seconds``.
+    - Supplied kernel/app fields win per-field; defaults fill the rest.
+    """
+
+    def _capture_spawn(self):
+        """Build a SessionManager where ``_do_spawn_isolated_runner``
+        is a MagicMock — exposes the kwargs the helper passed,
+        including the new ``effective_runtime_limits`` parameter."""
+        from unittest.mock import MagicMock as MM
+        apparmor = _make_default_apparmor()
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = True
+        cgroups.provision_cgroup.return_value = True
+        from pathlib import Path
+        cgroups.get_cgroup_path.return_value = Path(
+            "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1",
+        )
+        sm = _make_session_manager(
+            apparmor_manager=apparmor,
+            cgroups_manager=cgroups,
+        )
+        spawn_mock = MM(
+            return_value=_make_spawn_handle(
+                cgroup_path=(
+                    "/sys/fs/cgroup/jaato/jaato-ws-sess-A__sub_agent-1"
+                ),
+            ),
+        )
+        sm._do_spawn_isolated_runner = spawn_mock  # type: ignore[method-assign]
+        return sm, cgroups, spawn_mock
+
+    def test_default_applies_when_profile_omits_runtime_limits(self):
+        """Profile without ``runtime_limits`` → cgroup provisioned
+        with the conservative default."""
+        from shared.runtime_limits import (
+            ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS,
+        )
+        sm, cgroups, spawn_mock = self._capture_spawn()
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is True
+        cgroups.provision_cgroup.assert_called_once()
+        passed_limits = cgroups.provision_cgroup.call_args[0][1]
+        assert (
+            passed_limits == ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
+        )
+        # _do_spawn_isolated_runner received the same effective limits.
+        spawn_kwargs = spawn_mock.call_args.kwargs
+        assert (
+            spawn_kwargs["effective_runtime_limits"]
+            == ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
+        )
+
+    def test_default_applies_when_profile_supplies_empty_runtime_limits(
+        self,
+    ):
+        """``runtime_limits: {}`` (all-None) is semantically identical
+        to absent — defaults still apply per plan-Q2."""
+        from shared.runtime_limits import (
+            ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS,
+        )
+        sm, cgroups, spawn_mock = self._capture_spawn()
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(runtime_limits={}),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is True
+        passed_limits = cgroups.provision_cgroup.call_args[0][1]
+        assert (
+            passed_limits == ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
+        )
+
+    def test_supplied_kernel_fields_win_per_field(self):
+        """Profile sets ``memory_max_mb=4096`` → cgroup uses 4096 for
+        memory + default 128/100 for pids/cpu_weight."""
+        sm, cgroups, spawn_mock = self._capture_spawn()
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits={"memory_max_mb": 4096},
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is True
+        passed_limits = cgroups.provision_cgroup.call_args[0][1]
+        assert passed_limits.memory_max_mb == 4096
+        assert passed_limits.pids_max == 128  # Default fills.
+        assert passed_limits.cpu_weight == 100  # Default fills.
+
+    def test_supplied_app_fields_win_per_field(self):
+        """Profile sets ``tool_timeout_seconds=30`` → spawn-side
+        receives 30s for the timeout knob; output cap stays at
+        the 1 MiB default."""
+        sm, cgroups, spawn_mock = self._capture_spawn()
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(
+                runtime_limits={"tool_timeout_seconds": 30.0},
+            ),
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is True
+        spawn_kwargs = spawn_mock.call_args.kwargs
+        effective = spawn_kwargs["effective_runtime_limits"]
+        assert effective.tool_timeout_seconds == 30.0
+        assert effective.max_output_bytes == 1_048_576  # Default fills.
+
+    def test_cgroup_provision_skipped_when_manager_unavailable(self):
+        """The cgroup-skip branch can only fire when ``CgroupsManager``
+        is unavailable on the host — profile-content can no longer
+        bypass cgroup provision after §5.1."""
+        apparmor = _make_default_apparmor()
+        cgroups = MagicMock()
+        cgroups.is_available.return_value = False  # Host capability gap.
+        sm = _make_session_manager(
+            apparmor_manager=apparmor,
+            cgroups_manager=cgroups,
+            spawn_returns=_make_spawn_handle(cgroup_path=""),
+        )
+
+        result = sm._spawn_isolated_runner(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            profile_payload=_valid_payload(),  # No runtime_limits.
+            task="do thing",
+            workspace_path="/work",
+        )
+
+        assert result["ok"] is True
+        assert result["cgroup_path"] == ""
+        # Defaults exist but the host can't enforce them — provision
+        # not called.
+        cgroups.provision_cgroup.assert_not_called()
 
 
 # ──────────────────────────────────────────────────────────────────────

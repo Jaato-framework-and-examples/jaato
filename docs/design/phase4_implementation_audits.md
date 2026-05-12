@@ -1666,6 +1666,20 @@ shipped as gaps in §4.3.  Phase 5 should pick them up:
 10. **`profile_payload` allow-list / typed model.**  Daemon-side
     handler accepts free-form dict; Phase 5 should add an allow-list
     or pydantic model to reject unknown fields.
+11. **Mainline `RuntimeLimits` app-layer passthrough to runner.**
+    *Surfaced during Phase 5 §5.1 work; SHIPPED as Phase 5 §5.1b.*
+    `RunnerSpawner.spawn` accepts `max_output_chars` +
+    `tool_timeout_seconds` kwargs and forwards them as
+    `JAATO_RUNNER_*` env vars; the runner-side cli plugin reads
+    those at startup.  Pre-§5.1b
+    `server/runner_spawn.py:spawn_session_runner` (the mainline
+    IPC / WS spawn path) didn't pass them — so a main-session
+    profile that set `runtime_limits.tool_timeout_seconds` or
+    `max_output_bytes` silently no-op'd on the runner subprocess.
+    §5.1b reads `server._profile.runtime_limits` (same field the WS
+    path consults for cgroup provision) and forwards the app-layer
+    values.  No mainline defaulting — wiring-only.  Audit:
+    `docs/design/phase5_5_1b_mainline_runtime_limits_passthrough_audit.md`.
 
 ### Cumulative test count for §4.3
 

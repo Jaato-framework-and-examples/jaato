@@ -166,3 +166,82 @@ class RuntimeLimits:
         return any(v is not None for v in (
             self.memory_max_mb, self.pids_max, self.cpu_weight,
         ))
+
+
+# Phase 5 §5.1: default `RuntimeLimits` applied to subagents spawned with
+# ``agent_params.isolated=true`` whenever the profile omits the
+# corresponding field.  The opt-in establishes the "isolation implies
+# bounds" invariant; without a default, a profile that forgot to declare
+# ``runtime_limits`` would silently skip cgroup provision and inherit the
+# daemon's default cgroup (no caps) — the documented Phase 4 §4.3.9 item 1
+# hardening gap.
+#
+# Values chosen for typical LLM-driven subagent workloads:
+# * 2 GiB memory — comfortable for tool-running subagents; OOM-kills runaways.
+# * 128 pids — generous for shell/cli workloads; rejects fork-bomb classes.
+# * cpu.weight=100 — cgroup v2 default fair-share weight.
+# * 120s tool timeout — conservative wall-clock cap for individual subprocesses.
+# * 1 MiB output cap — prevents chatty tools from saturating the wire.
+#
+# See ``docs/design/phase5_5_1_isolated_default_runtime_limits_audit.md``
+# for the per-field rationale and merge semantics.
+ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS = RuntimeLimits(
+    memory_max_mb=2048,
+    pids_max=128,
+    cpu_weight=100,
+    tool_timeout_seconds=120.0,
+    max_output_bytes=1_048_576,
+)
+
+
+def apply_isolated_defaults(
+    supplied: Optional[RuntimeLimits],
+) -> RuntimeLimits:
+    """Merge *supplied* with :data:`ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS`.
+
+    Per-field semantics: when *supplied* sets a field, that value wins;
+    when *supplied* leaves a field as ``None`` (or is itself ``None``),
+    the default fills in.  The ``extra`` forward-compat dict is taken
+    from *supplied* verbatim — defaults don't contribute unknown keys.
+
+    Used by :meth:`SessionManager._spawn_isolated_runner` to compute the
+    effective `RuntimeLimits` for an isolated subagent before provisioning
+    its sub-cgroup and forwarding app-layer caps to the runner subprocess.
+
+    Returns a fresh :class:`RuntimeLimits` instance — never returns the
+    module-level default object directly, so the caller can't mutate the
+    shared default through field-by-field assignment.  (The dataclass is
+    frozen anyway, but defensive copying preserves the invariant under
+    future-frozen-removal scenarios.)
+    """
+    if supplied is None:
+        supplied = RuntimeLimits()
+    default = ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
+    return RuntimeLimits(
+        memory_max_mb=(
+            supplied.memory_max_mb
+            if supplied.memory_max_mb is not None
+            else default.memory_max_mb
+        ),
+        pids_max=(
+            supplied.pids_max
+            if supplied.pids_max is not None
+            else default.pids_max
+        ),
+        cpu_weight=(
+            supplied.cpu_weight
+            if supplied.cpu_weight is not None
+            else default.cpu_weight
+        ),
+        tool_timeout_seconds=(
+            supplied.tool_timeout_seconds
+            if supplied.tool_timeout_seconds is not None
+            else default.tool_timeout_seconds
+        ),
+        max_output_bytes=(
+            supplied.max_output_bytes
+            if supplied.max_output_bytes is not None
+            else default.max_output_bytes
+        ),
+        extra=dict(supplied.extra),
+    )
