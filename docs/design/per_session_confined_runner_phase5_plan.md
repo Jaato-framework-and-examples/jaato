@@ -83,10 +83,10 @@ surfaced during §5.1 work:
 
 | Plan | Audit ledger item |
 |------|-------------------|
-| §5.1 | §4.3.9 item 1 — Default `RuntimeLimits` for isolated subagents |
+| §5.1 | §4.3.9 item 1 — Default `RuntimeLimits` for isolated subagents (shipped) |
 | §5.2 | §4.3.9 item 2 — Nested cgroup structure (parent-bounded sub) |
 | §5.3 | §4.3.9 item 4 — Cgroup-leak audit at session shutdown |
-| §5.1b | §4.3.9 item 11 — Mainline `RuntimeLimits` app-layer passthrough to runner (surfaced during §5.1; broader than §4.3 sub-track but kernel-/cgroup-adjacent) |
+| §5.1b | §4.3.9 item 11 — Mainline `RuntimeLimits` app-layer passthrough to runner (shipped) |
 
 **Shared audit context:** all four touch the runtime-limits wiring
 path.  §5.1 / §5.2 / §5.3 share the

@@ -1667,22 +1667,19 @@ shipped as gaps in §4.3.  Phase 5 should pick them up:
     handler accepts free-form dict; Phase 5 should add an allow-list
     or pydantic model to reject unknown fields.
 11. **Mainline `RuntimeLimits` app-layer passthrough to runner.**
-    *Surfaced during Phase 5 §5.1 work (commit `f486fd0`).*
+    *Surfaced during Phase 5 §5.1 work; SHIPPED as Phase 5 §5.1b.*
     `RunnerSpawner.spawn` accepts `max_output_chars` +
     `tool_timeout_seconds` kwargs and forwards them as
     `JAATO_RUNNER_*` env vars; the runner-side cli plugin reads
-    those at startup.  But `server/runner_spawn.py:spawn_session_runner`
-    (the mainline IPC / WS spawn path) doesn't pass them — so a
-    main-session profile that sets `runtime_limits.tool_timeout_seconds`
-    or `max_output_bytes` silently no-ops on the runner subprocess.
-    §5.1 wired the isolated-subagent spawn site explicitly to close
-    the gap for isolated runners; the mainline path remains.  Scope
-    note: broader than the §4.3 sub-track (touches the IPC/WS spawn
-    flow, not the §4.3.6 sub-runner spawn), but tracked here so the
-    Phase 5 Theme A audit can pick it up alongside §5.1's defaults.
-    Phase 5: extend `runner_spawn.build_session_envelope`'s caller
-    chain (or a parallel `spawn_session_runner` arg) to read the
-    server's `_runtime_limits` and forward to `RunnerSpawner.spawn`.
+    those at startup.  Pre-§5.1b
+    `server/runner_spawn.py:spawn_session_runner` (the mainline
+    IPC / WS spawn path) didn't pass them — so a main-session
+    profile that set `runtime_limits.tool_timeout_seconds` or
+    `max_output_bytes` silently no-op'd on the runner subprocess.
+    §5.1b reads `server._profile.runtime_limits` (same field the WS
+    path consults for cgroup provision) and forwards the app-layer
+    values.  No mainline defaulting — wiring-only.  Audit:
+    `docs/design/phase5_5_1b_mainline_runtime_limits_passthrough_audit.md`.
 
 ### Cumulative test count for §4.3
 

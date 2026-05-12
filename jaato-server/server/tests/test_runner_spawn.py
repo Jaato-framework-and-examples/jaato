@@ -302,3 +302,154 @@ def test_ws_apparmor_pre_init_hook_accepts_client_id_kwarg() -> None:
     assert "client_id" in param_names, (
         f"WS hook signature missing client_id param; got {param_names!r}"
     )
+
+
+# ----------------------------------------------------------------------
+# Phase 5 §5.1b — mainline RuntimeLimits app-layer passthrough
+# ----------------------------------------------------------------------
+
+
+class _ProfileWithLimits:
+    """Tiny stand-in for ``SubagentProfile`` exposing the field
+    ``spawn_session_runner`` reads.  Avoids importing the full
+    profile machinery into this lightweight test module."""
+
+    def __init__(self, runtime_limits: Any) -> None:
+        self.runtime_limits = runtime_limits
+
+
+def test_app_layer_fields_forwarded_when_profile_sets_them(
+    daemon_loop, tmp_path,
+) -> None:
+    """Phase 5 §5.1b: profile carrying ``runtime_limits`` with
+    ``tool_timeout_seconds`` + ``max_output_bytes`` set must
+    propagate those values into ``RunnerSpawner.spawn``'s
+    matching kwargs, which the spawner forwards as
+    ``JAATO_RUNNER_*`` env vars."""
+    from server.runner_spawn import spawn_session_runner
+    from shared.runtime_limits import RuntimeLimits
+
+    server = _FakeJaatoServer()
+    server._profile = _ProfileWithLimits(
+        RuntimeLimits(
+            tool_timeout_seconds=30.0,
+            max_output_bytes=8192,
+        ),
+    )
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-1",
+        workspace_path=str(tmp_path),
+        profile_name="jaato-ws-sess-1",
+        daemon_loop=daemon_loop,
+    )
+
+    spawn_call = _FakeSpawner.instances[0].spawn_calls[0]
+    assert spawn_call["max_output_chars"] == 8192
+    assert spawn_call["tool_timeout_seconds"] == 30.0
+
+
+def test_no_profile_passes_none_for_both_kwargs(
+    daemon_loop, tmp_path,
+) -> None:
+    """Inline-spec / no-profile sessions have ``server._profile is
+    None``.  Both app-layer kwargs forward as ``None``;
+    ``RunnerSpawner.spawn`` then skips the env-var write."""
+    from server.runner_spawn import spawn_session_runner
+
+    server = _FakeJaatoServer()
+    # _FakeJaatoServer doesn't set _profile in __init__; the
+    # getattr-with-default path inside spawn_session_runner must
+    # tolerate the missing attr.
+    spawn_session_runner(
+        server=server,
+        session_id="sess-1",
+        workspace_path=str(tmp_path),
+        profile_name="jaato-ws-sess-1",
+        daemon_loop=daemon_loop,
+    )
+
+    spawn_call = _FakeSpawner.instances[0].spawn_calls[0]
+    assert spawn_call["max_output_chars"] is None
+    assert spawn_call["tool_timeout_seconds"] is None
+
+
+def test_profile_without_runtime_limits_passes_none(
+    daemon_loop, tmp_path,
+) -> None:
+    """Profile with ``runtime_limits=None`` (the SubagentProfile
+    default) → both kwargs forward as ``None``.  No mainline
+    defaulting: §5.1b is wiring-only."""
+    from server.runner_spawn import spawn_session_runner
+
+    server = _FakeJaatoServer()
+    server._profile = _ProfileWithLimits(runtime_limits=None)
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-1",
+        workspace_path=str(tmp_path),
+        profile_name="jaato-ws-sess-1",
+        daemon_loop=daemon_loop,
+    )
+
+    spawn_call = _FakeSpawner.instances[0].spawn_calls[0]
+    assert spawn_call["max_output_chars"] is None
+    assert spawn_call["tool_timeout_seconds"] is None
+
+
+def test_kernel_fields_do_not_leak_into_app_layer_kwargs(
+    daemon_loop, tmp_path,
+) -> None:
+    """Profile that sets only the kernel-enforced fields
+    (memory/pids/cpu_weight) → both app-layer kwargs stay ``None``.
+    Kernel fields wire through ``CgroupsManager.provision_cgroup``
+    elsewhere; the spawn kwargs only carry app-layer values."""
+    from server.runner_spawn import spawn_session_runner
+    from shared.runtime_limits import RuntimeLimits
+
+    server = _FakeJaatoServer()
+    server._profile = _ProfileWithLimits(
+        RuntimeLimits(memory_max_mb=4096, pids_max=64, cpu_weight=100),
+    )
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-1",
+        workspace_path=str(tmp_path),
+        profile_name="jaato-ws-sess-1",
+        daemon_loop=daemon_loop,
+    )
+
+    spawn_call = _FakeSpawner.instances[0].spawn_calls[0]
+    assert spawn_call["max_output_chars"] is None
+    assert spawn_call["tool_timeout_seconds"] is None
+
+
+def test_partial_app_layer_supplied_forwards_only_set_fields(
+    daemon_loop, tmp_path,
+) -> None:
+    """Per-field independence: profile sets only
+    ``tool_timeout_seconds`` → timeout kwarg is 30.0, output kwarg
+    is ``None``.  Mirrors the no-defaulting decision (§3.2 of the
+    §5.1b audit)."""
+    from server.runner_spawn import spawn_session_runner
+    from shared.runtime_limits import RuntimeLimits
+
+    server = _FakeJaatoServer()
+    server._profile = _ProfileWithLimits(
+        RuntimeLimits(tool_timeout_seconds=30.0),
+    )
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-1",
+        workspace_path=str(tmp_path),
+        profile_name="jaato-ws-sess-1",
+        daemon_loop=daemon_loop,
+    )
+
+    spawn_call = _FakeSpawner.instances[0].spawn_calls[0]
+    assert spawn_call["tool_timeout_seconds"] == 30.0
+    assert spawn_call["max_output_chars"] is None
