@@ -21,13 +21,17 @@ Authentication
 Optional attribution
 --------------------
 
-OpenRouter exposes app-level rankings when integrators send two
-optional headers:
+OpenRouter exposes app-level rankings when integrators send the
+attribution headers documented at
+https://openrouter.ai/docs/app-attribution:
 
-- ``HTTP-Referer``        — site URL
-- ``X-OpenRouter-Title``  — site / app title
+- ``HTTP-Referer``              — site URL (required for app rankings)
+- ``X-OpenRouter-Title``        — site / app display name
+- ``X-OpenRouter-Categories``   — comma-separated marketplace categories
+                                  (e.g. ``cli-agent``)
 
-Both are defaulted but can be overridden via env vars.
+All three are defaulted (jaato itself attributes as ``cli-agent``);
+each can be overridden per-profile or via env vars.
 
 Environment variables
 ---------------------
@@ -38,6 +42,7 @@ Environment variables
     JAATO_OPENROUTER_CONTEXT_LENGTH Override context window
     JAATO_OPENROUTER_HTTP_REFERER   Attribution: site URL
     JAATO_OPENROUTER_APP_TITLE      Attribution: app title
+    JAATO_OPENROUTER_APP_CATEGORIES Attribution: comma-separated categories
 """
 
 from __future__ import annotations
@@ -86,6 +91,7 @@ from .converters import (
     get_original_tool_name,
     history_to_openai,
     map_finish_reason,
+    read_chunk_error,
     response_from_openai,
     serialize_history as _serialize_history,
     system_message_with_cache,
@@ -94,10 +100,14 @@ from .converters import (
 from .env import (
     DEFAULT_BASE_URL,
     DEFAULT_CONTEXT_LENGTH,
+    HEADER_APP_CATEGORIES,
     HEADER_APP_TITLE,
     HEADER_HTTP_REFERER,
+    MAX_CATEGORIES_PER_REQUEST,
+    MAX_CATEGORY_LENGTH,
     get_checked_credential_locations,
     resolve_api_key,
+    resolve_app_categories,
     resolve_app_title,
     resolve_base_url,
     resolve_context_length,
@@ -130,6 +140,102 @@ REASONING_CAPABLE_HINTS = (
 )
 
 
+# Format check for OpenRouter's marketplace category slugs: lowercase
+# letters, digits, hyphens.  OpenRouter additionally requires
+# recognized values from a curated taxonomy, but unrecognized strings
+# are silently dropped server-side — so the regex covers wire shape
+# only.  See https://openrouter.ai/docs/app-attribution.
+_CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _validate_categories(categories: List[str]) -> List[str]:
+    """Validate marketplace categories against OpenRouter's documented rules.
+
+    Returns the input list unchanged on success.  Raises ``TypeError``
+    on shape errors and ``ValueError`` on format violations — both
+    chosen to fail loud so a typo in a profile doesn't silently send
+    a header OpenRouter drops on the floor.
+
+    Validates:
+      * Each entry is a non-empty lowercase string matching
+        ``[a-z0-9-]+`` (no leading hyphen).
+      * Each entry is ≤ :data:`MAX_CATEGORY_LENGTH` characters.
+      * The list contains ≤ :data:`MAX_CATEGORIES_PER_REQUEST` entries.
+    """
+    if not isinstance(categories, list):
+        raise TypeError(
+            f"OpenRouter app_categories must be a list, "
+            f"got {type(categories).__name__}"
+        )
+    if len(categories) > MAX_CATEGORIES_PER_REQUEST:
+        raise ValueError(
+            f"OpenRouter accepts at most {MAX_CATEGORIES_PER_REQUEST} "
+            f"app_categories per request, got {len(categories)}"
+        )
+    for entry in categories:
+        if not isinstance(entry, str):
+            raise TypeError(
+                f"OpenRouter app_categories entries must be strings, "
+                f"got {type(entry).__name__}: {entry!r}"
+            )
+        if len(entry) > MAX_CATEGORY_LENGTH:
+            raise ValueError(
+                f"OpenRouter app_categories entries must be ≤ "
+                f"{MAX_CATEGORY_LENGTH} characters; {entry!r} is "
+                f"{len(entry)} characters"
+            )
+        if not _CATEGORY_RE.match(entry):
+            raise ValueError(
+                f"OpenRouter app_categories entries must be lowercase "
+                f"hyphen-separated slugs matching [a-z0-9-]+; got {entry!r}"
+            )
+    return categories
+
+
+# OpenRouter sets ``X-Generation-Id`` on every chat / completions
+# response (see https://openrouter.ai/docs/api/reference/streaming
+# "Additional Information").  Capture is best-effort: both the OpenAI
+# SDK's batch response and ``Stream`` wrapper expose the underlying
+# httpx response, but the exact attribute path has shifted across
+# SDK versions.  This helper tries the documented paths and returns
+# ``None`` quietly when none are available — never an exception, since
+# the ID is observability-only.
+_GENERATION_ID_HEADERS = ("x-generation-id", "X-Generation-Id")
+
+
+def _extract_generation_id(response_or_stream: Any) -> Optional[str]:
+    """Return the value of OpenRouter's ``X-Generation-Id`` header, if any.
+
+    Looks at the object's ``response`` attribute (Stream wrapper),
+    then ``_raw_response`` (newer SDK), then the object itself (batch
+    response), trying common header accessor shapes (``.headers``
+    mapping or dict).  Never raises.
+    """
+    if response_or_stream is None:
+        return None
+    for attr in ("response", "_raw_response", None):
+        target = (
+            getattr(response_or_stream, attr, None) if attr else response_or_stream
+        )
+        if target is None:
+            continue
+        headers = getattr(target, "headers", None)
+        if headers is None:
+            continue
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            for key in _GENERATION_ID_HEADERS:
+                value = getter(key)
+                if isinstance(value, str) and value:
+                    return value
+        elif isinstance(headers, dict):
+            for key in _GENERATION_ID_HEADERS:
+                value = headers.get(key)
+                if isinstance(value, str) and value:
+                    return value
+    return None
+
+
 class OpenRouterProvider:
     """OpenRouter model provider.
 
@@ -157,6 +263,38 @@ class OpenRouterProvider:
         self._base_url: str = DEFAULT_BASE_URL
         self._http_referer: str = ""
         self._app_title: str = ""
+
+        # Marketplace categories for OpenRouter's app rankings — emitted
+        # as the ``X-OpenRouter-Categories`` header (comma-separated).
+        # Empty list means the header is omitted entirely.  Validated
+        # at initialize() against OpenRouter's documented format
+        # (lowercase, hyphen-separated, ≤30 chars, ≤5 per request);
+        # unrecognized categories are silently dropped server-side.
+        # See https://openrouter.ai/docs/app-attribution.
+        self._app_categories: List[str] = []
+
+        # Arbitrary additional HTTP headers stamped on every request via
+        # the OpenAI client's ``default_headers``.  Profile-only knob;
+        # primary use is OpenRouter's provider-specific beta header
+        # passthrough (e.g. ``x-anthropic-beta: fine-grained-tool-streaming-2025-05-14``,
+        # ``interleaved-thinking-2025-05-14``, ``structured-outputs-2025-11-13``).
+        # See https://openrouter.ai/docs/features/provider-routing
+        # "Provider-Specific Headers".  Merged into the headers OpenRouter
+        # already gets (``HTTP-Referer`` / ``X-OpenRouter-Title`` / ``Authorization``)
+        # — user values win on key collisions.
+        self._extra_headers: Dict[str, str] = {}
+
+        # Cross-model fallback list — OpenRouter's request-level
+        # ``models`` body field (sibling of ``model`` / ``messages``).
+        # When set, OpenRouter tries each candidate in order on
+        # outage / context-limit / safety failures of the primary.
+        # Distinct from ``routing.order`` (which constrains *providers*
+        # for a single model) and from any framework-level model
+        # fallback (which is profile-scoped, not per-request).
+        # Required by routing's ``partition: "none"`` examples
+        # (see https://openrouter.ai/docs/features/provider-routing
+        # "Advanced Sorting with Partition" / Use Cases 1-3).
+        self._models_fallback: List[str] = []
 
         # Per-call accounting (NOT conversation state)
         self._last_usage: TokenUsage = TokenUsage()
@@ -224,6 +362,14 @@ class OpenRouterProvider:
         self._agent_name: Optional[str] = None
         self._agent_id: str = "main"
 
+        # OpenRouter returns ``X-Generation-Id`` on every chat / completions
+        # response (see https://openrouter.ai/docs/api/reference/streaming
+        # "Additional Information").  Capturing the most recent one lets
+        # operators correlate trace logs and ledger entries with
+        # OpenRouter's dashboard / support tickets.  Updated by both
+        # batch and streaming paths; cleared on shutdown.
+        self._last_generation_id: Optional[str] = None
+
     # ==================== Agent Context / Tracing ====================
 
     def set_agent_context(
@@ -265,8 +411,32 @@ class OpenRouterProvider:
 
         - **Top-level** (auth / identity):
             - ``api_key``, ``http_referer``, ``app_title``
+            - ``app_categories`` (``List[str]``) — OpenRouter
+              marketplace categories for app rankings (emitted as the
+              ``X-OpenRouter-Categories`` header).  See
+              https://openrouter.ai/docs/app-attribution for the
+              taxonomy.  Defaults to :data:`DEFAULT_APP_CATEGORIES`
+              (``["cli-agent"]`` for jaato); pass ``[]`` to opt out of
+              category attribution entirely.  Validated strictly:
+              lowercase hyphen-separated slugs, ≤30 chars each, ≤5
+              entries per request.
+            - ``extra_headers`` (``Dict[str, str]``) — additional HTTP
+              headers stamped on every request via the OpenAI client's
+              ``default_headers``.  Used for OpenRouter's
+              provider-specific beta-header passthrough:
+              ``x-anthropic-beta: fine-grained-tool-streaming-2025-05-14``,
+              ``interleaved-thinking-2025-05-14``,
+              ``structured-outputs-2025-11-13``, etc.  See
+              https://openrouter.ai/docs/features/provider-routing
+              "Provider-Specific Headers".
         - ``api_params`` (OpenAI Chat Completions request body fields):
             - ``temperature``, ``top_p``, ``top_k``, ``max_tokens``
+            - ``models`` (``List[str]``) — OpenRouter's request-level
+              cross-model fallback list (sibling of ``model`` in the
+              request body).  OpenRouter walks each candidate on
+              outage / context-limit / safety failures.  Pairs with
+              ``routing.sort = {by: ..., partition: "none"}`` to find
+              the best provider across all candidate models.
             - ``enable_thinking``, ``thinking_budget``, ``thinking_level``
             - ``cache_prompt`` (``"auto"`` / True / False; default
               ``"auto"`` enables explicit caching only for upstreams
@@ -277,10 +447,15 @@ class OpenRouterProvider:
               extended-TTL variant)
         - ``routing`` (OpenRouter ``provider`` extension — a dict
           forwarded verbatim via ``extra_body`` on every request):
-            - ``order``, ``allow_fallbacks``, ``require_parameters``,
-              ``data_collection``, ``ignore``, ``quantizations``,
-              ``sort``, ... (see
-              https://openrouter.ai/docs/features/provider-routing)
+            - Common keys: ``order``, ``allow_fallbacks``,
+              ``require_parameters``, ``data_collection``, ``ignore``,
+              ``only``, ``quantizations``, ``sort`` (string or
+              ``{by, partition}`` object), ``max_price``, ``zdr``,
+              ``enforce_distillable_text``, ``preferred_min_throughput``,
+              ``preferred_max_latency`` (number or ``{p50, p75, p90, p99}``)
+            - Any new OpenRouter routing key works without code changes
+              — the dict is opaque pass-through.  See
+              https://openrouter.ai/docs/features/provider-routing
         - ``framework_overrides`` (rare escape hatches):
             - ``context_length``, ``base_url``
 
@@ -309,11 +484,14 @@ class OpenRouterProvider:
         # ``project_backlog_provider_config_namespacing``):
         #
         #   plugin_configs.openrouter:
-        #     <top-level>           # auth / identity (api_key, http_referer, app_title)
+        #     <top-level>           # auth / identity (api_key, http_referer,
+        #                           #   app_title, app_categories, extra_headers)
         #     api_params:           # OpenAI Chat Completions request body params
-        #       temperature, top_p, top_k, max_tokens
+        #       temperature, top_p, top_k, max_tokens, models (fallback list)
         #       enable_thinking, thinking_budget, thinking_level
-        #     routing:              # OpenRouter `provider` extension (sort/ignore/order/...)
+        #       cache_prompt, cache_ttl
+        #     routing:              # OpenRouter `provider` extension (sort/ignore/
+        #                           #   order/only/zdr/preferred_min_throughput/...)
         #     framework_overrides:  # rare escape hatches (context_length, base_url)
         #
         # Backward compatibility: every nested key is also read from the
@@ -355,6 +533,46 @@ class OpenRouterProvider:
         self._app_title = (
             config.extra.get("app_title") or resolve_app_title()
         )
+
+        # Marketplace categories — profile takes precedence over env
+        # (and env is parsed from a comma-separated string).  Both
+        # paths share the same validation: format violations raise
+        # immediately so a typo can't silently invalidate the header.
+        # Pass an explicit empty list to opt out of category attribution
+        # entirely without touching DEFAULT_APP_CATEGORIES.
+        categories_extra = config.extra.get("app_categories")
+        if categories_extra is None:
+            self._app_categories = _validate_categories(resolve_app_categories())
+        else:
+            if not isinstance(categories_extra, (list, tuple)):
+                raise TypeError(
+                    "OpenRouter 'app_categories' config must be a list of "
+                    f"strings, got {type(categories_extra).__name__}"
+                )
+            self._app_categories = _validate_categories(list(categories_extra))
+
+        # Top-level: arbitrary HTTP headers (e.g. ``x-anthropic-beta``).
+        # Profile-only; no env-var fallback because headers don't compose
+        # well with environment configuration (would mask per-profile
+        # intent).  Validated strictly so a typo (``"x-anthropic-beta"``
+        # as a string instead of a dict) fails loud rather than being
+        # silently dropped on the floor.
+        extra_headers_extra = config.extra.get("extra_headers")
+        if extra_headers_extra is not None:
+            if not isinstance(extra_headers_extra, dict):
+                raise TypeError(
+                    "OpenRouter 'extra_headers' config must be a dict of "
+                    f"str→str, got {type(extra_headers_extra).__name__}"
+                )
+            normalised: Dict[str, str] = {}
+            for k, v in extra_headers_extra.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise TypeError(
+                        "OpenRouter 'extra_headers' entries must be str→str; "
+                        f"got {type(k).__name__} -> {type(v).__name__}"
+                    )
+                normalised[k] = v
+            self._extra_headers = normalised
 
         # framework_overrides: rare escape hatches.  Normally
         # context_length is discovered from the OpenRouter catalog at
@@ -406,6 +624,29 @@ class OpenRouterProvider:
         # Some upstreams reject requests without explicit per-model
         # temperature / top_p values; per-profile configuration of
         # these is the principled way to express model-specific tuning.
+
+        # Cross-model fallback list (OpenRouter's ``models`` body field).
+        # Stored as a clean list of strings so ``_build_extra_body``
+        # can forward it verbatim.  Validated strictly — silently
+        # accepting a non-list would mask profile typos and result
+        # in OpenRouter ignoring the fallback.
+        models_extra = _knob("models", layer=api_params)
+        if models_extra is not None:
+            if not isinstance(models_extra, (list, tuple)):
+                raise TypeError(
+                    "OpenRouter 'models' (cross-model fallback list) must be "
+                    f"a list of strings, got {type(models_extra).__name__}"
+                )
+            cleaned_models: List[str] = []
+            for entry in models_extra:
+                if not isinstance(entry, str) or not entry.strip():
+                    raise TypeError(
+                        "OpenRouter 'models' entries must be non-empty "
+                        f"strings, got {entry!r}"
+                    )
+                cleaned_models.append(entry)
+            self._models_fallback = cleaned_models
+
         temp_extra = _knob("temperature", layer=api_params)
         if temp_extra is not None:
             self._temperature = float(temp_extra)
@@ -464,6 +705,7 @@ class OpenRouterProvider:
         self._trace(
             f"[INIT] client created, base_url={self._base_url}, "
             f"referer={self._http_referer!r}, title={self._app_title!r}, "
+            f"categories={self._app_categories!r}, "
             f"provider_routing={'configured' if self._provider_routing else 'none'}"
         )
 
@@ -471,7 +713,11 @@ class OpenRouterProvider:
         """Build the OpenAI client configured for OpenRouter.
 
         Sets the optional attribution headers via ``default_headers``
-        so every request automatically includes them.
+        so every request automatically includes them.  Profile-supplied
+        ``extra_headers`` (e.g. ``x-anthropic-beta``) are merged in
+        after the framework defaults — profile values win on key
+        collisions, so a profile can override the attribution headers
+        if needed, but normally just adds new ones (beta opt-ins).
         """
         client_class = get_openai_client_class()
         default_headers: Dict[str, str] = {}
@@ -479,6 +725,10 @@ class OpenRouterProvider:
             default_headers[HEADER_HTTP_REFERER] = self._http_referer
         if self._app_title:
             default_headers[HEADER_APP_TITLE] = self._app_title
+        if self._app_categories:
+            default_headers[HEADER_APP_CATEGORIES] = ",".join(self._app_categories)
+        if self._extra_headers:
+            default_headers.update(self._extra_headers)
 
         return client_class(
             base_url=self._base_url,
@@ -561,6 +811,7 @@ class OpenRouterProvider:
             self._client.close()
         self._client = None
         self._model_name = None
+        self._last_generation_id = None
 
     def get_auth_info(self) -> str:
         """Return a short description of the credential source used."""
@@ -728,6 +979,13 @@ class OpenRouterProvider:
         body: Dict[str, Any] = {}
         if self._provider_routing:
             body["provider"] = self._provider_routing
+        if self._models_fallback:
+            # Cross-model fallback list — sibling of ``model`` in the
+            # request body.  OpenRouter walks this list on outage /
+            # context-limit / safety failures of the primary ``model``.
+            # Forwarded as a fresh list so later mutations of
+            # ``self._models_fallback`` don't bleed into in-flight requests.
+            body["models"] = list(self._models_fallback)
         if self._enable_thinking:
             reasoning: Dict[str, Any] = {}
             if self._thinking_level:
@@ -823,6 +1081,10 @@ class OpenRouterProvider:
                     **kwargs,
                 )
                 provider_response = response_from_openai(response)
+                gen_id = _extract_generation_id(response)
+                if gen_id:
+                    self._last_generation_id = gen_id
+                    self._trace(f"COMPLETE_GENERATION_ID {gen_id}")
 
             # Mirror the streaming-path gate: if reasoning isn't
             # enabled for this session, drop any reasoning content
@@ -900,6 +1162,7 @@ class OpenRouterProvider:
                     function_calls.append(fc)
             tool_call_accumulators.clear()
 
+        response_stream = None
         try:
             self._trace(f"{trace_prefix}_START")
             chunk_count = 0
@@ -909,12 +1172,38 @@ class OpenRouterProvider:
                 **kwargs,
             )
 
+            # Capture OpenRouter's generation ID for log correlation
+            # (header is set on the response that the stream wraps).
+            gen_id = _extract_generation_id(response_stream)
+            if gen_id:
+                self._last_generation_id = gen_id
+                self._trace(f"{trace_prefix}_GENERATION_ID {gen_id}")
+
             for chunk in response_stream:
                 if cancel_token and cancel_token.is_cancelled:
                     self._trace(f"{trace_prefix}_CANCELLED after {chunk_count} chunks")
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
+
+                # Mid-stream error per OpenRouter's streaming spec: a
+                # top-level ``error`` field arrives in a chunk alongside
+                # a sentinel choice with ``finish_reason: "error"``.
+                # Raise so retry/error-handling layers see it rather
+                # than silently truncating the response.
+                chunk_error = read_chunk_error(chunk)
+                if chunk_error is not None:
+                    msg = chunk_error.get("message") or "Upstream provider error"
+                    code = chunk_error.get("code")
+                    self._trace(
+                        f"{trace_prefix}_MID_STREAM_ERROR code={code!r} msg={msg!r}"
+                    )
+                    raise InfrastructureError(
+                        status_code=0,
+                        original_error=(
+                            f"{code}: {msg}" if code is not None else str(msg)
+                        ),
+                    )
 
                 if not chunk.choices:
                     if chunk.usage:
@@ -1008,6 +1297,24 @@ class OpenRouterProvider:
                 finish_reason = FinishReason.CANCELLED
             else:
                 raise
+        finally:
+            # Close the underlying HTTP connection.  Per the OpenRouter
+            # streaming spec ("Stream Cancellation"), aborting the
+            # connection immediately stops upstream model processing
+            # and billing on supported providers (OpenAI, Anthropic,
+            # DeepSeek, Together, ...).  Without this close, a cancelled
+            # turn keeps the upstream generating until the SDK ``Stream``
+            # object is garbage-collected — which on cancellation can
+            # mean billing for the entire response the user no longer
+            # wants.
+            if response_stream is not None:
+                try:
+                    response_stream.close()
+                except Exception as close_exc:  # pragma: no cover - best effort
+                    self._trace(
+                        f"{trace_prefix}_CLOSE_ERROR "
+                        f"{type(close_exc).__name__}: {close_exc}"
+                    )
 
         flush_text_block()
         flush_tool_calls()
@@ -1112,6 +1419,16 @@ class OpenRouterProvider:
     def get_token_usage(self) -> TokenUsage:
         """Return token usage from the last response."""
         return self._last_usage
+
+    def get_last_generation_id(self) -> Optional[str]:
+        """Return OpenRouter's ``X-Generation-Id`` from the most recent call.
+
+        Useful for log correlation, support tickets, and ledger
+        annotations — OpenRouter's dashboard indexes individual calls
+        by this ID.  ``None`` if no call has been made or the upstream
+        didn't expose the header (older SDK versions / unusual paths).
+        """
+        return self._last_generation_id
 
     # ==================== Serialization ====================
 

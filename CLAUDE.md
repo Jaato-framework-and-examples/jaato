@@ -604,8 +604,9 @@ Available models include Llama 3.3/3.1, DeepSeek-R1, Nemotron, and other NIM cat
 | `JAATO_OPENROUTER_BASE_URL` | Endpoint (default: `https://openrouter.ai/api/v1`) |
 | `JAATO_OPENROUTER_MODEL` | Default model name |
 | `JAATO_OPENROUTER_CONTEXT_LENGTH` | Override context window size |
-| `JAATO_OPENROUTER_HTTP_REFERER` | App-attribution: `HTTP-Referer` header for OpenRouter rankings |
-| `JAATO_OPENROUTER_APP_TITLE` | App-attribution: `X-OpenRouter-Title` header for OpenRouter rankings |
+| `JAATO_OPENROUTER_HTTP_REFERER` | App-attribution: `HTTP-Referer` header (required for OpenRouter app rankings) |
+| `JAATO_OPENROUTER_APP_TITLE` | App-attribution: `X-OpenRouter-Title` header (display name) |
+| `JAATO_OPENROUTER_APP_CATEGORIES` | App-attribution: `X-OpenRouter-Categories` header (comma-separated; default `cli-agent`) |
 
 **Authentication Options (in priority order):**
 1. **Environment variable**: Set `JAATO_OPENROUTER_API_KEY`
@@ -632,6 +633,17 @@ plugin_configs:
     api_key: "sk-or-..."           # overrides env / stored credentials
     http_referer: "https://..."    # HTTP-Referer header for app rankings
     app_title: "MyApp"             # X-OpenRouter-Title header
+    app_categories: ["cli-agent"]  # X-OpenRouter-Categories header
+                                   # (marketplace categories for jaato's
+                                   # placement in OpenRouter rankings;
+                                   # default ["cli-agent"], pass [] to
+                                   # opt out of category attribution).
+                                   # See https://openrouter.ai/docs/app-attribution
+    extra_headers:                 # arbitrary additional headers (str→str)
+      x-anthropic-beta: "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+                                   # OpenRouter forwards supported beta
+                                   # headers to upstreams; see
+                                   # https://openrouter.ai/docs/features/provider-routing#provider-specific-headers
 
     # api_params — OpenAI Chat Completions request body fields
     api_params:
@@ -639,6 +651,15 @@ plugin_configs:
       top_p: 1.0
       top_k: 40
       max_tokens: 8192             # cap on response size
+      models:                      # cross-model fallback list (sibling of `model`)
+        - anthropic/claude-sonnet-4.5
+        - openai/gpt-5-mini
+        - google/gemini-3-flash-preview
+                                   # OpenRouter walks candidates on outage /
+                                   # context-limit / safety failures of `model`.
+                                   # Pairs with routing.sort.partition="none"
+                                   # to find the best provider across all
+                                   # candidate models.
       enable_thinking: true        # extended-reasoning request + extraction
       thinking_budget: 16384       # → reasoning.max_tokens
       thinking_level: "high"       # → reasoning.effort (low/medium/high)
@@ -650,15 +671,24 @@ plugin_configs:
       cache_ttl: "5m"              # "5m" (default) or "1h" (2x write
                                    # premium, no mid-session cache miss)
 
-    # routing — OpenRouter `provider` extension; forwarded via extra_body
+    # routing — OpenRouter `provider` extension; forwarded via extra_body.
+    # Opaque pass-through: any field from
+    # https://openrouter.ai/docs/features/provider-routing works.
     routing:
-      sort: "price"                # price / throughput / latency
-      data_collection: "deny"
-      ignore: ["Groq"]
-      require_parameters: true
-      allow_fallbacks: true
-      # Any [provider routing](https://openrouter.ai/docs/features/provider-routing)
-      # key works (order, quantizations, ...) — passed through verbatim.
+      sort: "price"                # "price" | "throughput" | "latency"
+                                   # OR {by: "...", partition: "model"|"none"}
+      data_collection: "deny"      # "allow" (default) | "deny"
+      ignore: ["Groq"]             # provider slugs to skip
+      only: ["azure"]              # allowlist (mutex with ignore)
+      order: ["openai", "together"]  # try these first, then fall back
+      require_parameters: true     # only upstreams supporting every param
+      allow_fallbacks: true        # false → fail rather than try others
+      quantizations: ["fp8"]       # int4/int8/fp4/fp6/fp8/fp16/bf16/fp32
+      zdr: true                    # Zero Data Retention endpoints only
+      enforce_distillable_text: true   # only distillable-text-allowed models
+      max_price: {prompt: 1, completion: 2, request: 0.01, image: 0.001}
+      preferred_min_throughput: {p90: 50}  # number for p50, or {p50,p75,p90,p99}
+      preferred_max_latency: {p50: 1, p90: 3, p99: 5}
 
     # framework_overrides — rare escape hatches
     framework_overrides:
@@ -668,9 +698,9 @@ plugin_configs:
 
 | Layer | Keys | Purpose |
 |-------|------|---------|
-| top-level | `api_key`, `http_referer`, `app_title` | auth / identity |
-| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl` | OpenAI Chat Completions body fields. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. |
-| `routing` | OpenRouter [provider routing](https://openrouter.ai/docs/features/provider-routing) keys | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts). |
+| top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `app_categories` (`List[str]`) is jaato's hook into [OpenRouter's app marketplace](https://openrouter.ai/docs/app-attribution) — emitted as the `X-OpenRouter-Categories` header. Default is `["cli-agent"]` (jaato is a terminal-driven agentic tool orchestrator); pass `[]` to opt out of category attribution entirely. Validated strictly: lowercase hyphen-separated slugs, ≤30 chars each, ≤5 entries; unrecognized categories are silently dropped server-side. `extra_headers` (`Dict[str,str]`) is the hook for OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) — Anthropic `x-anthropic-beta` is the canonical case (`fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`, `structured-outputs-2025-11-13`). Both merge into the OpenAI client's `default_headers`; profile values win on key collisions. |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. |
+| `routing` | any [provider routing](https://openrouter.ai/docs/features/provider-routing) key (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `ignore`, `only`, `quantizations`, `sort` (string or `{by, partition}`), `zdr`, `enforce_distillable_text`, `max_price`, `preferred_min_throughput`, `preferred_max_latency`, ...) | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts) and `api_params.models` (cross-model fallback list, routing constrains providers across all of them). Opaque pass-through — new routing keys land automatically. |
 | `framework_overrides` | `context_length`, `base_url` | rare escape hatches; normally context length is discovered from the OpenRouter catalog at connect time. |
 
 **Backward compatibility:** the same keys are also accepted at the

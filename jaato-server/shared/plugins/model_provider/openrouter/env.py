@@ -20,10 +20,13 @@ ENV_OPENROUTER_MODEL = "JAATO_OPENROUTER_MODEL"
 ENV_OPENROUTER_CONTEXT_LENGTH = "JAATO_OPENROUTER_CONTEXT_LENGTH"
 ENV_OPENROUTER_HTTP_REFERER = "JAATO_OPENROUTER_HTTP_REFERER"
 ENV_OPENROUTER_APP_TITLE = "JAATO_OPENROUTER_APP_TITLE"
+ENV_OPENROUTER_APP_CATEGORIES = "JAATO_OPENROUTER_APP_CATEGORIES"
 
 # OpenRouter uses these header names for app attribution / rankings.
+# See https://openrouter.ai/docs/app-attribution.
 HEADER_HTTP_REFERER = "HTTP-Referer"
 HEADER_APP_TITLE = "X-OpenRouter-Title"
+HEADER_APP_CATEGORIES = "X-OpenRouter-Categories"
 
 # Default OpenRouter endpoint.  The same key works for all upstream models.
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
@@ -35,6 +38,18 @@ DEFAULT_CONTEXT_LENGTH = 32768
 # when an integrator opts in.  Users can override via env vars.
 DEFAULT_HTTP_REFERER = "https://github.com/Jaato-framework-and-examples/jaato"
 DEFAULT_APP_TITLE = "jaato"
+
+# Marketplace category for jaato.  ``cli-agent`` is the closest fit in
+# OpenRouter's taxonomy ("Terminal-based coding assistants") — jaato is
+# a terminal-driven multi-provider agentic tool orchestrator.  Per
+# https://openrouter.ai/docs/app-attribution, OpenRouter silently
+# drops unrecognized categories, so the worst case for the default is
+# that future taxonomy changes turn it into a no-op until we update.
+DEFAULT_APP_CATEGORIES = ("cli-agent",)
+
+# OpenRouter's documented limits on the X-OpenRouter-Categories header.
+MAX_CATEGORIES_PER_REQUEST = 5
+MAX_CATEGORY_LENGTH = 30
 
 
 def resolve_api_key() -> Optional[str]:
@@ -78,6 +93,27 @@ def resolve_http_referer() -> str:
 def resolve_app_title() -> str:
     """Resolve the X-Title header for OpenRouter app rankings."""
     return os.environ.get(ENV_OPENROUTER_APP_TITLE, DEFAULT_APP_TITLE)
+
+
+def resolve_app_categories() -> List[str]:
+    """Resolve the X-OpenRouter-Categories header value as a list.
+
+    The env var is read as a comma-separated string (the same form
+    that becomes the wire header value); whitespace around each entry
+    is stripped, empty entries are dropped.  Returns the
+    :data:`DEFAULT_APP_CATEGORIES` tuple as a list when unset.
+
+    Format validation is the caller's job — this function trusts that
+    the user knows OpenRouter's taxonomy.  Unrecognized categories are
+    silently ignored by OpenRouter per
+    https://openrouter.ai/docs/app-attribution, so the failure mode is
+    "no category attached" rather than a request error.
+    """
+    raw = os.environ.get(ENV_OPENROUTER_APP_CATEGORIES)
+    if raw is None:
+        return list(DEFAULT_APP_CATEGORIES)
+    parts = [c.strip() for c in raw.split(",")]
+    return [c for c in parts if c]
 
 
 def get_checked_credential_locations() -> List[str]:

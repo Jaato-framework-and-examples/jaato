@@ -547,7 +547,15 @@ def response_from_openai(response: "ChatCompletion") -> ProviderResponse:
 # ==================== Streaming Helpers ====================
 
 def map_finish_reason(reason: Optional[str]) -> FinishReason:
-    """Map an OpenAI streaming finish reason to a ``FinishReason``."""
+    """Map an OpenAI streaming finish reason to a ``FinishReason``.
+
+    ``"error"`` is OpenRouter-specific: it accompanies the mid-stream
+    error event documented at
+    https://openrouter.ai/docs/api/reference/streaming
+    ("Errors After Tokens Have Been Sent"), where the upstream
+    disconnects partway through a response.  The framework's
+    ``FinishReason.ERROR`` is its dedicated outcome.
+    """
     if not reason:
         return FinishReason.UNKNOWN
 
@@ -560,8 +568,54 @@ def map_finish_reason(reason: Optional[str]) -> FinishReason:
         return FinishReason.TOOL_USE
     elif reason_lower == "content_filter":
         return FinishReason.SAFETY
+    elif reason_lower == "error":
+        return FinishReason.ERROR
 
     return FinishReason.UNKNOWN
+
+
+def read_chunk_error(chunk: Any) -> Optional[Dict[str, Any]]:
+    """Return OpenRouter's mid-stream ``error`` payload, or ``None``.
+
+    Per https://openrouter.ai/docs/api/reference/streaming, when an
+    upstream disconnects after some tokens have been sent OpenRouter
+    cannot change the HTTP status (already 200 OK), so it emits a final
+    SSE chunk shaped like::
+
+        {"id":"...", "object":"chat.completion.chunk", ...,
+         "error":{"code":"server_error","message":"..."},
+         "choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}
+
+    The ``error`` field is top-level (sibling of ``choices``).  The
+    OpenAI SDK's ``ChatCompletionChunk`` Pydantic model doesn't declare
+    it, so on real responses it lands in ``model_extra``; tests can
+    populate it as either a dict or a small namespace object.
+
+    We accept an error only when it materialises as a real dict or
+    as an object exposing a string ``message`` — that way the
+    helper Just Works on test doubles without being fooled by
+    ``MagicMock``'s auto-attributes (which are never dicts and never
+    have a string ``message``).
+    """
+    if chunk is None:
+        return None
+    direct = getattr(chunk, "error", None)
+    if isinstance(direct, dict):
+        return direct
+    if direct is not None:
+        msg = getattr(direct, "message", None)
+        code = getattr(direct, "code", None)
+        if isinstance(msg, str):
+            return {
+                "code": code if isinstance(code, (str, int)) else None,
+                "message": msg,
+            }
+    extra = getattr(chunk, "model_extra", None)
+    if isinstance(extra, dict):
+        candidate = extra.get("error")
+        if isinstance(candidate, dict):
+            return candidate
+    return None
 
 
 # ==================== Serialization ====================

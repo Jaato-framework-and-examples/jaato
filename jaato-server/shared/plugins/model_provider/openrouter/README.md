@@ -60,8 +60,9 @@ session profile overrides per session.
 | `JAATO_OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Endpoint |
 | `JAATO_OPENROUTER_MODEL` | — | Default model |
 | `JAATO_OPENROUTER_CONTEXT_LENGTH` | catalog | Context-window override |
-| `JAATO_OPENROUTER_HTTP_REFERER` | `https://github.com/Jaato-framework-and-examples/jaato` | App attribution |
-| `JAATO_OPENROUTER_APP_TITLE` | `jaato` | App attribution |
+| `JAATO_OPENROUTER_HTTP_REFERER` | `https://github.com/Jaato-framework-and-examples/jaato` | [App attribution](https://openrouter.ai/docs/app-attribution): site URL (required for rankings) |
+| `JAATO_OPENROUTER_APP_TITLE` | `jaato` | App attribution: display name |
+| `JAATO_OPENROUTER_APP_CATEGORIES` | `cli-agent` | App attribution: comma-separated marketplace categories |
 
 ### Profile `plugin_configs["openrouter"]`
 
@@ -74,6 +75,11 @@ plugin_configs:
     api_key: "sk-or-..."           # overrides env / stored credentials
     http_referer: "https://..."    # HTTP-Referer header
     app_title: "MyApp"             # X-OpenRouter-Title header
+    app_categories: ["cli-agent"]  # X-OpenRouter-Categories header
+                                   # (marketplace categories for rankings;
+                                   # pass [] to opt out of category attribution)
+    extra_headers:                 # arbitrary HTTP headers (e.g. beta opt-ins)
+      x-anthropic-beta: "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
 
     # api_params — OpenAI Chat Completions request body fields
     api_params:
@@ -81,19 +87,43 @@ plugin_configs:
       top_p: 1.0
       top_k: 40
       max_tokens: 8192
+      models:                      # cross-model fallback list (sibling of `model`)
+        - anthropic/claude-sonnet-4.5
+        - openai/gpt-5-mini
+        - google/gemini-3-flash-preview
       enable_thinking: true        # extended-reasoning request + extraction
       thinking_budget: 16384       # → reasoning.max_tokens
       thinking_level: "high"       # → reasoning.effort (low/medium/high)
       cache_prompt: "auto"         # "auto" (default) | true | false
       cache_ttl: "5m"              # "5m" (default) | "1h"
 
-    # routing — OpenRouter provider routing extension, passed verbatim
+    # routing — OpenRouter provider routing extension, passed verbatim.
+    # Any key from https://openrouter.ai/docs/features/provider-routing
+    # works without code changes — the dict is opaque pass-through.
     routing:
-      sort: "price"                # price / throughput / latency
-      data_collection: "deny"
-      ignore: ["Groq"]
-      require_parameters: true
-      allow_fallbacks: true
+      sort: "price"                # "price" | "throughput" | "latency"
+                                   # OR {by: "...", partition: "model"|"none"}
+      data_collection: "deny"      # "allow" (default) | "deny"
+      ignore: ["Groq"]             # provider slugs to skip
+      only: ["azure"]              # allowlist (mutex with ignore)
+      order: ["openai", "together"]  # try these first, then fall back
+      require_parameters: true     # only upstreams that support every
+                                   # param in the request (e.g. tools, JSON)
+      allow_fallbacks: true        # set false to fail rather than try others
+      quantizations: ["fp8"]       # filter by quant level
+      zdr: true                    # Zero Data Retention endpoints only
+      enforce_distillable_text: true  # only models that allow text distillation
+      max_price:                   # caps; request fails if no provider qualifies
+        prompt: 1
+        completion: 2
+        request: 0.01
+        image: 0.001
+      preferred_min_throughput:    # number for p50, or per-percentile object
+        p90: 50                    # ≥50 tokens/sec at p90 over 5-min window
+      preferred_max_latency:
+        p50: 1
+        p90: 3
+        p99: 5
 
     # framework_overrides — rare escape hatches
     framework_overrides:
@@ -103,9 +133,9 @@ plugin_configs:
 
 | Layer | Keys | Purpose |
 |---|---|---|
-| top-level | `api_key`, `http_referer`, `app_title` | auth / identity |
-| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl` | OpenAI Chat Completions body fields |
-| `routing` | OpenRouter [provider routing](https://openrouter.ai/docs/features/provider-routing) keys | constrains which upstream serves each request |
+| top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `app_categories` (`List[str]`) opts your profile into OpenRouter's [marketplace rankings](https://openrouter.ai/docs/app-attribution) via the `X-OpenRouter-Categories` header (jaato defaults to `["cli-agent"]`; pass `[]` to opt out). Validated strictly: lowercase hyphen-separated, ≤30 chars each, ≤5 entries. `extra_headers` carries OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) (e.g. `x-anthropic-beta`). |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl` | OpenAI Chat Completions body fields; `models` is OpenRouter's request-level cross-model fallback list |
+| `routing` | any [provider routing](https://openrouter.ai/docs/features/provider-routing) key (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `ignore`, `only`, `quantizations`, `sort`, `zdr`, `enforce_distillable_text`, `max_price`, `preferred_min_throughput`, `preferred_max_latency`, ...) | constrains which upstream serves each request; opaque pass-through, so new routing keys work without a framework release |
 | `framework_overrides` | `context_length`, `base_url` | rare escape hatches |
 
 **Backward compatibility:** every nested key is also accepted at the
