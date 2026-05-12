@@ -23,15 +23,28 @@ from shared.session_envelope import SessionInitEnvelope
 # ----------------------------------------------------------------------
 
 
-def _stub_server(*, profile=None, config_root=None, agent_params=None) -> Any:
+def _stub_server(
+    *,
+    profile=None,
+    config_root=None,
+    agent_params=None,
+    main_agent_id=None,
+) -> Any:
     """Build a minimal JaatoServer-shaped stub.  ``_build_session_envelope``
     reads ``_profile`` + ``config_root`` + (Phase 4 §D) ``_agent_params``
-    so SimpleNamespace suffices."""
-    return SimpleNamespace(
-        _profile=profile,
-        config_root=config_root,
-        _agent_params=dict(agent_params or {}),
-    )
+    + (regression fix 2026-05-12) ``_main_agent_id`` so SimpleNamespace
+    suffices.
+
+    ``main_agent_id=None`` means the stub omits ``_main_agent_id``
+    entirely so the getattr-with-default fallback can be exercised."""
+    fields: dict = {
+        "_profile": profile,
+        "config_root": config_root,
+        "_agent_params": dict(agent_params or {}),
+    }
+    if main_agent_id is not None:
+        fields["_main_agent_id"] = main_agent_id
+    return SimpleNamespace(**fields)
 
 
 def _stub_profile(**overrides: Any) -> Any:
@@ -323,6 +336,148 @@ def test_config_root_pass_through() -> None:
         profile_name="x",
     )
     assert env.config_root == "/srv/operator/.jaato"
+
+
+# ----------------------------------------------------------------------
+# Regression fix 2026-05-12: agent_id propagation + completion_payload_schema
+# ----------------------------------------------------------------------
+#
+# Two bugs in this builder discovered via the kb-enablement-2.0
+# cascade smoke test:
+#
+# 1. ``agent_id="main"`` was HARDCODED.  Result: runner-side
+#    ``JaatoSession._agent_id`` stayed ``"main"`` regardless of the
+#    daemon's ``--agent <name>`` resolution.  Downstream
+#    ``AgentCompletedEvent.agent_id`` always carried ``"main"``;
+#    reactor rules keying on logical agent identity (e.g.
+#    ``agent_id == "discovery"``) silently missed.
+#
+# 2. ``completion_payload_schema`` was MISSING from the
+#    ``SessionInitEnvelope`` constructor call entirely.  Even though
+#    the dataclass field existed (default None), the builder never
+#    populated it.  Result: profiles declaring
+#    ``completion_payload_schema`` saw the runner-side
+#    ``LifecycleTools._payload_schema`` stay ``None`` → legacy
+#    summary path fired instead of typed payload validation.
+#
+# Both were introduced when build_session_envelope was relocated in
+# §7c step 2 (copied verbatim with the bugs intact).  IPC test
+# fixtures used agent_name=None + no schema, masking both.
+
+
+class TestAgentIdPropagation:
+    """Pin: envelope.agent_id reflects the daemon-resolved
+    ``--agent <name>`` instead of the hardcoded ``"main"``."""
+
+    def test_agent_id_reads_server_main_agent_id(self) -> None:
+        """Pin: when the JaatoServer's ``_main_agent_id`` is set
+        (the daemon resolved ``--agent discovery`` at construction),
+        the envelope carries the logical identity verbatim."""
+        env = _build_session_envelope(
+            server=_stub_server(main_agent_id="discovery"),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert env.agent_id == "discovery", (
+            f"envelope must carry the daemon-resolved agent_id "
+            f"'discovery', got {env.agent_id!r}"
+        )
+
+    def test_agent_id_defaults_to_main_when_attr_missing(self) -> None:
+        """Pin: when the server stub omits ``_main_agent_id``
+        entirely (legacy server / no ``--agent`` flag), the
+        envelope falls back to the literal ``"main"``.  Preserves
+        backward compat with the pre-fix behavior."""
+        env = _build_session_envelope(
+            server=_stub_server(main_agent_id=None),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert env.agent_id == "main"
+
+    def test_agent_id_with_dashes_and_underscores(self) -> None:
+        """Pin: any valid agent name flows through verbatim — no
+        sanitization at the envelope layer (that lives in the
+        daemon's agent-name resolver)."""
+        env = _build_session_envelope(
+            server=_stub_server(main_agent_id="kb-enablement_2_dispatcher"),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert env.agent_id == "kb-enablement_2_dispatcher"
+
+
+class TestCompletionPayloadSchema:
+    """Pin: envelope.completion_payload_schema is sourced from
+    ``profile.completion_payload_schema`` instead of being silently
+    omitted from the constructor."""
+
+    def test_inline_schema_dict_passes_through(self) -> None:
+        """Pin: an inline JSON Schema dict declared on the profile
+        flows verbatim to the envelope (no flattening, no string
+        coercion).  Runner-side
+        ``completion_schema_loader.resolve_completion_schema``
+        accepts dicts directly."""
+        inline = {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+        }
+        profile = _stub_profile(completion_payload_schema=inline)
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert env.completion_payload_schema == inline
+
+    def test_string_path_passes_through(self) -> None:
+        """Pin: a string path (resolved by
+        ``completion_schema_loader`` against the workspace's
+        ``.jaato/completion_schemas/``) flows verbatim — resolution
+        is the runner's job, not the envelope builder's."""
+        profile = _stub_profile(
+            completion_payload_schema="completion_schemas/discovery_result.schema.json",
+        )
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert (
+            env.completion_payload_schema
+            == "completion_schemas/discovery_result.schema.json"
+        )
+
+    def test_none_when_profile_has_no_schema(self) -> None:
+        """Pin: profile without ``completion_payload_schema``
+        attribute → envelope carries None.  Legacy untyped
+        completion path on the runner side."""
+        profile = _stub_profile()  # no completion_payload_schema set
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert env.completion_payload_schema is None
+
+    def test_none_when_no_profile_at_all(self) -> None:
+        """Pin: server without a resolved profile (auto-spawn path)
+        → envelope carries None.  Symmetric to the no-profile
+        provider/model fallback above."""
+        env = _build_session_envelope(
+            server=_stub_server(profile=None),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="auto",
+        )
+        assert env.completion_payload_schema is None
 
 
 def test_envelope_round_trip_via_dict() -> None:
