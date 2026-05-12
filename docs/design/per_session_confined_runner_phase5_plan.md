@@ -119,7 +119,7 @@ Two items from §4.3.9 plus two memory-backlog items:
 |------|--------|
 | §5.8  | §4.3.9 item 10 — `profile_payload` typed model / allow-list |
 | §5.9  | §4.3.9 item 5 — Supervisor-declared sub-profile tightening flags |
-| §5.10 | memory `project_backlog_apparmor_child_subprofile` — AppArmor escape-vector closure (in-process denylist landed Phase 4; subprocess-side needs child subprofile).  §5.10a (template) + §5.10b (transition callback) shipped without real-host gate; §5.10c (cli wire-up), §5.10d (interactive_shell), §5.10e (sub-runner //child) await operator real-host signoff per audit-discipline #3. |
+| §5.10 | memory `project_backlog_apparmor_child_subprofile` — AppArmor escape-vector closure.  §5.10a/b/c/d shipped (PRs #64, #65, #69); §5.10e shipped as **skip-install for sub-runners** (NOT three-level nesting — the §4.3.4 sub-profile post-v15 already drops the escape primitive by construction; see `phase5_5_10e_sub_runner_skip_audit.md`).  Real-host EACCES verified for §5.10c on Ubuntu 24.04 / AppArmor 4.0.1. |
 | §5.11 | memory `project_backlog_per_session_egress_allowlist` — Per-session network-egress allowlist (closes the host-filter hole AppArmor can't reach) |
 
 **Shared audit context:** all four close confused-deputy surfaces
