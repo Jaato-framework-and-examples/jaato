@@ -29,6 +29,7 @@ get the real :class:`JaatoRuntime`.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Protocol, TYPE_CHECKING
 
@@ -415,6 +416,63 @@ def bootstrap_session(
             "runner-session bootstrap: session construct/configure crashed",
         )
         raise BootstrapError("configure", str(exc)) from exc
+
+    # ---- 4. Phase 5 §5.10c — install AppArmor child-profile
+    # transition callback on subprocess-spawning plugins.
+    #
+    # Read the runner's own profile name from the JAATO_RUNNER_PROFILE
+    # env var (set by RunnerSpawner._build_env, consumed by
+    # runner/__main__.py:110 for self-confinement).  Build the
+    # transition callback via make_child_transition_callback and
+    # install it on the session's executor — the executor forwards to
+    # plugins that implement set_apparmor_child_transition_callback
+    # (cli, interactive_shell).  Plugins compose the callback with
+    # the existing cgroup-attach in their Popen preexec_fn so model-
+    # controlled subprocesses land in //child (drops escape rules).
+    #
+    # When JAATO_RUNNER_PROFILE is empty (developer escape hatch:
+    # JAATO_RUNNER_DISABLE_CONFINE=1), no callback is installed —
+    # subprocesses fall back to today's pre-§5.10c behavior.
+    #
+    # Best-effort: install failure logs WARNING but doesn't roll back
+    # the session.  Pre-§5.10c was None-callback behavior anyway; if
+    # the install fails, we degrade to that.  See
+    # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+    try:
+        runner_profile = os.environ.get("JAATO_RUNNER_PROFILE", "").strip()
+        if runner_profile:
+            from server.apparmor import make_child_transition_callback
+            child_cb = make_child_transition_callback(runner_profile)
+            executor = getattr(session, "_executor", None)
+            if executor is not None and hasattr(
+                executor, "set_apparmor_child_transition_callback",
+            ):
+                executor.set_apparmor_child_transition_callback(child_cb)
+                logger.info(
+                    "runner-session bootstrap: installed AppArmor "
+                    "//child transition callback for profile=%s",
+                    runner_profile,
+                )
+            else:
+                logger.warning(
+                    "runner-session bootstrap: session has no executor "
+                    "with set_apparmor_child_transition_callback — "
+                    "subprocess spawn will use today's behavior "
+                    "(no //child transition)",
+                )
+        else:
+            logger.info(
+                "runner-session bootstrap: JAATO_RUNNER_PROFILE empty; "
+                "skipping AppArmor //child transition callback "
+                "install (runner is unconfined)",
+            )
+    except Exception:  # noqa: BLE001 — best-effort
+        logger.exception(
+            "runner-session bootstrap: failed to install AppArmor "
+            "//child transition callback; subprocess spawn falls back "
+            "to pre-§5.10c behavior (escape vector remains open for "
+            "this session)",
+        )
 
     logger.info(
         "runner-session bootstrap ready: session_id=%s profile=%s "

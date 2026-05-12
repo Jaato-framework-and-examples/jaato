@@ -265,3 +265,174 @@ class TestEventReaderTelemetryInjection:
         success, result = executor.execute("noop", {})
         assert success is True
         assert "_telemetry" not in result
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 §5.10c — AppArmor child-profile transition callback forwarding
+# ---------------------------------------------------------------------------
+
+
+class _DummyPluginWithApparmorSetter:
+    """Fake plugin that implements set_apparmor_child_transition_callback.
+
+    Mirrors `_DummyPluginWithSetter` for the §5.10c forwarding chain."""
+
+    def __init__(self):
+        self.calls = []
+
+    def set_apparmor_child_transition_callback(self, callback):
+        self.calls.append(callback)
+
+
+class TestSetApparmorChildTransitionCallback:
+    """Phase 5 §5.10c: the executor stores the callback and forwards
+    it to any plugin that implements
+    ``set_apparmor_child_transition_callback``.  Same shape as
+    :meth:`set_runtime_limits`'s forwarding — plugins that don't
+    implement the method are silently skipped."""
+
+    def test_default_state_is_none(self):
+        executor = ToolExecutor()
+        assert executor.get_apparmor_child_transition_callback() is None
+
+    def test_setter_stores_callback(self):
+        executor = ToolExecutor()
+        cb = lambda: None
+        executor.set_apparmor_child_transition_callback(cb)
+        assert executor.get_apparmor_child_transition_callback() is cb
+
+    def test_setter_accepts_none(self):
+        """Passing None clears a previously installed callback."""
+        executor = ToolExecutor()
+        executor.set_apparmor_child_transition_callback(lambda: None)
+        executor.set_apparmor_child_transition_callback(None)
+        assert executor.get_apparmor_child_transition_callback() is None
+
+    def test_forwards_to_plugin_with_setter(self):
+        plugin = _DummyPluginWithApparmorSetter()
+        executor = _make_executor_with_registry({"cli": plugin})
+
+        cb = lambda: None
+        executor.set_apparmor_child_transition_callback(cb)
+
+        assert plugin.calls == [cb]
+
+    def test_skips_plugin_without_setter(self):
+        """A plugin lacking the method (todo, file_edit, ...) is
+        silently skipped — only subprocess-spawning plugins care
+        about the //child transition."""
+        plugin = _DummyPluginWithoutSetter()
+        executor = _make_executor_with_registry({"todo": plugin})
+        executor.set_apparmor_child_transition_callback(lambda: None)
+        # No crash, no AttributeError surfaced.
+
+    def test_forwards_only_to_plugins_with_setter(self):
+        good = _DummyPluginWithApparmorSetter()
+        bad = _DummyPluginWithoutSetter()
+        executor = _make_executor_with_registry(
+            {"cli": good, "todo": bad},
+        )
+
+        cb = lambda: None
+        executor.set_apparmor_child_transition_callback(cb)
+
+        assert good.calls == [cb]
+
+    def test_repeat_call_overwrites(self):
+        plugin = _DummyPluginWithApparmorSetter()
+        executor = _make_executor_with_registry({"cli": plugin})
+
+        cb1 = lambda: None
+        cb2 = lambda: None
+        executor.set_apparmor_child_transition_callback(cb1)
+        executor.set_apparmor_child_transition_callback(cb2)
+
+        assert plugin.calls == [cb1, cb2]
+
+
+class TestCliPluginPreexecComposition:
+    """Phase 5 §5.10c: the cli plugin composes apparmor + cgroup
+    callbacks into a single preexec_fn.  Apparmor-first ordering per
+    §6.1 of the audit doc — the new profile must apply during the
+    cgroup write."""
+
+    def _make_cli_plugin(self):
+        from shared.plugins.cli.plugin import CLIToolPlugin
+        return CLIToolPlugin()
+
+    def test_both_none_returns_none(self):
+        """No callbacks installed → preexec_fn is None (today's
+        pre-§5.10c Popen behavior)."""
+        plugin = self._make_cli_plugin()
+        assert plugin._build_subprocess_preexec_fn() is None
+
+    def test_only_cgroup_returns_cgroup_directly(self):
+        """Cgroup-only path — no apparmor wrapping overhead."""
+        plugin = self._make_cli_plugin()
+        cgroup_cb = lambda: None
+        plugin.set_runtime_limits(cgroup_cb, None)
+        assert plugin._build_subprocess_preexec_fn() is cgroup_cb
+
+    def test_only_apparmor_returns_apparmor_directly(self):
+        """Apparmor-only path — e.g., a confined runner without
+        kernel runtime_limits configured."""
+        plugin = self._make_cli_plugin()
+        apparmor_cb = lambda: None
+        plugin.set_apparmor_child_transition_callback(apparmor_cb)
+        assert plugin._build_subprocess_preexec_fn() is apparmor_cb
+
+    def test_both_compose_apparmor_first(self):
+        """Composite preexec_fn runs apparmor FIRST, then cgroup.
+        Order matters per §6.1 of the audit doc."""
+        plugin = self._make_cli_plugin()
+        call_order = []
+
+        def apparmor_cb():
+            call_order.append("apparmor")
+
+        def cgroup_cb():
+            call_order.append("cgroup")
+
+        plugin.set_runtime_limits(cgroup_cb, None)
+        plugin.set_apparmor_child_transition_callback(apparmor_cb)
+
+        composite = plugin._build_subprocess_preexec_fn()
+        assert composite is not None
+        composite()
+        assert call_order == ["apparmor", "cgroup"]
+
+    def test_apparmor_failure_propagates(self):
+        """Fail-closed: an apparmor transition failure must propagate
+        as an exception so Popen treats it as a spawn failure.  A
+        silent failure would leave the child in the parent profile
+        with escape rules intact — exactly the gap §5.10 closes."""
+        plugin = self._make_cli_plugin()
+
+        def apparmor_cb():
+            raise OSError("EACCES")
+
+        def cgroup_cb():
+            # Must not be reached.
+            raise AssertionError("cgroup ran after apparmor failed")
+
+        plugin.set_runtime_limits(cgroup_cb, None)
+        plugin.set_apparmor_child_transition_callback(apparmor_cb)
+
+        composite = plugin._build_subprocess_preexec_fn()
+        try:
+            composite()
+        except OSError as exc:
+            assert "EACCES" in str(exc)
+        else:
+            raise AssertionError(
+                "apparmor failure must propagate (fail-closed)",
+            )
+
+    def test_set_apparmor_callback_accepts_none(self):
+        """Passing None clears a previously installed callback —
+        cleanup path for sessions transitioning between confined and
+        unconfined modes (rare but supported)."""
+        plugin = self._make_cli_plugin()
+        plugin.set_apparmor_child_transition_callback(lambda: None)
+        plugin.set_apparmor_child_transition_callback(None)
+        assert plugin._apparmor_child_transition is None
