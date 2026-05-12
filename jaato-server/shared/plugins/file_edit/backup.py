@@ -72,6 +72,22 @@ class BackupManager:
     Backups are stored in .jaato/backups/ with the naming convention:
     {path_with_underscores}_{ISO_timestamp}.bak
 
+    The ISO timestamp is rendered with **microsecond resolution**
+    (``%Y-%m-%dT%H-%M-%S-%f``).  Older backups produced before the
+    flake-fix landed used second resolution
+    (``%Y-%m-%dT%H-%M-%S``); :meth:`list_all_backups` /
+    :meth:`get_backup_info` parse both formats (new first, old
+    fallback, ``st_mtime`` last).
+
+    On the rare microsecond-resolution collision (two
+    ``create_backup`` calls in the same microsecond, e.g.
+    mocked-clock tests or pathologically fast loops),
+    :meth:`_unique_backup_path` appends a ``-N`` counter to the
+    timestamp portion until the path is unused.  Same wire format
+    as a collision-free name from a parser's perspective
+    (``rsplit('_', 1)`` still puts the entire timestamp+counter on
+    the right).
+
     The number of backups kept per file is controlled by the
     JAATO_FILE_BACKUP_COUNT environment variable (default: 5).
 
@@ -363,8 +379,22 @@ class BackupManager:
             safe_name = safe_name[1:]
         return safe_name
 
+    # ISO 8601-like timestamp format used in backup filenames.
+    # Microseconds (``%f``) appended after seconds so rapid-
+    # sequential ``create_backup`` calls don't collide on the
+    # filename.  Pre-flake-fix backups used the seconds-only form
+    # (``_BACKUP_TIMESTAMP_FMT_LEGACY``); both parsers below try
+    # the new format first, fall back to the legacy one.
+    _BACKUP_TIMESTAMP_FMT = "%Y-%m-%dT%H-%M-%S-%f"
+    _BACKUP_TIMESTAMP_FMT_LEGACY = "%Y-%m-%dT%H-%M-%S"
+
     def _backup_filename(self, file_path: Path) -> str:
         """Generate a backup filename for the given file.
+
+        Returns a name with microsecond-resolution timestamp.
+        Callers that need filesystem uniqueness should use
+        :meth:`_unique_backup_path` instead — it appends a ``-N``
+        counter on the rare microsecond collision.
 
         Args:
             file_path: Original file path
@@ -373,8 +403,96 @@ class BackupManager:
             Backup filename with timestamp
         """
         safe_name = self._sanitize_path(file_path)
-        timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        timestamp = datetime.now().strftime(self._BACKUP_TIMESTAMP_FMT)
         return f"{safe_name}_{timestamp}.bak"
+
+    @classmethod
+    def _parse_backup_timestamp(
+        cls, timestamp_str: str, st_mtime_fallback: float,
+    ) -> datetime:
+        """Parse a backup filename's timestamp portion.
+
+        Tries the current microsecond-resolution format first
+        (``%Y-%m-%dT%H-%M-%S-%f``), then the legacy seconds-only
+        format (``%Y-%m-%dT%H-%M-%S``), then falls back to
+        ``st_mtime``.  Also tolerates the ``-N`` collision-
+        counter suffix appended by :meth:`_unique_backup_path`:
+        strips a trailing ``-<int>`` once and retries before
+        falling back.
+
+        Args:
+            timestamp_str: The portion of the backup filename
+                after the final ``_`` and before ``.bak``.
+            st_mtime_fallback: The backup file's
+                ``stat().st_mtime``, used when no format matches.
+
+        Returns:
+            A ``datetime`` reconstructed from the timestamp
+            portion, or from ``st_mtime`` if the portion can't be
+            parsed.
+        """
+        for fmt in (cls._BACKUP_TIMESTAMP_FMT, cls._BACKUP_TIMESTAMP_FMT_LEGACY):
+            try:
+                return datetime.strptime(timestamp_str, fmt)
+            except ValueError:
+                pass
+        # Try stripping a trailing ``-N`` collision counter
+        # (current format produces strings like
+        # ``2026-05-12T15-30-45-123456-2`` on collision).
+        if "-" in timestamp_str:
+            head, _, tail = timestamp_str.rpartition("-")
+            if tail.isdigit():
+                for fmt in (cls._BACKUP_TIMESTAMP_FMT, cls._BACKUP_TIMESTAMP_FMT_LEGACY):
+                    try:
+                        return datetime.strptime(head, fmt)
+                    except ValueError:
+                        pass
+        return datetime.fromtimestamp(st_mtime_fallback)
+
+    def _unique_backup_path(self, file_path: Path) -> Path:
+        """Return a filesystem path guaranteed not to collide with
+        an existing backup.
+
+        Calls :meth:`_backup_filename` to produce a microsecond-
+        resolution candidate.  If the resulting path already
+        exists (mocked-clock test, identical-microsecond rapid
+        loop), appends a ``-N`` counter to the timestamp portion
+        (before the ``.bak`` extension) and retries.
+
+        The counter is appended INSIDE the timestamp portion (not
+        with a trailing ``_N``) so the existing
+        ``rsplit('_', 1)`` parser still extracts the whole
+        ``{timestamp}-{counter}`` as a single string — falling
+        back to ``st_mtime`` on parse failure, which keeps
+        :meth:`list_all_backups` working without per-parser
+        changes for the collision case.
+
+        Args:
+            file_path: Original file path
+
+        Returns:
+            Absolute path under ``self._base_dir`` that does not
+            yet exist on disk.
+        """
+        candidate = self._base_dir / self._backup_filename(file_path)
+        if not candidate.exists():
+            return candidate
+
+        # Collision path — extremely rare (sub-microsecond loop or
+        # mocked clock).  Append ``-N`` before the .bak extension.
+        # Bounded to 10_000 attempts so a buggy filesystem can't
+        # spin us infinitely; in practice 1-2 attempts is enough.
+        stem = candidate.name[:-len(".bak")]
+        for n in range(2, 10_000):
+            candidate = self._base_dir / f"{stem}-{n}.bak"
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError(
+            f"BackupManager: failed to find a unique backup "
+            f"filename for {file_path!r} after 10_000 attempts "
+            f"(base_dir={self._base_dir!r}).  This indicates a "
+            f"clock or filesystem fault."
+        )
 
     def _get_backups_for_file(self, file_path: Path) -> List[Path]:
         """Get all backup files for a given file, sorted oldest to newest.
@@ -414,8 +532,12 @@ class BackupManager:
         # Ensure backup directory exists
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create backup
-        backup_path = self._base_dir / self._backup_filename(file_path)
+        # Create backup.  Use _unique_backup_path so two
+        # create_backup calls in the same microsecond don't
+        # overwrite each other (pre-fix flake: same-second
+        # timestamps in test_list_backups when the wall clock
+        # crossed a sub-second boundary inconveniently).
+        backup_path = self._unique_backup_path(file_path)
         backup_path.write_bytes(file_path.read_bytes())
 
         # Record metadata with waypoint tagging
@@ -590,11 +712,13 @@ class BackupManager:
                     # Note: This is an approximation since we can't fully reverse sanitization
                     original_path = "/" + sanitized_path.replace("_", "/")
 
-                    # Parse timestamp
-                    try:
-                        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H-%M-%S")
-                    except ValueError:
-                        timestamp = datetime.fromtimestamp(stat.st_mtime)
+                    # Parse timestamp.  Microsecond-resolution
+                    # format first (post flake-fix), legacy
+                    # seconds-only format second, st_mtime
+                    # fallback last.
+                    timestamp = self._parse_backup_timestamp(
+                        timestamp_str, stat.st_mtime,
+                    )
                 else:
                     original_path = name
                     timestamp = datetime.fromtimestamp(stat.st_mtime)
@@ -637,10 +761,9 @@ class BackupManager:
                 timestamp_str = parts[1]
                 original_path = "/" + sanitized_path.replace("_", "/")
 
-                try:
-                    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H-%M-%S")
-                except ValueError:
-                    timestamp = datetime.fromtimestamp(stat.st_mtime)
+                timestamp = self._parse_backup_timestamp(
+                    timestamp_str, stat.st_mtime,
+                )
             else:
                 original_path = name
                 timestamp = datetime.fromtimestamp(stat.st_mtime)
