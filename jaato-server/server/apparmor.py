@@ -288,6 +288,13 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
   audit deny {workspace_path}/.jaato/instructions/**       wlk,
   audit deny {workspace_path}/.jaato/references/**         wlk,
+  # Workspace-tier AppArmor fragments — read by _render_profile on
+  # the NEXT session spawn.  A confined runner that could write a
+  # fragment here would be authoring its own future-session rules
+  # (privilege escalation: confined now, broader-confined-or-
+  # unconfined next).  Same wlk pattern as the other user-authored
+  # config subpaths.
+  audit deny {workspace_path}/.jaato/apparmor-fragments/** wlk,
 
   # ---- shared read-only resources ----
   {venv_path}/           r,
@@ -1273,6 +1280,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
   audit deny {workspace_path}/.jaato/instructions/**       wlk,
   audit deny {workspace_path}/.jaato/references/**         wlk,
+  # Workspace-tier AppArmor fragments — privilege-escalation guard
+  # (mirrors base; isolated sub-runner could otherwise plant rules
+  # for the next session's profile).
+  audit deny {workspace_path}/.jaato/apparmor-fragments/** wlk,
 
   # ---- read-denies on user-authored config ----
   # Information-isolation between agents in a cascade — same as
@@ -1922,6 +1933,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
     audit deny {workspace_path}/.jaato/instructions/**       wlk,
     audit deny {workspace_path}/.jaato/references/**         wlk,
+    # Workspace-tier AppArmor fragments — privilege-escalation guard
+    # (mirrors base; a tool execution under tool_hat could otherwise
+    # plant rules for the next session's profile).
+    audit deny {workspace_path}/.jaato/apparmor-fragments/** wlk,
 
     # ---- tool_hat-specific read-denies on user-authored config ----
     # The whole point of the sub-profile: tool execution can't read
@@ -2090,6 +2105,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
     audit deny {workspace_path}/.jaato/instructions/**       wlk,
     audit deny {workspace_path}/.jaato/references/**         wlk,
+    # Workspace-tier AppArmor fragments — privilege-escalation guard
+    # (mirrors base; a //child subprocess could otherwise plant
+    # rules for the next session's profile).
+    audit deny {workspace_path}/.jaato/apparmor-fragments/** wlk,
 
     # ---- tool_hat-style read-denies (mirrors tool_hat) ----
     # Same information-isolation as the in-process tool_hat: a

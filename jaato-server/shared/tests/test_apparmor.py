@@ -407,6 +407,59 @@ class TestRenderProfile:
             "on venv *.so.*"
         )
 
+    def test_workspace_apparmor_fragments_writes_denied_in_all_profiles(
+        self, manager,
+    ):
+        """Pin: ``<workspace>/.jaato/apparmor-fragments/**`` is
+        write-denied in EVERY profile body — base, isolated sub-
+        profile (§4.3.4), tool_hat (§5.10), //child (§5.10).
+
+        Privilege-escalation guard: PR #77 made
+        ``<workspace>/.jaato/apparmor-fragments/*.rules`` a
+        first-class fragment-discovery source, read live by
+        ``_render_profile`` on the next session spawn.  Without
+        this deny, a confined runner that can write to its
+        workspace could plant a fragment file that auto-installs
+        broader AppArmor rules on the next session — escape via
+        time-shifted rule authoring.  Same ``wlk`` pattern as the
+        other v13 narrow per-subpath denies (write + link +
+        lock)."""
+        # Base profile
+        profile = manager._render_profile("s1", "/workspace")
+        assert "audit deny /workspace/.jaato/apparmor-fragments/** wlk" in profile, (
+            "base profile missing apparmor-fragments write-deny"
+        )
+
+        # Isolated sub-profile
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert "audit deny /workspace/.jaato/apparmor-fragments/** wlk" in sub, (
+            "isolated sub-profile missing apparmor-fragments write-deny"
+        )
+
+        # tool_hat body (extract via brace counting)
+        if "profile tool_hat" in profile:
+            tool_hat_body = self._extract_brace_body(
+                profile, "profile tool_hat",
+            )
+            assert (
+                "audit deny /workspace/.jaato/apparmor-fragments/** wlk"
+                in tool_hat_body
+            ), "tool_hat body missing apparmor-fragments write-deny"
+
+        # //child body
+        if "profile child" in profile:
+            child_body = self._extract_brace_body(
+                profile, "profile child",
+            )
+            assert (
+                "audit deny /workspace/.jaato/apparmor-fragments/** wlk"
+                in child_body
+            ), "//child body missing apparmor-fragments write-deny"
+
     def test_allows_reading_user_tier_services(self, manager):
         """Regression: SchemaStore's tiered lookup reads
         ``~/.jaato/services/`` as a user-tier fallback when the
