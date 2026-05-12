@@ -88,6 +88,16 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         # buffer at the protocol layer (see read_until_idle in session.py).
         self._cgroup_attach: Optional[Callable[[], None]] = None
         self._runtime_limits = None
+        # Phase 5 §5.10d: AppArmor child-profile transition callback
+        # installed via set_apparmor_child_transition_callback().  When
+        # set, the plugin's ShellSession spawn preexec_fn writes
+        # ``changeprofile <profile>//child`` to
+        # /proc/self/attr/current between fork() and exec() so the new
+        # PTY child enters the per-session ``//child`` sub-profile
+        # (which drops the escape-vector rules).  None until the
+        # executor calls — same contract as _cgroup_attach.  See
+        # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
         # Reaper thread
         self._reaper_thread: Optional[threading.Thread] = None
         self._reaper_stop = threading.Event()
@@ -232,6 +242,64 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
             f"set_runtime_limits: attach={attach_callback is not None} "
             f"limits={limits!r}"
         )
+
+    def set_apparmor_child_transition_callback(
+        self,
+        callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Install the AppArmor child-profile transition callback
+        (Phase 5 §5.10d).
+
+        Mirrors the cli plugin's §5.10c wiring exactly.  Forwarded by
+        ``ToolExecutor.set_apparmor_child_transition_callback`` at
+        runner-side bootstrap.  When set, the plugin's
+        ``ShellSession`` spawn composes this callback with the
+        cgroup-attach callback: AppArmor transition FIRST, then
+        cgroup attach, then exec.  Order matters — the new ``//child``
+        profile applies during the cgroup write.
+
+        Closes the verified escape at ``apparmor.py:413-449`` for the
+        interactive_shell surface: a PTY child running
+        ``python3 -c 'open("/proc/self/attr/current","w").write("changeprofile unconfined")'``
+        from a shell tool cannot escape the per-session profile.
+
+        Argument may be ``None`` when the runner isn't AppArmor-
+        confined (JAATO_RUNNER_DISABLE_CONFINE=1 or daemon-side
+        legacy paths) — spawn falls back to cgroup-only preexec_fn.
+        """
+        self._apparmor_child_transition = callback
+        self._trace(
+            f"set_apparmor_child_transition_callback: "
+            f"transition={callback is not None}"
+        )
+
+    def _build_subprocess_preexec_fn(
+        self,
+    ) -> Optional[Callable[[], None]]:
+        """Phase 5 §5.10d: compose the apparmor + cgroup preexec_fn.
+
+        Mirrors :meth:`CLIToolPlugin._build_subprocess_preexec_fn` —
+        same four-case ladder (none / apparmor-only / cgroup-only /
+        both), same apparmor-first ordering, same fail-closed
+        semantics (an exception in preexec_fn propagates as a spawn
+        failure; ShellSession surfaces the failure to the caller
+        instead of returning a half-started session that's lost
+        confinement).
+        """
+        apparmor_cb = self._apparmor_child_transition
+        cgroup_cb = self._cgroup_attach
+        if apparmor_cb is None and cgroup_cb is None:
+            return None
+        if apparmor_cb is None:
+            return cgroup_cb
+        if cgroup_cb is None:
+            return apparmor_cb
+
+        def _composite() -> None:
+            apparmor_cb()
+            cgroup_cb()
+
+        return _composite
 
     # --- Tool schemas ---
 
@@ -556,10 +624,19 @@ IMPORTANT NOTES:
 
         # AppArmor confinement (if any) is inherited from the parent
         # thread via fork+exec — see ToolExecutor.set_apparmor_context.
-        # Cgroup attach (if any) runs as preexec_fn on the backend's
-        # spawn — moves the forked PTY child into the session's cgroup
-        # before exec, so memory.max / pids.max / cpu.weight apply from
-        # the first instruction of the new program.
+        # Phase 5 §5.10d — preexec_fn composes two callbacks between
+        # fork() and exec():
+        #   1. AppArmor child-profile transition (writes
+        #      ``changeprofile <session>//child`` to
+        #      /proc/self/attr/current).  The forked PTY child enters
+        #      the ``//child`` sub-profile, dropping the escape-vector
+        #      rules — a model-controlled shell that writes to
+        #      attr/current gets EACCES.
+        #   2. Cgroup attach (writes the forked child's PID to
+        #      cgroup.procs), so memory.max / pids.max / cpu.weight
+        #      apply from the first instruction of the new program.
+        # Either callback may be None; the composite handles all
+        # four (none, apparmor-only, cgroup-only, both).
         spawn_command = command
 
         self._trace(f"spawn: id={session_id}, cmd={command[:80]}, backend={_BACKEND}")
@@ -573,7 +650,7 @@ IMPORTANT NOTES:
                 idle_timeout=self._idle_timeout,
                 max_lifetime=self._max_lifetime,
                 cwd=self._workspace_root,
-                preexec_fn=self._cgroup_attach,
+                preexec_fn=self._build_subprocess_preexec_fn(),
             )
 
             # Read initial output (program banner, first prompt, etc.)
