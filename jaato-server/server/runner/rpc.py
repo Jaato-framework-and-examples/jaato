@@ -2880,6 +2880,19 @@ class RunnerRPC:
     _NOTIF_TOOL_OUTPUT = "tool_output"
     _NOTIF_TURN_PROGRESS = "turn_progress"
 
+    # Path F regression fix (2026-05-12): runner-side
+    # ``lifecycle_tools._execute_signal_completion`` calls
+    # ``hooks.on_agent_completed`` and ``JaatoSession`` calls
+    # ``hooks.on_session_quiescent`` on the runner-side shim — both
+    # were no-op ``pass`` pre-fix, so neither event reached the
+    # daemon-side reactor engine.  The Path F audit at
+    # ``_AgentUIHooksNotificationShim`` (below) incorrectly assumed
+    # these methods were "covered daemon-side" — true pre-§7c when
+    # ``lifecycle_tools.py`` lived in the daemon process, untrue
+    # post-§7c when the module moved into the runner subprocess.
+    _NOTIF_AGENT_COMPLETED = "agent_completed"
+    _NOTIF_SESSION_QUIESCENT = "session_quiescent"
+
     # Phase 4 §4.4 (Finding 2 closure): session-plugin description-
     # callback bridges runner → daemon as a notification frame.
     # Runner-side session plugin (now runner-tier per §4.4 sub-action
@@ -4087,11 +4100,20 @@ class _AgentUIHooksNotificationShim:
     Methods not listed are no-ops — the daemon-side already covers
     the other ``AgentUIHooks`` methods via different paths:
     - ``on_agent_created`` / ``on_agent_status_changed`` /
-      ``on_agent_completed`` / ``on_session_quiescent`` /
       ``on_agent_turn_completed`` / ``on_agent_context_updated`` /
       ``on_agent_gc_config`` / ``on_agent_history_updated``: invoked
       by daemon-side code (subagent plugin, JaatoClient wrapper)
       against daemon-side ``ServerAgentHooks`` directly.
+    - ``on_agent_completed`` / ``on_session_quiescent``: emitted
+      across the wire via NotificationFrames (2026-05-12 fix —
+      pre-fix these were ``pass`` no-ops on the assumption that
+      they were called daemon-side, which was true pre-§7c when
+      ``lifecycle_tools.py`` lived in the daemon process but FALSE
+      post-§7c when the module moved into the runner subprocess.
+      ``lifecycle_tools._execute_signal_completion`` and
+      ``JaatoSession``'s quiescence hook both call the runner-side
+      shim; the daemon-side ``ServerAgentHooks`` cannot be reached
+      without crossing the wire).
     - ``on_agent_instruction_budget_updated``: already covered by
       the §7c step 6.6.4.2 ``instruction_budget_updated``
       notification frame.
@@ -4226,11 +4248,80 @@ class _AgentUIHooksNotificationShim:
     def on_agent_status_changed(self, *args: Any, **kwargs: Any) -> None:
         pass
 
-    def on_agent_completed(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def on_agent_completed(
+        self,
+        agent_id: str,
+        completed_at: Any = None,
+        success: bool = True,
+        token_usage: Optional[Dict[str, int]] = None,
+        turns_used: Optional[int] = None,
+        error: str = "",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Forward ``on_agent_completed`` across the wire.
 
-    def on_session_quiescent(self, *args: Any, **kwargs: Any) -> None:
-        pass
+        Pre-fix (2026-05-12) this was a ``pass`` no-op that
+        dropped the event entirely.  Runner-side
+        ``lifecycle_tools._execute_signal_completion`` calls this
+        method after validating the agent's typed payload; the
+        daemon-side ``ServerAgentHooks.on_agent_completed``
+        receives the demuxed frame and fires
+        ``AgentCompletedEvent`` into the reactor engine.
+        """
+        try:
+            completed_at_str: Optional[str]
+            if completed_at is None:
+                completed_at_str = None
+            elif hasattr(completed_at, "isoformat"):
+                completed_at_str = completed_at.isoformat()
+            else:
+                completed_at_str = str(completed_at)
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_AGENT_COMPLETED,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "completed_at": completed_at_str,
+                    "success": bool(success),
+                    "token_usage": (
+                        dict(token_usage) if token_usage else None
+                    ),
+                    "turns_used": (
+                        int(turns_used) if turns_used is not None else None
+                    ),
+                    "error": str(error or ""),
+                    "payload": payload,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("agent_completed notify raised")
+
+    def on_session_quiescent(
+        self,
+        agent_id: str,
+        reason: str = "natural",
+    ) -> None:
+        """Forward ``on_session_quiescent`` across the wire.
+
+        Pre-fix (2026-05-12) this was a ``pass`` no-op.  Runner-
+        side ``JaatoSession``'s quiescence hook (jaato_session.py
+        line ~4906) calls this after the
+        ``signal_completion``-bearing turn has fully wrapped up;
+        the daemon-side ``ServerAgentHooks.on_session_quiescent``
+        receives the demuxed frame and fires
+        ``SessionTerminatedEvent`` to attached clients.
+        """
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_SESSION_QUIESCENT,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "reason": str(reason or "natural"),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("session_quiescent notify raised")
 
     def on_agent_turn_completed(self, *args: Any, **kwargs: Any) -> None:
         pass

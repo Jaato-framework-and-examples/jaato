@@ -3793,6 +3793,42 @@ class JaatoServer:
                         )
                     return
 
+                # Path F regression fix (2026-05-12): bridge the
+                # runner-side ``on_agent_completed`` notification to
+                # the daemon-side ``ServerAgentHooks.on_agent_completed``,
+                # which fires ``AgentCompletedEvent`` into the
+                # reactor engine + event-bus subscribers.  Pre-fix
+                # the runner-side shim's ``on_agent_completed`` was
+                # a ``pass`` no-op, so the event was dropped before
+                # crossing the wire and the daemon-side reactor
+                # never saw it (cascade rules keying on
+                # ``AgentCompletedEvent.agent_id`` silently missed).
+                if event_type == "agent_completed":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_agent_completed(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            completed_at=payload.get("completed_at"),
+                            success=bool(payload.get("success", True)),
+                            token_usage=payload.get("token_usage"),
+                            turns_used=payload.get("turns_used"),
+                            error=payload.get("error", "") or "",
+                            payload=payload.get("payload"),
+                        )
+                    return
+
+                # Same fix shape for ``on_session_quiescent``, which
+                # fires ``SessionTerminatedEvent`` to attached
+                # clients after the quiescent turn wraps up.
+                if event_type == "session_quiescent":
+                    hooks = server._get_ui_hooks()
+                    if hooks is not None:
+                        hooks.on_session_quiescent(
+                            agent_id=payload.get("agent_id") or server._main_agent_id,
+                            reason=payload.get("reason", "natural") or "natural",
+                        )
+                    return
+
                 # Phase 4 §4.4 (Finding 2 closure): bridge the runner-
                 # side session-plugin description-callback to the
                 # daemon's SessionDescriptionUpdatedEvent stream.
