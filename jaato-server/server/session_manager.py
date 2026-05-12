@@ -1819,14 +1819,17 @@ class SessionManager:
                 if handle.parent_session_id == parent_session_id
             ]
 
-        if not owned_handles:
-            return 0
-
-        logger.info(
-            "_cascade_teardown_isolated_subagents: tearing down "
-            "%d sub-runner(s) for parent_session=%s",
-            len(owned_handles), parent_session_id,
-        )
+        if owned_handles:
+            logger.info(
+                "_cascade_teardown_isolated_subagents: tearing down "
+                "%d sub-runner(s) for parent_session=%s",
+                len(owned_handles), parent_session_id,
+            )
+        # Phase 5 §5.3: don't short-circuit on empty owned_handles —
+        # the orphan-scan tail still runs to catch kernel state left
+        # behind by rollback failures or crashes that never registered
+        # a handle.  Per the ledger, the leak audit runs at every
+        # parent teardown, not only when known handles existed.
 
         for handle in owned_handles:
             # 1. Close RPC client (signals EOF; sub-runner exits).
@@ -1889,6 +1892,46 @@ class SessionManager:
             logger.info(
                 "cascade teardown: completed for %s",
                 handle.isolated_session_id,
+            )
+
+        # Phase 5 §5.3 — orphan sub-cgroup reaper.  After the known-
+        # handles loop completes, scan for sub-cgroups under this
+        # parent that exist on disk but aren't in the just-torn-down
+        # set.  Sources of orphans: rollback failure mid-teardown
+        # (e.g., transient EBUSY before _rollback_isolated_resources'
+        # teardown_cgroup call) and mid-spawn crashes that left
+        # kernel state without a corresponding handle.  Reap via the
+        # existing teardown_cgroup path so behaviour matches known
+        # handles exactly.  Best-effort: failures log WARNING but
+        # don't change the cascade return value (which is the count
+        # of HANDLES torn down, not orphans reaped).  See
+        # docs/design/phase5_5_3_cgroup_leak_audit_audit.md.
+        torn_down_ids = {h.isolated_session_id for h in owned_handles}
+        try:
+            cgroups_manager = self._resolve_cgroups_manager()
+            if cgroups_manager is not None:
+                orphans = cgroups_manager.list_orphan_sub_cgroups(
+                    parent_session_id, torn_down_ids,
+                )
+                for orphan_id in orphans:
+                    logger.warning(
+                        "cascade teardown: reaped orphaned sub-cgroup "
+                        "%s — likely cause: rollback or mid-spawn crash",
+                        orphan_id,
+                    )
+                    try:
+                        cgroups_manager.teardown_cgroup(orphan_id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "cascade teardown: orphan reap failed "
+                            "for %s — manual cleanup may be required",
+                            orphan_id,
+                        )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "cascade teardown: orphan scan failed for "
+                "parent_session=%s — no orphans reaped",
+                parent_session_id,
             )
 
         return len(owned_handles)
