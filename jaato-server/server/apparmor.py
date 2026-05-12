@@ -223,7 +223,20 @@ class AppArmorManager:
     # bootstrap.py landed (commit 4a8ec141, 2026-05-07) but masked by
     # mock-only CI.  See
     # docs/design/phase5_runner_self_confine_read_rule_audit.md.
-    _TEMPLATE_VERSION = 15
+    # v16 (2026-05-12): grant ``mr`` (read + mmap-exec) on venv
+    # C-extension shared objects (``*.so`` + ``*.so.*``).  The
+    # ``#include <abstractions/python>`` line above covers
+    # ``/usr/lib/python*/**`` and ``/usr/local/lib/python*/**``
+    # with mmap-exec, but daemon venvs at other paths (``/tmp/...``,
+    # ``~/.venvs/...``, etc.) fall outside those globs and have no
+    # PROT_EXEC permission on their ``.so`` files.  Symptom:
+    # ``import anthropic`` / ``import numpy`` / any other module
+    # with a C-extension dependency fails inside the runner with
+    # ``failed to map segment from shared object`` (kernel-level
+    # mmap denial wrapped as a misleading "package not installed"
+    # ToolError).  Narrow grant — only ELF shared objects get
+    # mmap-exec; .py source and data files in the venv stay r-only.
+    _TEMPLATE_VERSION = 16
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -279,6 +292,14 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # ---- shared read-only resources ----
   {venv_path}/           r,
   {venv_path}/**         r,
+  # v16: mmap-exec on venv C-extension shared objects.  Without
+  # ``m`` on ``*.so`` / ``*.so.*`` the kernel rejects PROT_EXEC
+  # mmap when Python imports a C extension whose ``.so`` lives
+  # outside ``abstractions/python``'s /usr/lib/python and
+  # /usr/local/lib/python coverage.  Narrow grant — only ELF
+  # shared objects, not .py.
+  {venv_path}/**/*.so    mr,
+  {venv_path}/**/*.so.*  mr,
   {venv_path}/bin/*      ix,
 
   # ---- jaato source tree (read-only, for editable installs) ----
@@ -1268,6 +1289,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # ---- shared read-only resources ----
   {self._venv_path}/           r,
   {self._venv_path}/**         r,
+  # v16: mmap-exec on venv C-extension shared objects (mirrors base).
+  {self._venv_path}/**/*.so    mr,
+  {self._venv_path}/**/*.so.*  mr,
   {self._venv_path}/bin/*      ix,
   {self._source_root}/         r,
   {self._source_root}/**       r,
@@ -1891,6 +1915,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # ---- shared read-only resources (mirrors base) ----
     {self._venv_path}/           r,
     {self._venv_path}/**         r,
+    # v16: mmap-exec on venv C-extension shared objects (mirrors base).
+    {self._venv_path}/**/*.so    mr,
+    {self._venv_path}/**/*.so.*  mr,
     {self._venv_path}/bin/*      ix,
     {self._source_root}/         r,
     {self._source_root}/**       r,
@@ -2054,6 +2081,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # ---- shared read-only resources (mirrors tool_hat) ----
     {self._venv_path}/           r,
     {self._venv_path}/**         r,
+    # v16: mmap-exec on venv C-extension shared objects (mirrors tool_hat).
+    {self._venv_path}/**/*.so    mr,
+    {self._venv_path}/**/*.so.*  mr,
     {self._venv_path}/bin/*      ix,
     {self._source_root}/         r,
     {self._source_root}/**       r,

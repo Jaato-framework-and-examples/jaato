@@ -279,6 +279,134 @@ class TestRenderProfile:
                 f"isolated sub-profile attr/current rule missing read: {rule!r}"
             )
 
+    def test_template_version_bumped_to_16(self, manager):
+        """v16 template adds ``mr`` (mmap-exec) rules on venv
+        ``*.so`` / ``*.so.*`` shared objects.  Closes the
+        ``failed to map segment from shared object`` class when
+        the daemon venv lives outside ``abstractions/python``'s
+        coverage (``/usr/lib/python*``, ``/usr/local/lib/python*``)
+        — e.g., the runner can't import jiter / numpy /
+        anthropic because their C-extensions have no PROT_EXEC
+        grant.  Narrow grant: only ELF shared objects, not .py.
+        Surfaced 2026-05-12 by kb-enablement-2.0 cascade smoke
+        test running against a daemon at ``/tmp/jaato-test/``."""
+        assert manager._TEMPLATE_VERSION >= 16
+        profile = manager._render_profile("s1", "/workspace")
+        assert (
+            f"jaato-apparmor-template-version: {manager._TEMPLATE_VERSION}"
+            in profile
+        )
+
+    @staticmethod
+    def _extract_brace_body(text: str, anchor: str) -> str:
+        """Extract the body inside ``{...}`` following ``anchor``.
+
+        Brace-counts to handle nested braces and literal ``}``
+        characters inside ``@{HOME}`` substitutions.  Returns the
+        body text (between the matching braces, exclusive)."""
+        start = text.find(anchor)
+        assert start != -1, f"anchor {anchor!r} not in profile"
+        brace_start = text.find("{", start)
+        depth = 0
+        for i, ch in enumerate(text[brace_start:], brace_start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[brace_start + 1: i]
+        raise AssertionError(
+            f"unmatched brace after anchor {anchor!r}"
+        )
+
+    def test_v16_base_profile_grants_mmap_exec_on_venv_so(
+        self, manager,
+    ):
+        """Pin v16 base profile body grants ``mr`` on venv .so
+        files.  Without ``m`` the kernel rejects PROT_EXEC mmap
+        when Python imports a C extension whose shared object
+        lives in the daemon venv — the import surfaces as a
+        misleading "package not installed" ToolError because the
+        provider wrapper translates ImportError uniformly."""
+        profile = manager._render_profile("s1", "/workspace")
+        # Strip nested sub-profile bodies so we only inspect the
+        # base.  Order matters: child + tool_hat come after the
+        # base-only rules.
+        base_body = profile
+        for anchor in ("profile child", "profile tool_hat"):
+            if anchor in base_body:
+                base_body = base_body.split(anchor)[0]
+        assert "/usr/local/venv/**/*.so    mr," in base_body, (
+            "v16 base profile missing mmap-exec grant on "
+            "venv *.so; C-extension imports will EACCES"
+        )
+        assert "/usr/local/venv/**/*.so.*  mr," in base_body, (
+            "v16 base profile missing mmap-exec grant on "
+            "venv *.so.* (versioned shared libs like "
+            "libpython3.12.so.1.0)"
+        )
+
+    def test_v16_tool_hat_grants_mmap_exec_on_venv_so(
+        self, manager,
+    ):
+        """Pin v16 tool_hat sub-profile body grants ``mr`` on
+        venv .so files (mirrors base).  Tools spawned under
+        tool_hat (CLI, interactive_shell) need the same
+        C-extension import capability as the base."""
+        profile = manager._render_profile("s1", "/workspace")
+        if "profile tool_hat" not in profile:
+            return
+        tool_hat_body = self._extract_brace_body(
+            profile, "profile tool_hat",
+        )
+        assert "/usr/local/venv/**/*.so    mr," in tool_hat_body, (
+            "v16 tool_hat body missing mmap-exec grant on "
+            "venv *.so"
+        )
+        assert "/usr/local/venv/**/*.so.*  mr," in tool_hat_body, (
+            "v16 tool_hat body missing mmap-exec grant on "
+            "venv *.so.*"
+        )
+
+    def test_v16_child_grants_mmap_exec_on_venv_so(self, manager):
+        """Pin v16 //child sub-profile body grants ``mr`` on
+        venv .so files.  Subprocesses transition into //child
+        between fork() and exec() via preexec_fn (Phase 5
+        §5.10); a confined subprocess that can't mmap-exec a
+        .so can't import any C extension."""
+        profile = manager._render_profile("s1", "/workspace")
+        if "profile child" not in profile:
+            return
+        child_body = self._extract_brace_body(profile, "profile child")
+        assert "/usr/local/venv/**/*.so    mr," in child_body, (
+            "v16 //child body missing mmap-exec grant on venv *.so"
+        )
+        assert "/usr/local/venv/**/*.so.*  mr," in child_body, (
+            "v16 //child body missing mmap-exec grant on venv *.so.*"
+        )
+
+    def test_v16_isolated_sub_profile_grants_mmap_exec_on_venv_so(
+        self, manager,
+    ):
+        """Pin v16 isolated subagent sub-profile (§4.3.4) grants
+        ``mr`` on venv .so files.  Isolated subagents run their
+        own sub-runner with the same Python import surface as
+        the parent — same C-extension requirement."""
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/tmp/test-ws",
+        )
+        assert "/usr/local/venv/**/*.so    mr," in sub, (
+            "v16 isolated sub-profile missing mmap-exec grant "
+            "on venv *.so; isolated subagent can't import "
+            "C extensions"
+        )
+        assert "/usr/local/venv/**/*.so.*  mr," in sub, (
+            "v16 isolated sub-profile missing mmap-exec grant "
+            "on venv *.so.*"
+        )
+
     def test_allows_reading_user_tier_services(self, manager):
         """Regression: SchemaStore's tiered lookup reads
         ``~/.jaato/services/`` as a user-tier fallback when the
