@@ -211,6 +211,18 @@ class TestRenderProfile:
             in profile
         )
 
+    def test_template_version_bumped_to_14(self, manager):
+        """v14 template ships the ``profile child`` sub-profile that
+        closes the verified escape vector at apparmor.py:413-449.
+        Subprocesses transition into ``//child`` between fork() and
+        exec() via preexec_fn — Phase 5 §5.10."""
+        assert manager._TEMPLATE_VERSION >= 14
+        profile = manager._render_profile("s1", "/workspace")
+        assert (
+            f"jaato-apparmor-template-version: {manager._TEMPLATE_VERSION}"
+            in profile
+        )
+
     def test_tenant_runtime_paths_are_writable(self, manager):
         """Tenant-runtime subpaths under ``.jaato/`` (sessions/, logs/,
         cache/, vision/, services/_discovered/, memory/, todos/,
@@ -298,6 +310,184 @@ class TestRenderProfile:
         ctx = factory()
         assert hasattr(ctx, "__enter__")
         assert hasattr(ctx, "__exit__")
+
+    def test_child_subprofile_present(self, manager):
+        """Phase 5 §5.10a: v14 introduces the ``profile child {...}``
+        sub-profile.  Subprocesses transition into it via
+        ``change_profile -> jaato-ws-X//child`` between fork() and
+        exec() so the dangerous escape rules (writable
+        attr/current + change_profile -> unconfined) don't apply to
+        model-controlled subprocess content.
+
+        Body mirrors tool_hat's workspace + venv reads."""
+        profile = manager._render_profile("s1", "/workspace")
+        assert "profile child" in profile
+        child_body = profile.split("profile child")[1]
+        # Mirrors tool_hat workspace allow.
+        assert "/workspace/   rw," in child_body
+        assert "/workspace/** rwkl," in child_body
+
+    def test_child_subprofile_drops_escape_rules(self, manager):
+        """The whole point of //child: the three escape-vector rules
+        from base + tool_hat are absent so a process in //child
+        cannot escape to unconfined.  This is the kernel-enforced
+        primitive that closes the Phase 4 known-escape-vector class
+        for subprocess spawn."""
+        import re
+        profile = manager._render_profile("s1", "/workspace")
+        child_body = profile.split("profile child")[1]
+        # Match the rule SHAPE (apparmor_parser ignores `#` comments
+        # so any non-comment line ending with `,` is a real rule).
+        # Test must distinguish rule lines from comment mentions —
+        # the audit's "drops these rules" comment block lives in the
+        # body and contains the rule strings as documentation.
+        def _has_uncommented_rule(body: str, rule_pattern: str) -> bool:
+            for line in body.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if re.search(rule_pattern, stripped):
+                    return True
+            return False
+
+        assert not _has_uncommented_rule(
+            child_body, r"^change_profile\s+->\s+unconfined,$",
+        ), "child must not authorize change_profile -> unconfined"
+        # The writable proc rules — both base + task variants — are
+        # absent.  Subprocess cannot effect ANY change_profile (even
+        # to another sub-profile) because the file write itself is
+        # denied.
+        assert not _has_uncommented_rule(
+            child_body, r"^/proc/self/attr/current\s+w,$",
+        ), "child must not authorize writes to /proc/self/attr/current"
+        assert not _has_uncommented_rule(
+            child_body, r"^/proc/self/task/\*/attr/current\s+w,$",
+        ), "child must not authorize writes to /proc/self/task/*/attr/current"
+
+    def test_child_subprofile_keeps_tool_hat_read_denies(self, manager):
+        """Per the user's design pick (option A — tool_hat body minus
+        the three escape rules), //child preserves the
+        information-isolation read-denies on user-authored config.
+        A subprocess can't read other agents' personas/profiles any
+        more than the in-process tool_hat path can."""
+        import re
+        profile = manager._render_profile("s1", "/workspace")
+        child_body = profile.split("profile child")[1]
+        for path in (
+            "/workspace/.jaato/agents/**",
+            "/workspace/.jaato/profiles/**",
+            "/workspace/.jaato/prompts/**",
+            "/workspace/.jaato/scripts/**",
+            "/workspace/.jaato/completion_schemas/**",
+            "/workspace/.jaato/spawn_schemas/**",
+            "/workspace/.jaato/instructions/**",
+            "/workspace/.jaato/reactors.json",
+        ):
+            pattern = (
+                r"audit\s+deny\s+"
+                + re.escape(path)
+                + r"\s+r,"
+            )
+            assert re.search(pattern, child_body), (
+                f"child must deny reads on user-authored config: {path}"
+            )
+
+
+class TestMakeChildTransitionCallback:
+    """Phase 5 §5.10b — the preexec_fn-style transition callback
+    that subprocess-spawning plugins use in ``preexec_fn`` to enter
+    the per-session ``//child`` sub-profile between fork() and exec()."""
+
+    def test_returns_zero_arg_callable(self):
+        from server.apparmor import make_child_transition_callback
+        cb = make_child_transition_callback("jaato-ws-test")
+        assert callable(cb)
+
+    def test_writes_changeprofile_target_to_attr_current(self, tmp_path, monkeypatch):
+        """The callback writes ``changeprofile <profile>//child`` to
+        /proc/self/attr/current.  We swap in a tmp file to capture
+        the write without touching the real kernel-pseudofile."""
+        from server import apparmor as ap
+
+        captured = tmp_path / "attr_current"
+        captured.write_text("")  # ensure file exists
+
+        # Replace os.open in the apparmor module so our callback
+        # targets the fake path instead of /proc/self/attr/current.
+        real_open = ap.os.open
+
+        def _fake_open(path, *args, **kwargs):
+            if path == "/proc/self/attr/current":
+                return real_open(str(captured), *args, **kwargs)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(ap.os, "open", _fake_open)
+
+        cb = ap.make_child_transition_callback("jaato-ws-myses")
+        cb()
+
+        assert captured.read_bytes() == b"changeprofile jaato-ws-myses//child"
+
+    def test_session_profile_name_used_verbatim(self, tmp_path, monkeypatch):
+        """The session profile name passed at factory time appears
+        verbatim in the write payload.  Subagent isolated-runner
+        callers can pass a sub-profile name (e.g.
+        ``jaato-ws-parent//subagent``) and get
+        ``jaato-ws-parent//subagent//child`` — three-level nesting
+        is preserved (Phase 5 §5.10e preview)."""
+        from server import apparmor as ap
+
+        captured = tmp_path / "attr_current"
+        captured.write_text("")
+        real_open = ap.os.open
+
+        def _fake_open(path, *args, **kwargs):
+            if path == "/proc/self/attr/current":
+                return real_open(str(captured), *args, **kwargs)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(ap.os, "open", _fake_open)
+
+        cb = ap.make_child_transition_callback(
+            "jaato-ws-parent//subagent",
+        )
+        cb()
+
+        assert captured.read_bytes() == (
+            b"changeprofile jaato-ws-parent//subagent//child"
+        )
+
+    def test_fails_closed_when_write_path_missing(self, tmp_path):
+        """If /proc/self/attr/current is missing or unwritable,
+        the callback raises (subprocess.Popen surfaces this as a
+        spawn failure — the new process never starts).  Fail-closed
+        is the correct posture: a silent transition failure would
+        leave the child in the parent profile with the escape
+        rules intact."""
+        import os as _os
+        from server.apparmor import make_child_transition_callback
+
+        # Force os.open to fail with ENOENT.
+        original_open = _os.open
+
+        def _broken_open(path, *args, **kwargs):
+            if path == "/proc/self/attr/current":
+                raise FileNotFoundError(2, "no such file", path)
+            return original_open(path, *args, **kwargs)
+
+        try:
+            _os.open = _broken_open  # type: ignore[assignment]
+            cb = make_child_transition_callback("jaato-ws-X")
+            try:
+                cb()
+            except FileNotFoundError:
+                pass
+            else:
+                raise AssertionError(
+                    "expected FileNotFoundError from broken /proc write"
+                )
+        finally:
+            _os.open = original_open  # type: ignore[assignment]
 
 
 class TestMakeConfineContext:

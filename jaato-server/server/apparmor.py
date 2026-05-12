@@ -204,7 +204,16 @@ class AppArmorManager:
     #       to honor.  This template duplicates the base body inside
     #       ``profile tool_hat { ... }`` and appends the
     #       hat-specific read-denies.
-    _TEMPLATE_VERSION = 13
+    # Phase 5 §5.10 (template v14): add ``profile child`` sub-profile
+    # that mirrors ``tool_hat``'s body but drops the three escape-
+    # vector rules (``change_profile -> unconfined``,
+    # ``/proc/self/attr/current w``, and the task variant).
+    # Subprocess-spawning plugins transition into the sub-profile via
+    # preexec_fn between fork() and exec(), so a model-controlled
+    # subprocess can't break confinement by writing changeprofile to
+    # attr/current.  See
+    # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+    _TEMPLATE_VERSION = 14
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -506,6 +515,29 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # tool execution uses the sub-profile name; for everything else
   # (prefetch, reactor dispatch) uses the base profile name.
 {tool_hat_subprofile}
+
+  # ---- //child sub-profile (Phase 5 §5.10, template v14) ----
+  # Subprocess execution context.  Subprocesses spawned by the cli /
+  # interactive_shell plugins enter this sub-profile via
+  # ``change_profile -> jaato-ws-{session_id}//child`` between fork()
+  # and exec() (preexec_fn writes to /proc/self/attr/current).  The
+  # body mirrors ``tool_hat``'s rule set verbatim and additionally
+  # DROPS the three escape-vector lines that the base + tool_hat
+  # profiles must keep for the framework's apparmor_confine.__exit__
+  # path:
+  #
+  #     change_profile -> unconfined,        ← removed in //child
+  #     /proc/self/attr/current      w,      ← removed in //child
+  #     /proc/self/task/*/attr/current w,    ← removed in //child
+  #
+  # A process in //child cannot write changeprofile to attr/current
+  # (kernel rejects with EACCES) and cannot transition anywhere.
+  # The dangerous primitive is moved from "any subprocess can use
+  # it" to "only the framework's parent-tier code can use it" —
+  # closes the verified escape at apparmor.py:413-449.
+  #
+  # See docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+{child_subprofile}
 }}
 '''
 
@@ -1674,6 +1706,22 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             session_id=session_id,
         )
 
+        # Phase 5 §5.10: build the //child sub-profile body.  Mirrors
+        # tool_hat's rule set but drops the three escape-vector lines
+        # (change_profile -> unconfined + /proc/self/attr/current w +
+        # task variant).  Subprocess-spawning plugins transition
+        # into //child via preexec_fn so model-controlled subprocesses
+        # cannot escape via the kernel-level transition primitive.
+        child_subprofile = self._build_child_subprofile(
+            workspace_path=workspace_path,
+            premium_rules=premium_rules,
+            config_root_rules=config_root_rules,
+            env_file_rule=env_file_rule,
+            refs_include_glob=f"{self._refs_dir(session_id)}/*",
+            extension_fragments_inline=extension_fragments_inline,
+            session_id=session_id,
+        )
+
         return self.PROFILE_TEMPLATE.format(
             template_version=self._TEMPLATE_VERSION,
             session_id=session_id,
@@ -1686,6 +1734,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             refs_include_glob=f"{self._refs_dir(session_id)}/*",
             extension_fragments_inline=extension_fragments_inline,
             tool_hat_subprofile=tool_hat_subprofile,
+            child_subprofile=child_subprofile,
         )
 
     def _build_tool_hat_subprofile(
@@ -1829,6 +1878,175 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     include if exists "{refs_include_glob}"
 
     # ---- extension fragments (mirrors base, re-indented) ----
+{nested_extension_fragments}
+  }}"""
+
+    def _build_child_subprofile(
+        self,
+        workspace_path: str,
+        premium_rules: str,
+        config_root_rules: str,
+        env_file_rule: str,
+        refs_include_glob: str,
+        extension_fragments_inline: str,
+        session_id: str,
+    ) -> str:
+        """Build the ``profile child { ... }`` sub-profile body
+        (Phase 5 §5.10, template v14).
+
+        Subprocesses spawned by the cli / interactive_shell plugins
+        transition into this sub-profile via
+        ``change_profile -> jaato-ws-{session_id}//child`` between
+        fork() and exec() (preexec_fn writes ``changeprofile`` to
+        ``/proc/self/attr/current``).
+
+        The body mirrors :meth:`_build_tool_hat_subprofile`'s rule
+        set verbatim and **drops** the three escape-vector lines that
+        the base + tool_hat profiles must keep for the framework's
+        ``apparmor_confine.__exit__`` path:
+
+            change_profile -> unconfined,
+            /proc/self/attr/current      w,
+            /proc/self/task/*/attr/current w,
+
+        A subprocess in ``//child`` cannot write ``changeprofile`` to
+        ``attr/current`` (kernel rejects with EACCES) and cannot
+        transition anywhere — the dangerous primitive is moved from
+        "any subprocess can use it" to "only the framework's
+        parent-tier code can use it".
+
+        See
+        ``docs/design/phase5_5_10_apparmor_child_subprofile_audit.md``.
+        """
+        # Re-indent extension_fragments_inline from 2-space to 4-space
+        # so it nests correctly inside the sub-profile block.  Same
+        # transform applied by _build_tool_hat_subprofile.
+        nested_extension_fragments = "\n".join(
+            f"  {line}" if line.strip() else line
+            for line in extension_fragments_inline.splitlines()
+        )
+        return f"""  profile child {{
+    #include <abstractions/base>
+    #include <abstractions/nameservice>
+    #include <abstractions/python>
+
+    # ---- workspace + integrity write-denies (mirrors tool_hat) ----
+    {workspace_path}/   rw,
+    {workspace_path}/** rwkl,
+    audit deny {workspace_path}/.jaato/agents/**             wlk,
+    audit deny {workspace_path}/.jaato/profiles/**           wlk,
+    audit deny {workspace_path}/.jaato/prompts/**            wlk,
+    audit deny {workspace_path}/.jaato/scripts/**            wlk,
+    audit deny {workspace_path}/.jaato/services/*/           wlk,
+    audit deny {workspace_path}/.jaato/reactors.json         wlk,
+    audit deny {workspace_path}/.jaato/completion_schemas/** wlk,
+    audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
+    audit deny {workspace_path}/.jaato/instructions/**       wlk,
+    audit deny {workspace_path}/.jaato/references/**         wlk,
+
+    # ---- tool_hat-style read-denies (mirrors tool_hat) ----
+    # Same information-isolation as the in-process tool_hat: a
+    # subprocess can't read other agents' personas, profile JSON,
+    # prompts, schemas, instructions, scripts, or reactors.json.
+    audit deny {workspace_path}/.jaato/agents/**             r,
+    audit deny {workspace_path}/.jaato/profiles/**           r,
+    audit deny {workspace_path}/.jaato/prompts/**            r,
+    audit deny {workspace_path}/.jaato/scripts/**            r,
+    audit deny {workspace_path}/.jaato/completion_schemas/** r,
+    audit deny {workspace_path}/.jaato/spawn_schemas/**      r,
+    audit deny {workspace_path}/.jaato/instructions/**       r,
+    audit deny {workspace_path}/.jaato/reactors.json         r,
+
+    # ---- shared read-only resources (mirrors tool_hat) ----
+    {self._venv_path}/           r,
+    {self._venv_path}/**         r,
+    {self._venv_path}/bin/*      ix,
+    {self._source_root}/         r,
+    {self._source_root}/**       r,
+    {premium_rules}
+    {config_root_rules}
+
+    # ---- user-global jaato config (mirrors tool_hat) ----
+    @{{HOME}}/.jaato/agents/         r,
+    @{{HOME}}/.jaato/agents/**       r,
+    @{{HOME}}/.jaato/profiles/       r,
+    @{{HOME}}/.jaato/profiles/**     r,
+    @{{HOME}}/.jaato/prompts/        r,
+    @{{HOME}}/.jaato/prompts/**      r,
+    @{{HOME}}/.jaato/skills/         r,
+    @{{HOME}}/.jaato/skills/**       r,
+    @{{HOME}}/.jaato/themes/         r,
+    @{{HOME}}/.jaato/themes/**       r,
+    @{{HOME}}/.jaato/services/       r,
+    @{{HOME}}/.jaato/services/**     r,
+    @{{HOME}}/.jaato/references/     r,
+    @{{HOME}}/.jaato/references/**   r,
+    @{{HOME}}/.jaato/keybindings.json r,
+    @{{HOME}}/.jaato/theme.json       r,
+    @{{HOME}}/.jaato/gc.json          r,
+    {env_file_rule}
+    @{{HOME}}/.jaato/memories/       rw,
+    @{{HOME}}/.jaato/memories/**     rw,
+    @{{HOME}}/.jaato/memories.jsonl  rw,
+    @{{HOME}}/.claude/skills/        r,
+    @{{HOME}}/.claude/skills/**      r,
+    @{{HOME}}/.claude/commands/      r,
+    @{{HOME}}/.claude/commands/**    r,
+    @{{HOME}}/.cache/huggingface/    rw,
+    @{{HOME}}/.cache/huggingface/**  rwk,
+    @{{HOME}}/.cache/torch/          rw,
+    @{{HOME}}/.cache/torch/**        rwk,
+
+    # ---- temp files (mirrors tool_hat) ----
+    /tmp/jaato-{session_id}-** rw,
+    /tmp/jaato-{session_id}/   rw,
+    /tmp/jaato-{session_id}/** rw,
+
+    # ---- basic system access (mirrors tool_hat) ----
+    /usr/bin/**          ix,
+    /usr/local/bin/**    ix,
+    /bin/**              ix,
+    /usr/lib/**          rm,
+    /lib/**              rm,
+    /etc/ld.so.cache     r,
+    /etc/passwd          r,
+    /etc/nsswitch.conf   r,
+    /proc/self/**        r,
+    /dev/null            rw,
+    /dev/urandom         r,
+    /dev/pts/*           rw,
+
+    # ---- network (mirrors tool_hat) ----
+    network inet  stream,
+    network inet6 stream,
+    network inet  dgram,
+    network inet6 dgram,
+    deny network raw,
+
+    # ---- denied capabilities (mirrors tool_hat) ----
+    deny ptrace,
+    deny mount,
+    deny capability sys_admin,
+    deny capability net_admin,
+    deny capability sys_ptrace,
+
+    # ---- DROP: profile transitions ----
+    # Phase 5 §5.10: the three rules that base + tool_hat carry are
+    # intentionally absent here:
+    #
+    #     change_profile -> unconfined,
+    #     /proc/self/attr/current      w,
+    #     /proc/self/task/*/attr/current w,
+    #
+    # A subprocess in //child cannot escape to unconfined, and the
+    # kernel rejects writes to /proc/self/attr/current with EACCES.
+    # No transition out of //child is possible for the subprocess's
+    # lifetime.
+
+    # ---- per-session reference fragments (mirrors tool_hat) ----
+    include if exists "{refs_include_glob}"
+
+    # ---- extension fragments (mirrors tool_hat, re-indented) ----
 {nested_extension_fragments}
   }}"""
 
@@ -1989,6 +2207,72 @@ def make_tool_confine_context(
         A zero-argument callable that returns a context manager.
     """
     return make_confine_context(f"{session_profile_name}//tool_hat")
+
+
+def make_child_transition_callback(
+    session_profile_name: str,
+) -> Callable[[], None]:
+    """Return a ``preexec_fn``-style callback that transitions the
+    forked child into the per-session ``//child`` sub-profile
+    (Phase 5 §5.10, template v14+).
+
+    Designed for ``subprocess.Popen(preexec_fn=...)``: runs in the
+    forked child between ``fork()`` and ``exec()``.  The callback
+    writes ``changeprofile {session_profile_name}//child`` to
+    ``/proc/self/attr/current``.  Per AppArmor sub-profile
+    semantics, the parent profile (which the runner is in)
+    implicitly authorizes transitions to inline-declared
+    sub-profiles, so no explicit ``change_profile -> //child``
+    rule is needed in the parent profile.
+
+    After the ``exec()``, the new program is in ``//child``, which
+    mirrors ``tool_hat``'s body but drops the three escape-vector
+    rules.  A subprocess in ``//child`` cannot write
+    ``changeprofile`` to ``/proc/self/attr/current`` (kernel
+    rejects with EACCES) and cannot transition anywhere — closing
+    the verified escape vector at ``apparmor.py:413-449``.
+
+    **Fail-closed semantics.**  If the write fails (e.g.,
+    AppArmor unavailable on the host, or the source profile
+    lacks the necessary permissions), the callback raises an
+    ``OSError`` from the forked child.  ``subprocess.Popen``
+    surfaces this as a spawn failure — the subprocess never
+    starts.  This is intentional: a failed transition would mean
+    the child inherits the dangerous parent profile, which is the
+    exact escape we're trying to prevent.  Spawn failure is the
+    correct fail-closed posture.
+
+    Used alongside :meth:`CgroupsManager.make_attach_callback` —
+    plugins compose both callables in their ``preexec_fn``,
+    apparmor transition first (so the new profile applies during
+    the cgroup write), then cgroup attach, then exec.
+
+    Args:
+        session_profile_name: The session's BASE profile name
+            (e.g. ``"jaato-ws-20260506_135835"``).  The sub-profile
+            name ``"//child"`` is appended automatically.
+
+    Returns:
+        A zero-argument callable suitable for
+        ``Popen(preexec_fn=...)``.
+    """
+    target = f"{session_profile_name}//child"
+    payload = f"changeprofile {target}".encode("ascii")
+
+    def _transition() -> None:
+        # Open + write in one syscall pair; can't use Path.write_text
+        # because /proc/self/attr/current rejects the truncate that
+        # write_text implies, and signal-handler-style territory
+        # (preexec_fn) shouldn't allocate Python objects unnecessarily.
+        fd = os.open(
+            "/proc/self/attr/current", os.O_WRONLY,
+        )
+        try:
+            os.write(fd, payload)
+        finally:
+            os.close(fd)
+
+    return _transition
 
 
 # ------------------------------------------------------------------
