@@ -261,6 +261,14 @@ explicitly:
 - Cross-platform runner via platform-specific sandbox primitives.
 - Multi-tenant acceptance gate (parent §6.4) — per-operator
   policy store, capability-based fragment loading.
+- **`max_output_bytes` / `max_output_chars` naming consistency.**
+  `RuntimeLimits.max_output_bytes` (the profile field) maps to
+  `RunnerSpawner.spawn(max_output_chars=...)` → env var
+  `JAATO_RUNNER_MAX_OUTPUT_CHARS` → cli plugin's `_max_output_chars`
+  attribute.  For ASCII the two are interchangeable; for multi-byte
+  content they're not.  Surfaced during Phase 5 §5.1b peer review;
+  preserve mapping today, rename to one or the other in Phase 6
+  cleanup.
 
 Phase 5 audits SHOULD flag any item drifting toward this list and
 re-decide rather than absorb.
