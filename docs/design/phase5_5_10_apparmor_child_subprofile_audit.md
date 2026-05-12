@@ -223,9 +223,19 @@ isolated slice with its own verification gate.
   for the PTY-based plugin's `pexpect.spawn`.  **REAL-HOST
   VERIFICATION GATE.**  Same exploit check, this time targeting a
   shell-spawned process.  ~50 LoC + tests.
-- **§5.10e — sub-runner sub-profile `//child` analog.**  Apply
-  the same pattern to the §4.3.4 isolated-subagent sub-profile.
-  **REAL-HOST VERIFICATION GATE.**  ~80 LoC + tests.
+- **§5.10e — sub-runner skip-install.**  *SHIPPED — pivot from
+  the original "sub-sub-profile" framing below.*  The v15 work
+  (PR #67, signed off by the same author who picked up §5.10e)
+  already dropped the escape primitive from the §4.3.4
+  sub-profile (`owner /proc/*/attr/current r,` only — no write
+  capability, no `change_profile -> unconfined`).  Subprocesses
+  spawned by sub-runners inherit the sub-profile by construction
+  — no //child transition needed AND not installable (the sub-
+  profile lacks writable attr/current, so the transition write
+  would EACCES).  §5.10e ships a three-case branch in
+  `bootstrap_session` that skips the install for sub-runners
+  (profile name contains `//`).  Detailed audit:
+  `docs/design/phase5_5_10e_sub_runner_skip_audit.md`.
 
 Sub-commits §5.10a + §5.10b are ship-able without real-host
 verification.  §5.10c/d/e need an operator-driven real-host
@@ -290,20 +300,57 @@ A subprocess in `//child` has the same useful capability surface as
 in tool_hat (it can read its inputs, write outputs to the
 workspace, run tools) but cannot escape the confinement.
 
-### 6.4 Sub-runner sub-profile case (§5.10e preview)
+### 6.4 Sub-runner sub-profile case — DECISION (post-§5.10e ship)
 
-The §4.3.4 isolated-subagent sub-profile
-(`jaato-ws-{parent}//{subagent}`) has the same escape vector — it
-also grants `change_profile -> unconfined` + `/proc/self/attr/current w`
-to support its own `apparmor_confine.__exit__` path.  The fix is
-parallel: add `jaato-ws-{parent}//{subagent}//child` and wire the
-sub-runner's plugin spawn paths to transition.
+This subsection originally framed §5.10e as "three-level
+`//{subagent}//child` nesting" under the premise that the sub-
+profile carried the same escape primitive as the base.  **That
+premise turned out to be wrong**, surfaced during §5.10e's
+pre-implementation audit:
 
-The naming gets verbose (`//{subagent}//child` is a three-level
-nest).  AppArmor supports this — sub-sub-profiles work the same
-way.  But the template generation needs care to keep the rendered
-profile valid.  Staged last (§5.10e) so §5.10c/d's pattern is
-established first.
+- The §4.3.4 sub-profile DROP block (`apparmor.py:1259-1264`)
+  explicitly omits `change_profile -> unconfined` and writable
+  `/proc/*/attr/current`.  Comment block at lines 1248-1256
+  documents this as deliberate design: *"No write permission: by
+  design the sub-runner stays in this profile for its lifetime
+  ... the write capability the parent + tool_hat profiles keep
+  is intentionally absent."*
+- PR #67 (template v15) added `owner /proc/*/attr/current r,`
+  (read-only) for the runner's self-confine verify step.  The
+  write capability was never re-added.
+- So the sub-profile lacks BOTH halves of the escape primitive
+  (the semantic `change_profile -> unconfined` rule AND the
+  writable file).  Subprocesses inherit the sub-profile and
+  cannot escape via the kernel-level transition rule —
+  by construction, with no additional work needed.
+
+**§5.10e decision (signed off by the v15 author):**
+skip-install for sub-runners.  When `JAATO_RUNNER_PROFILE`
+contains the Audit 6 `//` separator, `bootstrap_session` logs
+INFO and returns without invoking
+`make_child_transition_callback` or the executor setter.
+
+Three-case install matrix (post-§5.10e):
+
+| Case | Profile shape | Action |
+|---|---|---|
+| 1 | empty (JAATO_RUNNER_DISABLE_CONFINE=1) | skip + INFO log |
+| 2 | contains `//` (sub-runner under sub-profile) | skip + INFO log |
+| 3 | non-empty, no `//` (main runner) | install + audible-failure |
+
+The audible-failure contract from `37f8547` applies only to case
+3.  Cases 1 and 2 are INFO-level skips — neither degrades
+security (case 1 has no profile; case 2 has a strictly stronger
+profile than //child would be).
+
+Three-level nesting was rejected because it would require
+re-introducing writable `/proc/*/attr/current` to the sub-profile
+(undoing v15) for a transition target (`//{subagent}//child`)
+that's byte-equivalent to the existing sub-profile.  Net-
+negative.
+
+See `docs/design/phase5_5_10e_sub_runner_skip_audit.md` for the
+full §5.10e audit.
 
 ## 7. Test plan
 

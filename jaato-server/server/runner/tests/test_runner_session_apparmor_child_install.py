@@ -228,3 +228,240 @@ def test_bootstrap_logs_info_on_successful_install(
     assert any(
         "jaato-ws-sess-5-10c" in m for m in install_msgs
     ), "profile name must appear in the install log"
+
+
+# ----------------------------------------------------------------------
+# Phase 5 §5.10e — sub-runner skip
+# ----------------------------------------------------------------------
+
+
+def test_install_skipped_when_runner_profile_is_subprofile(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 5 §5.10e: JAATO_RUNNER_PROFILE contains the Audit 6
+    sub-profile separator ``//`` → install is skipped silently
+    (INFO log).  v15 design intent (PR #67) already drops the
+    escape primitive from the sub-profile, so subprocesses inherit
+    the no-escape posture by construction — no //child transition
+    needed (and not installable: sub-profile lacks writable
+    attr/current per the same v15 work).
+
+    Setter MUST NOT be called.  Bootstrap MUST succeed.  INFO log
+    MUST explain the skip with the profile name + audit reference."""
+    import logging
+    monkeypatch.setenv(
+        "JAATO_RUNNER_PROFILE",
+        "jaato-ws-parent//subagent",
+    )
+    # Setter present but should never be called.
+    stub = _StubRuntimeWithSession(with_setter=True)
+
+    with caplog.at_level(logging.INFO):
+        host = bootstrap_session(
+            _envelope(),
+            runtime_factory=lambda env: stub,
+        )
+
+    assert host is not None
+    assert stub.install_calls == [], (
+        "sub-runner skip path called the setter — §5.10e says it "
+        "must not, because the sub-profile lacks writable "
+        "attr/current and the transition would EACCES at preexec_fn"
+    )
+    skip_msgs = [
+        r.message for r in caplog.records
+        if r.levelno >= logging.INFO
+        and "sub-profile" in r.message
+        and "skipping" in r.message
+    ]
+    assert skip_msgs, (
+        f"missing INFO log explaining the sub-runner skip; "
+        f"got {[r.message for r in caplog.records]!r}"
+    )
+    assert any(
+        "jaato-ws-parent//subagent" in m for m in skip_msgs
+    ), "sub-profile name must appear in the skip log"
+
+
+def test_install_skipped_for_subprofile_even_if_setter_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin: the sub-runner skip path bypasses the audible-failure
+    contract.  Without this test, a refactor that moves the
+    has_setter check ABOVE the sub-profile branch would re-impose
+    the audible-failure on sub-runners — breaking isolated subagents
+    on hosts that legitimately lack the setter (none today, but
+    defensive).
+
+    Setter missing + sub-profile name → no BootstrapError, no setter
+    call.  The §5.10c audible-failure contract applies ONLY to main
+    runners (case 3 in the three-case matrix)."""
+    monkeypatch.setenv(
+        "JAATO_RUNNER_PROFILE",
+        "jaato-ws-parent//subagent",
+    )
+    stub = _StubRuntimeWithSession(with_setter=False)
+
+    # No exception — install path is bypassed entirely.
+    host = bootstrap_session(
+        _envelope(),
+        runtime_factory=lambda env: stub,
+    )
+
+    assert host is not None
+    assert stub.install_calls == []
+
+
+def test_main_runner_install_path_unchanged_post_5_10e(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin: main runners (profile name lacks ``//``) still run the
+    §5.10c install path — happy + audible-failure both preserved.
+
+    This test pins the case-3 matrix branch.  Catches a regression
+    where the §5.10e three-case refactor would have accidentally
+    skipped install for main runners too."""
+    import logging
+    monkeypatch.setenv("JAATO_RUNNER_PROFILE", "jaato-ws-main_session")
+    stub = _StubRuntimeWithSession(with_setter=True)
+
+    with caplog.at_level(logging.INFO):
+        bootstrap_session(
+            _envelope(),
+            runtime_factory=lambda env: stub,
+        )
+
+    assert len(stub.install_calls) == 1, (
+        "main-runner install must still run after the §5.10e refactor"
+    )
+    install_msgs = [
+        r.message for r in caplog.records
+        if "installed AppArmor" in r.message
+    ]
+    assert install_msgs, (
+        "main-runner install must still emit the INFO log"
+    )
+
+
+def test_three_case_matrix_distinguished_in_logs(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin: each of the three cases (empty / sub-profile / main)
+    emits a DISTINCT INFO log.  Operators inspecting runner logs
+    can determine which branch fired without guessing — important
+    for incident debugging where the install path is the suspect."""
+    import logging
+
+    # Case 1: empty profile.
+    monkeypatch.delenv("JAATO_RUNNER_PROFILE", raising=False)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        bootstrap_session(
+            _envelope(),
+            runtime_factory=lambda env: _StubRuntimeWithSession(
+                with_setter=False,
+            ),
+        )
+    case1_msgs = {r.message for r in caplog.records}
+    assert any("empty" in m and "unconfined" in m for m in case1_msgs)
+
+    # Case 2: sub-profile.
+    monkeypatch.setenv(
+        "JAATO_RUNNER_PROFILE", "jaato-ws-parent//subagent",
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        bootstrap_session(
+            _envelope(),
+            runtime_factory=lambda env: _StubRuntimeWithSession(
+                with_setter=True,
+            ),
+        )
+    case2_msgs = {r.message for r in caplog.records}
+    assert any(
+        "sub-profile" in m and "skipping" in m for m in case2_msgs
+    )
+
+    # Case 3: main runner.
+    monkeypatch.setenv("JAATO_RUNNER_PROFILE", "jaato-ws-main")
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        bootstrap_session(
+            _envelope(),
+            runtime_factory=lambda env: _StubRuntimeWithSession(
+                with_setter=True,
+            ),
+        )
+    case3_msgs = {r.message for r in caplog.records}
+    assert any("installed AppArmor" in m for m in case3_msgs)
+
+
+def test_sub_profile_template_drops_escape_rules(workspace_root_tmp=None):
+    """Smoke test: pin that ``_render_sub_profile``'s body does NOT
+    contain uncommented ``change_profile -> unconfined`` or writable
+    ``/proc/*/attr/current`` rules.
+
+    Catches accidental re-introduction by future template edits.
+    The §5.10e skip-install correctness depends on the sub-profile
+    keeping its v15 "no escape primitive" posture — a future PR
+    that adds ``w,`` back to the sub-profile would silently
+    re-open the gap §4.3.4 + v15 closed.  This test fires before
+    that happens."""
+    import re
+    from server.apparmor import AppArmorManager
+
+    # Use a minimal manager — _render_sub_profile only needs the
+    # workspace_root + venv_path attrs the constructor sets.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        from pathlib import Path
+        ws = Path(tmp) / "workspaces"
+        ws.mkdir()
+        (ws / "sessions").mkdir()
+        mgr = AppArmorManager(
+            workspace_root=str(ws),
+            venv_path="/usr/local/venv",
+            profile_dir=str(Path(tmp) / "profiles"),
+        )
+        body = mgr._render_sub_profile(
+            parent_session_id="parent_x",
+            subagent_id="agent_1",
+            workspace_path="/workspace",
+        )
+
+    # Strip comments so DROP-block documentation doesn't fool the
+    # assertion (same approach as the §5.10a //child template test).
+    rule_lines = [
+        line.strip() for line in body.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    # Must NOT carry change_profile -> unconfined (escape primitive).
+    for rule in rule_lines:
+        assert not re.match(
+            r"change_profile\s+->\s+unconfined,$", rule,
+        ), (
+            f"sub-profile must NOT authorize "
+            f"change_profile -> unconfined; got rule: {rule!r}.  "
+            f"v15 design intent (PR #67) drops this; §5.10e "
+            f"skip-install depends on it staying dropped."
+        )
+
+    # Must NOT carry writable /proc/.../attr/current (file-write
+    # half of the escape primitive).  Owner-qualified READ is OK
+    # (v15 added it for confine_to_profile.read_current_profile).
+    for rule in rule_lines:
+        # Match `(owner )?/proc/.../attr/current <perm>,` where
+        # <perm> contains `w`.
+        m = re.match(
+            r"(owner\s+)?/proc/[\w*/]+/attr/current\s+([rwklm]+)\s*,$",
+            rule,
+        )
+        if m:
+            perms = m.group(2)
+            assert "w" not in perms, (
+                f"sub-profile must NOT grant write to "
+                f"/proc/.../attr/current; got rule: {rule!r}.  "
+                f"v15 design intent drops this; §5.10e "
+                f"skip-install depends on it staying dropped."
+            )

@@ -42,7 +42,7 @@ Two profile contexts are affected:
 |---------|--------|-------------|-----|
 | Base profile `jaato-ws-<id>` | `apparmor.py:460-461` (PROFILE_TEMPLATE) | YES — runner subprocess self-confines | change `w,` → `rw,` |
 | tool_hat sub-profile | `apparmor.py:1874-1875` (`_build_tool_hat_subprofile`) | DEFENSIVE — daemon's `apparmor_confine` only writes, doesn't read.  Bring read in for symmetry + future-proofing | change `w,` → `rw,` |
-| Isolated sub-profile `<parent>//<subagent>` | `apparmor.py:_render_sub_profile` | YES — sub-runner subprocess also calls `confine_to_profile` | add `/proc/*/attr/current r,` + `/proc/*/task/*/attr/current r,` next to existing `/proc/*/` rules |
+| Isolated sub-profile `<parent>//<subagent>` | `apparmor.py:_render_sub_profile` | YES — sub-runner subprocess also calls `confine_to_profile` | add `/proc/*/attr/current r,` + `/proc/*/task/*/attr/current r,` next to existing `/proc/*/` rules.  **`r,` only, NOT `rw,` — intentional, see Phase 5 §5.10e (`phase5_5_10e_sub_runner_skip_audit.md`).  Sub-profile staying write-less is what lets §5.10e's bootstrap_session skip the §5.10c install for sub-runners: subprocesses inherit the no-escape-primitive posture by construction, no //child transition needed.** |
 | //child sub-profile (Phase 5 §5.10a) | `apparmor.py:_build_child_subprofile` | NO — subprocesses entering //child via preexec_fn don't call `confine_to_profile`; they only get changeprofile'd from the parent context | no change |
 
 NOT a §5.10 regression — broken since `bootstrap.py:read_current_profile`
