@@ -108,20 +108,50 @@ class TestRenderProfile:
 
     def test_allows_writing_attr_current_for_restore(self, manager):
         """Regression: restore-to-unconfined on context-manager exit
-        writes to ``/proc/self/task/<tid>/attr/current``.  If the profile
-        doesn't grant write access to that file, the kernel denies the
-        file-write and the thread stays trapped in the enforce-mode
-        profile — even though ``change_profile -> unconfined`` authorizes
-        the semantic transition.  Trapped workers leak across sessions
-        and cause EACCES on subsequent reads of ``~/.jaato/*_auth.json``
-        and any external sandbox-added paths."""
+        writes to attr/current.  If the profile doesn't grant write
+        access, the kernel denies the file-write and the thread stays
+        trapped in the enforce-mode profile — even though
+        ``change_profile -> unconfined`` authorizes the semantic
+        transition.  Trapped workers leak across sessions and cause
+        EACCES on subsequent reads of ``~/.jaato/*_auth.json`` and any
+        external sandbox-added paths.
+
+        v15 switched the rule form from ``/proc/self/...`` (which only
+        matched writes accidentally via the procfs special-case
+        write path) to ``owner /proc/*/...`` (which matches the
+        kernel's resolved path for BOTH read and write)."""
+        import re
         profile = manager._render_profile("s1", "/workspace")
-        # Per-thread variant (used by apparmor_confine since it keys
-        # on threading.get_native_id())
-        assert "/proc/self/task/*/attr/current w" in profile
-        # Process-level variant — harmless to include and covers
-        # code paths that might write to the process-level attr file.
-        assert "/proc/self/attr/current" in profile
+        # Strip comments so docstring text doesn't fool the assertion.
+        rule_lines = [
+            l.strip() for l in profile.splitlines()
+            if l.strip() and not l.lstrip().startswith("#")
+        ]
+        # Per-thread variant write rule (apparmor_confine writes to
+        # /proc/self/task/<tid>/attr/current).  Accept either v14
+        # form (/proc/self/...) or v15 form (owner /proc/*/...).
+        has_task_write = any(
+            re.match(
+                r"(owner\s+)?/proc/(self|\*)/task/\*/attr/current\s+[rw]+,",
+                rule,
+            )
+            for rule in rule_lines
+        )
+        assert has_task_write, (
+            "profile missing task/<tid>/attr/current write rule; "
+            "apparmor_confine restore-to-unconfined will fail"
+        )
+        # Process-level variant
+        has_proc_write = any(
+            re.match(
+                r"(owner\s+)?/proc/(self|\*)/attr/current\s+[rw]+,",
+                rule,
+            )
+            for rule in rule_lines
+        )
+        assert has_proc_write, (
+            "profile missing process-level attr/current write rule"
+        )
         # The semantic capability rule must still be present (file-
         # write alone doesn't authorize the profile transition).
         assert "change_profile -> unconfined" in profile
@@ -135,6 +165,119 @@ class TestRenderProfile:
         assert manager._TEMPLATE_VERSION >= 4
         profile = manager._render_profile("s1", "/workspace")
         assert f"jaato-apparmor-template-version: {manager._TEMPLATE_VERSION}" in profile
+
+    def test_template_version_bumped_to_15(self, manager):
+        """Phase 5 ad-hoc fix: read-rule addition to /proc/self/attr/current
+        bumps template_version 14 → 15.  Invalidates apparmor_parser's
+        binary cache so the runner self-confinement verify-read step
+        starts working on hosts that have an older cached compile."""
+        assert manager._TEMPLATE_VERSION >= 15
+
+    def test_v15_base_profile_allows_attr_current_read(self, manager):
+        """Phase 5 ad-hoc fix: parent profile body grants `r` on
+        /proc/self/attr/current so the runner's confine_to_profile
+        verify-after-write step (server/runner/bootstrap.py:188) can
+        read the kernel's view of the current profile.  Before v15 the
+        profile had `w` only and the read EACCESed.
+
+        Pin checks both rule shapes: `rw,` (the chosen form) OR a
+        separate `r,` line.  Either passes the kernel's permission
+        check."""
+        import re
+        profile = manager._render_profile("s1", "/workspace")
+        # Strip comments so docstring text mentioning the old `w,`
+        # rule doesn't fool the assertion.
+        rule_lines = [
+            l.strip() for l in profile.splitlines()
+            if l.strip() and not l.lstrip().startswith("#")
+        ]
+        attr_rules = [
+            l for l in rule_lines
+            if "attr/current" in l and "/proc/" in l
+            and "task" not in l  # exclude task/<tid>/ variant (separate rule)
+        ]
+        # At least one rule must include `r` permission (rw or just r)
+        has_read = any(
+            re.match(r"(owner\s+)?/proc/(self|\*)/attr/current\s+r[wlmkixacd]*,", rule) is not None
+            for rule in attr_rules
+        )
+        assert has_read, (
+            f"v15 base profile must allow read on /proc/self/attr/current; "
+            f"got rules: {attr_rules!r}"
+        )
+
+    def test_v15_tool_hat_allows_attr_current_read(self, manager):
+        """Phase 5 ad-hoc fix: tool_hat sub-profile body mirrors the
+        base profile's rw permission on attr/current.  Defensive — the
+        framework's apparmor_confine context manager doesn't itself
+        read attr/current today, but keeping the hat at parity with
+        the base means a future verify-read addition won't silently
+        break the hat path."""
+        import re
+        profile = manager._render_profile("s1", "/workspace")
+        if "profile tool_hat" not in profile:
+            return  # tool_hat may be optional in some templates
+        # Find tool_hat body by brace-counting (the body has `@{HOME}`
+        # references with literal `}` characters that confuse naive
+        # split-on-`}`).  Start at the `{` right after "profile tool_hat"
+        # and walk until depth returns to zero.
+        start = profile.find("profile tool_hat")
+        brace_start = profile.find("{", start)
+        depth = 0
+        body_end = None
+        for i, ch in enumerate(profile[brace_start:], brace_start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    body_end = i
+                    break
+        assert body_end is not None, "couldn't locate tool_hat closing brace"
+        tool_hat_body = profile[brace_start + 1: body_end]
+
+        attr_rules = [
+            l.strip() for l in tool_hat_body.splitlines()
+            if "attr/current" in l and "/proc/" in l
+            and "task" not in l
+            and not l.lstrip().startswith("#")
+        ]
+        has_read = any(
+            re.match(r"(owner\s+)?/proc/(self|\*)/attr/current\s+r[wlmkixacd]*,", rule) is not None
+            for rule in attr_rules
+        )
+        assert has_read, (
+            f"v15 tool_hat body must allow read on /proc/self/attr/current; "
+            f"got rules: {attr_rules!r}"
+        )
+
+    def test_v15_isolated_sub_profile_allows_attr_current_read(self, manager):
+        """Phase 5 ad-hoc fix: isolated-subagent sub-profile grants
+        read access to /proc/*/attr/current so the sub-runner subprocess
+        can verify its own confinement after the kernel transitions it.
+
+        No write permission expected — the sub-runner stays in this
+        profile for its lifetime per §4.3.4 design (no further
+        self-transitions).  Read-only is the right contract."""
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/tmp/test-ws",
+        )
+        rule_lines = [
+            l.strip() for l in sub.splitlines()
+            if "/proc/" in l and "attr/current" in l
+            and not l.lstrip().startswith("#")
+        ]
+        assert rule_lines, (
+            "isolated sub-profile missing /proc/*/attr/current rule entirely; "
+            "sub-runner confine_to_profile verify-read will EACCES"
+        )
+        # All present rules must grant `r` (we don't want a pure `w,`)
+        for rule in rule_lines:
+            assert rule.endswith(",") and " r" in rule, (
+                f"isolated sub-profile attr/current rule missing read: {rule!r}"
+            )
 
     def test_allows_reading_user_tier_services(self, manager):
         """Regression: SchemaStore's tiered lookup reads

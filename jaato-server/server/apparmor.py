@@ -213,7 +213,17 @@ class AppArmorManager:
     # subprocess can't break confinement by writing changeprofile to
     # attr/current.  See
     # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
-    _TEMPLATE_VERSION = 14
+    # Phase 5 ad-hoc (template v15): add ``r`` permission to
+    # ``/proc/self/attr/current`` (parent + tool_hat) and
+    # ``/proc/*/attr/current`` (isolated sub-profile) so the runner's
+    # ``confine_to_profile.read_current_profile`` verify-after-write
+    # step in ``server/runner/bootstrap.py:188`` doesn't EACCES.
+    # Surfaced 2026-05-12 by real-host §4.3 isolated-subagent
+    # verification.  Not a §5.10 regression; broken since
+    # bootstrap.py landed (commit 4a8ec141, 2026-05-07) but masked by
+    # mock-only CI.  See
+    # docs/design/phase5_runner_self_confine_read_rule_audit.md.
+    _TEMPLATE_VERSION = 15
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -456,9 +466,23 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # because proc_pid_attr_write enforces ``current != task → -EACCES`` —
   # only the task itself can write its own attr/current.
   # See ``project_backlog_apparmor_child_subprofile`` memory.
+  #
+  # Phase 5 template v15: rule form switched from ``/proc/self/...`` to
+  # ``owner /proc/*/...``.  Empirically, AppArmor resolves the
+  # /proc/self/ symlink to /proc/<pid>/ BEFORE matching against rules,
+  # so ``/proc/self/attr/current r,`` never matches a read.  The
+  # write rule worked accidentally on v14 because procfs's
+  # proc_pid_attr_write takes a different code path that bypassed the
+  # full LSM file-mediation check.  The ``owner`` qualifier covers
+  # both read and write against the resolved path while preserving
+  # the process-is-owner constraint.
+  #
+  # The ``r`` permission is required by the runner subprocess's
+  # ``confine_to_profile.read_current_profile`` verify-after-write
+  # step (server/runner/bootstrap.py:188).
   change_profile -> unconfined,
-  /proc/self/attr/current      w,
-  /proc/self/task/*/attr/current w,
+  owner /proc/*/attr/current      rw,
+  owner /proc/*/task/*/attr/current rw,
 
   # ---- per-session reference fragments ----
   # ``add_reference_fragment(session_id, ref_id, path)`` writes one
@@ -1221,6 +1245,17 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   /proc/*/comm              r,
   /proc/*/fd/               r,
   /proc/*/fd/*              r,
+  # Read-only access to attr/current — required by the sub-runner's
+  # confine_to_profile.read_current_profile verify-after-write step
+  # (server/runner/bootstrap.py:188).  ``owner`` qualifier matches the
+  # kernel's resolved /proc/<pid>/ path AND verifies the process is
+  # the file's owner (always true for the process's own attr/current).
+  # No write permission: by design the sub-runner stays in this
+  # profile for its lifetime (no further self-transitions per the
+  # DROP block below), so the write capability the parent + tool_hat
+  # profiles keep is intentionally absent.  Phase 5 template v15.
+  owner /proc/*/attr/current      r,
+  owner /proc/*/task/*/attr/current r,
 
   # ---- DROP: external-reference admit (no add_reference_fragment
   # from sub-runner — Phase 5+ behind opt-in).
@@ -1870,9 +1905,11 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     deny capability sys_ptrace,
 
     # ---- profile transitions (mirrors base, needed to exit hat) ----
+    # ``owner /proc/*/...`` form matches the kernel's resolved path
+    # for both read and write (see v15 note in the base profile body).
     change_profile -> unconfined,
-    /proc/self/attr/current      w,
-    /proc/self/task/*/attr/current w,
+    owner /proc/*/attr/current      rw,
+    owner /proc/*/task/*/attr/current rw,
 
     # ---- per-session reference fragments (mirrors base) ----
     include if exists "{refs_include_glob}"
