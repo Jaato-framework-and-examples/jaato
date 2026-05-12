@@ -78,18 +78,23 @@ tasks share machinery and audit context.
 
 ### Theme A — Resource-isolation defaults (security)
 
-Three items from `phase4_implementation_audits.md` §4.3.9:
+Three items from `phase4_implementation_audits.md` §4.3.9, plus one
+surfaced during §5.1 work:
 
 | Plan | Audit ledger item |
 |------|-------------------|
 | §5.1 | §4.3.9 item 1 — Default `RuntimeLimits` for isolated subagents |
 | §5.2 | §4.3.9 item 2 — Nested cgroup structure (parent-bounded sub) |
 | §5.3 | §4.3.9 item 4 — Cgroup-leak audit at session shutdown |
+| §5.1b | §4.3.9 item 11 — Mainline `RuntimeLimits` app-layer passthrough to runner (surfaced during §5.1; broader than §4.3 sub-track but kernel-/cgroup-adjacent) |
 
-**Shared audit context:** all three touch the cgroup-provisioning
-path inside `SessionManager._spawn_isolated_runner`'s helper chain.
-Single audit-commit covers the resource-isolation rules table that
-all three implementations consult.
+**Shared audit context:** all four touch the runtime-limits wiring
+path.  §5.1 / §5.2 / §5.3 share the
+`SessionManager._spawn_isolated_runner` helper chain.  §5.1b sits on
+the parallel `runner_spawn.spawn_session_runner` mainline flow but
+consumes the same `RuntimeLimits` dataclass + `RunnerSpawner.spawn`
+env-passthrough machinery, so the Theme A audit covers it under the
+same rules table.
 
 ### Theme B — Runtime observability + crash detection (operability)
 

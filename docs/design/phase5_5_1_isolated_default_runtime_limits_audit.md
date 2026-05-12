@@ -62,8 +62,9 @@ them here):
   / `tool_timeout_seconds` to `RunnerSpawner.spawn` either** — the
   `runner_spawn.spawn_session_runner` call site omits them today.  Fixing
   the mainline path is a separate task (it broadens beyond the
-  isolation-implies-bounds invariant §5.1 is scoped to).  Tracked
-  internally — file a follow-up audit when picked up.
+  isolation-implies-bounds invariant §5.1 is scoped to).  Filed as
+  `phase4_implementation_audits.md` §4.3.9 item 11 and slotted as
+  Theme A §5.1b in `per_session_confined_runner_phase5_plan.md`.
 - **Wiring `runtime_limits` into `SessionInitEnvelope`** — today the
   schema doesn't carry it, so app-layer fields flow only via the
   spawn-time env-var path.  Adding it to the envelope would let
