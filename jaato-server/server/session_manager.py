@@ -944,6 +944,7 @@ class SessionManager:
         agent_params: Optional[Dict[str, Any]] = None,
         display_name: Optional[str] = None,
         parent_agent_id: Optional[str] = None,
+        sub_profile_tightenings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Daemon-side helper for the isolated-subagent opt-in
         (Phase 4 §4.3.3).
@@ -1133,6 +1134,7 @@ class SessionManager:
             parent_session_id=parent_session_id,
             subagent_id=subagent_id,
             workspace_path=workspace_path,
+            tightenings=sub_profile_tightenings,
         )
         if not ok:
             logger.warning(

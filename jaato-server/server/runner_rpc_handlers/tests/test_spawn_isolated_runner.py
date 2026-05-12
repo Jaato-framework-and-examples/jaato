@@ -431,6 +431,103 @@ class TestRoutedHelperBridge:
         # Helper was NOT invoked — validation rejected the request first.
         assert sm.calls == []
 
+    # ── Phase 5 §5.9: sub-profile tightening flow integration ─────
+
+    @pytest.mark.asyncio
+    async def test_tightenings_extracted_from_agent_params(self):
+        """§5.9 pin: tightening keys in ``agent_params`` are
+        extracted, validated, passed to the helper as
+        ``sub_profile_tightenings``, AND stripped from the
+        forwarded ``agent_params`` dict so the new sub-runner
+        doesn't see daemon-side control flags as template data."""
+        sm = _StubSessionManager({"ok": False, "stage": "sub_profile"})
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        handler.set_spawn_dependencies(session_manager=sm)
+
+        await handler.handle(_valid_args(agent_params={
+            "isolated": True,
+            "isolated_workspace_subpath": "scratch",
+            "isolated_read_only_workspace": True,
+            "template_arg": "alice",
+        }))
+
+        call = sm.calls[0]
+        # Tightenings reach the helper as a typed dict.
+        assert call["sub_profile_tightenings"] == {
+            "isolated_workspace_subpath": "scratch",
+            "isolated_read_only_workspace": True,
+        }
+        # Tightening keys + ``isolated`` are stripped from
+        # forwarded agent_params; template data passes through.
+        assert call["agent_params"] == {"template_arg": "alice"}
+        assert "isolated" not in call["agent_params"]
+        assert "isolated_workspace_subpath" not in call["agent_params"]
+        assert "isolated_read_only_workspace" not in call["agent_params"]
+
+    @pytest.mark.asyncio
+    async def test_no_tightenings_forwards_empty_dict(self):
+        """§5.9 pin: when no tightening keys are present, the
+        helper sees an empty ``sub_profile_tightenings`` dict —
+        NOT None.  Distinguishes "no tightenings declared" from
+        "validator failed" for downstream code (provision
+        renders the default body in both cases, but the
+        distinction matters for diagnostics)."""
+        sm = _StubSessionManager({"ok": False, "stage": "sub_profile"})
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        handler.set_spawn_dependencies(session_manager=sm)
+
+        await handler.handle(_valid_args(agent_params={
+            "isolated": True,
+            "template_arg": "alice",
+        }))
+
+        call = sm.calls[0]
+        assert call["sub_profile_tightenings"] == {}
+
+    @pytest.mark.asyncio
+    async def test_tightening_validation_failure_surfaces(self):
+        """§5.9 pin: a malformed tightening value surfaces as a
+        ``ValueError`` with the handler-method-name prefix +
+        ``sub-profile tightening validation failed`` marker.
+
+        Helper MUST NOT be invoked — validation rejects the
+        request before any resource provisioning."""
+        sm = _StubSessionManager({"ok": True})
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        handler.set_spawn_dependencies(session_manager=sm)
+
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"subagent\.spawn_isolated_runner: sub-profile "
+                r"tightening validation failed: "
+            ),
+        ):
+            await handler.handle(_valid_args(agent_params={
+                "isolated": True,
+                "isolated_workspace_subpath": "../escape",
+            }))
+
+        assert sm.calls == [], (
+            "helper invoked despite tightening validation failure — "
+            "validator must run BEFORE routing"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tightening_validation_runs_before_helper_when_unwired(self):
+        """§5.9 pin: same gate as the §5.8 'validator runs
+        before routing' pin, but for tightening flags.  Even
+        with ``_session_manager=None``, tightening validation
+        fires first."""
+        handler = SpawnIsolatedRunnerHandler(parent_session_id="sess-A")
+        assert handler._session_manager is None
+        with pytest.raises(
+            ValueError, match="sub-profile tightening validation failed",
+        ):
+            await handler.handle(_valid_args(agent_params={
+                "isolated_read_only_workspace": "not-a-bool",
+            }))
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Lifecycle

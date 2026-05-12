@@ -65,6 +65,10 @@ from typing import Any, Dict, Optional
 from server.runner_rpc_handlers.profile_payload_schema import (
     validate_profile_payload,
 )
+from server.runner_rpc_handlers.sub_profile_tightenings_schema import (
+    SUB_PROFILE_TIGHTENING_KEYS,
+    extract_and_validate_tightenings,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -324,6 +328,26 @@ class SpawnIsolatedRunnerHandler:
                 "if present, must be a str or None"
             )
 
+        # Phase 5 §5.9: extract + validate supervisor-declared
+        # sub-profile tightening flags from agent_params.  Same
+        # trust-boundary discipline as §5.8 (profile_payload
+        # validation) — allow-list of permitted keys, per-key
+        # value shape checks, reject-unknown posture.  Tightenings
+        # are daemon-side control flags (modify the rendered
+        # sub-profile body); the strip step below removes them
+        # from the agent_params forwarded as template data to the
+        # new sub-runner.  See
+        # docs/design/phase5_5_9_sub_profile_tightening_flags_audit.md.
+        try:
+            sub_profile_tightenings = extract_and_validate_tightenings(
+                args.get("agent_params"),
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"subagent.spawn_isolated_runner: sub-profile "
+                f"tightening validation failed: {exc}"
+            ) from exc
+
         # ── Confused-deputy: parent_session_id echo check ──────
         if args["parent_session_id"] != self._parent_session_id:
             raise ValueError(
@@ -350,16 +374,20 @@ class SpawnIsolatedRunnerHandler:
         # exercised; subsequent sub-commits only need to extend the
         # helper body, not touch the handler.
         if self._session_manager is not None:
-            # Strip the ``isolated`` control flag from agent_params
-            # before forwarding — it's a routing flag, not template
-            # data the subagent should see.  Per Audit 5 in
-            # ``phase4_implementation_audits.md``.
+            # Strip the ``isolated`` control flag AND every Phase 5
+            # §5.9 sub-profile tightening key from agent_params
+            # before forwarding — both are daemon-side routing /
+            # control flags, not template data the subagent should
+            # see.  Per Audit 5 in ``phase4_implementation_audits.md``
+            # (isolated) + ``phase5_5_9_sub_profile_tightening_flags_audit.md``
+            # (tightening keys).
             forwarded_agent_params: Optional[Dict[str, Any]] = None
             raw_agent_params = args.get("agent_params")
             if raw_agent_params is not None:
                 forwarded_agent_params = {
                     k: v for k, v in raw_agent_params.items()
                     if k != "isolated"
+                    and k not in SUB_PROFILE_TIGHTENING_KEYS
                 }
             return self._session_manager._spawn_isolated_runner(
                 parent_session_id=args["parent_session_id"],
@@ -370,6 +398,7 @@ class SpawnIsolatedRunnerHandler:
                 agent_params=forwarded_agent_params,
                 display_name=args.get("display_name"),
                 parent_agent_id=args.get("parent_agent_id"),
+                sub_profile_tightenings=sub_profile_tightenings,
             )
 
         # ── Unwired stub (no SessionManager reference yet) ─────

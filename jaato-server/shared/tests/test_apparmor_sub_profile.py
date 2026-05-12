@@ -405,3 +405,234 @@ class TestRenderSubProfile:
         )
         assert "Parent session: sess-A" in body
         assert "Subagent id:    agent-1" in body
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 5 §5.9: supervisor-declared sub-profile tightenings
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestSubProfileTighteningsRender:
+    """Pin the rendered sub-profile body's behavior under each
+    supervisor-declared tightening flag.
+
+    These tests are the load-bearing snapshot pins for §5.9: the
+    validator only checks structural safety of the supervisor's
+    input, but the renderer is what actually narrows the
+    sub-profile's authority on the kernel.  If the renderer
+    silently ignored a tightening, the validator wouldn't catch
+    it — that's the regression these tests guard against."""
+
+    def test_no_tightenings_renders_default_body(self, manager):
+        """Pin: ``None`` / empty / omitted tightenings produce
+        byte-identical output to the legacy 3-arg call.
+        Required for backward compatibility with all pre-§5.9
+        callers (every test in this file, every production
+        caller via session_manager that didn't pass the new
+        kwarg)."""
+        default_body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+        )
+        none_body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings=None,
+        )
+        empty_body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings={},
+        )
+        assert default_body == none_body == empty_body
+
+    def test_workspace_subpath_narrows_allow_rule(self, manager):
+        """Pin: ``isolated_workspace_subpath: "scratch"`` narrows
+        the workspace allow from ``/workspace/**`` to
+        ``/workspace/scratch/**``.
+
+        Load-bearing security pin — without this the renderer
+        silently ignores the supervisor's subpath declaration and
+        the subagent gets default (broader) access."""
+        body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings={"isolated_workspace_subpath": "scratch"},
+        )
+        # New scoped allow MUST be present.
+        assert "/workspace/scratch/   rw," in body
+        assert "/workspace/scratch/** rwkl," in body
+        # Default broader allow MUST be absent.
+        assert "/workspace/   rw," not in body
+        assert "/workspace/** rwkl," not in body
+
+    def test_workspace_subpath_with_nested_dir(self, manager):
+        """Pin: subpath with internal ``/`` is rendered
+        verbatim (validator already vetted it for path
+        traversal)."""
+        body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings={
+                "isolated_workspace_subpath": "scratch/agent-1",
+            },
+        )
+        assert "/workspace/scratch/agent-1/   rw," in body
+        assert "/workspace/scratch/agent-1/** rwkl," in body
+
+    def test_read_only_workspace_downgrades_perms(self, manager):
+        """Pin: ``isolated_read_only_workspace: True`` downgrades
+        workspace ``rwkl`` to ``r`` and dir ``rw`` to ``r``.
+        No write/lock/link capability anywhere under the
+        workspace tree."""
+        body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings={"isolated_read_only_workspace": True},
+        )
+        # Workspace allow rules — read-only forms present.
+        assert "/workspace/   r," in body
+        assert "/workspace/** r," in body
+        # Default write forms absent.
+        assert "/workspace/   rw," not in body
+        assert "/workspace/** rwkl," not in body
+
+    def test_combined_subpath_plus_read_only(self, manager):
+        """Pin: subpath + read-only compose — read-only allow
+        rules scoped to the subpath, no broader allow rules at
+        all."""
+        body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings={
+                "isolated_workspace_subpath": "scratch",
+                "isolated_read_only_workspace": True,
+            },
+        )
+        assert "/workspace/scratch/   r," in body
+        assert "/workspace/scratch/** r," in body
+        # No other workspace allows at all.
+        assert "/workspace/   rw," not in body
+        assert "/workspace/   r,\n" not in body  # bare workspace
+        assert "/workspace/** rwkl," not in body
+
+    def test_tightenings_do_not_erode_integrity_denies(self, manager):
+        """Pin: integrity-deny block on ``.jaato/**`` is
+        baseline-invariant — tightenings can only strengthen
+        security, never weaken it.  This test guards against an
+        accidental refactor that templates the deny block
+        through the tightening branch."""
+        body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings={
+                "isolated_workspace_subpath": "scratch",
+                "isolated_read_only_workspace": True,
+            },
+        )
+        assert "audit deny /workspace/.jaato/agents/**" in body
+        assert "audit deny /workspace/.jaato/profiles/**" in body
+        assert "audit deny /workspace/.jaato/reactors.json" in body
+
+    def test_tightenings_do_not_erode_drop_invariants(self, manager):
+        """Pin: §4.3.4 + v15 + §5.10e DROP invariants stay
+        intact under tightenings.  No ``change_profile``, no
+        fragment-admit ``include if exists``, no nested
+        ``profile tool_hat`` — these are layered guarantees that
+        tightenings only add to, never remove from."""
+        body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings={
+                "isolated_workspace_subpath": "scratch",
+                "isolated_read_only_workspace": True,
+            },
+        )
+        assert "change_profile -> unconfined" not in body
+        assert "include if exists" not in body
+        assert "profile tool_hat" not in body
+
+    def test_profile_name_unchanged_by_tightenings(self, manager):
+        """Pin: tightenings affect rule bodies, NOT the profile
+        name.  Sub-runner self-confines to
+        ``jaato-ws-{parent}//{subagent}`` regardless of
+        tightenings."""
+        body = manager._render_sub_profile(
+            parent_session_id="sess-A",
+            subagent_id="agent-1",
+            workspace_path="/workspace",
+            tightenings={
+                "isolated_workspace_subpath": "scratch",
+                "isolated_read_only_workspace": True,
+            },
+        )
+        assert 'profile "jaato-ws-sess-A//agent-1"' in body
+
+
+class TestProvisionSubProfileWithTightenings:
+    """Pin that ``provision_sub_profile`` threads the
+    ``tightenings`` kwarg through to ``_render_sub_profile``."""
+
+    def test_provision_forwards_tightenings_to_render(
+        self, manager, profile_dir,
+    ):
+        """Pin: ``tightenings`` kwarg passed to
+        ``provision_sub_profile`` reaches the rendered profile
+        file on disk.
+
+        Asserts on the written-file content rather than on the
+        render-method invocation — that way the test exercises
+        the full provision → write → load pipeline (matching
+        the existing happy-path test's style)."""
+        manager._available = True
+        tightenings = {"isolated_workspace_subpath": "scratch"}
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            ok, _ = manager.provision_sub_profile(
+                parent_session_id="sess-A",
+                subagent_id="agent-1",
+                workspace_path="/workspace",
+                tightenings=tightenings,
+            )
+        assert ok is True
+
+        sub_path = profile_dir / "jaato-ws-sess-A__sub_agent-1"
+        content = sub_path.read_text()
+
+        # The tightening reached the rendered body: narrowed
+        # allow + no default broader allow.
+        assert "/workspace/scratch/   rw," in content
+        assert "/workspace/scratch/** rwkl," in content
+        assert "/workspace/   rw," not in content
+        assert "/workspace/** rwkl," not in content
+
+    def test_provision_default_tightenings_render_unchanged(
+        self, manager, profile_dir,
+    ):
+        """Pin: when caller omits ``tightenings``, the rendered
+        body retains the pre-§5.9 default workspace allow rules
+        — backward-compat with all pre-§5.9 production callers
+        + test fixtures."""
+        manager._available = True
+        with patch("server.apparmor.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            ok, _ = manager.provision_sub_profile(
+                parent_session_id="sess-A",
+                subagent_id="agent-1",
+                workspace_path="/workspace",
+            )
+        assert ok is True
+
+        sub_path = profile_dir / "jaato-ws-sess-A__sub_agent-1"
+        content = sub_path.read_text()
+        assert "/workspace/   rw," in content
+        assert "/workspace/** rwkl," in content
