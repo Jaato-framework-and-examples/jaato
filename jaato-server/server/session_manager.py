@@ -1241,6 +1241,20 @@ class SessionManager:
                 "parent=%s subagent=%s (cgroup_path=%s)",
                 parent_session_id, subagent_id, cgroup_path,
             )
+            # Phase 5 §5.2: nesting-visibility instrumentation.
+            # Sibling cgroup structure (today, per §4.3.5) means
+            # sub bounds don't compose under the parent's.  When
+            # sub's kernel-enforced cap exceeds parent's, true
+            # nesting WOULD have capped at parent's bound — log
+            # so operators get visibility into where a Phase 6
+            # nested-layout migration would change behavior.
+            # Observability-only; no behavior change.  See
+            # docs/design/phase5_5_2_nested_cgroup_deferral_audit.md.
+            self._log_nesting_visibility(
+                parent_session_id=parent_session_id,
+                subagent_id=subagent_id,
+                sub_limits=effective_runtime_limits,
+            )
         else:
             logger.info(
                 "_spawn_isolated_runner: sub-cgroup skipped for "
@@ -1920,6 +1934,82 @@ class SessionManager:
                 "_rollback_isolated_resources: sub-AppArmor "
                 "teardown failed for parent=%s subagent=%s",
                 parent_session_id, subagent_id,
+            )
+
+    def _log_nesting_visibility(
+        self,
+        *,
+        parent_session_id: str,
+        subagent_id: str,
+        sub_limits: RuntimeLimits,
+    ) -> None:
+        """Phase 5 §5.2 — log when sub-cgroup bounds would have been
+        capped by parent under a nested-layout migration.
+
+        Today's sub-cgroup is sibling to the parent's (per §4.3.5
+        + cgroup v2 "no internal processes" rule); their kernel
+        limits don't compose.  When the supervisor declares an
+        isolated sub with `memory_max_mb` or `pids_max` greater
+        than the parent's, true nesting WOULD have capped the sub
+        at parent's value.  This helper surfaces those cases at
+        `INFO` so operators can see the evidence base for a Phase 6
+        nested-layout migration.
+
+        Pure observability — no behavior change.  Sub-cgroup limits
+        are already applied as declared by the time this helper
+        runs.
+
+        `cpu_weight` is intentionally omitted: it's a share within
+        a cgroup hierarchy, not an absolute cap, so a parent-vs-sub
+        comparison doesn't represent composition semantics.  When
+        Phase 6 ships the restructure, cpu_weight composition
+        becomes meaningful; until then, omitting it from the log
+        avoids misleading operators.
+
+        See `docs/design/phase5_5_2_nested_cgroup_deferral_audit.md`.
+        """
+        parent_session = self._sessions.get(parent_session_id)
+        parent_server = getattr(parent_session, "server", None) if parent_session else None
+        parent_profile = getattr(parent_server, "_profile", None) if parent_server else None
+        parent_limits = getattr(parent_profile, "runtime_limits", None) if parent_profile else None
+
+        if parent_limits is None:
+            logger.info(
+                "_spawn_isolated_runner: nesting-visibility — "
+                "parent=%s has no kernel runtime_limits; "
+                "sub %s bounds are independent "
+                "(sub.memory_max_mb=%s, sub.pids_max=%s).  "
+                "Phase 6 nested layout would have nothing to cap.",
+                parent_session_id, subagent_id,
+                sub_limits.memory_max_mb, sub_limits.pids_max,
+            )
+            return
+
+        fields_exceeded: List[str] = []
+        if (parent_limits.memory_max_mb is not None
+                and sub_limits.memory_max_mb is not None
+                and sub_limits.memory_max_mb > parent_limits.memory_max_mb):
+            fields_exceeded.append(
+                f"memory_max_mb (sub={sub_limits.memory_max_mb}, "
+                f"parent={parent_limits.memory_max_mb})"
+            )
+        if (parent_limits.pids_max is not None
+                and sub_limits.pids_max is not None
+                and sub_limits.pids_max > parent_limits.pids_max):
+            fields_exceeded.append(
+                f"pids_max (sub={sub_limits.pids_max}, "
+                f"parent={parent_limits.pids_max})"
+            )
+
+        if fields_exceeded:
+            logger.info(
+                "_spawn_isolated_runner: nesting-visibility — "
+                "parent=%s subagent=%s sub-cgroup bounds EXCEED "
+                "parent's on: %s.  Today (sibling layout per §4.3.5): "
+                "sub gets its declared bounds independently.  Phase 6 "
+                "nested layout would cap at parent's value.  See "
+                "Phase 5 §5.2.",
+                parent_session_id, subagent_id, "; ".join(fields_exceeded),
             )
 
     def _resolve_cgroups_manager(self) -> Optional[Any]:
