@@ -138,6 +138,25 @@ class RunnerSpawner:
 
         self._assert_daemon_unconfined()
 
+        # Phase 5 — session-scoped TMPDIR.  Must exist before fork
+        # because the confined runner's profile won't let it mkdir
+        # outside the /tmp/jaato-{session_id}/** allow rule.
+        # Daemon side runs unconfined so this mkdir succeeds without
+        # confinement-related checks.  ``exist_ok=True`` handles
+        # the rare case of a stale dir from a prior session with the
+        # same id (e.g., session-restore path).
+        try:
+            os.makedirs(
+                self._session_tmpdir(session_id),
+                exist_ok=True,
+            )
+        except OSError as exc:
+            logger.warning(
+                "RunnerSpawner.spawn: failed to create session tmpdir %s "
+                "before fork: %s — runner may EACCES on tempfile probe",
+                self._session_tmpdir(session_id), exc,
+            )
+
         parent_sock, child_sock = socket.socketpair(
             socket.AF_UNIX, socket.SOCK_STREAM,
         )
@@ -247,7 +266,22 @@ class RunnerSpawner:
         tool_timeout_seconds: Optional[float],
         disable_confine: bool,
     ) -> Dict[str, str]:
-        """Compose the env dict the runner reads at startup."""
+        """Compose the env dict the runner reads at startup.
+
+        Also sets ``TMPDIR`` to the session-scoped path
+        ``/tmp/jaato-<session_id>`` so the confined runner's
+        :func:`tempfile.gettempdir` probe lands inside the profile's
+        ``/tmp/jaato-{session_id}/**`` allow rule.  Without this, the
+        runner crashes at plugin-import time with
+        ``FileNotFoundError: No usable temporary directory found``
+        because the profile's narrow ``/tmp/`` rules reject the
+        generic write the tempfile sanity-check performs.  See
+        ``project_backlog_runner_apparmor_tmpdir`` memory.
+
+        The directory itself is created in :meth:`spawn` before fork
+        (the confined child can't ``mkdir`` outside its allow list,
+        and the dir must exist when Python first probes it).
+        """
         env = os.environ.copy()
         env["JAATO_RUNNER_PROFILE"] = profile_name
         env["JAATO_RUNNER_SESSION_ID"] = session_id
@@ -261,7 +295,19 @@ class RunnerSpawner:
             env["JAATO_RUNNER_TOOL_TIMEOUT_SECONDS"] = str(tool_timeout_seconds)
         if disable_confine:
             env["JAATO_RUNNER_DISABLE_CONFINE"] = "1"
+        # Phase 5 — session-scoped TMPDIR.  Profile allow rule:
+        # /tmp/jaato-{session_id}/** rwkl.
+        env["TMPDIR"] = self._session_tmpdir(session_id)
         return env
+
+    @staticmethod
+    def _session_tmpdir(session_id: str) -> str:
+        """Return the session-scoped tmpdir path used by ``TMPDIR``.
+
+        Static so :meth:`spawn` can mkdir before fork and tests can
+        pin the convention without instantiating a spawner.
+        """
+        return f"/tmp/jaato-{session_id}"
 
     def _exec_runner(
         self,
