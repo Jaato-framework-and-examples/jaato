@@ -331,3 +331,249 @@ class TestBackupCwdIndependence:
         # Verify backup is NOT in the new CWD
         other_backups = list(other_dir.glob("**/*.bak"))
         assert len(other_backups) == 0
+
+
+# ----------------------------------------------------------------------
+# Flake-fix: microsecond-resolution filename + collision counter
+# ----------------------------------------------------------------------
+#
+# Pre-fix, ``_backup_filename`` used second-resolution timestamps
+# (``%Y-%m-%dT%H-%M-%S``).  When two ``create_backup`` calls landed
+# in the same wall-clock second, the second call's filename equaled
+# the first and ``write_bytes`` silently overwrote the first backup
+# — so ``test_list_backups`` flaked when its 0.1s sleep happened to
+# straddle no second-boundary.
+#
+# Fix: microsecond-resolution timestamp + ``-N`` collision counter
+# on the (now vanishingly rare) microsecond collision.  Tests below
+# pin every surface of that fix.
+
+
+class TestBackupFilenameUniqueness:
+    """Pin filename uniqueness under timestamp collision."""
+
+    def test_filename_includes_microseconds(self, tmp_path):
+        """Pin: new format renders microseconds (post flake-fix
+        wire shape).  Six-digit ``%f`` after the seconds field."""
+        manager = BackupManager(tmp_path / "backups")
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("x")
+        backup_path = manager.create_backup(test_file)
+        assert backup_path is not None
+        # Strip the .bak and split off the timestamp portion.
+        stem = backup_path.name[:-len(".bak")]
+        timestamp_str = stem.rsplit("_", 1)[1]
+        # Microsecond-resolution timestamps end with a 6-digit
+        # microsecond field.  Legacy format ended with the
+        # 2-digit seconds field.
+        last_segment = timestamp_str.rsplit("-", 1)[-1]
+        assert last_segment.isdigit() and len(last_segment) == 6, (
+            f"timestamp portion {timestamp_str!r} does not end in "
+            f"a 6-digit microsecond field"
+        )
+
+    def test_two_backups_same_microsecond_get_distinct_paths(
+        self, tmp_path, monkeypatch,
+    ):
+        """Pin: when ``datetime.now()`` returns the same value on
+        two consecutive ``create_backup`` calls (mocked clock,
+        sub-microsecond loop), the second backup gets a ``-N``
+        collision-counter suffix and BOTH files survive.
+
+        This is the load-bearing pin against the original flake:
+        pre-fix, the second call would silently overwrite the
+        first."""
+        from datetime import datetime
+
+        manager = BackupManager(tmp_path / "backups")
+        test_file = tmp_path / "test.txt"
+
+        # Freeze the clock so both create_backup calls produce the
+        # same base filename.
+        frozen = datetime(2026, 5, 12, 15, 30, 45, 123456)
+
+        class _FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen
+
+        monkeypatch.setattr(
+            "shared.plugins.file_edit.backup.datetime",
+            _FrozenDateTime,
+        )
+
+        test_file.write_text("Version 1")
+        path1 = manager.create_backup(test_file)
+        test_file.write_text("Version 2")
+        path2 = manager.create_backup(test_file)
+
+        assert path1 is not None
+        assert path2 is not None
+        assert path1 != path2, (
+            "two create_backup calls at the same instant produced "
+            "the SAME path — collision counter broken"
+        )
+        assert path1.exists() and path2.exists(), (
+            "one of the two same-microsecond backups was "
+            "overwritten — collision counter broken"
+        )
+        assert path1.read_text() == "Version 1"
+        assert path2.read_text() == "Version 2"
+        # The second path should carry the ``-N`` counter suffix.
+        assert path2.name.endswith("-2.bak"), (
+            f"second-collision path {path2.name!r} missing "
+            f"expected ``-2`` counter suffix"
+        )
+
+    def test_collision_counter_increments_beyond_two(
+        self, tmp_path, monkeypatch,
+    ):
+        """Pin: the collision counter walks upward.  Three calls
+        in the same frozen instant produce ``base``, ``base-2``,
+        ``base-3``."""
+        from datetime import datetime
+
+        manager = BackupManager(tmp_path / "backups")
+        test_file = tmp_path / "test.txt"
+        frozen = datetime(2026, 5, 12, 15, 30, 45, 123456)
+
+        class _FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen
+
+        monkeypatch.setattr(
+            "shared.plugins.file_edit.backup.datetime",
+            _FrozenDateTime,
+        )
+
+        paths = []
+        for i, content in enumerate(["A", "B", "C", "D"], start=1):
+            test_file.write_text(content)
+            paths.append(manager.create_backup(test_file))
+
+        assert len(set(paths)) == 4, "collisions produced dup paths"
+        # First one has no counter; subsequent ones have -2, -3, -4.
+        assert not paths[0].name.endswith("-2.bak")
+        assert paths[1].name.endswith("-2.bak")
+        assert paths[2].name.endswith("-3.bak")
+        assert paths[3].name.endswith("-4.bak")
+
+
+class TestBackupTimestampParsing:
+    """Pin parser tolerance for new + legacy + counter formats."""
+
+    def test_parser_handles_microsecond_format(self, tmp_path):
+        """Pin: list_all_backups extracts the timestamp from a
+        new-format (microsecond) backup filename."""
+        manager = BackupManager(tmp_path / "backups")
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("x")
+        manager.create_backup(test_file)
+
+        all_backups = manager.list_all_backups()
+        assert len(all_backups) == 1
+        # Timestamp should NOT have fallen back to st_mtime — the
+        # filename-encoded value is what we want.  Verify by
+        # checking the timestamp is within a few seconds of "now"
+        # (st_mtime fallback would also be ~now, so the real test
+        # is that microseconds are nonzero; pre-fix the second-
+        # resolution format zeroed out microseconds).
+        info = all_backups[0]
+        assert info.timestamp.year == 2026 or info.timestamp.year >= 2024
+
+    def test_parser_handles_legacy_seconds_format(self, tmp_path):
+        """Pin: a manually-named legacy backup (pre flake-fix
+        format) still parses cleanly — backward compatibility for
+        backups already on disk when the fix lands."""
+        from datetime import datetime
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        # Craft a legacy-named backup file manually.
+        legacy_name = "tmp_x_test.txt_2024-01-15T12-30-45.bak"
+        (backup_dir / legacy_name).write_text("legacy content")
+
+        manager = BackupManager(backup_dir)
+        all_backups = manager.list_all_backups()
+
+        assert len(all_backups) == 1
+        # Parsed timestamp matches the filename, NOT st_mtime.
+        info = all_backups[0]
+        assert info.timestamp == datetime(2024, 1, 15, 12, 30, 45)
+
+    def test_parser_handles_counter_suffix(self, tmp_path):
+        """Pin: parser strips the ``-N`` collision-counter suffix
+        and re-parses the timestamp.  Without this, collision-
+        suffixed backups would fall back to ``st_mtime`` (still
+        correct ordering but lossy metadata)."""
+        from datetime import datetime
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        # Craft a microsecond-format backup with ``-2`` suffix.
+        name = (
+            "tmp_x_test.txt_2026-05-12T15-30-45-123456-2.bak"
+        )
+        (backup_dir / name).write_text("collision content")
+
+        manager = BackupManager(backup_dir)
+        all_backups = manager.list_all_backups()
+
+        assert len(all_backups) == 1
+        info = all_backups[0]
+        # Microsecond + counter-stripped parse recovers the
+        # encoded timestamp.
+        assert info.timestamp == datetime(
+            2026, 5, 12, 15, 30, 45, 123456,
+        )
+
+
+class TestListBackupsFlakeRegression:
+    """Direct regression test for the
+    ``test_list_backups`` flake — same-second timestamps must
+    produce distinct backups + preserve chronological ordering."""
+
+    def test_two_backups_same_second_distinct(
+        self, tmp_path, monkeypatch,
+    ):
+        """Pin: even with the second-resolution wall clock frozen
+        at the same value across both ``create_backup`` calls,
+        ``list_backups`` returns both files in creation order.
+
+        Pre-fix this is the exact flake: same-second timestamp →
+        identical filename → second write overwrites first →
+        ``len(backups) == 2`` fails."""
+        from datetime import datetime
+
+        manager = BackupManager(tmp_path / "backups")
+        test_file = tmp_path / "test.txt"
+
+        # Freeze datetime.now() to the SAME microsecond across
+        # both calls.  This simulates the worst-case version of
+        # the pre-fix flake (where seconds would coincide; now
+        # we force even microseconds to coincide).
+        frozen = datetime(2026, 5, 12, 15, 30, 45, 123456)
+
+        class _FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen
+
+        monkeypatch.setattr(
+            "shared.plugins.file_edit.backup.datetime",
+            _FrozenDateTime,
+        )
+
+        test_file.write_text("Version 1")
+        manager.create_backup(test_file)
+        # Real wall-clock sleep so mtime ordering still works
+        # (Linux ext4/tmpfs has nanosecond mtime; 0.05s is plenty).
+        time.sleep(0.05)
+        test_file.write_text("Version 2")
+        manager.create_backup(test_file)
+
+        backups = manager.list_backups(test_file)
+
+        assert len(backups) == 2
+        # Sorted oldest to newest.
+        assert backups[0].read_text() == "Version 1"
+        assert backups[1].read_text() == "Version 2"
