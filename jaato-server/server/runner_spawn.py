@@ -278,6 +278,43 @@ def build_session_envelope(
     # reading ``context.agent_params`` saw an empty dict.
     agent_params_dict = dict(getattr(server, "_agent_params", {}) or {})
 
+    # Read the daemon-side resolved agent identity + profile's
+    # completion_payload_schema.  Both were previously hardcoded /
+    # omitted:
+    #
+    # - ``agent_id`` was hardcoded ``"main"`` regardless of
+    #   ``--agent <name>`` resolution.  Result: the runner-side
+    #   ``JaatoSession._agent_id`` stayed at its ``__init__`` default
+    #   of ``"main"`` for EVERY session, because the only attribute
+    #   that updates ``_agent_id`` post-construction is
+    #   ``set_ui_hooks`` — and the runner-side bootstrap installs the
+    #   UI hooks shim via direct attribute write (rpc.py:3178-3185),
+    #   bypassing ``set_ui_hooks``.  Downstream consequence:
+    #   ``AgentCompletedEvent.agent_id`` always carried ``"main"``;
+    #   reactor where-clauses keying on the logical agent identity
+    #   (e.g. ``agent_id == "discovery"``) silently missed.
+    #
+    # - ``completion_payload_schema`` was missing from the
+    #   constructor entirely.  Even though
+    #   :class:`SessionInitEnvelope` declared the field,
+    #   ``build_session_envelope`` never populated it — the runner-
+    #   side ``JaatoSession._completion_payload_schema`` stayed
+    #   ``None`` for profile-declared payload schemas, and
+    #   ``LifecycleTools._execute_signal_completion`` fell back to
+    #   the legacy ``summary`` string path instead of validating
+    #   the typed payload.
+    #
+    # Both regressions surfaced 2026-05-12 by the kb-enablement-2.0
+    # cascade smoke test.  See:
+    # - ``docs/design/per_session_confined_runner_phase5_plan.md``
+    # - The §7c step-2 relocation commit that copied the body
+    #   verbatim from server/__main__.py without catching the gaps.
+    profile_completion_schema = None
+    if profile is not None:
+        profile_completion_schema = getattr(
+            profile, "completion_payload_schema", None,
+        )
+
     return SessionInitEnvelope(
         session_id=session_id,
         workspace_path=workspace_path,
@@ -287,13 +324,14 @@ def build_session_envelope(
         plugins=plugin_specs,
         plugin_configs=plugin_configs_dict,
         system_instructions=system_instructions,
-        agent_id="main",
+        agent_id=getattr(server, "_main_agent_id", "main"),
         gc=gc_dict,
         agent_params=agent_params_dict,
         config_root=getattr(server, "config_root", None),
         env_overrides=env_overrides,
         project=project_val,
         location=location_val,
+        completion_payload_schema=profile_completion_schema,
     )
 
 
