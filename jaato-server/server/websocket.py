@@ -668,6 +668,7 @@ class JaatoWSServer:
                     daemon_loop=daemon_loop,
                     disable_confine=(profile_name == ""),
                     cgroup_attach=cgroup_attach,
+                    pool_manager=getattr(ws_server, "_pool_manager_ref", None),
                 )
             except Exception as exc:  # noqa: BLE001 — spawn boundary
                 logger.warning(

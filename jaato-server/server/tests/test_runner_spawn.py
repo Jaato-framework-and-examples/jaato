@@ -453,3 +453,180 @@ def test_partial_app_layer_supplied_forwards_only_set_fields(
     spawn_call = _FakeSpawner.instances[0].spawn_calls[0]
     assert spawn_call["tool_timeout_seconds"] == 30.0
     assert spawn_call["max_output_chars"] is None
+
+
+# ----------------------------------------------------------------------
+# Pool routing (pool PR 4)
+# ----------------------------------------------------------------------
+
+
+class _FakePoolManager:
+    """Stand-in for :class:`server.runner_pool.PoolManager`.
+
+    Controls the acquire_slot return value per-test so the routing
+    branches are pinned without spawning real subprocesses.
+    """
+
+    def __init__(self, slot_handle: Optional[Tuple[int, Any]] = None) -> None:
+        self.slot_handle = slot_handle
+        self.acquire_calls = 0
+
+    def acquire_slot(self) -> Optional[Tuple[int, Any]]:
+        self.acquire_calls += 1
+        return self.slot_handle
+
+
+def _stub_socket() -> Any:
+    """Lightweight stub for the slot's daemon-side socket."""
+    return MagicMock(name="slot_daemon_socket")
+
+
+def test_pool_routing_uses_slot_when_flag_enabled(
+    daemon_loop, tmp_path, monkeypatch,
+) -> None:
+    """Pool slot is consumed when env flag is on + pool has a slot +
+    session opted out of AppArmor."""
+    from server.runner_spawn import spawn_session_runner
+
+    monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "true")
+    server = _FakeJaatoServer()
+    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-pool",
+        workspace_path=str(tmp_path),
+        profile_name="",
+        daemon_loop=daemon_loop,
+        disable_confine=True,
+        pool_manager=pool,
+    )
+
+    # Pool was consulted.
+    assert pool.acquire_calls == 1
+    # Cold spawn was NOT invoked (slot served the session).
+    assert _FakeSpawner.instances == []
+    # The slot pid + socket are wired through the SpawnedRunner.
+    assert server.spawned is not None
+    assert server.spawned.pid == 99999
+
+
+def test_pool_routing_falls_back_when_flag_disabled(
+    daemon_loop, tmp_path, monkeypatch,
+) -> None:
+    """No flag → never consult the pool, even if pool_manager is set."""
+    from server.runner_spawn import spawn_session_runner
+
+    monkeypatch.delenv("JAATO_RUNNER_POOL_ENABLED", raising=False)
+    server = _FakeJaatoServer()
+    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-noflag",
+        workspace_path=str(tmp_path),
+        profile_name="",
+        daemon_loop=daemon_loop,
+        disable_confine=True,
+        pool_manager=pool,
+    )
+
+    assert pool.acquire_calls == 0
+    assert len(_FakeSpawner.instances) == 1  # cold-spawned
+
+
+def test_pool_routing_falls_back_when_pool_empty(
+    daemon_loop, tmp_path, monkeypatch,
+) -> None:
+    """Empty pool → cold-spawn."""
+    from server.runner_spawn import spawn_session_runner
+
+    monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "1")
+    server = _FakeJaatoServer()
+    pool = _FakePoolManager(slot_handle=None)  # empty
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-empty",
+        workspace_path=str(tmp_path),
+        profile_name="",
+        daemon_loop=daemon_loop,
+        disable_confine=True,
+        pool_manager=pool,
+    )
+
+    assert pool.acquire_calls == 1
+    assert len(_FakeSpawner.instances) == 1  # cold-spawned
+
+
+def test_pool_routing_skipped_when_apparmor_opted_in(
+    daemon_loop, tmp_path, monkeypatch,
+) -> None:
+    """Session opted into AppArmor → never consult the pool (PR 4
+    slots run unconfined; per-slot self-confinement is PR 5)."""
+    from server.runner_spawn import spawn_session_runner
+
+    monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "true")
+    server = _FakeJaatoServer()
+    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-apparmor",
+        workspace_path=str(tmp_path),
+        profile_name="jaato-ws-sess-apparmor",
+        daemon_loop=daemon_loop,
+        disable_confine=False,  # apparmor opted-in
+        pool_manager=pool,
+    )
+
+    assert pool.acquire_calls == 0
+    assert len(_FakeSpawner.instances) == 1
+
+
+def test_pool_routing_skipped_when_cgroup_attach_set(
+    daemon_loop, tmp_path, monkeypatch,
+) -> None:
+    """Session needs cgroup_attach → never consult the pool (slot
+    is already in daemon cgroup; migration is PR 5)."""
+    from server.runner_spawn import spawn_session_runner
+
+    monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "true")
+    server = _FakeJaatoServer()
+    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-cgroup",
+        workspace_path=str(tmp_path),
+        profile_name="",
+        daemon_loop=daemon_loop,
+        disable_confine=True,
+        cgroup_attach=lambda: None,  # needs cgroup migration
+        pool_manager=pool,
+    )
+
+    assert pool.acquire_calls == 0
+    assert len(_FakeSpawner.instances) == 1
+
+
+def test_pool_routing_no_pool_manager_falls_back(
+    daemon_loop, tmp_path, monkeypatch,
+) -> None:
+    """``pool_manager=None`` is the default; routing is skipped."""
+    from server.runner_spawn import spawn_session_runner
+
+    monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "true")
+    server = _FakeJaatoServer()
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-none",
+        workspace_path=str(tmp_path),
+        profile_name="",
+        daemon_loop=daemon_loop,
+        disable_confine=True,
+        pool_manager=None,
+    )
+
+    assert len(_FakeSpawner.instances) == 1
