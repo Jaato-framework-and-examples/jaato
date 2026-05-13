@@ -1,7 +1,26 @@
 """Runner subprocess entry point: ``python -m server.runner``.
 
-Spawned by :class:`server.runner_spawner.RunnerSpawner` with the RPC
-socketpair inherited as fd 3 and per-session config in env:
+Two modes:
+
+- **Session mode** (default): spawned by
+  :class:`server.runner_spawner.RunnerSpawner` for a single session.
+  Self-confines to its AppArmor profile, adopts the RPC socketpair on
+  fd 3, executes session work until the daemon closes the socket.
+
+- **Template mode** (``--template-mode``): spawned by
+  :class:`server.runner_template.TemplateManager` ONCE at daemon
+  startup.  Imports runner-tier plugin modules + walks the plugin
+  discovery directory so the resulting Python process has all the
+  imports + class definitions warm in memory.  Then sits idle on a
+  control pipe (fd 3) waiting for fork-slot requests (PR 3) or
+  shutdown.  Per the pre-warm runner pool design at
+  ``docs/design/runner_prewarm_pool_plan.md``, pool slots fork from
+  this template and inherit the warm-imports memory image — turning
+  the per-session ~50s plugin-discovery + plugin-import cost into a
+  one-time daemon-startup cost.
+
+Spawned (session mode) with the RPC socketpair inherited as fd 3 and
+per-session config in env:
 
 - ``JAATO_RUNNER_PROFILE`` — AppArmor profile to self-confine to (REQUIRED).
 - ``JAATO_RUNNER_SESSION_ID`` — session id (informational; logging only).
@@ -103,9 +122,132 @@ def _parse_float_env(name: str) -> Optional[float]:
         return None
 
 
+def _run_template_mode() -> None:
+    """Template-mode entry point — pre-warm runner pool design (pool PR 2).
+
+    Imports the runner-tier plugin modules + walks plugin discovery so
+    the resulting Python process has all the imports + class definitions
+    warm in memory.  Then sits idle on fd 3 (the control pipe from the
+    daemon) until shutdown.
+
+    Pool slots (PR 3) will fork from this template, inheriting the warm
+    imports — eliminating the per-session 50s plugin-discovery cost
+    observed on v62 step 6 (see ``docs/design/runner_prewarm_pool_plan.md``
+    §2 for the cost breakdown).
+
+    PR 2 ships ONLY the template subprocess.  The fork-slot protocol
+    (template responds to FORK_SLOT messages by forking + handing back
+    a child PID/socket via SCM_RIGHTS) is PR 3 work.  In PR 2 the
+    template just imports + sleeps.
+
+    Three things make this safe to run unconfined (no AppArmor) inside
+    the daemon-host:
+
+    - The template never serves user-facing requests.  Only the daemon
+      writes to its control pipe.
+    - The template never reads workspace files.  Plugin discovery walks
+      ``shared/plugins/*/`` — daemon-host code paths only.
+    - The template has no FS writes beyond stdlib's compiled-bytecode
+      caches.
+
+    Pool slots forked from the template DO self-confine to a per-session
+    AppArmor profile before running session work (mirrors today's
+    runner self-confine pattern).
+
+    Lifecycle exits:
+      - Daemon closes fd 3 → ``os.read(3, ...)`` returns empty bytes
+        → clean exit with code 0.
+      - Daemon sends ``SHUTDOWN\\n`` line → clean exit with code 0.
+      - Any uncaught exception during plugin import → fatal exit code
+        2 (matching session-mode's _fatal contract so daemon detection
+        is uniform).
+    """
+    _setup_logging(log_path=None)
+    log = logging.getLogger("server.runner.template")
+    log.info("runner template starting (warming runner-tier plugin imports)")
+
+    try:
+        from shared.plugins.registry import PluginRegistry
+    except Exception as exc:  # noqa: BLE001 — boundary surface
+        _fatal(
+            f"template-mode: failed to import PluginRegistry: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    # Walk runner-tier plugins.  Matches the call site in
+    # ``server/runner/session.py:_configure_runtime_plugins`` (line
+    # 187) so the template inherits exactly the import set sessions
+    # consume.  Daemon-tier plugins (auth, gc_*, cache_*, etc.) are
+    # excluded — they live on the daemon side and aren't part of the
+    # runner's per-session bootstrap cost.
+    t0 = __import__("time").perf_counter()
+    try:
+        registry = PluginRegistry()
+        registry.discover(tier_filter="runner")
+    except Exception as exc:  # noqa: BLE001 — boundary surface
+        _fatal(
+            f"template-mode: plugin discovery crashed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    discover_ms = (__import__("time").perf_counter() - t0) * 1000
+    log.info(
+        "runner template ready: %d plugins discovered in %.1fms — "
+        "pool slots will fork from this process",
+        len(list(registry.list_exposed())) if hasattr(registry, "list_exposed") else 0,
+        discover_ms,
+    )
+
+    # Sit idle on fd 3 waiting for the daemon's shutdown signal.
+    # PR 3 will extend this loop to dispatch FORK_SLOT requests.
+    try:
+        control_sock = socket.socket(fileno=3)
+        control_sock.setblocking(True)
+    except OSError as exc:
+        _fatal(
+            f"template-mode: could not adopt fd 3 as control socket: "
+            f"{exc}; daemon's TemplateManager.spawn() is supposed to "
+            f"dup the control socketpair to fd 3 before exec"
+        )
+
+    log.info("runner template idle on fd 3; awaiting daemon control commands")
+    try:
+        buf = b""
+        while True:
+            chunk = control_sock.recv(256)
+            if not chunk:
+                # Daemon closed the control pipe — clean shutdown path.
+                log.info("runner template: control pipe EOF; shutting down")
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                cmd = line.decode("utf-8", errors="replace").strip()
+                if cmd == "SHUTDOWN":
+                    log.info("runner template: SHUTDOWN command received")
+                    return
+                # PR 3 will add FORK_SLOT handling here.
+                log.warning(
+                    "runner template: unknown control command %r "
+                    "(PR 3 will add FORK_SLOT)", cmd,
+                )
+    finally:
+        try:
+            control_sock.close()
+        except OSError:
+            pass
+
+
 def main() -> None:
     """Run bootstrap + serve.  Never returns under normal operation —
     serve exits cleanly on peer EOF, after which we ``sys.exit(0)``."""
+    # ----- 0. Mode dispatch -----
+    # ``--template-mode`` selects the pre-warm template subprocess
+    # entry point (pool PR 2).  Daemon spawns one template at startup
+    # via :class:`server.runner_template.TemplateManager`.
+    if "--template-mode" in sys.argv:
+        _run_template_mode()
+        sys.exit(0)
+
     # ----- 1. Read env -----
     profile_name = os.environ.get("JAATO_RUNNER_PROFILE", "").strip()
     session_id = os.environ.get("JAATO_RUNNER_SESSION_ID", "").strip()
