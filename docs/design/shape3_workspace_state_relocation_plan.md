@@ -1,8 +1,41 @@
 # Shape 3 — Workspace-State Relocation (Daemon → Runner)
 
-**Status:** Design — multi-PR project; PR 1 specified, PRs 2-4 outlined.
+**Status:** PR 1 shipped + reverted; PRs 2-4 design pending revisit after the AppArmor + secret-resolution constraint surfaced (see §0.1).  Specifically:
+- PR 1 (runner reads workspace .env) — shipped in PR #91 (server 0.6.77), REVERTED by PR #92 (server 0.6.78).  The runner-side workspace .env reading was load-bearing-broken under AppArmor confinement.  See §0.1 for the constraint + the wire-transit shape that replaces it.
+- PR 2 (runner reads profile YAML) — scope needs revisit.  Profile YAML structure parsing can still move; profile.env value resolution stays daemon-side.
+- PR 3 (runner reads auth files) — scope needs revisit.  Auth credentials are by definition secrets; reading them runner-side hits the same AppArmor constraint that broke PR 1.
+- PR 4 (daemon-side cleanup) — premise (eliminate daemon-side workspace state) is invalidated.  Daemon retains secret-resolution authority indefinitely.
+
 **Origin:** 2026-05-13 design conversation on `jaato --new-session` regression — user articulated the principle that *per-workspace provided attributes should be resolved by the per-workspace process*. Initial draft (commit `98b2f0f7`) framed this as "client reads workspace files and sends over wire" — that framing was wrong about the topology (see §0). This revision frames it correctly: **the runner subprocess is the per-workspace process**; workspace file reading moves from daemon to runner. No wire-format changes are needed.
+
 **Forcing function:** profile-less `jaato --new-session` regression introduced by `6406fe35` (Phase 3 §7c step 1, 2026-05-09). Stage 3.1 (5-LoC runner-side `os.environ` fallback) was rejected as a halfway house that preserves the architectural smell — daemon-side `dotenv_values(workspace/.env)` still runs.
+
+## 0.1 AppArmor + secret-resolution constraint (PR #91 → #92 retrospective)
+
+PR 1 shipped per this plan's design in PR #91 (server 0.6.77) — runner-side `bootstrap_session` read `<workspace>/.env`, ran `expand_variables` (which calls `_resolve_secret_uri`), and applied resolved values to `os.environ`.
+
+Under the AppArmor-confined-runner model (Phase 3 §4.6 et al.), this broke.  `jaato_premium.secret_resolvers.PassResolver.__init__` shells to `pass version` as a sanity check.  The confined runner's AppArmor profile correctly blocks the exec — `pass version` returns exit 126, `_discover_secret_resolvers()` registers zero schemes, `_resolve_secret_uri()` returns the literal URI with a warning, the provider plugin uses the 28-byte literal as a bearer token, and Z.AI rejects with 401.  Surfaced 2026-05-13 via v64 cascade smoke.
+
+**The principle of this plan is invalidated for secret resolution.**  "Per-workspace state belongs to the per-workspace process" works for non-secret workspace state (profile YAML structure, agent markdown, GC config) but collides with confinement for any operation that needs to exec resolver subprocesses or otherwise access the user's password store.  The daemon (unconfined) is the only process with the capability; the runner (confined) must consume pre-resolved values.
+
+**Resolution (PR #92, server 0.6.78):**
+- Daemon-side `JaatoServer._resolve_session_env` resumes reading `<workspace>/.env`.
+- New `SessionInitEnvelope.session_env: Dict[str, str]` field carries the fully-resolved env (workspace .env + profile.env + env_overrides, all `${VAR}` and secret URIs decoded daemon-side).
+- Runner-side `bootstrap_session` applies `envelope.session_env` to `os.environ` verbatim — never runs `_resolve_secret_uri`, never execs `pass`.
+- Wire channel: existing `runner_rpc` socketpair (FD-pass, private to daemon-runner pair).
+- Trust posture: identical to pre-PR-91 fork-inherit semantics.  Runner sees specific session secrets needed for provider HTTP calls; cannot enumerate the password store.
+
+**Audit performed pre-merge of PR #92** (four exposure surfaces verified clean before adding the new field carrying plaintext secrets):
+- **Logging**: no `envelope.to_dict()` log site; step 1b logs key COUNT, never values.
+- **Persistence**: envelope is in-memory only; `SessionRecord` / `WaypointRecord` / subagent serializers exclude envelope fields.
+- **Client events**: no event class declares `envelope` / `session_env` / `env_overrides` fields; `ProfileSummary.env_var_names` exposes KEYS only with docstring contract "values never leave the daemon".
+- **Fork-replay**: every fork path (waypoint, headless reactor, disk-restore) constructs a fresh `BootstrapEnvelope` at entry — fresh daemon-side resolution per fork.
+
+The audit framework is reusable for any future field carrying resolved secrets across the wire.
+
+**General rule for Shape 3 (revised):** per-workspace relocation needs an explicit security-side review for any operation requiring exec or kernel access outside the confined profile's allow-list.  Daemon stays the unconfined authority for those operations.  Workspace state that DOES NOT require such access (file parsing, YAML/JSON load) can still relocate per the original principle.
+
+See `feedback_secret_resolution_stays_daemon_side` memory + PR #92 description for context.
 
 ## 0. Correction from the initial draft (2026-05-13)
 
@@ -60,84 +93,80 @@ The daemon's role narrows to: routing, session lifecycle bookkeeping, AppArmor/c
 
 Four PRs, each independently reviewable and rollback-safe. Each preserves back-compat during the migration via daemon-side fallback paths that get removed in PR 4.
 
-### PR 1 — Runner reads workspace `.env`
+### PR 1 — Runner reads workspace `.env` — **SHIPPED PR #91, REVERTED PR #92**
 
-**Scope:**
+**As-shipped (PR #91, server 0.6.77, merged 2026-05-13):**
 
-- Runner-side `bootstrap_session` (in `server/runner/session.py`) reads `<workspace_path>/.env` via `dotenv_values()` BEFORE constructing the session
-- Resolves `pass://` URIs runner-side
-- Populates the runner subprocess's `os.environ` with the resolved values
-- Populates a new `JaatoSession._session_env` (mirrors the daemon's current attribute) so plugin code can call `session.get_session_env(...)`
-- Daemon-side `JaatoServer._resolve_session_env()` no longer reads `dotenv_values(workspace/.env)`; that file path is removed from the call (daemon STILL resolves `env_overrides` from the envelope, which currently carries `profile.env` values daemon-side)
-- Closes the profile-less `jaato --new-session` regression by having the runner read `MODEL_NAME` / `JAATO_PROVIDER` from its own resolved env
+- Runner-side `bootstrap_session` reads `<workspace_path>/.env` via `dotenv_values()` BEFORE constructing the session.
+- Resolves `pass://` URIs runner-side via `expand_variables` → `_resolve_secret_uri`.
+- Populates runner's `os.environ` with resolved values.
+- New `JaatoSession._session_env` + `get_session_env(key, default)` accessor.
+- Daemon-side `JaatoServer._resolve_session_env` no longer reads `dotenv_values(workspace/.env)`.
 
-**Touchpoints:**
-- `jaato-server/server/runner/session.py:bootstrap_session` — add env-file reading before `_build_session`
-- `jaato-server/shared/jaato_session.py` — add `_session_env` instance dict + `get_session_env(key)` accessor
-- `jaato-server/server/core.py:_resolve_session_env` — remove `dotenv_values(workspace/.env)` call; daemon keeps reading only what it still needs (provider config for auth-pending paths, etc.)
-- `jaato-server/server/runner_spawn.py:build_session_envelope` — read fallback model_name from envelope's `env_overrides` when `profile.model` is empty
+**Reverted (PR #92, server 0.6.78, merged 2026-05-13):**
 
-**Effort:** ~150 LoC + tests. ~half day.
+The runner-side secret-URI resolution failed under AppArmor confinement — `pass` exec blocked, resolvers don't register, URIs survive as literals.  See §0.1 above for the full retrospective.  PR #92 reshapes the wiring:
 
-**Closes:** profile-less `jaato --new-session` regression. Cascade and other flows continue working (back-compat — daemon's profile-derived path still populates envelope fields).
+- Daemon resumes workspace .env reading (revert).
+- New `SessionInitEnvelope.session_env` field ships fully-resolved env daemon → runner.
+- Runner applies the dict to `os.environ` verbatim; no resolver discovery, no `pass` exec.
+- `JaatoSession._session_env` + `get_session_env` accessor stay (now populated by the envelope-applied dict).
 
-**No wire-format change.** SDK and TUI untouched.
+**Net architectural change after PR 1 + PR 92:**
 
-### PR 2 — Runner reads workspace profile YAML
+- ✅ Workspace .env READING stays daemon-side (file lives on daemon-runner host; daemon is unconfined; can exec resolvers).
+- ✅ Resolved env REACHES runner via a dedicated wire field (`envelope.session_env`).  Cold-spawn path also relies on fork-inherit `os.environ` overlay (`_with_session_env`) — pool-served path relies solely on the envelope wire transit.  Both produce the same runner-side `os.environ` state.
+- ✅ `JaatoSession.get_session_env(key)` accessor available for plugin code that needs per-session env lookup separate from `os.environ`.
 
-**Scope:**
+**No wire-format break.**  `envelope.session_env` is additive; old runners ignore unknown fields.
 
-- Runner-side `bootstrap_session` parses `<workspace_path>/.jaato/profiles/<profile_name>.yaml` itself via `shared/plugins/subagent/config.py:_load_profile` (already exists; just relocate the call site)
-- Runner-side derives `model_name`, `provider_name`, `plugins`, `plugin_configs`, `system_instructions`, `gc`, `completion_payload_schema`, `runtime_limits`, `env` from the parsed profile
-- Daemon-side stops parsing profiles for runner-bound sessions; envelope sheds the profile-derived fields (or marks them deprecated for transition)
-- Envelope carries `profile_name` (string) instead of `profile` (dict) for runner-bound sessions
+### PR 2 — Runner reads workspace profile YAML — **SCOPE PENDING REVISIT (§0.1 constraint)**
 
-**Touchpoints:**
-- `jaato-server/server/runner/session.py:bootstrap_session` — add profile-parsing call
-- `jaato-server/shared/session_envelope.py` — `SessionInitEnvelope` adds `profile_name` field; existing profile-derived fields marked deprecated
-- `jaato-server/server/session_manager.py` — stop parsing profile for envelope construction; just pass `profile_name`
-- `jaato-server/server/runner_spawn.py:build_session_envelope` — read profile from runner only
+Original scope (pre-§0.1): runner parses profile YAML + derives all profile fields runner-side.  Profile.env values resolved via `expand_variables` runner-side.
 
-**Effort:** ~250 LoC + tests. ~1-2 days. Larger than PR 1 because profile parsing is non-trivial (inheritance, validation, plugin_configs merging).
+§0.1 invalidates the resolution part: `profile.env` values containing `pass://` (a common pattern) cannot resolve runner-side under AppArmor confinement.  Same failure mode that took down PR 1.
 
-**Risk:** profile resolution has subtle behaviors (inheritance chains, env-var expansion, plugin_configs precedence) that daemon-side has gotten right; runner-side needs the same. Mostly a matter of relocating function calls, not rewriting logic.
+**Revised scope (split into two layers):**
 
-**No wire-format change for client-daemon.** Envelope schema evolves (daemon-internal).
+- **Profile YAML structure parsing**: CAN move runner-side.  Reads the file via `_load_profile`, derives `model_name`, `provider_name`, `plugins`, `plugin_configs`, `system_instructions`, `gc`, `completion_payload_schema`, `runtime_limits`.  No exec required; no secrets in this layer.
+- **Profile.env value resolution**: STAYS daemon-side.  Daemon reads `profile.env`, runs `expand_variables`, contributes to `server._session_env`, ships via `envelope.session_env`.  Same path as workspace .env per PR #92.
 
-### PR 3 — Runner reads workspace auth files
+**Open design questions before specifying this PR:**
 
-**Scope:**
+1. Does the daemon need profile YAML to be parsed in order to populate the envelope's other fields, OR can profile.env be a separate read (`yaml.safe_load(<profile>.yaml)["env"]`) while the rest of the profile parses runner-side?  Probably yes — daemon needs `model_name` etc. for its own bookkeeping today (transports, telemetry).
+2. If daemon STILL parses profile YAML for its own needs, what does "runner reads profile YAML" actually deliver beyond a redundant re-parse?  Two answers: (a) test the runner-side parser pin against daemon-side equivalence; (b) future "daemon as pure factory" target needs runner-side parsing as a prerequisite.
+3. Is the `_load_profile` import surface clean from the runner (the audit in §0 / open question 3 of v1 doc).  Probably yes; `shared/plugins/subagent/config.py` is import-clean.
 
-- Auth plugins are already `PLUGIN_TIER="runner"` (per memory + audit) — they instantiate runner-side
-- This PR makes the credential FILE READING also runner-side
-- `<workspace>/.jaato/auth/*_auth.json` reads move from daemon-side `verify_auth` / provider construction to the runner-side auth-plugin instances
-- `pass://` resolution for auth credentials (today daemon-side) moves to runner — runner's `pass` access still works because runner is on the user's machine
+PR 2 specification deferred until these are answered.  Workspace state relocation is no longer a clean reorg — secret-touching layers stay daemon-side.
 
-**Touchpoints:**
-- `jaato-server/server/core.py:verify_auth` — RPC to runner instead of daemon-side credential read
-- `jaato-server/shared/jaato_runtime.py:verify_auth` — receives RPC, executes runner-side
-- Per-provider auth plugins — already runner-tier; audit each for any remaining daemon-side credential FILE READING
+**Effort estimate (revised):** ~150 LoC + tests for the structural parse relocation; profile.env resolution is unchanged (no work).  ~1 day.
 
-**Effort:** ~200 LoC + tests. ~1 day. Most of the auth lifecycle is already runner-side; this just closes the file-reading gap.
+### PR 3 — Runner reads workspace auth files — **SCOPE INVALIDATED (§0.1 constraint)**
 
-### PR 4 — Daemon-side cleanup
+Original scope: relocate `<workspace>/.jaato/auth/*_auth.json` reads from daemon to runner, including `pass://` resolution of auth credentials.
 
-**Scope:**
+§0.1 invalidates this entirely.  Auth credentials are by definition secrets.  Reading them runner-side means resolving `pass://` runner-side means hitting the AppArmor exec block.  Same failure mode as PR 1.
 
-After PRs 1-3, daemon-side `_session_env`, `_resolve_session_env`, `_with_session_env`, `dotenv_values(env_file)` are dead code paths. Remove them.
+**Revised position:** auth file reading + secret resolution STAY daemon-side.  Auth plugins remain `PLUGIN_TIER="runner"` (their per-session lifecycle is runner-scoped), but the credential MATERIAL is daemon-provided.  Today's mechanism (daemon resolves env, ships via envelope; auth plugins read os.environ in the runner) already implements this correctly — no work needed.
 
-- `JaatoServer._session_env` attribute removed
-- `JaatoServer._resolve_session_env()` removed
-- `JaatoServer._with_session_env()` removed
-- Daemon-side `_resolve_secret_uri` (`shared/plugins/subagent/config.py`) is no longer called from daemon; keep for runner-side profile parsing (per PR 2)
-- Update `feedback_daemon_is_workspace_agnostic` memory — daemon now truly is workspace-agnostic for file reads
+The fundamental misframing of the original PR 3 was assuming "auth lifecycle runner-side ⇒ credential file reading runner-side."  Those are independent.  Plugin lifecycle can be runner-tier while credential resolution stays daemon-side.
 
-**Touchpoints:**
-- `jaato-server/server/core.py` — strip workspace-file-reading methods
-- `jaato-server/server/session_manager.py` — strip callers
-- Tests — remove tests pinning daemon-side workspace reading
+**This PR is closed-as-unneeded.**  No work.
 
-**Effort:** ~150 LoC removed + tests. ~half day. Net negative LoC.
+### PR 4 — Daemon-side cleanup — **PREMISE INVALIDATED (§0.1 constraint)**
+
+Original premise: after PRs 1-3, daemon-side `_session_env` / `_resolve_session_env` / `_with_session_env` / `dotenv_values(env_file)` would be dead code; PR 4 removes them.
+
+§0.1 + the PR #92 resolution invalidate this entirely.  Daemon retains:
+
+- `_session_env` attribute — holds the fully-resolved env, shipped via `envelope.session_env`.
+- `_resolve_session_env` method — reads workspace .env + profile.env + env_overrides, runs `expand_variables` (including secret URIs).
+- `_with_session_env` context manager — applies the resolved env to `os.environ` daemon-side for the brief runtime-construct window where daemon-side code (`build_session_envelope` reading PROJECT_ID etc.) needs it.
+- `dotenv_values(env_file)` call — load-bearing for workspace .env reading.
+
+**This PR is closed-as-unneeded.**  Daemon-side workspace-file-reading is structural under the confinement model.
+
+Conceivable scope NARROWING (not removal): if `build_session_envelope` stops reading `PROJECT_ID`/`LOCATION` from `os.environ` (separate backlog: replace with provider-specific config objects), the `_with_session_env` os.environ-overlay could narrow to only the actual daemon-side consumers.  Track via that backlog, not here.
 
 ## 5. Back-compat + rollback story
 
@@ -199,5 +228,6 @@ PR 1 alone closes the profile-less `jaato --new-session` regression and the env-
 ## 11. Decision log
 
 - **2026-05-13 (initial draft, PR #83 commit `98b2f0f7`)** — framed Shape 3 as "client reads workspace files and sends over wire". Premise was based on wrong WS-mode topology assumption.
-- **2026-05-13 (this revision)** — user corrected: in both IPC and WS modes the runner is co-located with the workspace; no wire-format work is needed. Rewrote with runner-as-per-workspace-process framing. Original doc preserved in git history at commit `98b2f0f7` for the wire-format work that would only matter in a hypothetical daemon-remote-from-workspace deployment.
+- **2026-05-13 (revision 2)** — user corrected: in both IPC and WS modes the runner is co-located with the workspace; no wire-format work is needed. Rewrote with runner-as-per-workspace-process framing. Original doc preserved in git history at commit `98b2f0f7` for the wire-format work that would only matter in a hypothetical daemon-remote-from-workspace deployment.
 - **2026-05-13** — Stage 3.1 (5-LoC runner-side `os.environ` fallback) considered and rejected. Reason: preserves the daemon-reads-workspace-files smell; doesn't address the architectural shape.
+- **2026-05-13 (revision 3, post-PR-#92)** — AppArmor + secret-resolution constraint surfaced via v64 cascade smoke after PR #91 shipped.  The "per-workspace state to the per-workspace process" principle holds for non-secret state but collides with the confined-runner model for any operation requiring exec or kernel access (resolver subprocesses, GPG agent, password store).  PR 1 reverted via PR #92's wire-transit reshape.  PR 2 scope split (YAML parse OK; profile.env resolution stays daemon-side).  PR 3 closed (auth file reading + secret resolution both stay daemon-side).  PR 4 closed (daemon retains workspace-file-reading authority for secret-touching operations).  General rule documented in §0.1.  Memory: `feedback_secret_resolution_stays_daemon_side`.

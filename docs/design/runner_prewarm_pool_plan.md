@@ -1,6 +1,6 @@
 # Runner Pre-warm Pool + Deferred Provider INIT — Bootstrap Latency Reduction
 
-**Status:** PRs 1-4 shipped (server 0.6.76). PR 5 (operationalization) pending v63 cascade validation.
+**Status:** PRs 1-4 shipped (server 0.6.76).  Env-propagation regression surfaced + fixed via PR #91 → PR #92 (server 0.6.78).  PR 5 (operationalization) pending; PR 4 confirmed end-to-end by v65 cascade smoke against the Y fix.
 **Origin:** 2026-05-13 cascade step-6 stall diagnosed as 30s RPC timeout (`runner_rpc_client.py:704`). Root cause: §7c seat-flip (`6406fe35`, 2026-05-09) moved JaatoSession into per-session subprocesses, introducing ~16s of per-session Python startup + runner-tier-plugin import cost that didn't exist pre-§7c. Workspace state growth (37 generated Java files at step 6) tipped step 6's bootstrap over the 30s line.
 **Decision (2026-05-13):** address the regression structurally rather than via band-aids (raising timeout, partial deferral). Reduce per-session bootstrap from ~30s to ~3s while preserving §7c's per-session isolation properties.
 
@@ -9,6 +9,8 @@
 - PR 2 → #87 (`a401047f` line, see merge `16d17741` parent): template subprocess + lifecycle
 - PR 3 → #88: pool slot fork-slot RPC + PoolManager
 - PR 4 → #89 (`6b2a768c`, merged in `fef96997`): route through pool + replenishment thread (combined; replenishment originally PR 5 scope)
+- PR 4 follow-up: PR #91 (Shape 3 PR 1 attempt — workspace .env reading moved runner-side) shipped + reverted by PR #92 (Y fix: daemon-resolved env shipped via `envelope.session_env`).  Pool routing surfaced the env-propagation seat-flip gap which surfaced an AppArmor + secret-resolution constraint that invalidated Shape 3 PR 1's principle for secret-touching state.  See `docs/design/shape3_workspace_state_relocation_plan.md` §0.1 retrospective.
+- **v65 cascade smoke (2026-05-13, post-PR-92):** pool-routed sessions land at ~7s bootstrap (context, host_validator, codegen steps); apparmor-confined discovery cold-spawns at ~11s; 5x reduction vs v62's 35s pre-pool step 6.  PR 4's structural fix delivered as designed.
 
 ## 1. Principle
 
@@ -299,3 +301,5 @@ PR 1 alone unblocked the cascade.  PR 4 is the structural fix — once the flag 
 - **2026-05-13** — Stage 3.1 (5-LoC `os.environ` fallback) and Shape α (raise timeout to 120s) both rejected as band-aids that mask the structural cost.
 - **2026-05-13** — PR 4 combined with replenishment thread (originally PR 5 scope) per user authorization "PR 4 combined".  Without replenishment, target_size=2 only amortizes the first 2 of an N-step cascade — defeating the pool for the very workload that motivated the multi-PR project.  Combined PR delivers measurable cascade unblock on first ship.
 - **2026-05-13** — PR 4 pool path gated to sessions with `disable_confine=True` AND no `cgroup_attach`.  Per-slot AppArmor self-confine + cgroup migration both deferred to PR 5 because they require new post-fork RPC handshakes the existing wire surface doesn't support.  Trade-off: PR 4 ships faster + does the structural work; PR 5 brings the kernel-isolation properties back.
+- **2026-05-13 (post-PR-4)** — PR #91 surfaced an env-propagation regression specific to pool slots: workspace .env values weren't reaching pool-routed runners because pool slots aren't forked from the daemon thread holding the `_with_session_env` `os.environ` overlay.  Initial fix attempt (Shape 3 PR 1: runner-side workspace .env reading) failed under AppArmor confinement (`pass` exec blocked → secret URIs survived as literals).  PR #92 reshape (Y fix): daemon resolves daemon-side, ships fully-resolved env via new `envelope.session_env` wire field.  Pool routing now end-to-end functional with secret URIs.  Audit framework (logging / persistence / events / fork-replay) used pre-merge of PR #92 documented in the PR body — reusable for any future wire field carrying resolved secrets.
+- **2026-05-13** — v65 cascade smoke validation against PR #92 daemon: pool-routed bootstrap ~7s (5x reduction vs v62 cold step-6 35s).  Step-6 timeout class closed.  PR 4 + #92 deliver the projected savings.
