@@ -247,6 +247,26 @@ Model uses `list_tools()` → `get_tool_schemas()` workflow to discover tools.
 - Enabled by default (`JAATO_DEFERRED_TOOLS=true`)
 - Core tools: introspection, file_edit, cli, filesystem_query, todo, clarification
 
+### Pre-warm Runner Pool
+
+Sessions consume a pre-warm runner subprocess from a pool instead of cold-spawning one each time.  Cuts per-session bootstrap from ~30s (with full plugin discovery + imports) to ~7s on cascade workloads.
+
+Architecture: daemon spawns a **template subprocess** at startup that imports all runner-tier plugin modules.  N pre-warm **pool slots** fork from the template (no exec), inheriting the warm imports.  When a session arrives, daemon claims a pool slot and dispatches `session.bootstrap` to it via the same `RunnerRPCClient` it would use for a cold-spawned runner.  Slot self-confines to the session's AppArmor profile in bootstrap step 1c via `aa_change_profile` (main-thread dispatch so subsequently-spawned worker threads inherit the confined cred).
+
+**Operational properties:**
+- **Subreaper**: daemon calls `prctl(PR_SET_CHILD_SUBREAPER, 1)` at startup so orphaned descendants (slots whose template died) re-parent to the daemon.
+- **Watchdog**: `PoolManager` replenishment thread detects template death + auto-respawns + refills pool.
+- **READY handshake**: template sends `"READY\n"` after plugin discovery completes; daemon's `TemplateManager.spawn` blocks for it (30s timeout) instead of a fixed sleep.
+- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`).
+
+**Configuration:**
+- Enabled by default (`JAATO_RUNNER_POOL_ENABLED=true`).  Disable with `=false` / `0` / `no` / `off`.
+- Pool size via `JAATO_RUNNER_POOL_SIZE` (default 2).
+
+**Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible (slot self-confines to the per-session profile).
+
+See `docs/design/runner_prewarm_pool_plan.md` for the full multi-PR plan + decision log.
+
 ### Tool Traits
 
 Tools can declare semantic **traits** on their `ToolSchema` via the `traits` field (a `FrozenSet[str]`). Traits drive cross-cutting behavior without hardcoding tool names in session or plugin code.
@@ -744,6 +764,8 @@ Available Models:
 | `JAATO_GC_THRESHOLD` | GC trigger threshold % (default: 80.0) |
 | `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
+| `JAATO_RUNNER_POOL_ENABLED` | Enable pre-warm runner pool routing (default: `true`).  Sessions consume pre-warm pool slots instead of cold-spawning a runner subprocess.  Set to `false` / `0` / `no` / `off` to disable.  See `docs/design/runner_prewarm_pool_plan.md`. |
+| `JAATO_RUNNER_POOL_SIZE` | Number of pre-warm pool slots to keep idle (default: 2).  Raise for cascade workloads that spawn many sessions in tight succession. |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 | `JAATO_CGROUPS_ROOT` | Parent cgroup v2 directory for the WS server's per-session cgroup tree (default: `/sys/fs/cgroup/jaato`). Override when the host has subtree_control delegated under a different path. Must already exist with `memory`, `pids`, `cpu` in `cgroup.subtree_control`. |
