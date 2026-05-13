@@ -123,6 +123,27 @@ class SessionInitEnvelope:
         env_overrides: Environment-variable overrides applied during
             session-init (e.g. provider env from a post-auth wizard
             response).  Layered atop the workspace's ``.env``.
+
+            **Deprecated:** post-Y the runner consumes ``session_env``
+            (which already includes the layered + resolved overrides).
+            Carried for backward compat with older runner versions
+            until schema_version bumps; new code should not rely on
+            this field reaching the runner.
+        session_env: Fully-resolved per-session environment (workspace
+            ``.env`` + profile.env + env_overrides, all ``${VAR}`` and
+            secret-URI resolved daemon-side).  **Carries plaintext
+            secrets** (decoded ``pass://`` / ``vault://`` values).
+            Wire-only — never persisted, never logged, never forwarded
+            to clients.  Runner applies these to ``os.environ``
+            verbatim during ``bootstrap_session`` without further
+            resolution.
+
+            This is the load-bearing channel for confined-runner
+            secret access: the daemon (unconfined) does the resolver
+            exec; the runner (AppArmor-confined and unable to exec
+            ``pass``) consumes pre-resolved literals.  See
+            ``project_backlog_env_propagation_seat_flip_gap`` history
+            + the PR #91 retrospective for context.
     """
 
     session_id: str
@@ -145,6 +166,11 @@ class SessionInitEnvelope:
     agent_params: Dict[str, str] = field(default_factory=dict)
     config_root: Optional[str] = None
     env_overrides: Dict[str, str] = field(default_factory=dict)
+    # PR #91 Y fix: fully-resolved per-session env carrying plaintext
+    # secrets.  Wire-only — daemon → runner over the socketpair, never
+    # persisted, logged, or forwarded to clients.  See field docstring
+    # above for the full security contract.
+    session_env: Dict[str, str] = field(default_factory=dict)
     # Phase 3 post-Step-7 Path C: provider-connect args.  Carried in
     # the envelope so the runner-side ``bootstrap_session`` can call
     # ``runtime.connect(project, location)`` before
@@ -182,6 +208,7 @@ class SessionInitEnvelope:
             "agent_params": dict(self.agent_params),
             "config_root": self.config_root,
             "env_overrides": dict(self.env_overrides),
+            "session_env": dict(self.session_env),
             "project": self.project,
             "location": self.location,
         }
@@ -233,6 +260,7 @@ class SessionInitEnvelope:
             agent_params=dict(d.get("agent_params") or {}),
             config_root=d.get("config_root"),
             env_overrides=dict(d.get("env_overrides") or {}),
+            session_env=dict(d.get("session_env") or {}),
             project=str(d.get("project", "")),
             location=str(d.get("location", "")),
         )

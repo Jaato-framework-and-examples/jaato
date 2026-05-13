@@ -922,41 +922,42 @@ class JaatoServer:
         if self._session_env_resolved:
             return
 
+        from dotenv import dotenv_values
         from shared.plugins.subagent.config import expand_variables
 
-        # Shape 3 PR 1: the daemon NO LONGER reads ``<workspace>/.env``.
-        # The runner-side ``bootstrap_session`` is now the per-workspace
-        # process that owns workspace .env reading + secret-URI
-        # resolution.  Pre-PR-1 the daemon read the file and relied on
-        # ``_with_session_env()`` ``os.environ`` overlay to propagate
-        # values to the cold-spawned runner via fork-inheritance; that
-        # mechanism broke silently for pool-served sessions (slot was
-        # forked from the template at daemon startup, not from this
-        # daemon thread holding the overlay).
+        # PR #91 retrospective (Shape 3 PR 1 attempt + Y fix):
+        # The daemon resolves session env — including workspace .env —
+        # because the daemon (unconfined) is the only process with
+        # access to the user's password store via ``pass`` /
+        # ``vault`` / etc. exec.  The AppArmor-confined runner
+        # subprocess correctly cannot exec those tools.
         #
-        # Audited daemon-side workspace .env consumers as of this PR:
-        # ``build_session_envelope`` (in ``runner_spawn.py`` +
-        # ``session_manager.py``) reads ``PROJECT_ID`` /
-        # ``LOCATION`` from ``os.environ`` for Vertex AI sessions.
-        # Those reads return "" post-PR-1; the runner-side
-        # ``bootstrap_session`` now falls back to its own
-        # ``os.environ`` (populated from workspace .env) when the
-        # envelope's project/location are empty.  The
-        # ``PROJECT_ID``/``LOCATION`` env-knob shape is itself an
-        # architectural smell — separately backlogged for replacement
-        # by provider-specific config objects.
+        # PR #91 tried to move workspace .env reading to the runner
+        # (Shape 3's "per-workspace state belongs to the per-workspace
+        # process" principle), which surfaced this AppArmor
+        # constraint: the runner's resolver init exits 126
+        # (CalledProcessError on ``pass version``), no scheme
+        # registers, ``pass://`` URIs survive as literal strings.
         #
-        # Daemon still resolves profile.env + env_overrides because
-        # those values feed the SessionInitEnvelope's ``env_overrides``
-        # field, which the runner applies post-fork.  Workspace .env
-        # never crosses the wire; runner reads it itself.
-        self._session_env = {}
+        # Y fix: daemon stays the secret-resolution authority.
+        # ``build_session_envelope`` reads ``self._session_env`` (the
+        # fully-resolved dict this method produces) and ships it via
+        # ``envelope.session_env``.  The runner applies it to
+        # ``os.environ`` unchanged — no resolver discovery,
+        # no ``pass`` exec, no AppArmor-blocked subprocess.  Same
+        # trust posture as pre-PR-91 (cold-spawn fork-inherit):
+        # runner ends up with specific session secrets; cannot
+        # enumerate the password store.
+        raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
+        raw_filtered = {k: v for k, v in raw_session_env.items() if v is not None}
+        # ``${VAR}`` cross-references within .env resolve against
+        # sibling entries; secret URIs (pass://, vault://, awssm://,
+        # sops://, keyring://) resolve via the registered
+        # SecretResolver.
+        self._session_env = expand_variables(raw_filtered, context=raw_filtered)
 
         # Profile env: block — higher precedence than .env, supports
-        # ${VAR} expansion and secret URI resolution.  Daemon resolves
-        # because the daemon constructed the SubagentProfile (Shape 3
-        # PR 2 relocates profile parsing too; until then, daemon still
-        # owns this layer).
+        # ${VAR} expansion and secret URI resolution.
         if self._profile and self._profile.env:
             expanded_env = expand_variables(self._profile.env)
             self._session_env.update(expanded_env)
