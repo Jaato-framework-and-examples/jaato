@@ -144,3 +144,179 @@ class TestTemplateManagerIsAlive:
         mgr.spawn()
         mgr.shutdown()
         assert not mgr.is_alive()
+
+
+class TestTemplateManagerRequestForkSlot:
+    """Tests for the FORK_SLOT RPC (pool PR 3)."""
+
+    def test_returns_none_before_spawn(self):
+        """Before ``spawn()``, no template is running to fork from."""
+        mgr = TemplateManager()
+        assert mgr.request_fork_slot() is None
+
+    def test_forks_a_real_slot(self):
+        """End-to-end: spawn template, fork a slot, verify the slot
+        process exists, then SHUTDOWN the slot.
+
+        The slot inherits the template's warm imports (which is the
+        whole point of the pool design) — but PR 3 just verifies the
+        slot PROCESS exists and accepts SHUTDOWN.  Envelope handling
+        is PR 4."""
+        mgr = TemplateManager()
+        mgr.spawn()
+        # Let the template's discover() finish so it's ready to handle
+        # FORK_SLOT.  Template-side discover took ~1.7s in PR 2; allow
+        # 3s for safety.
+        time.sleep(3.0)
+
+        try:
+            handle = mgr.request_fork_slot()
+            assert handle is not None, (
+                "request_fork_slot returned None — template should be "
+                "ready by now"
+            )
+            slot_pid, daemon_end = handle
+            assert slot_pid > 0
+            # /proc/<slot_pid> should exist on Linux.
+            assert os.path.isdir(f"/proc/{slot_pid}"), (
+                f"forked slot pid={slot_pid} not in /proc"
+            )
+            # Send SHUTDOWN to the slot directly.
+            daemon_end.sendall(b"SHUTDOWN\n")
+            daemon_end.close()
+            # Slot should exit cleanly + be reapable.  Note: the
+            # slot's parent is the daemon (this test process) because
+            # of fork inheritance, so we waitpid here.  A "dead but
+            # not reaped" slot stays as a zombie in /proc — checking
+            # /proc/<pid> existence is the wrong probe.
+            reaped = False
+            for _ in range(100):  # 5s budget at 50ms intervals
+                try:
+                    waited_pid, _ = os.waitpid(slot_pid, os.WNOHANG)
+                    if waited_pid == slot_pid:
+                        reaped = True
+                        break
+                except ChildProcessError:
+                    reaped = True  # already reaped
+                    break
+                time.sleep(0.05)
+            assert reaped, (
+                f"slot pid={slot_pid} did not exit + reap within 5s "
+                f"after SHUTDOWN"
+            )
+        finally:
+            mgr.shutdown()
+
+    def test_multiple_slots_distinct_pids(self):
+        """Fork 3 slots, verify they're 3 distinct processes."""
+        mgr = TemplateManager()
+        mgr.spawn()
+        time.sleep(3.0)
+
+        handles = []
+        try:
+            for _ in range(3):
+                h = mgr.request_fork_slot()
+                assert h is not None
+                handles.append(h)
+            pids = [h[0] for h in handles]
+            assert len(set(pids)) == 3, (
+                f"expected 3 distinct slot PIDs; got {pids}"
+            )
+        finally:
+            for slot_pid, sock in handles:
+                try:
+                    sock.sendall(b"SHUTDOWN\n")
+                    sock.close()
+                except OSError:
+                    pass
+                try:
+                    os.waitpid(slot_pid, 0)
+                except ChildProcessError:
+                    pass
+            mgr.shutdown()
+
+
+class TestPoolManager:
+    """Tests for PoolManager (pool PR 3 — daemon-side pool wrapper)."""
+
+    def test_target_size_zero_disables_pool(self):
+        """``target_size=0`` means no pool — ``spawn_initial_slots``
+        returns 0 without touching the template."""
+        from server.runner_pool import PoolManager
+
+        # Template-manager mock not even needed because target_size=0
+        # short-circuits.
+        pool = PoolManager(template_manager=None, target_size=0)
+        assert pool.spawn_initial_slots() == 0
+        assert pool.idle_count() == 0
+
+    def test_spawn_initial_slots_with_live_template(self):
+        """End-to-end: spawn template, ask pool to fork 2 slots, verify
+        idle_count == 2, then shutdown."""
+        from server.runner_pool import PoolManager
+
+        tm = TemplateManager()
+        tm.spawn()
+        time.sleep(3.0)
+        try:
+            pool = PoolManager(template_manager=tm, target_size=2)
+            forked = pool.spawn_initial_slots()
+            assert forked == 2
+            assert pool.idle_count() == 2
+            pool.shutdown_all()
+            assert pool.idle_count() == 0
+        finally:
+            tm.shutdown()
+
+    def test_acquire_slot_pops_idle(self):
+        """``acquire_slot`` returns one idle slot per call; empty pool
+        returns None."""
+        from server.runner_pool import PoolManager
+
+        tm = TemplateManager()
+        tm.spawn()
+        time.sleep(3.0)
+        try:
+            pool = PoolManager(template_manager=tm, target_size=2)
+            pool.spawn_initial_slots()
+            assert pool.idle_count() == 2
+
+            h1 = pool.acquire_slot()
+            assert h1 is not None
+            assert pool.idle_count() == 1
+
+            h2 = pool.acquire_slot()
+            assert h2 is not None
+            assert pool.idle_count() == 0
+
+            h3 = pool.acquire_slot()
+            assert h3 is None  # empty
+
+            # Clean up the acquired slots ourselves (PR 4 will do this
+            # via session bootstrap; PR 3 the test does it manually).
+            for slot_pid, sock in [h1, h2]:
+                sock.sendall(b"SHUTDOWN\n")
+                sock.close()
+                try:
+                    os.waitpid(slot_pid, 0)
+                except ChildProcessError:
+                    pass
+        finally:
+            tm.shutdown()
+
+    def test_shutdown_all_idempotent(self):
+        """Calling ``shutdown_all()`` twice is safe."""
+        from server.runner_pool import PoolManager
+
+        tm = TemplateManager()
+        tm.spawn()
+        time.sleep(3.0)
+        try:
+            pool = PoolManager(template_manager=tm, target_size=1)
+            pool.spawn_initial_slots()
+            pool.shutdown_all()
+            pool.shutdown_all()  # second call — no-op
+            assert pool.idle_count() == 0
+        finally:
+            tm.shutdown()

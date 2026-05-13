@@ -228,6 +228,147 @@ class TemplateManager:
                 pid,
             )
 
+    def request_fork_slot(
+        self, timeout: float = 5.0,
+    ) -> "Optional[tuple[int, socket.socket]]":
+        """Ask the template to fork a new pool slot (pool PR 3).
+
+        Protocol:
+
+        1. Create a socketpair (daemon_end, slot_end)
+        2. Send ``FORK_SLOT\\n`` + ``slot_end`` FD via SCM_RIGHTS over
+           the template's control pipe
+        3. Close daemon's copy of ``slot_end`` (the kernel keeps the
+           refcount alive in the template's address space)
+        4. Wait for the template's ``FORKED:<pid>\\n`` reply
+        5. Return ``(slot_pid, daemon_end)`` — the daemon-side socket
+           is the only way to talk to that specific slot
+
+        Thread-safe: serializes concurrent fork-slot requests via
+        the manager's lock so the template's single-threaded control
+        loop sees one command at a time.
+
+        Args:
+            timeout: Wall-clock cap on the FORKED reply.  Default 5s;
+                template fork should be sub-100ms in practice.
+
+        Returns:
+            ``(slot_pid, daemon_side_socket)`` on success.  ``None``
+            on failure (template dead, fork failed, timeout).  Caller
+            tracks the handle for later session bootstrap (PR 4) +
+            shutdown.
+
+        Raises:
+            None — all failures return ``None`` with a warning log.
+            Pool manager treats ``None`` as "couldn't grow the pool;
+            sessions fall back to cold-spawn session-mode".
+        """
+        import struct
+
+        with self._lock:
+            if self.control_sock is None or self.pid is None:
+                logger.warning(
+                    "TemplateManager.request_fork_slot: no template "
+                    "running; cannot fork-slot",
+                )
+                return None
+
+            # Step 1: create the new slot's socketpair.
+            try:
+                daemon_end, slot_end = socket.socketpair(
+                    socket.AF_UNIX, socket.SOCK_STREAM,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "TemplateManager.request_fork_slot: socketpair "
+                    "failed: %s", exc,
+                )
+                return None
+
+            # Step 2: send FORK_SLOT + slot_end FD via SCM_RIGHTS.
+            try:
+                self.control_sock.sendmsg(
+                    [b"FORK_SLOT\n"],
+                    [(
+                        socket.SOL_SOCKET,
+                        socket.SCM_RIGHTS,
+                        struct.pack("i", slot_end.fileno()),
+                    )],
+                )
+            except OSError as exc:
+                logger.warning(
+                    "TemplateManager.request_fork_slot: sendmsg "
+                    "failed: %s", exc,
+                )
+                daemon_end.close()
+                slot_end.close()
+                return None
+
+            # Step 3: close daemon's slot_end (template's kernel-side
+            # dup keeps the FD alive in the child after fork).
+            slot_end.close()
+
+            # Step 4: wait for FORKED:<pid> reply.
+            self.control_sock.settimeout(timeout)
+            try:
+                reply_bytes = self.control_sock.recv(256)
+            except socket.timeout:
+                logger.warning(
+                    "TemplateManager.request_fork_slot: timed out "
+                    "after %.1fs waiting for FORKED reply", timeout,
+                )
+                daemon_end.close()
+                return None
+            except OSError as exc:
+                logger.warning(
+                    "TemplateManager.request_fork_slot: recv failed: %s",
+                    exc,
+                )
+                daemon_end.close()
+                return None
+            finally:
+                self.control_sock.settimeout(None)
+
+            if not reply_bytes:
+                logger.warning(
+                    "TemplateManager.request_fork_slot: template "
+                    "closed control pipe before replying",
+                )
+                daemon_end.close()
+                return None
+
+            reply = reply_bytes.decode("utf-8", errors="replace").strip()
+            if reply.startswith("FORKED:"):
+                try:
+                    slot_pid = int(reply[len("FORKED:"):])
+                except ValueError:
+                    logger.warning(
+                        "TemplateManager.request_fork_slot: malformed "
+                        "FORKED reply %r", reply,
+                    )
+                    daemon_end.close()
+                    return None
+                logger.info(
+                    "TemplateManager: forked pool slot pid=%d (template "
+                    "pid=%d)", slot_pid, self.pid,
+                )
+                return (slot_pid, daemon_end)
+
+            if reply == "FORK_FAILED":
+                logger.warning(
+                    "TemplateManager.request_fork_slot: template "
+                    "reported FORK_FAILED",
+                )
+                daemon_end.close()
+                return None
+
+            logger.warning(
+                "TemplateManager.request_fork_slot: unexpected reply %r",
+                reply,
+            )
+            daemon_end.close()
+            return None
+
     def is_alive(self) -> bool:
         """Return True if the template subprocess is still running.
 

@@ -183,7 +183,7 @@ def _run_template_mode() -> None:
     t0 = __import__("time").perf_counter()
     try:
         registry = PluginRegistry()
-        registry.discover(tier_filter="runner")
+        discovered = registry.discover(tier_filter="runner")
     except Exception as exc:  # noqa: BLE001 — boundary surface
         _fatal(
             f"template-mode: plugin discovery crashed: "
@@ -192,8 +192,12 @@ def _run_template_mode() -> None:
     discover_ms = (__import__("time").perf_counter() - t0) * 1000
     log.info(
         "runner template ready: %d plugins discovered in %.1fms — "
-        "pool slots will fork from this process",
-        len(list(registry.list_exposed())) if hasattr(registry, "list_exposed") else 0,
+        "pool slots will fork from this process and inherit warm "
+        "imports.  Note: discover() walks __init__.py files; some "
+        "plugins defer heavy imports to initialize() which only fires "
+        "post-bootstrap.  PR 2 measures actual savings will be confirmed "
+        "when PR 4 routes sessions through the pool.",
+        len(discovered),
         discover_ms,
     )
 
@@ -211,30 +215,239 @@ def _run_template_mode() -> None:
 
     log.info("runner template idle on fd 3; awaiting daemon control commands")
     try:
+        _template_control_loop(control_sock, log)
+    finally:
+        try:
+            control_sock.close()
+        except OSError:
+            pass
+
+
+def _template_control_loop(control_sock: "socket.socket", log) -> None:
+    """Template's main loop — read commands from daemon on fd 3.
+
+    Two commands supported (PR 3):
+
+    - ``SHUTDOWN\\n`` — clean exit.
+    - ``FORK_SLOT\\n`` with a socket FD attached via ``SCM_RIGHTS``
+      — fork; in child, become a pool slot listening on the
+      received socket; in parent (template), reply
+      ``FORKED:<pid>\\n`` to the daemon over the control socket.
+
+    Each command must arrive as a complete line via a single
+    ``recvmsg`` call (no buffering across calls).  This works
+    because the daemon-side ``TemplateManager`` sends each command
+    atomically via one ``sendmsg``, and the kernel's Unix-socket
+    datagram-like framing for ``SOCK_STREAM`` preserves the boundary
+    for short payloads — but we still defensively read until we
+    have a complete line.
+
+    Unknown commands log a warning and are dropped.
+    """
+    import struct
+
+    while True:
+        # ``recvmsg`` lets us receive both bytes AND ancillary data
+        # (SCM_RIGHTS FDs).  CMSG_SPACE(struct.calcsize("i")) sizes
+        # the ancillary buffer for a single passed FD.
+        try:
+            data, ancdata, _flags, _addr = control_sock.recvmsg(
+                4096,
+                socket.CMSG_SPACE(struct.calcsize("i")),
+            )
+        except OSError as exc:
+            log.warning("runner template: recvmsg failed: %s; exiting", exc)
+            return
+
+        if not data:
+            # Daemon closed the control pipe — clean shutdown path.
+            log.info("runner template: control pipe EOF; shutting down")
+            return
+
+        # Extract any SCM_RIGHTS FD that came alongside this message.
+        received_fd: Optional[int] = None
+        for cmsg_level, cmsg_type, cmsg_data in ancdata:
+            if cmsg_level == socket.SOL_SOCKET and cmsg_type == socket.SCM_RIGHTS:
+                # CMSG_RIGHTS can carry an array of FDs; take the first.
+                received_fd = struct.unpack("i", cmsg_data[:struct.calcsize("i")])[0]
+                break
+
+        # Parse the command line (strip newline + whitespace).
+        cmd = data.decode("utf-8", errors="replace").strip()
+
+        if cmd == "SHUTDOWN":
+            log.info("runner template: SHUTDOWN command received")
+            if received_fd is not None:
+                # SHUTDOWN shouldn't carry an FD, but defend against it.
+                try:
+                    os.close(received_fd)
+                except OSError:
+                    pass
+            return
+
+        if cmd == "FORK_SLOT":
+            if received_fd is None:
+                log.error(
+                    "runner template: FORK_SLOT command arrived without "
+                    "SCM_RIGHTS FD; dropping"
+                )
+                continue
+            _handle_fork_slot(control_sock, received_fd, log)
+            continue
+
+        # Unknown command — log + drop any attached FD.
+        log.warning("runner template: unknown control command %r", cmd)
+        if received_fd is not None:
+            try:
+                os.close(received_fd)
+            except OSError:
+                pass
+
+
+def _handle_fork_slot(
+    control_sock: "socket.socket", slot_fd: int, log,
+) -> None:
+    """Handle a FORK_SLOT command (template side).
+
+    Fork the template process.  In the child, close the template's
+    control socket (the child doesn't talk to the daemon over that
+    pipe; it has its own slot socket on the received FD) and enter
+    slot-mode.  In the parent (template), close the received FD
+    (only the child needs it) and reply ``FORKED:<child_pid>\\n``
+    to the daemon.
+
+    Both branches log + handle errors uniformly:
+
+    - Fork failure: log + reply ``FORK_FAILED\\n`` to daemon.
+    - Child-side slot-mode exit: ``sys.exit(0)`` ends the child
+      cleanly — the daemon sees the slot's slot-socket closure +
+      the SIGCHLD signal as the slot's lifecycle terminating.
+    """
+    try:
+        child_pid = os.fork()
+    except OSError as exc:
+        log.error("runner template: fork failed: %s", exc)
+        try:
+            os.close(slot_fd)
+        except OSError:
+            pass
+        try:
+            control_sock.sendall(b"FORK_FAILED\n")
+        except OSError:
+            pass
+        return
+
+    if child_pid == 0:
+        # CHILD: become a pool slot.  Drop the template's control
+        # socket (child doesn't talk to the daemon over that pipe;
+        # it has its own slot socket) and enter slot-mode.
+        try:
+            control_sock.close()
+        except OSError:
+            pass
+        _run_slot_mode(slot_fd, log)
+        # _run_slot_mode calls sys.exit; this return is a safety net.
+        os._exit(0)
+
+    # PARENT (template): close received FD (only the child uses it)
+    # and acknowledge to daemon with the slot's PID.
+    try:
+        os.close(slot_fd)
+    except OSError:
+        pass
+    try:
+        control_sock.sendall(f"FORKED:{child_pid}\n".encode("utf-8"))
+        log.info(
+            "runner template: forked slot pid=%d (warm imports inherited)",
+            child_pid,
+        )
+    except OSError as exc:
+        log.warning(
+            "runner template: failed to acknowledge fork-slot to daemon "
+            "(slot pid=%d already forked): %s", child_pid, exc,
+        )
+
+
+def _run_slot_mode(slot_fd: int, log) -> None:
+    """Slot-mode entry — runs AFTER fork from template.
+
+    The slot inherits the template's warm-imported plugin modules
+    (the whole point of the pool design).  Sits idle on the slot
+    socket waiting for a bootstrap envelope (PR 4) or shutdown.
+
+    PR 3 ships ONLY the idle-wait behavior — slots wait for a
+    SHUTDOWN command or pipe EOF and exit.  PR 4 will add
+    envelope-handling that bootstraps a real session inside the
+    slot (reusing the existing ``bootstrap_session`` code path that
+    today's session-mode runners take).
+    """
+    # Dup the slot socket FD to fd 3 to match the existing runner
+    # convention (session-mode also adopts fd 3 as its RPC socket).
+    # PR 4 will route the bootstrap envelope here; for PR 3 the slot
+    # just listens for SHUTDOWN.
+    try:
+        os.dup2(slot_fd, 3)
+    except OSError as exc:
+        sys.stderr.write(
+            f"runner slot: failed to dup slot_fd to fd 3: {exc}\n"
+        )
+        os._exit(2)
+    try:
+        os.close(slot_fd)
+    except OSError:
+        pass
+
+    try:
+        slot_sock = socket.socket(fileno=3)
+        slot_sock.setblocking(True)
+    except OSError as exc:
+        sys.stderr.write(
+            f"runner slot: failed to adopt fd 3 as socket: {exc}\n"
+        )
+        os._exit(2)
+
+    slot_log = logging.getLogger("server.runner.slot")
+    slot_log.info(
+        "runner slot ready: pid=%d (warm imports inherited from "
+        "template); waiting for envelope or shutdown",
+        os.getpid(),
+    )
+
+    try:
         buf = b""
         while True:
-            chunk = control_sock.recv(256)
+            chunk = slot_sock.recv(4096)
             if not chunk:
-                # Daemon closed the control pipe — clean shutdown path.
-                log.info("runner template: control pipe EOF; shutting down")
+                slot_log.info(
+                    "runner slot pid=%d: daemon closed slot pipe; exiting",
+                    os.getpid(),
+                )
                 break
             buf += chunk
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 cmd = line.decode("utf-8", errors="replace").strip()
                 if cmd == "SHUTDOWN":
-                    log.info("runner template: SHUTDOWN command received")
-                    return
-                # PR 3 will add FORK_SLOT handling here.
-                log.warning(
-                    "runner template: unknown control command %r "
-                    "(PR 3 will add FORK_SLOT)", cmd,
+                    slot_log.info(
+                        "runner slot pid=%d: SHUTDOWN command received",
+                        os.getpid(),
+                    )
+                    sys.exit(0)
+                # PR 4 will add envelope handling here — receive
+                # the SessionInitEnvelope, self-confine to the
+                # session's AppArmor profile, run bootstrap_session,
+                # serve the session.
+                slot_log.warning(
+                    "runner slot pid=%d: ignoring unknown command %r "
+                    "(PR 4 will add envelope handling)",
+                    os.getpid(), cmd,
                 )
     finally:
         try:
-            control_sock.close()
+            slot_sock.close()
         except OSError:
             pass
+    sys.exit(0)
 
 
 def main() -> None:
