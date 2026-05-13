@@ -318,6 +318,115 @@ def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]
     return applied
 
 
+def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
+    """Transition the runner to ``envelope.profile_name`` if needed.
+
+    Pool PR 5a.  Pool slots fork from the template unconfined; this
+    step transitions them to the session's AppArmor profile BEFORE
+    runtime construction, plugin initialize, and prefetch run — so
+    workspace access + tool execution honor the per-session
+    confinement.
+
+    Cold-spawn runners self-confined in ``__main__.py`` step 2 BEFORE
+    ``bootstrap_session`` was called, so the kernel already reports
+    the target profile in ``/proc/self/attr/current``.  This function
+    detects that and skips the redundant transition (it would also
+    fail anyway — ``aa_change_profile`` from ``P → P`` requires
+    ``change_profile -> P`` in P itself, which the per-session
+    profiles deliberately omit per §6.1 escape-vector hardening).
+
+    No-op cases:
+      - ``envelope.profile_name`` is empty (operator opted out of
+        confinement; runner runs unconfined).
+      - The kernel already reports the target profile (cold-spawn
+        idempotency).
+
+    Raises:
+        BootstrapError: confinement attempt failed (kernel refused
+            the transition, libapparmor unavailable, or
+            ``/proc/self/attr/current`` disagrees post-transition).
+            Daemon-side spawn helper translates this into a session
+            failure via the bootstrap RPC's error envelope.
+    """
+    target_profile = envelope.profile_name or ""
+    if not target_profile:
+        logger.info(
+            "runner-session bootstrap: envelope.profile_name empty; "
+            "skipping AppArmor self-confine (unconfined session)",
+        )
+        return
+
+    # Check kernel-reported current profile.  Idempotency: if we're
+    # already in the target profile (cold-spawn already self-confined),
+    # skip the no-op-but-error-prone re-transition.
+    try:
+        from .bootstrap import (
+            ConfinementMismatchError,
+            confine_to_profile,
+            read_current_profile,
+        )
+    except ImportError as exc:  # noqa: BLE001 — boundary surface
+        # AppArmor module not importable (test path or Windows host
+        # where the module guards platform).  Log + skip; the daemon's
+        # session-spawn flow detects the lack of confinement via the
+        # apparmor.is_available() probe and chooses the path
+        # accordingly.
+        logger.warning(
+            "runner-session bootstrap: AppArmor module unavailable "
+            "(%s); skipping self-confine for profile=%s",
+            exc, target_profile,
+        )
+        return
+
+    try:
+        actual = read_current_profile()
+    except OSError as exc:
+        # ``/proc/self/attr/current`` not readable — non-Linux or
+        # apparmor-less host.  Daemon shouldn't have set
+        # ``profile_name`` in this case; surface the inconsistency.
+        raise BootstrapError(
+            "confine",
+            f"cannot read /proc/self/attr/current ({exc}) but "
+            f"envelope.profile_name={target_profile!r} indicates "
+            f"confinement was expected — likely a non-Linux host "
+            f"running a profile-bearing envelope",
+        ) from exc
+
+    # ``read_current_profile`` returns e.g. ``jaato-ws-<sid> (enforce)``
+    # post-transition, or ``unconfined`` pre-transition.  Match by
+    # prefix so the enforcement-mode suffix doesn't trip the check.
+    expected_prefix = f"{target_profile} "
+    if actual.startswith(expected_prefix) or actual == target_profile:
+        logger.info(
+            "runner-session bootstrap: already confined to %s "
+            "(kernel reports: %s); skipping redundant self-confine",
+            target_profile, actual,
+        )
+        return
+
+    # Need to transition.  ``confine_to_profile`` does the
+    # ``aa_change_profile`` syscall + verifies the kernel agrees.
+    try:
+        confine_to_profile(target_profile)
+    except ConfinementMismatchError as exc:
+        raise BootstrapError(
+            "confine",
+            f"AppArmor confinement mismatch — kernel reports "
+            f"{exc.actual!r} but we requested {exc.expected!r}.  "
+            f"Likely cause: pool slot's current profile (typically "
+            f"``unconfined``) doesn't permit ``change_profile -> "
+            f"{exc.expected}``.  Verify daemon-side "
+            f"``AppArmorManager.provision_profile`` loaded "
+            f"{exc.expected} before the bootstrap RPC was dispatched.",
+        ) from exc
+    except RuntimeError as exc:
+        raise BootstrapError(
+            "confine",
+            f"AppArmor self-confine failed for profile={target_profile}: "
+            f"{exc}",
+        ) from exc
+
+
 def bootstrap_session(
     envelope: SessionInitEnvelope,
     *,
@@ -395,6 +504,27 @@ def bootstrap_session(
             "to os.environ (session_id=%s)",
             len(resolved_session_env), envelope.session_id,
         )
+
+    # ---- 1c. Per-slot AppArmor self-confine (pool PR 5a) ----
+    # Pool slots fork from the (unconfined) template — they need to
+    # transition to the session's AppArmor profile BEFORE plugin
+    # initialize / prefetch runs, so workspace + tool execution
+    # happen under the per-session confinement.  Cold-spawn runners
+    # already self-confined in ``__main__.py`` step 2 before
+    # ``bootstrap_session`` was called; this step is a NO-OP for
+    # them (the kernel already reports the target profile in
+    # ``/proc/self/attr/current``).
+    #
+    # Idempotency invariant:
+    #   - Cold-spawn: __main__.py confined → ``proc/self/attr/current``
+    #     starts with ``<profile> (enforce)`` → we detect + skip.
+    #   - Pool slot: template was unconfined → ``proc/self/attr/current``
+    #     reads ``unconfined`` → we call ``confine_to_profile``.
+    #
+    # When ``envelope.profile_name`` is empty (operator-side
+    # ``disable_confine`` opt-out or no AppArmor opt-in), the step
+    # is also a no-op — runner runs unconfined.
+    _maybe_self_confine(envelope)
 
     # ---- 2. Optionally construct the runtime ----
     if runtime_factory is None:

@@ -124,22 +124,19 @@ def spawn_session_runner(
             instead of a cold-spawned runner.  ``None`` (or empty
             pool, or flag disabled) falls back to cold-spawn.
 
-            Pool-slot caveats vs cold-spawn (PR 4):
-              - Slot runs UNCONFINED (no per-session AppArmor).
-                Per-slot self-confinement is PR 5 work.
-              - Slot does NOT receive the ``JAATO_RUNNER_*`` env vars
-                — workspace_path + cgroup_attach are not honored.
-                Cgroup attach is also not done for pool-served
-                sessions because the slot was forked from the
-                template (already in the daemon's cgroup) and
-                migrating mid-life would require subreaper
-                coordination (PR 5).
+            Pool routing gates (post-PR 5a):
+              - ``pool_manager`` is wired by the daemon.
+              - ``JAATO_RUNNER_POOL_ENABLED`` is set.
+              - No ``cgroup_attach`` supplied (PR 5b territory —
+                slot is template-child, mid-life cgroup migration
+                requires subreaper coordination).
 
-            For PR 4 the pool path is gated to sessions that DON'T
-            opt into AppArmor (i.e. ``disable_confine=True``) and
-            that don't have a cgroup_attach callback.  Sessions with
-            either of those constraints fall back to cold-spawn —
-            same behavior as before PR 4 from the session's POV.
+            Per-slot AppArmor self-confinement landed in PR 5a:
+            slots accept ``envelope.profile_name`` and call
+            ``aa_change_profile`` in ``bootstrap_session`` step 1c
+            BEFORE plugin initialize / prefetch.  The pre-PR-5a
+            ``disable_confine`` gate is removed — sessions with
+            AppArmor opt-in are now eligible for pool routing.
 
     Raises:
         RuntimeError: when *daemon_loop* is None or the runner-RPC
@@ -163,22 +160,21 @@ def spawn_session_runner(
         log_dir = os.path.join(workspace_path, ".jaato", "logs")
         log_path = os.path.join(log_dir, f"runner-{session_id}.log")
 
-    # ----- Pool routing (pool PR 4) -----
+    # ----- Pool routing (pool PR 4 + 5a) -----
     # Pool-served path is gated to sessions that:
     #   (a) Have a pool_manager wired by the daemon.
     #   (b) Have JAATO_RUNNER_POOL_ENABLED set.
-    #   (c) Are NOT opting into AppArmor (disable_confine=True).
-    #       PR 4 slots run unconfined; per-slot AppArmor is PR 5.
-    #   (d) Don't need a cgroup_attach.  Pool slots are forked from
+    #   (c) Don't need a cgroup_attach.  Pool slots are forked from
     #       the template (already in daemon cgroup); migrating
-    #       mid-life is PR 5 + subreaper-fix territory.
-    # All four gates must hold or we fall back to cold-spawn.
+    #       mid-life is PR 5b + subreaper-fix territory.
+    # (PR 5a removed the disable_confine gate — apparmor sessions are
+    # now eligible for pool routing because the slot self-confines
+    # to envelope.profile_name in bootstrap_session step 1c.)
     spawned: Optional[SpawnedRunner] = None
     pool_served = False
     if (
         pool_manager is not None
         and _pool_enabled()
-        and disable_confine
         and cgroup_attach is None
     ):
         handle = pool_manager.acquire_slot()
@@ -187,14 +183,18 @@ def spawn_session_runner(
             spawned = SpawnedRunner(
                 pid=slot_pid,
                 parent_socket=daemon_sock,
-                profile_name="",  # slot is unconfined in PR 4
+                # Slot will transition to ``profile_name`` itself in
+                # bootstrap_session step 1c.  Record the target on
+                # the SpawnedRunner for audit / diagnostic surfaces.
+                profile_name=profile_name,
                 session_id=session_id,
             )
             pool_served = True
             logger.info(
                 "spawn_session_runner: session %s served by pool slot "
-                "pid=%d (warm imports inherited from template)",
-                session_id, slot_pid,
+                "pid=%d (warm imports inherited; slot will self-confine "
+                "to profile=%s)",
+                session_id, slot_pid, profile_name or "(unconfined)",
             )
         else:
             logger.info(
