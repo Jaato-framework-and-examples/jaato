@@ -1,8 +1,14 @@
 # Runner Pre-warm Pool + Deferred Provider INIT — Bootstrap Latency Reduction
 
-**Status:** Design — multi-PR project; staging specified.
+**Status:** PRs 1-4 shipped (server 0.6.76). PR 5 (operationalization) pending v63 cascade validation.
 **Origin:** 2026-05-13 cascade step-6 stall diagnosed as 30s RPC timeout (`runner_rpc_client.py:704`). Root cause: §7c seat-flip (`6406fe35`, 2026-05-09) moved JaatoSession into per-session subprocesses, introducing ~16s of per-session Python startup + runner-tier-plugin import cost that didn't exist pre-§7c. Workspace state growth (37 generated Java files at step 6) tipped step 6's bootstrap over the 30s line.
 **Decision (2026-05-13):** address the regression structurally rather than via band-aids (raising timeout, partial deferral). Reduce per-session bootstrap from ~30s to ~3s while preserving §7c's per-session isolation properties.
+
+**Ship log:**
+- PR 1 → #85 (`1a7665e2`): defer provider INIT to first model use
+- PR 2 → #87 (`a401047f` line, see merge `16d17741` parent): template subprocess + lifecycle
+- PR 3 → #88: pool slot fork-slot RPC + PoolManager
+- PR 4 → #89 (`6b2a768c`, merged in `fef96997`): route through pool + replenishment thread (combined; replenishment originally PR 5 scope)
 
 ## 1. Principle
 
@@ -105,7 +111,7 @@ User-visible impact: first model call has ~9s extra latency. But that's INSIDE t
 
 Each PR independently reviewable, rollback-safe. Each requires daemon restart; coordinate with peer per `feedback_cascade_aware_daemon_restart_coordination`.
 
-### PR 1 — Defer provider INIT (β / Y from earlier discussion)
+### PR 1 — Defer provider INIT (β / Y from earlier discussion) — **SHIPPED 0.6.74 → PR #85**
 
 **Scope:**
 - `JaatoSession.configure()` removes the `runtime.create_provider()` call at line 1650
@@ -126,7 +132,7 @@ Each PR independently reviewable, rollback-safe. Each requires daemon restart; c
 
 **Standalone-rollback-safe:** yes (no wire-format change, no daemon-restart-required interface change beyond the code change itself).
 
-### PR 2 — Template subprocess
+### PR 2 — Template subprocess — **SHIPPED 0.6.75 → PR #87**
 
 **Scope:**
 - New entry point: `python -m server.runner --template-mode`
@@ -147,7 +153,7 @@ Each PR independently reviewable, rollback-safe. Each requires daemon restart; c
 
 **Standalone-rollback-safe:** yes (template subprocess sits idle; no other code paths consume it yet).
 
-### PR 3 — Pool slot management
+### PR 3 — Pool slot management — **SHIPPED 0.6.75 → PR #88**
 
 **Scope:**
 - Daemon's pool manager: spawn N slots from template at startup
@@ -168,46 +174,67 @@ Each PR independently reviewable, rollback-safe. Each requires daemon restart; c
 
 **Standalone-rollback-safe:** yes (pool exists but unused).
 
-### PR 4 — Session bootstrap via pool
+### PR 4 — Session bootstrap via pool + replenishment thread — **SHIPPED 0.6.76 → PR #89**
 
-**Scope:**
-- `SessionManager._construct_and_initialize_server` picks a pool slot if available, sends bootstrap envelope to slot
-- Pool empty → fall back to cold spawn (today's behavior)
-- Feature flag: `JAATO_RUNNER_POOL_ENABLED=true` (default false during rollout)
-- Tests: cascade smoke runs against pool, asserts pool path is taken
+**Final scope (combined with replenishment thread per 2026-05-13 user authorization "PR 4 combined"):**
+- Slot mode no longer runs PR 3's line-delimited command loop. After fork from template, slot adopts fd 3 as RPC socket and runs `RunnerRPC.serve()` — same body session-mode runners use after AppArmor self-confine.
+- `spawn_session_runner` accepts `pool_manager` parameter. Pool path is gated to sessions that satisfy ALL four conditions: pool_manager wired AND `JAATO_RUNNER_POOL_ENABLED=true` AND `disable_confine=True` AND no `cgroup_attach`. Any gate failure → today's cold-spawn path unchanged.
+- `PoolManager.start_replenishment()` spawns a daemon thread that watches `idle_count() < target_size` and asks the template for a fork-slot to refill. Daemon's `start()` invokes it after `spawn_initial_slots()`.
+- Feature flag default stays **opt-in (`false`)** — PR 5 flips after soak.
 
-**Touchpoints:**
-- `jaato-server/server/session_manager.py:_construct_and_initialize_server` — pool-or-cold-spawn branch
-- `jaato-server/server/runner_spawn.py:dispatch_bootstrap_envelope` — accept a pool slot's pipe handle
-- `jaato-server/server/runner_pool.py` — claim_slot / release_slot APIs
+**Touchpoints (actual):**
+- `jaato-server/server/runner/__main__.py` — `_run_slot_mode` replaced command loop with `RunnerRPC.serve()`
+- `jaato-server/server/runner_spawn.py` — `_pool_enabled()` env reader + four-gate routing in `spawn_session_runner`
+- `jaato-server/server/runner_pool.py` — `start_replenishment` / `stop_replenishment` / `_replenish_loop`
+- `jaato-server/server/session_manager.py` — `set_apparmor_dependencies(pool_manager=...)`; threaded into `_spawn_session_runner_unconditional`
+- `jaato-server/server/websocket.py` — apparmor pre-init hook reads `getattr(ws_server, "_pool_manager_ref", None)`
+- `jaato-server/server/__main__.py` — sets `ws_server._pool_manager_ref` + calls `pool_manager.start_replenishment()`
 
-**Effort:** ~200 LoC + tests. ~1-2 days.
+**Tests shipped:** 5 new template/pool cases (slot serves echo-RPC + 4 replenishment cases) + 6 routing-gate cases (one per branch).  411 server tests + 604 runner tests green.
 
-**User-facing impact:** when flag enabled, per-session bootstrap drops to ~3-5s. When flag disabled (default), no change.
+**User-facing impact:** when flag enabled, per-session bootstrap drops to ~3-5s for sessions that meet the four gates. When flag disabled (default), no change.
 
 **Standalone-rollback-safe:** yes (flag gates the change; default off).
 
-### PR 5 — Operationalization + cleanup
+**Deferred to PR 5:**
+- Per-slot AppArmor self-confinement (slots run unconfined in PR 4 — same posture as `JAATO_RUNNER_DISABLE_CONFINE=true`)
+- Subreaper fix (`prctl(PR_SET_CHILD_SUBREAPER)`) so daemon can `waitpid` slot PIDs cleanly (slots are template-children; current code catches `ChildProcessError` and ignores — operationally fine)
+- Template watchdog auto-respawn on template death
+- Proper template-ready handshake replacing the 2s sleep in daemon startup
+- Flag default flip to `true`
 
-**Scope:**
-- Pool size telemetry (idle / in-use / failed-fork count)
-- Slow-template-fork detection (if pool replenish takes >10s, alarm)
-- Graceful daemon shutdown: drain pool before exit
-- Flip `JAATO_RUNNER_POOL_ENABLED` default to `true`
-- Document the architecture in `docs/architecture.md` + update CLAUDE.md
-- Remove the feature flag once stable (one-week soak period)
+### PR 5 — Operationalization + cleanup — **PENDING (post-v63 validation)**
 
-**Effort:** ~150 LoC + tests + docs. ~1 day.
+Scope evolved as PR 4 absorbed replenishment.  Net PR 5 work now:
+
+**Hardening (correctness):**
+- **Per-slot AppArmor self-confinement.**  Slots accept the bootstrap envelope's `profile_name`, call `aa_change_profile()` BEFORE plugin.initialize() runs.  Restores per-session confinement parity with cold-spawned session-mode runners.  Requires an extra RPC (e.g., `session.self_confine`) the daemon calls before `session.bootstrap`, OR extending the bootstrap RPC handler to honor a `profile_name` field and self-confine when set + not yet confined.
+- **Subreaper fix.**  Daemon calls `prctl(PR_SET_CHILD_SUBREAPER, 1)` at startup so it re-parents the template's children (i.e., pool slots) on template death.  Today, slots are template-children and the daemon's `waitpid(slot_pid)` returns `ChildProcessError`.  Caught + ignored as a non-blocking issue in PR 4; PR 5 closes it.
+
+**Operationalization:**
+- **Template watchdog auto-respawn.**  If template dies (OOM, signal), daemon detects + respawns the template + drains and refills the pool from the new template.  Today, template death silently breaks all future fork-slot requests.
+- **Template-ready handshake.**  Replace the 2s `time.sleep` in daemon `start()` with a proper "template-ready" message the template sends after `discover()` completes.  Removes a startup race window where pool spawn would fail if discover takes longer than 2s.
+- **Pool telemetry.**  Counters: `pool_slot_acquired_total`, `pool_slot_cold_spawn_fallback_total`, `pool_replenish_failures_total`.  Surface in daemon log + optionally OpenTelemetry counters.
+- **Graceful pool drain on shutdown.**  Daemon shutdown currently runs `shutdown_all()` which closes slot sockets.  PR 5 audits whether active sessions on pool slots get a chance to flush + the cleanup ordering is right.
+
+**Rollout:**
+- Flip `JAATO_RUNNER_POOL_ENABLED` default to `true` after a 1-week soak window.
+- Document architecture in `docs/architecture.md` + add a note in CLAUDE.md.
+- Eventually remove the feature flag (one or two releases after default flip).
+
+**Effort:** ~250 LoC + tests + docs.  ~2 days focused work.
+
+**Standalone-rollback-safe:** Individually yes — AppArmor self-confine + subreaper + watchdog are each independent landings.  Flag default flip is the only piece with measurable cascade impact at flip time.
 
 ## 5. Back-compat + rollback story
 
-| Stage | Rollback action |
-|---|---|
-| PR 1 (defer provider INIT) | Code revert. No wire-format change. |
-| PR 2 (template subprocess) | Stop spawning template at daemon startup. Template exits cleanly when daemon dies. |
-| PR 3 (pool slots) | Stop spawning slots. Existing fallback path (cold spawn) handles all sessions. |
-| PR 4 (route through pool) | Flag flip: `JAATO_RUNNER_POOL_ENABLED=false`. Sessions fall back to cold spawn. |
-| PR 5 (default-on + cleanup) | Flag flip default. Future revert is `git revert` + daemon restart. |
+| Stage | Status | Rollback action |
+|---|---|---|
+| PR 1 (defer provider INIT) | shipped 0.6.74 | Code revert. No wire-format change. |
+| PR 2 (template subprocess) | shipped 0.6.75 | Stop spawning template at daemon startup. Template exits cleanly when daemon dies. |
+| PR 3 (pool slots) | shipped 0.6.75 | Stop spawning slots. Existing fallback path (cold spawn) handles all sessions. |
+| PR 4 (route through pool + replenishment) | shipped 0.6.76 | Flag flip: `JAATO_RUNNER_POOL_ENABLED=false`. Sessions fall back to cold spawn. |
+| PR 5 (self-confine + subreaper + watchdog + default-on) | pending | Flag flip default. Future revert is `git revert` + daemon restart. |
 
 Throughout the migration, the cold-spawn path remains functional. Every PR can be independently shipped, run for days, and rolled back without state corruption.
 
@@ -253,16 +280,16 @@ Each PR lands behind:
 
 ## 10. Estimated total effort
 
-| PR | LoC | Tests | Time | Risk |
-|---|---|---|---|---|
-| PR 1 | ~150 | ~30 | 3-4 hours | LOW |
-| PR 2 | ~300 | ~40 | 1-2 days | MEDIUM |
-| PR 3 | ~400 | ~50 | 2-3 days | MEDIUM |
-| PR 4 | ~200 | ~30 | 1-2 days | MEDIUM |
-| PR 5 | ~150 | ~20 | 1 day | LOW |
-| **Total** | **~1200** | **~170** | **~1 week focused work** | MEDIUM |
+| PR | LoC | Tests | Time | Risk | Status |
+|---|---|---|---|---|---|
+| PR 1 | ~150 | ~30 | 3-4 hours | LOW | shipped 0.6.74 |
+| PR 2 | ~300 | ~40 | 1-2 days | MEDIUM | shipped 0.6.75 |
+| PR 3 | ~400 | ~50 | 2-3 days | MEDIUM | shipped 0.6.75 |
+| PR 4 (combined w/ replenishment) | ~760 line-delta | ~11 new | 1 day | MEDIUM | shipped 0.6.76 |
+| PR 5 (self-confine + subreaper + watchdog + flag default flip) | ~250 | ~30 | ~2 days | MEDIUM | pending |
+| **Total** | **~1900 line-delta shipped + ~250 pending** | **~170** | **~1 week focused work, ~80% done** | MEDIUM | |
 
-PR 1 alone unblocks the cascade. PRs 2-5 deliver the full 10x speedup.
+PR 1 alone unblocked the cascade.  PR 4 is the structural fix — once the flag flips in PR 5, every session that opts out of AppArmor automatically benefits from warm imports.
 
 ## 11. Decision log
 
@@ -270,3 +297,5 @@ PR 1 alone unblocks the cascade. PRs 2-5 deliver the full 10x speedup.
 - **2026-05-13** — Module-global audit (`re.compile`, `frozenset`, `threading.local`, `threading.Lock` × 1) confirmed runner-tier plugins are fork-safe by construction. No per-plugin opt-in hint required.
 - **2026-05-13** — Deferred provider INIT chosen as PR 1 (independent of pool, smallest cascade-unblock).
 - **2026-05-13** — Stage 3.1 (5-LoC `os.environ` fallback) and Shape α (raise timeout to 120s) both rejected as band-aids that mask the structural cost.
+- **2026-05-13** — PR 4 combined with replenishment thread (originally PR 5 scope) per user authorization "PR 4 combined".  Without replenishment, target_size=2 only amortizes the first 2 of an N-step cascade — defeating the pool for the very workload that motivated the multi-PR project.  Combined PR delivers measurable cascade unblock on first ship.
+- **2026-05-13** — PR 4 pool path gated to sessions with `disable_confine=True` AND no `cgroup_attach`.  Per-slot AppArmor self-confine + cgroup migration both deferred to PR 5 because they require new post-fork RPC handshakes the existing wire surface doesn't support.  Trade-off: PR 4 ships faster + does the structural work; PR 5 brings the kernel-isolation properties back.
