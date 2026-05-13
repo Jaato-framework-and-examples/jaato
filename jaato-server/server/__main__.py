@@ -599,17 +599,13 @@ class JaatoDaemon:
 
         # Pool PR 3: fork N idle slots from the template.  Slots sit
         # idle through the daemon's lifetime waiting for bootstrap
-        # envelopes (PR 4 will wire session routing through the pool).
-        # PR 3 ships only the pool infrastructure — session-mode
-        # remains the authoritative bootstrap path until PR 4.
-        # Sleep briefly to let the template finish plugin discovery
-        # before asking it to fork; template's discover took ~1.7s in
-        # PR 2 measurement.  A small delay here avoids a race where
-        # the template's first FORK_SLOT lands before recvmsg is
-        # ready.  PR 5 will add a proper handshake.
+        # envelopes (PR 4 routed sessions through the pool).
+        #
+        # Pool PR 5c: ``TemplateManager.spawn`` now blocks for the
+        # template's READY signal (sent after plugin discovery
+        # completes), so no time.sleep is needed here — the template
+        # is guaranteed-ready by the time we hit ``is_alive`` below.
         if self._template_manager.is_alive():
-            import time
-            time.sleep(2.0)  # generous, matches the discover time
             try:
                 self._pool_manager.spawn_initial_slots()
             except Exception as exc:  # noqa: BLE001 — boundary surface
