@@ -55,6 +55,14 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+# Pool PR 5c: wall-clock cap on waiting for the template's READY
+# signal post-spawn.  Plugin discovery typically takes ~1.5-2s on
+# fast workstations and up to ~10s on slow hosts; 30s is generous
+# enough to cover CI / cold-host edge cases without leaving the
+# daemon hung indefinitely on a stuck template.
+_DEFAULT_READY_TIMEOUT = 30.0
+
+
 class TemplateManager:
     """Owns the single template subprocess for the daemon's lifetime.
 
@@ -146,9 +154,82 @@ class TemplateManager:
             self.control_sock = parent_sock
             logger.info(
                 "TemplateManager: spawned template pid=%d "
-                "(imports warming up — plugins will be ready in "
-                "~5-10s based on daemon-host load)",
-                pid,
+                "(imports warming up — waiting for READY signal "
+                "before declaring template usable)", pid,
+            )
+
+        # Pool PR 5c: wait for the template to send "READY\n" over the
+        # control socket once plugin discovery completes.  Replaces
+        # the daemon's previous 2s ``time.sleep``.  Held OUTSIDE the
+        # lock above so we don't pin _lock for the full ready-wait
+        # window — other accesses to is_alive() / shutdown() should
+        # not block on template warm-up.
+        self._wait_for_ready(timeout=_DEFAULT_READY_TIMEOUT)
+
+    def _wait_for_ready(self, timeout: float) -> None:
+        """Block until template sends ``READY\\n`` over the control
+        socket OR the timeout fires.
+
+        Pool PR 5c: replaces the daemon's previous 2s ``time.sleep``
+        after template spawn.  On timeout, the daemon logs a warning
+        but does NOT fail — the template may still come up later
+        (next FORK_SLOT will hang or fail gracefully) and the
+        watchdog (PR 5b) will eventually respawn if needed.
+
+        Reads exactly the "READY\\n" prefix.  Any additional bytes
+        in the recv buffer (e.g. an unexpected message) are
+        non-fatal: the control loop will deal with them.
+        """
+        with self._lock:
+            sock = self.control_sock
+            pid = self.pid
+
+        if sock is None or pid is None:
+            return  # Defensive: spawn() didn't actually populate state.
+
+        sock.settimeout(timeout)
+        try:
+            data = sock.recv(64)
+        except socket.timeout:
+            logger.warning(
+                "TemplateManager: template pid=%d did not send READY "
+                "within %.1fs.  Pool may be slow to fill; watchdog "
+                "will retry on subsequent loop iterations.  Possible "
+                "causes: plugin discovery stuck, very slow host, or "
+                "template subprocess crashed before sending signal.",
+                pid, timeout,
+            )
+            return
+        except OSError as exc:
+            logger.warning(
+                "TemplateManager: recv READY failed (pid=%d): %s; "
+                "treating as best-effort.  Pool may be empty until "
+                "watchdog respawn cycle.", pid, exc,
+            )
+            return
+        finally:
+            sock.settimeout(None)
+
+        if not data:
+            logger.warning(
+                "TemplateManager: template pid=%d closed control "
+                "socket before sending READY (likely crashed during "
+                "plugin imports).  Watchdog will respawn.", pid,
+            )
+            return
+
+        decoded = data.decode("utf-8", errors="replace").strip()
+        if decoded.split("\n", 1)[0] == "READY":
+            logger.info(
+                "TemplateManager: template pid=%d READY (plugin "
+                "discovery complete; pool slots can fork now)", pid,
+            )
+        else:
+            logger.warning(
+                "TemplateManager: template pid=%d sent unexpected "
+                "first message %r (expected 'READY\\n'); proceeding "
+                "anyway but the template may be in a degraded state",
+                pid, decoded[:60],
             )
 
     def shutdown(self, timeout: float = 5.0) -> None:

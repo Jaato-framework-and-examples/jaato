@@ -314,12 +314,12 @@ class PoolManager:
         while not self._replenish_stop.is_set():
             try:
                 # Template watchdog (PR 5b): detect death + respawn.
+                # PR 5c: ``template_manager.spawn`` (called inside
+                # _handle_template_death) blocks for the new
+                # template's READY signal, so no explicit sleep
+                # needed before the next iteration tries fork-slot.
                 if not self._template_manager.is_alive():
                     self._handle_template_death()
-                    # Brief sleep so new template can warm up before
-                    # the next iteration tries fork-slot.  PR 5c will
-                    # replace this with a proper ready signal.
-                    self._replenish_stop.wait(self._replenish_interval * 4)
                     continue
 
                 # Cheap check: pool already at target, sleep.
@@ -362,8 +362,11 @@ class PoolManager:
              session's bootstrap already completed and the slot serves
              RPC until session end.  Only IDLE slot handles in our
              possession need cleanup here.
-          2. Respawn the template.  On failure, the outer loop's
-             exception handler retries.
+          2. Respawn the template.  ``spawn`` blocks for the new
+             template's READY signal (PR 5c) before returning, so
+             the next replenish iteration can immediately fork-slot
+             without a sleep.  On spawn failure, the outer loop's
+             exception handler retries on the next iteration.
 
         Best-effort throughout — daemon shutdown signals via
         ``_replenish_stop`` are honored.

@@ -213,6 +213,24 @@ def _run_template_mode() -> None:
             f"dup the control socketpair to fd 3 before exec"
         )
 
+    # Pool PR 5c: signal readiness to the daemon BEFORE entering the
+    # control loop.  Replaces the daemon-side 2s ``time.sleep`` (which
+    # was a race window — fast hosts wasted ~0.5s, slow hosts saw the
+    # first FORK_SLOT arrive before recvmsg was ready).  Daemon's
+    # ``TemplateManager.spawn`` blocks on this signal up to a generous
+    # 30s timeout.  Same socket as control commands — daemon reads
+    # READY first, then sends FORK_SLOT / SHUTDOWN as usual.
+    try:
+        control_sock.sendall(b"READY\n")
+    except OSError as exc:
+        # If daemon already closed the control socket (rare race during
+        # daemon shutdown), there's nothing useful to do — the
+        # subsequent control loop will see EOF and exit clean.
+        log.warning(
+            "runner template: failed to send READY signal: %s; "
+            "control loop will still run", exc,
+        )
+
     log.info("runner template idle on fd 3; awaiting daemon control commands")
     try:
         _template_control_loop(control_sock, log)
