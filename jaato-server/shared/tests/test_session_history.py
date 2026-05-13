@@ -182,7 +182,14 @@ class TestSessionHistoryMessagesRef:
 
 
 def _make_configured_session():
-    """Create a configured JaatoSession with mock provider."""
+    """Create a configured JaatoSession with mock provider.
+
+    Triggers ``_ensure_provider()`` post-configure so tests that
+    interact with the provider don't see ``None`` due to the
+    2026-05-13 deferred-provider-INIT change.  Production callers
+    that need the provider always go through send_message /
+    generate / etc. which call ``_ensure_provider()`` first; the
+    helper mirrors that lifecycle so unit tests don't have to."""
     mock_runtime = MagicMock()
     mock_provider = MagicMock()
     mock_runtime.create_provider.return_value = mock_provider
@@ -194,6 +201,10 @@ def _make_configured_session():
 
     session = JaatoSession(mock_runtime, "test-model")
     session.configure()
+    # Trigger lazy provider creation so downstream test code sees
+    # session._provider == mock_provider (matches production where
+    # send_message would have already done this on first use).
+    session._ensure_provider()
     return session, mock_provider
 
 
