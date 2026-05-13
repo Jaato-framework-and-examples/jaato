@@ -290,8 +290,32 @@ class JaatoSession:
         # ``shared/dynamic_instructions.py``.
         self._agent_params: Dict[str, Any] = {}
 
-        # Provider for this session (created during configure())
+        # Provider for this session.  Lazy-initialized on first
+        # model use via :meth:`_ensure_provider` (deferred from
+        # ``configure()`` per the 2026-05-13 bootstrap-latency design
+        # at ``docs/design/runner_prewarm_pool_plan.md`` §3.5).  The
+        # 9s zhipuai INIT / multi-second anthropic INIT shifts off
+        # the bootstrap RPC critical path; first model call wears
+        # the cost, which is invisible under the existing streaming
+        # spinner.  ``None`` after configure() finishes; populated
+        # on first ``send_message`` / first BUDGET_BG token-count
+        # refinement attempt, whichever fires first.
         self._provider: Optional['ModelProviderPlugin'] = None
+        # Pending provider-creation args, stashed by ``configure()``
+        # for ``_ensure_provider()`` to consume on first use.  Set
+        # to ``None`` for skip_provider (auth-pending) mode where
+        # the provider truly never gets created here.
+        self._provider_lazy_pending: Optional[Dict[str, Any]] = None
+        # Serializes concurrent first-use _ensure_provider() calls
+        # (e.g., BUDGET_BG thread + send_message racing on a fresh
+        # session).  Once the provider exists, the lock's hot path
+        # is just an "already initialized" check.
+        self._provider_init_lock = threading.Lock()
+        # True iff ``configure()`` finished its work successfully.
+        # Decoupled from ``_provider is not None`` because the
+        # provider is now lazy; ``is_configured`` checks this flag
+        # instead.
+        self._configured: bool = False
 
         # Canonical conversation history owned by the session.
         # Phase 1: synced from provider after each provider operation.
@@ -725,8 +749,15 @@ class JaatoSession:
 
     @property
     def is_configured(self) -> bool:
-        """Check if session is configured and ready."""
-        return self._provider is not None
+        """Check if session is configured and ready.
+
+        Decoupled from ``self._provider`` since 2026-05-13 (deferred
+        provider INIT design).  A configured session may not yet have
+        constructed its provider — that happens lazily on first model
+        use via :meth:`_ensure_provider`.  ``is_configured`` reflects
+        whether ``configure()`` finished its work.
+        """
+        return self._configured
 
     @property
     def agent_id(self) -> str:
@@ -1644,23 +1675,24 @@ class JaatoSession:
                     except Exception as e:
                         print(f"Warning: Failed to configure plugin '{plugin_name}': {e}")
 
-        # Create provider for this session (with optional provider override)
-        # Skip if in auth-pending mode
+        # Stash provider-creation args for lazy use by ``_ensure_provider``.
+        # Pre-2026-05-13 the eager ``self._provider = self._runtime.create_provider(...)``
+        # call here added 9s (zhipuai) / 2-3s (anthropic) to the bootstrap
+        # RPC critical path because ``create_provider`` calls
+        # ``provider.initialize(config)`` which does the network handshake.
+        # Deferring shifts that cost to first model call, where the user
+        # is already waiting under the streaming spinner.  See
+        # ``docs/design/runner_prewarm_pool_plan.md`` §3.5 + §4 PR 1.
+        # ``skip_provider`` (auth-pending mode) keeps the existing
+        # "never create the provider here" semantics — the post-auth
+        # handler triggers the lazy path the same way send_message does.
         if not skip_provider:
-            self._provider = self._runtime.create_provider(
-                self._model_name,
-                provider_name=self._provider_name_override,
-                skip_model_test=skip_model_test,
-                plugin_configs=plugin_configs,
-            )
-
-            # Propagate agent context to provider for trace identification
-            if hasattr(self._provider, 'set_agent_context'):
-                self._provider.set_agent_context(
-                    agent_type=self._agent_type,
-                    agent_name=self._agent_name,
-                    agent_id=self._agent_id
-                )
+            self._provider_lazy_pending = {
+                'model_name': self._model_name,
+                'provider_name': self._provider_name_override,
+                'skip_model_test': skip_model_test,
+                'plugin_configs': plugin_configs,
+            }
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
@@ -1941,15 +1973,79 @@ class JaatoSession:
         if not skip_provider:
             self._history.clear()
 
-        # Populate instruction budget after all configuration is complete
+        # Populate instruction budget after all configuration is complete.
+        # ``_count_tokens`` is already defensive against ``self._provider is
+        # None`` — synchronous-phase falls back to the chars/4 estimate; the
+        # background-refinement phase short-circuits via ``has_count_tokens``
+        # when no provider exists.  Budget refinement triggers lazy provider
+        # creation if/when needed (see ``_start_background_token_counting``).
         self._populate_instruction_budget(session_instructions=system_instructions)
 
-        # Wire cache plugin (after budget is populated so we can set it)
-        self._wire_cache_plugin()
+        # Note: cache plugin wiring moved from here into ``_ensure_provider``
+        # since 2026-05-13 — wiring needs a constructed provider, which is
+        # now lazy.  The cache plugin attaches when the provider first
+        # materializes; for the configure-then-first-message gap (where
+        # there's no provider yet), there's nothing to cache against either.
+
+        self._configured = True
 
         _configure_ms = (_time.perf_counter() - _t_configure_start) * 1000
         if _configure_ms > 10.0:
             self._trace(f"configure: completed in {_configure_ms:.1f}ms")
+
+    def _ensure_provider(self) -> Optional['ModelProviderPlugin']:
+        """Lazy-create the session's provider on first model use.
+
+        Idempotent + thread-safe.  Pre-2026-05-13 the provider was
+        eagerly created in ``configure()`` — that added 9s (zhipuai) or
+        2-3s (anthropic) to the bootstrap RPC critical path because
+        ``create_provider`` calls ``provider.initialize(config)`` which
+        does the network handshake.  Deferring shifts that cost to first
+        model call where the user is already waiting under the streaming
+        spinner.  See ``docs/design/runner_prewarm_pool_plan.md`` §3.5.
+
+        Returns:
+            The constructed provider, or ``None`` if this session is
+            in skip_provider mode (auth-pending — caller is responsible
+            for re-running this once auth completes).
+        """
+        # Fast-path: already initialized.  Avoid lock contention on the
+        # hot path.  Memory visibility is fine: ``self._provider`` is
+        # only written under the lock, so a non-None read here implies
+        # the writer's lock-release happens-before this read.
+        if self._provider is not None:
+            return self._provider
+
+        with self._provider_init_lock:
+            # Re-check under the lock (double-checked locking).
+            if self._provider is not None:
+                return self._provider
+            if self._provider_lazy_pending is None:
+                # skip_provider (auth-pending) mode — provider truly
+                # never created here; post-auth path triggers a new
+                # _ensure_provider call after stashing the pending args.
+                return None
+            cfg = self._provider_lazy_pending
+            self._provider = self._runtime.create_provider(
+                cfg['model_name'],
+                provider_name=cfg['provider_name'],
+                skip_model_test=cfg['skip_model_test'],
+                plugin_configs=cfg['plugin_configs'],
+            )
+            # Propagate agent context to provider for trace identification.
+            if hasattr(self._provider, 'set_agent_context'):
+                self._provider.set_agent_context(
+                    agent_type=self._agent_type,
+                    agent_name=self._agent_name,
+                    agent_id=self._agent_id,
+                )
+            # Wire cache plugin now that the provider exists.  Pre-defer
+            # this fired at the end of configure() unconditionally.
+            self._wire_cache_plugin()
+            # Consume the stashed args — repeated calls become no-ops
+            # (the fast-path above returns the cached provider).
+            self._provider_lazy_pending = None
+            return self._provider
 
     def _wire_cache_plugin(self) -> None:
         """Discover and attach the cache plugin matching the active provider.
@@ -3411,8 +3507,23 @@ NOTES
         Raises:
             RuntimeError: If session is not configured.
         """
-        if not self._provider:
+        if not self._configured:
             raise RuntimeError("Session not configured. Call configure() first.")
+
+        # Lazy-init the provider on first model use (deferred-provider-INIT
+        # design 2026-05-13).  The 9s/2-3s INIT cost happens here on first
+        # send_message instead of during configure(), shifting it off the
+        # bootstrap RPC critical path.  Idempotent + thread-safe.
+        self._ensure_provider()
+        if not self._provider:
+            # skip_provider (auth-pending) mode and auth still hasn't
+            # completed — fall through to the existing error path so
+            # the caller sees a clear failure.
+            raise RuntimeError(
+                "Session has no provider — auth-pending mode and auth "
+                "has not completed yet, OR _ensure_provider() returned "
+                "without setting one (check configure() succeeded)"
+            )
 
         # Block while an observation pause is active.  The observer
         # holds the lock briefly (snapshot, interrogation, etc.) and
@@ -7682,8 +7793,11 @@ NOTES
         Uses ``provider.complete()`` with a single user message and no tools.
         Does not modify or use session history.
         """
-        if not self._provider:
+        if not self._configured:
             raise RuntimeError("Session not configured.")
+        self._ensure_provider()
+        if not self._provider:
+            raise RuntimeError("Session has no provider (skip_provider mode + auth incomplete)")
 
         messages = [Message.from_text(Role.USER, prompt)]
         with self._provider_access():
@@ -7697,8 +7811,11 @@ NOTES
         on_output: OutputCallback
     ) -> str:
         """Send a message with custom Part objects."""
-        if not self._provider:
+        if not self._configured:
             raise RuntimeError("Session not configured.")
+        self._ensure_provider()
+        if not self._provider:
+            raise RuntimeError("Session has no provider (skip_provider mode + auth incomplete)")
 
         return self._run_chat_loop_with_parts(parts, on_output)
 

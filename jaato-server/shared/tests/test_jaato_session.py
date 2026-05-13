@@ -51,8 +51,21 @@ class TestJaatoSessionSetAgentContext:
 class TestJaatoSessionConfigure:
     """Tests for JaatoSession.configure()."""
 
-    def test_configure_creates_provider(self):
-        """Test that configure creates a provider."""
+    def test_configure_defers_provider_creation(self):
+        """Pin: configure() does NOT eagerly create the provider.
+
+        2026-05-13 deferred-provider-INIT change.  Pre-change,
+        ``configure()`` called ``runtime.create_provider()`` which
+        triggered ``provider.initialize()`` — 9s of network handshake
+        on the bootstrap critical path.  Post-change, configure stashes
+        the creation args and ``_ensure_provider()`` constructs the
+        provider on first model use.
+
+        Two pins:
+          1. configure() does NOT call create_provider
+          2. is_configured returns True anyway (decoupled from
+             ``_provider is not None``)
+        """
         mock_runtime = MagicMock()
         mock_provider = MagicMock()
         mock_runtime.create_provider.return_value = mock_provider
@@ -65,13 +78,68 @@ class TestJaatoSessionConfigure:
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
         session.configure()
 
+        # Pre-change: create_provider called once during configure.
+        # Post-change: NOT called during configure (deferred to _ensure_provider).
+        mock_runtime.create_provider.assert_not_called()
+        # is_configured is True even though _provider is None.
+        assert session.is_configured
+        assert session._provider is None
+        # Args were stashed for the lazy path.
+        assert session._provider_lazy_pending is not None
+        assert session._provider_lazy_pending['model_name'] == "gemini-2.5-flash"
+
+    def test_ensure_provider_creates_provider_lazily(self):
+        """Pin: ``_ensure_provider()`` creates the provider using the
+        args stashed by configure().  Idempotent — second call is
+        a no-op that returns the cached provider."""
+        mock_runtime = MagicMock()
+        mock_provider = MagicMock()
+        mock_runtime.create_provider.return_value = mock_provider
+        mock_runtime.get_tool_schemas.return_value = []
+        mock_runtime.get_executors.return_value = {}
+        mock_runtime.get_system_instructions.return_value = None
+        mock_runtime.registry = None
+        mock_runtime.permission_plugin = None
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session.configure()
+        assert session._provider is None  # not yet
+
+        # First _ensure_provider call — provider gets created.
+        result = session._ensure_provider()
+        assert result is mock_provider
+        assert session._provider is mock_provider
         mock_runtime.create_provider.assert_called_once_with(
             "gemini-2.5-flash",
             provider_name=None,
             skip_model_test=False,
             plugin_configs=None,
         )
-        assert session.is_configured
+
+        # Second call — idempotent, no additional create_provider call.
+        result2 = session._ensure_provider()
+        assert result2 is mock_provider
+        mock_runtime.create_provider.assert_called_once()  # still just once
+
+    def test_ensure_provider_returns_none_in_skip_provider_mode(self):
+        """Pin: skip_provider (auth-pending) mode means the lazy path
+        ALSO doesn't create a provider — ``_ensure_provider()`` returns
+        None.  The post-auth handler is responsible for stashing the
+        pending args and triggering a fresh _ensure_provider call."""
+        mock_runtime = MagicMock()
+        mock_runtime.get_tool_schemas.return_value = []
+        mock_runtime.get_executors.return_value = {}
+        mock_runtime.get_system_instructions.return_value = None
+        mock_runtime.registry = None
+        mock_runtime.permission_plugin = None
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session.configure(skip_provider=True)
+        assert session._provider_lazy_pending is None
+
+        result = session._ensure_provider()
+        assert result is None
+        mock_runtime.create_provider.assert_not_called()
 
     def test_configure_with_tools_subset(self):
         """Test that configure can use a tool subset."""

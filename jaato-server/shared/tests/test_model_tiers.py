@@ -281,6 +281,8 @@ class TestJaatoSessionTierMode:
     def test_switch_tier_changes_model_and_calls_provider_connect(self):
         s = self._session()
         s.configure(tier_config=self._three_tier_cfg())
+        # Trigger lazy provider creation (deferred-provider-INIT 2026-05-13).
+        s._ensure_provider()
         provider = s._provider
         provider.connect.reset_mock()
 
@@ -296,6 +298,8 @@ class TestJaatoSessionTierMode:
     def test_switch_tier_idempotent(self):
         s = self._session()
         s.configure(tier_config=self._three_tier_cfg())
+        # Trigger lazy provider creation (deferred-provider-INIT 2026-05-13).
+        s._ensure_provider()
         provider = s._provider
         provider.connect.reset_mock()
 
