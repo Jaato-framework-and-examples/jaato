@@ -564,6 +564,25 @@ class JaatoDaemon:
         for ext in self._extensions:
             await ext.start()
 
+        # Pool PR 5b: claim subreaper role for the daemon.  Pool slots
+        # are template-children (forked from the template, no exec).
+        # By default, when the template dies, slots get re-parented to
+        # PID 1 (init/systemd) — daemon loses visibility, can't
+        # ``waitpid`` them.  ``prctl(PR_SET_CHILD_SUBREAPER, 1)``
+        # claims the role for the daemon: orphaned descendants
+        # re-parent to the daemon instead of init.
+        #
+        # This unlocks: (1) clean ``waitpid(slot_pid)`` in pool
+        # teardown (no more ``ChildProcessError`` swallow);
+        # (2) the template watchdog (also PR 5b) — when template
+        # dies, slots come back to the daemon so the watchdog can
+        # reap + drain + respawn cleanly.
+        #
+        # Linux-only.  Non-Linux hosts log a debug message and skip.
+        # Failure is non-fatal — pool still works via the existing
+        # ChildProcessError-swallow path, just slightly less tidy.
+        self._configure_subreaper()
+
         # Pool PR 2: spawn the pre-warm runner template.  The template
         # subprocess imports runner-tier plugin modules at startup so
         # pool slots (PR 3) can fork from it and inherit warm imports
@@ -810,6 +829,79 @@ class JaatoDaemon:
                 # ``start()`` (see the ``_pool_manager_ref`` write).
                 pool_manager=self._pool_manager,
             )
+
+    # ------------------------------------------------------------------
+    # Pool PR 5b: subreaper setup for pool slot re-parenting
+    # ------------------------------------------------------------------
+
+    def _configure_subreaper(self) -> None:
+        """Set ``PR_SET_CHILD_SUBREAPER`` on the daemon process.
+
+        Pool slots are template-children (forked from the template
+        subprocess, no exec).  When the template dies, slots get
+        orphaned — by default re-parented to PID 1 (init / systemd),
+        out of the daemon's reach for ``waitpid`` + lifecycle
+        management.
+
+        ``prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)`` claims that role
+        for the daemon: any descendant of the daemon (template,
+        slots, slots' children) that gets orphaned will re-parent to
+        the daemon instead of to init.
+
+        After this call:
+
+        - Daemon teardown calls ``os.waitpid(slot_pid)`` directly
+          (slots are template-children; if template dies first or
+          we're in the brief window between template's death and
+          init's reap, slots have re-parented to daemon).
+        - The template watchdog (also PR 5b) can detect template
+          death, reap any orphaned slots that came back to the
+          daemon, and respawn the template + refill the pool.
+
+        Linux-only — uses Linux-specific ``prctl(2)``.  Other
+        platforms log debug and skip.  Failure is non-fatal: the
+        pool still works via the existing ``ChildProcessError``
+        catch-and-ignore in ``shutdown_all``; daemon just can't
+        recover cleanly from template death (slots leak to init).
+        """
+        if sys.platform != "linux":
+            logger.debug(
+                "subreaper setup: skipped on non-Linux platform (%s) — "
+                "Linux-only prctl call", sys.platform,
+            )
+            return
+
+        import ctypes
+        try:
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        except OSError as exc:
+            logger.warning(
+                "subreaper setup: libc.so.6 unavailable (%s); "
+                "skipping prctl call.  Pool will continue working but "
+                "without subreaper cleanup on template death.", exc,
+            )
+            return
+
+        # PR_SET_CHILD_SUBREAPER is option 36 in <linux/prctl.h>.
+        # ``prctl(int option, ulong arg2, ulong arg3, ulong arg4,
+        # ulong arg5)`` — arg2=1 to enable, args 3-5 unused.
+        PR_SET_CHILD_SUBREAPER = 36
+        rc = libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+        if rc != 0:
+            err = ctypes.get_errno()
+            logger.warning(
+                "subreaper setup: prctl(PR_SET_CHILD_SUBREAPER, 1) "
+                "returned rc=%d errno=%d.  Pool will continue working "
+                "but without subreaper cleanup on template death.",
+                rc, err,
+            )
+            return
+
+        logger.info(
+            "subreaper setup: daemon (pid=%d) claimed PR_SET_CHILD_SUBREAPER; "
+            "orphaned descendants will re-parent to this process instead "
+            "of init.", os.getpid(),
+        )
 
     # ------------------------------------------------------------------
     # Daemon Extensions (entry-point-based lifecycle objects)
