@@ -349,6 +349,17 @@ class JaatoDaemon:
         # CommandRouter — created in start(), owns pending-state dicts
         self._command_router = None
 
+        # Pre-warm runner template (pool PR 2).  Spawned in :meth:`start`
+        # AFTER extensions load + before IPC accepts connections.  Sits
+        # idle through the daemon's lifetime with runner-tier plugin
+        # modules pre-imported, ready for pool slots (PR 3) to fork
+        # from.  ``None`` when template-mode is disabled (no pool work
+        # consumes the template yet in PR 2, so failure to spawn is
+        # logged but non-fatal — sessions fall back to cold-spawn
+        # session-mode).
+        from server.runner_template import TemplateManager
+        self._template_manager: TemplateManager = TemplateManager()
+
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
 
@@ -525,6 +536,24 @@ class JaatoDaemon:
         for ext in self._extensions:
             await ext.start()
 
+        # Pool PR 2: spawn the pre-warm runner template.  The template
+        # subprocess imports runner-tier plugin modules at startup so
+        # pool slots (PR 3) can fork from it and inherit warm imports
+        # — eliminating the per-session 50s plugin-discovery cost
+        # observed on v62 step 6.  In PR 2, the template just sits
+        # idle (no pool consumes it yet); session-mode is the
+        # authoritative path until PR 4 routes through the pool.
+        # Failure to spawn is logged but non-fatal: sessions continue
+        # to cold-spawn through the existing session-mode path.
+        try:
+            self._template_manager.spawn()
+        except Exception as exc:  # noqa: BLE001 — boundary surface
+            logger.warning(
+                "Failed to spawn runner template (pool PR 2): %s; "
+                "sessions will continue to cold-spawn via session-mode",
+                exc,
+            )
+
         # Periodic health checks (server 0.6.54+) — currently inotify
         # pressure.  Cheap proc/self/fd scan every 5 minutes; warns
         # operators before the kernel limit is hit and sessions start
@@ -550,6 +579,20 @@ class JaatoDaemon:
         # Cleanup
         if self._session_manager:
             self._session_manager.shutdown()
+
+        # Pool PR 2: tear down the runner template as part of daemon
+        # exit.  The template is daemon-lifetime — alive across all
+        # sessions, never shut down on "idle" or "no active sessions".
+        # This call fires ONLY here, when the daemon itself is
+        # exiting.  Polite SHUTDOWN command first, SIGTERM after 5s
+        # timeout.  Idempotent.
+        try:
+            self._template_manager.shutdown()
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            logger.warning(
+                "Template teardown raised: %s; daemon will exit anyway",
+                exc,
+            )
 
         self._remove_pid()
         # Note: Don't remove config on normal stop - needed for restart
