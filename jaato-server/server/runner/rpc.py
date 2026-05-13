@@ -3948,8 +3948,35 @@ class RunnerRPC:
                             "runner RPC: malformed request frame: %s", exc,
                         )
                         continue
-                    # Dispatch to a worker thread.
-                    self._pool.submit(self._handle_request, env)
+                    if env.method == "session.bootstrap":
+                        # Pool PR 5a-fix: ``session.bootstrap`` runs
+                        # synchronously on the main thread (NOT via
+                        # ``self._pool.submit``).  Reason: step 1c
+                        # of ``bootstrap_session`` calls
+                        # ``aa_change_profile`` which is per-thread
+                        # in the Linux apparmor kernel module —
+                        # only the CALLING thread gets confined.  If
+                        # bootstrap ran in a worker thread, only that
+                        # worker would be confined; subsequently-
+                        # spawned workers (for tool.execute etc.)
+                        # would inherit the MAIN thread's
+                        # ``unconfined`` cred via pthread_create.
+                        # Running synchronously on main thread means
+                        # main confines BEFORE any worker spawns;
+                        # later worker threads inherit the confined
+                        # cred cleanly.  See the v67 cascade smoke
+                        # debug for the empirical evidence (worker
+                        # thread aa_change_profile silent-no-ops at
+                        # the verification step because /proc/self/
+                        # attr/current returns process-level state,
+                        # i.e. main thread's profile).  Same
+                        # synchronous-on-main-thread pattern that
+                        # cold-spawn uses in ``__main__.py`` step 2
+                        # — pool slot now mirrors it.
+                        self._handle_request(env)
+                    else:
+                        # Dispatch to a worker thread.
+                        self._pool.submit(self._handle_request, env)
                 elif kind == KIND_CANCEL:
                     try:
                         frame = CancelFrame.from_dict(payload)
