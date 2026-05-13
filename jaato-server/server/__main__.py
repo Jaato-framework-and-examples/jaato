@@ -358,7 +358,26 @@ class JaatoDaemon:
         # logged but non-fatal — sessions fall back to cold-spawn
         # session-mode).
         from server.runner_template import TemplateManager
+        from server.runner_pool import PoolManager
         self._template_manager: TemplateManager = TemplateManager()
+        # Pool manager (pool PR 3).  Asks the template to fork N pool
+        # slots at daemon startup.  Slots sit idle through the daemon's
+        # lifetime waiting for bootstrap envelopes (PR 4).  Pool size
+        # configurable via ``JAATO_RUNNER_POOL_SIZE`` env var (default
+        # 2).  Pool-empty fallback path = today's cold-spawn session-
+        # mode (preserved through PR 4's flag-gated rollout).
+        _pool_size_raw = os.environ.get("JAATO_RUNNER_POOL_SIZE", "2")
+        try:
+            _pool_size = int(_pool_size_raw)
+        except ValueError:
+            logger.warning(
+                "JAATO_RUNNER_POOL_SIZE=%r is not an int; defaulting "
+                "to 2", _pool_size_raw,
+            )
+            _pool_size = 2
+        self._pool_manager: PoolManager = PoolManager(
+            self._template_manager, target_size=_pool_size,
+        )
 
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
@@ -540,11 +559,7 @@ class JaatoDaemon:
         # subprocess imports runner-tier plugin modules at startup so
         # pool slots (PR 3) can fork from it and inherit warm imports
         # — eliminating the per-session 50s plugin-discovery cost
-        # observed on v62 step 6.  In PR 2, the template just sits
-        # idle (no pool consumes it yet); session-mode is the
-        # authoritative path until PR 4 routes through the pool.
-        # Failure to spawn is logged but non-fatal: sessions continue
-        # to cold-spawn through the existing session-mode path.
+        # observed on v62 step 6.
         try:
             self._template_manager.spawn()
         except Exception as exc:  # noqa: BLE001 — boundary surface
@@ -553,6 +568,29 @@ class JaatoDaemon:
                 "sessions will continue to cold-spawn via session-mode",
                 exc,
             )
+
+        # Pool PR 3: fork N idle slots from the template.  Slots sit
+        # idle through the daemon's lifetime waiting for bootstrap
+        # envelopes (PR 4 will wire session routing through the pool).
+        # PR 3 ships only the pool infrastructure — session-mode
+        # remains the authoritative bootstrap path until PR 4.
+        # Sleep briefly to let the template finish plugin discovery
+        # before asking it to fork; template's discover took ~1.7s in
+        # PR 2 measurement.  A small delay here avoids a race where
+        # the template's first FORK_SLOT lands before recvmsg is
+        # ready.  PR 5 will add a proper handshake.
+        if self._template_manager.is_alive():
+            import time
+            time.sleep(2.0)  # generous, matches the discover time
+            try:
+                self._pool_manager.spawn_initial_slots()
+            except Exception as exc:  # noqa: BLE001 — boundary surface
+                logger.warning(
+                    "Failed to spawn pool slots (pool PR 3): %s; "
+                    "sessions will continue to cold-spawn via session-"
+                    "mode (pool empty)",
+                    exc,
+                )
 
         # Periodic health checks (server 0.6.54+) — currently inotify
         # pressure.  Cheap proc/self/fd scan every 5 minutes; warns
@@ -579,6 +617,17 @@ class JaatoDaemon:
         # Cleanup
         if self._session_manager:
             self._session_manager.shutdown()
+
+        # Pool PR 3: tear down idle pool slots BEFORE template.  Slots
+        # were forked from template; killing template first orphans
+        # slots without their SHUTDOWN command.  Order matters here.
+        try:
+            self._pool_manager.shutdown_all()
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            logger.warning(
+                "Pool teardown raised: %s; daemon will exit anyway",
+                exc,
+            )
 
         # Pool PR 2: tear down the runner template as part of daemon
         # exit.  The template is daemon-lifetime — alive across all
