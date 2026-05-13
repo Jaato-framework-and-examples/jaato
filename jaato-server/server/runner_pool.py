@@ -31,7 +31,7 @@ import logging
 import os
 import socket
 import threading
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,34 @@ class PoolManager:
         self._replenish_interval = float(replenish_interval)
         self._replenish_stop = threading.Event()
         self._replenish_thread: Optional[threading.Thread] = None
+        # Pool PR 5d telemetry counters.  Monotonically-incrementing
+        # process-lifetime totals.  Snapshot via :meth:`get_telemetry`
+        # for diagnostic surfaces (logs, admin commands, OTel
+        # exporters wired by external code).
+        self._counters: Dict[str, int] = {
+            # Number of times ``acquire_slot`` returned a real handle.
+            "pool_slot_acquired_total": 0,
+            # Number of times ``acquire_slot`` returned None (pool
+            # empty when called).  Sessions in this state fall back
+            # to cold-spawn — useful for sizing decisions.
+            "pool_acquire_miss_total": 0,
+            # Number of times the replenishment thread forked a new
+            # slot to top up the pool.
+            "pool_replenish_success_total": 0,
+            # Number of times ``request_fork_slot`` returned None
+            # during replenishment (template stuck, IPC error, etc.).
+            "pool_replenish_failures_total": 0,
+            # Number of times the watchdog initiated a template
+            # respawn.  Each unit of this counter corresponds to one
+            # detected template death.
+            "template_respawn_attempts_total": 0,
+            # Number of those respawn attempts that raised an
+            # exception (template_manager.spawn() failed).  Watchdog
+            # retries on next iteration, so attempts >> failures is
+            # normal during a flaky-template incident.
+            "template_respawn_failures_total": 0,
+        }
+        self._counters_lock = threading.Lock()
 
     def spawn_initial_slots(self) -> int:
         """Fork ``target_size`` slots from the template.
@@ -157,12 +185,16 @@ class PoolManager:
             return len(self._idle_slots)
 
     def acquire_slot(self) -> Optional[SlotHandle]:
-        """Pop an idle slot off the pool (PR 4 will use this).
+        """Pop an idle slot off the pool.
 
-        PR 3 ships the API but the daemon doesn't call it yet.
         Caller becomes responsible for the slot — must either send
-        a bootstrap envelope (PR 4) or close the daemon-side socket
-        (which signals the slot to exit).
+        a bootstrap envelope (the daemon's spawn_session_runner path)
+        or close the daemon-side socket (which signals the slot to
+        exit).
+
+        Increments either ``pool_slot_acquired_total`` (hit) or
+        ``pool_acquire_miss_total`` (empty pool) for telemetry — see
+        :meth:`get_telemetry`.
 
         Returns:
             ``(pid, sock)`` of an idle slot, or ``None`` if the pool
@@ -170,8 +202,47 @@ class PoolManager:
         """
         with self._lock:
             if not self._idle_slots:
+                self._incr("pool_acquire_miss_total")
                 return None
-            return self._idle_slots.pop()
+            handle = self._idle_slots.pop()
+        self._incr("pool_slot_acquired_total")
+        return handle
+
+    def _incr(self, key: str, delta: int = 1) -> None:
+        """Atomic-ish bump of a telemetry counter.  Internal helper."""
+        with self._counters_lock:
+            self._counters[key] = self._counters.get(key, 0) + delta
+
+    def get_telemetry(self) -> Dict[str, int]:
+        """Return a snapshot of the pool's telemetry counters.
+
+        Snapshot semantics: caller gets a stable dict copy at the
+        moment of the call.  Counters keep incrementing concurrently
+        on the replenishment thread + acquire path; subsequent
+        snapshots reflect those increments.
+
+        Keys (pool PR 5d):
+          - ``pool_slot_acquired_total``: sessions served by a pool
+            slot.  High value relative to ``pool_acquire_miss_total``
+            means pool is well-sized for the workload.
+          - ``pool_acquire_miss_total``: ``acquire_slot`` returned
+            None.  Sessions fell back to cold-spawn.  If this is
+            growing fast, raise ``target_size`` or check
+            ``pool_replenish_failures_total``.
+          - ``pool_replenish_success_total``: replenishment thread
+            successfully forked a new slot.
+          - ``pool_replenish_failures_total``: replenishment thread's
+            ``request_fork_slot`` returned None.  Investigate
+            template health if growing.
+          - ``template_respawn_attempts_total``: watchdog initiated a
+            template respawn (template died).
+          - ``template_respawn_failures_total``: respawn ``spawn()``
+            raised.  Attempts >> failures means flaky template;
+            attempts == failures means template can't be respawned
+            (operator action needed).
+        """
+        with self._counters_lock:
+            return dict(self._counters)
 
     def shutdown_all(self) -> None:
         """Tear down the replenishment thread + every idle slot.
@@ -331,10 +402,12 @@ class PoolManager:
                     # request_fork_slot already logged the cause; back
                     # off briefly so we don't tight-loop on a flaky
                     # template.
+                    self._incr("pool_replenish_failures_total")
                     self._replenish_stop.wait(self._replenish_interval)
                     continue
                 with self._lock:
                     self._idle_slots.append(handle)
+                self._incr("pool_replenish_success_total")
                 logger.info(
                     "PoolManager replenish: forked slot pid=%d "
                     "(idle_count=%d/%d)",
@@ -403,9 +476,11 @@ class PoolManager:
         # Respawn the template.  ``spawn`` is idempotent if the
         # previous spawn cleaned up properly (is_alive() returning
         # False clears self.pid via waitpid).
+        self._incr("template_respawn_attempts_total")
         try:
             self._template_manager.spawn()
         except Exception as exc:  # noqa: BLE001 — boundary surface
+            self._incr("template_respawn_failures_total")
             logger.error(
                 "PoolManager watchdog: template respawn failed: %s; "
                 "will retry on next iteration", exc,
