@@ -511,19 +511,23 @@ def test_pool_routing_uses_slot_when_flag_enabled(
     assert server.spawned.pid == 99999
 
 
-def test_pool_routing_falls_back_when_flag_disabled(
+def test_pool_routing_falls_back_when_flag_explicitly_disabled(
     daemon_loop, tmp_path, monkeypatch,
 ) -> None:
-    """No flag → never consult the pool, even if pool_manager is set."""
+    """Pool PR 5e: default is enabled.  Explicit ``false`` disables.
+
+    Operators who set ``JAATO_RUNNER_POOL_ENABLED=false`` opt OUT of
+    the pool — sessions cold-spawn.  Recognised falsy values:
+    ``0`` / ``false`` / ``no`` / ``off`` (case-insensitive)."""
     from server.runner_spawn import spawn_session_runner
 
-    monkeypatch.delenv("JAATO_RUNNER_POOL_ENABLED", raising=False)
+    monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "false")
     server = _FakeJaatoServer()
     pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
 
     spawn_session_runner(
         server=server,
-        session_id="sess-noflag",
+        session_id="sess-disabled",
         workspace_path=str(tmp_path),
         profile_name="",
         daemon_loop=daemon_loop,
@@ -533,6 +537,32 @@ def test_pool_routing_falls_back_when_flag_disabled(
 
     assert pool.acquire_calls == 0
     assert len(_FakeSpawner.instances) == 1  # cold-spawned
+
+
+def test_pool_routing_enabled_by_default(
+    daemon_loop, tmp_path, monkeypatch,
+) -> None:
+    """Pool PR 5e: when the env var is unset (deleted), the pool is
+    enabled by default.  Pre-PR-5e this test verified the opposite —
+    that empty meant disabled."""
+    from server.runner_spawn import spawn_session_runner
+
+    monkeypatch.delenv("JAATO_RUNNER_POOL_ENABLED", raising=False)
+    server = _FakeJaatoServer()
+    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+
+    spawn_session_runner(
+        server=server,
+        session_id="sess-default",
+        workspace_path=str(tmp_path),
+        profile_name="",
+        daemon_loop=daemon_loop,
+        disable_confine=True,
+        pool_manager=pool,
+    )
+
+    assert pool.acquire_calls == 1
+    assert _FakeSpawner.instances == []  # pool-served, no cold-spawn
 
 
 def test_pool_routing_falls_back_when_pool_empty(

@@ -52,17 +52,35 @@ logger = logging.getLogger(__name__)
 def _pool_enabled() -> bool:
     """Read the ``JAATO_RUNNER_POOL_ENABLED`` env var.
 
-    PR 4 default: pool routing is opt-in.  Sessions only consume a
-    pre-warm pool slot when the daemon was started with the env var
-    set; otherwise every session falls through to the historical
-    cold-spawn path (RunnerSpawner.spawn).
+    Pool PR 5e: default flipped to **enabled**.  Sessions consume
+    pre-warm pool slots unless the operator explicitly disables the
+    pool by setting ``JAATO_RUNNER_POOL_ENABLED=false`` (or
+    ``0`` / ``no`` / ``off``).
 
-    PR 5 will flip the default to enabled after the pool soaks.
-    Operators wanting to disable the pool at runtime export
-    ``JAATO_RUNNER_POOL_ENABLED=false`` before starting the daemon.
+    Rationale: PRs 4-5d shipped the pool's structural correctness,
+    operational robustness (subreaper + watchdog), startup determinism
+    (READY handshake), and observability (telemetry).  Default-on
+    delivers the cascade speedup to every operator without per-deployment
+    configuration.
+
+    Disable cases (set env var to a falsy value):
+      - Suspected pool regression — bisect against cold-spawn.
+      - Operator host with extremely tight memory budget where the
+        idle pool's ~150-300 MiB footprint is undesirable.
+      - Custom plugin set that doesn't work with fork-from-template
+        (would need to be a runner-tier plugin with module-global
+        non-fork-safe state — none exist today per the 2026-05-13
+        audit).
+
+    Pre-PR-5e the default was opt-in (off); explicit ``true`` was
+    required.  Operators who set ``true`` explicitly are unaffected
+    by the flip.  Operators who never set the var get the pool
+    automatically post-PR-5e.
     """
     raw = os.environ.get("JAATO_RUNNER_POOL_ENABLED", "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    # Empty (unset) → enabled.  Explicit-falsy → disabled.  Anything
+    # else (truthy or unrecognised) → enabled.
+    return raw not in ("0", "false", "no", "off")
 
 
 def spawn_session_runner(

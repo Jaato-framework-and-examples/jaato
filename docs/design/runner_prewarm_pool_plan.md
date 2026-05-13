@@ -236,7 +236,11 @@ Scope evolved as PR 4 absorbed replenishment.  Net PR 5 work now:
 | PR 2 (template subprocess) | shipped 0.6.75 | Stop spawning template at daemon startup. Template exits cleanly when daemon dies. |
 | PR 3 (pool slots) | shipped 0.6.75 | Stop spawning slots. Existing fallback path (cold spawn) handles all sessions. |
 | PR 4 (route through pool + replenishment) | shipped 0.6.76 | Flag flip: `JAATO_RUNNER_POOL_ENABLED=false`. Sessions fall back to cold spawn. |
-| PR 5 (self-confine + subreaper + watchdog + default-on) | pending | Flag flip default. Future revert is `git revert` + daemon restart. |
+| PR 5a (per-slot AppArmor self-confine) | shipped 0.6.79 → PR #94 + 0.6.80 → PR #95 (main-thread dispatch fix) | Code revert. |
+| PR 5b (subreaper + template watchdog) | shipped 0.6.81 → PR #96 | Code revert. |
+| PR 5c (READY handshake) | shipped 0.6.82 → PR #98 (re-created after stacking auto-close) | Code revert. |
+| PR 5d (telemetry counters) | shipped 0.6.83 → PR #99 | Code revert. Purely additive. |
+| PR 5e (flag default flip + docs) | shipped 0.6.84 | Code revert. Operators who relied on opt-in default see no functional change other than the default behavior; explicit `JAATO_RUNNER_POOL_ENABLED=true` still works. |
 
 Throughout the migration, the cold-spawn path remains functional. Every PR can be independently shipped, run for days, and rolled back without state corruption.
 
