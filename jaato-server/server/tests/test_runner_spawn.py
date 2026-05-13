@@ -559,11 +559,15 @@ def test_pool_routing_falls_back_when_pool_empty(
     assert len(_FakeSpawner.instances) == 1  # cold-spawned
 
 
-def test_pool_routing_skipped_when_apparmor_opted_in(
+def test_pool_routing_consumes_slot_when_apparmor_opted_in(
     daemon_loop, tmp_path, monkeypatch,
 ) -> None:
-    """Session opted into AppArmor → never consult the pool (PR 4
-    slots run unconfined; per-slot self-confinement is PR 5)."""
+    """PR 5a: AppArmor opt-in sessions are NOW pool-eligible.  The
+    slot self-confines via envelope.profile_name in step 1c of
+    bootstrap_session.  Pre-PR-5a these sessions fell through to
+    cold-spawn (disable_confine gate).  Post-PR-5a they consume a
+    pool slot and the slot carries the profile_name on its
+    SpawnedRunner handle."""
     from server.runner_spawn import spawn_session_runner
 
     monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "true")
@@ -580,8 +584,10 @@ def test_pool_routing_skipped_when_apparmor_opted_in(
         pool_manager=pool,
     )
 
-    assert pool.acquire_calls == 0
-    assert len(_FakeSpawner.instances) == 1
+    assert pool.acquire_calls == 1
+    assert _FakeSpawner.instances == []  # NOT cold-spawned
+    assert server.spawned is not None
+    assert server.spawned.profile_name == "jaato-ws-sess-apparmor"
 
 
 def test_pool_routing_skipped_when_cgroup_attach_set(
