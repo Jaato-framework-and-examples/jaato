@@ -283,8 +283,9 @@ class PoolManager:
         self._replenish_thread = None
 
     def _replenish_loop(self) -> None:
-        """Background loop body — wakes every ``_replenish_interval``
-        and tops up the pool by ONE slot per iteration.
+        """Background loop body — wakes every ``_replenish_interval``,
+        watchdogs the template + tops up the pool by ONE slot per
+        iteration.
 
         One-slot-per-iteration matters: when the cascade rapidly
         drains the pool (multiple steps in a tight loop) the loop
@@ -293,23 +294,37 @@ class PoolManager:
         On a hot cascade the loop body fires effectively-continuously
         until the pool is back at target_size.
 
+        Pool PR 5b watchdog (this iteration): detect template death
+        + auto-respawn.  When ``template_manager.is_alive()`` flips
+        False (template OOM-killed, segfaulted, or otherwise gone)
+        the loop:
+
+          1. Drains any idle slot handles — slots may have re-parented
+             to the daemon via subreaper (PR 5b daemon startup bit);
+             ``waitpid`` them so they don't zombie.
+          2. Respawns the template via ``template_manager.spawn()``.
+          3. Sleeps briefly to let the new template's plugin discovery
+             complete before the next iteration tries fork-slot.
+             (PR 5c will replace this sleep with a proper ready
+             handshake.)
+
         Stops cleanly when ``_replenish_stop`` is set (daemon
-        shutdown) OR when the template manager reports dead.
+        shutdown).
         """
         while not self._replenish_stop.is_set():
             try:
+                # Template watchdog (PR 5b): detect death + respawn.
+                if not self._template_manager.is_alive():
+                    self._handle_template_death()
+                    # Brief sleep so new template can warm up before
+                    # the next iteration tries fork-slot.  PR 5c will
+                    # replace this with a proper ready signal.
+                    self._replenish_stop.wait(self._replenish_interval * 4)
+                    continue
+
                 # Cheap check: pool already at target, sleep.
                 if self.idle_count() >= self.target_size:
                     self._replenish_stop.wait(self._replenish_interval)
-                    continue
-                # Template dead = nothing we can do until daemon restarts.
-                if not self._template_manager.is_alive():
-                    logger.warning(
-                        "PoolManager replenish: template is dead; "
-                        "sleeping %.1fs before re-checking",
-                        self._replenish_interval * 10,
-                    )
-                    self._replenish_stop.wait(self._replenish_interval * 10)
                     continue
                 handle = self._template_manager.request_fork_slot()
                 if handle is None:
@@ -331,3 +346,70 @@ class PoolManager:
                     "and continuing",
                 )
                 self._replenish_stop.wait(self._replenish_interval)
+
+    def _handle_template_death(self) -> None:
+        """Recover from template-subprocess death (pool PR 5b watchdog).
+
+        Pool slots are template-children (forked, no exec).  When the
+        template dies, slots get orphaned.  With the daemon's
+        ``PR_SET_CHILD_SUBREAPER`` bit set (PR 5b startup), orphaned
+        descendants re-parent to the daemon — so ``waitpid`` works.
+
+        Recovery sequence:
+          1. Drain idle slot handles — close their sockets (slot sees
+             EOF, exits), waitpid them.  Acquired slots (handed out to
+             active sessions) keep running independently; the
+             session's bootstrap already completed and the slot serves
+             RPC until session end.  Only IDLE slot handles in our
+             possession need cleanup here.
+          2. Respawn the template.  On failure, the outer loop's
+             exception handler retries.
+
+        Best-effort throughout — daemon shutdown signals via
+        ``_replenish_stop`` are honored.
+        """
+        with self._lock:
+            stale = list(self._idle_slots)
+            self._idle_slots.clear()
+
+        for slot_pid, slot_sock in stale:
+            try:
+                slot_sock.close()
+            except OSError:
+                pass
+            # Subreaper re-parented slot to daemon → waitpid works.
+            # If subreaper wasn't set OR if init already reaped, we
+            # get ChildProcessError — tolerate it.
+            try:
+                os.waitpid(slot_pid, 0)
+            except ChildProcessError:
+                pass
+
+        if stale:
+            logger.warning(
+                "PoolManager watchdog: template died; reaped %d "
+                "orphaned idle slot(s).  Acquired (in-use) slots "
+                "keep running independently.", len(stale),
+            )
+        else:
+            logger.warning(
+                "PoolManager watchdog: template died; idle pool was "
+                "empty so no orphaned slots to reap.",
+            )
+
+        # Respawn the template.  ``spawn`` is idempotent if the
+        # previous spawn cleaned up properly (is_alive() returning
+        # False clears self.pid via waitpid).
+        try:
+            self._template_manager.spawn()
+        except Exception as exc:  # noqa: BLE001 — boundary surface
+            logger.error(
+                "PoolManager watchdog: template respawn failed: %s; "
+                "will retry on next iteration", exc,
+            )
+            return
+
+        logger.info(
+            "PoolManager watchdog: template respawned successfully — "
+            "pool will refill on subsequent iterations",
+        )
