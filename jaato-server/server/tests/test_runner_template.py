@@ -237,6 +237,98 @@ class TestTemplateManagerRequestForkSlot:
             mgr.shutdown()
 
 
+def _send_recv_echo(sock, request_id: int = 1, payload=None) -> dict:
+    """Drive one ``echo`` RPC against a slot's RPC dispatcher.
+
+    Helper for PR 4 tests that verify a forked slot is in
+    ``RunnerRPC.serve()`` mode (not the PR 3 command loop).  The
+    slot's RPC accepts the same length-prefixed JSON framing the
+    daemon-side ``RunnerRPCClient`` uses; this helper sidesteps that
+    client (which is async + needs a daemon loop) and writes raw
+    frames synchronously.
+
+    Returns the decoded response payload dict.
+
+    Raises:
+        TimeoutError: slot didn't respond within 10s — usually means
+            the slot is still in PR 3's command loop (which doesn't
+            speak length-prefixed JSON) instead of PR 4's RPC mode.
+    """
+    import json
+    from shared.framing import read_frame_sync, write_frame_sync
+
+    payload = payload or {"hello": "slot"}
+    request = json.dumps({
+        "id": request_id,
+        "kind": "request",
+        "method": "echo",
+        "args": payload,
+    })
+    sock.settimeout(10.0)
+    try:
+        write_frame_sync(sock, request)
+        raw = read_frame_sync(sock)
+    finally:
+        sock.settimeout(None)
+    if raw is None:
+        raise RuntimeError(
+            "slot closed the socket before responding to echo — slot "
+            "may have crashed or PR 4's RPC adoption regressed"
+        )
+    return json.loads(raw)
+
+
+class TestSlotServesRPC:
+    """Pool PR 4: forked slots speak RunnerRPC framing on their socket.
+
+    Pre-PR-4 (PR 3) slots ran a line-delimited command loop
+    accepting ``SHUTDOWN\\n``.  PR 4 replaced that with the
+    ``RunnerRPC.serve()`` body (same as session-mode runners after
+    they self-confine).  These tests pin the new behavior end-to-end
+    against a real subprocess.
+    """
+
+    def test_slot_responds_to_echo_rpc(self):
+        """A freshly-forked slot answers an ``echo`` RPC.
+
+        Demonstrates two PR 4 properties at once:
+          - The slot's RunnerRPC.serve() loop is actually running.
+          - The slot's worker pool dispatches requests + writes
+            response frames over the slot socket.
+
+        Without PR 4 the slot would either block on its command-
+        loop ``recv`` (returning nothing within the test timeout)
+        or send garbage back, both of which fail this assertion.
+        """
+        mgr = TemplateManager()
+        mgr.spawn()
+        time.sleep(3.0)
+        try:
+            handle = mgr.request_fork_slot()
+            assert handle is not None
+            slot_pid, daemon_end = handle
+
+            try:
+                response = _send_recv_echo(
+                    daemon_end, request_id=42, payload={"x": 1, "y": "z"},
+                )
+            finally:
+                # Close → slot's serve loop sees EOF → clean exit.
+                daemon_end.close()
+                try:
+                    os.waitpid(slot_pid, 0)
+                except ChildProcessError:
+                    pass
+
+            assert response.get("id") == 42
+            assert response.get("kind") == "response"
+            assert response.get("ok") is True
+            # echo returns args verbatim under "result".
+            assert response.get("result") == {"x": 1, "y": "z"}
+        finally:
+            mgr.shutdown()
+
+
 class TestPoolManager:
     """Tests for PoolManager (pool PR 3 — daemon-side pool wrapper)."""
 
@@ -320,3 +412,115 @@ class TestPoolManager:
             assert pool.idle_count() == 0
         finally:
             tm.shutdown()
+
+
+class TestPoolReplenishment:
+    """Pool PR 4: the background replenishment thread keeps the pool
+    topped up between session acquisitions.
+
+    Without replenishment a cascade of N sessions cold-spawns N - pool_size
+    runners — defeating the pool.  With replenishment the pool refills
+    fast enough that cascade steps past the initial window find a warm
+    slot waiting.
+    """
+
+    def test_replenishment_refills_pool_after_acquire(self):
+        """End-to-end: acquire a slot, verify replenishment forks a
+        replacement within a few seconds + restores idle_count to
+        target."""
+        from server.runner_pool import PoolManager
+
+        tm = TemplateManager()
+        tm.spawn()
+        time.sleep(3.0)
+        try:
+            pool = PoolManager(
+                template_manager=tm,
+                target_size=2,
+                replenish_interval=0.1,  # tight loop for fast test
+            )
+            pool.spawn_initial_slots()
+            assert pool.idle_count() == 2
+
+            pool.start_replenishment()
+            try:
+                # Acquire a slot — pool drops to 1.
+                handle = pool.acquire_slot()
+                assert handle is not None
+                assert pool.idle_count() == 1
+
+                # Replenishment thread should refill within a few
+                # seconds (template fork is sub-100ms; we allow 5s
+                # to be tolerant of test-host scheduling jitter).
+                refilled = _wait_until(
+                    lambda: pool.idle_count() >= 2,
+                    timeout=5.0,
+                )
+                assert refilled, (
+                    f"replenishment did not refill pool back to target "
+                    f"within 5s; idle_count={pool.idle_count()}"
+                )
+            finally:
+                # Clean up the acquired slot.
+                slot_pid, sock = handle
+                sock.close()
+                try:
+                    os.waitpid(slot_pid, 0)
+                except ChildProcessError:
+                    pass
+                pool.shutdown_all()
+        finally:
+            tm.shutdown()
+
+    def test_stop_replenishment_clean(self):
+        """``stop_replenishment`` joins the thread within timeout."""
+        from server.runner_pool import PoolManager
+
+        tm = TemplateManager()
+        tm.spawn()
+        time.sleep(3.0)
+        try:
+            pool = PoolManager(
+                template_manager=tm,
+                target_size=1,
+                replenish_interval=0.1,
+            )
+            pool.start_replenishment()
+            time.sleep(0.3)  # let the thread spin a couple of cycles
+            pool.stop_replenishment(timeout=3.0)
+            assert pool._replenish_thread is None
+        finally:
+            tm.shutdown()
+
+    def test_start_replenishment_idempotent(self):
+        """A second :meth:`start_replenishment` call is a no-op."""
+        from server.runner_pool import PoolManager
+
+        tm = TemplateManager()
+        tm.spawn()
+        time.sleep(3.0)
+        try:
+            pool = PoolManager(
+                template_manager=tm,
+                target_size=1,
+                replenish_interval=0.5,
+            )
+            pool.start_replenishment()
+            first_thread = pool._replenish_thread
+            pool.start_replenishment()  # second call — no-op
+            assert pool._replenish_thread is first_thread
+            pool.stop_replenishment()
+        finally:
+            tm.shutdown()
+
+    def test_target_size_zero_skips_thread(self):
+        """``target_size=0`` means no replenishment thread spins up."""
+        from server.runner_pool import PoolManager
+
+        pool = PoolManager(
+            template_manager=None,
+            target_size=0,
+            replenish_interval=0.1,
+        )
+        pool.start_replenishment()
+        assert pool._replenish_thread is None

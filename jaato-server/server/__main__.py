@@ -508,6 +508,15 @@ class JaatoDaemon:
                     _cgroups_root_env,
                 )
             self._ws_server = JaatoWSServer(**ws_server_kwargs)
+            # Pool PR 4: thread the daemon's PoolManager into the WS
+            # server so the WS apparmor pre-init hook can route session
+            # bootstrap through pre-warm slots when the session opts out
+            # of AppArmor (disable_confine=True) AND doesn't need a
+            # cgroup_attach.  The reference is a plain attribute write
+            # because the WS server's pre-init hook reads it via
+            # ``getattr(ws_server, "_pool_manager_ref", None)`` — no
+            # constructor parameter churn required.
+            self._ws_server._pool_manager_ref = self._pool_manager
             ws_adapter = self._ws_server.get_event_sink_adapter()
             ws_adapter.bind_loop(asyncio.get_running_loop())
             composite_sink.add_sink(ws_adapter)
@@ -590,6 +599,19 @@ class JaatoDaemon:
                     "sessions will continue to cold-spawn via session-"
                     "mode (pool empty)",
                     exc,
+                )
+            # Pool PR 4: start the background replenishment thread.
+            # Keeps the pool topped up between session bootstrap calls;
+            # without it a cascade with target_size=2 cold-spawns every
+            # step past the second.  Idempotent + clean-stop on
+            # ``shutdown_all`` (which the daemon shutdown path calls).
+            try:
+                self._pool_manager.start_replenishment()
+            except Exception as exc:  # noqa: BLE001 — boundary surface
+                logger.warning(
+                    "Failed to start pool replenishment thread "
+                    "(pool PR 4): %s; pool will not refill after "
+                    "sessions consume slots", exc,
                 )
 
         # Periodic health checks (server 0.6.54+) — currently inotify
@@ -781,6 +803,12 @@ class JaatoDaemon:
             self._session_manager.set_apparmor_dependencies(
                 ws_server=self._ws_server,
                 daemon_loop=daemon_loop,
+                # Pool PR 4: thread the daemon's pool manager so IPC
+                # sessions can route through pre-warm slots when the
+                # session opts out of AppArmor.  WS sessions get the
+                # pool manager through the WS server attribute set in
+                # ``start()`` (see the ``_pool_manager_ref`` write).
+                pool_manager=self._pool_manager,
             )
 
     # ------------------------------------------------------------------

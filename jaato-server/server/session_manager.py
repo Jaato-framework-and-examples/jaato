@@ -531,6 +531,7 @@ class SessionManager:
         self,
         ws_server: Any = None,
         daemon_loop: Any = None,
+        pool_manager: Any = None,
     ) -> None:
         """Wire the IPC AppArmor + runner-spawn dependencies (§3.13).
 
@@ -554,9 +555,16 @@ class SessionManager:
             daemon_loop: The daemon's main asyncio loop.  ``None`` is
                 accepted but disables apparmor provisioning (no
                 AppArmor manager can be constructed without it).
+            pool_manager: Pool PR 4 — the daemon's
+                :class:`server.runner_pool.PoolManager`, threaded
+                into :func:`spawn_session_runner` so IPC sessions can
+                claim a pre-warm pool slot instead of cold-spawning
+                a runner.  ``None`` disables the pool path for IPC
+                sessions (cold-spawn fallback applies).
         """
         self._ws_server_ref = ws_server
         self._daemon_loop = daemon_loop
+        self._pool_manager_ref = pool_manager
 
     def _provision_ipc_apparmor_and_spawn_runner(
         self,
@@ -843,6 +851,7 @@ class SessionManager:
                 profile_name=profile_name,
                 daemon_loop=getattr(self, "_daemon_loop", None),
                 disable_confine=(profile_name == ""),
+                pool_manager=getattr(self, "_pool_manager_ref", None),
             )
             # Phase 3 post-Step-7 regression fix (Path B):
             # synchronously dispatch ``session.bootstrap`` so the

@@ -369,22 +369,48 @@ def _handle_fork_slot(
 
 
 def _run_slot_mode(slot_fd: int, log) -> None:
-    """Slot-mode entry — runs AFTER fork from template.
+    """Slot-mode entry — runs AFTER fork from template (pool PR 4).
 
     The slot inherits the template's warm-imported plugin modules
-    (the whole point of the pool design).  Sits idle on the slot
-    socket waiting for a bootstrap envelope (PR 4) or shutdown.
+    (the whole point of the pool design) and the template's already-
+    walked discovery state.  It then becomes a real session-mode
+    runner: adopts the slot socket as fd 3, builds the executor,
+    and serves :class:`server.runner.rpc.RunnerRPC` exactly like
+    today's session-mode runners do after they self-confine.
 
-    PR 3 ships ONLY the idle-wait behavior — slots wait for a
-    SHUTDOWN command or pipe EOF and exit.  PR 4 will add
-    envelope-handling that bootstraps a real session inside the
-    slot (reusing the existing ``bootstrap_session`` code path that
-    today's session-mode runners take).
+    The daemon-side spawn helper (:func:`server.runner_spawn.spawn_session_runner`)
+    talks to the slot identically to a freshly-spawned session runner:
+
+    1. Wraps the slot's daemon-side socket in
+       :class:`server.runner_rpc_client.RunnerRPCClient`.
+    2. Starts the read-loop.
+    3. Dispatches ``session.bootstrap`` via
+       :meth:`RunnerRPCClient.bootstrap_session_threadsafe`.
+    4. Treats the slot as the session's runner for its full lifetime.
+
+    Slot bootstrap rules (PR 4 scope):
+
+    - The slot does NOT self-confine to an AppArmor profile.  Pool
+      slots in PR 4 run unconfined — same effective posture as
+      session-mode with ``JAATO_RUNNER_DISABLE_CONFINE=true``.  Per-
+      slot AppArmor self-confinement (using the envelope's
+      ``profile_name`` field) is deferred to PR 5 because per-session
+      confinement has to happen post-fork-pre-bootstrap, which needs
+      a small extension to the RPC dispatch (a ``self_confine`` handler
+      called before the first ``session.bootstrap``).
+    - The slot does NOT read ``JAATO_RUNNER_*`` env vars.  Workspace,
+      session id, and cli caps come from the bootstrap envelope —
+      same as how session-mode propagates them to the runner-side
+      ``JaatoSession`` host via ``session.bootstrap``.  The slot's
+      ``ToolExecutor`` is built with ``workspace_root=None`` and
+      default caps; the runner-side bootstrap handler updates
+      workspace + caps when the envelope arrives.
+
+    On peer EOF (daemon closed the slot socket) or RPC exit, the
+    slot exits cleanly with code 0.
     """
     # Dup the slot socket FD to fd 3 to match the existing runner
     # convention (session-mode also adopts fd 3 as its RPC socket).
-    # PR 4 will route the bootstrap envelope here; for PR 3 the slot
-    # just listens for SHUTDOWN.
     try:
         os.dup2(slot_fd, 3)
     except OSError as exc:
@@ -408,45 +434,40 @@ def _run_slot_mode(slot_fd: int, log) -> None:
 
     slot_log = logging.getLogger("server.runner.slot")
     slot_log.info(
-        "runner slot ready: pid=%d (warm imports inherited from "
-        "template); waiting for envelope or shutdown",
+        "runner slot pid=%d ready (warm imports inherited from template); "
+        "serving RPC on fd 3 — daemon will dispatch session.bootstrap",
         os.getpid(),
     )
 
+    # Build the executor + dispatcher.  workspace_root is None at this
+    # point — the bootstrap envelope carries the real workspace and
+    # the runner-side ``session.bootstrap`` handler updates the
+    # session host's workspace_path.  ToolExecutor uses its compile-
+    # time defaults for cli caps; runtime_limits from the envelope
+    # are forwarded to the session host the same way session-mode
+    # does it (env propagation isn't a pool-slot concern because
+    # cli-plugin reads its caps from the runtime, not from env in the
+    # slot process).
+    from .rpc import RunnerRPC
+    from .tool_executor import ToolExecutor
+
+    executor = ToolExecutor(workspace_root=None)
+    rpc = RunnerRPC(slot_sock, executor.execute, workspace_root=None)
+
     try:
-        buf = b""
-        while True:
-            chunk = slot_sock.recv(4096)
-            if not chunk:
-                slot_log.info(
-                    "runner slot pid=%d: daemon closed slot pipe; exiting",
-                    os.getpid(),
-                )
-                break
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                cmd = line.decode("utf-8", errors="replace").strip()
-                if cmd == "SHUTDOWN":
-                    slot_log.info(
-                        "runner slot pid=%d: SHUTDOWN command received",
-                        os.getpid(),
-                    )
-                    sys.exit(0)
-                # PR 4 will add envelope handling here — receive
-                # the SessionInitEnvelope, self-confine to the
-                # session's AppArmor profile, run bootstrap_session,
-                # serve the session.
-                slot_log.warning(
-                    "runner slot pid=%d: ignoring unknown command %r "
-                    "(PR 4 will add envelope handling)",
-                    os.getpid(), cmd,
-                )
+        rpc.serve()
+    except KeyboardInterrupt:
+        slot_log.info("runner slot pid=%d: SIGINT — shutting down", os.getpid())
+    except Exception:  # noqa: BLE001 — boundary surface
+        slot_log.exception("runner slot pid=%d: RPC serve crashed", os.getpid())
+        sys.exit(2)
     finally:
         try:
             slot_sock.close()
         except OSError:
             pass
+
+    slot_log.info("runner slot pid=%d: clean exit", os.getpid())
     sys.exit(0)
 
 

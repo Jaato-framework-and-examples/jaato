@@ -49,6 +49,22 @@ if TYPE_CHECKING:  # pragma: no cover — types only
 logger = logging.getLogger(__name__)
 
 
+def _pool_enabled() -> bool:
+    """Read the ``JAATO_RUNNER_POOL_ENABLED`` env var.
+
+    PR 4 default: pool routing is opt-in.  Sessions only consume a
+    pre-warm pool slot when the daemon was started with the env var
+    set; otherwise every session falls through to the historical
+    cold-spawn path (RunnerSpawner.spawn).
+
+    PR 5 will flip the default to enabled after the pool soaks.
+    Operators wanting to disable the pool at runtime export
+    ``JAATO_RUNNER_POOL_ENABLED=false`` before starting the daemon.
+    """
+    raw = os.environ.get("JAATO_RUNNER_POOL_ENABLED", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def spawn_session_runner(
     *,
     server: Any,  # JaatoServer (forward-typed; importing the real
@@ -59,9 +75,20 @@ def spawn_session_runner(
     daemon_loop: asyncio.AbstractEventLoop,
     disable_confine: bool = False,
     cgroup_attach: Optional[Callable[[], None]] = None,
+    pool_manager: Any = None,
 ) -> None:
     """Spawn the per-session runner subprocess and wire its RPC handle
     onto the JaatoServer.
+
+    Pool PR 4: when *pool_manager* is supplied AND
+    ``JAATO_RUNNER_POOL_ENABLED`` is set AND the pool has an idle
+    slot, the session reuses that slot's pre-warm runner subprocess
+    instead of paying the per-session fork+exec+plugin-imports cost
+    (~10-15s on v62 step 6).  The slot's daemon-side socket is
+    wrapped in a :class:`SpawnedRunner` and the rest of the bootstrap
+    flow (RunnerRPCClient + session.bootstrap RPC) is identical to
+    the cold-spawn path — by design, so PR 4 doesn't fork a parallel
+    code path that has to be maintained alongside the existing one.
 
     Args:
         server: The session's :class:`JaatoServer` instance.
@@ -90,6 +117,29 @@ def spawn_session_runner(
             after provisioning the cgroup.  ``None`` means no
             cgroup attach — the IPC session path (no cgroup
             provisioned) passes ``None``.
+        pool_manager: Pool PR 4 — the daemon's
+            :class:`server.runner_pool.PoolManager`.  When non-None
+            AND the pool routing flag is enabled AND the pool has an
+            idle slot, the session is served by a pre-warm slot
+            instead of a cold-spawned runner.  ``None`` (or empty
+            pool, or flag disabled) falls back to cold-spawn.
+
+            Pool-slot caveats vs cold-spawn (PR 4):
+              - Slot runs UNCONFINED (no per-session AppArmor).
+                Per-slot self-confinement is PR 5 work.
+              - Slot does NOT receive the ``JAATO_RUNNER_*`` env vars
+                — workspace_path + cgroup_attach are not honored.
+                Cgroup attach is also not done for pool-served
+                sessions because the slot was forked from the
+                template (already in the daemon's cgroup) and
+                migrating mid-life would require subreaper
+                coordination (PR 5).
+
+            For PR 4 the pool path is gated to sessions that DON'T
+            opt into AppArmor (i.e. ``disable_confine=True``) and
+            that don't have a cgroup_attach callback.  Sessions with
+            either of those constraints fall back to cold-spawn —
+            same behavior as before PR 4 from the session's POV.
 
     Raises:
         RuntimeError: when *daemon_loop* is None or the runner-RPC
@@ -99,7 +149,7 @@ def spawn_session_runner(
         Exception: any spawn / RPC failure.  Caller catches and
             downgrades.
     """
-    from server.runner_spawner import RunnerSpawner
+    from server.runner_spawner import SpawnedRunner, RunnerSpawner
     from server.runner_rpc_client import RunnerRPCClient
 
     if daemon_loop is None:
@@ -108,48 +158,89 @@ def spawn_session_runner(
             "start RunnerRPCClient"
         )
 
-    spawner = RunnerSpawner()
-
     log_path: Optional[str] = None
     if workspace_path:
         log_dir = os.path.join(workspace_path, ".jaato", "logs")
         log_path = os.path.join(log_dir, f"runner-{session_id}.log")
 
-    # Phase 5 §5.1b: forward the app-layer ``RuntimeLimits`` fields
-    # via ``RunnerSpawner.spawn``'s ``max_output_chars`` /
-    # ``tool_timeout_seconds`` kwargs.  The spawner translates them
-    # into the ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
-    # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars the runner-side
-    # cli plugin reads at startup.  Source of truth is
-    # ``server._profile.runtime_limits`` — same field the WS path
-    # consults for cgroup provision (see
-    # ``server/websocket.py:620-624``).  No defaulting on the
-    # mainline path: a profile that omits ``runtime_limits`` keeps
-    # the runner's compile-time defaults (§5.1's
-    # ``apply_isolated_defaults`` is specific to
-    # ``agent_params.isolated=true``).  See
-    # docs/design/phase5_5_1b_mainline_runtime_limits_passthrough_audit.md.
-    profile = getattr(server, "_profile", None)
-    runtime_limits = getattr(profile, "runtime_limits", None) if profile else None
-    max_output_chars = (
-        runtime_limits.max_output_bytes
-        if runtime_limits is not None else None
-    )
-    tool_timeout_seconds = (
-        runtime_limits.tool_timeout_seconds
-        if runtime_limits is not None else None
-    )
+    # ----- Pool routing (pool PR 4) -----
+    # Pool-served path is gated to sessions that:
+    #   (a) Have a pool_manager wired by the daemon.
+    #   (b) Have JAATO_RUNNER_POOL_ENABLED set.
+    #   (c) Are NOT opting into AppArmor (disable_confine=True).
+    #       PR 4 slots run unconfined; per-slot AppArmor is PR 5.
+    #   (d) Don't need a cgroup_attach.  Pool slots are forked from
+    #       the template (already in daemon cgroup); migrating
+    #       mid-life is PR 5 + subreaper-fix territory.
+    # All four gates must hold or we fall back to cold-spawn.
+    spawned: Optional[SpawnedRunner] = None
+    pool_served = False
+    if (
+        pool_manager is not None
+        and _pool_enabled()
+        and disable_confine
+        and cgroup_attach is None
+    ):
+        handle = pool_manager.acquire_slot()
+        if handle is not None:
+            slot_pid, daemon_sock = handle
+            spawned = SpawnedRunner(
+                pid=slot_pid,
+                parent_socket=daemon_sock,
+                profile_name="",  # slot is unconfined in PR 4
+                session_id=session_id,
+            )
+            pool_served = True
+            logger.info(
+                "spawn_session_runner: session %s served by pool slot "
+                "pid=%d (warm imports inherited from template)",
+                session_id, slot_pid,
+            )
+        else:
+            logger.info(
+                "spawn_session_runner: session %s — pool empty, falling "
+                "back to cold-spawn", session_id,
+            )
 
-    spawned = spawner.spawn(
-        profile_name=profile_name,
-        session_id=session_id,
-        workspace_path=workspace_path,
-        log_path=log_path,
-        max_output_chars=max_output_chars,
-        tool_timeout_seconds=tool_timeout_seconds,
-        disable_confine=disable_confine,
-        cgroup_attach=cgroup_attach,
-    )
+    # ----- Cold-spawn fallback (pre-PR-4 behavior) -----
+    if spawned is None:
+        spawner = RunnerSpawner()
+
+        # Phase 5 §5.1b: forward the app-layer ``RuntimeLimits`` fields
+        # via ``RunnerSpawner.spawn``'s ``max_output_chars`` /
+        # ``tool_timeout_seconds`` kwargs.  The spawner translates them
+        # into the ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
+        # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars the runner-side
+        # cli plugin reads at startup.  Source of truth is
+        # ``server._profile.runtime_limits`` — same field the WS path
+        # consults for cgroup provision (see
+        # ``server/websocket.py:620-624``).  No defaulting on the
+        # mainline path: a profile that omits ``runtime_limits`` keeps
+        # the runner's compile-time defaults (§5.1's
+        # ``apply_isolated_defaults`` is specific to
+        # ``agent_params.isolated=true``).  See
+        # docs/design/phase5_5_1b_mainline_runtime_limits_passthrough_audit.md.
+        profile = getattr(server, "_profile", None)
+        runtime_limits = getattr(profile, "runtime_limits", None) if profile else None
+        max_output_chars = (
+            runtime_limits.max_output_bytes
+            if runtime_limits is not None else None
+        )
+        tool_timeout_seconds = (
+            runtime_limits.tool_timeout_seconds
+            if runtime_limits is not None else None
+        )
+
+        spawned = spawner.spawn(
+            profile_name=profile_name,
+            session_id=session_id,
+            workspace_path=workspace_path,
+            log_path=log_path,
+            max_output_chars=max_output_chars,
+            tool_timeout_seconds=tool_timeout_seconds,
+            disable_confine=disable_confine,
+            cgroup_attach=cgroup_attach,
+        )
 
     rpc = RunnerRPCClient(
         spawned.parent_socket,
@@ -162,11 +253,13 @@ def spawn_session_runner(
 
     server.set_runner_rpc(rpc, spawned)
     logger.info(
-        "runner spawned for session %s: pid=%d profile=%s log=%s confined=%s",
+        "runner spawned for session %s: pid=%d profile=%s log=%s "
+        "confined=%s pool_served=%s",
         session_id, spawned.pid,
         profile_name or "(none)",
         log_path or "(inherited)",
         not disable_confine,
+        pool_served,
     )
 
 
