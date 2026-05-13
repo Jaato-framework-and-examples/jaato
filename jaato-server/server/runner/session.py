@@ -283,6 +283,86 @@ def _configure_runtime_plugins(
     )
 
 
+def _load_runner_session_env(
+    envelope: SessionInitEnvelope,
+) -> Dict[str, str]:
+    """Read + resolve the runner-side session env (Shape 3 PR 1).
+
+    Composition (precedence: low → high, last write wins):
+
+      1. ``<workspace_path>/.env`` parsed via ``dotenv_values``, with
+         ``${VAR}`` cross-references and secret URIs expanded via the
+         registered :class:`SecretResolver` plugins.
+      2. ``envelope.env_overrides`` — profile-declared env block +
+         post-auth wizard overrides that the daemon merged before
+         building the envelope.  Daemon-side `expand_variables` may
+         have already resolved these; treated as opaque key=value
+         here.
+
+    Returns:
+        Resolved key→value dict.  Empty when ``workspace_path`` is
+        unset AND no envelope overrides apply.
+
+    Failures resolving the workspace `.env` are not fatal — the
+    function logs at WARNING and returns whatever it managed to
+    resolve.  Bootstrap then continues with a partial env; downstream
+    code that needs a specific key will fail with its usual error
+    (e.g. prefetch script: ``KeyError: 'JAATO_INPUTS_DIR'``).  That's
+    the same error-surface as today's cold-spawn path when the .env
+    file is missing — pre-Shape-3 the daemon also returned a partial
+    env when the file didn't exist.
+    """
+    resolved: Dict[str, str] = {}
+
+    workspace_path = envelope.workspace_path
+    if workspace_path:
+        env_file = os.path.join(workspace_path, ".env")
+        if os.path.isfile(env_file):
+            try:
+                from dotenv import dotenv_values
+                from shared.plugins.subagent.config import expand_variables
+
+                raw = dotenv_values(env_file)
+                # dotenv_values returns Dict[str, Optional[str]]; drop
+                # blank-value entries (mirrors daemon-side filter).
+                raw_filtered = {
+                    k: v for k, v in raw.items() if v is not None
+                }
+                # Expand ${VAR} cross-references against the .env's own
+                # entries + resolve secret URIs via registered
+                # SecretResolver plugins.  Mirrors daemon-side
+                # _resolve_session_env at jaato_server/core.py:934.
+                expanded = expand_variables(raw_filtered, context=raw_filtered)
+                if isinstance(expanded, dict):
+                    resolved.update(expanded)
+            except Exception as exc:  # noqa: BLE001 — boundary surface
+                logger.warning(
+                    "runner-session bootstrap: failed to load workspace "
+                    ".env from %s: %s — continuing with partial env",
+                    env_file, exc,
+                )
+
+    # Layer envelope.env_overrides on top.  Pre-Shape-3 these were
+    # only applied to the daemon-side JaatoServer; runner-side needs
+    # them too so profile.env values (including post-auth wizard
+    # overrides) reach plugin initialize / prefetch via os.environ.
+    if envelope.env_overrides:
+        try:
+            from shared.plugins.subagent.config import expand_variables
+
+            expanded_overrides = expand_variables(dict(envelope.env_overrides))
+            if isinstance(expanded_overrides, dict):
+                resolved.update(expanded_overrides)
+        except Exception as exc:  # noqa: BLE001 — boundary surface
+            logger.warning(
+                "runner-session bootstrap: failed to expand envelope "
+                "env_overrides: %s — applying raw values", exc,
+            )
+            resolved.update(envelope.env_overrides)
+
+    return resolved
+
+
 def bootstrap_session(
     envelope: SessionInitEnvelope,
     *,
@@ -335,6 +415,38 @@ def bootstrap_session(
         logger.error("runner-session bootstrap: validation failed: %s", exc)
         raise BootstrapError("validate", str(exc)) from exc
 
+    # ---- 1b. Resolve workspace .env (Shape 3 PR 1) ----
+    # Read ``<workspace_path>/.env`` runner-side, expand ``${VAR}`` cross-
+    # references and resolve secret URIs (``pass://``, ``vault://``,
+    # etc.) via the registered ``SecretResolver`` entry points.  Apply
+    # the resolved keys to the runner subprocess's ``os.environ`` so:
+    #
+    #   - Plugin ``initialize(config)`` calls (run inside
+    #     ``_configure_runtime_plugins`` below) see the resolved env.
+    #   - Prefetch scripts that read ``os.environ[...]`` see it.
+    #   - Provider clients constructed inside ``runtime.create_session``
+    #     pick up env-resolved API keys / endpoints.
+    #
+    # Pre-Shape-3 the daemon ran this resolution inside a
+    # ``_with_session_env()`` context manager spanning the cold-spawn
+    # fork; the runner inherited the resolved values via fork-inherited
+    # ``os.environ``.  That path silently broke when pool slots arrived
+    # (slots are forked from the template at daemon startup, not from
+    # the per-session daemon thread, so they never saw the per-session
+    # ``os.environ`` overlay).  Shape 3 closes the gap by reading env
+    # at the per-workspace process where the file is read once — the
+    # runner — independent of which spawn path delivered the slot.
+    resolved_session_env: Dict[str, str] = _load_runner_session_env(envelope)
+    if resolved_session_env:
+        for key, value in resolved_session_env.items():
+            if value is not None:
+                os.environ[key] = value
+        logger.info(
+            "runner-session bootstrap: applied %d workspace .env "
+            "keys to os.environ (session_id=%s)",
+            len(resolved_session_env), envelope.session_id,
+        )
+
     # ---- 2. Optionally construct the runtime ----
     if runtime_factory is None:
         # Test-only path: caller explicitly wants no runtime.  Useful
@@ -376,11 +488,24 @@ def bootstrap_session(
     # ``_connected = True``); no provider-network call here.  The
     # real network connect happens inside ``create_session`` →
     # provider plugin ``initialize()``.
+    # Shape 3 PR 1: read PROJECT_ID / LOCATION from runner-side
+    # ``os.environ`` (which step 1b populated from workspace .env)
+    # when the envelope didn't carry them.  Pre-PR-1 the daemon read
+    # these from its own ``os.environ`` overlay and stuffed them in
+    # the envelope; post-PR-1 the daemon no longer reads workspace
+    # .env, so the runner falls back to its own resolved env.  The
+    # ``PROJECT_ID`` / ``LOCATION`` knob shape is itself an
+    # architectural smell (provider-specific values bound at the
+    # global env level rather than via a provider-specific config
+    # object); a separate backlog tracks the proper fix.  Until that
+    # ships, runner-side fallback keeps Vertex AI sessions working.
+    connect_project = envelope.project or os.environ.get("PROJECT_ID", "")
+    connect_location = envelope.location or os.environ.get("LOCATION", "")
     try:
         if hasattr(runtime, "connect") and not getattr(
             runtime, "is_connected", False,
         ):
-            runtime.connect(envelope.project, envelope.location)
+            runtime.connect(connect_project, connect_location)
     except Exception as exc:  # noqa: BLE001 — boundary surface
         logger.exception(
             "runner-session bootstrap: runtime.connect crashed",
@@ -416,6 +541,22 @@ def bootstrap_session(
             "runner-session bootstrap: session construct/configure crashed",
         )
         raise BootstrapError("configure", str(exc)) from exc
+
+    # Shape 3 PR 1: attach the resolved session env onto the
+    # JaatoSession so plugin code can read per-session env via
+    # ``session.get_session_env(key)``.  Mirrors the daemon's
+    # ``JaatoServer._session_env`` attribute — the runner-side analog
+    # for the same surface.  Tools needing the raw process env
+    # continue reading ``os.environ`` directly, which step 1b already
+    # populated.
+    if resolved_session_env:
+        try:
+            session._session_env = dict(resolved_session_env)
+        except Exception:  # noqa: BLE001 — best-effort attribute set
+            logger.debug(
+                "runner-session bootstrap: failed to attach _session_env "
+                "to session; plugin reads will fall back to os.environ",
+            )
 
     # ---- 4. Phase 5 §5.10c — install AppArmor child-profile
     # transition callback on subprocess-spawning plugins.

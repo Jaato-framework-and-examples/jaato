@@ -231,6 +231,15 @@ class JaatoSession:
         # operates against a different workspace than the runtime's
         # default (e.g. a worktree snapshot for fork-replay).
         self._workspace_path: Optional[str] = None
+        # Shape 3 PR 1: per-session resolved env (workspace ``.env`` +
+        # profile env + overrides, expanded and secret-URI-resolved).
+        # Populated by runner-side ``bootstrap_session`` AFTER the
+        # session is constructed.  Mirrors the daemon-side
+        # ``JaatoServer._session_env`` attribute — the runner-side
+        # analog where the resolution naturally belongs once Shape 3
+        # PR 4 removes the daemon-side surface.  Empty dict before
+        # population; readers use :meth:`get_session_env`.
+        self._session_env: Dict[str, str] = {}
         # AppArmor confine-context factory (server 0.6.50+).  Set by
         # ``JaatoRuntime.create_session`` from
         # ``runtime._confine_context_factory``.  When set, ``configure()``
@@ -1286,6 +1295,34 @@ class JaatoSession:
         if self._runtime and self._runtime.registry:
             return getattr(self._runtime.registry, '_workspace_path', None)
         return None
+
+    def get_session_env(
+        self, key: str, default: Optional[str] = None,
+    ) -> Optional[str]:
+        """Read a per-session env value (Shape 3 PR 1).
+
+        Lookup order:
+
+        1. ``self._session_env`` — the resolved workspace ``.env`` +
+           profile env + overrides populated by runner-side
+           ``bootstrap_session``.  Set after the session is
+           constructed; empty dict if Shape 3 PR 1's wiring hasn't
+           populated it (older daemons, test stubs, etc.).
+        2. ``os.environ`` — process-global fallback.  Runner-side
+           bootstrap also writes the resolved env here so third-party
+           code reading the process env sees the same values.
+
+        Mirrors ``shared.session_context.get_session_env`` — but reads
+        from the session-attached attribute instead of the
+        daemon-side ContextVar.  Use this accessor when you have a
+        :class:`JaatoSession` in hand; use the session_context
+        helper from code that runs outside a session method (e.g.
+        plugin discovery / initialize).
+        """
+        if self._session_env and key in self._session_env:
+            return self._session_env[key]
+        import os as _os
+        return _os.environ.get(key, default)
 
     def get_system_instruction(self) -> Optional[str]:
         """Return the materialised system instruction for this session.
