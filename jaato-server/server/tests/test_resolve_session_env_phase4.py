@@ -1,27 +1,31 @@
-"""Daemon-side ``_resolve_session_env`` contract (Phase 4 §B + Shape 3 PR 1).
+"""Daemon-side ``_resolve_session_env`` contract (Phase 4 §B + PR #92 Y fix).
 
 Phase 4 §B pinned: workspace .env values reach the runner via
 daemon-side resolution + ``_with_session_env`` ``os.environ`` overlay
 inherited by the cold-spawn fork.
 
-Shape 3 PR 1 (2026-05-13) moved workspace .env reading to the
-runner-side ``bootstrap_session`` — the per-workspace process where
-the file is colocated.  Daemon-side ``_resolve_session_env`` no
-longer reads ``<workspace>/.env``; it only resolves profile.env +
-env_overrides for the SessionInitEnvelope's wire field.  Workspace
-.env reading is pinned in
-``server/runner/tests/test_runner_session_workspace_env.py``.
+PR #91 attempted to relocate workspace .env reading to the runner
+(Shape 3 PR 1 principle), which broke under AppArmor confinement
+(``pass`` exec blocked → secret URIs survive as literals).
 
-This file's pins now cover only the daemon-side surface that
-remains:
+PR #92 (Y fix) restored daemon-side workspace .env reading AND added
+``envelope.session_env`` so the daemon ships the FULLY-RESOLVED env
+to the runner over the wire.  The runner no longer needs the
+``_with_session_env`` fork-inherit channel — it gets the same
+values via the envelope.  Daemon-side reading remains because:
+1. The daemon is unconfined and CAN exec ``pass`` / ``vault`` / etc.
+2. The runner subprocess (under AppArmor) cannot, so daemon-side
+   resolution is the only viable place.
 
-1. ``_resolve_session_env`` populates ``self._session_env`` from
-   profile.env + env_overrides (NOT workspace .env).
+Pins:
+
+1. ``_resolve_session_env`` reads workspace ``.env`` + profile.env +
+   env_overrides daemon-side, in that precedence (low → high).
 2. ``_resolve_session_env`` is idempotent (second call is a no-op).
-3. ``_with_session_env`` applies the resolved (profile.env +
-   env_overrides) values to ``os.environ`` for the duration of the
-   context — still load-bearing for daemon-side code paths reading
-   ``os.environ`` during runtime construction + plugin discovery.
+3. ``_with_session_env`` applies the resolved values to ``os.environ``
+   for the duration — still load-bearing for daemon-side code paths
+   that read ``os.environ`` during runtime construction (e.g.
+   ``build_session_envelope`` reading ``PROJECT_ID`` / ``LOCATION``).
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ from server.core import JaatoServer
 
 @pytest.fixture
 def env_file(tmp_path):
-    """Workspace .env file — present but no longer read daemon-side."""
+    """Workspace .env file with one literal + one cross-reference."""
     f = tmp_path / ".env"
     f.write_text(
         "PHASE4_FOO=bar-resolved\n"
@@ -50,7 +54,6 @@ class _ProfileWithEnv:
 
     def __init__(self, env: Dict[str, str]) -> None:
         self.env = env
-        # Other attributes that JaatoServer may probe during init.
         self.plugins: List[Any] = []
         self.plugin_configs: Dict[str, Any] = {}
         self.system_instructions: Optional[str] = None
@@ -60,35 +63,26 @@ class _ProfileWithEnv:
         self.suppress_base_instructions = False
 
 
-def test_resolve_session_env_does_not_read_workspace_dotenv(
-    env_file, tmp_path,
-):
-    """Shape 3 PR 1: daemon-side ``_resolve_session_env`` MUST NOT
-    populate ``self._session_env`` from ``<workspace>/.env``.  That
-    file is read runner-side now (see
-    ``test_runner_session_workspace_env.py``).  Daemon reading it
-    here was the pre-Shape-3 fork-inheritance mechanism; pool slots
-    silently broke that channel, so the resolution moved to the
-    per-workspace process where it belongs."""
+# ----------------------------------------------------------------------
+# Resolution
+# ----------------------------------------------------------------------
+
+
+def test_resolve_session_env_populates_from_workspace_dotenv(env_file, tmp_path):
+    """Daemon reads workspace .env into ``self._session_env``,
+    expanding ``${VAR}`` cross-references against sibling entries."""
     server = JaatoServer(env_file=str(env_file), workspace_path=str(tmp_path))
     server._resolve_session_env()
     assert server._session_env_resolved is True
-    # The workspace .env keys are NOT in the daemon-side resolved env.
-    assert "PHASE4_FOO" not in server._session_env
-    assert "PHASE4_BAZ" not in server._session_env
+    assert server._session_env["PHASE4_FOO"] == "bar-resolved"
+    assert server._session_env["PHASE4_BAZ"] == "qux-bar-resolved"
 
 
 def test_resolve_session_env_populates_from_profile_env(tmp_path):
-    """Profile.env values still resolve daemon-side because the
-    daemon constructed the SubagentProfile (Shape 3 PR 2 will
-    relocate this).  Until then, ``self._session_env`` carries
-    profile.env entries.  These also feed the envelope's
-    ``env_overrides`` field that the runner applies on top of its
-    own workspace .env read."""
+    """profile.env values resolve daemon-side."""
     server = JaatoServer(env_file=None, workspace_path=str(tmp_path))
     server._profile = _ProfileWithEnv(env={"PROFILE_KEY": "profile-value"})
     server._resolve_session_env()
-    assert server._session_env_resolved is True
     assert server._session_env["PROFILE_KEY"] == "profile-value"
 
 
@@ -104,27 +98,28 @@ def test_resolve_session_env_populates_from_env_overrides(tmp_path):
     assert server._session_env["OVERRIDE_KEY"] == "override-value"
 
 
-def test_resolve_session_env_overrides_win_over_profile(tmp_path):
-    """env_overrides > profile.env on key conflicts."""
+def test_resolve_session_env_layering_precedence(env_file, tmp_path):
+    """Precedence: workspace .env < profile.env < env_overrides.
+    Same key in all three lands with env_overrides value."""
     server = JaatoServer(
-        env_file=None,
+        env_file=str(env_file),
         workspace_path=str(tmp_path),
-        env_overrides={"K": "from-overrides"},
+        env_overrides={"PHASE4_FOO": "from-overrides"},
     )
-    server._profile = _ProfileWithEnv(env={"K": "from-profile"})
+    server._profile = _ProfileWithEnv(env={"PHASE4_FOO": "from-profile"})
     server._resolve_session_env()
-    assert server._session_env["K"] == "from-overrides"
+    assert server._session_env["PHASE4_FOO"] == "from-overrides"
 
 
-def test_resolve_session_env_is_idempotent(tmp_path):
-    """Second call is a no-op."""
-    server = JaatoServer(env_file=None, workspace_path=str(tmp_path))
-    server._profile = _ProfileWithEnv(env={"K": "v1"})
+def test_resolve_session_env_is_idempotent(env_file, tmp_path):
+    """Second call is a no-op — important so secrets don't get
+    re-resolved (re-running pass/vault subprocesses) when the runner
+    re-invokes."""
+    server = JaatoServer(env_file=str(env_file), workspace_path=str(tmp_path))
     server._resolve_session_env()
-    # Mutate after first resolve — second resolve should not overwrite.
-    server._session_env["K"] = "mutated"
-    server._resolve_session_env()
-    assert server._session_env["K"] == "mutated"
+    server._session_env["PHASE4_FOO"] = "mutated"
+    server._resolve_session_env()  # no-op
+    assert server._session_env["PHASE4_FOO"] == "mutated"
 
 
 def test_resolve_session_env_no_env_file(tmp_path):
@@ -136,31 +131,55 @@ def test_resolve_session_env_no_env_file(tmp_path):
     assert server._session_env == {}
 
 
-def test_with_session_env_propagates_profile_env_to_environ(
-    tmp_path, monkeypatch,
+# ----------------------------------------------------------------------
+# _with_session_env os.environ overlay (daemon-side consumers still
+# rely on this for the brief runtime-construct window)
+# ----------------------------------------------------------------------
+
+
+def test_with_session_env_propagates_to_environ_after_resolve(
+    env_file, tmp_path, monkeypatch,
 ):
-    """``_with_session_env`` applies profile.env (the only daemon-side
-    layer that remains workspace-tied) to ``os.environ`` for the
-    duration.  Daemon-side runtime construction + plugin discovery
-    reads ``os.environ`` inside this context."""
-    monkeypatch.delenv("PROFILE_KEY", raising=False)
-    server = JaatoServer(env_file=None, workspace_path=str(tmp_path))
-    server._profile = _ProfileWithEnv(env={"PROFILE_KEY": "in-context"})
+    """``_with_session_env`` applies the resolved env to ``os.environ``
+    for the duration of the context.  Daemon-side runtime construction
+    + ``build_session_envelope`` read these from ``os.environ`` (e.g.
+    PROJECT_ID for Vertex AI)."""
+    monkeypatch.delenv("PHASE4_FOO", raising=False)
+    monkeypatch.delenv("PHASE4_BAZ", raising=False)
+
+    server = JaatoServer(env_file=str(env_file), workspace_path=str(tmp_path))
     server._resolve_session_env()
 
     with server._with_session_env():
-        assert os.environ["PROFILE_KEY"] == "in-context"
-    assert "PROFILE_KEY" not in os.environ
+        assert os.environ["PHASE4_FOO"] == "bar-resolved"
+        assert os.environ["PHASE4_BAZ"] == "qux-bar-resolved"
+
+    assert "PHASE4_FOO" not in os.environ
+    assert "PHASE4_BAZ" not in os.environ
 
 
-def test_with_session_env_restores_previous_value(tmp_path, monkeypatch):
+def test_with_session_env_restores_previous_value(env_file, tmp_path, monkeypatch):
     """If ``os.environ`` had a different value before the with-block,
     exit restores the previous value rather than deleting."""
-    monkeypatch.setenv("PROFILE_KEY", "pre-existing-value")
-    server = JaatoServer(env_file=None, workspace_path=str(tmp_path))
-    server._profile = _ProfileWithEnv(env={"PROFILE_KEY": "in-context"})
+    monkeypatch.setenv("PHASE4_FOO", "pre-existing-value")
+
+    server = JaatoServer(env_file=str(env_file), workspace_path=str(tmp_path))
     server._resolve_session_env()
 
     with server._with_session_env():
-        assert os.environ["PROFILE_KEY"] == "in-context"
-    assert os.environ["PROFILE_KEY"] == "pre-existing-value"
+        assert os.environ["PHASE4_FOO"] == "bar-resolved"
+    assert os.environ["PHASE4_FOO"] == "pre-existing-value"
+
+
+def test_initialize_step1_treats_pre_resolved_env_as_authoritative(
+    env_file, tmp_path,
+):
+    """Pre-spawn resolution → runner-side re-call is a no-op via the
+    idempotency flag.  Mirrors the daemon-side pre-spawn + runner-side
+    initialize() double-call path."""
+    server = JaatoServer(env_file=str(env_file), workspace_path=str(tmp_path))
+    server._resolve_session_env()
+    snapshot = dict(server._session_env)
+
+    server._resolve_session_env()  # second call — no-op
+    assert server._session_env == snapshot

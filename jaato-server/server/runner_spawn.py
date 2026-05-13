@@ -408,6 +408,24 @@ def build_session_envelope(
             profile, "completion_payload_schema", None,
         )
 
+    # PR #91 Y fix: ship the FULLY-RESOLVED per-session env to the
+    # runner.  ``server._session_env`` is populated by the daemon's
+    # :meth:`JaatoServer._resolve_session_env` from workspace ``.env``
+    # + profile.env + env_overrides, with ``${VAR}`` cross-references
+    # expanded AND secret URIs (``pass://`` / ``vault://`` / etc.)
+    # resolved via the daemon's SecretResolver entry points.  The
+    # runner applies this dict to ``os.environ`` verbatim during
+    # bootstrap — no resolver discovery, no ``pass`` exec (which
+    # AppArmor correctly blocks).
+    #
+    # Trust posture: the runner-rpc socketpair (daemon ↔ runner) is
+    # FD-pass only — not in the filesystem, not on the network.
+    # Resolved secrets transit that channel in plaintext, same as
+    # pre-PR-91 fork-inherit ``os.environ`` semantics.  The audit
+    # behind PR #92 verified envelope.session_env is never logged,
+    # persisted, or forwarded to clients.
+    resolved_session_env = dict(getattr(server, "_session_env", {}) or {})
+
     return SessionInitEnvelope(
         session_id=session_id,
         workspace_path=workspace_path,
@@ -422,6 +440,7 @@ def build_session_envelope(
         agent_params=agent_params_dict,
         config_root=getattr(server, "config_root", None),
         env_overrides=env_overrides,
+        session_env=resolved_session_env,
         project=project_val,
         location=location_val,
         completion_payload_schema=profile_completion_schema,

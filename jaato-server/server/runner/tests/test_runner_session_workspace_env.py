@@ -1,34 +1,35 @@
-"""Tests for Shape 3 PR 1 — runner-side workspace ``.env`` reading.
+"""Tests for the runner-side session env wiring (PR #92 Y fix).
+
+PR #91 attempted to move workspace ``.env`` reading runner-side
+(Shape 3 PR 1 principle: "per-workspace state belongs to the per-
+workspace process").  Under AppArmor confinement that path was
+broken — the runner can't exec ``pass``, so secret-URI resolution
+fails and ``pass://`` survives as a literal in ``os.environ``.
+
+PR #92 (this file) pins the Y shape: the daemon (unconfined)
+resolves all session env — including ``${VAR}`` cross-references AND
+secret URIs — and ships the fully-resolved dict via
+``envelope.session_env``.  The runner applies the dict to
+``os.environ`` verbatim during bootstrap, never running its own
+resolver.
 
 Pins:
-1. ``bootstrap_session`` reads ``<workspace_path>/.env`` and applies
-   the resolved key-value pairs to ``os.environ`` BEFORE constructing
-   the runtime / configuring plugins.  Closes the pool-routing env-
-   propagation bug surfaced by v63 cascade smoke.
+1. ``bootstrap_session`` applies ``envelope.session_env`` to
+   ``os.environ`` BEFORE constructing the runtime / configuring
+   plugins.
 2. The resolved env is attached to the constructed
    :class:`JaatoSession` as ``_session_env`` so plugin code can call
    ``session.get_session_env(key)``.
-3. ``envelope.env_overrides`` (profile.env + post-auth wizard
-   overrides) layer on top of workspace ``.env``.
-4. ``PROJECT_ID`` / ``LOCATION`` fall back to ``os.environ`` (i.e.
-   the workspace .env values applied in step 1b) when the envelope
-   doesn't carry them — closes the daemon-side dependency on
-   provider-specific env knobs that Shape 3 PR 1 removes.
-
-End-to-end relevance: pre-PR-1 the daemon read workspace .env and
-fork-inherited the values into cold-spawned runners via
-``_with_session_env`` ``os.environ`` overlay.  Pool slots were
-forked from the template at daemon startup so they never saw the
-overlay → prefetch scripts reading ``os.environ["JAATO_INPUTS_DIR"]``
-crashed.  Post-PR-1 the runner reads workspace .env itself and
-populates ``os.environ`` from the per-workspace process, independent
-of which spawn path delivered the runner.
+3. Runner does NOT read ``<workspace>/.env`` itself — daemon owns
+   that file read.
+4. Envelope.project / envelope.location are used verbatim; runner
+   does not fall back to ``os.environ`` lookups (the daemon
+   populates the envelope fields when relevant).
 """
 
 from __future__ import annotations
 
 import os
-import textwrap
 from typing import Any, Dict, Optional
 
 import pytest
@@ -39,8 +40,8 @@ from shared.session_envelope import SessionInitEnvelope
 
 def _good_envelope(**overrides: Any) -> SessionInitEnvelope:
     base = dict(
-        session_id="sess-shape3",
-        workspace_path=None,  # tests override with the tmp workspace
+        session_id="sess-y",
+        workspace_path=None,
         profile_name="cli_test",
         provider_name="anthropic",
         model_name="claude-sonnet-4-6",
@@ -79,11 +80,10 @@ class _RecordingRuntime:
 @pytest.fixture
 def isolated_env(monkeypatch):
     """Ensure each test starts with a clean ``os.environ`` for the
-    keys we touch.  Pre-existing values would mask the assertion that
-    bootstrap put them there."""
+    keys we touch."""
     keys = [
-        "JAATO_INPUTS_DIR", "TEST_S3PR1_KEY_A", "TEST_S3PR1_KEY_B",
-        "TEST_S3PR1_CROSSREF", "PROJECT_ID", "LOCATION",
+        "JAATO_INPUTS_DIR", "TEST_Y_KEY_A", "TEST_Y_KEY_B",
+        "PROJECT_ID", "LOCATION", "ZHIPUAI_API_KEY",
     ]
     for k in keys:
         monkeypatch.delenv(k, raising=False)
@@ -91,127 +91,126 @@ def isolated_env(monkeypatch):
 
 
 # ----------------------------------------------------------------------
-# 1. Workspace .env reading
+# 1. envelope.session_env → os.environ
 # ----------------------------------------------------------------------
 
 
-def test_bootstrap_reads_workspace_dotenv_into_os_environ(
+def test_bootstrap_applies_envelope_session_env_to_os_environ(
     tmp_path, isolated_env,
 ) -> None:
-    """Core load-bearing fix: workspace ``.env`` values reach
-    ``os.environ`` via runner-side bootstrap_session."""
-    (tmp_path / ".env").write_text(textwrap.dedent("""\
-        JAATO_INPUTS_DIR=/data/cascade
-        TEST_S3PR1_KEY_A=value-a
-    """))
-
+    """Core load-bearing path: daemon-resolved env values reach the
+    runner's ``os.environ`` via ``envelope.session_env``.  Closes the
+    pool-routing env-propagation bug — pool slots get the env via
+    this wire path independent of fork inheritance."""
     runtime = _RecordingRuntime()
-    env = _good_envelope(workspace_path=str(tmp_path))
+    env = _good_envelope(
+        workspace_path=str(tmp_path),
+        session_env={
+            "JAATO_INPUTS_DIR": "/data/cascade",
+            "TEST_Y_KEY_A": "value-a",
+        },
+    )
     host = bootstrap_session(env, runtime_factory=lambda e: runtime)
 
     assert host.is_ready
     assert os.environ.get("JAATO_INPUTS_DIR") == "/data/cascade"
-    assert os.environ.get("TEST_S3PR1_KEY_A") == "value-a"
+    assert os.environ.get("TEST_Y_KEY_A") == "value-a"
 
 
-def test_bootstrap_no_workspace_path_is_noop(isolated_env) -> None:
-    """Headless sessions (no workspace) skip the env read cleanly."""
-    runtime = _RecordingRuntime()
-    env = _good_envelope(workspace_path=None)
-    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
-
-    assert host.is_ready
-    # Nothing was set because there's nothing to read.
-    assert os.environ.get("JAATO_INPUTS_DIR") is None
-
-
-def test_bootstrap_missing_dotenv_file_is_noop(
+def test_bootstrap_applies_pre_resolved_secret_value(
     tmp_path, isolated_env,
 ) -> None:
-    """Workspace without a ``.env`` file doesn't error."""
+    """Regression pin for PR #91 → #92: the daemon resolved
+    ``pass://jaato/zhipuai/api-key`` to a 49-byte value daemon-side
+    and shipped the resolved literal in ``envelope.session_env``.
+    The runner applies it verbatim — no resolver discovery, no
+    ``pass`` exec (which AppArmor would block)."""
+    resolved_key = "a85e05a017a746b98a3df41c864826ea.WHhuugYQUbRanAfM"
     runtime = _RecordingRuntime()
-    env = _good_envelope(workspace_path=str(tmp_path))
-    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
-
-    assert host.is_ready
-    assert os.environ.get("JAATO_INPUTS_DIR") is None
-
-
-def test_bootstrap_expands_dotenv_crossrefs(
-    tmp_path, isolated_env,
-) -> None:
-    """``${VAR}`` cross-references within ``.env`` resolve against
-    sibling entries — mirrors daemon-side ``_resolve_session_env``
-    behavior so the runner produces the same resolved values."""
-    (tmp_path / ".env").write_text(textwrap.dedent("""\
-        TEST_S3PR1_KEY_A=base-value
-        TEST_S3PR1_CROSSREF=${TEST_S3PR1_KEY_A}/suffix
-    """))
-
-    runtime = _RecordingRuntime()
-    env = _good_envelope(workspace_path=str(tmp_path))
+    env = _good_envelope(
+        workspace_path=str(tmp_path),
+        session_env={"ZHIPUAI_API_KEY": resolved_key},
+    )
     bootstrap_session(env, runtime_factory=lambda e: runtime)
 
-    assert os.environ.get("TEST_S3PR1_CROSSREF") == "base-value/suffix"
+    assert os.environ.get("ZHIPUAI_API_KEY") == resolved_key
+    # Sanity: not the literal URI shape.
+    assert not os.environ["ZHIPUAI_API_KEY"].startswith("pass://")
+
+
+def test_bootstrap_empty_session_env_is_noop(isolated_env) -> None:
+    """Envelope without ``session_env`` (daemon didn't resolve any
+    env) doesn't error."""
+    runtime = _RecordingRuntime()
+    env = _good_envelope(session_env={})
+    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
+
+    assert host.is_ready
+    assert os.environ.get("JAATO_INPUTS_DIR") is None
 
 
 # ----------------------------------------------------------------------
-# 2. Session attribute
+# 2. JaatoSession._session_env attribute
 # ----------------------------------------------------------------------
 
 
 def test_bootstrap_attaches_session_env_to_session(
     tmp_path, isolated_env,
 ) -> None:
-    """The resolved env is attached to the JaatoSession as
+    """The applied env is attached to the JaatoSession as
     ``_session_env`` so plugin code can call
     ``session.get_session_env(key)``."""
-    (tmp_path / ".env").write_text("TEST_S3PR1_KEY_B=attached")
-
-    runtime = _RecordingRuntime()
-    env = _good_envelope(workspace_path=str(tmp_path))
-    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
-
-    assert host.session is not None
-    assert host.session._session_env.get("TEST_S3PR1_KEY_B") == "attached"
-
-
-# ----------------------------------------------------------------------
-# 3. envelope.env_overrides layer
-# ----------------------------------------------------------------------
-
-
-def test_bootstrap_applies_envelope_env_overrides(
-    tmp_path, isolated_env,
-) -> None:
-    """envelope.env_overrides (profile.env + post-auth wizard overrides)
-    layer on top of workspace .env and reach os.environ."""
-    (tmp_path / ".env").write_text("TEST_S3PR1_KEY_A=from-workspace")
-
     runtime = _RecordingRuntime()
     env = _good_envelope(
         workspace_path=str(tmp_path),
-        env_overrides={
-            "TEST_S3PR1_KEY_A": "from-overrides",  # wins over .env
-            "TEST_S3PR1_KEY_B": "from-overrides-only",
-        },
+        session_env={"TEST_Y_KEY_B": "attached"},
+    )
+    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
+
+    assert host.session is not None
+    assert host.session._session_env.get("TEST_Y_KEY_B") == "attached"
+
+
+# ----------------------------------------------------------------------
+# 3. Runner does NOT read workspace .env itself
+# ----------------------------------------------------------------------
+
+
+def test_bootstrap_does_not_read_workspace_dotenv_runner_side(
+    tmp_path, isolated_env,
+) -> None:
+    """The runner must NOT consume ``<workspace>/.env`` directly.
+    Daemon owns that file read.  This pins the architectural shape:
+    if a future change makes the runner read the file, it would
+    re-introduce the AppArmor exec failure on pass://."""
+    (tmp_path / ".env").write_text("JAATO_INPUTS_DIR=should-not-be-read\n")
+
+    runtime = _RecordingRuntime()
+    # Empty session_env — daemon "didn't" resolve anything.  If the
+    # runner reads workspace .env itself, JAATO_INPUTS_DIR would
+    # appear in os.environ.
+    env = _good_envelope(
+        workspace_path=str(tmp_path),
+        session_env={},
     )
     bootstrap_session(env, runtime_factory=lambda e: runtime)
 
-    assert os.environ.get("TEST_S3PR1_KEY_A") == "from-overrides"
-    assert os.environ.get("TEST_S3PR1_KEY_B") == "from-overrides-only"
+    # The .env file is present but should NOT have been read.
+    assert os.environ.get("JAATO_INPUTS_DIR") is None
 
 
 # ----------------------------------------------------------------------
-# 4. PROJECT_ID / LOCATION fallback
+# 4. runtime.connect uses envelope project/location verbatim
 # ----------------------------------------------------------------------
 
 
-def test_bootstrap_connect_uses_envelope_project_when_set(
+def test_bootstrap_connect_uses_envelope_project(
     tmp_path, isolated_env,
 ) -> None:
-    """When the envelope carries project/location, the runner uses
-    those (back-compat with daemon-side resolution still in transit)."""
+    """The runner uses ``envelope.project`` / ``envelope.location``
+    verbatim — no ``os.environ`` fallback runner-side, because the
+    daemon now resolves them daemon-side and ships via the
+    envelope."""
     runtime = _RecordingRuntime()
     env = _good_envelope(
         workspace_path=str(tmp_path),
@@ -223,20 +222,19 @@ def test_bootstrap_connect_uses_envelope_project_when_set(
     assert runtime.connect_args == ("my-gcp-project", "us-central1")
 
 
-def test_bootstrap_connect_falls_back_to_os_environ_for_project(
+def test_bootstrap_connect_passes_empty_when_envelope_empty(
     tmp_path, isolated_env,
 ) -> None:
-    """When envelope.project is empty, runner falls back to
-    ``os.environ.get("PROJECT_ID")`` which step 1b populated from
-    workspace .env.  Closes the daemon-side ``PROJECT_ID`` /
-    ``LOCATION`` read that Shape 3 PR 1 removes."""
-    (tmp_path / ".env").write_text(textwrap.dedent("""\
-        PROJECT_ID=ws-derived-gcp
-        LOCATION=eu-west4
-    """))
-
+    """When daemon didn't carry project/location, runner passes
+    empty strings — provider plugins that need them (Vertex AI)
+    fail at provider initialize, not silently fall back to a global
+    env knob."""
     runtime = _RecordingRuntime()
-    env = _good_envelope(workspace_path=str(tmp_path), project="", location="")
+    env = _good_envelope(
+        workspace_path=str(tmp_path),
+        project="",
+        location="",
+    )
     bootstrap_session(env, runtime_factory=lambda e: runtime)
 
-    assert runtime.connect_args == ("ws-derived-gcp", "eu-west4")
+    assert runtime.connect_args == ("", "")
