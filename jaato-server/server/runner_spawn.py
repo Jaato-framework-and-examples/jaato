@@ -298,11 +298,12 @@ def build_session_envelope(
     hooks fire) and constructs the envelope the runner-side host
     needs.
 
-    Defaults applied for fields that would otherwise be empty:
-    - ``provider_name`` → ``"anthropic"`` (the framework default).
-    - ``model_name`` → ``""`` (the runner-side validate stage will
-      reject; surfaced loudly via the daemon's bootstrap-failure
-      WARNING).
+    Fallback rules (no hardcoded defaults):
+    - ``model_name``: profile.model → ``session_env["MODEL_NAME"]``.
+      Empty if neither declares; runner-side ``_validate_envelope``
+      raises ``BootstrapError(stage="validate")`` audibly.
+    - ``provider_name``: profile.provider → ``session_env["JAATO_PROVIDER"]``.
+      Same empty-stays-empty rule.
 
     Args:
         server: The :class:`JaatoServer` instance — has ``_profile``
@@ -357,13 +358,32 @@ def build_session_envelope(
                 gc_dict = {"type": gc_type, **dict(gc_config)}
         env_overrides = dict(getattr(profile, "env", {}) or {})
 
-    # Provider fallback — the JaatoRuntime default is "google_genai"
-    # but Phase 3's runner-tier plugins are most-tested against
-    # anthropic.  When neither the profile nor the env explicitly
-    # specifies, fall back to anthropic which has the broadest
-    # plugin compat coverage.
+    # Profile-less fallback: read ``MODEL_NAME`` / ``JAATO_PROVIDER``
+    # from the daemon's resolved session env (workspace ``.env`` +
+    # profile.env + env_overrides, populated by
+    # ``JaatoServer._resolve_session_env``).  Closes the profile-less
+    # ``jaato --new-session`` regression introduced by §7c step 1
+    # (commit 6406fe35, 2026-05-09) which made the runner-side
+    # bootstrap always run + always validate ``envelope.model_name``.
+    # Pre-§7c profile-less worked because the runner never validated
+    # the envelope's model_name field (it was read from the daemon's
+    # session env post-fork).
+    #
+    # No hardcoded default — if neither the profile NOR the session
+    # env declares ``MODEL_NAME`` / ``JAATO_PROVIDER``, the field
+    # stays empty and the runner-side ``_validate_envelope`` raises
+    # ``BootstrapError(stage="validate")`` with the missing field
+    # surfaced.  Loud failure beats a silent guess; the user's
+    # standing rule against hardcoded fallbacks (global CLAUDE.md)
+    # is honored here.  Pre-PR-100 (this PR) the provider had a
+    # silent ``"anthropic"`` default which papered over the
+    # configuration gap and could mask a Vertex / OpenRouter
+    # / etc. session creation slipping through with wrong provider.
+    session_env = getattr(server, "_session_env", {}) or {}
+    if not model_name:
+        model_name = session_env.get("MODEL_NAME", "") or ""
     if not provider_name:
-        provider_name = "anthropic"
+        provider_name = session_env.get("JAATO_PROVIDER", "") or ""
 
     # Phase 3 post-Step-7 Path C: read PROJECT_ID + LOCATION daemon-
     # side so the envelope carries the provider-connect args the
