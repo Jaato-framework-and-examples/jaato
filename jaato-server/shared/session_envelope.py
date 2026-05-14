@@ -45,7 +45,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 # Bumped per schema change.  Runners refuse a higher-version
 # envelope from the daemon (forward-compat is opt-in, not free).
-SESSION_ENVELOPE_VERSION = 2
+#
+# v3 (2026-05-14): added ``model_tiers``.  Phase 3 §3.3a/§3.12 moved
+# session state from daemon-tier to runner-tier; the
+# ``profile.model_tiers`` field (server 0.5.20) was never migrated and
+# the runner therefore left ``JaatoSession._tier_config = None``,
+# suppressing ``enter_tier`` tool registration for every pool-served
+# session.  v3 carries the tier mapping on the envelope so the runner
+# can resolve ``ModelTierConfig`` and register the tool.
+SESSION_ENVELOPE_VERSION = 3
 
 
 @dataclass
@@ -144,6 +152,15 @@ class SessionInitEnvelope:
             ``pass``) consumes pre-resolved literals.  See
             ``project_backlog_env_propagation_seat_flip_gap`` history
             + the PR #91 retrospective for context.
+        model_tiers: Profile-declared per-turn model-tier mapping
+            (``{"planner": "...", "dispatcher": "...", "executor":
+            "...", "initial": "...", "fallback": "..."}``) or ``None``
+            when the session runs in single-model mode.  Carried on the
+            envelope so the runner can resolve a
+            :class:`shared.model_tiers.ModelTierConfig` and pass it to
+            ``runtime.create_session(tier_config=...)``; that in turn
+            registers the ``enter_tier`` lifecycle tool so the model
+            can switch tiers mid-turn.  Schema v3.
     """
 
     session_id: str
@@ -183,6 +200,11 @@ class SessionInitEnvelope:
     # callers and the envelope schema_version stays unchanged.
     project: str = ""
     location: str = ""
+    # v3 (2026-05-14): per-turn model-tier mapping forwarded from
+    # ``profile.model_tiers``.  Empty dict / None means single-model
+    # mode (no ``enter_tier`` tool, no per-tier system-prompt line).
+    # See ``shared/model_tiers.py`` for the resolver and schema.
+    model_tiers: Optional[Dict[str, Any]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
@@ -211,6 +233,9 @@ class SessionInitEnvelope:
             "session_env": dict(self.session_env),
             "project": self.project,
             "location": self.location,
+            "model_tiers": (
+                dict(self.model_tiers) if self.model_tiers else None
+            ),
         }
 
     @classmethod
@@ -263,6 +288,9 @@ class SessionInitEnvelope:
             session_env=dict(d.get("session_env") or {}),
             project=str(d.get("project", "")),
             location=str(d.get("location", "")),
+            model_tiers=(
+                dict(d["model_tiers"]) if d.get("model_tiers") else None
+            ),
         )
 
 

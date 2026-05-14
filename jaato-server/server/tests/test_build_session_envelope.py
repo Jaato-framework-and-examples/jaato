@@ -60,6 +60,9 @@ def _stub_profile(**overrides: Any) -> Any:
         system_instructions=None,
         gc=None,
         env={},
+        # v3 (2026-05-14): default to no tier mode so tests not
+        # exercising tier propagation see the envelope's ``None``.
+        model_tiers=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -491,6 +494,61 @@ class TestCompletionPayloadSchema:
             profile_name="auto",
         )
         assert env.completion_payload_schema is None
+
+
+class TestModelTiersPassdown:
+    """v3 (2026-05-14): ``profile.model_tiers`` must be forwarded
+    on the envelope so the runner-side ``_build_session`` can resolve
+    a :class:`ModelTierConfig` and register the ``enter_tier``
+    lifecycle tool.
+
+    Before v3 the runner never received the tier map; pool-served
+    sessions silently dropped tier mode regardless of profile
+    config.  Discovery: 2026-05-14 in-pane TUI smoke test.
+    """
+
+    def test_profile_model_tiers_pass_through_to_envelope(self) -> None:
+        tiers = {
+            "planner": "glm-5",
+            "dispatcher": "glm-5-turbo",
+            "executor": "glm-4.7-flash",
+            "initial": "dispatcher",
+            "fallback": "dispatcher",
+        }
+        profile = _stub_profile(
+            provider="zhipuai",
+            model="glm-5-turbo",
+            model_tiers=tiers,
+        )
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="tier-test",
+        )
+        assert env.model_tiers == tiers
+
+    def test_profile_without_model_tiers_leaves_envelope_none(self) -> None:
+        """Single-model profiles emit ``model_tiers=None`` (not ``{}``)
+        so the runner's ``ModelTierConfig.resolve`` short-circuits and
+        ``enter_tier`` stays unregistered."""
+        profile = _stub_profile(provider="anthropic", model="claude-sonnet-4-6")
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="cli_test",
+        )
+        assert env.model_tiers is None
+
+    def test_no_profile_leaves_envelope_model_tiers_none(self) -> None:
+        env = _build_session_envelope(
+            server=_stub_server(profile=None),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="auto",
+        )
+        assert env.model_tiers is None
 
 
 def test_envelope_round_trip_via_dict() -> None:

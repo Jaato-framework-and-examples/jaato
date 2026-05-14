@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 
 if TYPE_CHECKING:  # pragma: no cover — types only
@@ -330,12 +330,22 @@ def build_session_envelope(
     system_instructions: Optional[str] = None
     gc_dict: Optional[dict] = None
     env_overrides: dict = {}
+    model_tiers_dict: Optional[Dict[str, Any]] = None
 
     if profile is not None:
         provider_name = getattr(profile, "provider", None) or ""
         model_name = getattr(profile, "model", None) or ""
         names = list(getattr(profile, "plugins", []) or [])
         preloaded = set(getattr(profile, "preloaded_plugins", set()) or set())
+        # v3 (2026-05-14): forward profile.model_tiers to the runner so
+        # it can resolve ``ModelTierConfig`` and register the
+        # ``enter_tier`` lifecycle tool.  Pre-v3 this never reached the
+        # runner — sessions silently ran in single-model mode regardless
+        # of profile config.  Empty dict means "no tiers declared";
+        # serialise as ``None`` to keep the envelope minimal.
+        raw_tiers = getattr(profile, "model_tiers", None) or None
+        if raw_tiers:
+            model_tiers_dict = {str(k): v for k, v in raw_tiers.items()}
         # Phase 4 §C: carry the full profile.plugin_configs at the
         # envelope's top level (schema v2) so auto-loaded plugins not
         # named in profile.plugins (e.g. permission) receive their
@@ -482,6 +492,7 @@ def build_session_envelope(
         project=project_val,
         location=location_val,
         completion_payload_schema=profile_completion_schema,
+        model_tiers=model_tiers_dict,
     )
 
 
