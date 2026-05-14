@@ -505,3 +505,116 @@ class TestAppArmorPrecedence:
         )
         assert result is None
         assert _FakeAppArmorManager.instances == []
+
+
+class TestConfigRootEnvelopeUnification:
+    """2026-05-14 unification: ``config_root`` + ``env_file`` flow from
+    the envelope (every entry point) into the policy generator, instead
+    of being read from ``client_config[client_id]`` (IPC-only).  The
+    pre-unification gap silently produced empty ``{config_root_rules}``
+    on the reactor-spawned headless path, which crashed peer's v76
+    cascade.  See
+    ``project_backlog_apparmor_config_root_threading_for_headless``.
+    """
+
+    def test_envelope_config_root_override_reaches_policy_generator(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Headless path: ``client_config`` is empty (no
+        ``ClientConfigRequest`` fires), but the envelope carries
+        ``config_root`` from the caller (e.g. reactor /
+        ``create_headless_session(config_root=...)``).  The policy
+        generator must receive that value, not None."""
+        sm = fake_session_manager
+        sm._client_config["headless"] = {}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        result = sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=True)),
+            session_id="s-headless-cr",
+            workspace_path=str(tmp_path),
+            client_id="headless",
+            config_root_override="/srv/operator/.jaato",
+            env_file_override="/srv/operator/.env",
+        )
+        assert result == "apparmor"
+        assert len(_FakeAppArmorManager.instances) == 1
+        provision_calls = _FakeAppArmorManager.instances[0].provision_calls
+        assert provision_calls == [{
+            "session_id": "s-headless-cr",
+            "workspace_path": str(tmp_path),
+            "config_root": "/srv/operator/.jaato",
+            "env_file": "/srv/operator/.env",
+        }]
+
+    def test_envelope_override_wins_over_client_config(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Explicit envelope override beats whatever ``client_config``
+        had.  The envelope is the source of truth post-unification;
+        ``client_config`` is the fallback for legacy IPC paths."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {
+            "config_root": "/legacy/.jaato",
+            "env_file": "/legacy/.env",
+        }
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=True)),
+            session_id="s-override",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+            config_root_override="/from-envelope/.jaato",
+            env_file_override="/from-envelope/.env",
+        )
+        provision_calls = _FakeAppArmorManager.instances[0].provision_calls
+        assert provision_calls[0]["config_root"] == "/from-envelope/.jaato"
+        assert provision_calls[0]["env_file"] == "/from-envelope/.env"
+
+    def test_client_config_fallback_when_no_envelope_override(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Existing IPC path (no envelope override passed) keeps
+        reading ``client_config`` for back-compat.  Closes the
+        regression risk that unification breaks the IPC flow."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {
+            "apparmor": True,
+            "config_root": "/ipc/.jaato",
+            "env_file": "/ipc/.env",
+        }
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=False)),
+            session_id="s-ipc",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+            # No overrides — pre-unification IPC behaviour preserved
+        )
+        provision_calls = _FakeAppArmorManager.instances[0].provision_calls
+        assert provision_calls[0]["config_root"] == "/ipc/.jaato"
+        assert provision_calls[0]["env_file"] == "/ipc/.env"
+
+    def test_neither_source_falls_back_to_none(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """No envelope override, no ``client_config`` entry; policy
+        generator receives ``None`` for both fields and renders
+        ``{config_root_rules}`` empty.  This is the workspace-internal
+        ``.jaato/`` layout — broad ``{workspace_path}/** rwkl`` grant
+        covers reads, no config_root needed."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {"apparmor": True}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=False)),
+            session_id="s-no-cr",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+        )
+        provision_calls = _FakeAppArmorManager.instances[0].provision_calls
+        assert provision_calls[0]["config_root"] is None
+        assert provision_calls[0]["env_file"] is None
