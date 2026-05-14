@@ -734,6 +734,36 @@ class SubagentProfile:
     # ``shared/model_tiers.py`` for the resolver and validation, and
     # ``project_backlog_per_turn_model`` for the full design.
     model_tiers: Dict[str, Any] = field(default_factory=dict)
+    # AppArmor confinement intent for the session (PR-A, 2026-05-14).
+    #
+    # ``False`` (default, back-compat) — the session bootstraps
+    # unconfined regardless of host AppArmor capability.  Same posture
+    # as every pre-PR-A caller of ``SessionManager.create_headless_session``.
+    #
+    # ``True`` — the session opts into per-session AppArmor confinement
+    # (same mechanism as the IPC client's ``apparmor=True`` toggle):
+    # the daemon provisions a per-session profile, the runner self-
+    # confines to it in ``bootstrap_session`` step 1c, and any //child
+    # subprocesses transition to ``//child``.  On hosts without
+    # AppArmor (macOS, BSD, containerised Linux without policy load
+    # support) the ``_maybe_self_confine`` helper no-ops just like
+    # ``IPCClient(apparmor=True)`` already does today — the field is a
+    # statement of intent; the actual enforcement is best-effort.
+    #
+    # **Default-flip planned (PR-B):**  Once cascade workloads
+    # (kb-enablement-2.0) have validated the field on non-trivial
+    # graphs, PR-B will flip the default to ``True`` so the security
+    # gradient closes.  Legacy callers that haven't opted out by then
+    # will need to set ``apparmor: false`` explicitly.  See
+    # ``project_backlog_apparmor_kwarg_for_headless_sessions`` for the
+    # full migration plan.
+    #
+    # Resolution precedence at session-creation time:
+    #   1. Explicit ``apparmor=`` kwarg on
+    #      ``SessionManager.create_headless_session`` (kwarg wins).
+    #   2. This profile field.
+    #   3. Legacy unconfined default (``False`` until PR-B).
+    apparmor: bool = False
 
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
@@ -909,6 +939,7 @@ def build_inline_profile(
         completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
         runtime_limits=runtime_limits,
         model_tiers=model_tiers,
+        apparmor=bool(data.get('apparmor', False)),
     )
 
 
@@ -1195,6 +1226,16 @@ def _merge_profiles(
         getattr(p, 'suppress_base_instructions', False) for p in parents
     ) or getattr(child, 'suppress_base_instructions', False)
 
+    # ``apparmor`` follows OR semantics: True if any layer in the chain
+    # (parents or child) sets it True.  Same rationale as
+    # ``suppress_base_instructions`` — a security primitive shouldn't be
+    # silently downgradeable by an inheritor.  An inheritor that
+    # genuinely wants unconfined operation should not inherit from a
+    # confined parent.
+    merged_apparmor = any(
+        getattr(p, 'apparmor', False) for p in parents
+    ) or getattr(child, 'apparmor', False)
+
     return SubagentProfile(
         name=child.name,
         description=child.description,
@@ -1213,6 +1254,7 @@ def _merge_profiles(
         spawn_payload_schema=merged_spawn_schema,
         completion_artifacts=merged_completion_artifacts,
         runtime_limits=merged_runtime_limits,
+        apparmor=merged_apparmor,
     )
 
 
@@ -1368,6 +1410,7 @@ def _scan_profiles_dir(
         completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
+            apparmor=bool(data.get('apparmor', False)),
         )
         if data.get('system_instructions'):
             import warnings
@@ -1588,6 +1631,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
+            apparmor=bool(data.get('apparmor', False)),
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -1847,6 +1891,7 @@ class SubagentConfig:
                 completion_payload_schema=profile_data.get('completion_payload_schema'),
                 runtime_limits=runtime_limits,
                 model_tiers=model_tiers,
+                apparmor=bool(profile_data.get('apparmor', False)),
             )
 
         return cls(

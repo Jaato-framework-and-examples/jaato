@@ -103,3 +103,33 @@ class TestBuildInlineProfile:
         }
         p = build_inline_profile({"model": "claude-haiku", "model_tiers": tiers})
         assert p.model_tiers == tiers
+
+    def test_apparmor_default_is_false(self):
+        """PR-A (2026-05-14): ``apparmor`` absent → False (back-compat)."""
+        p = build_inline_profile({"model": "m"})
+        assert p.apparmor is False
+
+    def test_apparmor_true_parsed(self):
+        """PR-A: explicit ``apparmor: true`` reaches the dataclass.  The
+        actual confinement still depends on the caller-level kwarg /
+        client_config opt-in (see ``test_ipc_apparmor_provision.py``);
+        this test just pins the parse → field path."""
+        p = build_inline_profile({"model": "m", "apparmor": True})
+        assert p.apparmor is True
+
+    def test_apparmor_false_explicit_parsed(self):
+        """Explicit ``apparmor: false`` is preserved (vs. absent).  Useful
+        for inline specs that want to lock the field at the spec layer
+        before PR-B flips the profile default to True."""
+        p = build_inline_profile({"model": "m", "apparmor": False})
+        assert p.apparmor is False
+
+    def test_apparmor_truthy_value_coerced(self):
+        """``data.get('apparmor', False)`` is wrapped in ``bool()``.  A
+        truthy non-bool (1, non-empty list, etc.) coerces to True;
+        falsy (0, empty) coerces to False.  Pins the coercion contract
+        so YAML / JSON differences across loaders don't regress."""
+        p_truthy = build_inline_profile({"model": "m", "apparmor": 1})
+        assert p_truthy.apparmor is True
+        p_falsy = build_inline_profile({"model": "m", "apparmor": 0})
+        assert p_falsy.apparmor is False
