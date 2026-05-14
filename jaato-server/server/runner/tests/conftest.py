@@ -1,16 +1,24 @@
 """Shared pytest fixtures for runner-side tests.
 
-PR 5a introduced an AppArmor self-confine step (``_maybe_self_confine``)
-to ``bootstrap_session``.  Most bootstrap tests use placeholder
-profile names like ``"cli_test"`` that aren't actually loaded in the
-kernel — without a mock, those tests would now fail with
-``aa_change_profile errno=2``.
+Two AppArmor-related helpers in ``bootstrap_session`` need to be
+auto-mocked for tests that use placeholder profile names like
+``"cli_test"`` (which aren't AppArmor profiles loaded in the
+kernel):
 
-This conftest auto-mocks ``_maybe_self_confine`` so existing
-bootstrap tests pass unchanged.  Tests that specifically exercise
-self-confine logic (``test_runner_session_self_confine_5a.py``)
-patch the underlying ``confine_to_profile`` / ``read_current_profile``
-helpers directly and so don't go through this mock.
+  1. ``_maybe_self_confine`` (PR 5a) — would call
+     ``aa_change_profile`` and fail with errno=2 (profile not
+     loaded) for placeholder names.
+  2. ``_maybe_install_child_callback`` (PR 102 extraction; was
+     inline pre-102) — would attempt the //child transition
+     callback install which raises ``BootstrapError`` when the
+     stub session's executor lacks
+     ``set_apparmor_child_transition_callback``.
+
+Tests that specifically exercise these helpers
+(``test_runner_session_self_confine_5a.py`` and
+``test_runner_session_apparmor_child_install.py``) opt out of the
+auto-mock so they can exercise the real orchestration logic with
+controlled inputs.
 """
 
 from __future__ import annotations
@@ -20,33 +28,60 @@ from unittest.mock import patch
 import pytest
 
 
+# Per-helper opt-out: each dedicated test file declares which helper
+# it wants to exercise without auto-mock.  The OTHER helper stays
+# mocked so the test's envelope.profile_name placeholder doesn't
+# trip the unrelated kernel-side machinery.
+_SELF_CONFINE_TESTERS = frozenset({
+    "test_runner_session_self_confine_5a.py",
+})
+_CHILD_CALLBACK_TESTERS = frozenset({
+    "test_runner_session_apparmor_child_install.py",
+})
+
+
 @pytest.fixture(autouse=True)
-def _disable_runner_self_confine(request):
-    """Auto-mock ``server.runner.session._maybe_self_confine`` for
-    every test in this directory EXCEPT the dedicated self-confine
-    test file.
+def _disable_runner_apparmor_helpers(request):
+    """Auto-mock ``_maybe_self_confine`` + ``_maybe_install_child_callback``
+    for every test in this directory.
 
     Most bootstrap tests use placeholder profile names that aren't
-    AppArmor profiles loaded in the kernel.  Pre-PR-5a, bootstrap_session
-    didn't call confine at all (cold-spawn handled it in
-    ``__main__.py``).  Post-PR-5a, bootstrap_session WILL call confine
-    when ``envelope.profile_name`` is set — so the placeholder names
-    cause ``aa_change_profile errno=2 (profile not loaded)``.
+    AppArmor profiles loaded in the kernel.  Without the mock both
+    helpers fail:
 
-    This fixture is a NO-OP for tests in
-    ``test_runner_session_self_confine_5a.py`` which inject their
-    own mocks targeting the underlying ``confine_to_profile`` /
-    ``read_current_profile`` helpers — letting them exercise the
-    real ``_maybe_self_confine`` orchestration logic.
+    - ``_maybe_self_confine`` calls ``aa_change_profile`` and the
+      kernel returns errno=2 (profile not loaded) → ``BootstrapError("confine", ...)``.
+    - ``_maybe_install_child_callback`` hits the case-3 path when
+      ``envelope.profile_name`` is set + lacks ``"//"``, tries to
+      install the callback on the stub session's executor, and
+      raises ``BootstrapError("configure", ...)`` because the
+      stub lacks ``set_apparmor_child_transition_callback``.
+
+    Dedicated tests opt out of ONE specific helper (the one they
+    exercise) via the per-helper sets above.  The OTHER helper
+    stays mocked so the test's envelope placeholder doesn't trip
+    the unrelated kernel-side machinery.
     """
-    # Skip the mock for the self-confine test file (it does its own
-    # injection at the helper level).
-    if request.node.fspath.basename == "test_runner_session_self_confine_5a.py":
-        yield
-        return
+    basename = request.node.fspath.basename
+    skip_self_confine_mock = basename in _SELF_CONFINE_TESTERS
+    skip_child_callback_mock = basename in _CHILD_CALLBACK_TESTERS
 
-    with patch(
-        "server.runner.session._maybe_self_confine",
-        return_value=None,
-    ):
+    patchers = []
+    if not skip_self_confine_mock:
+        patchers.append(patch(
+            "server.runner.session._maybe_self_confine",
+            return_value=None,
+        ))
+    if not skip_child_callback_mock:
+        patchers.append(patch(
+            "server.runner.session._maybe_install_child_callback",
+            return_value=None,
+        ))
+
+    for p in patchers:
+        p.start()
+    try:
         yield
+    finally:
+        for p in reversed(patchers):
+            p.stop()

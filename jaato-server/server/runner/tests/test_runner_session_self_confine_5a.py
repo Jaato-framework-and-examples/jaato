@@ -50,8 +50,21 @@ class _StubRuntime:
         self.is_connected = True
 
     def create_session(self, **kwargs: Any) -> Any:
+        class _Executor:
+            def set_apparmor_child_transition_callback(self, cb):
+                # PR 102: //child install matrix expects this method on
+                # the executor when envelope.profile_name is set (case
+                # 3).  No-op here — this test file mocks
+                # ``confine_to_profile`` directly to exercise
+                # ``_maybe_self_confine`` orchestration; the //child
+                # install step runs but the install itself doesn't
+                # touch real kernel state.
+                pass
+
         class _S:
             _session_env: Dict[str, str] = {}
+            _executor = _Executor()
+
         return _S()
 
 

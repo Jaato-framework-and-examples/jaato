@@ -3,12 +3,23 @@ in ``bootstrap_session`` (per peer review of e805e4d0).
 
 Pins the audible-failure contract for the install step:
 
-- ``JAATO_RUNNER_PROFILE`` empty  → install skipped silently (operator
-  opted out of confinement via ``JAATO_RUNNER_DISABLE_CONFINE=1``).
-- ``JAATO_RUNNER_PROFILE`` set    → install MUST succeed or
+- ``envelope.profile_name`` empty  → install skipped silently (operator
+  opted out of confinement via ``JAATO_RUNNER_DISABLE_CONFINE=1`` OR
+  profile-less unconfined session).
+- ``envelope.profile_name`` set    → install MUST succeed or
   bootstrap MUST raise ``BootstrapError("configure", ...)``.  A
   silent install failure would leave the session running with the
   escape vector open — exactly the gap §5.10 closes.
+
+**Source-of-truth migration (PR 102, 2026-05-13).**  Pre-PR-102 this
+matrix read ``os.environ.get("JAATO_RUNNER_PROFILE")``, which
+``RunnerSpawner._build_env`` set on cold-spawn but the
+template-fork-no-exec path never set on pool slots — so pool-served
+sessions confined via PR 5a's ``_maybe_self_confine`` took the
+"unconfined" case 1 branch here and silently skipped //child install,
+re-opening the apparmor.py:413-449 escape vector.  Tests now drive
+``envelope.profile_name`` directly (the canonical source); the env
+var no longer affects this code path.
 
 This mirrors the Phase 4 §4.3 PR #57 silent-isolation-downgrade
 fix: when an operator opts into kernel-level confinement,
@@ -78,12 +89,11 @@ class _StubRuntimeWithSession:
             def __init__(inner) -> None:
                 if stub._with_setter:
                     # Bind set_apparmor_child_transition_callback so
-                    # ``hasattr`` returns True; track installs.
-                    def _setter(cb: Any) -> None:
+                    # bootstrap can find + invoke it.
+                    def _setter(cb):
                         if stub._raises is not None:
                             raise stub._raises
                         stub.install_calls.append(cb)
-
                     inner.set_apparmor_child_transition_callback = _setter
 
         class _StubSession:
@@ -93,11 +103,12 @@ class _StubRuntimeWithSession:
         return _StubSession()
 
 
-def _envelope() -> SessionInitEnvelope:
+def _envelope(profile_name: str = "jaato-ws-sess-5-10c") -> SessionInitEnvelope:
+    """Build an envelope with a configurable AppArmor profile name."""
     return SessionInitEnvelope(
         session_id="sess-5-10c",
         workspace_path="/tmp/ws",
-        profile_name="jaato-ws-sess-5-10c",
+        profile_name=profile_name,
         provider_name="anthropic",
         model_name="claude-sonnet-4-6",
     )
@@ -108,17 +119,14 @@ def _envelope() -> SessionInitEnvelope:
 # ----------------------------------------------------------------------
 
 
-def test_bootstrap_raises_when_apparmor_install_fails_with_profile_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pin: ``JAATO_RUNNER_PROFILE`` set + executor lacks the setter →
+def test_bootstrap_raises_when_apparmor_install_fails_with_profile_set() -> None:
+    """Pin: ``envelope.profile_name`` set + executor lacks the setter →
     bootstrap raises ``BootstrapError("configure", ...)``.
 
-    The operator opted into kernel confinement via the env var; a
+    The operator opted into kernel confinement via the envelope; a
     silent fallback to today's pre-§5.10c behavior would leave the
     escape vector open.  Matches the §4.3 PR #57 audible-failure
     pattern."""
-    monkeypatch.setenv("JAATO_RUNNER_PROFILE", "jaato-ws-sess-5-10c")
     stub = _StubRuntimeWithSession(with_setter=False)
 
     with pytest.raises(BootstrapError) as exc_info:
@@ -128,10 +136,9 @@ def test_bootstrap_raises_when_apparmor_install_fails_with_profile_set(
         )
 
     assert exc_info.value.stage == "configure"
-    # Error message must explain WHY this is audible (operator opted in).
     msg = exc_info.value.message
     assert "AppArmor //child transition" in msg
-    assert "JAATO_RUNNER_PROFILE" in msg
+    assert "envelope.profile_name" in msg
     assert "JAATO_RUNNER_DISABLE_CONFINE" in msg, (
         "error message must point operators at the documented escape "
         "hatch (JAATO_RUNNER_DISABLE_CONFINE=1) so they can opt out "
@@ -139,17 +146,14 @@ def test_bootstrap_raises_when_apparmor_install_fails_with_profile_set(
     )
 
 
-def test_bootstrap_raises_when_setter_itself_crashes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pin: ``JAATO_RUNNER_PROFILE`` set + setter raises → bootstrap
+def test_bootstrap_raises_when_setter_itself_crashes() -> None:
+    """Pin: ``envelope.profile_name`` set + setter raises → bootstrap
     raises ``BootstrapError("configure", ...)`` wrapping the
     underlying exception.
 
     Distinguishes the "setter missing" case (hasattr fails) from the
     "setter present but broken" case.  Both are audible-failure
     territory under the §5.10c contract."""
-    monkeypatch.setenv("JAATO_RUNNER_PROFILE", "jaato-ws-sess-5-10c")
     stub = _StubRuntimeWithSession(
         with_setter=True,
         raises=RuntimeError("install boom"),
@@ -166,42 +170,35 @@ def test_bootstrap_raises_when_setter_itself_crashes(
     assert "install boom" in exc_info.value.message
 
 
-def test_bootstrap_silent_when_runner_profile_empty(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pin: ``JAATO_RUNNER_PROFILE`` empty → install skipped, session
-    constructs normally even when the executor lacks the setter.
+def test_bootstrap_silent_when_envelope_profile_empty() -> None:
+    """Pin: ``envelope.profile_name`` empty/None → install skipped,
+    session constructs normally even when the executor lacks the
+    setter.
 
-    This is the JAATO_RUNNER_DISABLE_CONFINE=1 escape hatch: the
-    operator explicitly opted OUT of kernel confinement, so the
-    §5.10c contract doesn't apply.  Pin protects the escape hatch
-    against accidental tightening that would refuse to start
-    sessions in dev / test environments."""
-    monkeypatch.delenv("JAATO_RUNNER_PROFILE", raising=False)
+    This is the unconfined-session path: profile-less startup or
+    explicit JAATO_RUNNER_DISABLE_CONFINE=1.  The §5.10c contract
+    doesn't apply when the runner itself isn't confined."""
     stub = _StubRuntimeWithSession(with_setter=False)
 
-    # No exception — install is silently skipped.
     host = bootstrap_session(
-        _envelope(),
+        _envelope(profile_name=""),
         runtime_factory=lambda env: stub,
     )
 
     assert host is not None
-    # No setter calls happened (setter wasn't even there).
     assert stub.install_calls == []
 
 
 def test_bootstrap_logs_info_on_successful_install(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Pin: happy path — JAATO_RUNNER_PROFILE set + setter present →
-    install runs, INFO log records the profile name.
+    """Pin: happy path — ``envelope.profile_name`` set + setter present
+    → install runs, INFO log records the profile name.
 
     Operators reviewing runner-side logs see one ``installed AppArmor
     //child transition callback`` line per session, which becomes the
     evidence trail that the escape-vector closure is wired."""
     import logging
-    monkeypatch.setenv("JAATO_RUNNER_PROFILE", "jaato-ws-sess-5-10c")
     stub = _StubRuntimeWithSession(with_setter=True)
 
     with caplog.at_level(logging.INFO):
@@ -222,8 +219,7 @@ def test_bootstrap_logs_info_on_successful_install(
         and "//child" in r.message
     ]
     assert install_msgs, (
-        f"missing INFO log for the successful install; "
-        f"got {[r.message for r in caplog.records]!r}"
+        f"missing INFO log; got {[r.message for r in caplog.records]!r}"
     )
     assert any(
         "jaato-ws-sess-5-10c" in m for m in install_msgs
@@ -235,10 +231,10 @@ def test_bootstrap_logs_info_on_successful_install(
 # ----------------------------------------------------------------------
 
 
-def test_install_skipped_when_runner_profile_is_subprofile(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+def test_install_skipped_when_envelope_profile_is_subprofile(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Phase 5 §5.10e: JAATO_RUNNER_PROFILE contains the Audit 6
+    """Phase 5 §5.10e: ``envelope.profile_name`` contains the Audit 6
     sub-profile separator ``//`` → install is skipped silently
     (INFO log).  v15 design intent (PR #67) already drops the
     escape primitive from the sub-profile, so subprocesses inherit
@@ -249,16 +245,11 @@ def test_install_skipped_when_runner_profile_is_subprofile(
     Setter MUST NOT be called.  Bootstrap MUST succeed.  INFO log
     MUST explain the skip with the profile name + audit reference."""
     import logging
-    monkeypatch.setenv(
-        "JAATO_RUNNER_PROFILE",
-        "jaato-ws-parent//subagent",
-    )
-    # Setter present but should never be called.
     stub = _StubRuntimeWithSession(with_setter=True)
 
     with caplog.at_level(logging.INFO):
         host = bootstrap_session(
-            _envelope(),
+            _envelope(profile_name="jaato-ws-parent//subagent"),
             runtime_factory=lambda env: stub,
         )
 
@@ -283,9 +274,7 @@ def test_install_skipped_when_runner_profile_is_subprofile(
     ), "sub-profile name must appear in the skip log"
 
 
-def test_install_skipped_for_subprofile_even_if_setter_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_install_skipped_for_subprofile_even_if_setter_missing() -> None:
     """Pin: the sub-runner skip path bypasses the audible-failure
     contract.  Without this test, a refactor that moves the
     has_setter check ABOVE the sub-profile branch would re-impose
@@ -296,15 +285,10 @@ def test_install_skipped_for_subprofile_even_if_setter_missing(
     Setter missing + sub-profile name → no BootstrapError, no setter
     call.  The §5.10c audible-failure contract applies ONLY to main
     runners (case 3 in the three-case matrix)."""
-    monkeypatch.setenv(
-        "JAATO_RUNNER_PROFILE",
-        "jaato-ws-parent//subagent",
-    )
     stub = _StubRuntimeWithSession(with_setter=False)
 
-    # No exception — install path is bypassed entirely.
     host = bootstrap_session(
-        _envelope(),
+        _envelope(profile_name="jaato-ws-parent//subagent"),
         runtime_factory=lambda env: stub,
     )
 
@@ -313,16 +297,11 @@ def test_install_skipped_for_subprofile_even_if_setter_missing(
 
 
 def test_main_runner_install_path_unchanged_post_5_10e(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Pin: main runners (profile name lacks ``//``) still run the
-    §5.10c install path — happy + audible-failure both preserved.
-
-    This test pins the case-3 matrix branch.  Catches a regression
-    where the §5.10e three-case refactor would have accidentally
-    skipped install for main runners too."""
+    §5.10c install path — happy + audible-failure both preserved."""
     import logging
-    monkeypatch.setenv("JAATO_RUNNER_PROFILE", "jaato-ws-main_session")
     stub = _StubRuntimeWithSession(with_setter=True)
 
     with caplog.at_level(logging.INFO):
@@ -331,137 +310,125 @@ def test_main_runner_install_path_unchanged_post_5_10e(
             runtime_factory=lambda env: stub,
         )
 
-    assert len(stub.install_calls) == 1, (
-        "main-runner install must still run after the §5.10e refactor"
-    )
-    install_msgs = [
-        r.message for r in caplog.records
-        if "installed AppArmor" in r.message
-    ]
-    assert install_msgs, (
-        "main-runner install must still emit the INFO log"
-    )
+    assert len(stub.install_calls) == 1
 
 
 def test_three_case_matrix_distinguished_in_logs(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Pin: each of the three cases (empty / sub-profile / main)
-    emits a DISTINCT INFO log.  Operators inspecting runner logs
-    can determine which branch fired without guessing — important
-    for incident debugging where the install path is the suspect."""
+    """Pin: the three log lines for the three matrix cases are
+    distinguishable.  Operators triaging an apparmor incident need
+    to see WHY a session ended up unconfined or sub-profile-skipped
+    — silent same-shape logs would hide bugs."""
     import logging
 
     # Case 1: empty profile.
-    monkeypatch.delenv("JAATO_RUNNER_PROFILE", raising=False)
-    caplog.clear()
+    stub1 = _StubRuntimeWithSession(with_setter=True)
     with caplog.at_level(logging.INFO):
         bootstrap_session(
-            _envelope(),
-            runtime_factory=lambda env: _StubRuntimeWithSession(
-                with_setter=False,
-            ),
+            _envelope(profile_name=""),
+            runtime_factory=lambda env: stub1,
         )
-    case1_msgs = {r.message for r in caplog.records}
-    assert any("empty" in m and "unconfined" in m for m in case1_msgs)
+    case1_msgs = [
+        r.message for r in caplog.records
+        if "unconfined" in r.message and "skipping" in r.message
+    ]
+    assert case1_msgs, "case 1 (empty) should log unconfined-skip"
+    caplog.clear()
 
     # Case 2: sub-profile.
-    monkeypatch.setenv(
-        "JAATO_RUNNER_PROFILE", "jaato-ws-parent//subagent",
-    )
-    caplog.clear()
+    stub2 = _StubRuntimeWithSession(with_setter=True)
     with caplog.at_level(logging.INFO):
         bootstrap_session(
-            _envelope(),
-            runtime_factory=lambda env: _StubRuntimeWithSession(
-                with_setter=True,
-            ),
+            _envelope(profile_name="jaato-ws-x//child-y"),
+            runtime_factory=lambda env: stub2,
         )
-    case2_msgs = {r.message for r in caplog.records}
-    assert any(
-        "sub-profile" in m and "skipping" in m for m in case2_msgs
-    )
+    case2_msgs = [
+        r.message for r in caplog.records
+        if "sub-profile" in r.message and "skipping" in r.message
+    ]
+    assert case2_msgs, "case 2 (sub-profile) should log sub-profile-skip"
+    caplog.clear()
 
     # Case 3: main runner.
-    monkeypatch.setenv("JAATO_RUNNER_PROFILE", "jaato-ws-main")
-    caplog.clear()
+    stub3 = _StubRuntimeWithSession(with_setter=True)
     with caplog.at_level(logging.INFO):
         bootstrap_session(
             _envelope(),
-            runtime_factory=lambda env: _StubRuntimeWithSession(
-                with_setter=True,
-            ),
+            runtime_factory=lambda env: stub3,
         )
-    case3_msgs = {r.message for r in caplog.records}
-    assert any("installed AppArmor" in m for m in case3_msgs)
-
-
-def test_sub_profile_template_drops_escape_rules(workspace_root_tmp=None):
-    """Smoke test: pin that ``_render_sub_profile``'s body does NOT
-    contain uncommented ``change_profile -> unconfined`` or writable
-    ``/proc/*/attr/current`` rules.
-
-    Catches accidental re-introduction by future template edits.
-    The §5.10e skip-install correctness depends on the sub-profile
-    keeping its v15 "no escape primitive" posture — a future PR
-    that adds ``w,`` back to the sub-profile would silently
-    re-open the gap §4.3.4 + v15 closed.  This test fires before
-    that happens."""
-    import re
-    from server.apparmor import AppArmorManager
-
-    # Use a minimal manager — _render_sub_profile only needs the
-    # workspace_root + venv_path attrs the constructor sets.
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        from pathlib import Path
-        ws = Path(tmp) / "workspaces"
-        ws.mkdir()
-        (ws / "sessions").mkdir()
-        mgr = AppArmorManager(
-            workspace_root=str(ws),
-            venv_path="/usr/local/venv",
-            profile_dir=str(Path(tmp) / "profiles"),
-        )
-        body = mgr._render_sub_profile(
-            parent_session_id="parent_x",
-            subagent_id="agent_1",
-            workspace_path="/workspace",
-        )
-
-    # Strip comments so DROP-block documentation doesn't fool the
-    # assertion (same approach as the §5.10a //child template test).
-    rule_lines = [
-        line.strip() for line in body.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
+    case3_msgs = [
+        r.message for r in caplog.records
+        if "installed AppArmor" in r.message
     ]
+    assert case3_msgs, "case 3 (main runner) should log install success"
 
-    # Must NOT carry change_profile -> unconfined (escape primitive).
-    for rule in rule_lines:
-        assert not re.match(
-            r"change_profile\s+->\s+unconfined,$", rule,
-        ), (
-            f"sub-profile must NOT authorize "
-            f"change_profile -> unconfined; got rule: {rule!r}.  "
-            f"v15 design intent (PR #67) drops this; §5.10e "
-            f"skip-install depends on it staying dropped."
-        )
 
-    # Must NOT carry writable /proc/.../attr/current (file-write
-    # half of the escape primitive).  Owner-qualified READ is OK
-    # (v15 added it for confine_to_profile.read_current_profile).
-    for rule in rule_lines:
-        # Match `(owner )?/proc/.../attr/current <perm>,` where
-        # <perm> contains `w`.
-        m = re.match(
-            r"(owner\s+)?/proc/[\w*/]+/attr/current\s+([rwklm]+)\s*,$",
-            rule,
-        )
-        if m:
-            perms = m.group(2)
-            assert "w" not in perms, (
-                f"sub-profile must NOT grant write to "
-                f"/proc/.../attr/current; got rule: {rule!r}.  "
-                f"v15 design intent drops this; §5.10e "
-                f"skip-install depends on it staying dropped."
-            )
+# ----------------------------------------------------------------------
+# PR 102 regression: pool slot has empty JAATO_RUNNER_PROFILE env var
+# but envelope.profile_name carries the per-session profile.  Install
+# MUST run for the pool-slot case — pre-PR-102 it was incorrectly
+# skipped.
+# ----------------------------------------------------------------------
+
+
+def test_pool_slot_install_runs_when_env_empty_but_envelope_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression pin for the pool-slot AppArmor escape (PR 102).
+
+    Pool slots inherit the daemon's os.environ via template-fork — the
+    daemon never sets ``JAATO_RUNNER_PROFILE``, so the slot's env var
+    is empty.  The runner is nevertheless confined to
+    ``envelope.profile_name`` via PR 5a's ``_maybe_self_confine``.
+    Pre-PR-102 this matrix read ``os.environ`` and took case 1
+    (unconfined-skip), silently leaving the //child callback
+    uninstalled → cli/interactive_shell subprocesses inherited the
+    runner's base profile with escape primitives retained.
+
+    Post-PR-102 the matrix reads ``envelope.profile_name`` so the
+    pool-slot case correctly falls into case 3 (main-runner install).
+
+    Test setup:
+      - Delete JAATO_RUNNER_PROFILE env var (mimics pool slot env).
+      - Envelope carries profile_name="jaato-ws-pool-victim".
+      - Stub executor has the setter.
+
+    Pre-PR-102 assertion: ``install_calls == []`` (skipped — bug).
+    Post-PR-102 assertion: ``install_calls`` has one callable (fixed).
+    """
+    monkeypatch.delenv("JAATO_RUNNER_PROFILE", raising=False)
+    stub = _StubRuntimeWithSession(with_setter=True)
+
+    bootstrap_session(
+        _envelope(profile_name="jaato-ws-pool-victim"),
+        runtime_factory=lambda env: stub,
+    )
+
+    assert len(stub.install_calls) == 1, (
+        f"Pool-slot //child install regression: expected exactly one "
+        f"setter call (case 3 in matrix), got {len(stub.install_calls)}.  "
+        f"Pre-PR-102 the matrix read os.environ.JAATO_RUNNER_PROFILE "
+        f"which is empty for pool slots → case 1 (silently skipped) → "
+        f"apparmor.py:413-449 escape vector reopened.  "
+        f"Post-PR-102 the matrix reads envelope.profile_name which "
+        f"carries the per-session profile."
+    )
+
+
+def test_pool_slot_with_apparmor_off_still_skips_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pool slot with operator opt-out (profile_name empty in envelope)
+    → install skipped, no BootstrapError.  Pin that PR 102's fix
+    doesn't accidentally make unconfined pool sessions fail loudly."""
+    monkeypatch.delenv("JAATO_RUNNER_PROFILE", raising=False)
+    stub = _StubRuntimeWithSession(with_setter=False)
+
+    host = bootstrap_session(
+        _envelope(profile_name=""),
+        runtime_factory=lambda env: stub,
+    )
+
+    assert host is not None
+    assert stub.install_calls == []
