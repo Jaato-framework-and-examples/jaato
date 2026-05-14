@@ -691,3 +691,159 @@ class TestApparmorInheritance:
         resolved, errors = resolve_profiles(profiles)
         assert not errors
         assert resolved["child"].apparmor is True
+
+
+class TestApparmorFragmentsInheritance:
+    """Piece 1 (2026-05-14): ``apparmor_fragments`` follows
+    CHILD-REPLACES-PARENT semantics across the inheritance chain.
+    Distinct from ``apparmor`` (bool, OR-merged) above: this is the
+    list of *which* fragments to compose, and replace lets cascade
+    authors SCOPE DOWN from a broader parent set (least-privilege).
+    """
+
+    def test_absent_everywhere_resolves_none(self):
+        """No declaration anywhere → None.  Workspace-default
+        "compose all fragments" applies at render time
+        (back-compat for non-cascade workspaces)."""
+        profiles = {
+            "base": SubagentProfile(name="base", description="Base"),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor_fragments is None
+
+    def test_parent_declaration_propagates_to_child(self):
+        """Parent declares a list; child inherits it verbatim when
+        child doesn't override.  Pattern for cascade base profile
+        declaring the cross-stage commons."""
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                apparmor_fragments=["jaato-kb-enablement-2"],
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor_fragments == ["jaato-kb-enablement-2"]
+
+    def test_child_replaces_parent_list(self):
+        """Child's list REPLACES parent's — does not union.  This is
+        the load-bearing semantic for least-privilege scoping:
+        host_validator declares ``[host_validator]`` and gets ONLY
+        that fragment, not the union with the parent's set."""
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                apparmor_fragments=["jaato-kb-enablement-2"],
+            ),
+            "host_validator": SubagentProfile(
+                name="host_validator", description="Host validator",
+                inherits=["base"],
+                apparmor_fragments=["host_validator"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # NOT the union with parent's ["jaato-kb-enablement-2"].
+        assert resolved["host_validator"].apparmor_fragments == ["host_validator"]
+
+    def test_child_empty_list_replaces_parent(self):
+        """Explicit ``apparmor_fragments: []`` on the child is the
+        maximally locked-down stage — composes NO fragments, even
+        if the parent declared some."""
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                apparmor_fragments=["jaato-kb-enablement-2"],
+            ),
+            "locked_down": SubagentProfile(
+                name="locked_down", description="Locked down",
+                inherits=["base"],
+                apparmor_fragments=[],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["locked_down"].apparmor_fragments == []
+
+    def test_cascade_regression_pin(self):
+        """The load-bearing least-privilege contract for cascades
+        (peer's 2026-05-14 design ask).  Setup mirrors the
+        kb-enablement-2.0 cascade:
+
+        - ``_base`` declares ``[jaato-kb-enablement-2]`` (commons)
+        - ``host_validator`` overrides to ``[host_validator]``
+          (its stack-specific binary-exec grants)
+        - ``codegen`` overrides to ``[]`` (no fragments — pure
+          read of workspace tree)
+
+        Assert that the resolved fragments for ``codegen`` do
+        NOT include ``host_validator`` — i.e. the binary-exec
+        grants stay scoped to the host_validator stage.  Without
+        replace semantics (e.g. if we'd union'd), codegen would
+        inherit the base's set, and the leak that motivated this
+        PR persists.  This test is the contract."""
+        profiles = {
+            "_base": SubagentProfile(
+                name="_base", description="Base",
+                apparmor_fragments=["jaato-kb-enablement-2"],
+            ),
+            "host_validator": SubagentProfile(
+                name="host_validator", description="Host validator",
+                inherits=["_base"],
+                apparmor_fragments=["host_validator"],
+            ),
+            "codegen": SubagentProfile(
+                name="codegen", description="Codegen",
+                inherits=["_base"],
+                apparmor_fragments=[],
+            ),
+            "transform": SubagentProfile(
+                name="transform", description="Transform",
+                inherits=["_base"],
+                # No override — inherits base's [jaato-kb-enablement-2]
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # host_validator: scoped to its own stage.
+        assert resolved["host_validator"].apparmor_fragments == ["host_validator"]
+        # codegen: locked down completely.
+        assert resolved["codegen"].apparmor_fragments == []
+        # transform: inherits base's commons (no host_validator leak).
+        assert resolved["transform"].apparmor_fragments == ["jaato-kb-enablement-2"]
+        # Sanity: NONE of the children that overrode inherit
+        # host_validator's grants.
+        assert "host_validator" not in (resolved["codegen"].apparmor_fragments or [])
+        assert "host_validator" not in (resolved["transform"].apparmor_fragments or [])
+
+    def test_multi_parent_first_declaration_wins(self):
+        """Two parents both declare; resolution walks parents in
+        order and uses the first non-None.  The current merge order
+        is parents-in-declared-order; child inheriting from
+        [p1, p2] picks p1's value when both declare.  Pin so any
+        future reordering surfaces here."""
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="P1",
+                apparmor_fragments=["a", "b"],
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="P2",
+                apparmor_fragments=["c", "d"],
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # p1 declared first → its value wins.
+        assert resolved["child"].apparmor_fragments == ["a", "b"]

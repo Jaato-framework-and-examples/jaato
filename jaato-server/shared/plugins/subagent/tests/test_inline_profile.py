@@ -133,3 +133,55 @@ class TestBuildInlineProfile:
         assert p_truthy.apparmor is True
         p_falsy = build_inline_profile({"model": "m", "apparmor": 0})
         assert p_falsy.apparmor is False
+
+    def test_apparmor_fragments_absent_resolves_none(self):
+        """Piece 1 (2026-05-14): field absent → None on the dataclass.
+        Distinct from explicit empty list.  Workspace-default
+        "compose all fragments" applies at render time."""
+        p = build_inline_profile({"model": "m"})
+        assert p.apparmor_fragments is None
+
+    def test_apparmor_fragments_explicit_empty_list_preserved(self):
+        """Explicit ``apparmor_fragments: []`` is distinct from
+        absent: the maximally locked-down stage in a cascade."""
+        p = build_inline_profile({"model": "m", "apparmor_fragments": []})
+        assert p.apparmor_fragments == []
+
+    def test_apparmor_fragments_non_empty_list_parsed(self):
+        p = build_inline_profile({
+            "model": "m",
+            "apparmor_fragments": ["host_validator", "kb-enablement-2"],
+        })
+        assert p.apparmor_fragments == ["host_validator", "kb-enablement-2"]
+
+    def test_apparmor_fragments_strips_whitespace(self):
+        """Entries get stripped — operator typos with surrounding
+        whitespace don't silently break the basename match."""
+        p = build_inline_profile({
+            "model": "m",
+            "apparmor_fragments": ["  host_validator  ", "kb-fixtures"],
+        })
+        assert p.apparmor_fragments == ["host_validator", "kb-fixtures"]
+
+    def test_apparmor_fragments_rejects_non_list(self):
+        """Strings and ints are rejected — quiet coercion would mask
+        operator typos (e.g. ``apparmor_fragments: host_validator``
+        in YAML, which yields a string, not a single-item list)."""
+        with pytest.raises(ValueError, match="must be a list of strings"):
+            build_inline_profile({
+                "model": "m", "apparmor_fragments": "host_validator",
+            })
+
+    def test_apparmor_fragments_rejects_non_string_entry(self):
+        with pytest.raises(ValueError, match=r"\[0\] must be a non-empty string"):
+            build_inline_profile({
+                "model": "m", "apparmor_fragments": [42, "foo"],
+            })
+
+    def test_apparmor_fragments_rejects_empty_string_entry(self):
+        """Empty-string entry would silently match nothing — reject
+        loudly so the operator notices the typo."""
+        with pytest.raises(ValueError, match=r"\[1\] must be a non-empty string"):
+            build_inline_profile({
+                "model": "m", "apparmor_fragments": ["host_validator", ""],
+            })

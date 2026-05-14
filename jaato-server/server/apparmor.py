@@ -812,6 +812,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         workspace_path: str,
         config_root: Optional[str] = None,
         env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
     ) -> bool:
         """Create and load an AppArmor profile for a session.
 
@@ -824,6 +825,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         return self._run_unconfined(
             self._provision_profile_impl,
             session_id, workspace_path, config_root, env_file,
+            requested_fragments,
         )
 
     def _provision_profile_impl(
@@ -832,6 +834,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         workspace_path: str,
         config_root: Optional[str] = None,
         env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
     ) -> bool:
         """Inner body of :meth:`provision_profile`.
 
@@ -860,6 +863,18 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
                 thread.  Without this, a confined parent that triggers
                 a reactor-spawned child fails with ``Permission
                 denied`` on the env file.
+            requested_fragments: Piece 1 (2026-05-14) — per-profile
+                fragment scoping.  When ``None`` (default), composes
+                EVERY ``*.rules`` file found under the user-tier,
+                workspace-tier, and walker-cache fragment directories
+                (back-compat — pre-Piece-1 behaviour).  When a list,
+                composes ONLY fragments whose basename (without
+                ``.rules``) matches an entry.  ``[]`` is distinct from
+                ``None`` — explicit empty list composes NO fragments,
+                yielding a maximally locked-down profile.  Unknown
+                fragment names log WARNING but don't abort.  See
+                ``project_backlog_per_profile_apparmor_fragments``
+                for the cascade least-privilege motivation.
 
         Returns:
             True on success, False on failure (logged, not raised).
@@ -871,6 +886,7 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
         profile_path = self._profile_dir / profile_name
         profile_content = self._render_profile(
             session_id, workspace_path, config_root, env_file,
+            requested_fragments=requested_fragments,
         )
 
         try:
@@ -1751,6 +1767,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         workspace_path: str,
         config_root: Optional[str] = None,
         env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
     ) -> str:
         """Render the profile template with session-specific values.
 
@@ -1758,6 +1775,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         Sibling workspaces are implicitly denied by AppArmor's default-
         deny policy — only the session's own ``workspace_path`` is in
         the allow list.
+
+        Piece 1 (2026-05-14): ``requested_fragments`` scopes which
+        AppArmor fragments compose into the rendered profile.
+        ``None`` (default) keeps the pre-Piece-1 behaviour — every
+        fragment under the search path is composed.  A list (possibly
+        empty) restricts composition to fragments whose basename
+        matches an entry.
         """
         if self._premium_root:
             premium_rules = (
@@ -1782,63 +1806,117 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         else:
             env_file_rule = "# (no client-supplied env_file)"
 
-        # Inline extension-supplied fragments at render time.  Reads
-        # every ``*.rules`` file under the user-tier
-        # (``~/.jaato/apparmor-fragments/``) AND the workspace-tier
-        # (``<workspace>/.jaato/apparmor-fragments/``) and
-        # concatenates the contents below the header in
-        # PROFILE_TEMPLATE.  Each fragment's content is wrapped with
-        # a ``# === <tier>/<filename> ===`` comment so kernel
-        # denials can be traced back to the originating extension
-        # when debugging ``dmesg | grep apparmor`` output.
+        # Inline extension-supplied fragments at render time.  Walks
+        # three tiers of search paths and concatenates the contents
+        # below the header in PROFILE_TEMPLATE.  Each fragment's
+        # content is wrapped with a ``# === <tier>/<filename> ===``
+        # comment so kernel denials can be traced back to the
+        # originating extension when debugging
+        # ``dmesg | grep apparmor`` output.
         #
-        # Tier ordering: user-tier fragments are inlined first, then
-        # workspace-tier.  Order does not affect AppArmor semantics
-        # (allow rules union, deny rules union, deny wins over allow
-        # at equal specificity), but matches the rest of jaato's
-        # tier discipline (``agents/``, ``profiles/``, ``services/``,
-        # ``openers.json``: workspace-tier-first → user-tier
-        # fallback for reads; for AppArmor we compose both since
-        # there's no fallback semantics — both contribute rules).
+        # **Search tiers (in walk order):**
         #
-        # Workspace-tier discovery: a fragment file at
-        # ``<workspace>/.jaato/apparmor-fragments/foo.rules`` only
-        # applies to sessions on that workspace, so workspace-
-        # specific paths (e.g., test fixtures outside the standard
-        # workspace tree) can live with the repo instead of
-        # polluting every session's confinement under that user.
-        chunks: List[str] = []
-        for tier_label, fragments_dir in (
-            (
-                "user",
-                Path("~/.jaato/apparmor-fragments").expanduser().resolve(),
-            ),
-            (
-                "workspace",
-                (Path(workspace_path) / ".jaato" / "apparmor-fragments").resolve(),
-            ),
-        ):
+        # 1. ``user`` — ``~/.jaato/apparmor-fragments/`` — applies
+        #    to every workspace under this user account.
+        # 2. ``workspace`` — ``<workspace>/.jaato/apparmor-fragments/``
+        #    — hand-authored, lives with the repo.  Only applies to
+        #    sessions on that workspace.
+        # 3. ``cache`` (Piece 1, 2026-05-14) —
+        #    ``<workspace>/.jaato/.cache/apparmor-fragments/`` —
+        #    walker-generated.  Sister workspaces (e.g.
+        #    kb-enablement-2.0) write stack-specific rule files here
+        #    at preflight time from a higher-level config (e.g.
+        #    ``.jaato/stacks/<active>/host_tools.yaml``).  Cache
+        #    wins on basename collision so walker output can shadow
+        #    hand-authored placeholders without renaming.  This keeps
+        #    the basename-namespace flat — the
+        #    ``profile.apparmor_fragments: [name]`` field pairs
+        #    naturally with one logical name per fragment.
+        #
+        # **Per-profile scoping (Piece 1, 2026-05-14):**
+        # ``requested_fragments`` filters the composed set:
+        # - ``None`` (default) — compose every fragment found in any
+        #   of the three search paths (back-compat for non-cascade
+        #   workspaces).
+        # - ``[]`` — compose nothing.  Maximally locked-down stage.
+        # - non-empty list — compose only fragments whose basename
+        #   (without ``.rules``) matches an entry in the list.
+        #   Unknown names log WARNING but don't abort.
+        # Order does not affect AppArmor semantics (allow rules
+        # union, deny rules union, deny wins at equal specificity).
+        SEARCH_TIERS = [
+            ("user", Path("~/.jaato/apparmor-fragments").expanduser().resolve()),
+            ("workspace", (Path(workspace_path) / ".jaato" / "apparmor-fragments").resolve()),
+            ("cache", (Path(workspace_path) / ".jaato" / ".cache" / "apparmor-fragments").resolve()),
+        ]
+
+        # Phase 1: discover every available fragment, keyed by
+        # basename (without ``.rules``).  Later tiers overwrite
+        # earlier ones — cache wins over workspace wins over user.
+        # The tier label is retained for the inlined comment.
+        discovered: Dict[str, Tuple[str, Path]] = {}
+        for tier_label, fragments_dir in SEARCH_TIERS:
             if not fragments_dir.is_dir():
                 continue
             for path in sorted(fragments_dir.glob("*.rules")):
-                try:
-                    body = path.read_text(encoding="utf-8")
-                except OSError as exc:
-                    logger.warning(
-                        "Skipping unreadable AppArmor fragment %s: %s",
-                        path, exc,
-                    )
-                    continue
-                # Indent each line by two spaces to match the
-                # surrounding profile body's indentation.  Strip
-                # trailing whitespace per-line, preserve blanks.
-                indented = "\n".join(
-                    f"  {line.rstrip()}" if line.strip() else ""
-                    for line in body.splitlines()
+                discovered[path.stem] = (tier_label, path)
+
+        # Phase 2: decide which fragments to include.  ``None`` =
+        # all discovered, in tier-iteration insertion order
+        # (user → workspace → cache, alphabetical within tier).
+        # Otherwise filter by basename in the operator's declaration
+        # order.
+        if requested_fragments is None:
+            selected_names = list(discovered.keys())
+        else:
+            selected_names = []
+            requested_set = set(requested_fragments)
+            available_set = set(discovered.keys())
+            unknown = requested_set - available_set
+            if unknown:
+                logger.warning(
+                    "AppArmor profile %s requests fragments %s but the "
+                    "following are not in the search path "
+                    "(%s/.jaato/apparmor-fragments + .cache; "
+                    "~/.jaato/apparmor-fragments): %s.  Continuing "
+                    "without them; check the operator authored the "
+                    "right filenames.",
+                    session_id, sorted(requested_set),
+                    workspace_path, sorted(unknown),
                 )
-                chunks.append(
-                    f"  # === {tier_label}/{path.name} ===\n{indented}"
+            # Preserve the operator's declaration order; AppArmor
+            # semantics are order-insensitive but matching the
+            # declaration order keeps rendered profiles readable.
+            for name in requested_fragments:
+                if name in available_set:
+                    selected_names.append(name)
+        logger.info(
+            "AppArmor profile %s composing %d fragments: %s",
+            session_id, len(selected_names), selected_names,
+        )
+
+        # Phase 3: inline the selected fragments' bodies.
+        chunks: List[str] = []
+        for name in selected_names:
+            tier_label, path = discovered[name]
+            try:
+                body = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.warning(
+                    "Skipping unreadable AppArmor fragment %s: %s",
+                    path, exc,
                 )
+                continue
+            # Indent each line by two spaces to match the
+            # surrounding profile body's indentation.  Strip
+            # trailing whitespace per-line, preserve blanks.
+            indented = "\n".join(
+                f"  {line.rstrip()}" if line.strip() else ""
+                for line in body.splitlines()
+            )
+            chunks.append(
+                f"  # === {tier_label}/{path.name} ===\n{indented}"
+            )
         extension_fragments_inline = (
             "\n\n".join(chunks) if chunks else "  # (no extension fragments)"
         )

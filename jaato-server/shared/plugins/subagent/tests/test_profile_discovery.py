@@ -287,8 +287,74 @@ class TestDiscoverYamlProfiles:
             profile_path.write_text(yaml.dump(profile_data))
 
             result = discover_profiles(tmpdir)
-
             assert "yml_agent" in result.profiles
+
+    def test_apparmor_fragments_equivalent_in_json_and_yaml(self, yaml_available):
+        """Piece 1 (2026-05-14): a profile authored with
+        ``apparmor_fragments: [host_validator]`` in JSON and the
+        equivalent YAML must produce identical ``SubagentProfile``
+        instances.  Enforces
+        [[feedback-profile-json-yaml-sync]] — JSON ≡ YAML for
+        every field including any new ones."""
+        if not yaml_available:
+            pytest.skip("PyYAML not installed")
+
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_data = {
+                "name": "via_json",
+                "description": "Host validator stage (via JSON)",
+                "plugins": ["cli"],
+                "apparmor": True,
+                "apparmor_fragments": ["host_validator", "kb-enablement-2"],
+            }
+            (Path(tmpdir) / "via_json.json").write_text(json.dumps(json_data))
+            yaml_data = dict(json_data)
+            yaml_data["name"] = "via_yaml"
+            yaml_data["description"] = "Host validator stage (via YAML)"
+            (Path(tmpdir) / "via_yaml.yaml").write_text(yaml.dump(yaml_data))
+
+            result = discover_profiles(tmpdir)
+
+            assert "via_json" in result.profiles
+            assert "via_yaml" in result.profiles
+            j = result.profiles["via_json"]
+            y = result.profiles["via_yaml"]
+            assert j.apparmor is True and y.apparmor is True
+            assert j.apparmor_fragments == ["host_validator", "kb-enablement-2"]
+            assert y.apparmor_fragments == ["host_validator", "kb-enablement-2"]
+
+    def test_apparmor_fragments_empty_list_preserved_in_both(self, yaml_available):
+        """Explicit ``apparmor_fragments: []`` survives both
+        deserialisers without getting silently normalised to None.
+        Distinct shapes are load-bearing."""
+        if not yaml_available:
+            pytest.skip("PyYAML not installed")
+
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_data = {
+                "name": "locked_down_json",
+                "description": "Locked-down cascade stage (via JSON)",
+                "plugins": [],
+                "apparmor": True,
+                "apparmor_fragments": [],
+            }
+            (Path(tmpdir) / "locked_down_json.json").write_text(json.dumps(json_data))
+            yaml_data = dict(json_data)
+            yaml_data["name"] = "locked_down_yaml"
+            yaml_data["description"] = "Locked-down cascade stage (via YAML)"
+            (Path(tmpdir) / "locked_down_yaml.yaml").write_text(yaml.dump(yaml_data))
+
+            result = discover_profiles(tmpdir)
+
+            assert result.profiles["locked_down_json"].apparmor_fragments == []
+            assert result.profiles["locked_down_yaml"].apparmor_fragments == []
+            # Sanity: neither is None.
+            assert result.profiles["locked_down_json"].apparmor_fragments is not None
+            assert result.profiles["locked_down_yaml"].apparmor_fragments is not None
 
 
 class TestSubagentConfigAutoDiscover:
