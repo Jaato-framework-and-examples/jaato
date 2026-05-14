@@ -604,3 +604,90 @@ class TestCompletionPayloadSchemaInheritance:
         resolved, errors = resolve_profiles(profiles)
         assert not errors
         assert resolved["child"].completion_payload_schema is None
+
+
+class TestApparmorInheritance:
+    """PR-A (2026-05-14): ``apparmor`` follows OR semantics across the
+    inheritance chain.  Once any layer (parents or child) sets it True,
+    the resolved profile is confined.  Rationale matches
+    ``suppress_base_instructions``: a security primitive shouldn't be
+    silently downgradeable by an inheritor.
+    """
+
+    def test_default_unset_resolves_false(self):
+        profiles = {
+            "base": SubagentProfile(name="base", description="Base"),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor is False
+
+    def test_parent_true_propagates_to_child(self):
+        """Parent declares apparmor=True; child without an explicit
+        value inherits it (the security gradient flows downward)."""
+        profiles = {
+            "secure_base": SubagentProfile(
+                name="secure_base", description="Base", apparmor=True,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["secure_base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor is True
+
+    def test_child_true_with_unconfined_parent_still_true(self):
+        """Child opts in explicitly even if parents didn't."""
+        profiles = {
+            "loose": SubagentProfile(name="loose", description="Loose"),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["loose"], apparmor=True,
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor is True
+
+    def test_child_cannot_disable_parent_confinement(self):
+        """OR semantics: an inheritor setting apparmor=False
+        cannot silently downgrade a confined parent.  This matches
+        ``suppress_base_instructions``'s rationale — security
+        primitives are one-way (off → on, never back).  An inheritor
+        that genuinely wants unconfined operation should not inherit
+        from a confined parent."""
+        profiles = {
+            "confined": SubagentProfile(
+                name="confined", description="Confined", apparmor=True,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["confined"], apparmor=False,
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # Parent's True wins via OR semantics.
+        assert resolved["child"].apparmor is True
+
+    def test_multi_parent_any_true_wins(self):
+        """One confined parent + one unconfined parent → resolved True."""
+        profiles = {
+            "p_confined": SubagentProfile(
+                name="p_confined", description="P1", apparmor=True,
+            ),
+            "p_loose": SubagentProfile(
+                name="p_loose", description="P2", apparmor=False,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["p_confined", "p_loose"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor is True

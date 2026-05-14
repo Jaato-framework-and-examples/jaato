@@ -572,6 +572,7 @@ class SessionManager:
         session_id: str,
         workspace_path: Optional[str],
         client_id: Optional[str],
+        apparmor_override: Optional[bool] = None,
     ) -> Optional[str]:
         """Provision IPC AppArmor (opt-in) + spawn the per-session runner.
 
@@ -620,15 +621,41 @@ class SessionManager:
         if client_id is None:
             return None
 
+        # PR-A (2026-05-14): resolve AppArmor opt-in across three
+        # sources, in precedence order:
+        #   1. ``apparmor_override`` kwarg — explicit caller intent
+        #      from ``SessionManager.create_headless_session`` /
+        #      reactor surface.  Wins outright when set.
+        #   2. ``client_config["apparmor"]`` — IPC ClientConfigRequest
+        #      opt-in (the existing pre-PR-A signal).  Used by the
+        #      TUI / direct-IPC clients.
+        #   3. ``server._profile.apparmor`` — profile-declared baseline.
+        #      Default ``False`` today; PR-B will flip the default to
+        #      ``True`` after kb-enablement-2.0 has validated the field.
+        #
+        # The two earlier sources are "explicit yes/no"; the profile
+        # field is the "what does this profile prefer" baseline.  A
+        # TUI user setting ``--apparmor`` on the wire still wins; a
+        # reactor passing ``apparmor=True`` via kwarg still wins.
+        client_config = self._client_config.get(client_id, {})
+        client_config_signal = client_config.get("apparmor")
+        profile = getattr(server, "_profile", None)
+        profile_apparmor = bool(getattr(profile, "apparmor", False)) if profile else False
+        if apparmor_override is not None:
+            opt_in_apparmor = bool(apparmor_override)
+        elif client_config_signal is not None:
+            opt_in_apparmor = bool(client_config_signal)
+        else:
+            opt_in_apparmor = profile_apparmor
+
         # Spawn requires a workspace (cwd target).  Sessions without
         # one don't get a runner; pre-§7a behavior preserved.
         if not workspace_path:
-            client_config = self._client_config.get(client_id, {})
-            if client_config.get("apparmor"):
-                # Surface the apparmor downgrade if the client
-                # explicitly asked.  Silent skip otherwise — most
-                # IPC sessions without workspace are short-lived
-                # / headless and don't expect a runner.
+            if opt_in_apparmor:
+                # Surface the apparmor downgrade if confinement was
+                # requested.  Silent skip otherwise — most IPC sessions
+                # without workspace are short-lived / headless and don't
+                # expect a runner.
                 self._notify_apparmor(
                     client_id, session_id,
                     "requested but session has no workspace_path — "
@@ -643,9 +670,6 @@ class SessionManager:
         # we don't duplicate.
         if self._workspace_under_ws_root(workspace_path):
             return None
-
-        client_config = self._client_config.get(client_id, {})
-        opt_in_apparmor = bool(client_config.get("apparmor"))
 
         # ----- Step 4: apparmor (opt-in) -----
         profile_name = ""
@@ -2359,6 +2383,7 @@ class SessionManager:
                 envelope.session_id,
                 envelope.workspace_path,
                 envelope.client_id,
+                apparmor_override=envelope.apparmor,
             )
 
         # Pre-initialize hooks fire BEFORE initialize() — gives
@@ -2953,6 +2978,7 @@ class SessionManager:
         initial_session_state: Optional[Dict[str, Any]] = None,
         inline_profile_data: Optional[Dict[str, Any]] = None,
         config_root: Optional[str] = None,
+        apparmor: Optional[bool] = None,
     ) -> str:
         """Implementation of session creation, called via ``Context().run()``.
 
@@ -3268,6 +3294,11 @@ class SessionManager:
             provisioned=provisioned,
             created_by=created_by,
             timestamp=timestamp,
+            # PR-A (2026-05-14): forward explicit AppArmor caller intent
+            # to the bootstrap helper.  None = no override (consult
+            # client_config then profile.apparmor); True/False short-
+            # circuits that chain.
+            apparmor=apparmor,
             # During init, emit directly to requesting client (not
             # yet attached to session).
             on_event_during_init=lambda e: self._emit_to_client(client_id, e),
@@ -3395,6 +3426,7 @@ class SessionManager:
         session_name: Optional[str] = None,
         config_root: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
+        apparmor: Optional[bool] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -3452,6 +3484,7 @@ class SessionManager:
             agent_params=agent_params,
             initial_session_state=initial_session_state,
             config_root=config_root,
+            apparmor=apparmor,
         )
         if not session_id:
             # Server 0.6.50.1+: log at WARNING so reactor callers

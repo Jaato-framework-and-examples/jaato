@@ -379,6 +379,17 @@ class BootstrapEnvelope:
     # which caused the documenter agent to hallucinate tmux pane ids.
     agent_params: Dict[str, str] = field(default_factory=dict)
 
+    # PR-A (2026-05-14): explicit AppArmor confinement override from the
+    # session-creation caller (``SessionManager.create_headless_session``
+    # ``apparmor=`` kwarg; reactor surface through ``ActionContext``).
+    # ``None`` means "no caller override — consult the IPC
+    # client_config, then the profile field, then the legacy default".
+    # ``True`` / ``False`` short-circuit that chain.  See backlog
+    # ``project_backlog_apparmor_kwarg_for_headless_sessions`` for the
+    # two-PR migration plan (PR-A: surface + back-compat False default;
+    # PR-B: flip profile default to True).
+    apparmor: Optional[bool] = None
+
     # -- Session record --------------------------------------------------
     provisioned: bool = False
     created_by: Optional[str] = None

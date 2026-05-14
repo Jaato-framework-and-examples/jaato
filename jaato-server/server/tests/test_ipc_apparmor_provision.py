@@ -357,3 +357,151 @@ def test_set_apparmor_dependencies_stashes_refs() -> None:
 
     assert sm._ws_server_ref is ws
     assert sm._daemon_loop == "<loop>"
+
+
+# ----------------------------------------------------------------------
+# PR-A (2026-05-14): precedence resolution across kwarg / client_config /
+# profile.apparmor.  Three sources can express confinement intent; the
+# helper must apply them in the order documented in
+# ``project_backlog_apparmor_kwarg_for_headless_sessions``.
+# ----------------------------------------------------------------------
+
+
+def _profile_stub(apparmor: bool) -> Any:
+    """Minimal profile stand-in carrying just ``apparmor``."""
+    return type("_FakeProfile", (), {"apparmor": apparmor})()
+
+
+def _server_with_profile(profile: Any) -> Any:
+    """JaatoServer stand-in that exposes ``_profile``."""
+    return type("_FakeJaatoServerWithProfile", (), {"_profile": profile})()
+
+
+class TestAppArmorPrecedence:
+    """Resolution order: kwarg override > client_config["apparmor"] >
+    profile.apparmor > legacy False default.  PR-A surfaces all three
+    sources but keeps the False default until PR-B flips it.
+    """
+
+    def test_kwarg_override_true_wins_over_falsy_sources(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Reactor / headless caller passes ``apparmor=True``; client
+        config + profile both say False/absent; opt-in fires."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {"apparmor": False}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        result = sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=False)),
+            session_id="s-kwarg-true",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+            apparmor_override=True,
+        )
+        # Spawn happens; apparmor provisioning is opted-in.
+        assert result == "apparmor"
+        assert len(_FakeAppArmorManager.instances) == 1
+
+    def test_kwarg_override_false_wins_over_truthy_sources(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Caller passes ``apparmor=False``; client config + profile
+        both say True; opt-in is suppressed.  This is the path TUI
+        will use after PR-B flips the profile default to True — a
+        defensive ``apparmor=False`` from the wire keeps interactive
+        sessions unconfined regardless of profile choice."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {"apparmor": True}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        result = sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=True)),
+            session_id="s-kwarg-false",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+            apparmor_override=False,
+        )
+        # Spawn happens unconfined; no AppArmor provisioning.
+        assert result is None
+        assert _FakeAppArmorManager.instances == []
+
+    def test_client_config_signal_wins_over_profile_when_kwarg_unset(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """No kwarg override; client_config["apparmor"]=True opts in
+        even when profile.apparmor=False (e.g. TUI user passes
+        ``--apparmor`` against a profile that didn't declare it)."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {"apparmor": True}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        result = sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=False)),
+            session_id="s-cc-true",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+            # apparmor_override absent
+        )
+        assert result == "apparmor"
+        assert len(_FakeAppArmorManager.instances) == 1
+
+    def test_profile_apparmor_consulted_when_no_kwarg_no_client_signal(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """No kwarg, no client_config opt-in; profile.apparmor=True
+        drives confinement.  This is the path PR-B will rely on once
+        the profile default flips to True — cascade-spawned headless
+        sessions of confined profiles will automatically opt in."""
+        sm = fake_session_manager
+        # No "apparmor" key in client_config — None lookup.
+        sm._client_config["c-1"] = {}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        result = sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=True)),
+            session_id="s-profile-true",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+        )
+        assert result == "apparmor"
+        assert len(_FakeAppArmorManager.instances) == 1
+
+    def test_all_sources_falsy_leaves_unconfined(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Default state: no opt-in anywhere → no provisioning, spawn
+        runs unconfined.  Preserves PR-A back-compat: existing callers
+        that didn't set the field keep their current behaviour."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        result = sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(_profile_stub(apparmor=False)),
+            session_id="s-all-false",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+        )
+        assert result is None
+        assert _FakeAppArmorManager.instances == []
+
+    def test_profile_apparmor_consulted_when_profile_attr_missing(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Older profile objects without an ``apparmor`` attribute (or
+        a None ``_profile`` on the server) must default to False
+        gracefully — no AttributeError, no opt-in by accident."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+
+        # Server without _profile at all
+        result = sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_stub(),  # no _profile attribute
+            session_id="s-no-profile",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+        )
+        assert result is None
+        assert _FakeAppArmorManager.instances == []
