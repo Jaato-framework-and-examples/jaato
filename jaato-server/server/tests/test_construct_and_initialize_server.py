@@ -109,6 +109,10 @@ class _FakeSessionManager:
         session_id: str,
         workspace_path: Optional[str],
         client_id: Optional[str],
+        *,
+        apparmor_override: Optional[bool] = None,
+        config_root_override: Optional[str] = None,
+        env_file_override: Optional[str] = None,
     ) -> Optional[str]:
         self.ipc_provision_calls.append(
             (server, session_id, workspace_path, client_id),

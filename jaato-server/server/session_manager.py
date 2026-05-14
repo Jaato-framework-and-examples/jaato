@@ -572,7 +572,10 @@ class SessionManager:
         session_id: str,
         workspace_path: Optional[str],
         client_id: Optional[str],
+        *,
         apparmor_override: Optional[bool] = None,
+        config_root_override: Optional[str] = None,
+        env_file_override: Optional[str] = None,
     ) -> Optional[str]:
         """Provision IPC AppArmor (opt-in) + spawn the per-session runner.
 
@@ -648,6 +651,27 @@ class SessionManager:
         else:
             opt_in_apparmor = profile_apparmor
 
+        # 2026-05-14 unification: resolve ``config_root`` + ``env_file``
+        # for the AppArmor policy generator across all entry points.
+        # Caller-supplied envelope override wins (used by headless +
+        # disk-restore + ephemeral subagent paths that don't populate
+        # ``client_config``); otherwise fall back to the IPC
+        # ``client_config`` (populated by ``ClientConfigRequest``);
+        # otherwise ``None`` (policy template's ``{config_root_rules}``
+        # renders empty).  Pre-unification, this helper read ONLY from
+        # ``client_config[client_id]`` — closes the v76 reactor-spawned
+        # cascade crash class where headless callers couldn't supply
+        # config_root to the policy generator.  See
+        # ``project_backlog_apparmor_config_root_threading_for_headless``.
+        if config_root_override is not None:
+            config_root = config_root_override
+        else:
+            config_root = client_config.get("config_root")
+        if env_file_override is not None:
+            env_file = env_file_override
+        else:
+            env_file = client_config.get("env_file")
+
         # Spawn requires a workspace (cwd target).  Sessions without
         # one don't get a runner; pre-§7a behavior preserved.
         if not workspace_path:
@@ -679,7 +703,8 @@ class SessionManager:
                 session_id=session_id,
                 workspace_path=workspace_path,
                 client_id=client_id,
-                client_config=client_config,
+                config_root=config_root,
+                env_file=env_file,
             )
             if profile_name == "" and sandbox_mode == "soft":
                 # Apparmor unavailable / provisioning failed.
@@ -706,7 +731,9 @@ class SessionManager:
 
         # ----- Step 5b: success notification + return -----
         if opt_in_apparmor and sandbox_mode == "apparmor":
-            config_root = client_config.get("config_root")
+            # ``config_root`` is the resolved value from above (envelope
+            # override first, then client_config); the notification
+            # reflects what the policy was actually generated with.
             self._notify_apparmor(
                 client_id, session_id,
                 f"profile provisioned (workspace={workspace_path}, "
@@ -781,14 +808,28 @@ class SessionManager:
         session_id: str,
         workspace_path: str,
         client_id: str,
-        client_config: Dict[str, Any],
+        *,
+        config_root: Optional[str],
+        env_file: Optional[str],
     ) -> "Tuple[str, Optional[str]]":
-        """Provision the AppArmor profile for an IPC session
+        """Provision the AppArmor profile for a session
         (Phase 3 §7a — opt-in only).
 
         Caller has already checked the apparmor opt-in flag and
         the workspace gates.  This method does only the apparmor
         lifecycle: lazy-init manager + provision_profile.
+
+        2026-05-14: signature unified to take ``config_root`` +
+        ``env_file`` as explicit kwargs.  Pre-fix the helper read
+        these from ``client_config[client_id]``, which made the
+        reactor-spawned headless path (no client_config) silently
+        omit the ``{config_root_rules}`` placeholder and produce a
+        profile that didn't grant reads on the repo-root
+        ``.jaato/`` for the kb-enablement-2.0 "framework config at
+        parent, sandbox inside" layout.  Now every entry point's
+        envelope carries these fields explicitly; the helper reads
+        the envelope's values uniformly.  See
+        ``project_backlog_apparmor_config_root_threading_for_headless``.
 
         Returns:
             ``(profile_name, sandbox_mode)``:
@@ -818,8 +859,6 @@ class SessionManager:
             )
             return "", "soft"
 
-        config_root = client_config.get("config_root")
-        env_file = client_config.get("env_file")
         if not apparmor.provision_profile(
             session_id,
             workspace_path,
@@ -2384,6 +2423,14 @@ class SessionManager:
                 envelope.workspace_path,
                 envelope.client_id,
                 apparmor_override=envelope.apparmor,
+                # 2026-05-14 unification: thread the envelope's
+                # ``config_root`` + ``env_file`` so the AppArmor policy
+                # generator receives them across all entry points (IPC,
+                # disk-restore, reactor-spawned headless, ephemeral
+                # subagent, WS standalone) — not just the IPC path
+                # that historically populated ``client_config[client_id]``.
+                config_root_override=envelope.config_root,
+                env_file_override=envelope.env_file,
             )
 
         # Pre-initialize hooks fire BEFORE initialize() — gives
