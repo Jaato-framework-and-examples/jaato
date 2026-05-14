@@ -4683,7 +4683,19 @@ class SessionManager:
     def _maybe_unload_session(self, session_id: str) -> None:
         """Unload a session from memory if no clients attached.
 
-        Saves to disk first if dirty.
+        Saves to disk first if dirty.  The heavy cleanup work (save,
+        workspace monitor stop, subagent teardown, server.shutdown)
+        is deferred to a background thread because callers may
+        invoke this from the asyncio loop's IPC disconnect handler.
+        The deferred-to-thread work performs ``run_coroutine_threadsafe``
+        RPCs to the runner; if those ran on the same loop they
+        deadlock (the scheduled coro can't progress while the
+        calling task holds the loop).  Pre-2026-05-14 the chain ran
+        inline and froze the loop for ~55 s (30 s save + 10 s
+        session.shutdown + 10 s runner-rpc close + 5 s buffer)
+        per disconnect; the per-session unload error message logged
+        as ``Failed to save session ...:`` (empty ``str(exc)``) was
+        the timeout's tell.
 
         Args:
             session_id: The session to potentially unload.
@@ -4706,7 +4718,57 @@ class SessionManager:
             )
             return
 
-        # Save before unloading
+        # Defer heavy cleanup to a background thread so the asyncio
+        # loop (when this is called from an IPC disconnect handler)
+        # doesn't deadlock on ``run_coroutine_threadsafe`` RPCs to
+        # the runner.  Fire-and-forget — no caller awaits the unload
+        # completion (verified against the 3 call sites).
+        thread = threading.Thread(
+            target=self._do_session_unload,
+            args=(session_id,),
+            name=f"unload-{session_id}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _do_session_unload(self, session_id: str) -> None:
+        """Background-thread body of session unload.
+
+        Invoked by :meth:`_maybe_unload_session` after the pre-checks
+        confirm no attached clients and no active model thread.  Does
+        the actual save + plugin teardown + server.shutdown on a
+        thread distinct from the daemon's asyncio loop so the
+        ``run_coroutine_threadsafe`` RPCs to the runner can complete
+        normally.
+
+        Re-checks ``self._sessions`` under the lock — a new client
+        might have attached between the pre-check and this thread's
+        first action.  If so, abort the unload.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            # Re-check attached clients: a new client could have
+            # attached between _maybe_unload_session's check and
+            # this thread starting.
+            if session.attached_clients:
+                logger.info(
+                    "Unload of session %s aborted — a client re-attached "
+                    "while the unload thread was scheduling", session_id,
+                )
+                return
+            if session.server and session.server._model_running:
+                logger.info(
+                    "Unload of session %s aborted — model thread became "
+                    "active while the unload thread was scheduling",
+                    session_id,
+                )
+                return
+
+        # Save before unloading.  Now running on a real thread so
+        # session_get_history_threadsafe + budget snapshot RPCs work
+        # without deadlocking.
         if session.is_dirty:
             self._save_session(session)
 
@@ -4740,9 +4802,16 @@ class SessionManager:
                 session_id,
             )
 
-        # Shutdown server and remove from memory
-        session.server.shutdown()
-        del self._sessions[session_id]
+        # Shutdown server and remove from memory.
+        try:
+            session.server.shutdown()
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.exception(
+                "Unload: server.shutdown raised for session %s — "
+                "removing from sessions anyway", session_id,
+            )
+        with self._lock:
+            self._sessions.pop(session_id, None)
         logger.info(f"Unloaded session: {session_id}")
 
     # ------------------------------------------------------------------
