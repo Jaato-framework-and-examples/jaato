@@ -45,11 +45,15 @@ from server.runner_spawn import build_session_envelope
 # ----------------------------------------------------------------------
 
 
-def test_schema_version_is_2() -> None:
-    """§C bumps schema_version 1 → 2.  Old runners refuse v2 envelopes
+def test_schema_version_is_at_least_2() -> None:
+    """§C bumps schema_version 1 → 2.  Old runners refuse v≥2 envelopes
     (per ``SessionInitEnvelope.from_dict``'s ``version > known`` guard);
-    new runners accept v1 envelopes with an empty plugin_configs default."""
-    assert SESSION_ENVELOPE_VERSION == 2
+    new runners accept v1 envelopes with an empty plugin_configs default.
+
+    The assertion is monotonic — later schema bumps (v3 added model_tiers
+    on 2026-05-14) keep this contract intact, so the version-floor is
+    what we pin here rather than a hard equality."""
+    assert SESSION_ENVELOPE_VERSION >= 2
 
 
 def test_envelope_plugin_configs_round_trip() -> None:
@@ -68,7 +72,7 @@ def test_envelope_plugin_configs_round_trip() -> None:
         },
     )
     d = env.to_dict()
-    assert d["schema_version"] == 2
+    assert d["schema_version"] == SESSION_ENVELOPE_VERSION
     assert d["plugin_configs"] == {
         "permission": {"policy": {"defaultPolicy": "allow"}},
         "cli": {"max_workers": 4},

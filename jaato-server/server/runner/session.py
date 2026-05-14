@@ -809,6 +809,25 @@ def _build_session(
         k: dict(v) for k, v in envelope.plugin_configs.items()
     }
 
+    # v3 (2026-05-14): resolve per-turn model-tier config from
+    # ``envelope.model_tiers`` (carried from profile.model_tiers
+    # daemon-side).  Profile-level config wins; an absent / empty dict
+    # falls through to the env-var path (``JAATO_TIER_*``).  A failed
+    # resolve degrades to single-model mode with a warning rather than
+    # aborting the runner — operators get an enter_tier-less session
+    # instead of a hard bootstrap failure.
+    tier_config = None
+    try:
+        from shared.model_tiers import ModelTierConfig
+        tier_config = ModelTierConfig.resolve(
+            profile_model_tiers=envelope.model_tiers or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "runner-session bootstrap: tier config rejected "
+            "(falling back to single-model mode): %s", exc,
+        )
+
     return runtime.create_session(
         model=envelope.model_name,
         tools=tool_names or None,
@@ -821,6 +840,7 @@ def _build_session(
         completion_artifacts=(
             envelope.completion_artifacts or None
         ),
+        tier_config=tier_config,
         # Thread the envelope's resolved agent_id into the runner-
         # side JaatoSession so AgentCompletedEvent.agent_id carries
         # the daemon's ``--agent <name>`` resolution (the envelope

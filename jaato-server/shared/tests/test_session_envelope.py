@@ -80,6 +80,51 @@ def test_full_envelope_round_trip() -> None:
     assert back == e
 
 
+def test_envelope_carries_model_tiers() -> None:
+    """v3 (2026-05-14): ``model_tiers`` must round-trip so the runner
+    can resolve ``ModelTierConfig`` and register the ``enter_tier``
+    lifecycle tool.  Before v3 the field didn't exist on the envelope
+    and ``profile.model_tiers`` never reached the runner, suppressing
+    tier mode for every pool-served session."""
+    tiers = {
+        "planner": "glm-5",
+        "dispatcher": "glm-5-turbo",
+        "executor": "glm-4.7-flash",
+        "initial": "dispatcher",
+        "fallback": "dispatcher",
+    }
+    e = SessionInitEnvelope(
+        session_id="sess-tiers",
+        workspace_path="/tmp/ws",
+        profile_name="tier-test",
+        provider_name="zhipuai",
+        model_name="glm-5-turbo",
+        model_tiers=tiers,
+    )
+    d = e.to_dict()
+    assert d["model_tiers"] == tiers
+    back = SessionInitEnvelope.from_dict(d)
+    assert back == e
+    assert back.model_tiers == tiers
+
+
+def test_envelope_model_tiers_defaults_none() -> None:
+    """Single-model sessions leave ``model_tiers=None``; absence in
+    the wire dict round-trips as ``None`` (not ``{}``) so the runner's
+    ``ModelTierConfig.resolve`` short-circuits cleanly."""
+    e = SessionInitEnvelope(
+        session_id="s",
+        workspace_path=None,
+        profile_name=None,
+        provider_name="anthropic",
+        model_name="m",
+    )
+    d = e.to_dict()
+    assert d["model_tiers"] is None
+    back = SessionInitEnvelope.from_dict(d)
+    assert back.model_tiers is None
+
+
 def test_envelope_jsonable() -> None:
     """``to_dict`` produces a JSON-serializable structure (no
     callables, datetimes, etc.).  Phase 3 §3.3a explicitly requires
