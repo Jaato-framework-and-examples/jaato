@@ -1121,6 +1121,184 @@ class TestExtensionFragmentTierDiscovery:
         )
 
 
+class TestApparmorFragmentsPerProfileScoping:
+    """Piece 1 (2026-05-14): per-profile fragment scoping via the
+    ``requested_fragments`` kwarg on ``_render_profile``.
+
+    ``None`` keeps the pre-Piece-1 "compose all" behaviour.
+    Non-None lists filter to a subset of the discovered fragments.
+    Closes the cascade least-privilege footgun documented in
+    ``project_backlog_per_profile_apparmor_fragments``.
+    """
+
+    def _patch_user_tier_to_tmp(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        return tmp_path / ".jaato" / "apparmor-fragments"
+
+    def _make_workspace(
+        self, tmp_path, ws_fragments=None, cache_fragments=None,
+    ):
+        """Build a workspace with optional workspace-tier and
+        cache-tier fragments.
+
+        Args:
+            ws_fragments: ``{basename: body}`` for
+                ``<workspace>/.jaato/apparmor-fragments/``.
+            cache_fragments: ``{basename: body}`` for
+                ``<workspace>/.jaato/.cache/apparmor-fragments/``.
+
+        Returns the workspace Path.
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(exist_ok=True)
+        if ws_fragments:
+            ws_dir = workspace / ".jaato" / "apparmor-fragments"
+            ws_dir.mkdir(parents=True, exist_ok=True)
+            for name, body in ws_fragments.items():
+                (ws_dir / f"{name}.rules").write_text(body)
+        if cache_fragments:
+            cache_dir = workspace / ".jaato" / ".cache" / "apparmor-fragments"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            for name, body in cache_fragments.items():
+                (cache_dir / f"{name}.rules").write_text(body)
+        return workspace
+
+    def test_none_composes_all_fragments_back_compat(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """``requested_fragments=None`` (default) keeps the
+        pre-Piece-1 behaviour: every fragment found is composed."""
+        self._patch_user_tier_to_tmp(monkeypatch, tmp_path)
+        workspace = self._make_workspace(tmp_path, ws_fragments={
+            "host_validator": "/usr/bin/mvn ix,\n",
+            "kb-fixtures": "/repo/fixtures/** r,\n",
+        })
+
+        rendered = manager._render_profile("sess1", str(workspace))
+
+        assert "# === workspace/host_validator.rules ===" in rendered
+        assert "# === workspace/kb-fixtures.rules ===" in rendered
+
+    def test_empty_list_composes_no_fragments_maximally_locked_down(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """``requested_fragments=[]`` is distinct from ``None``:
+        composes NO fragments even when the search path has
+        them.  Maximally locked-down cascade stage."""
+        self._patch_user_tier_to_tmp(monkeypatch, tmp_path)
+        workspace = self._make_workspace(tmp_path, ws_fragments={
+            "host_validator": "/usr/bin/mvn ix,\n",
+            "kb-fixtures": "/repo/fixtures/** r,\n",
+        })
+
+        rendered = manager._render_profile(
+            "sess1", str(workspace), requested_fragments=[],
+        )
+
+        assert "# === workspace/host_validator.rules ===" not in rendered
+        assert "# === workspace/kb-fixtures.rules ===" not in rendered
+        assert "(no extension fragments)" in rendered
+
+    def test_filter_includes_only_listed_by_basename(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """``requested_fragments=["host_validator"]`` includes only
+        that fragment by basename match; the kb-fixtures sibling
+        is excluded."""
+        self._patch_user_tier_to_tmp(monkeypatch, tmp_path)
+        workspace = self._make_workspace(tmp_path, ws_fragments={
+            "host_validator": "/usr/bin/mvn ix,\n",
+            "kb-fixtures": "/repo/fixtures/** r,\n",
+        })
+
+        rendered = manager._render_profile(
+            "sess1", str(workspace),
+            requested_fragments=["host_validator"],
+        )
+
+        assert "# === workspace/host_validator.rules ===" in rendered
+        assert "/usr/bin/mvn ix," in rendered
+        assert "# === workspace/kb-fixtures.rules ===" not in rendered
+
+    def test_cache_tier_wins_over_workspace_tier_on_collision(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """Walker-generated cache fragment shadows the
+        hand-authored workspace one when basenames collide.  This
+        is the Piece-2 hand-off contract: walker writes to
+        ``.jaato/.cache/apparmor-fragments/`` and that file is
+        what the framework composes."""
+        self._patch_user_tier_to_tmp(monkeypatch, tmp_path)
+        workspace = self._make_workspace(
+            tmp_path,
+            ws_fragments={
+                "host_validator": "# stub from repo\n/usr/bin/echo ix,\n",
+            },
+            cache_fragments={
+                "host_validator": "# walker-generated for java-spring stack\n/usr/bin/mvn ix,\n",
+            },
+        )
+
+        rendered = manager._render_profile(
+            "sess1", str(workspace),
+            requested_fragments=["host_validator"],
+        )
+
+        # Cache content present, workspace stub overridden out.
+        assert "/usr/bin/mvn ix," in rendered
+        assert "/usr/bin/echo ix," not in rendered
+        # Provenance comment tracks the WINNING tier (cache).
+        assert "# === cache/host_validator.rules ===" in rendered
+        assert "# === workspace/host_validator.rules ===" not in rendered
+
+    def test_unknown_fragment_name_logs_warning_no_abort(
+        self, manager, tmp_path, monkeypatch, caplog,
+    ):
+        """Profile declares ``apparmor_fragments`` with a name that
+        doesn't exist on disk → log WARNING but continue.  Operator
+        may have removed the fragment after authoring the profile;
+        rendering shouldn't fail loudly."""
+        self._patch_user_tier_to_tmp(monkeypatch, tmp_path)
+        workspace = self._make_workspace(tmp_path, ws_fragments={
+            "host_validator": "/usr/bin/mvn ix,\n",
+        })
+
+        with caplog.at_level("WARNING", logger="server.apparmor"):
+            rendered = manager._render_profile(
+                "sess1", str(workspace),
+                requested_fragments=["host_validator", "missing_one"],
+            )
+
+        # Known fragment is composed; missing is silently dropped.
+        assert "# === workspace/host_validator.rules ===" in rendered
+        # Warning mentions the missing name.
+        assert any(
+            "missing_one" in record.message for record in caplog.records
+        ), "operator should see a warning naming the missing fragment"
+
+    def test_cache_only_fragment_composed_when_listed(
+        self, manager, tmp_path, monkeypatch,
+    ):
+        """A fragment that exists ONLY in the cache tier (the
+        normal Piece-2 case — walker auto-generated, no
+        hand-authored sibling) composes when listed in
+        ``requested_fragments``."""
+        self._patch_user_tier_to_tmp(monkeypatch, tmp_path)
+        workspace = self._make_workspace(
+            tmp_path, cache_fragments={
+                "host_validator": "/usr/bin/mvn ix,\n",
+            },
+        )
+
+        rendered = manager._render_profile(
+            "sess1", str(workspace),
+            requested_fragments=["host_validator"],
+        )
+
+        assert "# === cache/host_validator.rules ===" in rendered
+        assert "/usr/bin/mvn ix," in rendered
+
+
 class TestProfileTemplateIncludesRefsDir:
     """The base profile must reference the per-session refs.d directory
     via ``include if exists`` so add_reference_fragment() can splice

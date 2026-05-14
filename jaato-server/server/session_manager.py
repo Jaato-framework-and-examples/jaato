@@ -576,6 +576,7 @@ class SessionManager:
         apparmor_override: Optional[bool] = None,
         config_root_override: Optional[str] = None,
         env_file_override: Optional[str] = None,
+        apparmor_fragments_override: Optional[List[str]] = None,
     ) -> Optional[str]:
         """Provision IPC AppArmor (opt-in) + spawn the per-session runner.
 
@@ -672,6 +673,19 @@ class SessionManager:
         else:
             env_file = client_config.get("env_file")
 
+        # Piece 1 (2026-05-14): per-profile apparmor fragment scoping.
+        # Resolution: explicit kwarg override wins; otherwise read
+        # from the resolved profile's ``apparmor_fragments`` field
+        # (already inheritance-merged with child-replaces semantics
+        # at profile-load time).  ``None`` (default) preserves the
+        # pre-Piece-1 "compose all fragments" behaviour;
+        # non-``None`` (including ``[]``) restricts the compose set.
+        if apparmor_fragments_override is not None:
+            requested_fragments: Optional[List[str]] = list(apparmor_fragments_override)
+        else:
+            profile_fragments = getattr(profile, "apparmor_fragments", None) if profile else None
+            requested_fragments = list(profile_fragments) if profile_fragments is not None else None
+
         # Spawn requires a workspace (cwd target).  Sessions without
         # one don't get a runner; pre-§7a behavior preserved.
         if not workspace_path:
@@ -705,6 +719,7 @@ class SessionManager:
                 client_id=client_id,
                 config_root=config_root,
                 env_file=env_file,
+                requested_fragments=requested_fragments,
             )
             if profile_name == "" and sandbox_mode == "soft":
                 # Apparmor unavailable / provisioning failed.
@@ -811,6 +826,7 @@ class SessionManager:
         *,
         config_root: Optional[str],
         env_file: Optional[str],
+        requested_fragments: Optional[List[str]] = None,
     ) -> "Tuple[str, Optional[str]]":
         """Provision the AppArmor profile for a session
         (Phase 3 §7a — opt-in only).
@@ -864,6 +880,7 @@ class SessionManager:
             workspace_path,
             config_root=config_root,
             env_file=env_file,
+            requested_fragments=requested_fragments,
         ):
             self._notify_apparmor(
                 client_id, session_id,

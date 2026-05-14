@@ -765,6 +765,46 @@ class SubagentProfile:
     #   3. Legacy unconfined default (``False`` until PR-B).
     apparmor: bool = False
 
+    # Per-profile AppArmor fragment scoping (Piece 1, 2026-05-14).
+    #
+    # When set, the per-session AppArmor policy composes only the
+    # fragments whose basename (without ``.rules``) matches an entry
+    # in this list, looked up in the fragment search path (user-tier
+    # ``~/.jaato/apparmor-fragments/``, workspace-tier
+    # ``<workspace>/.jaato/apparmor-fragments/``, and the
+    # walker-generated cache layer
+    # ``<workspace>/.jaato/.cache/apparmor-fragments/`` with cache
+    # taking precedence on basename collision).
+    #
+    # ``None`` (default, absent) — back-compat: the profile composes
+    # ALL fragments from the search path, just like pre-Piece-1
+    # behaviour.  This is the right default for workspaces with no
+    # cascade intent.
+    #
+    # ``[]`` (explicit empty list) — distinct from ``None``: the
+    # profile composes NO fragments.  Maximally locked-down stage in
+    # a cascade.
+    #
+    # Non-empty list — compose ONLY the listed fragments.  Unknown
+    # fragment names log WARNING but don't abort (operator may have
+    # removed the fragment after authoring the profile).
+    #
+    # **Inheritance semantics — child REPLACES parent.**  When the
+    # field is declared (not None) on the child, the child's value
+    # wins.  When the child doesn't declare it, the resolved value
+    # comes from the nearest parent in the ``inherits:`` chain.
+    # Replace (not union) lets cascade authors SCOPE DOWN from a
+    # parent's broader set — necessary for least-privilege, since
+    # union would only let children ADD permissions, never remove.
+    # Matches the ``model`` field's child-wins rationale (vs
+    # ``plugins`` which is union).
+    #
+    # See ``project_backlog_per_profile_apparmor_fragments`` for the
+    # design ask + the cascade footgun this closes (workspace-tier
+    # fragments bleeding binary-exec across all cascade stages when
+    # only one stage should have it).
+    apparmor_fragments: Optional[List[str]] = None
+
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
     """Normalize the ``inherits`` field to a list of strings or None.
@@ -779,6 +819,55 @@ def _normalize_inherits(value: Any) -> Optional[List[str]]:
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return None
+
+
+def _normalize_apparmor_fragments(value: Any) -> Optional[List[str]]:
+    """Coerce ``apparmor_fragments`` field value into the canonical shape.
+
+    Distinguishes three input states (Piece 1, 2026-05-14):
+
+    - **Absent** (``value is None`` — key not in the dict) → returns
+      ``None``.  The profile inherits the workspace-default
+      "compose all fragments" behaviour.  Back-compat for every
+      pre-Piece-1 profile.
+    - **Explicit empty list** (``value == []``) → returns ``[]``.
+      The profile composes NO fragments — maximally locked-down
+      stage in a cascade.  Distinct from absent (the field IS
+      declared, just empty).
+    - **Non-empty list of strings** → returns the same list with
+      entries coerced to ``str``.  These fragment basenames will
+      be looked up at policy-render time.
+
+    Anything else (non-list value, list of non-strings) is rejected
+    by raising :class:`ValueError`.  Quiet coercion would mask
+    operator typos in the YAML/JSON.
+
+    Args:
+        value: Raw value pulled from ``data.get('apparmor_fragments')``.
+
+    Returns:
+        ``None``, ``[]``, or ``List[str]`` per the rules above.
+
+    Raises:
+        ValueError: If ``value`` is non-None but isn't a list of
+            strings.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(
+            f"apparmor_fragments must be a list of strings, "
+            f"got {type(value).__name__}: {value!r}"
+        )
+    normalised: List[str] = []
+    for i, entry in enumerate(value):
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"apparmor_fragments[{i}] must be a non-empty string, "
+                f"got {type(entry).__name__}: {entry!r}"
+            )
+        normalised.append(entry.strip())
+    return normalised
 
 
 def _parse_completion_artifacts(value: Any) -> List[CompletionArtifact]:
@@ -940,6 +1029,12 @@ def build_inline_profile(
         runtime_limits=runtime_limits,
         model_tiers=model_tiers,
         apparmor=bool(data.get('apparmor', False)),
+        # Use ``data.get('apparmor_fragments')`` (returns None when
+        # absent) rather than ``data.get(..., default)`` — None
+        # signals "absent / inherit workspace default", which is
+        # semantically distinct from explicit ``[]`` (compose no
+        # fragments).  See :func:`_normalize_apparmor_fragments`.
+        apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
     )
 
 
@@ -1236,6 +1331,34 @@ def _merge_profiles(
         getattr(p, 'apparmor', False) for p in parents
     ) or getattr(child, 'apparmor', False)
 
+    # ``apparmor_fragments`` follows CHILD-REPLACES-PARENT semantics
+    # (Piece 1, 2026-05-14).  Distinct from ``apparmor`` above:
+    #
+    # - ``apparmor`` is a bool, OR-merged so children can't silently
+    #   downgrade a confined parent.
+    # - ``apparmor_fragments`` is a list expressing WHICH fragments
+    #   the profile wants.  Replace lets cascade authors SCOPE DOWN
+    #   from a broader parent set — necessary for least-privilege,
+    #   since union would only let children ADD permissions, never
+    #   remove.  Matches ``model`` field's child-wins rationale.
+    #
+    # Resolution: walk the inheritance chain in order child → parents.
+    # The first profile that declares the field (i.e. has a non-None
+    # value) wins.  ``None`` everywhere → resolved value is ``None``
+    # (workspace-default "compose all fragments" applies at render
+    # time).  See ``project_backlog_per_profile_apparmor_fragments``
+    # for the cascade footgun this design closes.
+    merged_apparmor_fragments: Optional[List[str]] = None
+    child_fragments = getattr(child, 'apparmor_fragments', None)
+    if child_fragments is not None:
+        merged_apparmor_fragments = list(child_fragments)
+    else:
+        for p in parents:
+            parent_fragments = getattr(p, 'apparmor_fragments', None)
+            if parent_fragments is not None:
+                merged_apparmor_fragments = list(parent_fragments)
+                break
+
     return SubagentProfile(
         name=child.name,
         description=child.description,
@@ -1255,6 +1378,7 @@ def _merge_profiles(
         completion_artifacts=merged_completion_artifacts,
         runtime_limits=merged_runtime_limits,
         apparmor=merged_apparmor,
+        apparmor_fragments=merged_apparmor_fragments,
     )
 
 
@@ -1411,6 +1535,7 @@ def _scan_profiles_dir(
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
+            apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
         )
         if data.get('system_instructions'):
             import warnings
@@ -1632,6 +1757,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
+            apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -1892,6 +2018,7 @@ class SubagentConfig:
                 runtime_limits=runtime_limits,
                 model_tiers=model_tiers,
                 apparmor=bool(profile_data.get('apparmor', False)),
+                apparmor_fragments=_normalize_apparmor_fragments(profile_data.get('apparmor_fragments')),
             )
 
         return cls(

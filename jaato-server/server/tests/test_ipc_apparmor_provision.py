@@ -63,12 +63,14 @@ class _FakeAppArmorManager:
         workspace_path: str,
         config_root: Optional[str] = None,
         env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
     ) -> bool:
         self.provision_calls.append({
             "session_id": session_id,
             "workspace_path": workspace_path,
             "config_root": config_root,
             "env_file": env_file,
+            "requested_fragments": requested_fragments,
         })
         return self.provision_outcome
 
@@ -545,6 +547,7 @@ class TestConfigRootEnvelopeUnification:
             "workspace_path": str(tmp_path),
             "config_root": "/srv/operator/.jaato",
             "env_file": "/srv/operator/.env",
+            "requested_fragments": None,
         }]
 
     def test_envelope_override_wins_over_client_config(
@@ -618,3 +621,110 @@ class TestConfigRootEnvelopeUnification:
         provision_calls = _FakeAppArmorManager.instances[0].provision_calls
         assert provision_calls[0]["config_root"] is None
         assert provision_calls[0]["env_file"] is None
+
+
+def _profile_stub_with_fragments(
+    apparmor: bool, apparmor_fragments: Any,
+) -> Any:
+    """Profile stand-in carrying both fields (Piece 1 wiring)."""
+    return type("_FakeProfileWithFragments", (), {
+        "apparmor": apparmor,
+        "apparmor_fragments": apparmor_fragments,
+    })()
+
+
+class TestApparmorFragmentsEnvelopeThreading:
+    """Piece 1 (2026-05-14): ``profile.apparmor_fragments`` reaches
+    ``apparmor.provision_profile(requested_fragments=...)`` end-to-end
+    through the spawn helper.
+    """
+
+    def test_profile_fragments_reach_provision_profile(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Profile declares ``apparmor_fragments=['host_validator']``;
+        spawn helper threads that into the policy generator."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+        profile = _profile_stub_with_fragments(
+            apparmor=True, apparmor_fragments=["host_validator"],
+        )
+
+        sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(profile),
+            session_id="s-fragments",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+        )
+        provision_calls = _FakeAppArmorManager.instances[0].provision_calls
+        assert provision_calls[0]["requested_fragments"] == ["host_validator"]
+
+    def test_profile_empty_fragments_reach_provision_profile(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Profile declares explicit ``apparmor_fragments=[]`` (the
+        maximally locked-down stage); empty list (not None) reaches
+        the policy generator."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+        profile = _profile_stub_with_fragments(
+            apparmor=True, apparmor_fragments=[],
+        )
+
+        sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(profile),
+            session_id="s-locked-down",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+        )
+        provision_calls = _FakeAppArmorManager.instances[0].provision_calls
+        # Empty list, not None — distinguishes from absent.
+        assert provision_calls[0]["requested_fragments"] == []
+
+    def test_profile_none_fragments_keeps_back_compat(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """Profile leaves ``apparmor_fragments`` absent (resolves to
+        None on the dataclass); spawn helper passes None →
+        provision_profile composes all fragments (back-compat)."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+        profile = _profile_stub_with_fragments(
+            apparmor=True, apparmor_fragments=None,
+        )
+
+        sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(profile),
+            session_id="s-default",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+        )
+        provision_calls = _FakeAppArmorManager.instances[0].provision_calls
+        assert provision_calls[0]["requested_fragments"] is None
+
+    def test_kwarg_override_wins_over_profile_field(
+        self, fake_session_manager, tmp_path,
+    ) -> None:
+        """``apparmor_fragments_override`` kwarg on the spawn helper
+        wins over the profile's field — same precedence pattern as
+        the other override kwargs (apparmor / config_root / env_file)."""
+        sm = fake_session_manager
+        sm._client_config["c-1"] = {}
+        sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+        profile = _profile_stub_with_fragments(
+            apparmor=True, apparmor_fragments=["host_validator"],
+        )
+
+        sm._provision_ipc_apparmor_and_spawn_runner(
+            server=_server_with_profile(profile),
+            session_id="s-kwarg-override",
+            workspace_path=str(tmp_path),
+            client_id="c-1",
+            apparmor_fragments_override=["from-kwarg"],
+        )
+        provision_calls = _FakeAppArmorManager.instances[0].provision_calls
+        # Override wins; profile's value is shadowed.
+        assert provision_calls[0]["requested_fragments"] == ["from-kwarg"]
