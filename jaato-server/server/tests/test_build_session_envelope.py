@@ -70,9 +70,17 @@ def _stub_profile(**overrides: Any) -> Any:
 # ----------------------------------------------------------------------
 
 
-def test_no_profile_uses_provider_default() -> None:
-    """When the server has no resolved profile, the envelope falls
-    back to the framework's default provider (``anthropic``)."""
+def test_no_profile_no_env_leaves_provider_empty() -> None:
+    """PR 101: when the server has no resolved profile AND no
+    session_env (workspace .env), the envelope's provider_name +
+    model_name stay empty.  Pre-PR-101 there was a hardcoded
+    ``"anthropic"`` provider fallback that papered over the
+    configuration gap; PR 101 removed it per the user's standing
+    rule against hardcoded fallbacks (global CLAUDE.md).
+
+    The runner-side ``_validate_envelope`` raises
+    ``BootstrapError(stage="validate")`` for empty model_name —
+    loud failure beats silent guess."""
     server = _stub_server(profile=None)
     env = _build_session_envelope(
         server=server,
@@ -80,7 +88,7 @@ def test_no_profile_uses_provider_default() -> None:
         workspace_path="/tmp/ws",
         profile_name="auto",
     )
-    assert env.provider_name == "anthropic"
+    assert env.provider_name == ""
     assert env.model_name == ""  # validate stage will reject this loudly
     assert env.plugins == []
     assert env.system_instructions is None
@@ -132,9 +140,14 @@ def test_profile_provider_and_model_pass_through() -> None:
     assert env.model_name == "anthropic/claude-3.5"
 
 
-def test_profile_provider_empty_falls_back_to_anthropic() -> None:
-    """An explicit empty/None ``provider`` on the profile triggers
-    the default fallback."""
+def test_profile_provider_empty_stays_empty_post_pr101() -> None:
+    """PR 101: profile with ``provider=None`` no longer triggers a
+    hardcoded ``"anthropic"`` fallback.  The envelope's provider_name
+    stays empty (or picks up from session_env JAATO_PROVIDER if
+    workspace .env supplied one — covered by
+    ``test_build_session_envelope_profileless_fallback.py``).  Pre-
+    PR-101 the silent default could mask Vertex / OpenRouter / etc.
+    sessions slipping through with wrong provider."""
     profile = _stub_profile(provider=None, model="claude-3.5")
     env = _build_session_envelope(
         server=_stub_server(profile=profile),
@@ -142,7 +155,7 @@ def test_profile_provider_empty_falls_back_to_anthropic() -> None:
         workspace_path="/tmp/ws",
         profile_name="cli_test",
     )
-    assert env.provider_name == "anthropic"
+    assert env.provider_name == ""
 
 
 def test_profile_system_instructions_pass_through() -> None:
