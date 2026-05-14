@@ -410,3 +410,115 @@ def test_configure_runtime_plugins_source_uses_runner_tier_filter() -> None:
         "into the runner-side registry — correctness violation per "
         "§3.3.5."
     )
+
+
+# ----------------------------------------------------------------------
+# Bootstrap timing instrumentation (2026-05-14)
+# ----------------------------------------------------------------------
+
+
+def test_configure_runtime_plugins_silent_when_timing_env_unset(
+    monkeypatch, caplog,
+) -> None:
+    """Default (env var unset / falsy): no "bootstrap timing report"
+    INFO line; only a DEBUG-level completion line.  Mirrors
+    daemon-side gating in ``server/core.py:2243-2245`` — operators
+    who don't opt in shouldn't see the verbose report.
+    """
+    monkeypatch.delenv("JAATO_BOOTSTRAP_TIMING", raising=False)
+    stub = _StubRuntime()
+
+    with caplog.at_level("DEBUG", logger="server.runner.session"):
+        _configure_runtime_plugins(stub, _envelope())
+
+    info_records = [
+        r for r in caplog.records
+        if r.levelname == "INFO"
+        and "bootstrap timing report" in r.message.lower()
+    ]
+    assert not info_records, (
+        "JAATO_BOOTSTRAP_TIMING unset → no INFO-level timing "
+        "report; got: " + repr([r.message for r in info_records])
+    )
+    # DEBUG-level completion line still emits.
+    debug_records = [
+        r for r in caplog.records
+        if r.levelname == "DEBUG"
+        and "runner-side bootstrap completed" in r.message.lower()
+    ]
+    assert debug_records, (
+        "Even when timing is off, a DEBUG line should record total "
+        "time for opportunistic observability."
+    )
+
+
+def test_configure_runtime_plugins_emits_report_when_timing_enabled(
+    monkeypatch, caplog,
+) -> None:
+    """``JAATO_BOOTSTRAP_TIMING=true`` → INFO-level
+    ``Runner-side bootstrap timing report`` with the BOOTSTRAP
+    TIMING REPORT header and the PER-PLUGIN BREAKDOWN section.
+    Mirrors the daemon-side report shape so operators see the same
+    structure across both halves of bootstrap.
+    """
+    monkeypatch.setenv("JAATO_BOOTSTRAP_TIMING", "true")
+    stub = _StubRuntime()
+
+    with caplog.at_level("INFO", logger="server.runner.session"):
+        _configure_runtime_plugins(stub, _envelope())
+
+    matching = [
+        r for r in caplog.records
+        if "runner-side bootstrap timing report" in r.message.lower()
+    ]
+    assert matching, (
+        "Expected INFO-level 'Runner-side bootstrap timing report' "
+        "line when JAATO_BOOTSTRAP_TIMING=true; got: "
+        + repr([r.message for r in caplog.records])
+    )
+    report = matching[0].message
+    # The shared BootstrapTimer emits a "BOOTSTRAP TIMING REPORT"
+    # header — same shape as daemon-side.
+    assert "BOOTSTRAP TIMING REPORT" in report
+    # Per-plugin breakdown section is present (registry.get_bootstrap_timings
+    # tracking is wired in).
+    assert "PER-PLUGIN BREAKDOWN" in report
+    # The four named stages should all appear.
+    for stage in ("discover", "expose_all", "set_workspace_path",
+                  "permission_init", "configure_plugins"):
+        assert stage in report, (
+            f"stage {stage!r} missing from runner-side timing report"
+        )
+
+
+def test_configure_runtime_plugins_timing_env_truthy_variants(
+    monkeypatch, caplog,
+) -> None:
+    """The env-var gate accepts ``1`` / ``true`` / ``yes`` (case-
+    insensitive), matching the daemon-side check.  Other strings
+    are treated as off.  Pin the contract so future restorers
+    don't accidentally narrow it."""
+    cases = [("1", True), ("true", True), ("TRUE", True), ("yes", True),
+             ("YES", True), ("0", False), ("false", False), ("", False)]
+    for value, expected_on in cases:
+        caplog.clear()
+        monkeypatch.setenv("JAATO_BOOTSTRAP_TIMING", value)
+        stub = _StubRuntime()
+        with caplog.at_level("INFO", logger="server.runner.session"):
+            _configure_runtime_plugins(stub, _envelope())
+
+        matching = [
+            r for r in caplog.records
+            if "runner-side bootstrap timing report" in r.message.lower()
+        ]
+        if expected_on:
+            assert matching, (
+                f"JAATO_BOOTSTRAP_TIMING={value!r} should enable "
+                f"the timing report"
+            )
+        else:
+            assert not matching, (
+                f"JAATO_BOOTSTRAP_TIMING={value!r} should NOT "
+                f"enable the timing report; got: "
+                f"{[r.message for r in matching]}"
+            )
