@@ -230,11 +230,48 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         return GCPolicy.EPHEMERAL
 
     def get_system_instructions(self) -> Optional[str]:
-        """Return system instructions for the introspection plugin."""
+        """Return system instructions for the introspection plugin.
+
+        2026-05-15 fix: reframe the explore-tools guidance from
+        unconditional (``"ALWAYS explore"``) to conditional
+        (``"WHEN REQUIRED, explore"``).
+
+        **Why the wording change matters.**  The prior text was an
+        absolute imperative.  Personas that need to scope the
+        agent to a narrow tool set (e.g. a typed-completion stage
+        that says "only call signal_completion; do not call
+        list_tools / get_tool_schemas") had to FIGHT the framework
+        instruction.  Same model, same persona, two contradictory
+        directives — the model has to weigh them, and the
+        framework's strong "ALWAYS" word often won.
+
+        Reframed as conditional ("WHEN REQUIRED"), the framework
+        instruction becomes a fallback for unclear cases: explore
+        WHEN your current information is insufficient.  The
+        persona's explicit "your only tool is X" statement
+        satisfies the qualifier — exploration isn't required, the
+        agent doesn't explore.  Both instructions coexist without
+        contradiction.
+
+        See ``feedback_kernel_scoping_beats_persona_prose``:
+        framework-level guidance should not unconditionally
+        contradict session-level contracts.  Personas already
+        narrow the tool surface via the persona text; the
+        framework just needs to not override that.
+
+        Profiles that want NO framework prompt at all retain the
+        ``suppress_base_instructions: true`` flag — the
+        documented escape hatch.  This change is for the typical
+        case where the persona is the authority on tool scoping
+        and the framework defers.
+        """
         return (
             "You have a DYNAMIC tool system with discoverable capabilities.\n\n"
-            "CRITICAL: Before saying 'I cannot do X', ALWAYS explore available tools first!\n\n"
-            "TOOL DISCOVERY WORKFLOW:\n"
+            "CAPABILITY DISCOVERY:\n"
+            "When your current information is insufficient to act, explore "
+            "available tools before concluding 'I cannot do X'.  Skip discovery "
+            "when the persona has already named the tool(s) to call.\n\n"
+            "TOOL DISCOVERY WORKFLOW (when required):\n"
             "1. `list_tools()` - See all categories with IDs and tool counts\n"
             "2. `list_tools(category_id='...')` - See tools in a specific category\n"
             "3. `get_tool_schemas(tool_ids=[...])` - Get full schemas for tools you need\n"
