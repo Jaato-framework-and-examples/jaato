@@ -255,30 +255,32 @@ def _configure_runtime_plugins(
             existing = plugin_configs.get(name, {})
             plugin_configs[name] = {**existing, **dict(cfg)}
 
-    # Step 4: expose_all — initializes each plugin requested by the
-    # session.  No on_progress callback runner-side.
+    # Step 4: expose_all — initializes each plugin.  No on_progress
+    # callback runner-side.  Initializes ALL discovered runner-tier
+    # plugins; tool exposure to the model is gated separately at the
+    # ``runtime.create_session(tools=...)`` layer.
     #
-    # 2026-05-15: gate ``initialize()`` on ``envelope.plugins``.
-    # Pre-fix, ``expose_all`` initialized ALL discovered runner-tier
-    # plugins regardless of profile.plugins — the heavyweight
-    # ``references`` plugin paid ~7.6s of SentenceTransformer model
-    # load on every session even when references wasn't in
-    # profile.plugins.  Post-fix, the registry skips initialize() for
-    # plugins not in the requested set (the registry's
-    # ``_ALWAYS_INITIALIZE_PLUGINS`` + enrichment-only plugins are
-    # always included regardless).  ``tools=`` on
-    # ``runtime.create_session`` was already the inclusion gate at
-    # the tool-exposure layer; this aligns init with that gate.
-    requested_plugin_names: List[str] = [
-        entry["name"]
-        for entry in envelope.plugins
-        if isinstance(entry, dict) and entry.get("name")
-    ]
+    # **PR-112 / option C disabled at the call site (2026-05-15).**
+    # PR-112 introduced ``requested_plugins=`` gating on this call
+    # so plugins not in ``profile.plugins`` would skip
+    # ``initialize()`` (saving ~7.6s of references-plugin
+    # SentenceTransformer model load for sessions that don't use
+    # references).  The gating broke peer's cascade in a way we
+    # couldn't fully diagnose within the available debug budget:
+    # discovery agent received the correct tool list (including
+    # ``signal_completion`` with its typed payload schema) but
+    # consistently produced prose-only responses for three turns,
+    # never invoking any function call.  Two interventions
+    # (PR-113's introspection-guidance reword and a controlled
+    # script that reproduced the working tool list) both
+    # falsified the working hypotheses.  Rolling back the gate
+    # restores the full plugin init set so peer's cascade
+    # unblocks; registry-side framework support
+    # (:meth:`PluginRegistry.expose_all`'s ``requested_plugins``
+    # kwarg) stays in place so option C can be re-enabled once
+    # the actual failure mode is understood.
     with timer.stage("expose_all"):
-        registry.expose_all(
-            plugin_configs,
-            requested_plugins=requested_plugin_names or None,
-        )
+        registry.expose_all(plugin_configs)
 
     # Step 5 (`self.todo_plugin = ...`): N/A runner-side — no
     # runner-resident code path needs the cached reference.
