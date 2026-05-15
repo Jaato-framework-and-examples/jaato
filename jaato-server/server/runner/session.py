@@ -174,17 +174,35 @@ def _configure_runtime_plugins(
        ``plugin_configs["permission"]`` overrides aren't currently in
        the envelope (filed: backlog §3.3c.X).
 
+    Bootstrap timing (2026-05-14): wraps every step with a sibling
+    :class:`BootstrapTimer` instance.  When
+    ``JAATO_BOOTSTRAP_TIMING=true`` is set in the runner subprocess'
+    environment (inherited from the daemon's launch env via fork
+    from the template), the per-stage + per-plugin breakdown lands
+    in the runner-side log.  Closes the gap documented in
+    ``project_backlog_runner_side_bootstrap_timer``: the daemon-side
+    timer in ``server/core.py`` measures only the ~2.3s of
+    ``JaatoServer.initialize()``; the ~10.4s of runner-tier plugin
+    configure happens in this function and was previously unmeasured.
+
     Raises:
         Any exception from registry discovery, plugin
         initialization, or ``configure_plugins`` propagates to the
         caller, which wraps it as ``BootstrapError("plugins", ...)``.
     """
+    from shared.bootstrap_timing import BootstrapTimer
     from shared.plugins.permission.plugin import PermissionPlugin
     from shared.plugins.registry import PluginRegistry
 
+    timer = BootstrapTimer()
+    timing_enabled = os.environ.get(
+        "JAATO_BOOTSTRAP_TIMING", "",
+    ).lower() in ("1", "true", "yes")
+
     # Step 1-2: construct + discover (runner-tier only).
-    registry = PluginRegistry(model_name=envelope.model_name)
-    registry.discover(tier_filter="runner")
+    with timer.stage("discover"):
+        registry = PluginRegistry(model_name=envelope.model_name)
+        registry.discover(tier_filter="runner")
 
     # Step 3: assemble plugin_configs.  Defaults mirror daemon-side
     # `core.py:1621-1675` for the 6 runner-tier entries.  Auth plugin
@@ -238,17 +256,22 @@ def _configure_runtime_plugins(
             plugin_configs[name] = {**existing, **dict(cfg)}
 
     # Step 4: expose_all — initializes each plugin.  No on_progress
-    # callback runner-side.
-    registry.expose_all(plugin_configs)
+    # callback runner-side.  This is the bulk of bootstrap time
+    # (~10s for 28 runner-tier plugins, per 0.6.91 measurement) —
+    # per-plugin breakdown lands in the report below when
+    # JAATO_BOOTSTRAP_TIMING is set.
+    with timer.stage("expose_all"):
+        registry.expose_all(plugin_configs)
 
     # Step 5 (`self.todo_plugin = ...`): N/A runner-side — no
     # runner-resident code path needs the cached reference.
 
     # Step 6-7: workspace + config_root broadcast.
-    if workspace_path:
-        registry.set_workspace_path(workspace_path)
-    if envelope.config_root:
-        registry.set_config_root(envelope.config_root)
+    with timer.stage("set_workspace_path"):
+        if workspace_path:
+            registry.set_workspace_path(workspace_path)
+        if envelope.config_root:
+            registry.set_config_root(envelope.config_root)
 
     # Step 8: permission plugin.  Default policy mirrors daemon-side
     # `core.py:1778-1794` baseline; profile-supplied
@@ -256,25 +279,68 @@ def _configure_runtime_plugins(
     # Phase 4 §C envelope.plugin_configs field (schema v2).  Shallow
     # merge: top-level keys from the profile (most commonly ``policy``)
     # replace defaults.  Mirrors daemon-side ``permission_init_config.update(...)``.
-    permission_init_config: Dict[str, Any] = {
-        "channel_type": "queue",
-        "channel_config": {"use_colors": False},
-        "workspace_path": workspace_path,
-        "policy": {
-            "defaultPolicy": "ask",
-            "whitelist": {"tools": [], "patterns": []},
-            "blacklist": {"tools": [], "patterns": []},
-        },
-    }
-    profile_perm_config = envelope.plugin_configs.get("permission")
-    if profile_perm_config:
-        permission_init_config.update(profile_perm_config)
-    permission_plugin = PermissionPlugin()
-    permission_plugin.initialize(permission_init_config)
+    with timer.stage("permission_init"):
+        permission_init_config: Dict[str, Any] = {
+            "channel_type": "queue",
+            "channel_config": {"use_colors": False},
+            "workspace_path": workspace_path,
+            "policy": {
+                "defaultPolicy": "ask",
+                "whitelist": {"tools": [], "patterns": []},
+                "blacklist": {"tools": [], "patterns": []},
+            },
+        }
+        profile_perm_config = envelope.plugin_configs.get("permission")
+        if profile_perm_config:
+            permission_init_config.update(profile_perm_config)
+        permission_plugin = PermissionPlugin()
+        permission_plugin.initialize(permission_init_config)
 
     # Step 9: wire onto the runtime.  ``ledger=None`` because token
     # accounting is daemon-tier per §4.2.
-    runtime.configure_plugins(registry, permission_plugin, None)
+    with timer.stage("configure_plugins"):
+        runtime.configure_plugins(registry, permission_plugin, None)
+
+    # Bootstrap timing report (when enabled).  Mirrors daemon-side
+    # `server/core.py:2213-2245` format so operators see the same
+    # shape across both halves of bootstrap.  The per-plugin
+    # breakdown reuses `registry.get_bootstrap_timings()` — the
+    # registry has been tracking import_ms / create_ms / init_ms
+    # since commit eb0ca640, just nobody read those numbers
+    # runner-side.
+    timer.finish()
+    if timing_enabled:
+        import io as _io
+        _buf = _io.StringIO()
+        _buf.write("Runner-side bootstrap timing report:\n")
+        timer.report(file=_buf)
+        plugin_timings = registry.get_bootstrap_timings()
+        if plugin_timings:
+            _buf.write("\n  PER-PLUGIN BREAKDOWN (sorted by total time):\n")
+            _buf.write("  " + "-" * 68 + "\n")
+            sorted_plugins = sorted(
+                plugin_timings.items(),
+                key=lambda x: x[1].get("total_ms", 0),
+                reverse=True,
+            )
+            for pname, ptiming in sorted_plugins:
+                total = ptiming.get("total_ms", 0)
+                if total < 1.0:
+                    continue
+                imp = ptiming.get("import_ms", 0)
+                create = ptiming.get("create_ms", 0)
+                init = ptiming.get("init_ms", 0)
+                _buf.write(
+                    f"    {pname:<30} total={total:>7.1f}ms  "
+                    f"import={imp:>6.1f}  create={create:>6.1f}  init={init:>7.1f}\n"
+                )
+            _buf.write("\n")
+        logger.info("%s", _buf.getvalue())
+    else:
+        logger.debug(
+            "Runner-side bootstrap completed in %.0f ms",
+            timer.total_elapsed * 1000,
+        )
 
     logger.info(
         "runner-session bootstrap: configured %d plugins runner-tier "
