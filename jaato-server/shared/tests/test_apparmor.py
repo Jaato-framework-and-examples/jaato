@@ -270,6 +270,105 @@ class TestRenderProfile:
         cached compile that lacks the new grant."""
         assert manager._TEMPLATE_VERSION >= 17
 
+    def _slice_child_body(self, rendered: str) -> str:
+        """Return the rendered //child sub-profile body, slicing
+        from ``profile child`` to the rest of the rendered output.
+        The //child block is the LAST sub-profile in the template,
+        so slicing to the end is correct.  Inline helper keeps
+        the v18 tests below readable."""
+        child_start = rendered.find("profile child")
+        assert child_start > 0, "//child sub-profile marker missing"
+        return rendered[child_start:]
+
+    def test_v18_child_subprofile_drops_broad_ix_grants(self, manager):
+        """Template v18 (2026-05-15) regression pin.
+
+        Pre-v18 the //child sub-profile mirrored the base body
+        verbatim including ``/usr/bin/** ix``, ``/usr/local/bin/**
+        ix``, ``/bin/** ix``.  That shadowed every per-profile
+        ``apparmor_fragments`` declaration — fragments listed
+        specific binaries but the broad rule already covered
+        everything.  Peer's v83 caught it empirically (agent
+        improvised ``curl`` when ``mvn dependency:get`` failed
+        even though the fragment only listed java/mvn).
+
+        v18 strips the three broad ``ix`` grants from //child
+        SPECIFICALLY.  Parent + tool_hat keep them (framework
+        code paths depend on them).  Fragments become the SOLE
+        source of exec authority for agent-controlled subprocesses.
+        """
+        rendered = manager._render_profile("v18_test", "/workspace")
+        child_body = self._slice_child_body(rendered)
+
+        for broad_rule in (
+            "/usr/bin/**          ix,",
+            "/usr/local/bin/**    ix,",
+            "/bin/**              ix,",
+        ):
+            assert broad_rule not in child_body, (
+                f"//child sub-profile must NOT grant the broad "
+                f"rule {broad_rule!r}.  Per-profile "
+                f"apparmor_fragments is the sole source of exec "
+                f"authority in //child post-v18; this rule "
+                f"shadows fragments and breaks per-stage scoping. "
+                f"Peer's v83 verified this empirically with the "
+                f"curl-fallback escape."
+            )
+
+    def test_v18_parent_and_tool_hat_keep_broad_ix(self, manager):
+        """v18 only narrows //child.  The parent profile body
+        and tool_hat sub-profile RETAIN the broad ``ix`` grants
+        because framework code (Python stdlib subprocess
+        machinery, prefetch scripts, references plugin's
+        SentenceTransformer load, runner-tier plugin internals)
+        runs in those contexts and needs to exec a long tail of
+        helpers we don't enumerate."""
+        rendered = manager._render_profile("v18_test", "/workspace")
+        tool_hat_start = rendered.find("profile tool_hat")
+        child_start = rendered.find("profile child")
+        assert 0 < tool_hat_start < child_start
+
+        parent_body = rendered[:tool_hat_start]
+        tool_hat_body = rendered[tool_hat_start:child_start]
+
+        for broad_rule, region_name, region in (
+            ("/usr/bin/**          ix,",     "parent",   parent_body),
+            ("/usr/local/bin/**    ix,",     "parent",   parent_body),
+            ("/bin/**              ix,",     "parent",   parent_body),
+            ("/usr/bin/**          ix,",     "tool_hat", tool_hat_body),
+            ("/usr/local/bin/**    ix,",     "tool_hat", tool_hat_body),
+            ("/bin/**              ix,",     "tool_hat", tool_hat_body),
+        ):
+            assert broad_rule in region, (
+                f"{region_name} must keep the broad rule "
+                f"{broad_rule!r} — v18 only narrows //child, not "
+                f"the framework-internal contexts.  Removing this "
+                f"would break framework subprocess machinery."
+            )
+
+    def test_v18_child_keeps_library_mapping(self, manager):
+        """The narrowing in //child is on EXEC capability (``ix``),
+        not on library mmap (``rm``).  An exec'd binary still
+        needs to mmap shared libraries (libc, ld-linux, etc.) to
+        run.  Pin the rm rules stay so a fragment-authorized
+        ``/usr/bin/java ix`` actually works when java tries to
+        load its required shared libraries."""
+        rendered = manager._render_profile("v18_test", "/workspace")
+        child_body = self._slice_child_body(rendered)
+        for rule in ("/usr/lib/**          rm,", "/lib/**              rm,"):
+            assert rule in child_body, (
+                f"//child must keep library-mapping rule {rule!r} "
+                f"so fragment-authorized execs can load their "
+                f"shared libraries.  Removing this breaks every "
+                f"exec, not just the broad ones."
+            )
+
+    def test_v18_template_version_bumped(self, manager):
+        """v18 narrows //child's exec authority — confinement
+        semantics change → ``apparmor_parser`` must recompile
+        from source.  Bump enforces that."""
+        assert manager._TEMPLATE_VERSION >= 18
+
     def test_v15_base_profile_allows_attr_current_read(self, manager):
         """Phase 5 ad-hoc fix: parent profile body grants `r` on
         /proc/self/attr/current so the runner's confine_to_profile

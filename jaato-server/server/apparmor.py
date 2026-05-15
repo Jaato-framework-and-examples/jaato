@@ -236,7 +236,7 @@ class AppArmorManager:
     # mmap denial wrapped as a misleading "package not installed"
     # ToolError).  Narrow grant — only ELF shared objects get
     # mmap-exec; .py source and data files in the venv stay r-only.
-    _TEMPLATE_VERSION = 17
+    _TEMPLATE_VERSION = 18
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -2280,10 +2280,52 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /tmp/jaato-{session_id}/   rw,
     /tmp/jaato-{session_id}/** rw,
 
-    # ---- basic system access (mirrors tool_hat) ----
-    /usr/bin/**          ix,
-    /usr/local/bin/**    ix,
-    /bin/**              ix,
+    # ---- basic system access (mirrors tool_hat, MINUS broad ix) ----
+    # Template v18 (2026-05-15): the broad ``/usr/bin/** ix``,
+    # ``/usr/local/bin/** ix``, ``/bin/** ix`` rules are
+    # INTENTIONALLY OMITTED from //child.  Rationale:
+    #
+    # The //child sub-profile is the agent-controlled exec
+    # context.  Per-profile ``apparmor_fragments`` (Piece 1, PR
+    # #107) authorize stage-specific binaries
+    # (e.g. host_validator's fragment declares
+    # ``/usr/bin/java ix, /usr/bin/mvn ix``).  Pre-v18, the broad
+    # ``/usr/bin/** ix`` rule shadowed those declarations — every
+    # cascade stage could exec ANY ``/usr/bin/*`` binary
+    # regardless of what its fragment listed.  Peer's v83 caught
+    # this empirically: a host_validator agent improvised
+    # ``curl`` when ``mvn dependency:get`` raised
+    # ``MojoExecutionException``; ``curl`` ran because the broad
+    # rule allowed it even though the fragment only listed
+    # java/mvn/sh/coreutils.  The per-profile scoping promise
+    # ("codegen/transform/build_descriptor cannot exec java
+    # because their fragment does not list it") was empty.
+    #
+    # In v18, ``apparmor_fragments`` becomes the SOLE source of
+    # exec authority in //child:
+    # - A fragment-less stage (or
+    #   ``apparmor_fragments: []``) gets NO exec authority — the
+    #   maximally locked-down cascade stage.
+    # - A stage with ``apparmor_fragments: [host_validator]``
+    #   gets only the binaries the host_validator.rules fragment
+    #   declares.
+    # - Shell helpers (sh, cat, grep, ...) that probes need must
+    #   appear in the fragment explicitly OR in a separately-
+    #   included ``shell_essentials`` fragment if operators
+    #   compose one later.
+    #
+    # The base profile + tool_hat sub-profile KEEP the broad
+    # ``ix`` grants — framework code (Python stdlib subprocess
+    # machinery, runner-tier plugin subprocesses, references
+    # plugin's SentenceTransformer load) executes there, not in
+    # //child.  Narrowing those would risk breaking framework
+    # internals invisibly; the agent-controlled-exec threat
+    # model belongs uniquely to //child.
+    #
+    # Library mapping (``rm``) is preserved unchanged — execs
+    # need shared-library mmap rights to load the binary they're
+    # about to run.  The deny is on ``ix`` (the exec capability),
+    # not on the libraries.
     /usr/lib/**          rm,
     /lib/**              rm,
     /etc/ld.so.cache     r,
