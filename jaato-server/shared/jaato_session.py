@@ -2135,6 +2135,57 @@ class JaatoSession:
                 f"{provider_name}"
             )
 
+            # Pre-warm trigger.  When the cache plugin opts in (via
+            # ``prewarm`` config or JAATO_ANTHROPIC_CACHE_PREWARM env)
+            # and the provider exposes ``warm_cache()``, fire a
+            # speculative request in a background thread to write the
+            # system+tools prefix to the server-side cache.  Subsequent
+            # real send_message() calls with the same prefix then get
+            # cache hits.  Best-effort and non-blocking: any failure is
+            # logged but does not affect session bootstrap.
+            if (
+                getattr(cache_plugin, "prewarm", False)
+                and hasattr(self._provider, "warm_cache")
+            ):
+                self._spawn_cache_prewarm()
+
+    def _spawn_cache_prewarm(self) -> None:
+        """Fire a background ``provider.warm_cache()`` request.
+
+        Snapshots the session's current ``system_instruction`` and
+        tool list (the cache-relevant prefix), spawns a daemon thread
+        that calls the provider's pre-warm hook, and returns immediately
+        so the caller (typically ``_wire_cache_plugin()``) is not blocked.
+
+        The thread is daemon=True so it does not prevent process exit
+        if the warm request is in flight when the session shuts down.
+        """
+        import threading
+        provider = self._provider
+        if provider is None:
+            return
+        sys_instruction = self._system_instruction
+        tools = self._get_tools_for_provider()
+
+        def _run() -> None:
+            try:
+                result = provider.warm_cache(
+                    system_instruction=sys_instruction,
+                    tools=tools,
+                )
+                self._trace(f"CACHE_PREWARM_RESULT: {result}")
+            except Exception as e:
+                # warm_cache itself should not raise — this is belt-
+                # and-suspenders for provider bugs.
+                self._trace(
+                    f"CACHE_PREWARM_THREAD_ERROR: {type(e).__name__}: {e}"
+                )
+
+        t = threading.Thread(
+            target=_run, daemon=True, name="jaato-cache-prewarm",
+        )
+        t.start()
+
     def _unwrap_turn_result(self, turn_result: 'TurnResult') -> 'ProviderResponse':
         """Extract the ``ProviderResponse`` from a ``TurnResult``.
 

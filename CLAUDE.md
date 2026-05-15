@@ -484,6 +484,20 @@ The device code flow uses GitHub Copilot's OAuth client ID and doesn't require c
 2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token`
 3. **API Key** (`sk-ant-api03-...`): Uses API credits
 
+**Cache pre-warming:** When `cache_anthropic.prewarm` is `true` in a profile
+(or `JAATO_ANTHROPIC_CACHE_PREWARM=true` in the environment), the session
+fires a speculative `max_tokens=1` request immediately after wiring the
+cache plugin.  The request reuses the exact `system` + `tools` of the real
+session and stamps the same `cache_control` breakpoints, so the
+server-side cache is populated before the first real user message
+arrives — turning that first message into a cache hit (~90% prompt-token
+discount on the cached prefix, lower TTFB).  Best-effort + non-blocking
+(runs in a daemon thread); any pre-warm failure is swallowed and traced
+without affecting session bootstrap.  Implements Anthropic's [pre-warming
+the cache](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pre-warming-the-cache)
+pattern.  Only effective when `cache_anthropic.enable_caching` is also
+on — a disabled cache with prewarm-on is a no-op.
+
 **Profile knobs** (under `plugin_configs.anthropic`) — namespaced into
 three layers since server 0.6.24 (no `routing` layer because Anthropic's
 API has no gateway routing extension):

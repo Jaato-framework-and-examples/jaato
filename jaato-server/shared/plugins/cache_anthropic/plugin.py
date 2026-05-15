@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -93,6 +94,12 @@ class AnthropicCachePlugin:
         self._cache_exclude_recent_turns: int = DEFAULT_CACHE_EXCLUDE_RECENT_TURNS
         self._enforce_min_tokens: bool = True
         self._model_name: Optional[str] = None
+        # Pre-warm flag — when True, the session fires a speculative
+        # max_tokens=1 request after wiring the cache plugin so the
+        # cacheable prefix (system + tool defs) is written to the
+        # server-side cache before the first real user message arrives.
+        # See https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pre-warming-the-cache
+        self._prewarm: bool = False
 
         # Budget reference (set via set_budget)
         self._budget: Optional["InstructionBudget"] = None
@@ -152,6 +159,10 @@ class AnthropicCachePlugin:
                 - cache_exclude_recent_turns (int): Fallback turn count.
                 - cache_min_tokens (bool): Enforce min token threshold.
                 - model_name (str): Current model for threshold selection.
+                - prewarm (bool): Fire a speculative max_tokens=1 request
+                    after wiring to write system+tools to the cache before
+                    the first real user message arrives.  Defaults to the
+                    JAATO_ANTHROPIC_CACHE_PREWARM env var.
         """
         if config is None:
             config = {}
@@ -165,6 +176,10 @@ class AnthropicCachePlugin:
         )
         self._enforce_min_tokens = config.get("cache_min_tokens", True)
         self._model_name = config.get("model_name")
+        env_prewarm = os.environ.get("JAATO_ANTHROPIC_CACHE_PREWARM", "").lower() in (
+            "1", "true", "yes", "on",
+        )
+        self._prewarm = bool(config.get("prewarm", env_prewarm))
 
     def shutdown(self) -> None:
         """Clean up resources (no-op — no persistent resources)."""
@@ -574,6 +589,17 @@ class AnthropicCachePlugin:
     def prefix_invalidated(self) -> bool:
         """Whether GC recently removed PRESERVABLE content."""
         return self._prefix_invalidated
+
+    @property
+    def prewarm(self) -> bool:
+        """Whether the session should pre-warm the cache after wiring.
+
+        Read by ``JaatoSession._wire_cache_plugin()`` to decide whether
+        to fire a speculative ``provider.warm_cache()`` request in a
+        background thread.  Only effective when caching itself is
+        ``_enabled`` — disabled-cache + prewarm-on is a no-op.
+        """
+        return self._prewarm
 
 
 def create_plugin() -> AnthropicCachePlugin:

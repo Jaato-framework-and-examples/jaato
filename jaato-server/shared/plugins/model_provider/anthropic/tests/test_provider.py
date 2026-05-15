@@ -945,3 +945,194 @@ class TestComplete:
 
         # The caller's list must not have been modified
         assert len(messages) == original_len
+
+
+def _warm_cache_mock_response(
+    prompt_tokens: int = 1234,
+    output_tokens: int = 1,
+    cache_creation: int = 1200,
+    cache_read: int = 0,
+):
+    """Build a mock messages.create() response with cache usage fields set."""
+    resp = MagicMock()
+    resp.stop_reason = "end_turn"
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = "."
+    resp.content = [text_block]
+    resp.usage = MagicMock(spec=[])
+    resp.usage.input_tokens = prompt_tokens
+    resp.usage.output_tokens = output_tokens
+    resp.usage.cache_creation_input_tokens = cache_creation
+    resp.usage.cache_read_input_tokens = cache_read
+    return resp
+
+
+class TestWarmCache:
+    """Tests for the Anthropic pre-warm cache hook.
+
+    Verifies that warm_cache() sends a minimal cache-populating
+    request, delegates breakpoint placement to the attached cache
+    plugin, and reports usage telemetry.
+    """
+
+    @patch('anthropic.Anthropic')
+    def test_warm_cache_skipped_without_cache_plugin(self, mock_client_class):
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514', skip_model_test=True)
+
+        result = provider.warm_cache(system_instruction="hi", tools=None)
+        assert result["skipped"] is True
+        assert result["success"] is False
+        mock_client.messages.create.assert_not_called()
+
+    @patch('anthropic.Anthropic')
+    def test_warm_cache_skipped_when_caching_disabled(self, mock_client_class):
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514', skip_model_test=True)
+
+        cache_plugin = MagicMock()
+        cache_plugin._enabled = False
+        provider.set_cache_plugin(cache_plugin)
+
+        result = provider.warm_cache(system_instruction="hi", tools=None)
+        assert result["skipped"] is True
+        mock_client.messages.create.assert_not_called()
+
+    @patch('anthropic.Anthropic')
+    def test_warm_cache_sends_minimal_request_with_cache_annotations(
+        self, mock_client_class
+    ):
+        """warm_cache() builds the same system+tools the real request
+        will, runs them through the cache plugin's prepare_request, and
+        sends max_tokens=1 with a stub user message."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = _warm_cache_mock_response(
+            prompt_tokens=1234, cache_creation=1200, cache_read=0,
+        )
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514', skip_model_test=True)
+
+        # Cache plugin returns annotated system/tools (with cache_control)
+        cache_plugin = MagicMock()
+        cache_plugin._enabled = True
+        annotated_system = [
+            {
+                "type": "text",
+                "text": "You are helpful.",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        cache_plugin.prepare_request.return_value = {
+            "system": annotated_system,
+            "tools": [],
+            "messages": [],
+            "cache_breakpoint_index": -1,
+        }
+        cache_plugin._budget_bp3_message_id = None
+        provider.set_cache_plugin(cache_plugin)
+
+        result = provider.warm_cache(
+            system_instruction="You are helpful.", tools=None,
+        )
+
+        assert result["success"] is True
+        assert result["cache_creation_tokens"] == 1200
+        assert result["cache_read_tokens"] == 0
+        assert result["prompt_tokens"] == 1234
+        assert result["error"] is None
+
+        # Verify the wire call shape
+        mock_client.messages.create.assert_called_once()
+        kwargs = mock_client.messages.create.call_args.kwargs
+        assert kwargs["model"] == "claude-sonnet-4-20250514"
+        assert kwargs["max_tokens"] == 1
+        assert kwargs["messages"] == [{"role": "user", "content": "."}]
+        # System block carries the cache_control breakpoint from the plugin
+        assert kwargs["system"] == annotated_system
+
+        # Cache plugin was consulted for breakpoint placement
+        cache_plugin.prepare_request.assert_called_once()
+        # Usage was rolled into the plugin's session-level totals
+        cache_plugin.extract_cache_usage.assert_called_once()
+
+    @patch('anthropic.Anthropic')
+    def test_warm_cache_swallows_api_errors(self, mock_client_class):
+        """warm_cache() never raises — errors are returned in the dict."""
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = RuntimeError("boom")
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514', skip_model_test=True)
+
+        cache_plugin = MagicMock()
+        cache_plugin._enabled = True
+        cache_plugin.prepare_request.return_value = {
+            "system": [{"type": "text", "text": "s"}],
+            "tools": [],
+            "messages": [],
+            "cache_breakpoint_index": -1,
+        }
+        provider.set_cache_plugin(cache_plugin)
+
+        # Must not raise
+        result = provider.warm_cache(system_instruction="s", tools=None)
+        assert result["success"] is False
+        assert result["error"] is not None
+        assert "boom" in result["error"]
+
+    @patch('anthropic.Anthropic')
+    def test_warm_cache_passes_tools_through_cache_plugin(self, mock_client_class):
+        """Tool defs go through cache plugin so the breakpoint on the
+        last tool definition matches what real requests will send."""
+        from jaato_sdk.plugins.model_provider.types import ToolSchema
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = _warm_cache_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514', skip_model_test=True)
+
+        annotated_tools = [
+            {"name": "alpha", "description": "a", "input_schema": {}},
+            {
+                "name": "beta",
+                "description": "b",
+                "input_schema": {},
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+        cache_plugin = MagicMock()
+        cache_plugin._enabled = True
+        cache_plugin.prepare_request.return_value = {
+            "system": None,
+            "tools": annotated_tools,
+            "messages": [],
+            "cache_breakpoint_index": -1,
+        }
+        provider.set_cache_plugin(cache_plugin)
+
+        tools = [
+            ToolSchema(name="alpha", description="a", parameters={}),
+            ToolSchema(name="beta", description="b", parameters={}),
+        ]
+        result = provider.warm_cache(system_instruction=None, tools=tools)
+
+        assert result["success"] is True
+        kwargs = mock_client.messages.create.call_args.kwargs
+        assert kwargs["tools"] == annotated_tools

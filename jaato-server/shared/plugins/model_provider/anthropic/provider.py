@@ -1013,6 +1013,146 @@ class AnthropicProvider:
         """
         self._cache_plugin = plugin
 
+    # ==================== Cache Pre-Warming ====================
+
+    def warm_cache(
+        self,
+        system_instruction: Optional[str],
+        tools: Optional[List[ToolSchema]],
+    ) -> Dict[str, Any]:
+        """Send a minimal request to populate the prompt cache.
+
+        Implements Anthropic's "pre-warming the cache" pattern documented at
+        https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pre-warming-the-cache
+        — a speculative request whose only purpose is to write the
+        cacheable prefix (system block + tool definitions) to the
+        server-side cache before the first real user message arrives.
+        Subsequent real ``complete()`` calls with the same prefix then
+        get cache hits (90% prompt-token savings + lower TTFB).
+
+        The request body is identical to a real ``complete()`` call in
+        every cache-relevant respect (same ``system`` blocks, same
+        sorted ``tools`` list, same ``cache_control`` breakpoints
+        stamped by the attached cache plugin) so the cache prefix that
+        gets written matches what real requests will read back.
+        Differences from a real call:
+
+        - ``max_tokens=1`` to minimize generation cost.
+        - Stub user message (``"."``) — Anthropic requires at least one.
+        - Streaming disabled (one round-trip, no event loop).
+        - Extended thinking intentionally omitted — thinking traces are
+          not cached and add latency we don't want on a warm-only call.
+        - Best-effort: any API error is swallowed and returned in the
+          result dict rather than raised, since pre-warming must never
+          fail a session bootstrap.
+
+        Args:
+            system_instruction: The system prompt the real session will
+                use.  Must match the real call's system content exactly
+                for the cached prefix to be reusable.
+            tools: The tool list the real session will use.  Same
+                exact-match requirement as ``system_instruction``.
+
+        Returns:
+            Dict with:
+              - ``success`` (bool): True on a 200 response.
+              - ``skipped`` (bool): True when no cache plugin is
+                attached or caching is disabled — there's nothing to
+                warm.
+              - ``cache_creation_tokens`` (int): Tokens written to the
+                cache by this request.  > 0 indicates the warm
+                succeeded in populating fresh cache entries.
+              - ``cache_read_tokens`` (int): Tokens read from a
+                pre-existing cache entry.  > 0 means the cache was
+                already warm before this call (e.g., the user
+                pre-warmed twice).
+              - ``prompt_tokens`` (int): Total prompt tokens billed
+                (cache writes are billed at 1.25x or 2x base; cache
+                reads at 0.1x).
+              - ``error`` (Optional[str]): Error message on failure.
+        """
+        result: Dict[str, Any] = {
+            "success": False,
+            "skipped": False,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "prompt_tokens": 0,
+            "error": None,
+        }
+
+        if not self._client or not self._model_name:
+            result["error"] = "Provider not connected"
+            return result
+
+        # No cache plugin or caching disabled → nothing to warm.
+        if not self._cache_plugin or not getattr(self._cache_plugin, "_enabled", False):
+            result["skipped"] = True
+            return result
+
+        # Refresh PKCE tokens if needed (same as the real complete() path).
+        try:
+            self._refresh_pkce_token_if_needed()
+        except Exception as e:
+            result["error"] = f"OAuth refresh failed: {type(e).__name__}: {e}"
+            return result
+
+        kwargs: Dict[str, Any] = {"max_tokens": 1}
+
+        system_blocks = self._build_system_blocks_from(system_instruction)
+        if system_blocks:
+            kwargs["system"] = system_blocks
+
+        tool_list = self._build_tool_list_from(tools)
+        if tool_list is not None:
+            kwargs["tools"] = tool_list
+
+        # Delegate cache annotations to the plugin — same path
+        # complete() uses, so the cache_control breakpoints match.
+        cache_result = self._cache_plugin.prepare_request(
+            system=kwargs.get("system"),
+            tools=kwargs.get("tools", []),
+            messages=[],
+        )
+        if cache_result.get("system") is not None:
+            kwargs["system"] = cache_result["system"]
+        if cache_result.get("tools"):
+            kwargs["tools"] = cache_result["tools"]
+
+        # Anthropic requires at least one user message; "." is minimal
+        # and avoids any "empty content" rejection.
+        api_messages = [{"role": "user", "content": "."}]
+
+        try:
+            self._trace("CACHE_PREWARM_START")
+            response = self._client.messages.create(
+                model=self._model_name,
+                messages=api_messages,
+                **kwargs,
+            )
+            from .converters import extract_usage_from_response
+            usage = extract_usage_from_response(response)
+            result["success"] = True
+            result["cache_creation_tokens"] = usage.cache_creation_tokens or 0
+            result["cache_read_tokens"] = usage.cache_read_tokens or 0
+            result["prompt_tokens"] = usage.prompt_tokens or 0
+            # Roll the warm-write tokens into the cache plugin's
+            # session-level totals so telemetry reflects the cost.
+            try:
+                self._cache_plugin.extract_cache_usage(usage)
+            except Exception:
+                pass  # Telemetry must never break the warm path
+            self._trace(
+                f"CACHE_PREWARM_DONE creation={result['cache_creation_tokens']} "
+                f"read={result['cache_read_tokens']} prompt={result['prompt_tokens']}"
+            )
+        except Exception as e:
+            result["error"] = f"{type(e).__name__}: {e}"
+            self._trace(f"CACHE_PREWARM_ERROR {type(e).__name__}: {e}")
+            # Swallow — pre-warm is best-effort and must never fail the
+            # session.  Caller reads result["error"] for telemetry.
+
+        return result
+
     # ==================== Stateless Completion ====================
 
     def complete(

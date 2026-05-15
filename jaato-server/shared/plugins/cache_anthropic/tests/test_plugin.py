@@ -54,6 +54,42 @@ class TestInitialize:
         assert plugin._model_name == "claude-sonnet-4-20250514"
 
 
+class TestPrewarmConfig:
+    """Tests for the prewarm config knob."""
+
+    def test_default_off(self, monkeypatch):
+        monkeypatch.delenv("JAATO_ANTHROPIC_CACHE_PREWARM", raising=False)
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True})
+        assert plugin.prewarm is False
+
+    def test_explicit_on(self, monkeypatch):
+        monkeypatch.delenv("JAATO_ANTHROPIC_CACHE_PREWARM", raising=False)
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True, "prewarm": True})
+        assert plugin.prewarm is True
+
+    def test_env_var_on(self, monkeypatch):
+        monkeypatch.setenv("JAATO_ANTHROPIC_CACHE_PREWARM", "true")
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True})
+        assert plugin.prewarm is True
+
+    def test_config_overrides_env(self, monkeypatch):
+        """Explicit config wins over env var (one direction)."""
+        monkeypatch.setenv("JAATO_ANTHROPIC_CACHE_PREWARM", "true")
+        plugin = AnthropicCachePlugin()
+        plugin.initialize({"enable_caching": True, "prewarm": False})
+        assert plugin.prewarm is False
+
+    def test_env_var_off_values(self, monkeypatch):
+        for val in ("0", "false", "no", "off", ""):
+            monkeypatch.setenv("JAATO_ANTHROPIC_CACHE_PREWARM", val)
+            plugin = AnthropicCachePlugin()
+            plugin.initialize({"enable_caching": True})
+            assert plugin.prewarm is False, f"env={val!r} should be off"
+
+
 class TestProperties:
     def test_name(self):
         plugin = AnthropicCachePlugin()
