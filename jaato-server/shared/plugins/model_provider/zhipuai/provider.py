@@ -185,6 +185,15 @@ class ZhipuAIProvider(AnthropicProvider):
     AnthropicProvider since Zhipu AI uses the same API format.
     """
 
+    # Vendor identity overrides for error messages.  The base class's
+    # ``_handle_api_error`` raises domain errors that read these via
+    # ``self`` — so when ``ZhipuAIProvider._handle_api_error`` falls
+    # through to ``super()`` (for usage-limit, overloaded, context-limit
+    # etc.) the error's user-facing text names "Zhipu AI" rather than
+    # the inherited "Anthropic API".
+    _provider_display_name: str = "Zhipu AI"
+    _provider_console_url: str = "https://open.bigmodel.cn/usercenter/apikeys"
+
     def __init__(self):
         """Initialize the provider (not yet connected)."""
         super().__init__()

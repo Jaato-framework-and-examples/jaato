@@ -123,6 +123,12 @@ class AnthropicProvider:
     conversation history and passes it to ``complete()`` on every call.
     The provider does not maintain internal message state.
 
+    Subclasses override the ``_provider_display_name`` /
+    ``_provider_console_url`` class attributes so vendor-targeted error
+    messages from ``_handle_api_error`` name the actual provider
+    (e.g. ZhipuAIProvider sets ``"Zhipu AI"``).  Without an override
+    the defaults are correct for Anthropic.
+
     Features:
     - Multiple Claude model families
     - Function calling with manual control
@@ -149,6 +155,14 @@ class AnthropicProvider:
     Environment variables:
         ANTHROPIC_API_KEY: API key for authentication
     """
+
+    # Vendor identity for error messages produced by
+    # ``_handle_api_error``.  Subclasses (ZhipuAIProvider, etc.) override
+    # these class attributes; ``_handle_api_error`` reads them via
+    # ``self`` so dynamic dispatch picks the right vendor for the
+    # subclass instance.
+    _provider_display_name: str = "Anthropic API"
+    _provider_console_url: str = "https://console.anthropic.com/"
 
     def __init__(self):
         """Initialize the provider (not yet connected)."""
@@ -813,7 +827,7 @@ class AnthropicProvider:
         )
         if is_ssl_error:
             from shared.ssl_helper import log_ssl_guidance
-            log_ssl_guidance("Anthropic API", error)
+            log_ssl_guidance(self._provider_display_name, error)
 
         # Check for authentication errors
         if "authentication" in error_str or "invalid api key" in error_str or "401" in error_str:
@@ -821,27 +835,42 @@ class AnthropicProvider:
                 reason="API key rejected",
                 key_prefix=self._api_key[:15] if self._api_key else None,
                 original_error=str(error),
+                provider_name=self._provider_display_name,
             ) from error
 
         # Check for rate limit errors
         if "rate" in error_str and "limit" in error_str or "429" in error_str:
-            raise RateLimitError(original_error=str(error)) from error
+            raise RateLimitError(
+                original_error=str(error),
+                provider_name=self._provider_display_name,
+            ) from error
 
         # Check for usage limit errors (API spending/quota limits)
         if "usage limit" in error_str or "api usage" in error_str:
-            # Try to extract reset date from error message
+            # Try to extract a reset date or full timestamp from the
+            # error message.  Providers vary in format — Zhipu emits
+            # ``2026-05-15 18:06:38``; Anthropic emits a bare date.  We
+            # capture the optional ``HH:MM:SS`` suffix when present so
+            # the user gets the full reset time rather than just the day.
             reset_date = None
-            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', str(error))
+            date_match = re.search(
+                r'(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?)', str(error)
+            )
             if date_match:
                 reset_date = date_match.group(1)
             raise UsageLimitError(
                 reset_date=reset_date,
                 original_error=str(error),
+                provider_name=self._provider_display_name,
+                console_url=self._provider_console_url,
             ) from error
 
         # Check for overloaded errors
         if "overloaded" in error_str or "529" in error_str:
-            raise OverloadedError(original_error=str(error)) from error
+            raise OverloadedError(
+                original_error=str(error),
+                provider_name=self._provider_display_name,
+            ) from error
 
         # Check for context length errors
         if any(x in error_str for x in ("context", "token", "too long", "maximum")):

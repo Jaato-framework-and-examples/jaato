@@ -45,12 +45,14 @@ class APIKeyInvalidError(AnthropicProviderError):
         reason: str = "Token rejected by API",
         key_prefix: Optional[str] = None,
         original_error: Optional[str] = None,
+        provider_name: str = "Anthropic API",
     ):
         self.reason = reason
         self.key_prefix = key_prefix
         self.original_error = original_error
+        self.provider_name = provider_name
 
-        message = f"Anthropic API key invalid: {reason}"
+        message = f"{provider_name} key invalid: {reason}"
         if key_prefix:
             message += f"\nKey prefix: {key_prefix}..."
         if original_error:
@@ -66,11 +68,13 @@ class RateLimitError(AnthropicProviderError):
         self,
         retry_after: Optional[int] = None,
         original_error: Optional[str] = None,
+        provider_name: str = "Anthropic API",
     ):
         self.retry_after = retry_after
         self.original_error = original_error
+        self.provider_name = provider_name
 
-        message = "Anthropic API rate limit exceeded."
+        message = f"{provider_name} rate limit exceeded."
         if retry_after:
             message += f" Retry after {retry_after} seconds."
         if original_error:
@@ -129,17 +133,19 @@ class ModelNotFoundError(AnthropicProviderError):
 
 
 class OverloadedError(AnthropicProviderError):
-    """Raised when Anthropic API is overloaded."""
+    """Raised when the provider API is overloaded."""
 
     def __init__(
         self,
         original_error: Optional[str] = None,
+        provider_name: str = "Anthropic API",
     ):
         self.original_error = original_error
+        self.provider_name = provider_name
 
         message = (
-            "Anthropic API is currently overloaded.\n"
-            "Please try again in a few moments."
+            f"{provider_name} is currently overloaded.\n"
+            f"Please try again in a few moments."
         )
         if original_error:
             message += f"\n\nOriginal error: {original_error}"
@@ -154,17 +160,21 @@ class UsageLimitError(AnthropicProviderError):
         self,
         reset_date: Optional[str] = None,
         original_error: Optional[str] = None,
+        provider_name: str = "Anthropic API",
+        console_url: str = "https://console.anthropic.com/",
     ):
         self.reset_date = reset_date
         self.original_error = original_error
+        self.provider_name = provider_name
+        self.console_url = console_url
 
-        message = "Anthropic API usage limit reached."
+        message = f"{provider_name} usage limit reached."
         if reset_date:
             message += f" Access will be restored on {reset_date}."
         message += (
-            "\n\nTo fix this:\n"
-            "  1. Check your usage at https://console.anthropic.com/\n"
-            "  2. Upgrade your plan or wait for the reset date"
+            f"\n\nTo fix this:\n"
+            f"  1. Check your usage at {console_url}\n"
+            f"  2. Upgrade your plan or wait for the reset date"
         )
         if original_error:
             message += f"\n\nOriginal error: {original_error}"
