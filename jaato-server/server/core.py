@@ -4029,6 +4029,12 @@ class JaatoServer:
                     session_env=_log_ctx.get('session_env'),
                 )
             server._model_running = True
+            # Tracks whether the try block escaped via except — used to
+            # short-circuit the nudge / continuation logic in finally so
+            # provider errors (quota, auth, context, etc.) don't get
+            # retried by COMPLETION_NUDGE.  See PR fixing "Fix #2e:
+            # COMPLETION_NUDGE fires on provider exceptions".
+            terminal_error: Optional[Exception] = None
             try:
                 # Run in workspace context so file operations use client's CWD
                 # Also apply session env so provider/tools can access session-specific config
@@ -4081,19 +4087,48 @@ class JaatoServer:
                             turns=usage.get('turns', 0),
                         ))
 
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as e:
                 server.emit(SystemMessageEvent(
                     message="Interrupted",
                     style="warning",
                 ))
+                terminal_error = e
             except Exception as e:
                 server.emit(ErrorEvent(
                     error=str(e),
                     error_type=type(e).__name__,
                 ))
+                terminal_error = e
             finally:
                 server._model_running = False
                 server._model_thread = None
+
+                # When the try block escaped via except — e.g. a non-
+                # transient provider error (UsageLimitError, quota,
+                # APIKeyInvalidError, ContextLimitError) propagated out
+                # of with_retry — emit a SessionTerminatedEvent and exit
+                # the model_thread cleanly.  Without this guard the
+                # finally would fall through to the status check and
+                # fire COMPLETION_NUDGE, which would restart the model
+                # thread and immediately hit the same provider error
+                # again.  That cycle masked the actual error (the v83-v91
+                # cascade investigation chased an imaginary regression
+                # for 4 days because Zhipu 5h-quota APIStatusError kept
+                # nudging instead of terminating).
+                #
+                # The ErrorEvent has already been emitted above; the
+                # SessionTerminatedEvent here gives the cascade
+                # orchestrator / TUI a terminal signal so they don't sit
+                # waiting for AGENT_COMPLETED that will never arrive.
+                if terminal_error is not None:
+                    from jaato_sdk.events import SessionTerminatedEvent
+                    server.emit(SessionTerminatedEvent(
+                        session_id=server.session_id or "",
+                        agent_id=server._main_agent_id,
+                        reason="error",
+                    ))
+                    clear_logging_context()
+                    return
 
                 # Process continuation stashed during _drain_child_messages().
                 # The stash write (in continuation_callback) and this read both
