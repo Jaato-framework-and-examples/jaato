@@ -4094,6 +4094,16 @@ class JaatoServer:
                 ))
                 terminal_error = e
             except Exception as e:
+                # Permanent INFO-level log of the wrapped error text at
+                # emit time.  Lets consumers verify end-to-end that the
+                # client-facing ErrorEvent payload carries the
+                # vendor-correct message (Fix #1a in PR #118) without
+                # needing to parse the binary IPC frame separately.
+                # Greppable token: MODEL_THREAD_TERMINAL_ERROR.
+                logger.info(
+                    "MODEL_THREAD_TERMINAL_ERROR error_type=%s error=%s",
+                    type(e).__name__, str(e),
+                )
                 server.emit(ErrorEvent(
                     error=str(e),
                     error_type=type(e).__name__,
