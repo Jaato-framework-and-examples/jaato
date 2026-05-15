@@ -1148,6 +1148,8 @@ class AnthropicProvider:
             except Exception as _dump_err:
                 logger.warning("PROVIDER_REQUEST_DUMP failed: %s", _dump_err)
 
+        provider_response = None
+        complete_exception: Optional[Exception] = None
         try:
             if on_chunk:
                 # Streaming mode
@@ -1168,43 +1170,58 @@ class AnthropicProvider:
                     **kwargs,
                 )
                 provider_response = response_from_anthropic(response)
+        except Exception as e:
+            complete_exception = e
 
-            if _dump_enabled:
-                try:
+        if _dump_enabled:
+            try:
+                if complete_exception is not None:
+                    logger.info(
+                        "PROVIDER_RESPONSE_DUMP outcome=exception exc_type=%s exc_msg=%s",
+                        type(complete_exception).__name__,
+                        str(complete_exception),
+                    )
+                elif provider_response is not None:
                     fcalls = [
-                        {"name": fc.name, "args": fc.arguments}
+                        {"name": fc.name, "args": fc.args}
                         for fc in provider_response.get_function_calls()
                     ]
                     logger.info(
-                        "PROVIDER_RESPONSE_DUMP finish_reason=%s text_len=%d function_calls=%s",
+                        "PROVIDER_RESPONSE_DUMP outcome=ok finish_reason=%s text_len=%d function_calls=%s",
                         getattr(provider_response, "finish_reason", None),
                         len(provider_response.get_text() or ""),
                         fcalls,
                     )
                     logger.info("PROVIDER_RESPONSE_DUMP text=%s", json.dumps(provider_response.get_text()))
-                except Exception as _dump_err:
-                    logger.warning("PROVIDER_RESPONSE_DUMP failed: %s", _dump_err)
+                else:
+                    logger.info("PROVIDER_RESPONSE_DUMP outcome=unreachable")
+            except Exception as _dump_err:
+                logger.warning("PROVIDER_RESPONSE_DUMP failed: %s", _dump_err)
 
-            # Update last_usage (this is per-call accounting, not conversation state)
-            self._last_usage = provider_response.usage
-
-            # Handle structured output via response parsing
-            text = provider_response.get_text()
-            if response_schema and text:
-                try:
-                    provider_response.structured_output = json.loads(text)
-                except json.JSONDecodeError:
-                    pass
-
-            return TurnResult.from_provider_response(provider_response)
-        except Exception as e:
-            self._handle_api_error(e)
+        if complete_exception is not None:
+            try:
+                self._handle_api_error(complete_exception)
+            except Exception:
+                raise
             # _handle_api_error converts to domain errors. Transient ones
             # (RateLimitError, OverloadedError) must propagate for with_retry.
             from .errors import RateLimitError as _RL, OverloadedError as _OL
-            if isinstance(e, (_RL, _OL)):
-                raise
-            return TurnResult.from_exception(e)
+            if isinstance(complete_exception, (_RL, _OL)):
+                raise complete_exception
+            return TurnResult.from_exception(complete_exception)
+
+        # Update last_usage (this is per-call accounting, not conversation state)
+        self._last_usage = provider_response.usage
+
+        # Handle structured output via response parsing
+        text = provider_response.get_text()
+        if response_schema and text:
+            try:
+                provider_response.structured_output = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+
+        return TurnResult.from_provider_response(provider_response)
 
     # ==================== Streaming ====================
 
