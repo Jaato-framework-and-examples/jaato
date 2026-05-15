@@ -1054,10 +1054,27 @@ class PluginRegistry:
             self._configs.pop(name, None)
             self._tool_plugin_cache.clear()
 
+    # Plugins that must always initialize regardless of the session's
+    # requested plugin set.  ``introspection`` provides the
+    # ``list_tools`` / ``get_tool_schemas`` tools that the
+    # deferred-loading mechanism depends on; ``permission`` is the
+    # framework's policy engine and is wired even when not in
+    # profile.plugins (the runner-side bootstrap constructs it
+    # separately, but the registry path should keep it included for
+    # symmetry with other call sites).  Add other unconditionally-
+    # essential plugins here only with care — anything in this set
+    # pays its initialize cost for EVERY session regardless of
+    # profile.
+    _ALWAYS_INITIALIZE_PLUGINS = frozenset({
+        "introspection",
+        "permission",
+    })
+
     def expose_all(
         self,
         config: Optional[Dict[str, Dict[str, Any]]] = None,
         on_progress: Optional[Callable[[str], None]] = None,
+        requested_plugins: Optional[List[str]] = None,
     ) -> None:
         """Expose all discovered plugins' tools.
 
@@ -1071,16 +1088,65 @@ class PluginRegistry:
             on_progress: Optional callback invoked with each plugin name
                 before it is exposed.  Used by the server to emit
                 per-plugin init progress events.
+            requested_plugins: When provided, only initializes plugins
+                whose name is in this list — PLUS the unconditionally-
+                essential set (:attr:`_ALWAYS_INITIALIZE_PLUGINS`) AND
+                all enrichment-only plugins (their enrichment fires
+                for every session regardless of profile.plugins).
+                Other discovered plugins remain registered in
+                ``self._plugins`` but get NEITHER ``initialize()``
+                NOR tool exposure — saving their per-session cost.
+
+                ``None`` (default) preserves pre-2026-05-15 behaviour:
+                every discovered plugin is initialized and exposed.
+
+                Motivated by the runner-side bootstrap measurement
+                showing the ``references`` plugin's
+                ``SentenceTransformer`` model load took ~7.6s on
+                EVERY session — even when ``references`` wasn't in
+                ``profile.plugins`` — because ``expose_all`` ran
+                ``initialize()`` unconditionally.  Filed as the
+                architectural fix for the references-init bottleneck;
+                see ``project_backlog_parallel_tool_main_thread_bottleneck``
+                lineage.
         """
         import concurrent.futures
 
         config = config or {}
+
+        # Resolve the effective initialize set.
+        #
+        # ``None`` ⇒ initialize every discovered plugin (back-compat
+        # for daemon-side ``server/core.py`` callers + tests that
+        # don't pass the kwarg).
+        #
+        # Non-None ⇒ union of:
+        #   1. caller's requested plugins,
+        #   2. ``_ALWAYS_INITIALIZE_PLUGINS`` (introspection +
+        #      permission today),
+        #   3. all enrichment-only plugins (their enrichment fires
+        #      regardless of profile.plugins, so they need their
+        #      ``initialize()`` to set up subscriptions).
+        # Anything not in this union is left registered-but-
+        # uninitialized: ``self._plugins[name]`` still holds the
+        # instance, but ``expose_tool()`` doesn't fire for it, so
+        # neither its tools nor its ``initialize()`` side-effects
+        # reach the session.
+        if requested_plugins is None:
+            target_names: Optional[set] = None  # sentinel: "all"
+        else:
+            target_names = (
+                set(requested_plugins)
+                | set(self._ALWAYS_INITIALIZE_PLUGINS)
+                | set(self._enrichment_only)
+            )
 
         # Identify plugins that opt into parallel init (I/O-heavy, like MCP)
         parallel_names = [
             name for name, plugin in self._plugins.items()
             if getattr(plugin, 'PARALLEL_INIT', False)
             and name not in self._exposed
+            and (target_names is None or name in target_names)
         ]
 
         # Pre-initialize I/O-heavy plugins in background threads so their
@@ -1102,7 +1168,17 @@ class PluginRegistry:
         # pre-initialized above, expose_tool() will find them already
         # initialized (their initialize() is idempotent) and skip the
         # initialization step.
+        skipped: List[str] = []
         for name in self._plugins:
+            if target_names is not None and name not in target_names:
+                # Plugin is discovered + registered but not requested
+                # by this session — skip both initialize() and tool
+                # exposure.  The plugin instance survives in
+                # ``self._plugins`` so introspection still works, but
+                # its tools won't appear in the session's tool list
+                # and its per-session ``initialize()`` cost is avoided.
+                skipped.append(name)
+                continue
             # If this plugin is being pre-initialized, wait for it first
             if name in futures:
                 try:
@@ -1112,6 +1188,12 @@ class PluginRegistry:
             if on_progress:
                 on_progress(name)
             self.expose_tool(name, config.get(name))
+
+        if skipped:
+            _trace(
+                f"expose_all: skipped initialize for {len(skipped)} "
+                f"plugins not requested by session: {sorted(skipped)}"
+            )
 
     def unexpose_all(self) -> None:
         """Stop exposing all plugins' tools."""
