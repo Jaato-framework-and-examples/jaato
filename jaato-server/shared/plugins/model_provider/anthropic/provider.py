@@ -1125,6 +1125,29 @@ class AnthropicProvider:
             validated, cache_breakpoint_index=history_breakpoint
         )
 
+        # Diagnostic: when JAATO_DUMP_PROVIDER_REQUEST is set, dump the
+        # full request payload (tools, system, messages) and the resulting
+        # response (text + function_calls + finish_reason) so we can diff
+        # what the model receives and produces across framework changes.
+        # The marker tokens PROVIDER_REQUEST_DUMP / PROVIDER_RESPONSE_DUMP
+        # make this greppable in mixed daemon logs.
+        _dump_enabled = os.environ.get("JAATO_DUMP_PROVIDER_REQUEST", "").lower() in ("1", "true", "yes", "on")
+        if _dump_enabled:
+            try:
+                tools_in_kwargs = kwargs.get("tools") or []
+                tool_names_in_request = [t.get("name") for t in tools_in_kwargs if isinstance(t, dict)]
+                logger.info(
+                    "PROVIDER_REQUEST_DUMP model=%s tool_count=%d tool_names=%s",
+                    self._model_name,
+                    len(tools_in_kwargs),
+                    tool_names_in_request,
+                )
+                logger.info("PROVIDER_REQUEST_DUMP system=%s", json.dumps(kwargs.get("system")))
+                logger.info("PROVIDER_REQUEST_DUMP tools=%s", json.dumps(tools_in_kwargs))
+                logger.info("PROVIDER_REQUEST_DUMP messages=%s", json.dumps(api_messages))
+            except Exception as _dump_err:
+                logger.warning("PROVIDER_REQUEST_DUMP failed: %s", _dump_err)
+
         try:
             if on_chunk:
                 # Streaming mode
@@ -1145,6 +1168,22 @@ class AnthropicProvider:
                     **kwargs,
                 )
                 provider_response = response_from_anthropic(response)
+
+            if _dump_enabled:
+                try:
+                    fcalls = [
+                        {"name": fc.name, "args": fc.arguments}
+                        for fc in (provider_response.function_calls or [])
+                    ]
+                    logger.info(
+                        "PROVIDER_RESPONSE_DUMP finish_reason=%s text_len=%d function_calls=%s",
+                        getattr(provider_response, "finish_reason", None),
+                        len(provider_response.get_text() or ""),
+                        fcalls,
+                    )
+                    logger.info("PROVIDER_RESPONSE_DUMP text=%s", json.dumps(provider_response.get_text()))
+                except Exception as _dump_err:
+                    logger.warning("PROVIDER_RESPONSE_DUMP failed: %s", _dump_err)
 
             # Update last_usage (this is per-call accounting, not conversation state)
             self._last_usage = provider_response.usage
