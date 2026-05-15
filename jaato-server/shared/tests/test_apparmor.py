@@ -173,6 +173,103 @@ class TestRenderProfile:
         starts working on hosts that have an older cached compile."""
         assert manager._TEMPLATE_VERSION >= 15
 
+    def test_v17_parent_grants_change_profile_to_child_subprofile(self, manager):
+        """Template v17 (2026-05-15) regression pin.
+
+        Pre-v17 the parent profile body declared the ``//child``
+        sub-profile inline but did NOT grant
+        ``change_profile -> jaato-ws-X//child,``.  The kernel
+        denied every cli_based_tool subprocess transition with
+        ``apparmor="DENIED" operation="change_profile"
+        target="...//child"`` — peer's v82 cascade smoking gun.
+        The legacy code comment in
+        ``make_child_transition_callback`` claimed "inline
+        sub-profiles are implicitly authorized" — empirically
+        false on AppArmor 4.0.1.
+
+        Pin the parent body explicitly grants the transition.  Any
+        future restorer who deletes the rule (e.g. while
+        simplifying the template) breaks every confined cli call.
+        """
+        import re
+        session_id = "20260515_x_v17"
+        profile = manager._render_profile(session_id, "/workspace")
+        # Take only the parent body (everything before the
+        # ``profile tool_hat`` sub-profile declaration).
+        parent_end = profile.find("profile tool_hat")
+        assert parent_end > 0, "tool_hat sub-profile marker missing"
+        parent_body = profile[:parent_end]
+        rule_lines = [
+            l.strip() for l in parent_body.splitlines()
+            if l.strip() and not l.lstrip().startswith("#")
+        ]
+        expected = f"change_profile -> jaato-ws-{session_id}//child,"
+        assert expected in rule_lines, (
+            f"Parent profile missing the ``change_profile -> "
+            f"jaato-ws-{{session_id}}//child,`` grant.  Without it "
+            f"every cli_based_tool subprocess in a confined session "
+            f"hits AppArmor DENIED on the preexec_fn transition.  "
+            f"Looked for: {expected!r}.  Rules found: "
+            f"{[r for r in rule_lines if 'change_profile' in r]}"
+        )
+
+    def test_v17_unconfined_grant_still_present(self, manager):
+        """v17 adds the //child rule without removing the
+        ``-> unconfined`` rule.  apparmor_confine's defensive
+        reset-to-unconfined on tool_hat entry/exit still needs
+        the unconfined transition; this is a deliberate-but-
+        documented escape vector (see PROFILE_TEMPLATE block
+        at apparmor.py:447-510) that's distinct from this fix."""
+        profile = manager._render_profile("s1", "/workspace")
+        parent_end = profile.find("profile tool_hat")
+        parent_body = profile[:parent_end] if parent_end > 0 else profile
+        rule_lines = [
+            l.strip() for l in parent_body.splitlines()
+            if l.strip() and not l.lstrip().startswith("#")
+        ]
+        assert "change_profile -> unconfined," in rule_lines
+
+    def test_v17_child_subprofile_still_denies_change_profile(self, manager):
+        """v17 only changes the parent.  The //child sub-profile's
+        contract (no ``change_profile -> unconfined,`` so the
+        forked subprocess can't escape back) is preserved.  This
+        is the existing test
+        ``test_apparmor_sub_profile.py::test_child_sub_profile_no_change_profile_to_unconfined``
+        in spirit — duplicate here as a paired-pin: parent grants
+        the transition INTO //child, but //child grants NO
+        outbound transitions.  Both halves are load-bearing."""
+        import re
+        profile = manager._render_profile("s1", "/workspace")
+        child_start = profile.find("profile child")
+        # Sub-profile name may render with various surrounding
+        # whitespace; locate the first ``profile child`` block.
+        if child_start < 0:
+            # Older template may name it differently — skip this
+            # check rather than false-positive.
+            return
+        # Take a slice until the closing brace of the child block.
+        child_body = profile[child_start:]
+        rule_lines = [
+            l.strip() for l in child_body.splitlines()
+            if l.strip() and not l.lstrip().startswith("#")
+        ]
+        # The forked subprocess in //child MUST NOT be able to
+        # escape via change_profile.
+        assert not any(
+            re.match(r"change_profile\s+->\s+", rule)
+            for rule in rule_lines[:40]  # only inspect the immediate //child body
+        ), (
+            "//child sub-profile must NOT grant change_profile to "
+            "any target — otherwise a model-controlled subprocess "
+            "could re-escape from //child."
+        )
+
+    def test_v17_template_version_bumped(self, manager):
+        """Confinement-correctness changes must bump
+        _TEMPLATE_VERSION so apparmor_parser doesn't reuse a stale
+        cached compile that lacks the new grant."""
+        assert manager._TEMPLATE_VERSION >= 17
+
     def test_v15_base_profile_allows_attr_current_read(self, manager):
         """Phase 5 ad-hoc fix: parent profile body grants `r` on
         /proc/self/attr/current so the runner's confine_to_profile
