@@ -1173,7 +1173,7 @@ class AnthropicProvider:
                 try:
                     fcalls = [
                         {"name": fc.name, "args": fc.arguments}
-                        for fc in (provider_response.function_calls or [])
+                        for fc in provider_response.get_function_calls()
                     ]
                     logger.info(
                         "PROVIDER_RESPONSE_DUMP finish_reason=%s text_len=%d function_calls=%s",
