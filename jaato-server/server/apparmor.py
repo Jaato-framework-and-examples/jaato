@@ -236,7 +236,7 @@ class AppArmorManager:
     # mmap denial wrapped as a misleading "package not installed"
     # ToolError).  Narrow grant — only ELF shared objects get
     # mmap-exec; .py source and data files in the venv stay r-only.
-    _TEMPLATE_VERSION = 16
+    _TEMPLATE_VERSION = 17
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -508,7 +508,38 @@ profile jaato-ws-{session_id} flags=(attach_disconnected) {{
   # The ``r`` permission is required by the runner subprocess's
   # ``confine_to_profile.read_current_profile`` verify-after-write
   # step (server/runner/bootstrap.py:188).
+  #
+  # Phase 5 §5.10 (template v17, 2026-05-15): add explicit
+  # ``change_profile -> jaato-ws-{session_id}//child,``.  Pre-v17,
+  # subprocess transitions into the inline-declared ``//child``
+  # sub-profile were silently denied by the kernel.  The legacy
+  # assumption (still papered into
+  # ``make_child_transition_callback``'s pre-v17 docstring) was
+  # "parent profile implicitly authorizes transitions to inline
+  # sub-profiles".  Empirically false on AppArmor 4.0.1: kernel
+  # ``dmesg`` shows
+  # ``apparmor="DENIED" operation="change_profile" target="...//child"``
+  # for every cli_based_tool subprocess.  The ``//child`` sub-
+  # profile was declared but the transition was never authorized.
+  #
+  # Why this stayed latent: until per-stack apparmor_fragments
+  # (Piece 1 + walker) landed, confined cascades ran with an
+  # over-permissive workspace-tier fragment that masked the
+  # denial (subprocesses likely fell through to the parent
+  # profile or unconfined depending on the path).  Strict
+  # per-stage scoping exposes it because the //child path is
+  # actually taken now.
+  #
+  # tool_hat transitions do NOT need the symmetric rule because
+  # ``apparmor_confine`` defensively writes ``changeprofile
+  # unconfined`` first (see :func:`apparmor_confine` rationale),
+  # bouncing through unconfined before entering the sub-profile.
+  # The cli ``preexec_fn`` path can't do that bounce — the
+  # security boundary requires the forked child to inherit the
+  # parent profile and transition directly to ``//child``, so
+  # the rule must be granted explicitly.
   change_profile -> unconfined,
+  change_profile -> jaato-ws-{session_id}//child,
   owner /proc/*/attr/current      rw,
   owner /proc/*/task/*/attr/current rw,
 
@@ -2466,11 +2497,20 @@ def make_child_transition_callback(
     Designed for ``subprocess.Popen(preexec_fn=...)``: runs in the
     forked child between ``fork()`` and ``exec()``.  The callback
     writes ``changeprofile {session_profile_name}//child`` to
-    ``/proc/self/attr/current``.  Per AppArmor sub-profile
-    semantics, the parent profile (which the runner is in)
-    implicitly authorizes transitions to inline-declared
-    sub-profiles, so no explicit ``change_profile -> //child``
-    rule is needed in the parent profile.
+    ``/proc/self/attr/current``.
+
+    **Template v17 (2026-05-15) fix.**  Pre-v17 this docstring
+    claimed "no explicit ``change_profile -> //child`` rule is
+    needed in the parent profile" — empirically false on AppArmor
+    4.0.1.  The kernel's ``change_profile`` mediation runs against
+    the parent profile's rules even when the target is an inline
+    sub-profile, and the transition is DENIED unless explicitly
+    authorized.  Template v17 adds the
+    ``change_profile -> jaato-ws-{session_id}//child,`` grant
+    alongside ``-> unconfined``.  See the corresponding
+    PROFILE_TEMPLATE block at ``apparmor.py:511-540`` for the
+    full rationale + why this stayed latent until per-stack
+    fragment scoping (Piece 1) exposed it.
 
     After the ``exec()``, the new program is in ``//child``, which
     mirrors ``tool_hat``'s body but drops the three escape-vector
