@@ -522,3 +522,115 @@ class TestPluginAutoDiscovery:
                 assert "discovered" in plugin._config.profiles
             finally:
                 os.chdir(original_cwd)
+
+
+class TestScanProfilesDirLogProvenance:
+    """Regression pin (2026-05-15): the per-pass summary log emitted
+    by ``_scan_profiles_dir`` must list only profile names ACTUALLY
+    registered in THAT pass — not the cumulative ``profiles`` dict
+    across all preceding passes.
+
+    The bug: before this fix the line read
+
+        Discovered 24 profile(s) from /home/X/.jaato/profiles:
+          codegen, host_validator, _base_kb_pipeline, ...
+
+    where ``codegen`` etc. came from a prior workspace-tier pass.
+    Operators reading the log assumed those names lived under
+    ``~/.jaato/profiles/`` when they didn't.  The count (24) was
+    per-pass; the name list was cumulative; the line was internally
+    inconsistent and externally misleading.
+    """
+
+    def test_summary_log_lists_only_this_pass_names(self, caplog):
+        """Pass A registers two names; pass B registers two
+        different names.  Pass B's log line must NOT contain
+        pass A's names."""
+        from ..config import _scan_profiles_dir
+
+        with tempfile.TemporaryDirectory() as d_a, \
+             tempfile.TemporaryDirectory() as d_b:
+            (Path(d_a) / "alpha.json").write_text(
+                json.dumps({"name": "alpha", "description": "from A"})
+            )
+            (Path(d_a) / "beta.json").write_text(
+                json.dumps({"name": "beta", "description": "from A"})
+            )
+            (Path(d_b) / "gamma.json").write_text(
+                json.dumps({"name": "gamma", "description": "from B"})
+            )
+            (Path(d_b) / "delta.json").write_text(
+                json.dumps({"name": "delta", "description": "from B"})
+            )
+
+            profiles = {}
+            errors = {}
+            with caplog.at_level(
+                "INFO", logger="shared.plugins.subagent.config",
+            ):
+                _scan_profiles_dir(Path(d_a), profiles, errors)
+                _scan_profiles_dir(Path(d_b), profiles, errors)
+
+            info_lines = [
+                r.message for r in caplog.records
+                if r.levelname == "INFO" and "Discovered" in r.message
+            ]
+            assert len(info_lines) == 2, (
+                f"Expected one summary log per pass; got: {info_lines}"
+            )
+            a_line, b_line = info_lines
+            # Pass A reports its 2 names; doesn't see B's yet.
+            assert "alpha" in a_line and "beta" in a_line
+            assert "gamma" not in a_line and "delta" not in a_line
+            # Pass B reports only ITS 2 names, not A's.
+            assert "gamma" in b_line and "delta" in b_line, (
+                f"Pass B should list gamma/delta: {b_line}"
+            )
+            assert "alpha" not in b_line and "beta" not in b_line, (
+                "Pass B's log line includes pass A's names — "
+                "regression: provenance mismatch.  Line was: "
+                + b_line
+            )
+
+    def test_summary_count_matches_listed_names(self, caplog):
+        """Count and name-list must agree.  Pre-fix the count was
+        per-pass (correct) but the names were cumulative (wrong);
+        the line was internally inconsistent: ``N profile(s):`` plus
+        a list of length ≠ N.  Pin: count equals comma-separated
+        list length, for every pass."""
+        from ..config import _scan_profiles_dir
+        import re
+
+        with tempfile.TemporaryDirectory() as d_a, \
+             tempfile.TemporaryDirectory() as d_b:
+            for i in range(3):
+                (Path(d_a) / f"a_{i}.json").write_text(
+                    json.dumps({"name": f"a_{i}", "description": ""})
+                )
+            for i in range(2):
+                (Path(d_b) / f"b_{i}.json").write_text(
+                    json.dumps({"name": f"b_{i}", "description": ""})
+                )
+
+            profiles = {}
+            errors = {}
+            with caplog.at_level(
+                "INFO", logger="shared.plugins.subagent.config",
+            ):
+                _scan_profiles_dir(Path(d_a), profiles, errors)
+                _scan_profiles_dir(Path(d_b), profiles, errors)
+
+            for record in caplog.records:
+                if record.levelname != "INFO" or "Discovered" not in record.message:
+                    continue
+                m = re.match(
+                    r"Discovered (\d+) profile\(s\) from .*?: (.+)",
+                    record.message,
+                )
+                assert m, f"unexpected log shape: {record.message}"
+                count = int(m.group(1))
+                names = [n.strip() for n in m.group(2).split(",")]
+                assert count == len(names), (
+                    f"count/name-list mismatch: {count} vs "
+                    f"{len(names)} names in {record.message!r}"
+                )
