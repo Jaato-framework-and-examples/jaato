@@ -1464,6 +1464,14 @@ def _scan_profiles_dir(
     if not directory.is_dir():
         return
 
+    # Track names actually registered IN THIS PASS so the summary
+    # log line below reports the correct provenance.  Pre-fix the
+    # log printed ``profiles.items()`` which is the cumulative dict
+    # across all preceding passes — names from earlier directories
+    # appeared in the line claiming they came from ``directory``,
+    # which is misleading to operators ("why does my home dir have
+    # 'codegen' in it?  it doesn't.").  See 2026-05-15 finding.
+    found_names: List[str] = []
     found = 0
     for file_path in directory.iterdir():
         if not file_path.is_file():
@@ -1552,13 +1560,14 @@ def _scan_profiles_dir(
                 name, name,
             )
         found += 1
+        found_names.append(name)
         logger.debug("Discovered profile '%s' from %s", name, file_path)
 
     if found:
         logger.info(
             "Discovered %d profile(s) from %s: %s",
             found, directory,
-            ", ".join(n for n, p in profiles.items()),
+            ", ".join(found_names),
         )
 
 
