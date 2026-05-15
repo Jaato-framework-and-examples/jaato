@@ -419,3 +419,116 @@ class TestToolDiscoverability:
         plugin = create_plugin()
         for schema in plugin.get_tool_schemas():
             assert schema.discoverability == "core"
+
+
+class TestExploreToolsGuidanceWording:
+    """2026-05-15 regression pin: the explore-tools guidance is phrased
+    CONDITIONALLY ("WHEN REQUIRED" / "when your current information is
+    insufficient"), not as an unconditional imperative ("ALWAYS explore").
+
+    **Why the wording matters.**  Personas that scope the agent to a
+    narrow tool set (e.g. discovery profile saying "only call
+    signal_completion; do not call list_tools / get_tool_schemas")
+    must coexist with the framework's general guidance.  An
+    unconditional ``"ALWAYS explore tools first"`` directly
+    contradicts the persona — same model, same prompt, two
+    competing imperatives, and the framework's strong word often
+    won (peer's v86 cascade aborted at discovery for exactly this
+    reason).
+
+    A conditional phrasing makes the framework instruction a
+    FALLBACK for unclear cases ("explore WHEN you need to") while
+    leaving room for the persona to say "exploration isn't
+    required, the tool is X".  Both coexist without contradiction.
+
+    See ``feedback_kernel_scoping_beats_persona_prose`` for the
+    governing rule: framework instructions must not contradict
+    session-level contracts.
+    """
+
+    def test_guidance_phrased_conditionally_not_unconditionally(self):
+        """The exact word ``ALWAYS`` (as an unqualified imperative
+        directing the model to explore) must not appear in the
+        guidance.  Pin the absence of that phrase so a future
+        restorer can't accidentally re-introduce it."""
+        plugin = create_plugin()
+        si = plugin.get_system_instructions()
+        assert si is not None
+        # Lowercase compare to catch any casing variation.
+        si_lower = si.lower()
+        # The specific imperative shape that caused v86: "ALWAYS
+        # explore available tools first".  Forbid this exact pattern.
+        assert "always explore" not in si_lower, (
+            "Introspection guidance must not contain the unconditional "
+            "imperative 'ALWAYS explore'.  Personas that need to scope "
+            "the agent to a narrow tool set (e.g. typed-completion "
+            "stages) need the framework instruction to be conditional "
+            "so it doesn't contradict their explicit tool-list. "
+            f"Got: {si!r}"
+        )
+
+    def test_guidance_contains_conditional_qualifier(self):
+        """The guidance must carry an explicit qualifier indicating
+        WHEN exploration applies (the conditional that lets a
+        narrow-tool-list persona override default exploration)."""
+        plugin = create_plugin()
+        si = plugin.get_system_instructions()
+        assert si is not None
+        # One of the qualifier phrases must be present so the
+        # instruction reads as conditional rather than absolute.
+        qualifiers = [
+            "when required",
+            "when your current information is insufficient",
+            "skip discovery when the persona",
+        ]
+        si_lower = si.lower()
+        assert any(q in si_lower for q in qualifiers), (
+            "Introspection guidance must contain a conditional "
+            "qualifier (one of: 'when required', 'when your "
+            "current information is insufficient', 'skip discovery "
+            "when the persona') so personas can override the "
+            "default exploration behaviour.  Got: "
+            f"{si!r}"
+        )
+
+    def test_guidance_still_describes_workflow_for_unclear_cases(self):
+        """When exploration IS warranted, the guidance must still tell
+        the agent HOW (the list_tools → get_tool_schemas → call
+        chain).  We're softening the trigger condition, not removing
+        the workflow."""
+        plugin = create_plugin()
+        si = plugin.get_system_instructions()
+        assert si is not None
+        # The workflow steps should remain.
+        assert "list_tools" in si
+        assert "get_tool_schemas" in si
+        # The category quick-reference should remain.
+        assert "CATEGORY QUICK REFERENCE" in si
+
+    def test_guidance_returned_for_typed_completion_sessions(self):
+        """Sessions with typed completion contracts STILL receive the
+        guidance — we don't gate by session state.  The wording is
+        what changed.  The persona handles the "don't explore"
+        decision; the framework just provides the general
+        capability description.
+
+        Pin: a typed-completion session (the v86 repro case) still
+        gets the guidance, just no longer in an unconditional form
+        that contradicts its persona."""
+        plugin = create_plugin()
+
+        class TypedSession:
+            _completion_payload_schema = {"type": "object", "properties": {}}
+
+        plugin.set_session(TypedSession())
+        si = plugin.get_system_instructions()
+        assert si is not None, (
+            "Guidance must be returned even for typed-completion "
+            "sessions — the fix is in the wording, not in suppression. "
+            "Suppression-based gating was the wrong approach: it "
+            "made framework guidance conditional on session state "
+            "rather than letting personas authoritatively scope "
+            "behaviour."
+        )
+        # And the conditional qualifier must still be present.
+        assert "always explore" not in si.lower()
