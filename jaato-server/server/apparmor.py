@@ -236,7 +236,13 @@ class AppArmorManager:
     # mmap denial wrapped as a misleading "package not installed"
     # ToolError).  Narrow grant — only ELF shared objects get
     # mmap-exec; .py source and data files in the venv stay r-only.
-    _TEMPLATE_VERSION = 18
+    # v19 (2026-05-15): ``flags=(...)`` is now a placeholder so the
+    # diagnostic env ``JAATO_APPARMOR_COMPLAIN`` can append ``complain``
+    # mode — denials get logged to dmesg without enforcement.  Used to
+    # harvest the missing-rule set in one cascade run, then ship
+    # targeted grants from the kernel-audit data instead of guessing.
+    # Default (env unset) behaviour is byte-identical to v18.
+    _TEMPLATE_VERSION = 19
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -244,7 +250,7 @@ class AppArmorManager:
 # jaato-apparmor-template-version: {template_version}
 #include <tunables/global>
 
-profile jaato-ws-{session_id} flags=(attach_disconnected) {{
+profile jaato-ws-{session_id} flags=({profile_flags}) {{
   #include <abstractions/base>
   #include <abstractions/nameservice>
   #include <abstractions/python>
@@ -1984,6 +1990,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             session_id=session_id,
         )
 
+        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")
+        profile_flags = "attach_disconnected, complain" if complain else "attach_disconnected"
+
         return self.PROFILE_TEMPLATE.format(
             template_version=self._TEMPLATE_VERSION,
             session_id=session_id,
@@ -1997,6 +2006,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             extension_fragments_inline=extension_fragments_inline,
             tool_hat_subprofile=tool_hat_subprofile,
             child_subprofile=child_subprofile,
+            profile_flags=profile_flags,
         )
 
     def _build_tool_hat_subprofile(
