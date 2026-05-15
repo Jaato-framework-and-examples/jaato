@@ -255,13 +255,30 @@ def _configure_runtime_plugins(
             existing = plugin_configs.get(name, {})
             plugin_configs[name] = {**existing, **dict(cfg)}
 
-    # Step 4: expose_all — initializes each plugin.  No on_progress
-    # callback runner-side.  This is the bulk of bootstrap time
-    # (~10s for 28 runner-tier plugins, per 0.6.91 measurement) —
-    # per-plugin breakdown lands in the report below when
-    # JAATO_BOOTSTRAP_TIMING is set.
+    # Step 4: expose_all — initializes each plugin requested by the
+    # session.  No on_progress callback runner-side.
+    #
+    # 2026-05-15: gate ``initialize()`` on ``envelope.plugins``.
+    # Pre-fix, ``expose_all`` initialized ALL discovered runner-tier
+    # plugins regardless of profile.plugins — the heavyweight
+    # ``references`` plugin paid ~7.6s of SentenceTransformer model
+    # load on every session even when references wasn't in
+    # profile.plugins.  Post-fix, the registry skips initialize() for
+    # plugins not in the requested set (the registry's
+    # ``_ALWAYS_INITIALIZE_PLUGINS`` + enrichment-only plugins are
+    # always included regardless).  ``tools=`` on
+    # ``runtime.create_session`` was already the inclusion gate at
+    # the tool-exposure layer; this aligns init with that gate.
+    requested_plugin_names: List[str] = [
+        entry["name"]
+        for entry in envelope.plugins
+        if isinstance(entry, dict) and entry.get("name")
+    ]
     with timer.stage("expose_all"):
-        registry.expose_all(plugin_configs)
+        registry.expose_all(
+            plugin_configs,
+            requested_plugins=requested_plugin_names or None,
+        )
 
     # Step 5 (`self.todo_plugin = ...`): N/A runner-side — no
     # runner-resident code path needs the cached reference.
