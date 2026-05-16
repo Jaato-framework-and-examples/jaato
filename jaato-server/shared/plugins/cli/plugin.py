@@ -756,6 +756,27 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # all four (none, apparmor-only, cgroup-only, both).
             cmd = command if use_shell else argv
 
+            # Diagnostic (server 0.6.108+, 2026-05-16): surface the env
+            # preconditions immediately before Popen so we can confirm
+            # whether ``HOME`` survives the daemon -> template ->
+            # pool-slot -> cli inheritance chain.  v100/v101 cascade
+            # evidence showed ``cat ~/...`` failing with the tilde
+            # unexpanded — symptom of HOME unset/empty in the
+            # subprocess.  Grep across the server code base found no
+            # explicit HOME mutation, so the loss (if it really is
+            # HOME loss) happens via a runtime path that source
+            # inspection alone cannot pinpoint.  This log line is the
+            # ground truth at the Popen boundary.
+            logger.info(
+                "CLI_SUBPROCESS_ENV path=streaming shell=%s cwd=%r "
+                "home=%r user=%r path_len=%d env_keys=%d cmd_preview=%r",
+                use_shell, self._workspace_root,
+                env.get("HOME", "<MISSING>"),
+                env.get("USER", "<MISSING>"),
+                len(env.get("PATH", "")), len(env),
+                command[:80] + ("..." if len(command) > 80 else ""),
+            )
+
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
