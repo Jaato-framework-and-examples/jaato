@@ -2004,3 +2004,49 @@ class TestReferencesPluginApparmorRules:
         assert rendered.count("@{HOME}/.cache/huggingface/** rwk,") == 3
         assert rendered.count("@{HOME}/.cache/torch/         rw,") == 3
         assert rendered.count("@{HOME}/.cache/torch/**       rwk,") == 3
+
+
+class TestSubprofileComplainFlag:
+    """Template v22 — JAATO_APPARMOR_COMPLAIN propagates to sub-profiles."""
+
+    def test_default_subprofiles_have_no_flags_declaration(self, manager, monkeypatch):
+        """When the env knob is unset, sub-profile headers stay byte-equivalent
+        to v21 (no ``flags=`` clause).  AppArmor doesn't permit
+        ``attach_disconnected`` on sub-profiles, so the only legal flag here
+        is ``complain``; absent the knob, no clause is emitted at all."""
+        monkeypatch.delenv("JAATO_APPARMOR_COMPLAIN", raising=False)
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "profile tool_hat {" in rendered
+        assert "profile child {" in rendered
+        assert "profile tool_hat flags=" not in rendered
+        assert "profile child flags=" not in rendered
+
+    def test_complain_env_propagates_to_both_subprofiles(self, manager, monkeypatch):
+        """v22 acceptance: with the knob set, both sub-profile headers
+        carry ``flags=(complain)`` so cli_based_tool subprocesses
+        transitioning into ``//child`` also run complain-mode."""
+        monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", "1")
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "profile tool_hat flags=(complain) {" in rendered
+        assert "profile child flags=(complain) {" in rendered
+        # Base profile keeps the existing combined flag set
+        assert "flags=(attach_disconnected, complain)" in rendered
+
+    def test_complain_env_truthy_variants(self, manager, monkeypatch):
+        """Accept the same truthy variants as the base profile path:
+        ``1``, ``true``, ``yes`` (case-insensitive)."""
+        for value in ("1", "true", "True", "YES"):
+            monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", value)
+            rendered = manager._render_profile("s1", "/workspace")
+            assert "profile tool_hat flags=(complain) {" in rendered, (
+                f"JAATO_APPARMOR_COMPLAIN={value!r} did not enable complain on tool_hat"
+            )
+
+    def test_complain_env_falsy_keeps_subprofiles_enforce(self, manager, monkeypatch):
+        """Empty string / unset / "0" / "false" all keep sub-profiles enforce."""
+        for value in ("", "0", "false", "no"):
+            monkeypatch.setenv("JAATO_APPARMOR_COMPLAIN", value)
+            rendered = manager._render_profile("s1", "/workspace")
+            assert "profile tool_hat flags=" not in rendered, (
+                f"JAATO_APPARMOR_COMPLAIN={value!r} incorrectly enabled complain on tool_hat"
+            )
