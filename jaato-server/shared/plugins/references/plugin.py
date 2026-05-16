@@ -16,15 +16,19 @@ Enrichment Support:
 """
 
 import json
+import logging
 import os
 import re
 import shutil
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+
+logger = logging.getLogger(__name__)
 from ..subagent.config import expand_variables
 
 from .models import ReferenceSource, ReferenceContents, InjectionMode, SourceType
@@ -162,6 +166,11 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # and sentence-transformers is installed.
         self._embedding_provider: Optional[EmbeddingProviderProtocol] = None
         self._bundles: List[Bundle] = []
+        # Cached initialize() config for lazy embedding provider load.
+        # When ``_init_embedding_provider`` is skipped at initialize() time
+        # (no bundles in the workspace), ``_execute_compute_embedding``
+        # uses this to lazy-load the provider on first call.
+        self._cached_init_config: Optional[Dict[str, Any]] = None
         # Retained for back-compat with tests that directly inspect the
         # plugin state; points at the root bundle's matcher when present.
         # New code should iterate self._bundles instead.
@@ -1146,15 +1155,17 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self._tag_similarity_threshold = config.get("tag_similarity_threshold", 0.4)
         self._max_matches_per_piece = config.get("max_matches_per_piece", 3)
 
-        # Always try to create the embedding provider so that the
-        # compute_embedding tool works even when generating embeddings
-        # for the first time (no existing sidecar/config yet).
-        self._init_embedding_provider(config)
-
         # Discover bundles (root + subdirectories with their own manifests)
         # and load sub-bundle references into the flat catalog. Safe to
         # call unconditionally — a workspace with no manifest anywhere
         # yields an empty bundle list and becomes a no-op.
+        #
+        # Reordered before ``_init_embedding_provider`` (server 0.6.111+,
+        # 2026-05-16): bundle presence gates whether we incur the
+        # premium SentenceTransformer module import cost (measured
+        # 6.7-31.7s cold; BOOTSTRAP_TIMING reports in /tmp/jaato.log
+        # 0.6.110).  No coupling — ``_discover_and_load_bundles`` only
+        # reads ``_config`` / ``_workspace_path`` / ``_project_root``.
         self._discover_and_load_bundles()
 
         # Register the handler that exposes this plugin's bundle-relevant
@@ -1166,6 +1177,23 @@ class ReferencesPlugin(RunnerForwardingMixin):
         from ..bundle_common.handler import registry as _bundle_registry
         from .entry_handler import ReferencesEntryHandler
         _bundle_registry.register(ReferencesEntryHandler(self))
+
+        # Initialize the embedding provider only when bundles exist.
+        # Workspaces without bundles cannot run semantic matching (no
+        # sidecar to match against); the premium SentenceTransformer
+        # module load is deferred to first ``compute_embedding`` call —
+        # see ``_execute_compute_embedding``.  Saves the cold-runner
+        # bootstrap cost on profiles that don't use references for
+        # semantic queries (e.g. body-wired prefetch workflows).
+        if self._bundles:
+            self._init_embedding_provider(config)
+        else:
+            self._cached_init_config = config
+            self._trace(
+                "initialize: skipping embedding provider "
+                "(no bundles in workspace; will lazy-init on first "
+                "compute_embedding call)"
+            )
 
         # Reconcile drift (new/edited/removed references) against each
         # bundle's sidecar. Bundles with reconcile_mode == "lazy" are
@@ -2110,6 +2138,14 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return {"error": "'input' and 'file' are mutually exclusive — provide one, not both."}
         if not text_input and not file_path:
             return {"error": "Provide either 'input' (text) or 'file' (path)."}
+
+        # Lazy-load: ``initialize()`` skips ``_init_embedding_provider``
+        # when the workspace has no bundles (server 0.6.111+).  Attempt
+        # the load now — the user may be generating embeddings for a
+        # first bundle.  ``_init_embedding_provider`` is idempotent
+        # (early return when provider already set).
+        if not self._embedding_provider and self._cached_init_config is not None:
+            self._init_embedding_provider(self._cached_init_config)
 
         if not self._embedding_provider:
             return {
