@@ -1757,3 +1757,77 @@ class TestReferenceAuthorizer:
 
         assert ok is True
         rm.assert_called_once_with("s1", "ref-A")
+
+
+class TestPluginContributedRules:
+    """Plugin-contribution hook (template v20, Phase 0)."""
+
+    def test_no_rules_renders_empty_marker_in_base_and_both_subprofiles(self, manager):
+        """``plugin_rules=None`` emits a "(none for this session)" comment so the
+        section header is greppable in every rendered profile."""
+        rendered = manager._render_profile("s1", "/workspace")
+        # Base + tool_hat + child sub-profile = 3 occurrences
+        assert rendered.count("(none for this session)") == 3
+
+    def test_empty_list_treated_same_as_none(self, manager):
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=[])
+        assert rendered.count("(none for this session)") == 3
+
+    def test_rules_spliced_into_base_and_both_subprofiles(self, manager):
+        rules = [
+            "/dev/shm/sem.* rwk,",
+            "@{HOME}/.cache/foo/   rw,",
+        ]
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        # Section header appears in base + tool_hat + child
+        assert rendered.count("# ---- plugin-contributed rules ----") == 3
+        # Each rule appears 3 times (once per profile context)
+        assert rendered.count("/dev/shm/sem.* rwk,") == 3
+        assert rendered.count("@{HOME}/.cache/foo/   rw,") == 3
+        # Default "(none for this session)" marker absent
+        assert "(none for this session)" not in rendered
+
+    def test_format_plugin_contributed_rules_indents_correctly(self):
+        from server.apparmor import AppArmorManager
+        out_base = AppArmorManager._format_plugin_contributed_rules(
+            ["/dev/shm/sem.* rwk,"], indent="  ",
+        )
+        assert out_base == "  # ---- plugin-contributed rules ----\n  /dev/shm/sem.* rwk,"
+
+        out_sub = AppArmorManager._format_plugin_contributed_rules(
+            ["/dev/shm/sem.* rwk,"], indent="    ",
+        )
+        assert out_sub == "    # ---- plugin-contributed rules ----\n    /dev/shm/sem.* rwk,"
+
+    def test_format_plugin_contributed_rules_empty(self):
+        from server.apparmor import AppArmorManager
+        out = AppArmorManager._format_plugin_contributed_rules(None, indent="  ")
+        assert out == "  # ---- plugin-contributed rules (none for this session) ----"
+        out_empty = AppArmorManager._format_plugin_contributed_rules([], indent="  ")
+        assert out_empty == "  # ---- plugin-contributed rules (none for this session) ----"
+
+    def test_provision_profile_forwards_plugin_rules(self, manager, tmp_path, monkeypatch):
+        """End-to-end: provision_profile -> _render_profile picks up plugin_rules."""
+        # Stub out apparmor_parser invocation; we only care about the rendered file.
+        manager._profile_dir = tmp_path
+        captured = {}
+
+        def fake_parser(*args, **kwargs):
+            class R: returncode = 0
+            return R()
+
+        monkeypatch.setattr(_apparmor_mod, "subprocess", MagicMock(run=fake_parser))
+        monkeypatch.setattr(manager, "is_available", lambda: True)
+        monkeypatch.setattr(manager, "_run_unconfined",
+                            lambda fn, *a, **kw: fn(*a, **kw))
+
+        rules = ["@{HOME}/.cache/foo/ rw,"]
+        ok = manager.provision_profile(
+            "s1", "/workspace", plugin_rules=rules,
+        )
+        assert ok is True
+
+        # Profile file should contain the rule
+        written = (tmp_path / "jaato-ws-s1").read_text()
+        assert "@{HOME}/.cache/foo/ rw," in written
+        assert written.count("@{HOME}/.cache/foo/ rw,") == 3  # base + 2 subprofiles
