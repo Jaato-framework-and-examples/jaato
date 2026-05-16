@@ -194,6 +194,43 @@ class SubagentPlugin:
         """Unique identifier for this plugin."""
         return "subagent"
 
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute subagent-plugin host paths to the AppArmor profile.
+
+        Phase 4 of the plugin-apparmor-contribution refactor
+        (template v26, 2026-05-16).  Previously hardcoded in
+        ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
+        subagent plugin in ``profile.plugins`` no longer carry the
+        grants (least-privilege).
+
+        The plugin reads agent personas (``~/.jaato/agents/*.md``) for
+        ``--agent`` spawns and subagent profile definitions
+        (``~/.jaato/profiles/*.{json,yaml}``) for resolving subagent
+        profiles at spawn time.  Both are user-tier reads; the
+        workspace tier is covered by the framework template's
+        workspace rule.
+
+        Note: ``~/.jaato/agents/`` is also independently declared by
+        ``PromptLibraryPlugin.get_apparmor_rules`` because
+        prompt_library discovers agents as prompts.  The resolver
+        unions both contributions; AppArmor parsing is idempotent on
+        duplicate rules.
+        """
+        return [
+            "@{HOME}/.jaato/agents/    r,",
+            "@{HOME}/.jaato/agents/**  r,",
+            "@{HOME}/.jaato/profiles/  r,",
+            "@{HOME}/.jaato/profiles/** r,",
+        ]
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin with configuration.
 
