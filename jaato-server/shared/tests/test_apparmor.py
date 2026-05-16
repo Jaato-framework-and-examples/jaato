@@ -661,8 +661,23 @@ class TestRenderProfile:
         ``~/.jaato/services/`` as a user-tier fallback when the
         workspace tier doesn't have the service.  Confined WS sessions
         need AppArmor read access to that path, otherwise tiered lookup
-        is invisible to any model call coming from a confined tool."""
-        profile = manager._render_profile("s1", "/workspace")
+        is invisible to any model call coming from a confined tool.
+
+        Phase 3 (template v24, 2026-05-16): rule migrated to the
+        service_connector plugin's ``get_apparmor_rules``.  Sessions
+        whose ``profile.plugins`` includes service_connector get the
+        grant via the resolver+plugin_rules path; sessions without it
+        no longer carry the grant (least-privilege).  This test now
+        verifies the new convention rather than the old hardcoded form.
+        """
+        from shared.plugins.service_connector.plugin import ServiceConnectorPlugin
+        rules = ServiceConnectorPlugin.get_apparmor_rules(
+            workspace_path="/workspace", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        profile = manager._render_profile(
+            "s1", "/workspace", plugin_rules=rules,
+        )
         assert "@{HOME}/.jaato/services/" in profile
         assert "@{HOME}/.jaato/services/**" in profile
 
@@ -1959,7 +1974,11 @@ class TestResolvePluginApparmorRules:
 
 
 class TestReferencesPluginApparmorRules:
-    """References plugin override (Phase 1, template v21)."""
+    """References plugin override.
+
+    Phase 1 (template v21) — HF + torch caches.
+    Phase 3 (template v24) — user-tier references catalog reads.
+    """
 
     def test_returns_huggingface_and_torch_caches(self):
         from shared.plugins.references.plugin import ReferencesPlugin
@@ -1972,7 +1991,19 @@ class TestReferencesPluginApparmorRules:
         assert "@{HOME}/.cache/huggingface/   rw," in rules
         assert "@{HOME}/.cache/huggingface/** rwk," in rules
         assert "@{HOME}/.cache/torch/         rw," in rules
-        assert "@{HOME}/.cache/torch/**       rwk," in rules
+        assert "@{HOME}/.cache/torch/**       rwk,"
+
+    def test_returns_user_tier_catalog_reads(self):
+        """Phase 3 acceptance: ~/.jaato/references/ catalog reads."""
+        from shared.plugins.references.plugin import ReferencesPlugin
+        rules = ReferencesPlugin.get_apparmor_rules(
+            workspace_path="/ws",
+            session_id="s1",
+            config_root=None,
+            plugin_config={},
+        )
+        assert "@{HOME}/.jaato/references/    r," in rules
+        assert "@{HOME}/.jaato/references/**  r," in rules
 
     def test_is_a_classmethod_callable_without_instance(self):
         """Daemon-side resolution must work without instantiating the plugin."""
@@ -1981,7 +2012,8 @@ class TestReferencesPluginApparmorRules:
             workspace_path="/ws", session_id="s1",
             config_root=None, plugin_config={},
         )
-        assert len(rules) == 4
+        # 4 cache rules (Phase 1) + 2 catalog rules (Phase 3) = 6
+        assert len(rules) == 6
 
     def test_template_no_longer_hardcodes_hf_torch(self, manager):
         """Phase 1 acceptance: rendered profile body (with no plugins)
@@ -1990,20 +2022,70 @@ class TestReferencesPluginApparmorRules:
         assert "/.cache/huggingface/" not in rendered
         assert "/.cache/torch/" not in rendered
 
+    def test_template_no_longer_hardcodes_user_catalog(self, manager):
+        """Phase 3 acceptance: rendered profile body (with no plugins)
+        must NOT contain the user-tier references catalog grants."""
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "@{HOME}/.jaato/references/" not in rendered
+
     def test_template_picks_up_references_rules_when_passed(self, manager):
         """When the resolver feeds references' rules into _render_profile,
-        the HF + torch grants reappear in all 3 profile contexts."""
+        all grants reappear in all 3 profile contexts."""
         from shared.plugins.references.plugin import ReferencesPlugin
         rules = ReferencesPlugin.get_apparmor_rules(
             workspace_path="/workspace", session_id="s1",
             config_root=None, plugin_config={},
         )
         rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
-        # Each of the 4 rules appears 3 times (base + tool_hat + child)
+        # Each of the 6 rules appears 3 times (base + tool_hat + child)
         assert rendered.count("@{HOME}/.cache/huggingface/   rw,") == 3
         assert rendered.count("@{HOME}/.cache/huggingface/** rwk,") == 3
         assert rendered.count("@{HOME}/.cache/torch/         rw,") == 3
         assert rendered.count("@{HOME}/.cache/torch/**       rwk,") == 3
+        assert rendered.count("@{HOME}/.jaato/references/    r,") == 3
+        assert rendered.count("@{HOME}/.jaato/references/**  r,") == 3
+
+
+class TestServiceConnectorPluginApparmorRules:
+    """Service connector plugin override (Phase 3, template v24)."""
+
+    def test_returns_services_paths(self):
+        from shared.plugins.service_connector.plugin import ServiceConnectorPlugin
+        rules = ServiceConnectorPlugin.get_apparmor_rules(
+            workspace_path="/ws",
+            session_id="s1",
+            config_root=None,
+            plugin_config={},
+        )
+        assert "@{HOME}/.jaato/services/    r," in rules
+        assert "@{HOME}/.jaato/services/**  r," in rules
+
+    def test_is_a_classmethod_callable_without_instance(self):
+        """Daemon-side resolution must work without instantiating the plugin."""
+        from shared.plugins.service_connector.plugin import ServiceConnectorPlugin
+        rules = ServiceConnectorPlugin.get_apparmor_rules(
+            workspace_path="/ws", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        assert len(rules) == 2
+
+    def test_template_no_longer_hardcodes_services(self, manager):
+        """Phase 3 acceptance: rendered profile body (with no plugins)
+        must NOT contain the services grants."""
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "@{HOME}/.jaato/services/" not in rendered
+
+    def test_template_picks_up_service_connector_rules_when_passed(self, manager):
+        """When the resolver feeds service_connector's rules into _render_profile,
+        the grants reappear in all 3 profile contexts."""
+        from shared.plugins.service_connector.plugin import ServiceConnectorPlugin
+        rules = ServiceConnectorPlugin.get_apparmor_rules(
+            workspace_path="/workspace", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        assert rendered.count("@{HOME}/.jaato/services/    r,") == 3
+        assert rendered.count("@{HOME}/.jaato/services/**  r,") == 3
 
 
 class TestMemoryPluginApparmorRules:

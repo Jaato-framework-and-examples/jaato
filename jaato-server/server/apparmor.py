@@ -267,7 +267,7 @@ class AppArmorManager:
     # kernel) rather than the expected complain-mode AVC log entries.
     # The flag knob now does what its name implies — entire profile
     # chain is complain when set.
-    _TEMPLATE_VERSION = 23
+    _TEMPLATE_VERSION = 24
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -373,10 +373,8 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # ~/.jaato/prompts/ and ~/.jaato/skills/ migrated to prompt_library plugin (template v23).
   @{{HOME}}/.jaato/themes/         r,
   @{{HOME}}/.jaato/themes/**       r,
-  @{{HOME}}/.jaato/services/       r,
-  @{{HOME}}/.jaato/services/**     r,
-  @{{HOME}}/.jaato/references/     r,
-  @{{HOME}}/.jaato/references/**   r,
+  # ~/.jaato/services/ migrated to service_connector plugin (template v24).
+  # ~/.jaato/references/ migrated to references plugin (template v24).
   @{{HOME}}/.jaato/keybindings.json r,
   @{{HOME}}/.jaato/theme.json       r,
   @{{HOME}}/.jaato/gc.json          r,
@@ -2155,10 +2153,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # Prompts + skills migrated to prompt_library plugin (template v23).
     @{{HOME}}/.jaato/themes/         r,
     @{{HOME}}/.jaato/themes/**       r,
-    @{{HOME}}/.jaato/services/       r,
-    @{{HOME}}/.jaato/services/**     r,
-    @{{HOME}}/.jaato/references/     r,
-    @{{HOME}}/.jaato/references/**   r,
+    # ~/.jaato/services/ migrated to service_connector plugin (template v24).
+    # ~/.jaato/references/ migrated to references plugin (template v24).
     @{{HOME}}/.jaato/keybindings.json r,
     @{{HOME}}/.jaato/theme.json       r,
     @{{HOME}}/.jaato/gc.json          r,
@@ -2319,10 +2315,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # Prompts + skills migrated to prompt_library plugin (template v23).
     @{{HOME}}/.jaato/themes/         r,
     @{{HOME}}/.jaato/themes/**       r,
-    @{{HOME}}/.jaato/services/       r,
-    @{{HOME}}/.jaato/services/**     r,
-    @{{HOME}}/.jaato/references/     r,
-    @{{HOME}}/.jaato/references/**   r,
+    # ~/.jaato/services/ migrated to service_connector plugin (template v24).
+    # ~/.jaato/references/ migrated to references plugin (template v24).
     @{{HOME}}/.jaato/keybindings.json r,
     @{{HOME}}/.jaato/theme.json       r,
     @{{HOME}}/.jaato/gc.json          r,

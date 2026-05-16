@@ -207,23 +207,32 @@ class ReferencesPlugin(RunnerForwardingMixin):
     ) -> List[str]:
         """Contribute references-plugin host paths to the AppArmor profile.
 
-        Phase 1 of the plugin-apparmor-contribution refactor
-        (template v21, 2026-05-16).  These caches used to be hardcoded
-        in ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
-        references plugin in ``profile.plugins`` no longer carry the
-        grants (least-privilege).
+        Phase 1 (template v21) — HuggingFace + torch caches.
+        Phase 3 (template v24) — user-tier references catalog reads.
 
-        ``sentence-transformers``, ``HuggingFace transformers``, and
-        ``torch`` write lockfiles + metadata even when models are fully
-        cached locally — read-only would EACCES.  ``rwk`` covers
-        directory creation, file writes, and the file-lock primitive
-        joblib uses for the on-disk cache.
+        Previously hardcoded in ``apparmor.py:PROFILE_TEMPLATE``;
+        sessions without the references plugin in ``profile.plugins``
+        no longer carry the grants (least-privilege).
+
+        **Caches (rw):** ``sentence-transformers``,
+        ``HuggingFace transformers``, and ``torch`` write lockfiles +
+        metadata even when models are fully cached locally — read-only
+        would EACCES.  ``rwk`` covers directory creation, file writes,
+        and the file-lock primitive joblib uses for the on-disk cache.
+
+        **Catalog (r):** the plugin scans ``~/.jaato/references/`` to
+        discover available reference sources (catalog enumeration).
+        The actual reference *content* is read via per-reference
+        AppArmor fragments managed by ``add_reference_fragment``; this
+        rule covers the catalog-discovery scan only.
         """
         return [
             "@{HOME}/.cache/huggingface/   rw,",
             "@{HOME}/.cache/huggingface/** rwk,",
             "@{HOME}/.cache/torch/         rw,",
             "@{HOME}/.cache/torch/**       rwk,",
+            "@{HOME}/.jaato/references/    r,",
+            "@{HOME}/.jaato/references/**  r,",
         ]
 
     def _trace(self, msg: str) -> None:
