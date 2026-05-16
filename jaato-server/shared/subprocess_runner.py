@@ -19,6 +19,7 @@ callbacks, background execution, timeout choices) stay in the calling
 plugin — this module is deliberately minimal.
 """
 
+import logging
 import os
 import re
 import shlex
@@ -30,6 +31,8 @@ from typing import Callable, Dict, List, Optional
 
 from shared.ai_tool_runner import get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -195,6 +198,19 @@ def run_command(
     # the forked child into the session's cgroup before exec, so the
     # kernel-enforced memory.max / pids.max / cpu.weight apply from the
     # first instruction of the new program.
+    # Diagnostic (server 0.6.108+, 2026-05-16): see comment in
+    # cli/plugin.py:_execute_streaming for the v100/v101 HOME-unset
+    # investigation that motivated this log line.  Two Popen sites
+    # share this diagnostic — ``path=`` distinguishes them.
+    logger.info(
+        "CLI_SUBPROCESS_ENV path=run_command shell=%s cwd=%r "
+        "home=%r user=%r path_len=%d env_keys=%d cmd_preview=%r",
+        use_shell, cwd,
+        env.get("HOME", "<MISSING>"),
+        env.get("USER", "<MISSING>"),
+        len(env.get("PATH", "")), len(env),
+        command[:80] + ("..." if len(command) > 80 else ""),
+    )
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
