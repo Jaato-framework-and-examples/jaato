@@ -98,6 +98,39 @@ class MemoryPlugin(RunnerForwardingMixin):
         """Return plugin name."""
         return self._name
 
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute memory-plugin host paths to the AppArmor profile.
+
+        Phase 2 of the plugin-apparmor-contribution refactor
+        (template v23, 2026-05-16).  These paths used to be hardcoded
+        in ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
+        memory plugin in ``profile.plugins`` no longer carry the
+        grants (least-privilege).
+
+        Memory storage uses three layouts at ``~/.jaato/memories``:
+        - ``memories/raw/{id}.json`` — pending queue (one file per memory)
+        - ``memories/curated.jsonl`` — curated knowledge base
+        - ``memories.jsonl`` — legacy single-file store (retained for
+          migration; readable but not writable on new sessions)
+
+        Both the folder and its contents need ``rw`` so the plugin can
+        create the parent directory on first write, enumerate raw/, and
+        perform atomic tempfile+rename writes.
+        """
+        return [
+            "@{HOME}/.jaato/memories/       rw,",
+            "@{HOME}/.jaato/memories/**     rw,",
+            "@{HOME}/.jaato/memories.jsonl  rw,",
+        ]
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize storage backend and indexer.
 

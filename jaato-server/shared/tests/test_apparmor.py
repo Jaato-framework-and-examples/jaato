@@ -2006,6 +2006,106 @@ class TestReferencesPluginApparmorRules:
         assert rendered.count("@{HOME}/.cache/torch/**       rwk,") == 3
 
 
+class TestMemoryPluginApparmorRules:
+    """Memory plugin override (Phase 2, template v23)."""
+
+    def test_returns_memories_paths(self):
+        from shared.plugins.memory.plugin import MemoryPlugin
+        rules = MemoryPlugin.get_apparmor_rules(
+            workspace_path="/ws",
+            session_id="s1",
+            config_root=None,
+            plugin_config={},
+        )
+        assert "@{HOME}/.jaato/memories/       rw," in rules
+        assert "@{HOME}/.jaato/memories/**     rw," in rules
+        assert "@{HOME}/.jaato/memories.jsonl  rw," in rules
+
+    def test_is_a_classmethod_callable_without_instance(self):
+        """Daemon-side resolution must work without instantiating the plugin."""
+        from shared.plugins.memory.plugin import MemoryPlugin
+        rules = MemoryPlugin.get_apparmor_rules(
+            workspace_path="/ws", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        assert len(rules) == 3
+
+    def test_template_no_longer_hardcodes_memories(self, manager):
+        """Phase 2 acceptance: rendered profile body (with no plugins)
+        must NOT contain the memories grants."""
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "@{HOME}/.jaato/memories/" not in rendered
+        assert "@{HOME}/.jaato/memories.jsonl" not in rendered
+
+    def test_template_picks_up_memory_rules_when_passed(self, manager):
+        """When the resolver feeds memory's rules into _render_profile,
+        the grants reappear in all 3 profile contexts."""
+        from shared.plugins.memory.plugin import MemoryPlugin
+        rules = MemoryPlugin.get_apparmor_rules(
+            workspace_path="/workspace", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        # Each rule appears 3 times (base + tool_hat + child)
+        assert rendered.count("@{HOME}/.jaato/memories/       rw,") == 3
+        assert rendered.count("@{HOME}/.jaato/memories/**     rw,") == 3
+        assert rendered.count("@{HOME}/.jaato/memories.jsonl  rw,") == 3
+
+
+class TestPromptLibraryPluginApparmorRules:
+    """Prompt library plugin override (Phase 2, template v23)."""
+
+    def test_returns_prompts_skills_claude_paths(self):
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        rules = PromptLibraryPlugin.get_apparmor_rules(
+            workspace_path="/ws",
+            session_id="s1",
+            config_root=None,
+            plugin_config={},
+        )
+        # User-tier jaato prompts/skills
+        assert "@{HOME}/.jaato/prompts/    r," in rules
+        assert "@{HOME}/.jaato/prompts/**  r," in rules
+        assert "@{HOME}/.jaato/skills/     r," in rules
+        assert "@{HOME}/.jaato/skills/**   r," in rules
+        # Claude Code interop
+        assert "@{HOME}/.claude/skills/    r," in rules
+        assert "@{HOME}/.claude/skills/**  r," in rules
+        assert "@{HOME}/.claude/commands/  r," in rules
+        assert "@{HOME}/.claude/commands/**  r," in rules
+
+    def test_is_a_classmethod_callable_without_instance(self):
+        """Daemon-side resolution must work without instantiating the plugin."""
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        rules = PromptLibraryPlugin.get_apparmor_rules(
+            workspace_path="/ws", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        assert len(rules) == 8
+
+    def test_template_no_longer_hardcodes_prompts_skills_claude(self, manager):
+        """Phase 2 acceptance: rendered profile body (with no plugins)
+        must NOT contain ~/.jaato/prompts, ~/.jaato/skills, ~/.claude grants."""
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "@{HOME}/.jaato/prompts/" not in rendered
+        assert "@{HOME}/.jaato/skills/" not in rendered
+        assert "@{HOME}/.claude/skills/" not in rendered
+        assert "@{HOME}/.claude/commands/" not in rendered
+
+    def test_template_picks_up_prompt_library_rules_when_passed(self, manager):
+        """When the resolver feeds prompt_library's rules into _render_profile,
+        the grants reappear in all 3 profile contexts."""
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        rules = PromptLibraryPlugin.get_apparmor_rules(
+            workspace_path="/workspace", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        # Each of the 8 rules appears 3 times (base + tool_hat + child)
+        assert rendered.count("@{HOME}/.jaato/prompts/    r,") == 3
+        assert rendered.count("@{HOME}/.claude/commands/  r,") == 3
+
+
 class TestSubprofileComplainFlag:
     """Template v22 — JAATO_APPARMOR_COMPLAIN propagates to sub-profiles."""
 

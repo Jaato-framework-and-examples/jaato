@@ -206,6 +206,44 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
     def name(self) -> str:
         return "prompt_library"
 
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute prompt_library host paths to the AppArmor profile.
+
+        Phase 2 of the plugin-apparmor-contribution refactor
+        (template v23, 2026-05-16).  These paths used to be hardcoded
+        in ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
+        prompt_library plugin in ``profile.plugins`` no longer carry
+        the grants (least-privilege).
+
+        The plugin discovers prompts from five tiers (see
+        :class:`PromptLibraryPlugin` module docstring):
+        - workspace tier: ``.jaato/prompts/`` (covered by the
+          framework-template workspace rule)
+        - user tier: ``~/.jaato/prompts/`` and ``~/.jaato/skills/``
+        - Claude Code interop: ``~/.claude/skills/`` and
+          ``~/.claude/commands/``
+
+        All home-tier reads are read-only.
+        """
+        return [
+            "@{HOME}/.jaato/prompts/    r,",
+            "@{HOME}/.jaato/prompts/**  r,",
+            "@{HOME}/.jaato/skills/     r,",
+            "@{HOME}/.jaato/skills/**   r,",
+            "@{HOME}/.claude/skills/    r,",
+            "@{HOME}/.claude/skills/**  r,",
+            "@{HOME}/.claude/commands/  r,",
+            "@{HOME}/.claude/commands/**  r,",
+        ]
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the prompt library plugin.
 

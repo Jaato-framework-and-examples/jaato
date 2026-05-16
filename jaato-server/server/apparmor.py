@@ -267,7 +267,7 @@ class AppArmorManager:
     # kernel) rather than the expected complain-mode AVC log entries.
     # The flag knob now does what its name implies — entire profile
     # chain is complain when set.
-    _TEMPLATE_VERSION = 22
+    _TEMPLATE_VERSION = 23
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -370,10 +370,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   @{{HOME}}/.jaato/agents/**       r,
   @{{HOME}}/.jaato/profiles/       r,
   @{{HOME}}/.jaato/profiles/**     r,
-  @{{HOME}}/.jaato/prompts/        r,
-  @{{HOME}}/.jaato/prompts/**      r,
-  @{{HOME}}/.jaato/skills/         r,
-  @{{HOME}}/.jaato/skills/**       r,
+  # ~/.jaato/prompts/ and ~/.jaato/skills/ migrated to prompt_library plugin (template v23).
   @{{HOME}}/.jaato/themes/         r,
   @{{HOME}}/.jaato/themes/**       r,
   @{{HOME}}/.jaato/services/       r,
@@ -394,32 +391,18 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # ``Permission denied`` on the env file.
   {env_file_rule}
 
-  # ---- global memories (read-write) ----
-  # All sessions can propose and read cross-session memories.
-  # The maturity lifecycle (raw → validated) is the quality gate,
-  # not filesystem permissions.
-  #
-  # Layout (current):
-  #   memories/raw/{{id}}.json    — pending queue, one file per memory
-  #   memories/curated.jsonl      — curator-managed knowledge base
-  # Layout (legacy, retained for migration):
-  #   memories.jsonl              — pre-split single-file store
-  #
-  # The first two rules cover folder creation (mkdir on the parent),
-  # directory enumeration, and atomic tempfile + rename writes inside
-  # the raw/ subdirectory and against curated.jsonl.  The third rule
-  # keeps pre-split data readable until it's migrated away.
-  @{{HOME}}/.jaato/memories/       rw,
-  @{{HOME}}/.jaato/memories/**     rw,
-  @{{HOME}}/.jaato/memories.jsonl  rw,
+  # ---- global memories: migrated to memory plugin (template v23) ----
+  # Previously this block hardcoded the memories paths in the
+  # framework template.  MemoryPlugin.get_apparmor_rules now contributes
+  # those rules, spliced into the plugin-contributed section below.
+  # Sessions whose profile.plugins lacks memory no longer carry these
+  # grants -- least privilege.
 
-  # ---- Claude Code interop (read-only) ----
-  # The prompt_library plugin reads ~/.claude/skills and ~/.claude/commands
-  # so jaato can use Claude Code skill/command definitions interchangeably.
-  @{{HOME}}/.claude/skills/        r,
-  @{{HOME}}/.claude/skills/**      r,
-  @{{HOME}}/.claude/commands/      r,
-  @{{HOME}}/.claude/commands/**    r,
+  # ---- Claude Code interop + user prompts: migrated to prompt_library plugin (template v23) ----
+  # Previously this block hardcoded the user-tier prompts/skills paths
+  # and Claude Code interop paths.  PromptLibraryPlugin.get_apparmor_rules
+  # now contributes those rules.  Sessions whose profile.plugins lacks
+  # prompt_library no longer carry the grants.
 
   # ---- ML model caches: migrated to references plugin (template v21) ----
   # Previously this block hardcoded ~/.cache/huggingface + ~/.cache/torch
@@ -2169,10 +2152,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     @{{HOME}}/.jaato/agents/**       r,
     @{{HOME}}/.jaato/profiles/       r,
     @{{HOME}}/.jaato/profiles/**     r,
-    @{{HOME}}/.jaato/prompts/        r,
-    @{{HOME}}/.jaato/prompts/**      r,
-    @{{HOME}}/.jaato/skills/         r,
-    @{{HOME}}/.jaato/skills/**       r,
+    # Prompts + skills migrated to prompt_library plugin (template v23).
     @{{HOME}}/.jaato/themes/         r,
     @{{HOME}}/.jaato/themes/**       r,
     @{{HOME}}/.jaato/services/       r,
@@ -2183,13 +2163,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     @{{HOME}}/.jaato/theme.json       r,
     @{{HOME}}/.jaato/gc.json          r,
     {env_file_rule}
-    @{{HOME}}/.jaato/memories/       rw,
-    @{{HOME}}/.jaato/memories/**     rw,
-    @{{HOME}}/.jaato/memories.jsonl  rw,
-    @{{HOME}}/.claude/skills/        r,
-    @{{HOME}}/.claude/skills/**      r,
-    @{{HOME}}/.claude/commands/      r,
-    @{{HOME}}/.claude/commands/**    r,
+    # Global memories migrated to memory plugin (template v23).
+    # Claude Code interop migrated to prompt_library plugin (template v23).
     # ML model caches migrated to references plugin (template v21);
     # see base body comment.
 
@@ -2341,10 +2316,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     @{{HOME}}/.jaato/agents/**       r,
     @{{HOME}}/.jaato/profiles/       r,
     @{{HOME}}/.jaato/profiles/**     r,
-    @{{HOME}}/.jaato/prompts/        r,
-    @{{HOME}}/.jaato/prompts/**      r,
-    @{{HOME}}/.jaato/skills/         r,
-    @{{HOME}}/.jaato/skills/**       r,
+    # Prompts + skills migrated to prompt_library plugin (template v23).
     @{{HOME}}/.jaato/themes/         r,
     @{{HOME}}/.jaato/themes/**       r,
     @{{HOME}}/.jaato/services/       r,
@@ -2355,13 +2327,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     @{{HOME}}/.jaato/theme.json       r,
     @{{HOME}}/.jaato/gc.json          r,
     {env_file_rule}
-    @{{HOME}}/.jaato/memories/       rw,
-    @{{HOME}}/.jaato/memories/**     rw,
-    @{{HOME}}/.jaato/memories.jsonl  rw,
-    @{{HOME}}/.claude/skills/        r,
-    @{{HOME}}/.claude/skills/**      r,
-    @{{HOME}}/.claude/commands/      r,
-    @{{HOME}}/.claude/commands/**    r,
+    # Global memories migrated to memory plugin (template v23).
+    # Claude Code interop migrated to prompt_library plugin (template v23).
     # ML model caches migrated to references plugin (template v21);
     # see base body comment.
 
