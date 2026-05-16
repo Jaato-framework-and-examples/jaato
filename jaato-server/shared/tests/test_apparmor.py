@@ -1864,6 +1864,7 @@ class TestResolvePluginApparmorRules:
         profile = MagicMock()
         profile.plugins = []
         profile.plugin_configs = {}
+        profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
         out = resolve_plugin_apparmor_rules(
             server=MagicMock(), profile=profile,
             session_id="s1", workspace_path="/ws", config_root=None,
@@ -1875,6 +1876,7 @@ class TestResolvePluginApparmorRules:
         profile = MagicMock()
         profile.plugins = ["cli", "memory"]
         profile.plugin_configs = {}
+        profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
         # Plugin instances without get_apparmor_rules — registry returns
         # plain objects with no attribute.
         class _Plain: pass
@@ -1904,6 +1906,7 @@ class TestResolvePluginApparmorRules:
         profile = MagicMock()
         profile.plugins = ["a", "b"]
         profile.plugin_configs = {}
+        profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
         registry = MagicMock()
         registry.get_plugin.side_effect = lambda n: {"a": _PluginA(), "b": _PluginB()}.get(n)
         server = MagicMock()
@@ -1931,6 +1934,7 @@ class TestResolvePluginApparmorRules:
         profile = MagicMock()
         profile.plugins = ["references(preload)"]
         profile.plugin_configs = {}
+        profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
         registry = MagicMock()
         registry.get_plugin.side_effect = lambda n: _Plugin() if n == "references" else None
         server = MagicMock()
@@ -1959,6 +1963,7 @@ class TestResolvePluginApparmorRules:
         profile = MagicMock()
         profile.plugins = ["broken", "ok"]
         profile.plugin_configs = {}
+        profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
         registry = MagicMock()
         registry.get_plugin.side_effect = lambda n: {"broken": _Broken(), "ok": _Ok()}[n]
         server = MagicMock()
@@ -2044,6 +2049,82 @@ class TestReferencesPluginApparmorRules:
         assert rendered.count("@{HOME}/.cache/torch/**       rwk,") == 3
         assert rendered.count("@{HOME}/.jaato/references/    r,") == 3
         assert rendered.count("@{HOME}/.jaato/references/**  r,") == 3
+
+
+class TestGCApparmorRules:
+    """GC subsystem apparmor contribution (Phase 3b, template v25).
+
+    gc plugins live in ``profile.gc`` (not ``profile.plugins``); the
+    resolver special-cases the field and calls the shared module-level
+    helper ``shared.plugins.gc.get_gc_apparmor_rules``.
+    """
+
+    def test_helper_returns_gc_json_rule(self):
+        from shared.plugins.gc import get_gc_apparmor_rules
+        rules = get_gc_apparmor_rules()
+        assert "@{HOME}/.jaato/gc.json  r," in rules
+        assert len(rules) == 1
+
+    def test_template_no_longer_hardcodes_gc_json(self, manager):
+        """Phase 3b acceptance: rendered profile body (with no profile)
+        must NOT contain the gc.json grant."""
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "@{HOME}/.jaato/gc.json" not in rendered
+
+    def test_template_picks_up_gc_rule_when_passed(self, manager):
+        """When the resolver feeds gc's rules into _render_profile,
+        the grant reappears in all 3 profile contexts."""
+        from shared.plugins.gc import get_gc_apparmor_rules
+        rules = get_gc_apparmor_rules()
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        assert rendered.count("@{HOME}/.jaato/gc.json  r,") == 3
+
+    def test_resolver_unions_gc_rules_when_profile_gc_is_set(self):
+        """resolve_plugin_apparmor_rules should append gc rules when
+        profile.gc is non-None — even when profile.plugins is empty."""
+        from server.apparmor import resolve_plugin_apparmor_rules
+        from shared.plugins.subagent.config import GCProfileConfig
+
+        class _StubProfile:
+            plugins = []
+            plugin_configs = {}
+            gc = GCProfileConfig(type="truncate")
+
+        class _StubServer:
+            registry = None  # No registry: only the gc branch should fire.
+
+        rules = resolve_plugin_apparmor_rules(
+            server=_StubServer(),
+            profile=_StubProfile(),
+            session_id="s1",
+            workspace_path="/workspace",
+            config_root=None,
+        )
+        assert rules is not None
+        assert "@{HOME}/.jaato/gc.json  r," in rules
+
+    def test_resolver_does_not_emit_gc_rules_when_profile_gc_is_none(self):
+        """When profile.gc is None (rare; usually GCProfileConfig is set),
+        the resolver must NOT emit gc.json grants."""
+        from server.apparmor import resolve_plugin_apparmor_rules
+
+        class _StubProfile:
+            plugins = []
+            plugin_configs = {}
+            gc = None
+
+        class _StubServer:
+            registry = None
+
+        rules = resolve_plugin_apparmor_rules(
+            server=_StubServer(),
+            profile=_StubProfile(),
+            session_id="s1",
+            workspace_path="/workspace",
+            config_root=None,
+        )
+        # No plugins, no gc → None
+        assert rules is None
 
 
 class TestServiceConnectorPluginApparmorRules:

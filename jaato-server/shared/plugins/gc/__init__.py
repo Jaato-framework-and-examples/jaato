@@ -29,7 +29,7 @@ PLUGIN_KIND = "gc"
 
 PLUGIN_TIER = "daemon"
 import sys
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from .base import (
     GCConfig,
@@ -244,6 +244,29 @@ def load_gc_from_file(
         return None
 
 
+def get_gc_apparmor_rules() -> List[str]:
+    """Return AppArmor rules required by any gc plugin.
+
+    Phase 3b of the plugin-apparmor-contribution refactor
+    (template v25, 2026-05-16).  The ``~/.jaato/gc.json`` user-level
+    fallback was previously hardcoded in ``apparmor.py:PROFILE_TEMPLATE``;
+    sessions whose profile has no ``gc`` field no longer carry the
+    grant (least-privilege).
+
+    Surfaced as a module-level function rather than a per-plugin
+    classmethod because:
+    - The rule is shared by all 4 gc strategies (``load_gc_from_file``
+      reads the same path regardless of the active strategy).
+    - ``GCPlugin`` is a structural ``Protocol`` with no concrete base
+      class to hang a shared classmethod on.
+
+    The daemon-side resolver
+    (``server.apparmor.resolve_plugin_apparmor_rules``) calls this
+    function when ``profile.gc`` is set.
+    """
+    return ["@{HOME}/.jaato/gc.json  r,"]
+
+
 __all__ = [
     # Core types
     "GCPlugin",
@@ -255,6 +278,7 @@ __all__ = [
     "discover_gc_plugins",
     "load_gc_plugin",
     "load_gc_from_file",
+    "get_gc_apparmor_rules",
     "GC_PLUGIN_ENTRY_POINT",
     # Utilities
     "Turn",
