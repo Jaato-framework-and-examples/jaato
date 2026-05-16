@@ -556,8 +556,14 @@ def dispatch_bootstrap_envelope(
             session_id, result,
         )
     except Exception as exc:  # noqa: BLE001 — boundary surface
+        # %s on `exc` collapses arg-less exceptions (e.g. ``TimeoutError()``)
+        # to "", leaving the colon trailing into the suffix and the operator
+        # blind to root cause.  Surface ``error_type=`` + ``error=`` (same
+        # shape as MODEL_THREAD_TERMINAL_ERROR in core.py) so the class name
+        # is always visible, plus ``exc_info=True`` for the traceback when
+        # the logger config preserves it.
         logger.warning(
-            "runner session.bootstrap failed for %s: %s — "
+            "runner session.bootstrap failed for %s: error_type=%s error=%s — "
             "daemon-side JaatoSession remains authoritative",
-            session_id, exc, exc_info=True,
+            session_id, type(exc).__name__, exc, exc_info=True,
         )
