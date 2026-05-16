@@ -267,7 +267,7 @@ class AppArmorManager:
     # kernel) rather than the expected complain-mode AVC log entries.
     # The flag knob now does what its name implies — entire profile
     # chain is complain when set.
-    _TEMPLATE_VERSION = 24
+    _TEMPLATE_VERSION = 25
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -377,7 +377,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # ~/.jaato/references/ migrated to references plugin (template v24).
   @{{HOME}}/.jaato/keybindings.json r,
   @{{HOME}}/.jaato/theme.json       r,
-  @{{HOME}}/.jaato/gc.json          r,
+  # ~/.jaato/gc.json migrated to gc plugin subsystem (template v25).
 
   # ---- client-supplied env_file (read-only, optional) ----
   # When the client passes ``env_file`` on ``ClientConfigRequest``,
@@ -1381,7 +1381,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   @{{HOME}}/.jaato/skills/**       r,
   @{{HOME}}/.jaato/keybindings.json r,
   @{{HOME}}/.jaato/theme.json       r,
-  @{{HOME}}/.jaato/gc.json          r,
+  # ~/.jaato/gc.json migrated to gc plugin subsystem (template v25).
   @{{HOME}}/.jaato/memories/       rw,
   @{{HOME}}/.jaato/memories/**     rw,
   @{{HOME}}/.jaato/memories.jsonl  rw,
@@ -2157,7 +2157,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # ~/.jaato/references/ migrated to references plugin (template v24).
     @{{HOME}}/.jaato/keybindings.json r,
     @{{HOME}}/.jaato/theme.json       r,
-    @{{HOME}}/.jaato/gc.json          r,
+    # ~/.jaato/gc.json migrated to gc plugin subsystem (template v25).
     {env_file_rule}
     # Global memories migrated to memory plugin (template v23).
     # Claude Code interop migrated to prompt_library plugin (template v23).
@@ -2319,7 +2319,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # ~/.jaato/references/ migrated to references plugin (template v24).
     @{{HOME}}/.jaato/keybindings.json r,
     @{{HOME}}/.jaato/theme.json       r,
-    @{{HOME}}/.jaato/gc.json          r,
+    # ~/.jaato/gc.json migrated to gc plugin subsystem (template v25).
     {env_file_rule}
     # Global memories migrated to memory plugin (template v23).
     # Claude Code interop migrated to prompt_library plugin (template v23).
@@ -2468,40 +2468,55 @@ def resolve_plugin_apparmor_rules(
     """
     if profile is None:
         return None
-    plugin_specs = getattr(profile, "plugins", None) or []
-    if not plugin_specs:
-        return None
-    registry = getattr(server, "registry", None)
-    if registry is None:
-        return None
-    plugin_configs = getattr(profile, "plugin_configs", None) or {}
     rules: List[str] = []
-    for spec in plugin_specs:
-        plugin_name = spec.split("(", 1)[0].strip()
-        if not plugin_name:
-            continue
-        plugin = registry.get_plugin(plugin_name)
-        if plugin is None:
-            continue
-        get_rules = getattr(plugin, "get_apparmor_rules", None)
-        if get_rules is None or not callable(get_rules):
-            continue
+
+    plugin_specs = getattr(profile, "plugins", None) or []
+    registry = getattr(server, "registry", None)
+    plugin_configs = getattr(profile, "plugin_configs", None) or {}
+    if plugin_specs and registry is not None:
+        for spec in plugin_specs:
+            plugin_name = spec.split("(", 1)[0].strip()
+            if not plugin_name:
+                continue
+            plugin = registry.get_plugin(plugin_name)
+            if plugin is None:
+                continue
+            get_rules = getattr(plugin, "get_apparmor_rules", None)
+            if get_rules is None or not callable(get_rules):
+                continue
+            try:
+                contributed = get_rules(
+                    workspace_path=workspace_path,
+                    session_id=session_id,
+                    config_root=config_root,
+                    plugin_config=plugin_configs.get(plugin_name, {}),
+                )
+            except Exception:  # noqa: BLE001 — boundary surface
+                logger.exception(
+                    "plugin %s get_apparmor_rules failed for session %s — "
+                    "skipping its contribution",
+                    plugin_name, session_id,
+                )
+                continue
+            if contributed:
+                rules.extend(contributed)
+
+    # Phase 3b (template v25, 2026-05-16) — gc rules.
+    # gc plugins live in ``profile.gc`` (a single GCProfileConfig), not in
+    # ``profile.plugins``, so the per-plugin walk above doesn't see them.
+    # The gc.json rule is shared across all 4 gc strategies — surfaced as a
+    # module-level helper rather than a per-plugin classmethod (no concrete
+    # base class on the GCPlugin Protocol).
+    if getattr(profile, "gc", None) is not None:
         try:
-            contributed = get_rules(
-                workspace_path=workspace_path,
-                session_id=session_id,
-                config_root=config_root,
-                plugin_config=plugin_configs.get(plugin_name, {}),
-            )
+            from shared.plugins.gc import get_gc_apparmor_rules
+            rules.extend(get_gc_apparmor_rules())
         except Exception:  # noqa: BLE001 — boundary surface
             logger.exception(
-                "plugin %s get_apparmor_rules failed for session %s — "
-                "skipping its contribution",
-                plugin_name, session_id,
+                "gc apparmor rules failed for session %s — skipping",
+                session_id,
             )
-            continue
-        if contributed:
-            rules.extend(contributed)
+
     return rules if rules else None
 
 
