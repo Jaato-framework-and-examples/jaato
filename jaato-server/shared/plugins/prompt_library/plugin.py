@@ -231,6 +231,14 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         - Claude Code interop: ``~/.claude/skills/`` and
           ``~/.claude/commands/``
 
+        Phase 4 (template v26): also covers ``~/.jaato/agents/`` —
+        the plugin's ``_discover_prompts`` walks the agents directory
+        because agents (markdown files with ``params:`` frontmatter)
+        are discoverable as prompts.  ``~/.jaato/agents/`` is also
+        independently declared by ``SubagentPlugin.get_apparmor_rules``
+        — the resolver unions both contributions; AppArmor parsing
+        is idempotent on duplicate rules.
+
         All home-tier reads are read-only.
         """
         return [
@@ -238,6 +246,8 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
             "@{HOME}/.jaato/prompts/**  r,",
             "@{HOME}/.jaato/skills/     r,",
             "@{HOME}/.jaato/skills/**   r,",
+            "@{HOME}/.jaato/agents/     r,",
+            "@{HOME}/.jaato/agents/**   r,",
             "@{HOME}/.claude/skills/    r,",
             "@{HOME}/.claude/skills/**  r,",
             "@{HOME}/.claude/commands/  r,",

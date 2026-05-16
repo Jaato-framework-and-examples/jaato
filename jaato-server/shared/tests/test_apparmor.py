@@ -2127,6 +2127,154 @@ class TestGCApparmorRules:
         assert rules is None
 
 
+class TestSubagentPluginApparmorRules:
+    """Subagent plugin override (Phase 4, template v26)."""
+
+    def test_returns_agents_and_profiles_paths(self):
+        from shared.plugins.subagent.plugin import SubagentPlugin
+        rules = SubagentPlugin.get_apparmor_rules(
+            workspace_path="/ws",
+            session_id="s1",
+            config_root=None,
+            plugin_config={},
+        )
+        assert "@{HOME}/.jaato/agents/    r," in rules
+        assert "@{HOME}/.jaato/agents/**  r," in rules
+        assert "@{HOME}/.jaato/profiles/  r," in rules
+        assert "@{HOME}/.jaato/profiles/** r," in rules
+
+    def test_is_a_classmethod_callable_without_instance(self):
+        """Daemon-side resolution must work without instantiating the plugin."""
+        from shared.plugins.subagent.plugin import SubagentPlugin
+        rules = SubagentPlugin.get_apparmor_rules(
+            workspace_path="/ws", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        assert len(rules) == 4
+
+    def test_template_no_longer_hardcodes_agents_profiles(self, manager):
+        """Phase 4 acceptance: rendered profile body (with no plugins)
+        must NOT contain ~/.jaato/agents/ or ~/.jaato/profiles/ grants."""
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "@{HOME}/.jaato/agents/" not in rendered
+        assert "@{HOME}/.jaato/profiles/" not in rendered
+
+    def test_template_picks_up_subagent_rules_when_passed(self, manager):
+        """When the resolver feeds subagent's rules into _render_profile,
+        the grants reappear in all 3 profile contexts (base + tool_hat +
+        child)."""
+        from shared.plugins.subagent.plugin import SubagentPlugin
+        rules = SubagentPlugin.get_apparmor_rules(
+            workspace_path="/workspace", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        # Each of the 4 rules appears 3 times (base + tool_hat + child)
+        assert rendered.count("@{HOME}/.jaato/agents/    r,") == 3
+        assert rendered.count("@{HOME}/.jaato/profiles/  r,") == 3
+
+
+class TestPromptLibraryAgentsContribution:
+    """Phase 4 extension: prompt_library plugin also declares agents/.
+
+    Both subagent and prompt_library legitimately read ~/.jaato/agents/
+    (subagent for persona reads on --agent spawn; prompt_library for
+    agent-as-prompt discovery).  Each plugin's classmethod declares the
+    rule independently; the resolver unions both contributions, and
+    AppArmor parses duplicate rules idempotently.
+    """
+
+    def test_prompt_library_returns_agents_paths(self):
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        rules = PromptLibraryPlugin.get_apparmor_rules(
+            workspace_path="/ws",
+            session_id="s1",
+            config_root=None,
+            plugin_config={},
+        )
+        assert "@{HOME}/.jaato/agents/     r," in rules
+        assert "@{HOME}/.jaato/agents/**   r," in rules
+
+    def test_prompt_library_total_rule_count_includes_agents(self):
+        """Phase 2 shipped 8 rules; Phase 4 adds agents/ + agents/** → 10."""
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        rules = PromptLibraryPlugin.get_apparmor_rules(
+            workspace_path="/ws", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        assert len(rules) == 10
+
+    def test_resolver_unions_subagent_and_prompt_library_agents(self):
+        """When both plugins are in profile.plugins, the resolver appends
+        each plugin's contribution to the union (duplicate rules are
+        idempotent at the AppArmor parser level)."""
+        from server.apparmor import resolve_plugin_apparmor_rules
+        from shared.plugins.subagent.plugin import SubagentPlugin
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+
+        class _StubRegistry:
+            def get_plugin(self, name):
+                return {
+                    "subagent": SubagentPlugin(),
+                    "prompt_library": PromptLibraryPlugin(),
+                }.get(name)
+
+        class _StubServer:
+            registry = _StubRegistry()
+
+        class _StubProfile:
+            plugins = ["subagent", "prompt_library"]
+            plugin_configs = {}
+            gc = None
+
+        rules = resolve_plugin_apparmor_rules(
+            server=_StubServer(),
+            profile=_StubProfile(),
+            session_id="s1",
+            workspace_path="/ws",
+            config_root=None,
+        )
+        assert rules is not None
+        # Subagent contributes agents/ + agents/**.
+        # Prompt_library ALSO contributes agents/ + agents/** (different
+        # whitespace formatting; both parse to the same AppArmor rule).
+        assert "@{HOME}/.jaato/agents/    r," in rules     # subagent's
+        assert "@{HOME}/.jaato/agents/     r," in rules    # prompt_library's
+
+
+class TestIsolatedSubprofileMigrationCompletion:
+    """Phase 4 closes the Phase 2/3 gap on _build_isolated_subprofile.
+
+    Phases 2/3 stripped plugin-attributable paths from base + tool_hat +
+    child sub-profiles but missed the isolated sub-profile site.  This
+    pins that the isolated rendering no longer contains the migrated
+    paths either.
+    """
+
+    def test_isolated_subprofile_strips_phase2_phase3_paths(self, manager):
+        """The isolated sub-profile body must no longer contain the
+        paths migrated in Phase 2/3 (prompts, skills, memories,
+        memories.jsonl) — Phase 4 closes the missed site.
+
+        The isolated sub-profile builder is ``_render_sub_profile``
+        (different naming from the ``_build_*`` siblings — the reason
+        the strip was missed across Phases 1/2/3/3b).
+        """
+        body = manager._render_sub_profile(
+            parent_session_id="parent_s1",
+            subagent_id="sub_s1",
+            workspace_path="/workspace",
+        )
+        # Phase 2 paths
+        assert "@{HOME}/.jaato/prompts/" not in body
+        assert "@{HOME}/.jaato/skills/" not in body
+        assert "@{HOME}/.jaato/memories/" not in body
+        assert "@{HOME}/.jaato/memories.jsonl" not in body
+        # Phase 4 paths
+        assert "@{HOME}/.jaato/agents/" not in body
+        assert "@{HOME}/.jaato/profiles/" not in body
+
+
 class TestServiceConnectorPluginApparmorRules:
     """Service connector plugin override (Phase 3, template v24)."""
 
@@ -2238,13 +2386,17 @@ class TestPromptLibraryPluginApparmorRules:
         assert "@{HOME}/.claude/commands/**  r," in rules
 
     def test_is_a_classmethod_callable_without_instance(self):
-        """Daemon-side resolution must work without instantiating the plugin."""
+        """Daemon-side resolution must work without instantiating the plugin.
+
+        Phase 2 contract: 8 rules (prompts/skills/claude paths).
+        Phase 4 contract: 10 rules (adds agents/ + agents/**).
+        """
         from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
         rules = PromptLibraryPlugin.get_apparmor_rules(
             workspace_path="/ws", session_id="s1",
             config_root=None, plugin_config={},
         )
-        assert len(rules) == 8
+        assert len(rules) == 10
 
     def test_template_no_longer_hardcodes_prompts_skills_claude(self, manager):
         """Phase 2 acceptance: rendered profile body (with no plugins)

@@ -267,7 +267,7 @@ class AppArmorManager:
     # kernel) rather than the expected complain-mode AVC log entries.
     # The flag knob now does what its name implies — entire profile
     # chain is complain when set.
-    _TEMPLATE_VERSION = 25
+    _TEMPLATE_VERSION = 26
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -366,10 +366,8 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # ---- user-global jaato config (read-only) ----
   # Allow agent/profile/prompt/theme definitions from ~/.jaato/.
   # NOT allowed: credentials, *_auth.json, sibling workspaces.
-  @{{HOME}}/.jaato/agents/         r,
-  @{{HOME}}/.jaato/agents/**       r,
-  @{{HOME}}/.jaato/profiles/       r,
-  @{{HOME}}/.jaato/profiles/**     r,
+  # ~/.jaato/agents/ migrated to subagent + prompt_library plugins (template v26).
+  # ~/.jaato/profiles/ migrated to subagent plugin (template v26).
   # ~/.jaato/prompts/ and ~/.jaato/skills/ migrated to prompt_library plugin (template v23).
   @{{HOME}}/.jaato/themes/         r,
   @{{HOME}}/.jaato/themes/**       r,
@@ -1371,20 +1369,17 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   {premium_rules}
 
   # ---- user-global jaato config (read-only) ----
-  @{{HOME}}/.jaato/agents/         r,
-  @{{HOME}}/.jaato/agents/**       r,
-  @{{HOME}}/.jaato/profiles/       r,
-  @{{HOME}}/.jaato/profiles/**     r,
-  @{{HOME}}/.jaato/prompts/        r,
-  @{{HOME}}/.jaato/prompts/**      r,
-  @{{HOME}}/.jaato/skills/         r,
-  @{{HOME}}/.jaato/skills/**       r,
+  # ~/.jaato/agents/ migrated to subagent + prompt_library plugins (template v26).
+  # ~/.jaato/profiles/ migrated to subagent plugin (template v26).
+  # ~/.jaato/prompts/ migrated to prompt_library plugin (template v23; this
+  # isolated-subprofile site closed in template v26 — Phase 2/3 missed it).
+  # ~/.jaato/skills/ migrated to prompt_library plugin (template v23; this
+  # isolated-subprofile site closed in template v26 — Phase 2/3 missed it).
   @{{HOME}}/.jaato/keybindings.json r,
   @{{HOME}}/.jaato/theme.json       r,
   # ~/.jaato/gc.json migrated to gc plugin subsystem (template v25).
-  @{{HOME}}/.jaato/memories/       rw,
-  @{{HOME}}/.jaato/memories/**     rw,
-  @{{HOME}}/.jaato/memories.jsonl  rw,
+  # ~/.jaato/memories/ migrated to memory plugin (template v23; this
+  # isolated-subprofile site closed in template v26 — Phase 2/3 missed it).
 
   # ---- temp files ----
   /tmp/                     r,
@@ -2146,10 +2141,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {config_root_rules}
 
     # ---- user-global jaato config (mirrors base) ----
-    @{{HOME}}/.jaato/agents/         r,
-    @{{HOME}}/.jaato/agents/**       r,
-    @{{HOME}}/.jaato/profiles/       r,
-    @{{HOME}}/.jaato/profiles/**     r,
+    # ~/.jaato/agents/ migrated to subagent + prompt_library plugins (template v26).
+    # ~/.jaato/profiles/ migrated to subagent plugin (template v26).
     # Prompts + skills migrated to prompt_library plugin (template v23).
     @{{HOME}}/.jaato/themes/         r,
     @{{HOME}}/.jaato/themes/**       r,
@@ -2308,10 +2301,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {config_root_rules}
 
     # ---- user-global jaato config (mirrors tool_hat) ----
-    @{{HOME}}/.jaato/agents/         r,
-    @{{HOME}}/.jaato/agents/**       r,
-    @{{HOME}}/.jaato/profiles/       r,
-    @{{HOME}}/.jaato/profiles/**     r,
+    # ~/.jaato/agents/ migrated to subagent + prompt_library plugins (template v26).
+    # ~/.jaato/profiles/ migrated to subagent plugin (template v26).
     # Prompts + skills migrated to prompt_library plugin (template v23).
     @{{HOME}}/.jaato/themes/         r,
     @{{HOME}}/.jaato/themes/**       r,
