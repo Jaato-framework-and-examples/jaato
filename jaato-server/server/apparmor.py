@@ -257,7 +257,17 @@ class AppArmorManager:
     # in ``profile.plugins`` no longer carry these grants (least-
     # privilege).  WS-server-side path also wired to feed plugin_rules
     # through; previously WS bypassed the resolver.
-    _TEMPLATE_VERSION = 21
+    # v22 (2026-05-16): ``JAATO_APPARMOR_COMPLAIN=1`` now propagates the
+    # ``complain`` flag to the ``tool_hat`` + ``//child`` sub-profiles,
+    # not just the base profile.  Sub-profiles do NOT inherit the base
+    # flag in AppArmor; pre-v22 the env knob loosened the base but left
+    # cli_based_tool subprocesses (which transition into ``//child`` via
+    # ``change_profile``) running ENFORCE.  That asymmetry produced
+    # silent denials surfacing as ENOENT (path-traversal block at the
+    # kernel) rather than the expected complain-mode AVC log entries.
+    # The flag knob now does what its name implies — entire profile
+    # chain is complain when set.
+    _TEMPLATE_VERSION = 22
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -2017,6 +2027,17 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         # AppArmor sub-profiles do NOT inherit base rules — every allow
         # and deny must be redeclared.  We mirror the base body
         # verbatim and append the hat-specific read-denies on
+        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")
+        profile_flags = "attach_disconnected, complain" if complain else "attach_disconnected"
+        # v22 (2026-05-16): propagate complain to sub-profiles.  AppArmor
+        # sub-profiles do NOT inherit the parent's flag set, so
+        # JAATO_APPARMOR_COMPLAIN=1 has to be emitted on each sub-profile
+        # header explicitly.  When the env is unset, the clause is empty
+        # — preserving the v21 ``profile tool_hat {`` shape byte-for-byte
+        # (no ``attach_disconnected`` on sub-profiles per AppArmor doc:
+        # the flag is base-profile-only).
+        subprofile_flag_clause = " flags=(complain)" if complain else ""
+
         # user-authored config.  Indentation is 4 spaces (vs 2 for
         # base body) so the rendered profile is visually nested.
         tool_hat_subprofile = self._build_tool_hat_subprofile(
@@ -2028,6 +2049,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             extension_fragments_inline=extension_fragments_inline,
             plugin_contributed_rules=plugin_rules_subprofile_inline,
             session_id=session_id,
+            subprofile_flag_clause=subprofile_flag_clause,
         )
 
         # Phase 5 §5.10: build the //child sub-profile body.  Mirrors
@@ -2045,10 +2067,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             extension_fragments_inline=extension_fragments_inline,
             plugin_contributed_rules=plugin_rules_subprofile_inline,
             session_id=session_id,
+            subprofile_flag_clause=subprofile_flag_clause,
         )
-
-        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")
-        profile_flags = "attach_disconnected, complain" if complain else "attach_disconnected"
 
         return self.PROFILE_TEMPLATE.format(
             template_version=self._TEMPLATE_VERSION,
@@ -2077,6 +2097,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         extension_fragments_inline: str,
         plugin_contributed_rules: str,
         session_id: str,
+        subprofile_flag_clause: str = "",
     ) -> str:
         """Build the ``profile tool_hat { ... }`` sub-profile body
         (server 0.6.55+).
@@ -2093,7 +2114,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             f"  {line}" if line.strip() else line
             for line in extension_fragments_inline.splitlines()
         )
-        return f"""  profile tool_hat {{
+        return f"""  profile tool_hat{subprofile_flag_clause} {{
     #include <abstractions/base>
     #include <abstractions/nameservice>
     #include <abstractions/python>
@@ -2231,6 +2252,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         extension_fragments_inline: str,
         plugin_contributed_rules: str,
         session_id: str,
+        subprofile_flag_clause: str = "",
     ) -> str:
         """Build the ``profile child { ... }`` sub-profile body
         (Phase 5 §5.10, template v14).
@@ -2266,7 +2288,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             f"  {line}" if line.strip() else line
             for line in extension_fragments_inline.splitlines()
         )
-        return f"""  profile child {{
+        return f"""  profile child{subprofile_flag_clause} {{
     #include <abstractions/base>
     #include <abstractions/nameservice>
     #include <abstractions/python>
