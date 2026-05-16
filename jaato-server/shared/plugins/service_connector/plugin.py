@@ -75,6 +75,33 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
     def name(self) -> str:
         return "service_connector"
 
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute service_connector host paths to the AppArmor profile.
+
+        Phase 3 of the plugin-apparmor-contribution refactor
+        (template v24, 2026-05-16).  Previously hardcoded in
+        ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
+        service_connector plugin in ``profile.plugins`` no longer
+        carry the grants (least-privilege).
+
+        The plugin reads service definitions and schemas from the
+        user-tier directory at ``~/.jaato/services/``.  Read-only;
+        write paths live under the workspace tier (covered by the
+        framework-template workspace rule).
+        """
+        return [
+            "@{HOME}/.jaato/services/    r,",
+            "@{HOME}/.jaato/services/**  r,",
+        ]
+
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         trace_path = os.environ.get(
