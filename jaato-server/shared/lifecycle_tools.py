@@ -20,15 +20,66 @@ in a single ``payload`` parameter.  The flat shape mitigates the
 Anthropic/Bedrock stringification pathology (the model emits one huge
 nested arg as a JSON-string instead of an object).
 
-Providers that constrain tool calls at sampling (Anthropic, OpenAI,
-Google, Ollama, LM Studio) enforce the schema automatically;
-``jsonschema.validate`` runs server-side as defense-in-depth and on
-validation failure returns a structured error to the model so it can
-self-correct on its next turn.  The validated args dict is forwarded
-to ``hooks.on_agent_completed(payload=...)`` for reactor consumers —
+The schema is sent on the wire in the tool's parameter definition;
+``jsonschema.validate`` runs server-side after each ``signal_completion``
+call as defense-in-depth, and on validation failure returns a
+structured error to the model so it can self-correct on its next
+turn.  The validated args dict is forwarded to
+``hooks.on_agent_completed(payload=...)`` for reactor consumers —
 the ``payload`` shape passed to downstream is identical to the
 pre-G shape (a flat dict with the schema's properties), so no
 consumer-side changes are needed.
+
+.. warning::
+   **The schema is ADVISORY at the model layer unless the model
+   supports grammar-constrained sampling on its provider path.**
+
+   - Via **OpenRouter**: the model must be on OpenRouter's
+     structured-outputs supported list
+     (https://openrouter.ai/docs/guides/features/structured-outputs).
+     As of 2026-05-16: OpenAI GPT-4o+, Google Gemini, Anthropic
+     Sonnet 4.5 / Opus 4.1+, most OSS, Fireworks.
+     ``claude-haiku-4.5`` is **NOT** on the list.
+   - Via **direct Anthropic API**: tool definitions need ``strict:
+     true`` to force schema adherence — see
+     https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use.
+     Anthropic's default behavior is "advisory" — the model may
+     return incompatible types (e.g. ``"2"`` instead of ``2``).
+     jaato's provider plugins do not currently set ``strict: true``.
+
+   **When the active model lacks strict-mode support**, the schema
+   only constrains the post-hoc ``jsonschema.validate`` check — not
+   the model's emission.  Empirically (v109-v112,
+   ``feedback_cascade_completion_schemas_require_strict_model_support``
+   memory): claude-haiku-4.5 violated a ``{"type": "string",
+   "const": "1.0"}`` constraint for 7+ retries despite the schema
+   being visible from turn 1.  Adherence in that regime depends on
+   weak model priors + persona prose reinforcement.
+
+   **Implications for cascade authors (per Daniel's 2026-05-16 rule):**
+   when a cascade depends on schema constraints for determinism
+   (``const``, ``enum``, ``format``, ``additionalProperties: false``),
+   the order of operations is:
+
+   1. **Check** the model's documented strict-mode / structured-
+      outputs support list (Anthropic strict-tool-use docs,
+      OpenRouter structured-outputs list, etc.).
+   2. **If listed:** enable strict mode via the provider's knobs.
+   3. **If not listed:** switch to a model that does support it.
+
+   The framework deliberately does **not** simulate grammar-
+   constrained sampling with framework-side prose injection (e.g.
+   auto-injecting "field X is the string Y, not a number" into the
+   persona).  That would paper over a model limitation with a
+   half-measure.  A previous proposal to do so (Option B,
+   ``{{!framework:completion_schema}}`` directive) was rejected on
+   exactly these grounds.
+
+   Persona prose authored by the kb (in ``.jaato/agents/*.md``) is
+   a separate, kb-author-controlled lever — tactically effective
+   for unblocking a specific cascade run on an unsupported model
+   (v112 evidence), but a workaround for a wrong model choice,
+   not a recommended design pattern.
 
 **Schema authoring convention (server 0.6.27+).**  When you author a
 ``completion_payload_schema``, declare two optional string-array
