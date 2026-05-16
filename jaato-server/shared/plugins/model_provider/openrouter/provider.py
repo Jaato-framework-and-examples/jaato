@@ -332,6 +332,23 @@ class OpenRouterProvider:
         self._top_p: Optional[float] = None
         self._top_k: Optional[int] = None
 
+        # Strict tool-use mode (server 0.6.118+, 2026-05-16).  When True,
+        # ``tool_schema_to_openai`` emits ``"strict": True`` as a sibling
+        # of ``parameters`` in each function definition.  OpenRouter
+        # forwards this to supported upstreams (Anthropic Sonnet 4.5 /
+        # Opus 4.1+, OpenAI GPT-4o+, Gemini, OSS, Fireworks per
+        # https://openrouter.ai/docs/guides/features/structured-outputs),
+        # which then grammar-constrain tool-argument sampling to the
+        # schema.  Unsupported models (e.g. claude-haiku-4.5) are
+        # documented as "not in the supported list" — enabling strict
+        # for them is at best a no-op, at worst a 400 from upstream.
+        # The framework intentionally does NOT auto-rewrite schemas to
+        # satisfy OpenAI's strict-mode requirements
+        # (``additionalProperties: false`` on every object, exhaustive
+        # ``required`` arrays, no ``oneOf``/``anyOf``); kb authors own
+        # schema shape.  Wire errors surface mismatches.
+        self._strict_tools: bool = False
+
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
         self._catalog_cache: Optional[List[Dict[str, Any]]] = None
@@ -656,6 +673,9 @@ class OpenRouterProvider:
         top_k_extra = _knob("top_k", layer=api_params)
         if top_k_extra is not None:
             self._top_k = int(top_k_extra)
+        strict_tools_extra = _knob("strict_tools", layer=api_params)
+        if strict_tools_extra is not None:
+            self._strict_tools = bool(strict_tools_extra)
 
         # Thinking knobs — framework abstractions that translate to
         # OpenRouter's ``reasoning`` extension on the wire.  Live under
@@ -1039,7 +1059,9 @@ class OpenRouterProvider:
         kwargs: Dict[str, Any] = {}
         if tools:
             openai_tools = tool_schemas_to_openai(
-                tools, cache_control=cache_control,
+                tools,
+                cache_control=cache_control,
+                strict=self._strict_tools,
             )
             if openai_tools:
                 kwargs["tools"] = openai_tools

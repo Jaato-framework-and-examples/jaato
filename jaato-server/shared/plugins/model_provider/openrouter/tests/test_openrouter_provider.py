@@ -227,6 +227,84 @@ class TestToolSchemaConversion:
         assert result["function"]["parameters"]["type"] == "object"
 
 
+class TestStrictToolSchemaConversion:
+    """Strict tool-use mode knob (server 0.6.118+).
+
+    See ``provider.py`` docstring on ``self._strict_tools`` for the
+    rule context.  Setting ``api_params.strict_tools: true`` in the
+    profile threads ``strict=True`` into the converter, which emits
+    ``"strict": True`` as a sibling of ``parameters`` inside the
+    function definition.  OpenRouter forwards this to supported
+    upstreams for grammar-constrained tool-arg sampling.
+    """
+
+    def _basic_schema(self):
+        from jaato_sdk.plugins.model_provider.types import ToolSchema
+        return ToolSchema(
+            name="emit_status",
+            description="Emit a status report.",
+            parameters={
+                "type": "object",
+                "properties": {"version": {"type": "string", "const": "1.0"}},
+                "required": ["version"],
+                "additionalProperties": False,
+            },
+        )
+
+    def test_strict_false_default_omits_flag(self):
+        """Default (strict=False) preserves the legacy advisory shape —
+        no ``"strict"`` field in the function dict."""
+        result = tool_schema_to_openai(self._basic_schema())
+        assert "strict" not in result["function"]
+
+    def test_strict_true_emits_flag(self):
+        """``strict=True`` emits ``"strict": True`` as a sibling of
+        ``parameters`` inside the function dict."""
+        result = tool_schema_to_openai(self._basic_schema(), strict=True)
+        assert result["function"]["strict"] is True
+        # The flag is a sibling of parameters, not inside it.
+        assert "strict" not in result["function"]["parameters"]
+
+    def test_strict_does_not_disable_parameter_sanitization(self):
+        """The existing ``const`` → ``enum`` rewrite still happens even
+        when strict is on — strict-mode upstreams accept both, but the
+        sanitization is benign and removing it would be a separate
+        concern."""
+        result = tool_schema_to_openai(self._basic_schema(), strict=True)
+        version_param = result["function"]["parameters"]["properties"]["version"]
+        # const got rewritten to enum (existing sanitizer behaviour preserved).
+        assert version_param.get("enum") == ["1.0"]
+        assert "const" not in version_param
+        # Type is preserved.
+        assert version_param["type"] == "string"
+
+    def test_strict_list_form_threads_flag_to_every_tool(self):
+        """``tool_schemas_to_openai(..., strict=True)`` propagates the
+        flag to every converted function in the output list."""
+        from shared.plugins.model_provider.openrouter.converters import (
+            tool_schemas_to_openai,
+        )
+        a = self._basic_schema()
+        from jaato_sdk.plugins.model_provider.types import ToolSchema
+        b = ToolSchema(
+            name="another_tool", description="...", parameters={"type": "object"},
+        )
+        result = tool_schemas_to_openai([a, b], strict=True)
+        assert result is not None
+        assert all(t["function"]["strict"] is True for t in result)
+
+    def test_strict_list_form_default_omits_flag(self):
+        """When ``strict`` is not passed (or False), no function carries
+        the flag — preserves backward-compatible default."""
+        from shared.plugins.model_provider.openrouter.converters import (
+            tool_schemas_to_openai,
+        )
+        a = self._basic_schema()
+        result = tool_schemas_to_openai([a])
+        assert result is not None
+        assert all("strict" not in t["function"] for t in result)
+
+
 class TestMessageConversion:
     """Tests for Message <-> OpenAI format conversion."""
 
@@ -1195,6 +1273,42 @@ class TestConfigNamespacing:
         ))
         assert provider._temperature == 0.7
         assert provider._provider_routing == {"sort": "price"}
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_strict_tools_knob_default_false(self, mock_client_class):
+        """Without ``api_params.strict_tools``, the provider stays in
+        advisory mode (legacy default, no behavior change)."""
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"temperature": 0.5}},
+        ))
+        assert provider._strict_tools is False
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_strict_tools_knob_true_propagates(self, mock_client_class):
+        """``api_params.strict_tools: true`` flips the provider into
+        strict mode."""
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"strict_tools": True}},
+        ))
+        assert provider._strict_tools is True
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_strict_tools_knob_false_explicit(self, mock_client_class):
+        """Setting ``strict_tools: false`` explicitly leaves the
+        provider in advisory mode (no surprise from explicit declaration)."""
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"strict_tools": False}},
+        ))
+        assert provider._strict_tools is False
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_thinking_knobs_in_api_params(self, mock_client_class):

@@ -110,15 +110,40 @@ def _sanitize_parameters_for_strict_upstreams(
     return _clean(parameters)
 
 
-def tool_schema_to_openai(schema: ToolSchema) -> Dict[str, Any]:
-    """Convert a ``ToolSchema`` to the OpenAI tool definition dict."""
+def tool_schema_to_openai(
+    schema: ToolSchema,
+    *,
+    strict: bool = False,
+) -> Dict[str, Any]:
+    """Convert a ``ToolSchema`` to the OpenAI tool definition dict.
+
+    Args:
+        schema: The internal ``ToolSchema`` to convert.
+        strict: When ``True``, emits ``"strict": True`` as a sibling of
+            ``parameters`` inside the ``function`` dict.  OpenRouter
+            forwards this to supported upstreams (Anthropic Sonnet 4.5 /
+            Opus 4.1+, OpenAI GPT-4o+, Gemini, OSS, Fireworks per
+            https://openrouter.ai/docs/guides/features/structured-outputs),
+            which grammar-constrain tool-argument sampling to the
+            schema.  Set via ``plugin_configs.openrouter.api_params.strict_tools``
+            on the profile.  The framework intentionally does NOT auto-
+            rewrite ``parameters`` to satisfy OpenAI's strict-mode
+            schema requirements (``additionalProperties: false`` on
+            every object, exhaustive ``required`` arrays, no
+            ``oneOf``/``anyOf``); kb authors own schema shape and
+            wire-side errors surface mismatches.  Default ``False``
+            preserves the legacy advisory-mode wire shape.
+    """
+    function: Dict[str, Any] = {
+        "name": name_to_id(schema.name),
+        "description": schema.description,
+        "parameters": _sanitize_parameters_for_strict_upstreams(schema.parameters),
+    }
+    if strict:
+        function["strict"] = True
     return {
         "type": "function",
-        "function": {
-            "name": name_to_id(schema.name),
-            "description": schema.description,
-            "parameters": _sanitize_parameters_for_strict_upstreams(schema.parameters),
-        },
+        "function": function,
     }
 
 
@@ -126,6 +151,7 @@ def tool_schemas_to_openai(
     schemas: Optional[List[ToolSchema]],
     *,
     cache_control: Optional[Dict[str, str]] = None,
+    strict: bool = False,
 ) -> Optional[List[Dict[str, Any]]]:
     """Convert a list of ``ToolSchema`` objects to OpenAI tool definitions.
 
@@ -136,10 +162,14 @@ def tool_schemas_to_openai(
     tool-catalog caching.  Sorting matters: the cache prefix invalidates
     if tool registration order shifts between turns, so we always
     canonicalise to alphabetical when caching.
+
+    When ``strict`` is ``True``, every function definition in the
+    output carries ``"strict": True``.  See ``tool_schema_to_openai``
+    for the full contract.
     """
     if not schemas:
         return None
-    converted = [tool_schema_to_openai(s) for s in schemas]
+    converted = [tool_schema_to_openai(s, strict=strict) for s in schemas]
     if cache_control:
         converted.sort(key=lambda t: t["function"]["name"])
         converted[-1] = {**converted[-1], "cache_control": dict(cache_control)}
