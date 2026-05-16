@@ -62,13 +62,21 @@ class TestGetToolSchemas:
         assert "payload" not in params["properties"]
 
     def test_typed_payload_when_schema_present(self):
+        """Option G (server 0.6.115+): tool's parameters ARE the schema.
+
+        Top-level properties of completion_payload_schema become the
+        tool's flat args directly — no ``payload`` wrapper.
+        """
         lt = LifecycleTools(StubSession(schema=SAMPLE_SCHEMA))
         schemas = lt.get_tool_schemas()
         params = schemas[0].parameters
-        assert "payload" in params["properties"]
-        assert params["properties"]["payload"] == SAMPLE_SCHEMA
-        assert params["required"] == ["payload"]
-        assert "summary" not in params["properties"]
+        # The schema IS the parameter spec.  No "payload" wrapper.
+        assert params == SAMPLE_SCHEMA
+        # Top-level properties exposed as flat tool args.
+        assert "category" in params["properties"]
+        assert "severity" in params["properties"]
+        # The legacy "payload" key must NOT appear at the parameter level.
+        assert "payload" not in params["properties"]
 
     def test_tool_name_unchanged(self):
         lt_legacy = LifecycleTools(StubSession(schema=None))
@@ -109,23 +117,26 @@ class TestExecuteLegacy:
 class TestExecuteTyped:
 
     def test_valid_payload_emits_event(self):
+        """Option G: args dict IS the payload — no wrapper."""
         session = StubSession(schema=SAMPLE_SCHEMA)
         lt = LifecycleTools(session)
         payload = {"category": "billing", "severity": 3, "summary": "Refund"}
-        result = lt._execute_signal_completion({"payload": payload})
+        # Args are passed flat (no "payload" key).
+        result = lt._execute_signal_completion(payload)
 
         assert result["status"] == "completed"
         assert result["payload"] == payload
         assert result["summary"] == "Refund"  # derived from payload.summary
         assert len(session._ui_hooks.calls) == 1
+        # Downstream consumers still receive payload= as a flat dict.
         assert session._ui_hooks.calls[0]["payload"] == payload
 
     def test_invalid_payload_returns_error_no_event(self):
         session = StubSession(schema=SAMPLE_SCHEMA)
         lt = LifecycleTools(session)
-        # severity is wrong type
+        # severity is wrong type — passed as flat args
         result = lt._execute_signal_completion(
-            {"payload": {"category": "billing", "severity": "high"}}
+            {"category": "billing", "severity": "high"}
         )
 
         assert result["error"] == "validation_failed"
@@ -136,9 +147,8 @@ class TestExecuteTyped:
     def test_missing_required_field_returns_error(self):
         session = StubSession(schema=SAMPLE_SCHEMA)
         lt = LifecycleTools(session)
-        result = lt._execute_signal_completion(
-            {"payload": {"category": "billing"}}  # severity missing
-        )
+        # severity missing — passed as flat args
+        result = lt._execute_signal_completion({"category": "billing"})
         assert result["error"] == "validation_failed"
         assert len(session._ui_hooks.calls) == 0
 
@@ -151,7 +161,7 @@ class TestExecuteTyped:
         }
         session = StubSession(schema=schema)
         lt = LifecycleTools(session)
-        result = lt._execute_signal_completion({"payload": {"foo": "bar"}})
+        result = lt._execute_signal_completion({"foo": "bar"})
         assert result["summary"] == ""
         assert result["payload"] == {"foo": "bar"}
 
@@ -159,7 +169,7 @@ class TestExecuteTyped:
         session = StubSession(schema=SAMPLE_SCHEMA)
         lt = LifecycleTools(session)
         result = lt._execute_signal_completion(
-            {"payload": {"category": "invalid_cat", "severity": 1}}
+            {"category": "invalid_cat", "severity": 1}
         )
         assert result["error"] == "validation_failed"
 
@@ -167,7 +177,28 @@ class TestExecuteTyped:
         session = StubSession(schema=SAMPLE_SCHEMA)
         lt = LifecycleTools(session)
         result = lt._execute_signal_completion(
-            {"payload": {"category": "tech", "severity": 0}}  # below min
+            {"category": "tech", "severity": 0}  # below min
+        )
+        assert result["error"] == "validation_failed"
+
+    def test_legacy_wrapped_payload_now_fails(self):
+        """Option G removes the legacy ``{"payload": {...}}`` wrapper.
+
+        A caller that still passes the old shape will now have an arg
+        named ``payload`` which is not in the schema — surfaces as a
+        validation failure (likely on additionalProperties:false, or
+        missing required fields).  This test documents the breaking
+        change explicitly.
+        """
+        # Schema with additionalProperties:false to surface the failure cleanly.
+        schema = {
+            **SAMPLE_SCHEMA,
+            "additionalProperties": False,
+        }
+        session = StubSession(schema=schema)
+        lt = LifecycleTools(session)
+        result = lt._execute_signal_completion(
+            {"payload": {"category": "billing", "severity": 3}}
         )
         assert result["error"] == "validation_failed"
 
@@ -189,10 +220,9 @@ class TestSchemaResolutionFromPath:
         session = StubSession(schema="test.json", workspace_path=str(ws))
         lt = LifecycleTools(session)
 
-        # Schema was resolved at construction
+        # Option G: resolved schema IS the tool's parameters.
         params = lt.get_tool_schemas()[0].parameters
-        assert "payload" in params["properties"]
-        assert params["properties"]["payload"] == SAMPLE_SCHEMA
+        assert params == SAMPLE_SCHEMA
 
     def test_unresolvable_path_falls_back_to_legacy_summary(self, tmp_path):
         ws = tmp_path / "workspace"

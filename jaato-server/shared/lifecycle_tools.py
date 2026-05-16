@@ -12,17 +12,23 @@ needs this tool to signal explicitly.
 Registered as a core tool (not a plugin) so it is available regardless
 of the profile's plugin list.
 
-**Typed completion payloads.**  When the active session's profile
-declared a ``completion_payload_schema`` field, the tool's parameters
-are dynamically rebuilt: the legacy ``summary: str`` is replaced with
-``payload: <schema>``.  The schema is embedded directly in the tool
-parameters JSON Schema so providers that constrain tool calls at
-sampling (Anthropic, OpenAI, Google, Ollama, LM Studio) enforce the
-shape automatically; ``jsonschema.validate`` runs server-side as
-defense-in-depth and on validation failure returns a structured error
-to the model so it can self-correct on its next turn.  The validated
-payload is forwarded to ``hooks.on_agent_completed(payload=...)`` for
-reactor consumers to read as typed fields.
+**Typed completion payloads (Option G, server 0.6.115+).**  When the
+active session's profile declared a ``completion_payload_schema``
+field, the tool's parameters become the schema directly — top-level
+properties of the schema are exposed as flat tool args, NOT wrapped
+in a single ``payload`` parameter.  The flat shape mitigates the
+Anthropic/Bedrock stringification pathology (the model emits one huge
+nested arg as a JSON-string instead of an object).
+
+Providers that constrain tool calls at sampling (Anthropic, OpenAI,
+Google, Ollama, LM Studio) enforce the schema automatically;
+``jsonschema.validate`` runs server-side as defense-in-depth and on
+validation failure returns a structured error to the model so it can
+self-correct on its next turn.  The validated args dict is forwarded
+to ``hooks.on_agent_completed(payload=...)`` for reactor consumers —
+the ``payload`` shape passed to downstream is identical to the
+pre-G shape (a flat dict with the schema's properties), so no
+consumer-side changes are needed.
 
 **Schema authoring convention (server 0.6.27+).**  When you author a
 ``completion_payload_schema``, declare two optional string-array
@@ -151,13 +157,21 @@ class LifecycleTools:
                     "required": ["summary"],
                 }
             else:
-                parameters = {
-                    "type": "object",
-                    "properties": {
-                        "payload": self._payload_schema,
-                    },
-                    "required": ["payload"],
-                }
+                # Option G (server 0.6.115+, 2026-05-16): the profile's
+                # completion_payload_schema IS the tool's parameter schema.
+                # Top-level properties become flat tool args, no ``payload``
+                # wrapper.  Closes the Anthropic/Bedrock stringification
+                # pathology that v109 hit (the model emits one huge nested
+                # arg as a JSON-string instead of an object).  Five
+                # medium-sized top-level args don't trigger the same
+                # stringification heuristic that one huge nested arg does.
+                #
+                # Provider contract: tool ``parameters`` MUST be a
+                # ``type: object`` JSON Schema.  Profiles that declare a
+                # non-object completion_payload_schema would produce a
+                # malformed tool schema — this is treated as a kb
+                # authoring error and surfaced at provider call time.
+                parameters = self._payload_schema
 
             schemas.append(
                 ToolSchema(
@@ -328,15 +342,16 @@ class LifecycleTools:
         With no ``completion_payload_schema``: reads the legacy
         ``summary`` string and emits the event with ``payload=None``.
 
-        With a schema declared: validates ``payload`` against the
-        resolved schema using ``jsonschema``.  On validation failure,
-        returns a structured error to the model (no event emission)
-        so the model can self-correct on its next turn.  On success,
-        forwards the validated payload to
-        ``hooks.on_agent_completed(payload=...)`` and a derived
-        ``summary`` (from the payload's ``summary`` field if present,
-        otherwise empty) for reactor consumers that still read the
-        legacy field.
+        With a schema declared (Option G, server 0.6.115+): the
+        incoming ``args`` dict **IS** the payload (no ``payload``
+        wrapper).  ``args`` is validated directly against the schema
+        using ``jsonschema``.  On validation failure, returns a
+        structured error to the model (no event emission) so the model
+        can self-correct on its next turn.  On success, forwards the
+        validated payload to ``hooks.on_agent_completed(payload=...)``
+        and a derived ``summary`` (from the payload's ``summary``
+        field if present, otherwise empty) for reactor consumers that
+        still read the legacy field.
         """
         payload: Optional[Dict[str, Any]]
         summary: str
@@ -345,7 +360,10 @@ class LifecycleTools:
             summary = args.get("summary", "")
             payload = None
         else:
-            payload = args.get("payload")
+            # Option G: args dict IS the payload — the tool's parameters
+            # mirror completion_payload_schema's top-level properties
+            # directly.  No more "payload" wrapper.
+            payload = args
             try:
                 import jsonschema
                 jsonschema.validate(instance=payload, schema=self._payload_schema)
@@ -358,9 +376,9 @@ class LifecycleTools:
                 return {
                     "error": "validation_failed",
                     "message": (
-                        "The 'payload' argument did not match the profile's "
-                        "completion_payload_schema. Fix the payload and call "
-                        "signal_completion again."
+                        "The arguments did not match the profile's "
+                        "completion_payload_schema. Fix the arguments and "
+                        "call signal_completion again."
                     ),
                     "validation_error": exc.message,
                     "schema_path": list(exc.absolute_path),
