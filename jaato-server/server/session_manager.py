@@ -693,7 +693,8 @@ class SessionManager:
         # ``None`` when no profile is set OR no plugin contributes —
         # ``_render_profile`` treats both as "no contributions".  See
         # docs/design/plugin-apparmor-contribution.md.
-        plugin_rules = self._resolve_plugin_apparmor_rules(
+        from server.apparmor import resolve_plugin_apparmor_rules
+        plugin_rules = resolve_plugin_apparmor_rules(
             server=server,
             profile=profile,
             session_id=session_id,
@@ -833,69 +834,6 @@ class SessionManager:
             )
         except OSError:
             return False
-
-    def _resolve_plugin_apparmor_rules(
-        self,
-        server: 'JaatoServer',
-        profile: Optional[Any],
-        session_id: str,
-        workspace_path: str,
-        config_root: Optional[str],
-    ) -> Optional[List[str]]:
-        """Walk ``profile.plugins`` and union each plugin's contributed AppArmor rules.
-
-        Phase 0 (template v20, 2026-05-16) — see
-        ``docs/design/plugin-apparmor-contribution.md``.
-
-        For each plugin listed in ``profile.plugins`` (modifier suffixes
-        like ``(preload)`` stripped), look up the plugin instance from
-        ``server.registry`` and call its optional
-        ``get_apparmor_rules`` classmethod with session context.
-        Default (no plugin overrides the method) → returns ``None``,
-        signalling "no contributions" to ``_render_profile``.
-
-        Failures inside an individual plugin's ``get_apparmor_rules``
-        are logged but do not abort provisioning — the framework
-        baseline still renders.  A confined runner with one plugin's
-        rules missing beats a session that fails to start.
-        """
-        if profile is None:
-            return None
-        plugin_specs = getattr(profile, "plugins", None) or []
-        if not plugin_specs:
-            return None
-        registry = getattr(server, "registry", None)
-        if registry is None:
-            return None
-        plugin_configs = getattr(profile, "plugin_configs", None) or {}
-        rules: List[str] = []
-        for spec in plugin_specs:
-            plugin_name = spec.split("(", 1)[0].strip()
-            if not plugin_name:
-                continue
-            plugin = registry.get_plugin(plugin_name)
-            if plugin is None:
-                continue
-            get_rules = getattr(plugin, "get_apparmor_rules", None)
-            if get_rules is None or not callable(get_rules):
-                continue
-            try:
-                contributed = get_rules(
-                    workspace_path=workspace_path,
-                    session_id=session_id,
-                    config_root=config_root,
-                    plugin_config=plugin_configs.get(plugin_name, {}),
-                )
-            except Exception:  # noqa: BLE001 — boundary surface
-                logger.exception(
-                    "plugin %s get_apparmor_rules failed for session %s — "
-                    "skipping its contribution",
-                    plugin_name, session_id,
-                )
-                continue
-            if contributed:
-                rules.extend(contributed)
-        return rules if rules else None
 
     def _provision_apparmor_for_session(
         self,

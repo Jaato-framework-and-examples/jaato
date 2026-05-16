@@ -252,7 +252,12 @@ class AppArmorManager:
     # emits a "(none for this session)" comment line — byte-equivalent
     # rule semantics to v19.  See
     # ``docs/design/plugin-apparmor-contribution.md``.
-    _TEMPLATE_VERSION = 20
+    # v21 (2026-05-16): ML model caches (HF + torch) migrated to
+    # ReferencesPlugin.get_apparmor_rules.  Sessions WITHOUT references
+    # in ``profile.plugins`` no longer carry these grants (least-
+    # privilege).  WS-server-side path also wired to feed plugin_rules
+    # through; previously WS bypassed the resolver.
+    _TEMPLATE_VERSION = 21
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -406,14 +411,12 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   @{{HOME}}/.claude/commands/      r,
   @{{HOME}}/.claude/commands/**    r,
 
-  # ---- ML model caches (read-write) ----
-  # The embedding provider (sentence-transformers, HuggingFace transformers,
-  # ONNX runtime) loads models from these caches. Read-write because the
-  # libraries write lockfiles and metadata even for cached models.
-  @{{HOME}}/.cache/huggingface/    rw,
-  @{{HOME}}/.cache/huggingface/**  rwk,
-  @{{HOME}}/.cache/torch/          rw,
-  @{{HOME}}/.cache/torch/**        rwk,
+  # ---- ML model caches: migrated to references plugin (template v21) ----
+  # Previously this block hardcoded ~/.cache/huggingface + ~/.cache/torch
+  # in the framework template.  ReferencesPlugin.get_apparmor_rules
+  # now contributes those rules, spliced into the plugin-contributed
+  # section below.  Sessions whose profile.plugins lacks references
+  # no longer carry these grants -- least privilege.
 
   # ---- temp files scoped to session ----
   # Allow both file-prefix style (/tmp/jaato-<id>-foo) and subfolder
@@ -2166,10 +2169,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     @{{HOME}}/.claude/skills/**      r,
     @{{HOME}}/.claude/commands/      r,
     @{{HOME}}/.claude/commands/**    r,
-    @{{HOME}}/.cache/huggingface/    rw,
-    @{{HOME}}/.cache/huggingface/**  rwk,
-    @{{HOME}}/.cache/torch/          rw,
-    @{{HOME}}/.cache/torch/**        rwk,
+    # ML model caches migrated to references plugin (template v21);
+    # see base body comment.
 
     # ---- temp files (mirrors base) ----
     /tmp/jaato-{session_id}-** rw,
@@ -2339,10 +2340,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     @{{HOME}}/.claude/skills/**      r,
     @{{HOME}}/.claude/commands/      r,
     @{{HOME}}/.claude/commands/**    r,
-    @{{HOME}}/.cache/huggingface/    rw,
-    @{{HOME}}/.cache/huggingface/**  rwk,
-    @{{HOME}}/.cache/torch/          rw,
-    @{{HOME}}/.cache/torch/**        rwk,
+    # ML model caches migrated to references plugin (template v21);
+    # see base body comment.
 
     # ---- temp files (mirrors tool_hat) ----
     /tmp/jaato-{session_id}-** rw,
@@ -2449,6 +2448,78 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         ``add_reference_fragment()``.
         """
         return self._profile_dir / f"{self.get_profile_name(session_id)}.refs.d"
+
+
+def resolve_plugin_apparmor_rules(
+    server: Any,
+    profile: Optional[Any],
+    session_id: str,
+    workspace_path: str,
+    config_root: Optional[str],
+) -> Optional[List[str]]:
+    """Walk ``profile.plugins`` and union each plugin's contributed AppArmor rules.
+
+    Phase 0/1 of the plugin-apparmor-contribution refactor
+    (template v20+, 2026-05-16).  See
+    ``docs/design/plugin-apparmor-contribution.md``.
+
+    Module-level helper so both the IPC path
+    (``SessionManager._provision_ipc_apparmor_and_spawn_runner``) and
+    the WS path (``websocket.py:_apparmor_pre_init_hook``) can call it
+    without duplicating the resolution logic.
+
+    For each plugin listed in ``profile.plugins`` (modifier suffixes
+    like ``(preload)`` stripped), look up the plugin instance from
+    ``server.registry`` and call its optional
+    ``get_apparmor_rules`` classmethod with session context.
+
+    Returns ``None`` when the profile has no plugins, the server has
+    no registry, or no plugin contributes anything — the renderer
+    treats ``None`` and ``[]`` identically (renders "(none for this
+    session)" marker).
+
+    Failures inside an individual plugin's ``get_apparmor_rules`` are
+    logged but do not abort — the framework baseline still renders.
+    A confined runner missing one plugin's rules beats a session that
+    fails to start.
+    """
+    if profile is None:
+        return None
+    plugin_specs = getattr(profile, "plugins", None) or []
+    if not plugin_specs:
+        return None
+    registry = getattr(server, "registry", None)
+    if registry is None:
+        return None
+    plugin_configs = getattr(profile, "plugin_configs", None) or {}
+    rules: List[str] = []
+    for spec in plugin_specs:
+        plugin_name = spec.split("(", 1)[0].strip()
+        if not plugin_name:
+            continue
+        plugin = registry.get_plugin(plugin_name)
+        if plugin is None:
+            continue
+        get_rules = getattr(plugin, "get_apparmor_rules", None)
+        if get_rules is None or not callable(get_rules):
+            continue
+        try:
+            contributed = get_rules(
+                workspace_path=workspace_path,
+                session_id=session_id,
+                config_root=config_root,
+                plugin_config=plugin_configs.get(plugin_name, {}),
+            )
+        except Exception:  # noqa: BLE001 — boundary surface
+            logger.exception(
+                "plugin %s get_apparmor_rules failed for session %s — "
+                "skipping its contribution",
+                plugin_name, session_id,
+            )
+            continue
+        if contributed:
+            rules.extend(contributed)
+    return rules if rules else None
 
 
 # ------------------------------------------------------------------
