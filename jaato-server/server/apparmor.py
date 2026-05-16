@@ -242,7 +242,17 @@ class AppArmorManager:
     # harvest the missing-rule set in one cascade run, then ship
     # targeted grants from the kernel-audit data instead of guessing.
     # Default (env unset) behaviour is byte-identical to v18.
-    _TEMPLATE_VERSION = 19
+    # v20 (2026-05-16): plugin-contribution hook (Phase 0).  Plugins
+    # implementing the optional ``ToolPlugin.get_apparmor_rules``
+    # classmethod can contribute their own rule lines instead of having
+    # them hardcoded in this template.  Daemon-side resolution walks
+    # ``profile.plugins`` at session-spawn time, unions the rules, and
+    # splices into the ``{plugin_contributed_rules}`` placeholder in
+    # base + tool_hat + child profiles.  Default (no plugin overrides)
+    # emits a "(none for this session)" comment line — byte-equivalent
+    # rule semantics to v19.  See
+    # ``docs/design/plugin-apparmor-contribution.md``.
+    _TEMPLATE_VERSION = 20
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -584,6 +594,8 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # KeyError (when it does not).
 {extension_fragments_inline}
 
+{plugin_contributed_rules}
+
   # ---- tool_hat sub-profile (server 0.6.55+, template v13) ----
   # Tool execution context.  ``ToolExecutor.execute`` enters this
   # sub-profile via ``change_profile -> jaato-ws-{session_id}//tool_hat``
@@ -850,6 +862,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         config_root: Optional[str] = None,
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
     ) -> bool:
         """Create and load an AppArmor profile for a session.
 
@@ -862,7 +875,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         return self._run_unconfined(
             self._provision_profile_impl,
             session_id, workspace_path, config_root, env_file,
-            requested_fragments,
+            requested_fragments, plugin_rules,
         )
 
     def _provision_profile_impl(
@@ -872,6 +885,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         config_root: Optional[str] = None,
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
     ) -> bool:
         """Inner body of :meth:`provision_profile`.
 
@@ -924,6 +938,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         profile_content = self._render_profile(
             session_id, workspace_path, config_root, env_file,
             requested_fragments=requested_fragments,
+            plugin_rules=plugin_rules,
         )
 
         try:
@@ -1798,6 +1813,30 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         """Return the AppArmor profile name for a session."""
         return f"jaato-ws-{session_id}"
 
+    @staticmethod
+    def _format_plugin_contributed_rules(
+        plugin_rules: Optional[List[str]],
+        indent: str = "  ",
+    ) -> str:
+        """Format plugin-contributed rules as a template-spliceable section.
+
+        Returns a single string with each rule on its own line, indented to
+        ``indent`` (defaults to base profile's 2-space indentation).  Empty
+        / None input renders a "(none for this session)" comment so the
+        section header is always visible in rendered profiles — operators
+        can grep for ``plugin-contributed`` and find it in every profile,
+        whether populated or not.
+
+        Sub-profile builders (tool_hat, child) call this with ``indent="    "``
+        to nest correctly inside their 4-space-indented block.
+        """
+        if not plugin_rules:
+            return f"{indent}# ---- plugin-contributed rules (none for this session) ----"
+        lines = [f"{indent}# ---- plugin-contributed rules ----"]
+        for rule in plugin_rules:
+            lines.append(f"{indent}{rule}")
+        return "\n".join(lines)
+
     def _render_profile(
         self,
         session_id: str,
@@ -1805,6 +1844,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         config_root: Optional[str] = None,
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
     ) -> str:
         """Render the profile template with session-specific values.
 
@@ -1958,6 +1998,18 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             "\n\n".join(chunks) if chunks else "  # (no extension fragments)"
         )
 
+        # Phase 0 (template v20, 2026-05-16): plugin-contribution hook.
+        # Splice plugin-contributed rules into base + sub-profiles.  When
+        # ``plugin_rules`` is None/empty (no plugin overrides), both
+        # variants render a "(none for this session)" comment line —
+        # rule semantics unchanged from v19.
+        plugin_rules_base_inline = self._format_plugin_contributed_rules(
+            plugin_rules, indent="  ",
+        )
+        plugin_rules_subprofile_inline = self._format_plugin_contributed_rules(
+            plugin_rules, indent="    ",
+        )
+
         # Build the tool_hat sub-profile body (server 0.6.55+).
         # AppArmor sub-profiles do NOT inherit base rules — every allow
         # and deny must be redeclared.  We mirror the base body
@@ -1971,6 +2023,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             env_file_rule=env_file_rule,
             refs_include_glob=f"{self._refs_dir(session_id)}/*",
             extension_fragments_inline=extension_fragments_inline,
+            plugin_contributed_rules=plugin_rules_subprofile_inline,
             session_id=session_id,
         )
 
@@ -1987,6 +2040,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             env_file_rule=env_file_rule,
             refs_include_glob=f"{self._refs_dir(session_id)}/*",
             extension_fragments_inline=extension_fragments_inline,
+            plugin_contributed_rules=plugin_rules_subprofile_inline,
             session_id=session_id,
         )
 
@@ -2004,6 +2058,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             env_file_rule=env_file_rule,
             refs_include_glob=f"{self._refs_dir(session_id)}/*",
             extension_fragments_inline=extension_fragments_inline,
+            plugin_contributed_rules=plugin_rules_base_inline,
             tool_hat_subprofile=tool_hat_subprofile,
             child_subprofile=child_subprofile,
             profile_flags=profile_flags,
@@ -2017,6 +2072,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         env_file_rule: str,
         refs_include_glob: str,
         extension_fragments_inline: str,
+        plugin_contributed_rules: str,
         session_id: str,
     ) -> str:
         """Build the ``profile tool_hat { ... }`` sub-profile body
@@ -2160,6 +2216,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
 
     # ---- extension fragments (mirrors base, re-indented) ----
 {nested_extension_fragments}
+
+{plugin_contributed_rules}
   }}"""
 
     def _build_child_subprofile(
@@ -2170,6 +2228,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         env_file_rule: str,
         refs_include_glob: str,
         extension_fragments_inline: str,
+        plugin_contributed_rules: str,
         session_id: str,
     ) -> str:
         """Build the ``profile child { ... }`` sub-profile body
@@ -2378,6 +2437,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
 
     # ---- extension fragments (mirrors tool_hat, re-indented) ----
 {nested_extension_fragments}
+
+{plugin_contributed_rules}
   }}"""
 
     def _refs_dir(self, session_id: str) -> Path:

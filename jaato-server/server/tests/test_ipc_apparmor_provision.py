@@ -64,6 +64,7 @@ class _FakeAppArmorManager:
         config_root: Optional[str] = None,
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
     ) -> bool:
         self.provision_calls.append({
             "session_id": session_id,
@@ -71,6 +72,7 @@ class _FakeAppArmorManager:
             "config_root": config_root,
             "env_file": env_file,
             "requested_fragments": requested_fragments,
+            "plugin_rules": plugin_rules,
         })
         return self.provision_outcome
 
@@ -548,6 +550,7 @@ class TestConfigRootEnvelopeUnification:
             "config_root": "/srv/operator/.jaato",
             "env_file": "/srv/operator/.env",
             "requested_fragments": None,
+            "plugin_rules": None,
         }]
 
     def test_envelope_override_wins_over_client_config(

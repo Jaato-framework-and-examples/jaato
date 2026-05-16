@@ -69,6 +69,8 @@ class _FakeAppArmorManager:
     def provision_profile(
         self, session_id: str, workspace_path: str,
         config_root: Optional[str] = None, env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
     ) -> bool:
         self.provision_calls.append({
             "session_id": session_id,

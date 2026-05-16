@@ -932,3 +932,59 @@ class ToolPlugin(Protocol):
     #             self._setup_hooks()
     #     """
     #     ...
+    #
+    # AppArmor Contribution:
+    #
+    # Plugins that need host-tier filesystem paths (ML model caches,
+    # vendor-specific config dirs, etc.) should contribute their own
+    # AppArmor rules instead of relying on the framework's PROFILE_TEMPLATE
+    # hardcoding the paths.  See ``docs/design/plugin-apparmor-contribution.md``.
+    #
+    # @classmethod
+    # def get_apparmor_rules(
+    #     cls,
+    #     *,
+    #     workspace_path: str,
+    #     session_id: str,
+    #     config_root: Optional[str],
+    #     plugin_config: Dict[str, Any],
+    # ) -> List[str]:
+    #     """Return AppArmor rule lines this plugin needs in the session profile.
+    #
+    #     Called daemon-side at profile-render time, BEFORE the runner self-
+    #     confines.  Default: not implemented (treated as ``[]``).  Plugins
+    #     opt in by overriding.
+    #
+    #     The classmethod shape is mandatory — the daemon resolves rules
+    #     before any plugin instance exists in the runner.  Implementations
+    #     must work without ``self``.
+    #
+    #     Returned strings are spliced into the profile body verbatim, one
+    #     rule per string (no trailing newline; the daemon handles
+    #     formatting + indentation).  Each string must be valid AppArmor
+    #     rule syntax — syntax errors surface at ``apparmor_parser -r``
+    #     load time, not at Python import.  Comments via ``#`` are allowed.
+    #
+    #     Args:
+    #         workspace_path: Absolute path to the session workspace.
+    #         session_id: Session identifier (useful for /tmp/<plugin>-{id}
+    #             style scoping).
+    #         config_root: Optional client-supplied config_root override.
+    #             ``None`` when the workspace's own ``.jaato/`` is in use.
+    #         plugin_config: Per-plugin config dict from
+    #             ``SubagentProfile.plugin_configs.get(plugin_name, {})``.
+    #             Plugins reading a config-driven host path (e.g., a custom
+    #             HF_HOME, a vendor cache path) extract it here.
+    #
+    #     Returns:
+    #         List of AppArmor rule strings.  Empty list = no contribution.
+    #
+    #     Example:
+    #         @classmethod
+    #         def get_apparmor_rules(cls, *, workspace_path, session_id, config_root, plugin_config):
+    #             return [
+    #                 "@{HOME}/.cache/huggingface/   rw,",
+    #                 "@{HOME}/.cache/huggingface/** rwk,",
+    #             ]
+    #     """
+    #     ...

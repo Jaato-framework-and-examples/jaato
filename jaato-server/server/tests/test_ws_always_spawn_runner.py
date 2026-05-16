@@ -48,6 +48,7 @@ class _FakeAppArmor:
 
     def provision_profile(
         self, session_id: str, workspace_path: str,
+        **kwargs: Any,
     ) -> bool:
         self.provision_calls.append((session_id, workspace_path))
         return self.provision_outcome
