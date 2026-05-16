@@ -2242,6 +2242,73 @@ class TestPromptLibraryAgentsContribution:
         assert "@{HOME}/.jaato/agents/     r," in rules    # prompt_library's
 
 
+class TestMigratedPathsAbsentAcrossAllRenderers:
+    """Phase 5 contract test (template v27).
+
+    Pins that no plugin-attributable path (migrated in Phases 1-4)
+    appears in ANY profile-body renderer's output by default.  This
+    is the regression-prevention test that should have shipped with
+    Phase 1 — without it, Phases 1/2/3/3b shipped silently broken on
+    the fourth renderer (``_render_sub_profile``, see Phase 4 PR).
+
+    When a future migration adds a new ``get_apparmor_rules``
+    contribution, this test catches "forgot to strip a site"
+    automatically across ALL renderers.
+    """
+
+    # All paths migrated to plugin classmethods (Phases 1-4).
+    # If any of these appears in a default-rendered profile body
+    # (no plugins configured), some renderer is broken.
+    MIGRATED_PATH_SUBSTRINGS = (
+        # Phase 1 (references plugin caches)
+        "@{HOME}/.cache/huggingface/",
+        "@{HOME}/.cache/torch/",
+        # Phase 2 (memory + prompt_library)
+        "@{HOME}/.jaato/memories/",
+        "@{HOME}/.jaato/memories.jsonl",
+        "@{HOME}/.jaato/prompts/",
+        "@{HOME}/.jaato/skills/",
+        "@{HOME}/.claude/skills/",
+        "@{HOME}/.claude/commands/",
+        # Phase 3 (service_connector + references catalog)
+        "@{HOME}/.jaato/services/",
+        "@{HOME}/.jaato/references/",
+        # Phase 3b (gc subsystem)
+        "@{HOME}/.jaato/gc.json",
+        # Phase 4 (subagent agents/profiles)
+        "@{HOME}/.jaato/agents/",
+        "@{HOME}/.jaato/profiles/",
+    )
+
+    def _all_renderer_outputs(self, manager):
+        """Yield (renderer_name, rendered_body) for every profile-body
+        rendering path.  Adding a new renderer requires adding it here
+        — that's the explicit contract for "new renderer must pass
+        the migration-absence assertions."
+        """
+        # Base profile (includes the two nested sub-profiles tool_hat + child)
+        yield "base", manager._render_profile("s1", "/workspace")
+        # Isolated subagent (standalone profile)
+        yield "isolated", manager._render_sub_profile(
+            parent_session_id="parent_s1",
+            subagent_id="sub_s1",
+            workspace_path="/workspace",
+        )
+
+    def test_no_migrated_path_appears_by_default(self, manager):
+        """For every renderer, no migrated path appears when no
+        plugin_rules are passed (default render)."""
+        for name, body in self._all_renderer_outputs(manager):
+            for path in self.MIGRATED_PATH_SUBSTRINGS:
+                assert path not in body, (
+                    f"renderer={name!r} still contains migrated path "
+                    f"{path!r}; either a Phase 1-4 strip was missed at "
+                    f"this site, or a new migration didn't update this "
+                    f"renderer.  See ``_render_user_global_block`` and "
+                    f"Phase 1-4 PRs for the convention."
+                )
+
+
 class TestIsolatedSubprofileMigrationCompletion:
     """Phase 4 closes the Phase 2/3 gap on _build_isolated_subprofile.
 

@@ -267,7 +267,7 @@ class AppArmorManager:
     # kernel) rather than the expected complain-mode AVC log entries.
     # The flag knob now does what its name implies — entire profile
     # chain is complain when set.
-    _TEMPLATE_VERSION = 26
+    _TEMPLATE_VERSION = 27
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -363,19 +363,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # prompt_library, etc.) — can keep working under confinement.
   {config_root_rules}
 
-  # ---- user-global jaato config (read-only) ----
-  # Allow agent/profile/prompt/theme definitions from ~/.jaato/.
-  # NOT allowed: credentials, *_auth.json, sibling workspaces.
-  # ~/.jaato/agents/ migrated to subagent + prompt_library plugins (template v26).
-  # ~/.jaato/profiles/ migrated to subagent plugin (template v26).
-  # ~/.jaato/prompts/ and ~/.jaato/skills/ migrated to prompt_library plugin (template v23).
-  @{{HOME}}/.jaato/themes/         r,
-  @{{HOME}}/.jaato/themes/**       r,
-  # ~/.jaato/services/ migrated to service_connector plugin (template v24).
-  # ~/.jaato/references/ migrated to references plugin (template v24).
-  @{{HOME}}/.jaato/keybindings.json r,
-  @{{HOME}}/.jaato/theme.json       r,
-  # ~/.jaato/gc.json migrated to gc plugin subsystem (template v25).
+{user_global_block}
 
   # ---- client-supplied env_file (read-only, optional) ----
   # When the client passes ``env_file`` on ``ClientConfigRequest``,
@@ -2061,6 +2049,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             tool_hat_subprofile=tool_hat_subprofile,
             child_subprofile=child_subprofile,
             profile_flags=profile_flags,
+            user_global_block=self._render_user_global_block(2),
         )
 
     def _build_tool_hat_subprofile(
@@ -2140,22 +2129,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {premium_rules}
     {config_root_rules}
 
-    # ---- user-global jaato config (mirrors base) ----
-    # ~/.jaato/agents/ migrated to subagent + prompt_library plugins (template v26).
-    # ~/.jaato/profiles/ migrated to subagent plugin (template v26).
-    # Prompts + skills migrated to prompt_library plugin (template v23).
-    @{{HOME}}/.jaato/themes/         r,
-    @{{HOME}}/.jaato/themes/**       r,
-    # ~/.jaato/services/ migrated to service_connector plugin (template v24).
-    # ~/.jaato/references/ migrated to references plugin (template v24).
-    @{{HOME}}/.jaato/keybindings.json r,
-    @{{HOME}}/.jaato/theme.json       r,
-    # ~/.jaato/gc.json migrated to gc plugin subsystem (template v25).
+{self._render_user_global_block(4)}
     {env_file_rule}
-    # Global memories migrated to memory plugin (template v23).
-    # Claude Code interop migrated to prompt_library plugin (template v23).
-    # ML model caches migrated to references plugin (template v21);
-    # see base body comment.
 
     # ---- temp files (mirrors base) ----
     /tmp/jaato-{session_id}-** rw,
@@ -2300,22 +2275,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {premium_rules}
     {config_root_rules}
 
-    # ---- user-global jaato config (mirrors tool_hat) ----
-    # ~/.jaato/agents/ migrated to subagent + prompt_library plugins (template v26).
-    # ~/.jaato/profiles/ migrated to subagent plugin (template v26).
-    # Prompts + skills migrated to prompt_library plugin (template v23).
-    @{{HOME}}/.jaato/themes/         r,
-    @{{HOME}}/.jaato/themes/**       r,
-    # ~/.jaato/services/ migrated to service_connector plugin (template v24).
-    # ~/.jaato/references/ migrated to references plugin (template v24).
-    @{{HOME}}/.jaato/keybindings.json r,
-    @{{HOME}}/.jaato/theme.json       r,
-    # ~/.jaato/gc.json migrated to gc plugin subsystem (template v25).
+{self._render_user_global_block(4)}
     {env_file_rule}
-    # Global memories migrated to memory plugin (template v23).
-    # Claude Code interop migrated to prompt_library plugin (template v23).
-    # ML model caches migrated to references plugin (template v21);
-    # see base body comment.
 
     # ---- temp files (mirrors tool_hat) ----
     /tmp/jaato-{session_id}-** rw,
@@ -2422,6 +2383,68 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         ``add_reference_fragment()``.
         """
         return self._profile_dir / f"{self.get_profile_name(session_id)}.refs.d"
+
+    @staticmethod
+    def _render_user_global_block(indent_spaces: int = 2) -> str:
+        """Render the user-global config block shared across the
+        base profile and its two nested sub-profiles (tool_hat, child).
+
+        Phase 5 (template v27, 2026-05-16): consolidates the residual
+        user-global grants and migration-marker comments into a single
+        helper so future plugin migrations edit ONE location instead of
+        three.  Closes the smell behind why Phases 1-4 kept hitting
+        copy-paste patterns across multiple renderers.
+
+        **Scope: base + tool_hat + child only.**  The fourth renderer
+        (``_render_sub_profile``, isolated subagent) historically
+        carries a narrower active block (no ``themes/``) per its
+        minimal-grants security posture, and is NOT covered by this
+        helper.  See ``_render_sub_profile``'s own user-global block.
+
+        Active grants (client-side, not plugin-attributable):
+        - ``~/.jaato/themes/`` (and ``**``) — TUI theme definitions
+        - ``~/.jaato/keybindings.json`` — TUI keybinding config
+        - ``~/.jaato/theme.json`` — TUI theme override
+
+        Migrated paths (now contributed by plugin classmethods via
+        :func:`resolve_plugin_apparmor_rules`):
+        - ``~/.jaato/agents/`` — subagent + prompt_library (v26)
+        - ``~/.jaato/profiles/`` — subagent (v26)
+        - ``~/.jaato/prompts/``, ``~/.jaato/skills/`` — prompt_library (v23)
+        - ``~/.jaato/services/`` — service_connector (v24)
+        - ``~/.jaato/references/`` — references plugin catalog (v24)
+        - ``~/.jaato/memories/``, ``memories.jsonl`` — memory plugin (v23)
+        - ``~/.jaato/gc.json`` — gc subsystem helper (v25)
+        - ``~/.claude/skills/``, ``~/.claude/commands/`` —
+          prompt_library (v23)
+        - ``~/.cache/huggingface/``, ``~/.cache/torch/`` — references
+          plugin (v21)
+
+        Args:
+            indent_spaces: Leading whitespace per line.  ``2`` for the
+                base profile (uses 2-space indent inside the
+                ``profile { ... }`` block).  ``4`` for
+                ``_build_tool_hat_subprofile`` and
+                ``_build_child_subprofile`` (which nest one level
+                deeper inside ``profile foo { ... }``).
+
+        Returns:
+            The block as a single string with embedded newlines, ready
+            to splice into a template via ``.format()`` or f-string.
+            Does NOT include a leading or trailing newline.
+        """
+        indent = " " * indent_spaces
+        lines = [
+            "# ---- user-global jaato config (read-only) ----",
+            "# All plugin-attributable paths migrated to plugins' "
+            "get_apparmor_rules (Phases 1-4, templates v21-v26).",
+            "# Remaining grants are client-side reads not owned by any plugin.",
+            "@{HOME}/.jaato/themes/         r,",
+            "@{HOME}/.jaato/themes/**       r,",
+            "@{HOME}/.jaato/keybindings.json r,",
+            "@{HOME}/.jaato/theme.json       r,",
+        ]
+        return "\n".join(indent + line for line in lines)
 
 
 def resolve_plugin_apparmor_rules(
