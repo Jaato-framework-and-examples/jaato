@@ -1,5 +1,6 @@
 """CLI tool plugin for executing local shell commands."""
 
+import logging
 import os
 from shared.session_context import get_workspace_root, get_config_root
 import re
@@ -10,6 +11,8 @@ import tempfile
 import threading
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
