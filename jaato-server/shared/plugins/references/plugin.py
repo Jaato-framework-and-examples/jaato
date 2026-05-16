@@ -187,6 +187,36 @@ class ReferencesPlugin(RunnerForwardingMixin):
     def name(self) -> str:
         return self._name
 
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute references-plugin host paths to the AppArmor profile.
+
+        Phase 1 of the plugin-apparmor-contribution refactor
+        (template v21, 2026-05-16).  These caches used to be hardcoded
+        in ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
+        references plugin in ``profile.plugins`` no longer carry the
+        grants (least-privilege).
+
+        ``sentence-transformers``, ``HuggingFace transformers``, and
+        ``torch`` write lockfiles + metadata even when models are fully
+        cached locally — read-only would EACCES.  ``rwk`` covers
+        directory creation, file writes, and the file-lock primitive
+        joblib uses for the on-disk cache.
+        """
+        return [
+            "@{HOME}/.cache/huggingface/   rw,",
+            "@{HOME}/.cache/huggingface/** rwk,",
+            "@{HOME}/.cache/torch/         rw,",
+            "@{HOME}/.cache/torch/**       rwk,",
+        ]
+
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         _trace_write("REFERENCES", msg)

@@ -593,7 +593,24 @@ class JaatoWSServer:
             apparmor = ws_server._apparmor
             profile_name = ""  # empty = unconfined (disable_confine=True)
             if apparmor is not None and apparmor.is_available():
-                if apparmor.provision_profile(session_id, workspace_path):
+                # Phase 0/1 (template v20+, 2026-05-16): resolve plugin-
+                # contributed rules so the WS-spawned session profile
+                # mirrors the IPC path's plugin-contribution flow.
+                # Without this, references plugin's HF + torch grants
+                # (Phase 1) would be present in IPC but missing in WS
+                # sessions.
+                from server.apparmor import resolve_plugin_apparmor_rules
+                plugin_rules = resolve_plugin_apparmor_rules(
+                    server=server,
+                    profile=getattr(server, "_profile", None),
+                    session_id=session_id,
+                    workspace_path=workspace_path,
+                    config_root=None,
+                )
+                if apparmor.provision_profile(
+                    session_id, workspace_path,
+                    plugin_rules=plugin_rules,
+                ):
                     profile_name = apparmor.get_profile_name(session_id)
                 else:
                     logger.warning(
@@ -798,8 +815,20 @@ class JaatoWSServer:
             # AppArmor unavailable at that point), this catches it
             # and downgrades cleanly to soft mode.  ``apparmor_parser -r``
             # is idempotent so the redundant call is safe when both
-            # phases succeed.
-            if not apparmor.provision_profile(session_id, sess.workspace_path):
+            # phases succeed.  Plugin-rules resolution mirrors the
+            # pre-init hook (template v20+).
+            from server.apparmor import resolve_plugin_apparmor_rules
+            plugin_rules = resolve_plugin_apparmor_rules(
+                server=server,
+                profile=getattr(server, "_profile", None),
+                session_id=session_id,
+                workspace_path=sess.workspace_path,
+                config_root=None,
+            )
+            if not apparmor.provision_profile(
+                session_id, sess.workspace_path,
+                plugin_rules=plugin_rules,
+            ):
                 sess.sandbox_mode = "soft"
                 return
 

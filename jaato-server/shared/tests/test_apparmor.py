@@ -1831,3 +1831,176 @@ class TestPluginContributedRules:
         written = (tmp_path / "jaato-ws-s1").read_text()
         assert "@{HOME}/.cache/foo/ rw," in written
         assert written.count("@{HOME}/.cache/foo/ rw,") == 3  # base + 2 subprofiles
+
+
+class TestResolvePluginApparmorRules:
+    """Module-level helper used by IPC + WS provision paths."""
+
+    def test_returns_none_when_profile_is_none(self):
+        from server.apparmor import resolve_plugin_apparmor_rules
+        out = resolve_plugin_apparmor_rules(
+            server=MagicMock(), profile=None,
+            session_id="s1", workspace_path="/ws", config_root=None,
+        )
+        assert out is None
+
+    def test_returns_none_when_no_plugins(self):
+        from server.apparmor import resolve_plugin_apparmor_rules
+        profile = MagicMock()
+        profile.plugins = []
+        profile.plugin_configs = {}
+        out = resolve_plugin_apparmor_rules(
+            server=MagicMock(), profile=profile,
+            session_id="s1", workspace_path="/ws", config_root=None,
+        )
+        assert out is None
+
+    def test_returns_none_when_no_plugin_overrides(self):
+        from server.apparmor import resolve_plugin_apparmor_rules
+        profile = MagicMock()
+        profile.plugins = ["cli", "memory"]
+        profile.plugin_configs = {}
+        # Plugin instances without get_apparmor_rules — registry returns
+        # plain objects with no attribute.
+        class _Plain: pass
+        registry = MagicMock()
+        registry.get_plugin.return_value = _Plain()
+        server = MagicMock()
+        server.registry = registry
+        out = resolve_plugin_apparmor_rules(
+            server=server, profile=profile,
+            session_id="s1", workspace_path="/ws", config_root=None,
+        )
+        assert out is None
+
+    def test_unions_contributions_from_multiple_plugins(self):
+        from server.apparmor import resolve_plugin_apparmor_rules
+
+        class _PluginA:
+            @classmethod
+            def get_apparmor_rules(cls, **kw):
+                return ["/dev/shm/sem.* rwk,"]
+
+        class _PluginB:
+            @classmethod
+            def get_apparmor_rules(cls, **kw):
+                return ["@{HOME}/.cache/x/ rw,", "@{HOME}/.cache/x/** rwk,"]
+
+        profile = MagicMock()
+        profile.plugins = ["a", "b"]
+        profile.plugin_configs = {}
+        registry = MagicMock()
+        registry.get_plugin.side_effect = lambda n: {"a": _PluginA(), "b": _PluginB()}.get(n)
+        server = MagicMock()
+        server.registry = registry
+
+        out = resolve_plugin_apparmor_rules(
+            server=server, profile=profile,
+            session_id="s1", workspace_path="/ws", config_root=None,
+        )
+        assert out == [
+            "/dev/shm/sem.* rwk,",
+            "@{HOME}/.cache/x/ rw,",
+            "@{HOME}/.cache/x/** rwk,",
+        ]
+
+    def test_modifier_suffix_stripped(self):
+        """`references(preload)` should resolve to `references`."""
+        from server.apparmor import resolve_plugin_apparmor_rules
+
+        class _Plugin:
+            @classmethod
+            def get_apparmor_rules(cls, **kw):
+                return ["/test rwk,"]
+
+        profile = MagicMock()
+        profile.plugins = ["references(preload)"]
+        profile.plugin_configs = {}
+        registry = MagicMock()
+        registry.get_plugin.side_effect = lambda n: _Plugin() if n == "references" else None
+        server = MagicMock()
+        server.registry = registry
+
+        out = resolve_plugin_apparmor_rules(
+            server=server, profile=profile,
+            session_id="s1", workspace_path="/ws", config_root=None,
+        )
+        assert out == ["/test rwk,"]
+
+    def test_plugin_failure_does_not_abort(self, caplog):
+        """One plugin's exception is logged but doesn't break the union."""
+        from server.apparmor import resolve_plugin_apparmor_rules
+
+        class _Broken:
+            @classmethod
+            def get_apparmor_rules(cls, **kw):
+                raise RuntimeError("boom")
+
+        class _Ok:
+            @classmethod
+            def get_apparmor_rules(cls, **kw):
+                return ["/ok rwk,"]
+
+        profile = MagicMock()
+        profile.plugins = ["broken", "ok"]
+        profile.plugin_configs = {}
+        registry = MagicMock()
+        registry.get_plugin.side_effect = lambda n: {"broken": _Broken(), "ok": _Ok()}[n]
+        server = MagicMock()
+        server.registry = registry
+
+        out = resolve_plugin_apparmor_rules(
+            server=server, profile=profile,
+            session_id="s1", workspace_path="/ws", config_root=None,
+        )
+        assert out == ["/ok rwk,"]
+        # The broken plugin's exception was logged
+        assert any("broken get_apparmor_rules failed" in r.message for r in caplog.records)
+
+
+class TestReferencesPluginApparmorRules:
+    """References plugin override (Phase 1, template v21)."""
+
+    def test_returns_huggingface_and_torch_caches(self):
+        from shared.plugins.references.plugin import ReferencesPlugin
+        rules = ReferencesPlugin.get_apparmor_rules(
+            workspace_path="/ws",
+            session_id="s1",
+            config_root=None,
+            plugin_config={},
+        )
+        assert "@{HOME}/.cache/huggingface/   rw," in rules
+        assert "@{HOME}/.cache/huggingface/** rwk," in rules
+        assert "@{HOME}/.cache/torch/         rw," in rules
+        assert "@{HOME}/.cache/torch/**       rwk," in rules
+
+    def test_is_a_classmethod_callable_without_instance(self):
+        """Daemon-side resolution must work without instantiating the plugin."""
+        from shared.plugins.references.plugin import ReferencesPlugin
+        rules = ReferencesPlugin.get_apparmor_rules(
+            workspace_path="/ws", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        assert len(rules) == 4
+
+    def test_template_no_longer_hardcodes_hf_torch(self, manager):
+        """Phase 1 acceptance: rendered profile body (with no plugins)
+        must NOT contain the HF or torch grants."""
+        rendered = manager._render_profile("s1", "/workspace")
+        assert "/.cache/huggingface/" not in rendered
+        assert "/.cache/torch/" not in rendered
+
+    def test_template_picks_up_references_rules_when_passed(self, manager):
+        """When the resolver feeds references' rules into _render_profile,
+        the HF + torch grants reappear in all 3 profile contexts."""
+        from shared.plugins.references.plugin import ReferencesPlugin
+        rules = ReferencesPlugin.get_apparmor_rules(
+            workspace_path="/workspace", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        # Each of the 4 rules appears 3 times (base + tool_hat + child)
+        assert rendered.count("@{HOME}/.cache/huggingface/   rw,") == 3
+        assert rendered.count("@{HOME}/.cache/huggingface/** rwk,") == 3
+        assert rendered.count("@{HOME}/.cache/torch/         rw,") == 3
+        assert rendered.count("@{HOME}/.cache/torch/**       rwk,") == 3
