@@ -76,7 +76,31 @@ from jaato_sdk.plugins.base import (
 )
 from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from shared.tool_id_map import name_to_id, id_to_name
 from shared.trace import trace as _trace_write
+
+
+def _template_id(name: str) -> str:
+    """Return the LLM-facing hash id for a template name.
+
+    Mirrors ``shared.tool_id_map.name_to_id`` for tools (server 0.6.119+,
+    2026-05-17).  The hash is the surface the LLM sees; human names
+    remain authoritative inside the plugin's ``_template_index`` and on
+    disk.  Closes the semantic-prior class that v112 evidence exposed
+    (codegen agent skipped ``listTemplateVariables`` calls on templates
+    whose name matched Spring Boot training priors).
+    """
+    return name_to_id(name, prefix="tpl")
+
+
+def _template_name_from_id(template_id: str) -> str:
+    """Resolve an LLM-emitted hash id back to its human template name.
+
+    Returns the id unchanged when not recognized (mirrors
+    :func:`shared.tool_id_map.id_to_name`).  The plugin's executors
+    then fall through to the normal "template not found" error path.
+    """
+    return id_to_name(template_id)
 
 
 # File extensions recognized as standalone template files
@@ -813,13 +837,13 @@ class TemplatePlugin(RunnerForwardingMixin):
                 name="renderTemplateToFile",
                 description=(
                     "**PREFERRED OVER MANUAL CODING**: Render a template with variable substitution "
-                    "and write the result to a file. When a template exists for your task (check "
-                    ".jaato/templates/ or use listAvailableTemplates), you MUST use this tool instead "
+                    "and write the result to a file. When a template exists for your task (use "
+                    "listAvailableTemplates to discover them), you MUST use this tool instead "
                     "of writing code manually. Templates ensure consistency and reduce errors. "
                     "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
                     "Jinja2: {{name}}, {% if %}, {% for %}, {{ name | filter }}. "
                     "Mustache: {{name}}, {{#items}}...{{/items}}, {{^empty}}...{{/empty}}, {{.}}. "
-                    "Provide either 'template' for inline content or 'template_name' for a registered template."
+                    "Provide either 'template' for inline content or 'template_id' for a registered template."
                 ),
                 parameters={
                     "type": "object",
@@ -829,20 +853,28 @@ class TemplatePlugin(RunnerForwardingMixin):
                             "description": (
                                 "OPTIONAL — defaults to the template's declared "
                                 "// Output: directive (substituted with your `variables`). "
-                                "When using `template_name`, omit this field unless you "
+                                "When using `template_id`, omit this field unless you "
                                 "specifically need to redirect the output away from the "
                                 "template's canonical location. When using inline `template` "
                                 "OR when the template has no `// Output:` directive, you must "
                                 "supply this. NEVER include unsubstituted `{` or `}` placeholders."
                             )
                         },
-                        "template_name": {
+                        "template_id": {
                             "type": "string",
-                            "description": "Template name from the annotation (e.g., 'Entity.java.tpl'). Resolved via the template index. Mutually exclusive with 'template'."
+                            "description": (
+                                "Opaque template identifier (e.g. 'tpl_a8f0e2b1') obtained "
+                                "from the 'id' field of a listAvailableTemplates response entry. "
+                                "Resolved internally to the template file. Mutually exclusive "
+                                "with 'template'. Do NOT pass human template filenames "
+                                "(e.g. 'Entity.java.tpl') — the framework hashes those at the "
+                                "LLM boundary to keep tool calls grounded in the listed catalog "
+                                "rather than training-distribution priors."
+                            )
                         },
                         "template": {
                             "type": "string",
-                            "description": "Inline template string. Mutually exclusive with 'template_name'."
+                            "description": "Inline template string. Mutually exclusive with 'template_id'."
                         },
                         "variables": {
                             "type": "object",
@@ -871,7 +903,11 @@ class TemplatePlugin(RunnerForwardingMixin):
                     "**CHECK THIS BEFORE WRITING CODE**: List all templates available in this "
                     "session. If a template exists for your task, you MUST use renderTemplateToFile "
                     "instead of writing code manually. Shows both standalone templates (from "
-                    "referenced directories) and embedded templates (extracted from documentation)."
+                    "referenced directories) and embedded templates (extracted from documentation). "
+                    "Each entry carries a stable opaque 'id' (e.g. 'tpl_a8f0e2b1') — pass this "
+                    "id to renderTemplateToFile and listTemplateVariables. The human template "
+                    "filename is reported on 'source_path' for human audit only; never pass it "
+                    "as a tool argument."
                 ),
                 parameters={
                     "type": "object",
@@ -926,12 +962,17 @@ class TemplatePlugin(RunnerForwardingMixin):
                 parameters={
                     "type": "object",
                     "properties": {
-                        "template_name": {
+                        "template_id": {
                             "type": "string",
-                            "description": "Template name from the annotation (e.g., 'Entity.java.tpl')"
+                            "description": (
+                                "Opaque template identifier (e.g. 'tpl_a8f0e2b1') obtained "
+                                "from the 'id' field of a listAvailableTemplates response "
+                                "entry. Do NOT pass human template filenames — see "
+                                "listAvailableTemplates description."
+                            )
                         }
                     },
-                    "required": ["template_name"]
+                    "required": ["template_id"]
                 },
                 category="code",
                 discoverability="discoverable",
@@ -959,26 +1000,39 @@ class TemplatePlugin(RunnerForwardingMixin):
 manually writing code. Templates ensure consistency, reduce errors, and follow established
 patterns. Manual coding when a template exists is NOT acceptable.
 
+### IMPORTANT: Template Identifiers Are Opaque Hashes
+
+Templates are identified by stable opaque ids (e.g. `tpl_a8f0e2b1`).  You
+discover ids from `listAvailableTemplates`; you pass ids to
+`renderTemplateToFile` and `listTemplateVariables`.  Do NOT pass human
+template filenames as tool arguments — the framework hashes them so that
+your tool calls are grounded in the listed catalog rather than in
+training-distribution priors on filenames like `RestController.java.tpl`.
+
 ### IMPORTANT: Variable Names Are Provided Automatically
 
 When a template is detected, the system automatically injects an annotation
-showing the **exact variable names** required. Look for annotations like:
+showing the template's id AND the **exact variable names** required.  Look
+for annotations like:
 
 ```
-[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: Entity.java.tpl
+[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: tpl_a8f0e2b1
   Syntax: mustache
   Required variables: [Entity, basePackage, entityFields]
   ...
 ```
 
-**USE THESE EXACT VARIABLE NAMES** when calling renderTemplateToFile. Do NOT guess or
-invent variable names - use the ones shown in the annotation.
+**USE THESE EXACT VARIABLE NAMES** when calling renderTemplateToFile.  Do
+NOT guess or invent variable names — use the ones shown in the
+annotation.  When in doubt about a variable's structural kind (scalar /
+section / inverted_section), call `listTemplateVariables(template_id=...)`.
 
 ### TEMPLATE TOOLS:
 
-**renderTemplateToFile(template_name, variables, output_path=optional)** - PREFERRED tool for file generation
-  - template_name: Use the template **name** from the annotation (e.g., "Entity.java.tpl")
-  - The system resolves the name to the actual file location via the template index
+**renderTemplateToFile(template_id, variables, output_path=optional)** - PREFERRED tool for file generation
+  - template_id: Use the `id` from the annotation or from `listAvailableTemplates`
+    (e.g. `"tpl_a8f0e2b1"`).  Do NOT pass `"Entity.java.tpl"`.
+  - The system resolves the id to the actual file location via the template index
   - Use the EXACT variable names from the template annotation
   - **output_path is OPTIONAL** when the template declares a `// Output:` directive at the top:
     the framework substitutes `{{vars}}` in the directive with your `variables` and uses
@@ -991,14 +1045,17 @@ invent variable names - use the ones shown in the annotation.
 
 **listAvailableTemplates()** - List all available templates
   - Shows all templates discovered in this session (embedded + standalone)
-  - Each entry shows: name, origin, syntax, variables, source path
+  - Each entry: `{id, origin, syntax, variables, source_path, output_path_template, ...}`
+  - The `id` is the opaque hash you pass to other template tools
+  - The `source_path` is for human audit only — never pass it as a tool argument
   - Auto-approved (no permission required)
 
-**listTemplateVariables(template_name)** - Get required variables for a template (OPTIONAL)
-  - Use this if you need to re-check the variables for a template
-  - Helpful if the original annotation is no longer visible in context
+**listTemplateVariables(template_id)** - Get required variables for a template
+  - Use this when you need structural-type info (scalar / section / inverted_section)
+    or when the original annotation is no longer visible in context
+  - Pass the `id` from `listAvailableTemplates` (e.g. `"tpl_a8f0e2b1"`)
   - Auto-approved (no permission required)
-  - Returns: {"variables": ["var1", "var2", ...], "syntax": "jinja2|mustache", "count": N}
+  - Returns: {"variables": [{"name": "...", "kind": "...", ...}, ...], "syntax": "...", ...}
 
 ### CRITICAL: Directory Creation Rules
 
@@ -1017,7 +1074,7 @@ renderTemplateToFile: ...
 # Most templates declare their output path on a `// Output:` line at the top.
 # Omit output_path and the framework substitutes the directive with your variables.
 renderTemplateToFile(
-    template_name="Entity.java.tpl",
+    template_id="tpl_a8f0e2b1",   # from listAvailableTemplates response
     variables={"Entity": "Customer", "basePackage": "com.bank.customer", "basePackagePath": "com/bank/customer"}
 )
 # Resulting file lands at the template-declared path with {{vars}} substituted.
@@ -1026,7 +1083,7 @@ renderTemplateToFile(
 **Override only when needed (downstream tooling redirects):**
 ```
 renderTemplateToFile(
-    template_name="Entity.java.tpl",
+    template_id="tpl_a8f0e2b1",
     variables={"Entity": "Customer", "basePackage": "com.bank.customer"},
     output_path="custom/redirected/path/Customer.java"
 )
@@ -1045,12 +1102,11 @@ renderTemplateToFile(
 
 **Example - Generating multiple files (preferred form):**
 ```
-# Each template declares its own output path; just supply variables and the
-# framework places each file at the kb-author's canonical location.
-renderTemplateToFile(template_name="Entity.java.tpl", variables={"Entity": "Customer", ...})
-renderTemplateToFile(template_name="EntityId.java.tpl", variables={"Entity": "Customer", ...})
-renderTemplateToFile(template_name="DomainService.java.tpl", variables={"Entity": "Customer", ...})
-renderTemplateToFile(template_name="Repository.java.tpl", variables={"Entity": "Customer", ...})
+# Call listAvailableTemplates first to get each template's id, then:
+renderTemplateToFile(template_id="tpl_a8f0e2b1", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_id="tpl_4d3c91f0", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_id="tpl_77b2eea5", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_id="tpl_e016cc8a", variables={"Entity": "Customer", ...})
 ```
 
 ### Template Priority Rule (PREREQUISITE FOR FILE TOOLS)
@@ -1087,7 +1143,7 @@ mandatory corrections — call `listAvailableTemplates` and re-evaluate before p
 Do NOT read `.tpl`/`.tmpl` template files with file-reading tools and then pass the content
 to `writeNewFile`. This bypasses the template engine's variable substitution, syntax
 detection, and validation. The ONLY correct way to use a template is:
-- `renderTemplateToFile(template_name="...", variables={...}, output_path="...")`
+- `renderTemplateToFile(template_id="tpl_xxx", variables={...}, output_path="...")`
 
 The template engine resolves the file location, detects syntax (Jinja2/Mustache),
 substitutes variables, and writes the result. Manual reading and writing skips all of this.
@@ -1170,7 +1226,14 @@ Template rendering writes files to the workspace."""
 
         output_path = arguments.get("output_path", "")
         template = arguments.get("template")
-        template_name = arguments.get("template_name")
+        # Server 0.6.119+: the LLM passes a hash id; resolve it back to
+        # the human name for human-readable permission display.  Unknown
+        # ids round-trip unchanged so the display falls back to showing
+        # the id itself rather than an empty string.
+        template_id = arguments.get("template_id")
+        template_name = (
+            _template_name_from_id(template_id) if template_id else None
+        )
         variables = arguments.get("variables", {})
         overwrite = arguments.get("overwrite", False)
 
@@ -1292,7 +1355,7 @@ Template rendering writes files to the workspace."""
             f"📦 {total} template{'s' if total != 1 else ''} available "
             f"in the unified index.  Relevant ones surface in-context per "
             f"prompt; call `listAvailableTemplates` for the full catalog "
-            f"or `renderTemplateToFile(template_name=..., variables={{...}}, "
+            f"or `renderTemplateToFile(template_id=..., variables={{...}}, "
             f"output_path=...)` to use one.\n---"
         )
         enriched_instructions = instructions + pointer
@@ -1386,21 +1449,25 @@ Template rendering writes files to the workspace."""
 
         triggering_tags = self._indexer.triggering_tags(text, matches)
 
-        # Build the hint block.  Each bullet shows the template name,
-        # its description (when known), and the literal call form so the
-        # model can copy-paste rather than reconstruct argument shape.
-        hint_lines = ["", "📦 **Available Templates** — call by name:"]
+        # Build the hint block.  Each bullet shows the template's
+        # LLM-facing id (the actionable handle), its description (when
+        # known), and the literal call form so the model can copy-paste
+        # rather than reconstruct argument shape.  Human filename is
+        # shown as "audit" so the kb author / human reader can correlate
+        # — the LLM passes id only.
+        hint_lines = ["", "📦 **Available Templates** — call by `template_id`:"]
         for entry in matches:
             desc = entry.description.strip() if entry.description else ""
             tail = f" — {desc}" if desc else ""
-            hint_lines.append(f"  - `{entry.name}`{tail}")
+            entry_id = _template_id(entry.name)
+            hint_lines.append(f"  - `{entry_id}` (audit name: {entry.name}){tail}")
             if entry.variables:
                 var_preview = ", ".join(entry.variables[:5])
                 if len(entry.variables) > 5:
                     var_preview += f", … (+{len(entry.variables) - 5} more)"
                 hint_lines.append(f"    variables: [{var_preview}]")
         hint_lines.append(
-            "  Use: `renderTemplateToFile(template_name=<name>, "
+            "  Use: `renderTemplateToFile(template_id=<id>, "
             "variables={...}, output_path=...)`"
         )
 
@@ -1550,13 +1617,18 @@ Template rendering writes files to the workspace."""
                     var_list = "(none detected)"
                     var_dict_example = ""
 
+                # Compute the LLM-facing opaque id for this template
+                # (server 0.6.119+, the cutover surface).  The annotation
+                # shows it as the call argument; the human filename
+                # remains on the first line for kb-author audit.
+                _id = _template_id(template_path.name)
                 annotations.append(
-                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {_id} (audit name: {rel_path})\n"
                     f"  Syntax: {syntax}\n"
                     f"  Required variables: [{var_list}]\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
                     f"  Call: renderTemplateToFile(\n"
-                    f"      template_name=\"{rel_path}\",\n"
+                    f"      template_id=\"{_id}\",\n"
                     f"      variables={{{var_dict_example}}},\n"
                     f"      output_path=\"<your-output-file>\"\n"
                     f"  )"
@@ -2981,7 +3053,12 @@ Template rendering writes files to the workspace."""
                 display_path = str(source_path)
 
             templates.append({
-                "name": name,
+                # ``id`` is the LLM-facing opaque identifier; server
+                # 0.6.119+ replaces the human ``name`` field with this
+                # hash so the model never sees template filenames that
+                # could trigger training-distribution priors (see
+                # ``_template_id`` + ``feedback_semantic_identifiers_invite_training_prior``).
+                "id": _template_id(name),
                 "origin": entry.origin,
                 "syntax": entry.syntax,
                 "variables": entry.variables,
@@ -3022,8 +3099,10 @@ Template rendering writes files to the workspace."""
                 "template_evaluation_kind": entry.template_evaluation_kind,
             })
 
-        # Sort: standalone first (they're the primary templates), then embedded
-        templates.sort(key=lambda t: (0 if t["origin"] == "standalone" else 1, t["name"]))
+        # Sort: standalone first (they're the primary templates), then embedded.
+        # Secondary sort key is the source_path (server 0.6.119+; previously
+        # sorted on ``name`` which was removed for the cutover to ``id``).
+        templates.sort(key=lambda t: (0 if t["origin"] == "standalone" else 1, t["source_path"]))
 
         return {
             "templates": templates,
@@ -3424,20 +3503,28 @@ Template rendering writes files to the workspace."""
         """
         output_path = args.get("output_path", "")
         template = args.get("template")
-        template_name_arg = args.get("template_name")
+        template_id_arg = args.get("template_id")
+        # Resolve the LLM-facing hash id back to the human template name
+        # used by the internal index and on disk (server 0.6.119+).
+        # ``id_to_name`` round-trips unknown ids unchanged; the resulting
+        # name then fails ``_resolve_template_path`` below with a clear
+        # "template not found" error.
+        template_name_arg = (
+            _template_name_from_id(template_id_arg) if template_id_arg else None
+        )
         variables = self._coerce_variables(args.get("variables"))
         overwrite = args.get("overwrite", False)
 
-        # Mutual-exclusion checks on template / template_name come
-        # first because they're cheaper than path resolution.
-        if not template and not template_name_arg:
+        # Mutual-exclusion checks on template / template_id come first
+        # because they're cheaper than path resolution.
+        if not template and not template_id_arg:
             return {
-                "error": "Exactly one of 'template' or 'template_name' must be provided"
+                "error": "Exactly one of 'template' or 'template_id' must be provided"
             }
 
-        if template and template_name_arg:
+        if template and template_id_arg:
             return {
-                "error": "Provide either 'template' or 'template_name', not both"
+                "error": "Provide either 'template' or 'template_id', not both"
             }
 
         # Determine template source
@@ -4492,16 +4579,23 @@ Template rendering writes files to the workspace."""
             (kind detection for Jinja2 is a follow-up — current shape
             is consistent in API but flat in semantics).
         """
-        template_name = args.get("template_name", "")
+        template_id = args.get("template_id", "")
 
-        if not template_name:
-            return {"error": "template_name is required"}
+        if not template_id:
+            return {"error": "template_id is required"}
+
+        # Resolve the LLM-facing hash id back to the human template name
+        # (server 0.6.119+).  Mirrors how the runtime resolves tool hash
+        # ids back to human names before dispatching.  Unknown ids
+        # round-trip unchanged via ``id_to_name`` and fall through to
+        # the normal "template not found" error path below.
+        template_name = _template_name_from_id(template_id)
 
         # Resolve the template name via index or filesystem
         resolved_path, paths_tried = self._resolve_template_path(template_name)
         if not resolved_path or not resolved_path.exists():
             return {
-                "error": f"Template not found: {template_name}",
+                "error": f"Template not found: template_id={template_id}",
                 "paths_tried": paths_tried
             }
 

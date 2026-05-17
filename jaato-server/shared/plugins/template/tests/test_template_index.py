@@ -23,6 +23,7 @@ from shared.plugins.template.plugin import (
     TemplateIndexEntry,
     TEMPLATE_FILE_EXTENSIONS,
     PATH_ROUTING_FILENAME,
+    _template_id,
 )
 
 
@@ -31,6 +32,25 @@ def _names(item_keys):
     0.6.43+).  Each entry is ``{"name": str, "required": bool, "source": str}``;
     this helper centralises the migration from the prior List[str] view."""
     return [k["name"] for k in item_keys]
+
+
+def _render_args(template_name=None, **kw):
+    """Build a renderTemplateToFile args dict from a human template name.
+
+    Server 0.6.119+: tool args use the LLM-facing ``template_id`` hash
+    rather than ``template_name``.  Tests author with human names for
+    readability; this helper does the hash conversion in one place.
+    Pass ``template_name=None`` (default) when building args for an
+    inline ``template`` test.
+    """
+    if template_name is not None:
+        kw["template_id"] = _template_id(template_name)
+    return kw
+
+
+def _list_vars_args(template_name):
+    """Build a listTemplateVariables args dict from a human template name."""
+    return {"template_id": _template_id(template_name)}
 
 
 @pytest.fixture
@@ -315,7 +335,9 @@ class TestUnifiedListing:
         for t in result["templates"]:
             assert t["origin"] == "standalone"
             assert t["exists"] is True
-            assert "name" in t
+            # Cutover (server 0.6.119+): response carries ``id`` not ``name``.
+            assert "id" in t
+            assert t["id"].startswith("tpl_")
             assert "variables" in t
 
     def test_list_mixed_origins(self, plugin, template_dir):
@@ -465,7 +487,7 @@ class TestRenderWithIndex:
 
         output_file = plugin._base_path / "output" / "CustomerRepository.java"
         result = plugin._execute_render_template_to_file({
-            "template_name": "Repository.java.tpl",
+            "template_id": _template_id("Repository.java.tpl"),
             "variables": {
                 "basePackage": "com.bank.customer",
                 "Entity": "Customer",
@@ -483,7 +505,7 @@ class TestRenderWithIndex:
     def test_render_template_name_not_found(self, plugin):
         """Should return error when template name isn't in index."""
         result = plugin._execute_render_template_to_file({
-            "template_name": "NonExistent.java.tpl",
+            "template_id": _template_id("NonExistent.java.tpl"),
             "variables": {},
             "output_path": "/tmp/out.java",
         })
@@ -504,7 +526,7 @@ class TestRenderWithIndex:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_list_template_variables({
-            "template_name": "Repository.java.tpl",
+            "template_id": _template_id("Repository.java.tpl"),
         })
         assert "variables" in result, f"Expected variables, got: {result}"
         # Variables is now a list of {name, kind, item_keys?} dicts.
@@ -972,7 +994,7 @@ class TestMustacheStructuralParser:
             variables=[],
         )
         result = plugin._execute_list_template_variables({
-            "template_name": "test.java.tpl",
+            "template_id": _template_id("test.java.tpl"),
         })
         assert "warnings" in result, f"expected warnings, got {result}"
         assert "1 line(s) starting with '//'" in result["warnings"][0]
@@ -1048,7 +1070,7 @@ class TestMustacheStructuralParser:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_list_template_variables({
-            "template_name": "Repository.java.tpl",
+            "template_id": _template_id("Repository.java.tpl"),
         })
         assert "error" not in result
         assert isinstance(result["variables"], list)
@@ -2272,7 +2294,7 @@ class TestRenderThreadSafety:
 
         def list_one(name):
             return name, plugin._execute_list_template_variables({
-                "template_name": name,
+                "template_id": _template_id(name),
             })
 
         results = []
@@ -2405,7 +2427,7 @@ class TestOutputPathAutoDerivation:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "Entity.java.tpl",
+            "template_id": _template_id("Entity.java.tpl"),
             "variables": {
                 "basePackage": "com.bank.customer",
                 "basePackagePath": "com/bank/customer",
@@ -2443,7 +2465,7 @@ class TestOutputPathAutoDerivation:
 
         override = plugin._base_path / "custom" / "Override.java"
         result = plugin._execute_render_template_to_file({
-            "template_name": "X.java.tpl",
+            "template_id": _template_id("X.java.tpl"),
             "variables": {},
             "output_path": str(override),
         })
@@ -2468,7 +2490,7 @@ class TestOutputPathAutoDerivation:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "NoDir.java.tpl",
+            "template_id": _template_id("NoDir.java.tpl"),
             "variables": {},
         })
         assert "error" in result
@@ -2500,11 +2522,12 @@ class TestOutputPathAutoDerivation:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_list_available({})
-        by_name = {t["name"]: t for t in result["templates"]}
-        assert by_name["Has.tpl"]["output_path_template"] == (
+        # Cutover (server 0.6.119+): response carries ``id`` not ``name``.
+        by_id = {t["id"]: t for t in result["templates"]}
+        assert by_id[_template_id("Has.tpl")]["output_path_template"] == (
             "declared/{{x}}.java"
         )
-        assert by_name["Lacks.tpl"]["output_path_template"] == ""
+        assert by_id[_template_id("Lacks.tpl")]["output_path_template"] == ""
 
     def test_index_loader_handles_legacy_entries_without_output_path(
         self, plugin, tmp_path
@@ -2700,7 +2723,7 @@ class TestPolyglotOutputDirective:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "pom.xml.tpl",
+            "template_id": _template_id("pom.xml.tpl"),
             "variables": {"artifactId": "customer-service"},
             # No output_path — must auto-derive.
         })
@@ -2780,7 +2803,7 @@ class TestListVariablesIncludesPathTemplate:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_list_template_variables({
-            "template_name": "Entity.java.tpl",
+            "template_id": _template_id("Entity.java.tpl"),
         })
         var_names = {v["name"] for v in result["variables"]}
         # Body vars present
@@ -2806,7 +2829,7 @@ class TestListVariablesIncludesPathTemplate:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_list_template_variables({
-            "template_name": "Entity.java.tpl",
+            "template_id": _template_id("Entity.java.tpl"),
         })
         by_name = {v["name"]: v for v in result["variables"]}
         # Entity is in both body and path; body-parsed kind wins.
@@ -2829,7 +2852,7 @@ class TestListVariablesIncludesPathTemplate:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_list_template_variables({
-            "template_name": "Plain.java.tpl",
+            "template_id": _template_id("Plain.java.tpl"),
         })
         names = {v["name"] for v in result["variables"]}
         assert names == {"pkg", "Name"}
@@ -2850,7 +2873,7 @@ class TestListVariablesIncludesPathTemplate:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_list_template_variables({
-            "template_name": "config.xml.tpl",
+            "template_id": _template_id("config.xml.tpl"),
         })
         names = {v["name"] for v in result["variables"]}
         # Body var
@@ -2873,7 +2896,7 @@ class TestListVariablesIncludesPathTemplate:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_list_template_variables({
-            "template_name": "X.java.tpl",
+            "template_id": _template_id("X.java.tpl"),
         })
         # Body: pkg, Name.  Path: outDir, Name (Name dedups).  Merged: 3.
         assert result["count"] == 3
@@ -2898,7 +2921,7 @@ class TestListVariablesIncludesPathTemplate:
 
         # Step 1: listTemplateVariables to get the complete variable set.
         list_result = plugin._execute_list_template_variables({
-            "template_name": "Entity.java.tpl",
+            "template_id": _template_id("Entity.java.tpl"),
         })
         required_names = {v["name"] for v in list_result["variables"]}
         # Includes both body and path vars.
@@ -2908,7 +2931,7 @@ class TestListVariablesIncludesPathTemplate:
         # Step 2: agent supplies ALL variables and renders.
         # No output_path → auto-derive from directive.
         result = plugin._execute_render_template_to_file({
-            "template_name": "Entity.java.tpl",
+            "template_id": _template_id("Entity.java.tpl"),
             "variables": {
                 "Entity": "Customer",
                 "basePackage": "com.bank.customer",
@@ -2951,7 +2974,7 @@ class TestResolvedOutputPathValidation:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "ValueObject.java.tpl",
+            "template_id": _template_id("ValueObject.java.tpl"),
             "variables": {
                 "ValueObjectName": "",
                 "basePackage": "com.example.customer",
@@ -2989,7 +3012,7 @@ class TestResolvedOutputPathValidation:
         for entry in plugin._discover_standalone_templates(tpl_dir):
             plugin._template_index[entry.name] = entry
         result = plugin._execute_render_template_to_file({
-            "template_name": "X.java.tpl",
+            "template_id": _template_id("X.java.tpl"),
             # 'Name' missing entirely from the path-template's required vars
             "variables": {"basePackagePath": "com/x"},
         })
@@ -3011,7 +3034,7 @@ class TestResolvedOutputPathValidation:
         for entry in plugin._discover_standalone_templates(tpl_dir):
             plugin._template_index[entry.name] = entry
         result = plugin._execute_render_template_to_file({
-            "template_name": "Multi.java.tpl",
+            "template_id": _template_id("Multi.java.tpl"),
             "variables": {"root": "src", "module": "", "Name": ""},
         })
         assert "error" in result
@@ -3048,7 +3071,7 @@ class TestResolvedOutputPathValidation:
         # Supply non-empty values so body renders, but the explicit
         # output_path is a different file.
         result = plugin._execute_render_template_to_file({
-            "template_name": "X.java.tpl",
+            "template_id": _template_id("X.java.tpl"),
             "variables": {"Name": "X", "basePackagePath": "foo"},
             "output_path": str(plugin._base_path / "manual_path.java"),
         })
@@ -3069,7 +3092,7 @@ class TestResolvedOutputPathValidation:
         for entry in plugin._discover_standalone_templates(tpl_dir):
             plugin._template_index[entry.name] = entry
         result = plugin._execute_render_template_to_file({
-            "template_name": "NoDir.java.tpl",
+            "template_id": _template_id("NoDir.java.tpl"),
             "variables": {},
         })
         assert "error" in result
@@ -3091,7 +3114,7 @@ class TestResolvedOutputPathValidation:
         for entry in plugin._discover_standalone_templates(tpl_dir):
             plugin._template_index[entry.name] = entry
         result = plugin._execute_render_template_to_file({
-            "template_name": "Bad.java.tpl",
+            "template_id": _template_id("Bad.java.tpl"),
             "variables": {"Name": "Foo"},
         })
         assert "error" in result
@@ -3112,7 +3135,7 @@ class TestResolvedOutputPathValidation:
         for entry in plugin._discover_standalone_templates(tpl_dir):
             plugin._template_index[entry.name] = entry
         result = plugin._execute_render_template_to_file({
-            "template_name": "Trail.java.tpl",
+            "template_id": _template_id("Trail.java.tpl"),
             "variables": {"Name": "x"},
         })
         assert "error" in result
@@ -3134,7 +3157,7 @@ class TestResolvedOutputPathValidation:
         for entry in plugin._discover_standalone_templates(tpl_dir):
             plugin._template_index[entry.name] = entry
         result = plugin._execute_render_template_to_file({
-            "template_name": "ignore.tpl",
+            "template_id": _template_id("ignore.tpl"),
             "variables": {"module": "core"},
         })
         assert result.get("success") is True, result
@@ -3153,7 +3176,7 @@ class TestResolvedOutputPathValidation:
         for entry in plugin._discover_standalone_templates(tpl_dir):
             plugin._template_index[entry.name] = entry
         result = plugin._execute_render_template_to_file({
-            "template_name": "Good.java.tpl",
+            "template_id": _template_id("Good.java.tpl"),
             "variables": {
                 "Name": "Customer",
                 "basePackage": "com.bank",
@@ -3393,7 +3416,7 @@ class TestListVariablesHonorsIndex:
         )
 
         result = plugin._execute_list_template_variables({
-            "template_name": "Patched.java.tpl",
+            "template_id": _template_id("Patched.java.tpl"),
         })
         names = {v["name"] for v in result["variables"]}
         # Body vars from disk:
@@ -3421,7 +3444,7 @@ class TestListVariablesHonorsIndex:
         plugin._template_index["OnDisk.java.tpl"].output_path_template = ""
 
         result = plugin._execute_list_template_variables({
-            "template_name": "OnDisk.java.tpl",
+            "template_id": _template_id("OnDisk.java.tpl"),
         })
         names = {v["name"] for v in result["variables"]}
         # Disk extraction picks up the path-var as fallback.
@@ -3444,7 +3467,7 @@ class TestListVariablesHonorsIndex:
             (tpl_dir / "NoIndex.java.tpl").read_text()
         )
         result = plugin._execute_list_template_variables({
-            "template_name": "NoIndex.java.tpl",
+            "template_id": _template_id("NoIndex.java.tpl"),
         })
         names = {v["name"] for v in result["variables"]}
         assert "path" in names
@@ -3484,7 +3507,7 @@ class TestListVariablesHonorsIndex:
         )
 
         result = plugin._execute_list_template_variables({
-            "template_name": "UpdateRequest.java.tpl",
+            "template_id": _template_id("UpdateRequest.java.tpl"),
         })
         names = {v["name"] for v in result["variables"]}
         # Agent must see basePackagePath in the variable list.
@@ -3686,7 +3709,7 @@ class TestPathRouting:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "Entity.java.tpl",
+            "template_id": _template_id("Entity.java.tpl"),
             "variables": {
                 "Entity": "Customer",
                 "basePackage": "com.bank",
@@ -3719,7 +3742,7 @@ class TestPathRouting:
 
         # Agent supplies explicit output_path; routing still applies.
         result = plugin._execute_render_template_to_file({
-            "template_name": "X.java.tpl",
+            "template_id": _template_id("X.java.tpl"),
             "variables": {},
             "output_path": "com/example/X.java",
         })
@@ -3789,7 +3812,7 @@ class TestOutputDirectiveStripping:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "Entity.java.tpl",
+            "template_id": _template_id("Entity.java.tpl"),
             "variables": {
                 "Entity": "Customer",
                 "basePackage": "com.bank",
@@ -3825,7 +3848,7 @@ class TestOutputDirectiveStripping:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "pom.xml.tpl",
+            "template_id": _template_id("pom.xml.tpl"),
             "variables": {"artifactId": "my-service"},
         })
         assert result.get("success") is True, result
@@ -3853,7 +3876,7 @@ class TestOutputDirectiveStripping:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "script.py.tpl",
+            "template_id": _template_id("script.py.tpl"),
             "variables": {"name": "hello", "message": "hi"},
         })
         assert result.get("success") is True, result
@@ -3880,7 +3903,7 @@ class TestOutputDirectiveStripping:
             plugin._template_index[entry.name] = entry
 
         result = plugin._execute_render_template_to_file({
-            "template_name": "application.yml.tpl",
+            "template_id": _template_id("application.yml.tpl"),
             "variables": {"appName": "demo"},
         })
         assert result.get("success") is True, result
@@ -4133,13 +4156,14 @@ class TestVariantAxisFields:
         plugin._template_index["restclient.java.tpl"].variant_key = "http_client"
 
         result = plugin._execute_list_available({})
-        by_name = {t["name"]: t for t in result["templates"]}
+        # Cutover (server 0.6.119+): response carries ``id`` not ``name``.
+        by_id = {t["id"]: t for t in result["templates"]}
         # Variant template
-        assert by_name["restclient.java.tpl"]["variant_key"] == "http_client"
-        assert by_name["restclient.java.tpl"]["variant"] == "restclient"
+        assert by_id[_template_id("restclient.java.tpl")]["variant_key"] == "http_client"
+        assert by_id[_template_id("restclient.java.tpl")]["variant"] == "restclient"
         # Plain template
-        assert by_name["Plain.java.tpl"]["variant_key"] == ""
-        assert by_name["Plain.java.tpl"]["variant"] == ""
+        assert by_id[_template_id("Plain.java.tpl")]["variant_key"] == ""
+        assert by_id[_template_id("Plain.java.tpl")]["variant"] == ""
 
     def test_index_loader_reads_skip_when_flags(self, plugin, tmp_path):
         """Server 0.6.56+: index loader populates ``skip_when_flags``
@@ -4215,13 +4239,14 @@ class TestVariantAxisFields:
         }
 
         result = plugin._execute_list_available({})
-        by_name = {t["name"]: t for t in result["templates"]}
+        # Cutover (server 0.6.119+): response carries ``id`` not ``name``.
+        by_id = {t["id"]: t for t in result["templates"]}
         # Subscriber template carries the rule.
-        assert by_name["Response.java.tpl"]["skip_when_flags"] == {
+        assert by_id[_template_id("Response.java.tpl")]["skip_when_flags"] == {
             "hateoas": True,
         }
         # Plain template gets the empty-dict default.
-        assert by_name["Plain.java.tpl"]["skip_when_flags"] == {}
+        assert by_id[_template_id("Plain.java.tpl")]["skip_when_flags"] == {}
 
     def test_mod_017_three_client_options_repro(self, plugin, tmp_path):
         """Reproduces chunk-3 v1 mod-017 scenario: three HTTP-client
@@ -4679,11 +4704,12 @@ class TestTemplateEvaluationKindAndHelperSiblings:
         for entry in plugin._discover_standalone_templates(tpl_dir):
             plugin._template_index[entry.name] = entry
         result = plugin._execute_list_available({})
-        by_name = {t["name"]: t for t in result["templates"]}
-        assert by_name["Plain.java.tpl"]["template_evaluation_kind"] == (
+        # Cutover (server 0.6.119+): response carries ``id`` not ``name``.
+        by_id = {t["id"]: t for t in result["templates"]}
+        assert by_id[_template_id("Plain.java.tpl")]["template_evaluation_kind"] == (
             "substitution"
         )
-        assert by_name["Helper.java.tpl"]["template_evaluation_kind"] == (
+        assert by_id[_template_id("Helper.java.tpl")]["template_evaluation_kind"] == (
             "helpers"
         )
 
@@ -4731,3 +4757,102 @@ class TestTemplateEvaluationKindAndHelperSiblings:
         plugin._load_persisted_index()
         loaded = plugin._template_index["Old.tpl"]
         assert loaded.template_evaluation_kind == "substitution"
+
+
+# ==================== Cutover to template_id (server 0.6.119+) ====================
+
+class TestTemplateIdCutover:
+    """Tests for the template-name hashing surface (server 0.6.119+).
+
+    Mirrors the tool-name hashing pattern (``shared.tool_id_map``).
+    Templates are identified to the LLM by stable opaque hash ids
+    (e.g. ``tpl_a8f0e2b1``) rather than human filenames; this closes
+    the training-prior class that v112 codegen evidence exposed —
+    agents skipping ``listTemplateVariables`` calls because the
+    template name signaled "I already know what this is."
+
+    Internals stay human (``_template_index`` keyed on name; on-disk
+    paths human; result-dict ``template_name`` field preserved for
+    audit).  Only the tool-arg / tool-response boundary cuts over to
+    hash ids.
+    """
+
+    def test_listAvailableTemplates_emits_id_not_name(self, plugin, template_dir):
+        """The response entries carry ``id`` (hash) and DROP ``name``."""
+        entries = plugin._discover_standalone_templates(template_dir)
+        for e in entries:
+            plugin._template_index[e.name] = e
+        result = plugin._execute_list_available({})
+        assert result["templates"], "expected templates in the response"
+        for entry in result["templates"]:
+            assert "id" in entry
+            assert entry["id"].startswith("tpl_")
+            # The bare LLM-facing ``name`` field is gone.
+            assert "name" not in entry
+
+    def test_id_is_stable_function_of_name(self):
+        """Same name → same id, always.  Tested independent of any
+        plugin instance so the property is pinned at the helper level."""
+        from shared.plugins.template.plugin import _template_id
+        assert _template_id("Entity.java.tpl") == _template_id("Entity.java.tpl")
+        assert _template_id("A.tpl") != _template_id("B.tpl")
+        # Same as the tool-name hashing pipeline, with the tpl prefix.
+        assert _template_id("Entity.java.tpl").startswith("tpl_")
+
+    def test_render_rejects_template_name_arg(self, plugin, template_dir):
+        """Passing the legacy ``template_name`` arg fails — no back-compat."""
+        entries = plugin._discover_standalone_templates(template_dir)
+        for e in entries:
+            plugin._template_index[e.name] = e
+        result = plugin._execute_render_template_to_file({
+            "template_name": "Entity.java.tpl",  # legacy arg
+            "variables": {"Entity": "Customer"},
+            "output_path": str(plugin._base_path / "out.java"),
+        })
+        # No template_id supplied + no inline template → exactly-one error.
+        assert "error" in result
+        assert "template_id" in result["error"] or "Exactly one" in result["error"]
+
+    def test_list_variables_rejects_template_name_arg(self, plugin):
+        """Passing the legacy ``template_name`` arg fails — no back-compat."""
+        result = plugin._execute_list_template_variables({
+            "template_name": "Entity.java.tpl",
+        })
+        assert "error" in result
+        assert "template_id is required" in result["error"]
+
+    def test_render_resolves_template_id_to_entry(self, plugin, template_dir):
+        """Hash id passed by the LLM resolves to the correct template
+        via the reverse-lookup map.  Hash must round-trip through
+        ``name_to_id`` → ``id_to_name`` cleanly."""
+        entries = plugin._discover_standalone_templates(template_dir)
+        for e in entries:
+            plugin._template_index[e.name] = e
+        # Force the hash into the reverse map (which name_to_id does
+        # internally on the first call).
+        tpl_id = _template_id("Repository.java.tpl")
+        output_file = plugin._base_path / "out" / "CustomerRepository.java"
+        result = plugin._execute_render_template_to_file({
+            "template_id": tpl_id,
+            "variables": {
+                "basePackage": "com.bank.customer",
+                "Entity": "Customer",
+                "EntityId": "CustomerId",
+            },
+            "output_path": str(output_file),
+        })
+        assert result.get("success") is True, f"render failed: {result}"
+        assert output_file.exists()
+
+    def test_listAvailableTemplates_keeps_source_path_for_audit(
+        self, plugin, template_dir,
+    ):
+        """The human ``source_path`` is preserved so kb authors / human
+        readers can audit which template each id maps to."""
+        entries = plugin._discover_standalone_templates(template_dir)
+        for e in entries:
+            plugin._template_index[e.name] = e
+        result = plugin._execute_list_available({})
+        for entry in result["templates"]:
+            assert "source_path" in entry
+            assert entry["source_path"], "source_path must not be empty"
