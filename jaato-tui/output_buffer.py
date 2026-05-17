@@ -1259,6 +1259,16 @@ class OutputBuffer:
         # Replace agent_id with human-readable agent names when available
         if "agent_id" in display_args and display_args["agent_id"] in self._agent_id_to_name:
             display_args["agent_id"] = self._agent_id_to_name[display_args["agent_id"]]
+        # Replace template_id hash with the human template filename for
+        # user-facing rendering (server 0.6.120+).  Server enriches
+        # ToolCallStartEvent.tool_args with ``_template_name_display`` —
+        # an underscore-prefixed sibling carrying the resolved name from
+        # the daemon's reverse map.  Underscore marks it as UI-metadata
+        # (not a real tool arg).  When present, swap and drop the
+        # metadata key so the displayed args stay clean.
+        display_name = display_args.pop("_template_name_display", None)
+        if display_name and "template_id" in display_args:
+            display_args["template_id"] = display_name
         args_full = str(display_args) if display_args else ""
         args_str = format_tool_args_summary(display_args) if display_args else ""
 
