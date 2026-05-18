@@ -589,48 +589,68 @@ class GCProfileConfig:
 
 
 @dataclass
-class CompletionArtifact:
-    """A profile-declared file rendered from the agent's signal_completion payload.
+class CompletionProcessor:
+    """A profile-declared completion processor.
 
-    Output-side counterpart to dynamic-instructions prefetch scripts.
-    The framework executes the renderer after ``signal_completion``'s
-    payload validates against ``completion_payload_schema``; the agent
-    never calls ``writeNewFile`` itself for these files — same body-
-    wired pattern as input-side prefetch (the model produces the
-    structured data, the body deterministically projects it onto disk).
+    Replaces the prior split between ``completion_artifacts``
+    (renderers that produce files) and ``completion_validators`` (kb
+    Python that returns error lists) — both surfaces collapsed into
+    one ``completion_processors`` config field as of server 0.6.125+.
+    The two had the same plumbing (kb Python under
+    ``.jaato/scripts/``, loaded via ``script_loader``, run after
+    ``jsonschema.validate`` passes, block completion on failure); the
+    split was an artifact of incremental shipping (PR-138 added
+    validators while artifacts already existed and supported a
+    "validator-as-renderer" mode).
+
+    Each kb processor module exposes one or both of these top-level
+    callables — the framework probes for which symbols are present
+    and dispatches accordingly:
+
+    - ``render(payload: dict, context: RenderContext) -> str | bytes``
+      Produces output content.  When the processor entry declares an
+      ``output:`` path template, the returned bytes are written to
+      disk (atomic ``.tmp`` + ``rename``).  When ``output:`` is
+      omitted, the return is logged for audit but not persisted —
+      "validator-as-renderer" use case.
+
+    - ``validate(payload: dict, context: RenderContext) -> list[str]``
+      Returns a list of error strings.  Empty list → pass.  Non-empty
+      → completion blocked per the entry's ``on_error`` policy.  Has
+      access to ``context.tool_calls`` — the pre-computed ledger of
+      every function_call + function_response in the session, paired
+      by call_id.  Use to cross-check payload claims against actual
+      tool outcomes (e.g. agent claimed file X rendered, but the
+      corresponding ``renderTemplateToFile`` call returned an error).
+
+    Both functions can be present in one module — useful when a
+    single processor both writes an audit record AND checks payload
+    consistency.
 
     Attributes:
-        renderer: Script path resolved through the standard
-            ``script_loader`` tier (workspace ``.jaato/<path>`` →
-            user ``~/.jaato/<path>``).  Script must define
-            ``def render(payload: dict, context) -> str | bytes``.
-        output: Output file path, with simple ``{field}`` templating.
-            Substitutes from the payload first, then ``agent_params``,
-            then a small set of session-derived values (``case_id``,
-            ``agent_id``, ``workspace_path``).  Relative paths resolve
-            under the session's ``workspace_path``.
-
-            **Optional — validator-as-renderer pattern.**  When
-            ``output`` is omitted (``null`` / missing), the framework
-            runs the renderer for its side-effect (typically validation:
-            raise → on_error fires) but does not write a file to disk.
-            The renderer's return string is logged at INFO for audit
-            traceability but not persisted.  This lets a profile wire
-            in a "validator that consults runtime state and rejects
-            bad payloads" without inventing a fake output path.
-        on_error: How a render failure (script raised, file write
-            failed) is surfaced.  ``"fail_completion"`` returns a
-            validation_failed-style error to the model so it retries;
-            ``"warn"`` logs and continues, the completion still
-            succeeds and the missing artifact is the operator's
-            problem.  Default ``"fail_completion"``.
+        script: kb Python file path resolved through the standard
+            ``script_loader`` tier (absolute → ``<config_root>/<path>``
+            → ``~/.jaato/<path>``).
+        output: Optional output file path with simple ``{field}``
+            templating.  When set, the ``render`` symbol's return is
+            written to this path.  Substitutes from the payload first,
+            then ``agent_params``, then session-derived values
+            (``case_id``, ``agent_id``, ``workspace_path``).  Relative
+            paths resolve under ``workspace_path``.  ``None`` means the
+            processor runs for side-effect / validation only — useful
+            for ``validate``-only processors or ``render`` calls that
+            consult state without producing files.
+        on_error: How a failure (script raised, file write failed,
+            ``validate`` returned non-empty list) is surfaced.
+            ``"fail_completion"`` returns a validation_failed shape to
+            the model so it retries; ``"warn"`` logs and lets the
+            completion proceed (the operator can clean up after).
+            Default ``"fail_completion"``.
         description: Optional human-readable note on what this
-            artifact does and why it's wired in.  Ignored at runtime;
-            consumed by docs / introspection / profile-explorer
-            tooling.  Use for inline documentation in profile YAML/JSON
-            so the wiring's rationale travels with the wiring.
+            processor does and why it's wired in.  Ignored at runtime;
+            consumed by docs / introspection tooling.
     """
-    renderer: str
+    script: str
     output: Optional[str] = None
     on_error: str = "fail_completion"
     description: Optional[str] = None
@@ -717,24 +737,17 @@ class SubagentProfile:
     inherits: Optional[List[str]] = None
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
     spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
-    completion_artifacts: List[CompletionArtifact] = field(default_factory=list)
-    # kb-authored Python modules that semantically validate the
-    # ``signal_completion`` payload AFTER ``jsonschema.validate`` passes.
-    # Each entry is a path (workspace-relative or absolute) to a Python
-    # module exposing a ``validate(payload, tool_calls, workspace_path,
-    # ctx) -> list[str]`` callable.  Empty list = no semantic checks
-    # (legacy behaviour).
-    #
-    # Closes the "agent claims success, mvn discovers the lie later"
-    # bug class — schema validation accepts well-formed payloads, but
-    # only kb-authored Python can cross-check claims against the
-    # session's actual tool-call history and the workspace filesystem.
-    # See ``shared/completion_validators.py`` for the loader + ledger
-    # builder and ``shared/lifecycle_tools.py`` for the invocation
-    # site.  Inheritance concatenates parent + child (like
-    # completion_artifacts) — each validator is independent and both
-    # should fire.
-    completion_validators: List[str] = field(default_factory=list)
+    # Unified completion-processor surface (server 0.6.125+).  Replaces
+    # the prior split between ``completion_artifacts`` (renderers that
+    # produce files) and ``completion_validators`` (kb Python that
+    # returns error lists) — same plumbing under the hood (kb Python
+    # under ``.jaato/scripts/processors/``, loaded via
+    # ``script_loader``, run after ``jsonschema.validate`` passes,
+    # block completion on failure).  See :class:`CompletionProcessor`
+    # docstring for the full kb author contract (probe-by-symbol:
+    # ``render`` and/or ``validate``).  Inheritance concatenates
+    # parent + child — each processor is independent and all fire.
+    completion_processors: List[CompletionProcessor] = field(default_factory=list)
     runtime_limits: Optional[RuntimeLimits] = None
     # Per-turn model-tier config.  Empty dict means "single-model
     # mode" — the framework falls back to env vars (JAATO_TIER_*) at
@@ -887,46 +900,47 @@ def _normalize_apparmor_fragments(value: Any) -> Optional[List[str]]:
     return normalised
 
 
-def _parse_completion_artifacts(value: Any) -> List[CompletionArtifact]:
-    """Parse a profile's ``completion_artifacts`` list from raw JSON/YAML.
+def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
+    """Parse a profile's ``completion_processors`` list from raw JSON/YAML.
 
-    Accepts a list of dicts each shaped like
-    ``{"renderer": "scripts/foo.py", "output": "out/{case_id}/foo",
-    "on_error": "fail_completion", "description": "..."}``.
+    Replaces the prior ``_parse_completion_artifacts`` +
+    ``_parse_completion_validators`` (server 0.6.125+).  Each entry is
+    a dict shaped like::
 
-    ``output`` is **optional** — when omitted, the renderer runs as a
-    validator-only hook (its return string is logged but no file is
-    written).  See :class:`CompletionArtifact` docstring.
+        {"script": "scripts/processors/foo.py",
+         "output": "out/{case_id}/foo",      # optional
+         "on_error": "fail_completion",      # default
+         "description": "..."}               # optional
 
-    ``description`` is optional documentation that travels with the
-    wiring; ignored at runtime.
+    ``output`` is optional — when omitted, the processor runs for
+    side-effect (validator-only) and ``render``'s return is logged
+    but not written.  ``description`` travels with the wiring for
+    documentation; ignored at runtime.
 
     Skips malformed entries with a warning rather than raising —
-    partial profiles are loadable and the missing artifact surfaces
-    at completion time as a normal "renderer not found" error.
+    partial profiles still load and the missing/typo'd processor
+    surfaces at completion time as a load error the agent sees.
 
-    Returns an empty list when ``value`` is ``None``, missing, or not
-    a list.
+    Returns an empty list when ``value`` is ``None``, missing, or
+    not a list.
     """
     if not isinstance(value, list):
         return []
-    out: List[CompletionArtifact] = []
+    out: List[CompletionProcessor] = []
     for entry in value:
         if not isinstance(entry, dict):
             logger.warning(
-                "completion_artifacts: skipping non-dict entry: %r", entry,
+                "completion_processors: skipping non-dict entry: %r", entry,
             )
             continue
-        renderer = entry.get("renderer")
-        output = entry.get("output")  # optional now
-        if not isinstance(renderer, str) or not renderer.strip():
+        script = entry.get("script")
+        output = entry.get("output")
+        if not isinstance(script, str) or not script.strip():
             logger.warning(
-                "completion_artifacts: skipping entry without 'renderer': %r",
+                "completion_processors: skipping entry without 'script': %r",
                 entry,
             )
             continue
-        # output is now optional.  When present it must be a non-empty
-        # string; when absent the renderer runs validator-only.
         normalized_output: Optional[str]
         if output is None or output == "":
             normalized_output = None
@@ -934,73 +948,34 @@ def _parse_completion_artifacts(value: Any) -> List[CompletionArtifact]:
             normalized_output = output.strip()
         else:
             logger.warning(
-                "completion_artifacts: invalid 'output' value (must be a "
-                "non-empty string or omitted) for renderer=%r: %r",
-                renderer, output,
+                "completion_processors: invalid 'output' value (must be a "
+                "non-empty string or omitted) for script=%r: %r",
+                script, output,
             )
             continue
         on_error = entry.get("on_error", "fail_completion")
         if on_error not in ("fail_completion", "warn"):
             logger.warning(
-                "completion_artifacts: invalid on_error=%r for renderer=%r, "
+                "completion_processors: invalid on_error=%r for script=%r, "
                 "defaulting to 'fail_completion'",
-                on_error, renderer,
+                on_error, script,
             )
             on_error = "fail_completion"
         description = entry.get("description")
         if description is not None and not isinstance(description, str):
             logger.warning(
-                "completion_artifacts: 'description' must be a string for "
-                "renderer=%r (got %s); ignoring",
-                renderer, type(description).__name__,
+                "completion_processors: 'description' must be a string for "
+                "script=%r (got %s); ignoring",
+                script, type(description).__name__,
             )
             description = None
-        out.append(CompletionArtifact(
-            renderer=renderer.strip(),
+        out.append(CompletionProcessor(
+            script=script.strip(),
             output=normalized_output,
             on_error=on_error,
             description=description.strip() if description else None,
         ))
     return out
-
-
-def _parse_completion_validators(value: Any) -> List[str]:
-    """Parse a profile's ``completion_validators`` field from raw JSON/YAML.
-
-    Accepts a list of strings (each a script path resolved via
-    :func:`shared.script_loader.resolve_script_path` — absolute, or
-    relative to ``<config_root>/`` / ``~/.jaato/``).  Non-list inputs
-    yield an empty list with a WARNING (kb authoring mistake; the
-    framework should fail loud at signal_completion time when the
-    typo'd validator doesn't load).  Non-string entries are dropped
-    individually with a WARNING.
-
-    Returns the cleaned list of script-reference strings; the actual
-    import + callable extraction happens lazily on first
-    ``signal_completion`` invocation inside
-    :class:`shared.lifecycle_tools.LifecycleTools`.
-    """
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        logger.warning(
-            "completion_validators: expected list, got %s; ignoring",
-            type(value).__name__,
-        )
-        return []
-    cleaned: List[str] = []
-    for entry in value:
-        if not isinstance(entry, str):
-            logger.warning(
-                "completion_validators: skipping non-string entry: %r", entry,
-            )
-            continue
-        stripped = entry.strip()
-        if not stripped:
-            logger.warning("completion_validators: skipping empty entry")
-            continue
-        cleaned.append(stripped)
-    return cleaned
 
 
 def build_inline_profile(
@@ -1021,7 +996,7 @@ def build_inline_profile(
             Recognized keys: ``model``, ``provider``, ``plugins``,
             ``plugin_configs``, ``system_instructions``, ``max_turns``,
             ``gc``, ``env``, ``completion_payload_schema``,
-            ``completion_artifacts``, ``completion_validators``,
+            ``completion_processors``,
             ``runtime_limits``, ``model_tiers``.
         name: Display name for logs and traces. Default ``<inline>``.
         description: Human-readable description for the profile.
@@ -1082,8 +1057,7 @@ def build_inline_profile(
         inherits=None,
         completion_payload_schema=data.get('completion_payload_schema'),
         spawn_payload_schema=data.get('spawn_payload_schema'),
-        completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
-        completion_validators=_parse_completion_validators(data.get('completion_validators')),
+        completion_processors=_parse_completion_processors(data.get('completion_processors')),
         runtime_limits=runtime_limits,
         model_tiers=model_tiers,
         apparmor=bool(data.get('apparmor', False)),
@@ -1337,28 +1311,16 @@ def _merge_profiles(
         'spawn_payload_schema', child.spawn_payload_schema
     )
 
-    # completion_artifacts: concatenation across parent → child.  Each
-    # entry is independent (different output paths, different
-    # renderers); concatenating preserves both parent's and child's
-    # declarations without conflict semantics.  Child entries appear
-    # last so they take precedence if any future logic compares by
-    # output-path uniqueness.
-    merged_completion_artifacts: List[CompletionArtifact] = []
+    # completion_processors: concatenation across parent → child.  Each
+    # processor is independent (writes a different artefact or checks a
+    # different invariant); concatenating fires all of them.  Child
+    # entries appear last; the framework invokes them sequentially and
+    # aggregates ALL errors so the agent sees the full set on the
+    # retry prompt rather than playing whack-a-mole turn by turn.
+    merged_completion_processors: List[CompletionProcessor] = []
     for parent in parents:
-        merged_completion_artifacts.extend(parent.completion_artifacts)
-    merged_completion_artifacts.extend(child.completion_artifacts)
-
-    # completion_validators: concatenation across parent → child for
-    # the same reason as completion_artifacts — each validator is
-    # independent (checks a different invariant); concatenating fires
-    # all of them in order.  Child entries appear last; the framework
-    # invokes them sequentially and aggregates ALL errors so the
-    # agent sees the full set on the retry prompt rather than playing
-    # whack-a-mole turn by turn.
-    merged_completion_validators: List[str] = []
-    for parent in parents:
-        merged_completion_validators.extend(parent.completion_validators)
-    merged_completion_validators.extend(child.completion_validators)
+        merged_completion_processors.extend(parent.completion_processors)
+    merged_completion_processors.extend(child.completion_processors)
 
     # --- Concatenation: system_instructions ---
     instruction_parts = []
@@ -1445,8 +1407,7 @@ def _merge_profiles(
         inherits=None,  # Fully resolved
         completion_payload_schema=merged_completion_schema,
         spawn_payload_schema=merged_spawn_schema,
-        completion_artifacts=merged_completion_artifacts,
-        completion_validators=merged_completion_validators,
+        completion_processors=merged_completion_processors,
         runtime_limits=merged_runtime_limits,
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
@@ -1610,8 +1571,7 @@ def _scan_profiles_dir(
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
             spawn_payload_schema=data.get('spawn_payload_schema'),
-            completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
-            completion_validators=_parse_completion_validators(data.get('completion_validators')),
+            completion_processors=_parse_completion_processors(data.get('completion_processors')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
@@ -1834,8 +1794,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
             spawn_payload_schema=data.get('spawn_payload_schema'),
-            completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
-            completion_validators=_parse_completion_validators(data.get('completion_validators')),
+            completion_processors=_parse_completion_processors(data.get('completion_processors')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
@@ -2097,7 +2056,7 @@ class SubagentConfig:
                 env=env,
                 inherits=_normalize_inherits(profile_data.get('inherits')),
                 completion_payload_schema=profile_data.get('completion_payload_schema'),
-                completion_validators=_parse_completion_validators(profile_data.get('completion_validators')),
+                completion_processors=_parse_completion_processors(profile_data.get('completion_processors')),
                 runtime_limits=runtime_limits,
                 model_tiers=model_tiers,
                 apparmor=bool(profile_data.get('apparmor', False)),

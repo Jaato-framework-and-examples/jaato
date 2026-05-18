@@ -68,12 +68,12 @@ def test_full_envelope_round_trip() -> None:
         agent_id="researcher",
         gc={"type": "budget", "threshold_percent": 80.0},
         completion_payload_schema={"type": "object", "properties": {}},
-        completion_artifacts=[
-            {"renderer": "markdown", "output": "report.md"},
-        ],
-        completion_validators=[
-            "scripts/validators/codegen_files_exist.py",
-            "scripts/validators/codegen_render_succeeded.py",
+        completion_processors=[
+            {"script": "scripts/processors/codegen_files_exist.py",
+             "on_error": "fail_completion"},
+            {"script": "scripts/processors/render_report.py",
+             "output": "report.md",
+             "on_error": "fail_completion"},
         ],
         agent_params={"case_id": "case-42"},
         config_root="/srv/operator/.jaato",
@@ -84,32 +84,34 @@ def test_full_envelope_round_trip() -> None:
     assert back == e
 
 
-def test_completion_validators_round_trip() -> None:
-    """``completion_validators`` must survive to_dict/from_dict.
+def test_completion_processors_round_trip() -> None:
+    """``completion_processors`` must survive to_dict/from_dict.
 
-    Regression guard for the wire-envelope wiring gap (server 0.6.122+):
-    pre-0.6.122 the field existed on the dataclass but was silently
-    dropped at the wire boundary because to_dict / from_dict didn't
-    serialize it.  The runner-side ``LifecycleTools`` saw empty
-    validators and skipped invocation even when the profile declared
-    them.  kb-enablement-2.0 v118 evidence.
+    Regression guard for the unified processor wire surface (server
+    0.6.125+): replaces the prior ``completion_validators`` +
+    ``completion_artifacts`` envelope fields with one
+    ``completion_processors`` list.
     """
     e = SessionInitEnvelope(
-        session_id="sess-validators",
+        session_id="sess-processors",
         workspace_path="/tmp/ws",
         profile_name="codegen",
         provider_name="openrouter",
         model_name="claude-sonnet-4.5",
-        completion_validators=["scripts/validators/codegen_files_exist.py"],
+        completion_processors=[
+            {"script": "scripts/processors/codegen_files_exist.py",
+             "on_error": "fail_completion"},
+        ],
     )
     back = SessionInitEnvelope.from_dict(e.to_dict())
-    assert back.completion_validators == [
-        "scripts/validators/codegen_files_exist.py",
+    assert back.completion_processors == [
+        {"script": "scripts/processors/codegen_files_exist.py",
+         "on_error": "fail_completion"},
     ]
 
 
-def test_completion_validators_default_empty() -> None:
-    """Old wire payloads (without the field) decode to empty list."""
+def test_completion_processors_default_empty() -> None:
+    """Wire payloads without the field decode to empty list."""
     e = SessionInitEnvelope.from_dict({
         "schema_version": SESSION_ENVELOPE_VERSION,
         "session_id": "old",
@@ -117,9 +119,9 @@ def test_completion_validators_default_empty() -> None:
         "profile_name": None,
         "provider_name": "anthropic",
         "model_name": "claude-sonnet-4-6",
-        # No completion_validators key — pre-0.6.122 wire shape
+        # No completion_processors key
     })
-    assert e.completion_validators == []
+    assert e.completion_processors == []
 
 
 def test_envelope_carries_model_tiers() -> None:
