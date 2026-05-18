@@ -432,6 +432,7 @@ class SessionManager:
         profile_name: str,
         workspace_path: str,
         config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
     ) -> Tuple[Optional[Any], Optional[str]]:
         """Resolve an agent profile by name.
 
@@ -447,6 +448,20 @@ class SessionManager:
             workspace_path: Workspace directory containing ``.jaato/profiles/``.
             config_root: Optional override for the workspace tier — see
                 :func:`shared.config_resolver.resolve_config_search_path`.
+            env_file: Optional path to the session's ``.env`` file.  When
+                provided, the file is parsed and overlaid onto the
+                session-scoped ``ContextVar`` BEFORE
+                :func:`discover_profiles` runs — closes the wire-gap
+                where ``JAATO_PROFILE_SET`` (and any other env-var
+                read by profile discovery) is empty because the
+                normal ``_with_session_env`` block hasn't fired yet.
+                Discovered 2026-05-18 with the kb-enablement-2.0
+                handoff_test profile-set refactor: ``profiles/<set>/``
+                subdir was silently skipped because the contextvar
+                wasn't populated at this point in
+                ``_create_session_impl``.  Symmetric to PR #139
+                (completion_validators wire-gap) and PR #140
+                (plugin_configs pass:// wire-gap).  Server 0.6.124+.
 
         Returns:
             Tuple of ``(profile, None)`` on success, or
@@ -454,11 +469,53 @@ class SessionManager:
         """
         from shared.plugins.subagent.config import discover_profiles
 
-        result = discover_profiles(
-            ".jaato/profiles",
-            base_path=workspace_path,
-            config_root=config_root,
+        # Overlay env_file onto the session-scoped ContextVar so
+        # ``discover_profiles`` sees the workspace-declared
+        # ``JAATO_PROFILE_SET`` (and any other env-affected reads it
+        # may grow).  Same parsing pipeline as
+        # ``JaatoServer._resolve_session_env`` — ``dotenv_values`` +
+        # ``expand_variables`` so ``pass://`` / ``vault://`` / ``${VAR}``
+        # cross-references resolve daemon-side, never reaching the
+        # AppArmor-confined runner literal.  Saved/restored via
+        # try/finally so concurrent callers don't clobber each other's
+        # contextvar state.
+        from shared.session_context import (
+            _session_env as _session_env_var,
+            set_session_env,
         )
+        previous_env = _session_env_var.get()
+        overlay_applied = False
+        if env_file:
+            try:
+                from dotenv import dotenv_values
+                from shared.plugins.subagent.config import expand_variables
+                raw = dotenv_values(env_file)
+                raw_filtered = {k: v for k, v in raw.items() if v is not None}
+                resolved = expand_variables(raw_filtered, context=raw_filtered)
+                set_session_env(resolved)
+                overlay_applied = True
+            except Exception as exc:  # noqa: BLE001
+                # Failure to parse env_file is non-fatal for profile
+                # resolution — discover_profiles still falls back to
+                # the contextvar's existing value / ``os.environ``.
+                # Log at INFO so operators see the source of any
+                # profile-set-not-found surprises that follow.
+                logger.info(
+                    "_resolve_profile: env_file overlay skipped for "
+                    "%r (parse failed: %s); discover_profiles will "
+                    "fall back to contextvar / os.environ",
+                    env_file, exc,
+                )
+
+        try:
+            result = discover_profiles(
+                ".jaato/profiles",
+                base_path=workspace_path,
+                config_root=config_root,
+            )
+        finally:
+            if overlay_applied:
+                _session_env_var.set(previous_env)
         profile = result.profiles.get(profile_name)
         if profile is not None:
             return profile, None
@@ -3230,7 +3287,9 @@ class SessionManager:
         if profile_name:
             resolve_path = workspace_path or str(pathlib.Path.home())
             profile, error = self._resolve_profile(
-                profile_name, resolve_path, config_root=config_root,
+                profile_name, resolve_path,
+                config_root=config_root,
+                env_file=session_env_file,
             )
             if profile is None:
                 self._emit_to_client(client_id, ErrorEvent(
@@ -3286,7 +3345,9 @@ class SessionManager:
                 default_prof = agent_result["default_profile"]
                 resolve_path = workspace_path or str(pathlib.Path.home())
                 profile, error = self._resolve_profile(
-                    default_prof, resolve_path, config_root=config_root,
+                    default_prof, resolve_path,
+                    config_root=config_root,
+                    env_file=session_env_file,
                 )
                 if profile:
                     logger.info(f"  Using agent's default profile: {default_prof}")
