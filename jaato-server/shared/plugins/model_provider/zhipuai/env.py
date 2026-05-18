@@ -21,13 +21,26 @@ DEFAULT_ZHIPUAI_MODEL = "glm-4.7"
 def resolve_api_key() -> Optional[str]:
     """Resolve Zhipu AI API key from environment.
 
-    Checks:
-    1. ZHIPUAI_API_KEY environment variable
+    Resolution order:
+
+    1. ``JAATO_ZHIPUAI_API_KEY`` — jaato-namespaced (recommended).
+       Mirrors the convention used by other jaato providers
+       (``JAATO_OPENROUTER_API_KEY``, ``JAATO_NIM_API_KEY``, etc.).
+       Workspace ``.env`` values flow through ``_resolve_secret_uri``
+       daemon-side, so ``JAATO_ZHIPUAI_API_KEY=pass://path/to/secret``
+       resolves before reaching the runner via the session_env
+       channel.
+    2. ``ZHIPUAI_API_KEY`` — upstream SDK convention, kept for
+       backward compat with existing ``.env`` files / direct shell
+       exports.
 
     Returns:
-        API key if set, None otherwise.
+        API key if set, None otherwise.  First non-empty value wins.
     """
-    return os.environ.get("ZHIPUAI_API_KEY")
+    return (
+        os.environ.get("JAATO_ZHIPUAI_API_KEY")
+        or os.environ.get("ZHIPUAI_API_KEY")
+    )
 
 
 def resolve_base_url() -> str:

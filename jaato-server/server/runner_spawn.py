@@ -351,10 +351,28 @@ def build_session_envelope(
         # named in profile.plugins (e.g. permission) receive their
         # profile overrides.  Closes backlog §3.3c.X.  Per-entry
         # ``config`` is no longer set — entries are {name, preload} only.
-        plugin_configs_dict = {
+        #
+        # Server 0.6.123+: values flow through ``expand_plugin_configs``
+        # so ``${VAR}`` references AND secret URIs (``pass://`` /
+        # ``vault://``) resolve daemon-side before the runner sees
+        # them.  Pre-0.6.123 the envelope copied profile.plugin_configs
+        # LITERALLY — any ``pass://`` in
+        # ``plugin_configs.<provider>.api_key`` reached the runner
+        # unresolved, and the AppArmor-confined runner can't exec
+        # ``pass`` to resolve it itself (per
+        # ``feedback_secret_resolution_stays_daemon_side`` memory).
+        # Symmetric to the ``envelope.session_env`` resolution channel
+        # (PR #91 → #92).  Same trust posture: resolved plaintext on
+        # the daemon↔runner socketpair, never logged or forwarded.
+        from shared.plugins.subagent.config import expand_plugin_configs
+        raw_plugin_configs = {
             k: dict(v)
             for k, v in (getattr(profile, "plugin_configs", {}) or {}).items()
         }
+        plugin_configs_dict = expand_plugin_configs(
+            raw_plugin_configs,
+            workspace_root_override=getattr(server, "_workspace_path", None),
+        )
         for name in names:
             plugin_specs.append({"name": name, "preload": name in preloaded})
         system_instructions = getattr(profile, "system_instructions", None)
