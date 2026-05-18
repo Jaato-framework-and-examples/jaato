@@ -1786,6 +1786,28 @@ class JaatoServer:
                                 message=plugin_name,
                             )
 
+                        # Server 0.6.129+ structural fix: register
+                        # framework-known values on the registry
+                        # BEFORE ``expose_all`` fires, so the registry's
+                        # ``_augment_plugin_config`` helper injects them
+                        # into each plugin's config at init time.  Pre-fix
+                        # these were threaded per-plugin into the
+                        # ``plugin_configs`` dict above AND broadcast
+                        # post-init via ``set_workspace_path`` /
+                        # ``set_config_root`` — the "12 sites per
+                        # framework concept" pattern.  The single-layer
+                        # injection collapses the class.  See
+                        # ``shared/plugins/registry.py:_augment_plugin_config``.
+                        if self._workspace_path:
+                            self.registry.set_workspace_path(self._workspace_path)
+                        if self._config_root:
+                            self.registry.set_config_root(self._config_root)
+                        if self._session_id:
+                            self.registry.set_session_id(self._session_id)
+                        agent_name = getattr(self, "_main_agent_id", None) or "main"
+                        if agent_name:
+                            self.registry.set_agent_name(agent_name)
+
                         with _s3.sub("expose_all"):
                             self.registry.expose_all(
                                 plugin_configs, on_progress=_on_plugin_progress
@@ -1793,20 +1815,17 @@ class JaatoServer:
                         self.todo_plugin = self.registry.get_plugin("todo")
 
                         with _s3.sub("set_workspace_path"):
+                            # Post-init broadcast — idempotent refresh
+                            # given pre-init injection above, BUT still
+                            # needed to fire the ``set_workspace_path``
+                            # / ``set_config_root`` hooks on plugins
+                            # that update derived state (e.g.
+                            # ``file_edit._reinit_backup_manager`` per
+                            # PR-144).  Also propagates mid-session
+                            # workspace changes if the daemon ever
+                            # mutates ``self._workspace_path`` post-init.
                             if self._workspace_path:
                                 self.registry.set_workspace_path(self._workspace_path)
-                            # Mirror the workspace_path broadcast for
-                            # config_root.  The session_manager sets
-                            # ``server.config_root`` BEFORE
-                            # ``initialize()`` so plugins can load
-                            # their config from the right place; that
-                            # setter calls ``_update_plugin_config_root``
-                            # but the registry doesn't exist yet at
-                            # that point and the broadcast is a no-op.
-                            # Replay it here so the registry's stored
-                            # ``_config_root`` is populated and any
-                            # later ``set_config_root`` calls (e.g.
-                            # from re-discovery) inherit the value.
                             if self._config_root:
                                 self.registry.set_config_root(self._config_root)
 
