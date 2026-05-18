@@ -169,6 +169,15 @@ class PluginRegistry:
         # ``shared.config_resolver.resolve_config_search_path`` fall back
         # to ``<workspace_path>/.jaato/`` (today's behavior).
         self._config_root: Optional[str] = None
+        # Per-session framework values injected into every plugin's
+        # config dict at ``initialize()`` time (server 0.6.129+).
+        # See :meth:`_augment_plugin_config` for the contract.  Set
+        # before :meth:`expose_all` fires; the post-init
+        # ``set_workspace_path`` / ``set_config_root`` broadcasts
+        # still run for idempotent refresh AND to propagate later
+        # mid-session changes.
+        self._session_id: Optional[str] = None
+        self._agent_name: Optional[str] = None
         # Cache: tool_name -> plugin for get_plugin_for_tool() lookups
         self._tool_plugin_cache: Dict[str, ToolPlugin] = {}
         # Bootstrap timing: plugin name -> timing data
@@ -895,10 +904,15 @@ class PluginRegistry:
         # get_tool_schemas() / get_executors() on them.
         if name in self._enrichment_only:
             if not hasattr(plugin, '_initialized'):
-                plugin.initialize(config)
+                # Server 0.6.129+: framework-known values
+                # (workspace_path, config_root, session_id,
+                # agent_name) injected into config via setdefault.
+                # See :meth:`_augment_plugin_config` for the contract.
+                effective_config = self._augment_plugin_config(config)
+                plugin.initialize(effective_config)
                 plugin._initialized = True
-                if config:
-                    self._configs[name] = config
+                if effective_config:
+                    self._configs[name] = effective_config
                 _trace(f" Enrichment-only plugin '{name}' initialized (not exposed)")
             return True
 
@@ -913,9 +927,13 @@ class PluginRegistry:
 
         # Initialize if not already exposed, or if new config provided
         if name not in self._exposed:
+            # Server 0.6.129+: inject framework-known values into the
+            # plugin's config before initialize.  See
+            # :meth:`_augment_plugin_config`.
+            effective_config = self._augment_plugin_config(config)
             t0 = time.perf_counter()
             try:
-                plugin.initialize(config)
+                plugin.initialize(effective_config)
             except Exception as exc:
                 # Don't let one broken plugin take down the whole session.
                 # Record the failure and skip exposing the plugin so the
@@ -931,8 +949,8 @@ class PluginRegistry:
             self._init_timings[name] = {"init_ms": round(init_ms, 2)}
             if init_ms > 5.0:  # Log plugins taking >5ms to initialize
                 _trace(f" Plugin '{name}' initialize: {init_ms:.1f}ms")
-            if config:
-                self._configs[name] = config
+            if effective_config:
+                self._configs[name] = effective_config
             self._exposed.add(name)
             self._tool_plugin_cache.clear()
             # Wire up plugin with registry for authorized external paths
@@ -966,8 +984,10 @@ class PluginRegistry:
                     "Continuing with re-initialize.",
                     name, exc, exc_info=True,
                 )
+            # Server 0.6.129+: framework-key injection for re-init too.
+            effective_config = self._augment_plugin_config(config)
             try:
-                plugin.initialize(config)
+                plugin.initialize(effective_config)
             except Exception as exc:
                 logger.error(
                     "Plugin '%s' initialize() during re-init failed: %s. "
@@ -979,7 +999,7 @@ class PluginRegistry:
                 self._configs.pop(name, None)
                 self._tool_plugin_cache.clear()
                 return False
-            self._configs[name] = config
+            self._configs[name] = effective_config
             self._tool_plugin_cache.clear()
             # Re-wire after re-initialization
             if hasattr(plugin, 'set_plugin_registry'):
@@ -1159,7 +1179,10 @@ class PluginRegistry:
             )
             for name in parallel_names:
                 plugin = self._plugins[name]
-                cfg = config.get(name)
+                # Server 0.6.129+: framework-key injection also for
+                # parallel-init path (PARALLEL_INIT plugins like MCP).
+                # See :meth:`_augment_plugin_config`.
+                cfg = self._augment_plugin_config(config.get(name))
                 _trace(f"Starting parallel init for plugin '{name}'")
                 futures[name] = executor.submit(plugin.initialize, cfg)
             executor.shutdown(wait=False)
@@ -1287,6 +1310,80 @@ class PluginRegistry:
                     _trace(f"  -> {name}.set_config_root()")
                 except Exception as exc:
                     _trace(f"  -> {name}.set_config_root() failed: {exc}")
+
+    def set_session_id(self, session_id: Optional[str]) -> None:
+        """Set the session_id injected into plugin configs at init.
+
+        Server 0.6.129+: matches :meth:`set_workspace_path` /
+        :meth:`set_config_root` shape but doesn't broadcast — session_id
+        doesn't change mid-session, so no broadcast hook needed.  The
+        value is read by :meth:`_augment_plugin_config` at
+        :meth:`expose_tool` time.
+
+        Args:
+            session_id: Session identifier, or ``None`` to clear.
+        """
+        self._session_id = session_id
+
+    def set_agent_name(self, agent_name: Optional[str]) -> None:
+        """Set the agent_name injected into plugin configs at init.
+
+        Server 0.6.129+: mirrors :meth:`set_session_id`.  Read by
+        plugins that emit trace logs scoped to the agent identity
+        (e.g. ``file_edit``, ``memory``).
+        """
+        self._agent_name = agent_name
+
+    def _augment_plugin_config(
+        self, config: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Pre-populate plugin config with framework-known values.
+
+        Server 0.6.129+ structural fix.  Replaces the prior per-call-
+        site threading of framework values (``workspace_path``,
+        ``config_root``, ``session_id``, ``agent_name``) into
+        plugin_configs at ``core.py:1730`` (daemon-side) AND
+        ``server/runner/session.py:_bootstrap_session`` (runner-side).
+        Both sites had to manually populate these for every framework
+        concept that crossed the boundary — the "12 sites per
+        concept" pattern documented in
+        ``project_backlog_profile_field_propagation_duplication``.
+
+        Now: callers (daemon, runner, in-process subagent spawn) set
+        framework values on the registry via :meth:`set_workspace_path`
+        / :meth:`set_config_root` / :meth:`set_session_id` /
+        :meth:`set_agent_name` BEFORE calling
+        :meth:`expose_all` or :meth:`expose_tool`.  This method
+        augments the per-plugin config dict at every
+        ``plugin.initialize`` call site so each plugin sees the
+        framework values in its config without each caller having to
+        thread them per-plugin.
+
+        Operator-supplied values win (``setdefault`` semantics) —
+        explicit ``plugin_configs.<plugin>.workspace_path`` in a
+        profile YAML overrides the framework-known value.
+
+        Returns the augmented config dict, or the original
+        ``config`` if no framework values are set yet (preserving
+        the pre-fix behavior when callers bypass the setters).
+        """
+        framework_keys: Dict[str, Any] = {}
+        if self._workspace_path is not None:
+            framework_keys["workspace_path"] = self._workspace_path
+        if self._config_root is not None:
+            framework_keys["config_root"] = self._config_root
+        if self._session_id is not None:
+            framework_keys["session_id"] = self._session_id
+        if self._agent_name is not None:
+            framework_keys["agent_name"] = self._agent_name
+
+        if not framework_keys:
+            return config
+
+        augmented = dict(config) if config else {}
+        for k, v in framework_keys.items():
+            augmented.setdefault(k, v)
+        return augmented
 
     def get_config_root(self) -> Optional[str]:
         """Get the current read-only framework-config root override.

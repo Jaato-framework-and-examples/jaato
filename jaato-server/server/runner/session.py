@@ -255,6 +255,23 @@ def _configure_runtime_plugins(
             existing = plugin_configs.get(name, {})
             plugin_configs[name] = {**existing, **dict(cfg)}
 
+    # Server 0.6.129+ structural fix: register framework-known values
+    # on the registry BEFORE ``expose_all`` fires so each plugin's
+    # ``initialize`` sees them in config.  Mirrors the daemon-side
+    # reorder at ``core.py`` (same change shipped in the same PR).
+    # Pre-fix the runner-side had the same wire-gap: file_edit
+    # initialized BEFORE the broadcast lit up workspace/config_root,
+    # so its ``_detect_*`` fallbacks fired the cosmetic WARN every
+    # bootstrap.  See ``shared/plugins/registry.py:_augment_plugin_config``.
+    if workspace_path:
+        registry.set_workspace_path(workspace_path)
+    if envelope.config_root:
+        registry.set_config_root(envelope.config_root)
+    if session_id:
+        registry.set_session_id(session_id)
+    if envelope.agent_id:
+        registry.set_agent_name(envelope.agent_id)
+
     # Step 4: expose_all — initializes each plugin.  No on_progress
     # callback runner-side.  Initializes ALL discovered runner-tier
     # plugins; tool exposure to the model is gated separately at the
@@ -285,7 +302,12 @@ def _configure_runtime_plugins(
     # Step 5 (`self.todo_plugin = ...`): N/A runner-side — no
     # runner-resident code path needs the cached reference.
 
-    # Step 6-7: workspace + config_root broadcast.
+    # Step 6-7: workspace + config_root broadcast.  Post-init refresh
+    # — idempotent given the pre-init injection above, but still
+    # needed to fire the ``set_workspace_path`` / ``set_config_root``
+    # hooks on plugins that update derived state (e.g.
+    # ``file_edit._reinit_backup_manager`` per PR-144) and to
+    # propagate any mid-session changes.
     with timer.stage("set_workspace_path"):
         if workspace_path:
             registry.set_workspace_path(workspace_path)
