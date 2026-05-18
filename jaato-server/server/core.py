@@ -2290,6 +2290,11 @@ class JaatoServer:
                     self._profile.completion_artifacts
                 )
 
+            if self._profile.completion_validators:
+                kwargs["completion_validators"] = (
+                    self._profile.completion_validators
+                )
+
         # Per-turn model-tier config: profile-declared model_tiers win;
         # otherwise env vars (JAATO_TIER_*) are consulted; otherwise
         # the session stays in single-model mode (no enter_tier tool,

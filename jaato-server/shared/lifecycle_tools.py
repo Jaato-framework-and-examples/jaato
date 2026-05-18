@@ -123,11 +123,66 @@ For a worked example see ``feedback_completion_schema_warnings_field``
 in the project memory and the
 ``docs/design/payload-schema-conventions.md`` design document
 (unified spawn-side + completion-side guide).
+
+**Semantic validators (server 0.6.121+).**  Some bugs are
+structurally well-formed but semantically false — the agent's
+payload validates against the schema yet its claims contradict the
+session's actual tool-call history.  Concrete example
+(kb-enablement-2.0 v117): the codegen agent emitted ``files[]``
+with 20 entries, 6 of which were fabricated — their
+``renderTemplateToFile`` calls had returned errors, but the schema
+doesn't know about tool-call history and the agent rationalized
+success.
+
+Profiles can declare a list of kb-authored Python validators that
+run AFTER ``jsonschema.validate`` passes::
+
+    {
+      "name": "codegen",
+      "completion_payload_schema": "completion_schemas/step_result.json",
+      "completion_validators": [
+        "scripts/validators/codegen_files_exist.py",
+        "scripts/validators/codegen_render_succeeded.py"
+      ]
+    }
+
+Each validator is a Python module exposing one top-level callable::
+
+    def validate(
+        payload: dict,                    # the schema-validated args
+        tool_calls: list[dict],           # pre-computed ledger
+        workspace_path: pathlib.Path,     # session workspace dir
+        ctx: dict,                        # agent_params + session metadata
+    ) -> list[str]:                       # empty = OK; non-empty = errors
+
+``tool_calls`` is a list of dicts in chronological order, each with
+keys ``name`` (str), ``args`` (dict), ``result`` (dict — failed
+calls carry ``{"error": "...", "message": "..."}``), ``success``
+(bool — ``"error" not in result``), ``call_id`` (str), and
+``turn_index`` (int).  Author validators against this stable dict
+contract — no framework types need importing.
+
+Paths in the profile field resolve via the same loader as prefetch
+scripts and reactor handlers — see
+:func:`shared.script_loader.resolve_script_path`:
+
+1. absolute path → as-is
+2. ``<config_root>/<path>`` (workspace-tier kb)
+3. ``~/.jaato/<path>`` (user-tier fallback)
+
+Validators run AFTER schema validation and BEFORE artifact
+rendering.  Errors from any validator are aggregated (not
+short-circuited — the agent sees the full picture on retry) and
+returned as the same ``validation_failed`` shape used by schema
+failures.  See ``shared/completion_validators.py`` for the
+implementation and ``shared/tests/test_completion_validators.py``
+for end-to-end examples.
 """
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
@@ -169,6 +224,17 @@ class LifecycleTools:
                 getattr(session, 'runtime', None), '_config_root', None,
             ),
         )
+        # Lazy-loaded completion validators (kb-authored Python).  None
+        # until the first ``signal_completion`` call resolves the
+        # configured paths via ``shared.completion_validators.load_validators``;
+        # subsequent calls in the same session reuse the cached list.
+        # Each tuple is ``(path_str, callable_or_None, load_error_or_None)``;
+        # entries with a non-None load_error are surfaced as validation
+        # errors so the kb author sees the typo / missing-symbol issue
+        # at signal time.
+        self._validators_loaded: Optional[
+            List[Tuple[str, Optional[Any], Optional[str]]]
+        ] = None
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ``signal_completion`` schema for the active profile.
@@ -440,6 +506,74 @@ class LifecycleTools:
                 if isinstance(payload, dict)
                 else ""
             )
+
+        # Profile-declared semantic validators (kb-authored Python).
+        # Runs AFTER ``jsonschema.validate`` passes and BEFORE artifact
+        # rendering — same retry contract as schema validation: any
+        # validator error returns the same ``validation_failed`` shape
+        # so the agent retries within ``max_turns``.
+        #
+        # Catches the "structurally-well-formed-but-semantically-false"
+        # bug class (v117 kb-enablement-2.0 evidence): payload validates
+        # against the schema but its claims contradict the session's
+        # actual tool-call history or the workspace filesystem.  See
+        # ``shared/completion_validators.py`` for the contract.
+        configured_validators = getattr(
+            self._session, "_completion_validators", []
+        ) or []
+        if configured_validators and payload is not None:
+            from .completion_validators import (
+                build_tool_call_ledger,
+                invoke_validators,
+                load_validators,
+            )
+            if self._validators_loaded is None:
+                workspace_path_str = getattr(self._session, "workspace_path", None)
+                config_root_str = getattr(
+                    getattr(self._session, "runtime", None), "_config_root", None,
+                )
+                self._validators_loaded = load_validators(
+                    configured_validators,
+                    workspace_path=workspace_path_str,
+                    config_root=config_root_str,
+                )
+            try:
+                history = self._session.get_history()
+            except Exception:
+                history = []
+            ledger = build_tool_call_ledger(history)
+            workspace_path_obj = Path(
+                getattr(self._session, "workspace_path", None) or "."
+            )
+            validator_ctx = {
+                "agent_params": getattr(self._session, "_agent_params", {}) or {},
+                "agent_id": getattr(self._session, "_agent_id", "main"),
+            }
+            validator_errors = invoke_validators(
+                self._validators_loaded,
+                payload=payload,
+                tool_calls=ledger,
+                workspace_path=workspace_path_obj,
+                ctx=validator_ctx,
+            )
+            if validator_errors:
+                logger.info(
+                    "signal_completion: %d completion-validator error(s); "
+                    "returning self-correction prompt",
+                    len(validator_errors),
+                )
+                return {
+                    "error": "validation_failed",
+                    "message": (
+                        "Your payload structure was valid, but one or more "
+                        "completion validators reported semantic problems. "
+                        "Read each error below carefully, fix the underlying "
+                        "issue (e.g. surface failed tool calls in errors[], "
+                        "remove fabricated entries, or retry the failed "
+                        "tool calls), then call signal_completion again."
+                    ),
+                    "validator_errors": validator_errors,
+                }
 
         hooks = getattr(self._session, '_ui_hooks', None)
         if not hooks or not hasattr(hooks, 'on_agent_completed'):

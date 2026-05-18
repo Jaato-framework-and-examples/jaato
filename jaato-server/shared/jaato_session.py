@@ -267,6 +267,16 @@ class JaatoSession:
         # ``shared.plugins.subagent.config.CompletionArtifact``.
         self._completion_artifacts: List[Any] = []
 
+        # Profile-declared completion validators (kb-authored Python
+        # modules that semantically check the signal_completion
+        # payload AFTER ``jsonschema.validate`` passes).  Each entry is
+        # a path string resolved via
+        # :func:`shared.script_loader.resolve_script_path` at first
+        # signal_completion invocation (lazy load — keeps session
+        # bootstrap fast).  Empty list = no semantic checks.  See
+        # ``shared/completion_validators.py`` for the contract.
+        self._completion_validators: List[str] = []
+
         # Completion lifecycle tracking — flipped True by
         # ``LifecycleTools._execute_signal_completion`` on the first
         # successful invocation.  The completion-nudge guard reads this
@@ -1617,6 +1627,7 @@ class JaatoSession:
         tier_config: Optional['ModelTierConfig'] = None,
         agent_params: Optional[Dict[str, Any]] = None,
         completion_artifacts: Optional[List[Any]] = None,
+        completion_validators: Optional[List[str]] = None,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1676,6 +1687,12 @@ class JaatoSession:
         # doc in __init__.
         if completion_artifacts is not None:
             self._completion_artifacts = list(completion_artifacts)
+
+        # Profile-declared completion validators.  See
+        # ``_completion_validators`` doc in __init__ for the contract
+        # and ``shared/completion_validators.py`` for the loader.
+        if completion_validators is not None:
+            self._completion_validators = list(completion_validators)
 
         # Tier mode: when a tier_config is supplied, the session's
         # initial model is overridden by the initial tier's model so the
