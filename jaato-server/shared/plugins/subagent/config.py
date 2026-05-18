@@ -718,6 +718,23 @@ class SubagentProfile:
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
     spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
     completion_artifacts: List[CompletionArtifact] = field(default_factory=list)
+    # kb-authored Python modules that semantically validate the
+    # ``signal_completion`` payload AFTER ``jsonschema.validate`` passes.
+    # Each entry is a path (workspace-relative or absolute) to a Python
+    # module exposing a ``validate(payload, tool_calls, workspace_path,
+    # ctx) -> list[str]`` callable.  Empty list = no semantic checks
+    # (legacy behaviour).
+    #
+    # Closes the "agent claims success, mvn discovers the lie later"
+    # bug class — schema validation accepts well-formed payloads, but
+    # only kb-authored Python can cross-check claims against the
+    # session's actual tool-call history and the workspace filesystem.
+    # See ``shared/completion_validators.py`` for the loader + ledger
+    # builder and ``shared/lifecycle_tools.py`` for the invocation
+    # site.  Inheritance concatenates parent + child (like
+    # completion_artifacts) — each validator is independent and both
+    # should fire.
+    completion_validators: List[str] = field(default_factory=list)
     runtime_limits: Optional[RuntimeLimits] = None
     # Per-turn model-tier config.  Empty dict means "single-model
     # mode" — the framework falls back to env vars (JAATO_TIER_*) at
@@ -947,6 +964,45 @@ def _parse_completion_artifacts(value: Any) -> List[CompletionArtifact]:
     return out
 
 
+def _parse_completion_validators(value: Any) -> List[str]:
+    """Parse a profile's ``completion_validators`` field from raw JSON/YAML.
+
+    Accepts a list of strings (each a script path resolved via
+    :func:`shared.script_loader.resolve_script_path` — absolute, or
+    relative to ``<config_root>/`` / ``~/.jaato/``).  Non-list inputs
+    yield an empty list with a WARNING (kb authoring mistake; the
+    framework should fail loud at signal_completion time when the
+    typo'd validator doesn't load).  Non-string entries are dropped
+    individually with a WARNING.
+
+    Returns the cleaned list of script-reference strings; the actual
+    import + callable extraction happens lazily on first
+    ``signal_completion`` invocation inside
+    :class:`shared.lifecycle_tools.LifecycleTools`.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        logger.warning(
+            "completion_validators: expected list, got %s; ignoring",
+            type(value).__name__,
+        )
+        return []
+    cleaned: List[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            logger.warning(
+                "completion_validators: skipping non-string entry: %r", entry,
+            )
+            continue
+        stripped = entry.strip()
+        if not stripped:
+            logger.warning("completion_validators: skipping empty entry")
+            continue
+        cleaned.append(stripped)
+    return cleaned
+
+
 def build_inline_profile(
     data: Dict[str, Any],
     name: str = "<inline>",
@@ -965,6 +1021,7 @@ def build_inline_profile(
             Recognized keys: ``model``, ``provider``, ``plugins``,
             ``plugin_configs``, ``system_instructions``, ``max_turns``,
             ``gc``, ``env``, ``completion_payload_schema``,
+            ``completion_artifacts``, ``completion_validators``,
             ``runtime_limits``, ``model_tiers``.
         name: Display name for logs and traces. Default ``<inline>``.
         description: Human-readable description for the profile.
@@ -1026,6 +1083,7 @@ def build_inline_profile(
         completion_payload_schema=data.get('completion_payload_schema'),
         spawn_payload_schema=data.get('spawn_payload_schema'),
         completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
+        completion_validators=_parse_completion_validators(data.get('completion_validators')),
         runtime_limits=runtime_limits,
         model_tiers=model_tiers,
         apparmor=bool(data.get('apparmor', False)),
@@ -1290,6 +1348,18 @@ def _merge_profiles(
         merged_completion_artifacts.extend(parent.completion_artifacts)
     merged_completion_artifacts.extend(child.completion_artifacts)
 
+    # completion_validators: concatenation across parent → child for
+    # the same reason as completion_artifacts — each validator is
+    # independent (checks a different invariant); concatenating fires
+    # all of them in order.  Child entries appear last; the framework
+    # invokes them sequentially and aggregates ALL errors so the
+    # agent sees the full set on the retry prompt rather than playing
+    # whack-a-mole turn by turn.
+    merged_completion_validators: List[str] = []
+    for parent in parents:
+        merged_completion_validators.extend(parent.completion_validators)
+    merged_completion_validators.extend(child.completion_validators)
+
     # --- Concatenation: system_instructions ---
     instruction_parts = []
     for parent in parents:
@@ -1376,6 +1446,7 @@ def _merge_profiles(
         completion_payload_schema=merged_completion_schema,
         spawn_payload_schema=merged_spawn_schema,
         completion_artifacts=merged_completion_artifacts,
+        completion_validators=merged_completion_validators,
         runtime_limits=merged_runtime_limits,
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
@@ -1539,7 +1610,8 @@ def _scan_profiles_dir(
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
             spawn_payload_schema=data.get('spawn_payload_schema'),
-        completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
+            completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
+            completion_validators=_parse_completion_validators(data.get('completion_validators')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
@@ -1762,7 +1834,8 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
             spawn_payload_schema=data.get('spawn_payload_schema'),
-        completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
+            completion_artifacts=_parse_completion_artifacts(data.get('completion_artifacts')),
+            completion_validators=_parse_completion_validators(data.get('completion_validators')),
             runtime_limits=runtime_limits,
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
@@ -2024,6 +2097,7 @@ class SubagentConfig:
                 env=env,
                 inherits=_normalize_inherits(profile_data.get('inherits')),
                 completion_payload_schema=profile_data.get('completion_payload_schema'),
+                completion_validators=_parse_completion_validators(profile_data.get('completion_validators')),
                 runtime_limits=runtime_limits,
                 model_tiers=model_tiers,
                 apparmor=bool(profile_data.get('apparmor', False)),
