@@ -451,10 +451,38 @@ def build_session_envelope(
     # - The §7c step-2 relocation commit that copied the body
     #   verbatim from server/__main__.py without catching the gaps.
     profile_completion_schema = None
+    # Profile-declared completion validators + artefacts (server 0.6.122+).
+    # Both were broken in the runner path pre-0.6.122: SessionInitEnvelope
+    # carried fields for them, but build_session_envelope never populated
+    # them from the profile.  Result: runner-side
+    # ``runtime.create_session`` always got empty lists, so neither hook
+    # fired for cascade-spawned sessions (kb-enablement-2.0 v118
+    # evidence — codegen_files_exist.py validator silent despite valid
+    # profile YAML).  Profile-bound sessions over IPC (interactive TUI)
+    # work because they bypass the runner-subprocess split via the
+    # in-process subagent plugin path.
+    profile_completion_validators: list = []
+    profile_completion_artifacts: list = []
     if profile is not None:
         profile_completion_schema = getattr(
             profile, "completion_payload_schema", None,
         )
+        profile_completion_validators = list(
+            getattr(profile, "completion_validators", []) or []
+        )
+        raw_artifacts = getattr(profile, "completion_artifacts", []) or []
+        for entry in raw_artifacts:
+            if hasattr(entry, "renderer"):
+                # CompletionArtifact dataclass — serialise to dict shape
+                # the runner side reconstructs.
+                profile_completion_artifacts.append({
+                    "renderer": getattr(entry, "renderer", None),
+                    "output": getattr(entry, "output", None),
+                    "on_error": getattr(entry, "on_error", "warn"),
+                    "description": getattr(entry, "description", None),
+                })
+            elif isinstance(entry, dict):
+                profile_completion_artifacts.append(dict(entry))
 
     # PR #91 Y fix: ship the FULLY-RESOLVED per-session env to the
     # runner.  ``server._session_env`` is populated by the daemon's
@@ -492,6 +520,8 @@ def build_session_envelope(
         project=project_val,
         location=location_val,
         completion_payload_schema=profile_completion_schema,
+        completion_artifacts=profile_completion_artifacts,
+        completion_validators=profile_completion_validators,
         model_tiers=model_tiers_dict,
     )
 

@@ -1677,6 +1677,22 @@ class SessionManager:
             env_overrides=env_overrides,
             project=project_val,
             location=location_val,
+            completion_payload_schema=getattr(
+                profile, "completion_payload_schema", None,
+            ),
+            completion_validators=list(
+                getattr(profile, "completion_validators", []) or []
+            ),
+            completion_artifacts=[
+                {
+                    "renderer": getattr(a, "renderer", None),
+                    "output": getattr(a, "output", None),
+                    "on_error": getattr(a, "on_error", "warn"),
+                    "description": getattr(a, "description", None),
+                }
+                for a in (getattr(profile, "completion_artifacts", []) or [])
+                if hasattr(a, "renderer")
+            ],
         )
 
     def _dispatch_isolated_session_bootstrap(
