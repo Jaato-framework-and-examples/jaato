@@ -134,6 +134,77 @@ class FileEditPlugin(RunnerForwardingMixin):
     def name(self) -> str:
         return "file_edit"
 
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute file_edit's backup-path rules to AppArmor.
+
+        Server 0.6.128+ (PR-145): file_edit writes backups under
+        ``<config_root>/sessions/<session_id>/backups/`` (PR-144's
+        anchor) with fallback to
+        ``<workspace_path>/.jaato/sessions/<session_id>/backups/`` when
+        config_root is unset.  This method declares ``rw`` access to
+        BOTH branches so whichever ``_resolve_backup_base_dir`` picks
+        at runtime is covered by the AppArmor profile.  Also covers
+        the no-session_id default paths and the explicit operator
+        override (``plugin_config["backup_dir"]``).
+
+        Pre-PR-145 file_edit never exported rules.  Pre-PR-143 the
+        bug was invisible because BackupManager resolved to the
+        daemon's CWD (which typically had workspace-level grants).
+        PR-143 anchored on workspace_root (incidentally covered by
+        ``workspace/**`` grants); PR-144 corrected to config_root
+        (which can live OUTSIDE the workspace in the handoff_test
+        pattern, where no default grant covers).  PR-145 closes the
+        gap by declaring the rules explicitly per the established
+        plugin-apparmor-contribution pattern (memory, references,
+        subagent, prompt_library, service_connector already do this).
+
+        Caveat: each rule path is the BACKUP TARGET; AppArmor grants
+        rw inside the directory but the parent must already be
+        creatable.  The framework's session-apparmor template grants
+        ``<config_root>/**`` and ``<workspace>/.jaato/**`` rw so the
+        mkdir chain for nested ``sessions/<id>/backups/`` resolves
+        cleanly.  See ``memory/plugin.py:101-132`` for the canonical
+        pattern these rules follow.
+
+        See ``project_backlog_plugin_apparmor_rules_audit`` memory
+        for the 14-plugin gap class this PR documents.
+        """
+        rules: List[str] = []
+
+        def _add(base: str) -> None:
+            base = base.rstrip("/")
+            rules.append(f"{base}/    rw,")
+            rules.append(f"{base}/**  rw,")
+
+        # Branch 1: explicit operator override wins.
+        explicit_dir = plugin_config.get("backup_dir") if plugin_config else None
+        if isinstance(explicit_dir, str) and explicit_dir.strip():
+            _add(explicit_dir.strip())
+
+        # Branch 2: config_root anchor (PR-144 primary).
+        if config_root:
+            if session_id:
+                _add(f"{config_root}/sessions/{session_id}/backups")
+            else:
+                _add(f"{config_root}/backups")
+
+        # Branch 3: workspace fallback (config_root unset at runtime).
+        if workspace_path:
+            if session_id:
+                _add(f"{workspace_path}/.jaato/sessions/{session_id}/backups")
+            else:
+                _add(f"{workspace_path}/.jaato/backups")
+
+        return rules
+
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         _trace_write("FILE_EDIT", msg)
