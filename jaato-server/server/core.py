@@ -1727,8 +1727,22 @@ class JaatoServer:
                                 "workspace_path": self._workspace_path,
                                 "session_id": self._session_id,
                             },
+                            # file_edit needs workspace_path + config_root
+                            # at init time so the BackupManager anchors on
+                            # the correct location BEFORE any updateFile
+                            # fires.  Pre-PR-145 these came only from the
+                            # post-init ``set_workspace_path`` / ``set_config_root``
+                            # broadcasts (line 1781-1797 below), which
+                            # triggered the WARN at every session bootstrap
+                            # — the broadcasts did re-init the backup
+                            # manager correctly, but the init-time WARN was
+                            # cosmetic noise.  Threading these here mirrors
+                            # the pattern used by references / lsp / mcp /
+                            # auth plugins above.
                             "file_edit": {
                                 "session_id": self._session_id,
+                                "workspace_path": self._workspace_path,
+                                "config_root": self._config_root,
                             },
                             "waypoint": {
                                 "session_id": self._session_id,
