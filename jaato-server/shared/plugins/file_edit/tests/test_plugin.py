@@ -33,57 +33,153 @@ class TestFileEditPluginInitialization:
         assert plugin._initialized is True
         assert plugin._backup_manager._base_dir == backup_dir
 
-    def test_initialize_with_session_id(self, tmp_path):
-        """Server 0.6.126+: session_id creates session-scoped backup
-        directory anchored on ``workspace_root`` (NOT on the daemon's
-        CWD).  v122 evidence: pre-0.6.126 the path was relative and
-        resolved against the daemon's CWD, landing outside the
-        AppArmor-confined runner's grant when the daemon ran from the
-        jaato source tree.
+    def test_initialize_with_session_id_anchors_on_config_root(self, tmp_path):
+        """Server 0.6.127+: session_id creates session-scoped backup
+        directory anchored on ``config_root`` (NOT workspace_root).
+
+        Backups are jaato-meta-state and belong with other meta-state
+        (``.jaato/logs/``, ``.jaato/cache/`` etc.) under config_root,
+        NOT polluting the workspace with a second ``.jaato/`` tree.
+        PR-143 mistakenly anchored on workspace_root; PR-144 corrects.
         """
+        config_root_dir = tmp_path / ".jaato"
+        config_root_dir.mkdir()
         plugin = FileEditPlugin()
         plugin.initialize({
             "workspace_root": str(tmp_path),
+            "config_root": str(config_root_dir),
             "session_id": "test-session-123",
         })
         assert plugin._initialized is True
         expected_path = (
-            tmp_path / ".jaato" / "sessions" / "test-session-123" / "backups"
+            config_root_dir / "sessions" / "test-session-123" / "backups"
         ).resolve()
         assert plugin._backup_manager._base_dir == expected_path
 
     def test_initialize_session_id_ignores_cwd(self, tmp_path, monkeypatch):
-        """Pin: when workspace_root is set, the daemon's CWD does NOT
+        """Pin: when config_root is set, the daemon's CWD does NOT
         influence backup-path resolution.  Regression guard for the
         v122 wire-gap (CWD-relative resolution).
         """
-        # Set CWD to a path DIFFERENT from workspace_root — backup
-        # path must still anchor on workspace_root.
         decoy_dir = tmp_path / "decoy_cwd"
         workspace_dir = tmp_path / "real_workspace"
+        config_root_dir = tmp_path / "kb" / ".jaato"
         decoy_dir.mkdir()
         workspace_dir.mkdir()
+        config_root_dir.mkdir(parents=True)
         monkeypatch.chdir(decoy_dir)
 
         plugin = FileEditPlugin()
         plugin.initialize({
             "workspace_root": str(workspace_dir),
+            "config_root": str(config_root_dir),
             "session_id": "sess-1",
         })
         assert plugin._backup_manager._base_dir == (
-            workspace_dir / ".jaato" / "sessions" / "sess-1" / "backups"
+            config_root_dir / "sessions" / "sess-1" / "backups"
         ).resolve()
-        # Sanity: NOT under the decoy CWD.
+        # Sanity: NOT under the decoy CWD or the workspace.
         assert decoy_dir not in plugin._backup_manager._base_dir.parents
+        assert workspace_dir not in plugin._backup_manager._base_dir.parents
 
-    def test_initialize_no_session_id_anchors_on_workspace(self, tmp_path):
-        """Pin: even without session_id, the default ``.jaato/backups``
-        path anchors on workspace_root (not CWD)."""
+    def test_initialize_no_session_id_anchors_on_config_root(self, tmp_path):
+        """Pin: even without session_id, the default ``backups``
+        path anchors on config_root (not workspace, not CWD)."""
+        config_root_dir = tmp_path / ".jaato"
+        config_root_dir.mkdir()
         plugin = FileEditPlugin()
-        plugin.initialize({"workspace_root": str(tmp_path)})
+        plugin.initialize({
+            "workspace_root": str(tmp_path),
+            "config_root": str(config_root_dir),
+        })
         assert plugin._backup_manager._base_dir == (
-            tmp_path / ".jaato" / "backups"
+            config_root_dir / "backups"
         ).resolve()
+
+    def test_initialize_no_config_root_falls_back_to_workspace_jaato(
+        self, tmp_path,
+    ):
+        """Pin: when config_root is unset BUT workspace_root is known,
+        anchor backups on ``<workspace>/.jaato/`` — typical interactive
+        sessions where the daemon hasn't pushed a config_root override.
+        """
+        plugin = FileEditPlugin()
+        plugin.initialize({
+            "workspace_root": str(tmp_path),
+            "session_id": "sess-1",
+        })
+        assert plugin._backup_manager._base_dir == (
+            tmp_path / ".jaato" / "sessions" / "sess-1" / "backups"
+        ).resolve()
+
+    def test_set_config_root_broadcast_reinit_backup_manager(self, tmp_path):
+        """Pin: registry's set_config_root broadcast actually moves
+        the backup root, not just updates the in-memory value.
+
+        Mirrors how set_workspace_path already works on the 5 sibling
+        plugins (references, subagent, prompt_library, template,
+        service_connector).
+        """
+        # Initialize with config_root_A
+        config_root_a = tmp_path / "kb_a" / ".jaato"
+        config_root_a.mkdir(parents=True)
+        plugin = FileEditPlugin()
+        plugin.initialize({
+            "config_root": str(config_root_a),
+            "session_id": "sess-1",
+        })
+        assert plugin._backup_manager._base_dir == (
+            config_root_a / "sessions" / "sess-1" / "backups"
+        ).resolve()
+
+        # Broadcast a different config_root — backup root must move.
+        config_root_b = tmp_path / "kb_b" / ".jaato"
+        config_root_b.mkdir(parents=True)
+        plugin.set_config_root(str(config_root_b))
+        assert plugin._backup_manager._base_dir == (
+            config_root_b / "sessions" / "sess-1" / "backups"
+        ).resolve()
+
+    def test_set_workspace_path_broadcast_reinit_backup_manager(self, tmp_path):
+        """Pin: when only workspace_root is known (config_root unset),
+        ``set_workspace_path`` broadcast moves the backup root via
+        the workspace-fallback path."""
+        ws_a = tmp_path / "ws_a"
+        ws_a.mkdir()
+        plugin = FileEditPlugin()
+        plugin.initialize({
+            "workspace_root": str(ws_a),
+            "session_id": "sess-1",
+        })
+        assert plugin._backup_manager._base_dir == (
+            ws_a / ".jaato" / "sessions" / "sess-1" / "backups"
+        ).resolve()
+
+        ws_b = tmp_path / "ws_b"
+        ws_b.mkdir()
+        plugin.set_workspace_path(str(ws_b))
+        assert plugin._backup_manager._base_dir == (
+            ws_b / ".jaato" / "sessions" / "sess-1" / "backups"
+        ).resolve()
+
+    def test_explicit_backup_dir_wins_over_anchors(self, tmp_path):
+        """Operator-provided ``backup_dir`` wins regardless of
+        config_root / workspace_root / set_*_path broadcasts."""
+        explicit = tmp_path / "explicit"
+        config_root_dir = tmp_path / ".jaato"
+        config_root_dir.mkdir()
+        plugin = FileEditPlugin()
+        plugin.initialize({
+            "backup_dir": str(explicit),
+            "config_root": str(config_root_dir),
+            "session_id": "sess-1",
+        })
+        assert plugin._backup_manager._base_dir == explicit
+        # Broadcast a new config_root — operator's explicit override sticks.
+        new_cr = tmp_path / "kb" / ".jaato"
+        new_cr.mkdir(parents=True)
+        plugin.set_config_root(str(new_cr))
+        assert plugin._backup_manager._base_dir == explicit
 
     def test_initialize_backup_dir_takes_precedence_over_session_id(self, tmp_path):
         """Test that explicit backup_dir takes precedence over session_id."""

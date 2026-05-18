@@ -63,6 +63,25 @@ def _detect_workspace_root() -> Optional[str]:
     return None
 
 
+def _detect_config_root() -> Optional[str]:
+    """Auto-detect config root from per-task ContextVar / env.
+
+    Mirrors :func:`_detect_workspace_root` but for the framework
+    config root — the directory that holds ``profiles/`` /
+    ``agents/`` / ``scripts/`` / ``logs/`` / ``sessions/`` / etc.
+    Typically ``<workspace>/.jaato`` in interactive sessions, but
+    can be a separate location (e.g. the kb's ``.jaato`` at repo
+    root while the workspace is a sandbox/ subdir).
+
+    Returns:
+        Absolute path to config root, or None if not configured.
+    """
+    config_root = get_config_root()
+    if config_root:
+        return os.path.realpath(os.path.abspath(config_root))
+    return None
+
+
 class FileEditPlugin(RunnerForwardingMixin):
     """Plugin for file reading and editing operations.
 
@@ -90,8 +109,24 @@ class FileEditPlugin(RunnerForwardingMixin):
         self._initialized = False
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
-        # Workspace root for path sandboxing
+        # Workspace root for path sandboxing — drives which paths the
+        # plugin's tools may read/write.  Set via config / detection at
+        # initialize time; refreshed on ``set_workspace_path`` broadcast.
         self._workspace_root: Optional[str] = None
+        # Config root for meta-state placement (backups, future per-
+        # plugin caches).  Mirrors the established ``set_config_root``
+        # hook other plugins (references, subagent, prompt_library,
+        # template, service_connector) already implement.  Set via
+        # config / detection at initialize time; refreshed on
+        # ``set_config_root`` broadcast.
+        self._config_root: Optional[str] = None
+        # Session ID — cached so ``_reinit_backup_manager`` can rebuild
+        # the session-scoped path when either anchor (config_root or
+        # workspace_root fallback) changes via broadcast.
+        self._session_id: Optional[str] = None
+        # Explicit ``backup_dir`` from operator config (takes precedence
+        # over derived paths).  Cached so broadcasts respect it.
+        self._explicit_backup_dir: Optional[str] = None
         # Plugin registry for checking external path authorization
         self._plugin_registry = None
 
@@ -131,51 +166,29 @@ class FileEditPlugin(RunnerForwardingMixin):
         else:
             self._workspace_root = _detect_workspace_root()
 
-        # Initialize backup manager.  Priority: explicit backup_dir >
-        # session-scoped path > global default.
-        #
-        # Server 0.6.126+: when the plugin derives the backup path
-        # (no explicit ``backup_dir`` config), it anchors on
-        # ``self._workspace_root`` so backups live under
-        # ``<workspace>/.jaato/`` — where the AppArmor-confined runner
-        # actually has write permission.  Pre-0.6.126 the path was
-        # relative (``.jaato/sessions/<id>/backups``), and
-        # ``BackupManager.__init__`` resolved it against the daemon's
-        # CWD via ``Path(...).resolve()``.  On a daemon started from
-        # the jaato source tree, that produced
-        # ``<jaato-source>/.jaato/sessions/...`` — outside the runner's
-        # AppArmor grant.  v122 evidence: updateFile + findAndReplace
-        # both failed PermissionError; the agent had no honest path
-        # forward until the completion processor enforced honesty.
-        # Explicit ``backup_dir`` config still wins (absolute path
-        # honored as-is for operators who want a custom location).
-        backup_dir = config.get("backup_dir")
-        session_id = config.get("session_id")
-        if backup_dir:
-            self._backup_manager = BackupManager(Path(backup_dir))
-        elif self._workspace_root and session_id:
-            # Session-scoped backups align with session-scoped waypoints.
-            session_backup_dir = (
-                Path(self._workspace_root) / ".jaato" / "sessions"
-                / session_id / "backups"
-            )
-            self._backup_manager = BackupManager(session_backup_dir)
-        elif self._workspace_root:
-            self._backup_manager = BackupManager(
-                Path(self._workspace_root) / ".jaato" / "backups",
-            )
+        # Configure config root for backup-path anchoring.  PR-143
+        # mistakenly anchored backups on ``workspace_root`` —
+        # backups are jaato-meta-state and belong with other
+        # meta-state (``.jaato/logs/``, ``.jaato/cache/`` etc.)
+        # under ``config_root``, NOT polluting the workspace with
+        # a second ``.jaato/`` tree.  In typical interactive use
+        # ``config_root == <workspace>/.jaato`` so the bug was
+        # invisible; in the handoff_test pattern (config_root at
+        # repo root, sandbox/ inside as workspace) the misdirection
+        # surfaces.  See PR-144 commit message + v122 retrospective.
+        config_root = config.get("config_root")
+        if config_root:
+            self._config_root = os.path.realpath(os.path.abspath(config_root))
         else:
-            # No workspace root resolved (rare — daemon startup with
-            # no JAATO_WORKSPACE_ROOT env var and no workspace_root
-            # config).  Fall back to the legacy CWD-relative default
-            # so the plugin doesn't crash; operator must inspect.
-            logger.warning(
-                "file_edit: no workspace_root resolved; falling back "
-                "to CWD-relative .jaato/backups.  Set workspace_root "
-                "in plugin config or JAATO_WORKSPACE_ROOT env var to "
-                "anchor backups inside the workspace.",
-            )
-            self._backup_manager = BackupManager()
+            self._config_root = _detect_config_root()
+
+        # Cache derivation inputs so subsequent broadcasts
+        # (set_config_root / set_workspace_path) can rebuild the
+        # backup-manager path without losing operator-supplied state.
+        self._explicit_backup_dir = config.get("backup_dir")
+        self._session_id = config.get("session_id")
+
+        self._reinit_backup_manager()
 
         # Ensure .jaato is in .gitignore
         self._ensure_gitignore()
@@ -183,7 +196,73 @@ class FileEditPlugin(RunnerForwardingMixin):
         self._initialized = True
         backup_dir_str = str(self._backup_manager._base_dir) if self._backup_manager else "none"
         workspace_str = self._workspace_root or "none"
-        self._trace(f"initialize: backup_dir={backup_dir_str}, workspace_root={workspace_str}")
+        config_root_str = self._config_root or "none"
+        self._trace(
+            f"initialize: backup_dir={backup_dir_str}, "
+            f"workspace_root={workspace_str}, "
+            f"config_root={config_root_str}"
+        )
+
+    def _resolve_backup_base_dir(self) -> Optional[Path]:
+        """Resolve the backup base directory from current anchor state.
+
+        Priority:
+          1. ``self._explicit_backup_dir`` (operator override)
+          2. ``<config_root>/sessions/<session_id>/backups`` (session-scoped)
+          3. ``<config_root>/backups`` (when no session_id)
+          4. ``<workspace_root>/.jaato/sessions/<session_id>/backups``
+             (config_root unset — fallback to workspace convention)
+          5. ``<workspace_root>/.jaato/backups`` (config_root + session_id unset)
+          6. ``None`` — neither anchor known; caller falls back to
+             :class:`BackupManager`'s legacy CWD-relative behavior
+             with a WARNING.
+
+        Returns the resolved path or ``None`` when neither anchor
+        is available.
+        """
+        if self._explicit_backup_dir:
+            return Path(self._explicit_backup_dir)
+        if self._config_root:
+            base = Path(self._config_root)
+            if self._session_id:
+                return base / "sessions" / self._session_id / "backups"
+            return base / "backups"
+        if self._workspace_root:
+            # config_root unset → fall back to the workspace-convention
+            # ``<workspace>/.jaato/...``.  Typical interactive sessions
+            # where the daemon hasn't pushed a config_root override land
+            # here; the path collapses to the same physical location as
+            # config_root would in that setup.
+            base = Path(self._workspace_root) / ".jaato"
+            if self._session_id:
+                return base / "sessions" / self._session_id / "backups"
+            return base / "backups"
+        return None
+
+    def _reinit_backup_manager(self) -> None:
+        """Rebuild ``self._backup_manager`` from current anchor state.
+
+        Called from :meth:`initialize` and from the
+        :meth:`set_config_root` / :meth:`set_workspace_path`
+        broadcast handlers so a workspace/config-root change after
+        plugin init actually moves the backup root — not just the
+        in-memory copy of the value.
+        """
+        base = self._resolve_backup_base_dir()
+        if base is not None:
+            self._backup_manager = BackupManager(base)
+            return
+        # No anchor known — log loud and use BackupManager's legacy
+        # CWD-relative default so the plugin doesn't crash.  The
+        # operator should set ``workspace_root`` / ``config_root`` in
+        # plugin config or via the ContextVar.
+        logger.warning(
+            "file_edit: no config_root or workspace_root resolved; "
+            "falling back to CWD-relative .jaato/backups.  Set "
+            "workspace_root / config_root in plugin config or via "
+            "JAATO_WORKSPACE_ROOT / JAATO_CONFIG_ROOT env vars.",
+        )
+        self._backup_manager = BackupManager()
 
         # Log .jaato symlink detection for visibility
         if self._workspace_root:
@@ -197,6 +276,9 @@ class FileEditPlugin(RunnerForwardingMixin):
         self._backup_manager = None
         self._initialized = False
         self._workspace_root = None
+        self._config_root = None
+        self._session_id = None
+        self._explicit_backup_dir = None
         self._plugin_registry = None
 
     def set_plugin_registry(self, registry) -> None:
@@ -225,6 +307,9 @@ class FileEditPlugin(RunnerForwardingMixin):
         """Update the workspace root path.
 
         Called when a client connects with a different working directory.
+        Refreshes the backup manager so the new path actually takes
+        effect (broadcast updates the in-memory value AND the
+        backup-root anchor; pre-fix update only touched the value).
 
         Args:
             path: The new workspace root path, or None to disable sandboxing.
@@ -234,6 +319,33 @@ class FileEditPlugin(RunnerForwardingMixin):
         else:
             self._workspace_root = None
         self._trace(f"set_workspace_path: workspace_root={self._workspace_root}")
+        if self._initialized:
+            self._reinit_backup_manager()
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Update the config root path.
+
+        Broadcast by :meth:`shared.plugins.registry.PluginRegistry.set_config_root`
+        after a session resolves its config_root (workspace ``.jaato/``
+        in typical use, or an explicit override from
+        :class:`ClientConfigRequest.config_root`).  Mirrors the
+        established hook on the 5 sibling plugins (references,
+        subagent, prompt_library, template, service_connector).
+        Refreshes the backup manager so backups follow the new
+        anchor — backup root is meta-state and belongs with the
+        rest of the framework's meta-state under config_root, NOT
+        in the workspace.
+
+        Args:
+            path: The new config root path, or None to clear.
+        """
+        if path:
+            self._config_root = os.path.realpath(os.path.abspath(path))
+        else:
+            self._config_root = None
+        self._trace(f"set_config_root: config_root={self._config_root}")
+        if self._initialized:
+            self._reinit_backup_manager()
 
     def _is_path_allowed(self, path: str, mode: str = "read") -> bool:
         """Check if a path is allowed for access.
