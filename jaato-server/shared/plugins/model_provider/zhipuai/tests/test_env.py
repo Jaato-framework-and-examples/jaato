@@ -26,6 +26,49 @@ class TestResolveApiKey:
         with patch.dict('os.environ', {'ZHIPUAI_API_KEY': 'test-key-123'}):
             assert resolve_api_key() == 'test-key-123'
 
+    def test_from_jaato_namespaced_env_var(self):
+        """Should return API key from JAATO_ZHIPUAI_API_KEY.
+
+        Server 0.6.123+: jaato-namespaced env var added for consistency
+        with the JAATO_<PROVIDER>_API_KEY convention used by openrouter,
+        nim, etc.  Workspace ``.env`` values flow through
+        ``_resolve_secret_uri`` daemon-side so
+        ``JAATO_ZHIPUAI_API_KEY=pass://...`` resolves before reaching
+        the runner.
+        """
+        with patch.dict(
+            'os.environ',
+            {'JAATO_ZHIPUAI_API_KEY': 'jaato-namespaced-key'},
+            clear=True,
+        ):
+            assert resolve_api_key() == 'jaato-namespaced-key'
+
+    def test_jaato_namespaced_wins_over_legacy(self):
+        """When both env vars are set, JAATO_ZHIPUAI_API_KEY wins.
+
+        Resolution order documents JAATO_-namespaced as recommended;
+        the legacy ``ZHIPUAI_API_KEY`` is a fallback for backward
+        compat with direct shell exports / pre-existing .env files.
+        """
+        with patch.dict(
+            'os.environ',
+            {
+                'JAATO_ZHIPUAI_API_KEY': 'jaato-wins',
+                'ZHIPUAI_API_KEY': 'legacy-loses',
+            },
+            clear=True,
+        ):
+            assert resolve_api_key() == 'jaato-wins'
+
+    def test_legacy_env_var_still_works_alone(self):
+        """``ZHIPUAI_API_KEY`` alone still works (backward compat)."""
+        with patch.dict(
+            'os.environ',
+            {'ZHIPUAI_API_KEY': 'legacy-only'},
+            clear=True,
+        ):
+            assert resolve_api_key() == 'legacy-only'
+
 
 class TestResolveBaseUrl:
     """Tests for base URL resolution."""

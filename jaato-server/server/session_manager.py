@@ -1625,8 +1625,20 @@ class SessionManager:
         preloaded = set(
             getattr(profile, "preloaded_plugins", set()) or set(),
         )
-        plugin_configs = dict(
+        # Server 0.6.123+: values flow through ``expand_plugin_configs``
+        # so ``${VAR}`` references AND secret URIs (``pass://`` /
+        # ``vault://``) resolve daemon-side before the isolated
+        # subagent's runner sees them.  Same wire-gap class as PR #139
+        # (completion_validators) and the v118 zhipuai diagnosis.
+        # AppArmor-confined runners can't exec ``pass``, so resolution
+        # must happen here.
+        from shared.plugins.subagent.config import expand_plugin_configs
+        raw_plugin_configs = dict(
             getattr(profile, "plugin_configs", {}) or {},
+        )
+        plugin_configs = expand_plugin_configs(
+            raw_plugin_configs,
+            workspace_root_override=workspace_path,
         )
         plugin_specs = []
         for name in plugins_list:

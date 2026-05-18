@@ -251,6 +251,79 @@ def test_plugin_configs_attached_to_envelope_specs() -> None:
         )
 
 
+def test_plugin_configs_var_references_expanded_daemon_side() -> None:
+    """Server 0.6.123+: ``${VAR}`` references in plugin_configs values
+    expand daemon-side before reaching the runner.
+
+    Pre-0.6.123 the envelope carried profile.plugin_configs LITERALLY,
+    so values like ``"${HOME}/.config"`` reached the runner unresolved.
+    Same wire-gap class as the completion_validators fix in PR #139.
+    """
+    import os
+    profile = _stub_profile(
+        provider="anthropic",
+        model="m",
+        plugin_configs={
+            "lsp": {"config_path": "${HOME}/.lsp.json"},
+        },
+    )
+    env = _build_session_envelope(
+        server=_stub_server(profile=profile),
+        session_id="s",
+        workspace_path="/tmp/ws",
+        profile_name="x",
+    )
+    expected = f"{os.environ['HOME']}/.lsp.json"
+    assert env.plugin_configs["lsp"]["config_path"] == expected, (
+        f"Expected ${{HOME}} to expand daemon-side; got "
+        f"{env.plugin_configs['lsp']['config_path']!r}"
+    )
+
+
+def test_plugin_configs_pass_uri_resolves_daemon_side(monkeypatch) -> None:
+    """Server 0.6.123+: ``pass://`` URIs in plugin_configs values
+    resolve daemon-side via the secret resolver chain.
+
+    Trust posture: resolved plaintext on the daemon↔runner socketpair
+    (same as envelope.session_env per PR #91 → #92), never persisted
+    or forwarded.  Closes the v118 zhipuai diagnosis — kb authors can
+    now declare ``plugin_configs.zhipuai.api_key: pass://...`` and the
+    AppArmor-confined runner never has to exec ``pass`` itself.
+    """
+    from shared.plugins.subagent import config as _subagent_config
+
+    # Stub the secret resolver to a known value rather than touching
+    # an actual pass store on the test host.  We patch the resolver
+    # so any ``pass://`` URI returns the stub value.
+    def _stub_resolve_secret_uri(value):
+        if isinstance(value, str) and value.startswith("pass://"):
+            return f"RESOLVED({value})"
+        return value
+
+    monkeypatch.setattr(
+        _subagent_config, "_resolve_secret_uri", _stub_resolve_secret_uri,
+    )
+    profile = _stub_profile(
+        provider="zhipuai",
+        model="glm-5-turbo",
+        plugin_configs={
+            "zhipuai": {"api_key": "pass://jaato/zhipuai/api-key"},
+        },
+    )
+    env = _build_session_envelope(
+        server=_stub_server(profile=profile),
+        session_id="s",
+        workspace_path="/tmp/ws",
+        profile_name="x",
+    )
+    assert env.plugin_configs["zhipuai"]["api_key"] == (
+        "RESOLVED(pass://jaato/zhipuai/api-key)"
+    ), (
+        "pass:// URI must resolve daemon-side before reaching runner; "
+        f"got {env.plugin_configs['zhipuai']['api_key']!r}"
+    )
+
+
 def test_plugin_configs_for_unlisted_plugin_carried_through() -> None:
     """Phase 4 §C: plugin_configs entries for plugins NOT in the
     profile.plugins list are now carried in the envelope (closes
