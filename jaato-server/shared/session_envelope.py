@@ -115,10 +115,14 @@ class SessionInitEnvelope:
             dict or string path resolved via
             ``.jaato/completion_schemas/``.  ``None`` = legacy
             untyped completion.
-        completion_artifacts: Profile-declared output artefacts
-            (renderer / output / on_error specs) the runner's
-            ``LifecycleTools`` runs after a validated
-            ``signal_completion``.  Empty list = legacy behaviour.
+        completion_processors: Profile-declared completion processors
+            (server 0.6.125+).  Each entry is a serialised
+            ``CompletionProcessor`` dict (``script`` / ``output`` /
+            ``on_error`` / ``description``).  Runner-side
+            ``LifecycleTools`` invokes them after
+            ``signal_completion`` validates; processors expose
+            ``render`` and/or ``validate`` symbols (probe-by-symbol).
+            Empty list = no processors.
         agent_params: Spawn-time parameters from the parent caller
             (``agent_params={...}`` on ``spawn_subagent``).  Carried
             into dynamic-instructions render-context.  Empty for
@@ -179,18 +183,17 @@ class SessionInitEnvelope:
     agent_id: str = "main"
     gc: Optional[Dict[str, Any]] = None
     completion_payload_schema: Optional[Any] = None
-    completion_artifacts: List[Dict[str, Any]] = field(default_factory=list)
-    # Profile-declared completion validators (server 0.6.121+).  Each
-    # entry is a path string (absolute, ``<config_root>/<path>``, or
-    # ``~/.jaato/<path>``) to a kb-authored Python module exposing
-    # ``validate(payload, tool_calls, workspace_path, ctx) -> list[str]``.
-    # Runner-side ``LifecycleTools._execute_signal_completion`` invokes
-    # them AFTER ``jsonschema.validate`` passes; non-empty error list
-    # returns the same ``validation_failed`` shape as a schema failure.
-    # Empty list = no semantic checks (legacy behaviour).  See
-    # ``shared/completion_validators.py`` for the loader + ledger
-    # builder.
-    completion_validators: List[str] = field(default_factory=list)
+    # Profile-declared completion processors (server 0.6.125+).  Each
+    # entry is a serialised ``CompletionProcessor`` dict shaped like
+    # ``{"script": ..., "output": ..., "on_error": ..., "description": ...}``.
+    # Runner-side ``LifecycleTools._execute_signal_completion`` runs
+    # each processor after ``jsonschema.validate`` passes — modules
+    # may expose ``render`` (produces output content) and/or
+    # ``validate`` (returns error strings).  Replaces the prior split
+    # between ``completion_artifacts`` and ``completion_validators``
+    # — see ``shared/completion_processors.py`` for the loader,
+    # ledger builder, and per-processor invocation pipeline.
+    completion_processors: List[Dict[str, Any]] = field(default_factory=list)
     agent_params: Dict[str, str] = field(default_factory=dict)
     config_root: Optional[str] = None
     env_overrides: Dict[str, str] = field(default_factory=dict)
@@ -237,8 +240,7 @@ class SessionInitEnvelope:
             "agent_id": self.agent_id,
             "gc": dict(self.gc) if self.gc is not None else None,
             "completion_payload_schema": self.completion_payload_schema,
-            "completion_artifacts": [dict(a) for a in self.completion_artifacts],
-            "completion_validators": list(self.completion_validators),
+            "completion_processors": [dict(p) for p in self.completion_processors],
             "agent_params": dict(self.agent_params),
             "config_root": self.config_root,
             "env_overrides": dict(self.env_overrides),
@@ -291,12 +293,9 @@ class SessionInitEnvelope:
             agent_id=str(d.get("agent_id", "main")),
             gc=dict(d["gc"]) if d.get("gc") else None,
             completion_payload_schema=d.get("completion_payload_schema"),
-            completion_validators=[
-                str(v) for v in (d.get("completion_validators") or [])
-                if isinstance(v, str)
-            ],
-            completion_artifacts=[
-                dict(a) for a in (d.get("completion_artifacts") or [])
+            completion_processors=[
+                dict(p) for p in (d.get("completion_processors") or [])
+                if isinstance(p, dict)
             ],
             agent_params=dict(d.get("agent_params") or {}),
             config_root=d.get("config_root"),

@@ -255,27 +255,22 @@ class JaatoSession:
         # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
         self._completion_payload_schema: Optional[Any] = None
 
-        # Profile-declared output artefacts.  Each entry is a
-        # ``CompletionArtifact`` (renderer / output / on_error) — when
+        # Profile-declared completion processors (kb-authored Python
+        # under ``.jaato/scripts/processors/``).  Each entry is a
+        # ``CompletionProcessor`` carrying a script path + optional
+        # output template + on_error policy.  After
         # ``signal_completion`` validates against
         # ``_completion_payload_schema``, ``LifecycleTools`` runs each
-        # renderer in turn, passing the validated payload, and writes
-        # the result to the templated output path.  Empty list = legacy
-        # behaviour (agents call ``writeNewFile`` themselves).
-        # ``CompletionArtifact`` typed as ``Any`` here to avoid a top-
-        # level subagent-config import; concrete type is
-        # ``shared.plugins.subagent.config.CompletionArtifact``.
-        self._completion_artifacts: List[Any] = []
-
-        # Profile-declared completion validators (kb-authored Python
-        # modules that semantically check the signal_completion
-        # payload AFTER ``jsonschema.validate`` passes).  Each entry is
-        # a path string resolved via
-        # :func:`shared.script_loader.resolve_script_path` at first
-        # signal_completion invocation (lazy load — keeps session
-        # bootstrap fast).  Empty list = no semantic checks.  See
-        # ``shared/completion_validators.py`` for the contract.
-        self._completion_validators: List[str] = []
+        # processor in turn: probes for ``render`` (produces output
+        # bytes, optionally writes to disk) and/or ``validate``
+        # (returns error list, blocks completion).  Empty list = no
+        # processors (agents handle output themselves; no semantic
+        # post-checks).  ``CompletionProcessor`` typed as ``Any`` here
+        # to avoid a top-level subagent-config import; concrete type
+        # is ``shared.plugins.subagent.config.CompletionProcessor``.
+        # See ``shared/completion_processors.py`` for the loader,
+        # ledger builder, and invocation pipeline.
+        self._completion_processors: List[Any] = []
 
         # Completion lifecycle tracking — flipped True by
         # ``LifecycleTools._execute_signal_completion`` on the first
@@ -1626,8 +1621,7 @@ class JaatoSession:
         completion_payload_schema: Optional[Any] = None,
         tier_config: Optional['ModelTierConfig'] = None,
         agent_params: Optional[Dict[str, Any]] = None,
-        completion_artifacts: Optional[List[Any]] = None,
-        completion_validators: Optional[List[str]] = None,
+        completion_processors: Optional[List[Any]] = None,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1682,17 +1676,12 @@ class JaatoSession:
         if agent_params is not None:
             self._agent_params = dict(agent_params)
 
-        # Profile-declared output artefacts (rendered after
-        # signal_completion validates).  See ``_completion_artifacts``
-        # doc in __init__.
-        if completion_artifacts is not None:
-            self._completion_artifacts = list(completion_artifacts)
-
-        # Profile-declared completion validators.  See
-        # ``_completion_validators`` doc in __init__ for the contract
-        # and ``shared/completion_validators.py`` for the loader.
-        if completion_validators is not None:
-            self._completion_validators = list(completion_validators)
+        # Profile-declared completion processors.  See
+        # ``_completion_processors`` doc in __init__ for the contract
+        # and ``shared/completion_processors.py`` for the loader +
+        # invocation pipeline.
+        if completion_processors is not None:
+            self._completion_processors = list(completion_processors)
 
         # Tier mode: when a tier_config is supplied, the session's
         # initial model is overridden by the initial tier's model so the

@@ -124,7 +124,7 @@ in the project memory and the
 ``docs/design/payload-schema-conventions.md`` design document
 (unified spawn-side + completion-side guide).
 
-**Semantic validators (server 0.6.121+).**  Some bugs are
+**Completion processors (server 0.6.125+).**  Some bugs are
 structurally well-formed but semantically false — the agent's
 payload validates against the schema yet its claims contradict the
 session's actual tool-call history.  Concrete example
@@ -134,55 +134,59 @@ with 20 entries, 6 of which were fabricated — their
 doesn't know about tool-call history and the agent rationalized
 success.
 
-Profiles can declare a list of kb-authored Python validators that
-run AFTER ``jsonschema.validate`` passes::
+Profiles declare a list of kb-authored Python processors that
+run AFTER ``jsonschema.validate`` passes.  This is one unified
+surface (replacing the prior ``completion_artifacts`` +
+``completion_validators`` split) — each processor module can
+PRODUCE output and/or VALIDATE the payload via probe-by-symbol::
 
     {
       "name": "codegen",
       "completion_payload_schema": "completion_schemas/step_result.json",
-      "completion_validators": [
-        "scripts/validators/codegen_files_exist.py",
-        "scripts/validators/codegen_render_succeeded.py"
+      "completion_processors": [
+        {"script": "scripts/processors/codegen_files_exist.py",
+         "on_error": "fail_completion"},
+        {"script": "scripts/processors/render_audit.py",
+         "output": "audit/{case_id}.json"}
       ]
     }
 
-Each validator is a Python module exposing one top-level callable::
+Each module exposes one or both top-level callables::
 
-    def validate(
-        payload: dict,                    # the schema-validated args
-        tool_calls: list[dict],           # pre-computed ledger
-        workspace_path: pathlib.Path,     # session workspace dir
-        ctx: dict,                        # agent_params + session metadata
-    ) -> list[str]:                       # empty = OK; non-empty = errors
+    def render(payload: dict, context: RenderContext) -> str | bytes:
+        # Produces output content; written to disk when the entry
+        # declares ``output:`` — validator-as-renderer when ``output``
+        # is omitted.
 
-``tool_calls`` is a list of dicts in chronological order, each with
-keys ``name`` (str), ``args`` (dict), ``result`` (dict — failed
-calls carry ``{"error": "...", "message": "..."}``), ``success``
-(bool — ``"error" not in result``), ``call_id`` (str), and
-``turn_index`` (int).  Author validators against this stable dict
-contract — no framework types need importing.
+    def validate(payload: dict, context: RenderContext) -> list[str]:
+        # Returns error strings; empty = pass, non-empty = block
+        # completion per ``on_error`` policy.
 
-Paths in the profile field resolve via the same loader as prefetch
-scripts and reactor handlers — see
-:func:`shared.script_loader.resolve_script_path`:
+``context.tool_calls`` carries the pre-computed ledger of every
+function_call + function_response in the session (paired by
+call_id) — use it to cross-check payload claims against actual
+tool outcomes.  See
+:class:`shared.dynamic_instructions.RenderContext` for the full
+context shape.
+
+Paths resolve via the same loader as prefetch scripts and reactor
+handlers — see :func:`shared.script_loader.resolve_script_path`:
 
 1. absolute path → as-is
 2. ``<config_root>/<path>`` (workspace-tier kb)
 3. ``~/.jaato/<path>`` (user-tier fallback)
 
-Validators run AFTER schema validation and BEFORE artifact
-rendering.  Errors from any validator are aggregated (not
-short-circuited — the agent sees the full picture on retry) and
-returned as the same ``validation_failed`` shape used by schema
-failures.  See ``shared/completion_validators.py`` for the
-implementation and ``shared/tests/test_completion_validators.py``
-for end-to-end examples.
+Errors from any processor are aggregated (not short-circuited —
+the agent sees the full picture on retry) and returned as the
+same ``validation_failed`` shape used by schema failures.  See
+``shared/completion_processors.py`` for the implementation and
+``shared/tests/test_completion_processors.py`` for end-to-end
+examples.
 """
 
 import logging
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
@@ -224,17 +228,16 @@ class LifecycleTools:
                 getattr(session, 'runtime', None), '_config_root', None,
             ),
         )
-        # Lazy-loaded completion validators (kb-authored Python).  None
+        # Lazy-loaded completion processors (kb-authored Python).  None
         # until the first ``signal_completion`` call resolves the
-        # configured paths via ``shared.completion_validators.load_validators``;
-        # subsequent calls in the same session reuse the cached list.
-        # Each tuple is ``(path_str, callable_or_None, load_error_or_None)``;
-        # entries with a non-None load_error are surfaced as validation
-        # errors so the kb author sees the typo / missing-symbol issue
-        # at signal time.
-        self._validators_loaded: Optional[
-            List[Tuple[str, Optional[Any], Optional[str]]]
-        ] = None
+        # configured entries via
+        # ``shared.completion_processors.load_processors``; subsequent
+        # calls in the same session reuse the cached list.  Each
+        # element is a ``LoadedProcessor`` carrying the original
+        # ``CompletionProcessor`` entry plus probed ``render`` /
+        # ``validate`` callables; ``load_error`` surfaces typos /
+        # missing symbols to the agent at signal time.
+        self._processors_loaded: Optional[List[Any]] = None
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ``signal_completion`` schema for the active profile.
@@ -507,33 +510,34 @@ class LifecycleTools:
                 else ""
             )
 
-        # Profile-declared semantic validators (kb-authored Python).
-        # Runs AFTER ``jsonschema.validate`` passes and BEFORE artifact
-        # rendering — same retry contract as schema validation: any
-        # validator error returns the same ``validation_failed`` shape
-        # so the agent retries within ``max_turns``.
-        #
-        # Catches the "structurally-well-formed-but-semantically-false"
-        # bug class (v117 kb-enablement-2.0 evidence): payload validates
-        # against the schema but its claims contradict the session's
-        # actual tool-call history or the workspace filesystem.  See
-        # ``shared/completion_validators.py`` for the contract.
-        configured_validators = getattr(
-            self._session, "_completion_validators", []
+        # Unified completion processors (server 0.6.125+) — kb-authored
+        # Python that both PRODUCES output (render symbol) and VALIDATES
+        # the payload (validate symbol).  Replaces the prior split
+        # between completion_artifacts and completion_validators.
+        # Runs AFTER ``jsonschema.validate`` passes; any
+        # ``on_error: fail_completion`` failure returns the same
+        # ``validation_failed`` shape so the agent retries within
+        # ``max_turns``.  See ``shared/completion_processors.py`` for
+        # the loader, ledger builder, and per-processor invocation.
+        configured_processors = getattr(
+            self._session, "_completion_processors", []
         ) or []
-        if configured_validators and payload is not None:
-            from .completion_validators import (
+        processor_outcome = None
+        if configured_processors and payload is not None:
+            from .completion_processors import (
                 build_tool_call_ledger,
-                invoke_validators,
-                load_validators,
+                collect_failure_messages,
+                invoke_processors,
+                load_processors,
             )
-            if self._validators_loaded is None:
+            from .dynamic_instructions import build_render_context
+            if self._processors_loaded is None:
                 workspace_path_str = getattr(self._session, "workspace_path", None)
                 config_root_str = getattr(
                     getattr(self._session, "runtime", None), "_config_root", None,
                 )
-                self._validators_loaded = load_validators(
-                    configured_validators,
+                self._processors_loaded = load_processors(
+                    configured_processors,
                     workspace_path=workspace_path_str,
                     config_root=config_root_str,
                 )
@@ -542,38 +546,45 @@ class LifecycleTools:
             except Exception:
                 history = []
             ledger = build_tool_call_ledger(history)
-            workspace_path_obj = Path(
-                getattr(self._session, "workspace_path", None) or "."
-            )
-            validator_ctx = {
-                "agent_params": getattr(self._session, "_agent_params", {}) or {},
-                "agent_id": getattr(self._session, "_agent_id", "main"),
-            }
-            validator_errors = invoke_validators(
-                self._validators_loaded,
-                payload=payload,
+            ctx = build_render_context(
+                self._session,
+                agent_params=getattr(self._session, "_agent_params", {}),
                 tool_calls=ledger,
-                workspace_path=workspace_path_obj,
-                ctx=validator_ctx,
             )
-            if validator_errors:
+            processor_outcome = invoke_processors(
+                self._processors_loaded,
+                payload=payload,
+                context=ctx,
+            )
+            if processor_outcome.has_fatal:
+                failure_messages = collect_failure_messages(processor_outcome)
                 logger.info(
-                    "signal_completion: %d completion-validator error(s); "
+                    "signal_completion: %d completion-processor error(s); "
                     "returning self-correction prompt",
-                    len(validator_errors),
+                    len(failure_messages),
                 )
                 return {
                     "error": "validation_failed",
                     "message": (
-                        "Your payload structure was valid, but one or more "
-                        "completion validators reported semantic problems. "
-                        "Read each error below carefully, fix the underlying "
-                        "issue (e.g. surface failed tool calls in errors[], "
-                        "remove fabricated entries, or retry the failed "
-                        "tool calls), then call signal_completion again."
+                        "Your payload structure was valid, but one or "
+                        "more completion processors reported errors. "
+                        "Read each error below carefully, fix the "
+                        "underlying issue (e.g. surface failed tool "
+                        "calls in errors[], remove fabricated entries, "
+                        "retry failed tool calls, or correct payload "
+                        "fields a renderer needs), then call "
+                        "signal_completion again."
                     ),
-                    "validator_errors": validator_errors,
+                    "processor_errors": failure_messages,
                 }
+            # Soft failures — log but proceed.
+            for proc, msg in processor_outcome.warned:
+                logger.warning(
+                    "completion-processor warned (script=%s output=%s): %s",
+                    getattr(proc, "script", None),
+                    getattr(proc, "output", None),
+                    msg,
+                )
 
         hooks = getattr(self._session, '_ui_hooks', None)
         if not hooks or not hasattr(hooks, 'on_agent_completed'):
@@ -596,73 +607,6 @@ class LifecycleTools:
             if k in ('total_tokens', 'prompt_tokens', 'output_tokens')
             and isinstance(v, int)
         }
-        # Render profile-declared completion artefacts, if any.  This
-        # is the output-side body-wired counterpart to dynamic-
-        # instructions prefetch: deterministic projection of the
-        # validated payload onto disk, executed by the framework so
-        # the agent never had to call writeNewFile itself for files
-        # whose content is a function of the payload alone.  See
-        # ``shared/dynamic_instructions.py:render_completion_artifacts``.
-        # When a renderer with ``on_error="fail_completion"`` fails,
-        # we surface the error to the model as a structured retry
-        # prompt — same pattern as schema validation failure — and
-        # do NOT fire on_agent_completed (the completion isn't really
-        # complete until its mandatory side effects landed).
-        artifacts = getattr(self._session, "_completion_artifacts", None) or []
-        if artifacts and payload is not None:
-            from .dynamic_instructions import (
-                build_render_context,
-                render_completion_artifacts,
-            )
-            ctx = build_render_context(
-                self._session,
-                agent_params=getattr(self._session, "_agent_params", {}),
-            )
-            artifact_outcome = render_completion_artifacts(payload, ctx, artifacts)
-            if artifact_outcome.failed:
-                # Hard failure — return self-correction prompt to the
-                # model.  The agent's signal_completion did NOT fire
-                # on_agent_completed, _signal_completion_called stays
-                # False, so the loop continues / nudge guard can act.
-                fail_lines = "\n".join(
-                    f"- {getattr(a, 'output', '?')}: {msg}"
-                    for a, msg in artifact_outcome.failed
-                )
-                logger.error(
-                    "signal_completion: %d artefact(s) failed to render; "
-                    "returning self-correction prompt:\n%s",
-                    len(artifact_outcome.failed), fail_lines,
-                )
-                return {
-                    "error": "artifact_render_failed",
-                    "message": (
-                        "signal_completion succeeded validation but "
-                        "the framework could not render the profile's "
-                        "required output artefact(s).  Inspect the "
-                        "error(s) below, fix any payload fields the "
-                        "renderer needs, and call signal_completion "
-                        "again."
-                    ),
-                    "artifact_errors": [
-                        {
-                            "output": getattr(a, "output", None),
-                            "renderer": getattr(a, "renderer", None),
-                            "error": msg,
-                        }
-                        for a, msg in artifact_outcome.failed
-                    ],
-                }
-            # Soft failures — log but proceed.
-            for artifact, msg in artifact_outcome.warned:
-                logger.warning(
-                    "completion-artifact warned (output=%s renderer=%s): %s",
-                    getattr(artifact, "output", None),
-                    getattr(artifact, "renderer", None),
-                    msg,
-                )
-        else:
-            artifact_outcome = None
-
         hooks.on_agent_completed(
             agent_id=agent_id,
             completed_at=datetime.now(),
@@ -692,6 +636,6 @@ class LifecycleTools:
         }
         if payload is not None:
             result["payload"] = payload
-        if artifact_outcome and artifact_outcome.written:
-            result["artifacts_written"] = list(artifact_outcome.written)
+        if processor_outcome and processor_outcome.written:
+            result["artifacts_written"] = list(processor_outcome.written)
         return result

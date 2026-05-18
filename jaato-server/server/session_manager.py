@@ -1161,7 +1161,7 @@ class SessionManager:
                 contract (model, provider, plugins, plugin_configs,
                 system_instructions, gc, env, runtime_limits,
                 completion_payload_schema, spawn_payload_schema,
-                completion_artifacts, model_tiers,
+                completion_processors, model_tiers,
                 suppress_base_instructions, max_turns).
             task: First-turn prompt for the isolated runner.  §4.3.3
                 does NOT consume this; §4.3.6's forwarding will.
@@ -1749,18 +1749,15 @@ class SessionManager:
             completion_payload_schema=getattr(
                 profile, "completion_payload_schema", None,
             ),
-            completion_validators=list(
-                getattr(profile, "completion_validators", []) or []
-            ),
-            completion_artifacts=[
+            completion_processors=[
                 {
-                    "renderer": getattr(a, "renderer", None),
-                    "output": getattr(a, "output", None),
-                    "on_error": getattr(a, "on_error", "warn"),
-                    "description": getattr(a, "description", None),
+                    "script": getattr(p, "script", None),
+                    "output": getattr(p, "output", None),
+                    "on_error": getattr(p, "on_error", "fail_completion"),
+                    "description": getattr(p, "description", None),
                 }
-                for a in (getattr(profile, "completion_artifacts", []) or [])
-                if hasattr(a, "renderer")
+                for p in (getattr(profile, "completion_processors", []) or [])
+                if hasattr(p, "script")
             ],
         )
 

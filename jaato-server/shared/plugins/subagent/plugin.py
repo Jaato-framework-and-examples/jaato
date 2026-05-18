@@ -496,10 +496,7 @@ class SubagentPlugin:
                     provider_name=provider,
                     preloaded_plugins=profile.preloaded_plugins or None,
                     completion_payload_schema=profile.completion_payload_schema,
-                    completion_artifacts=profile.completion_artifacts,
-                    completion_validators=getattr(
-                        profile, "completion_validators", None,
-                    ) or None,
+                    completion_processors=profile.completion_processors or None,
                 )
 
                 # Restore parent session reference (was overwritten by configure())
@@ -3120,10 +3117,7 @@ class SubagentPlugin:
                 preloaded_plugins=profile.preloaded_plugins or None,
                 agent_params=agent_params,
                 completion_payload_schema=profile.completion_payload_schema,
-                completion_artifacts=profile.completion_artifacts,
-                completion_validators=getattr(
-                    profile, "completion_validators", None,
-                ) or None,
+                completion_processors=profile.completion_processors or None,
                 suppress_base_instructions=getattr(profile, 'suppress_base_instructions', False),
             )
             logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")

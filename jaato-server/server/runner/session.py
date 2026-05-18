@@ -860,6 +860,40 @@ def _validate_envelope(envelope: SessionInitEnvelope) -> None:
     # (inline-spec sessions don't carry a profile name).
 
 
+def _processors_from_envelope(
+    envelope: SessionInitEnvelope,
+) -> List[Any]:
+    """Reconstruct ``CompletionProcessor`` instances from wire-dict shape.
+
+    The wire envelope carries processors as a list of plain dicts
+    (``{"script": ..., "output": ..., "on_error": ..., "description": ...}``)
+    so the daemon ↔ runner socketpair doesn't require importing
+    ``shared.plugins.subagent.config.CompletionProcessor`` on both
+    sides of the boundary.  The runner reconstructs the dataclass
+    here because ``LifecycleTools`` reads attributes (``.script``,
+    ``.output``, ``.on_error``) not dict keys.
+
+    Server 0.6.125+ — replaces the prior ``completion_artifacts`` +
+    ``completion_validators`` envelope fields, both of which used
+    the same wire-dict-reconstruction pattern.
+    """
+    from shared.plugins.subagent.config import CompletionProcessor
+    out: List[Any] = []
+    for entry in envelope.completion_processors or []:
+        if not isinstance(entry, dict):
+            continue
+        script = entry.get("script")
+        if not isinstance(script, str) or not script.strip():
+            continue
+        out.append(CompletionProcessor(
+            script=script.strip(),
+            output=entry.get("output"),
+            on_error=entry.get("on_error", "fail_completion"),
+            description=entry.get("description"),
+        ))
+    return out
+
+
 def _build_session(
     runtime: "JaatoRuntime", envelope: SessionInitEnvelope,
 ) -> "JaatoSession":
@@ -922,11 +956,8 @@ def _build_session(
         preloaded_plugins=preloaded or None,
         completion_payload_schema=envelope.completion_payload_schema,
         agent_params=envelope.agent_params or None,
-        completion_artifacts=(
-            envelope.completion_artifacts or None
-        ),
-        completion_validators=(
-            envelope.completion_validators or None
+        completion_processors=(
+            _processors_from_envelope(envelope) or None
         ),
         tier_config=tier_config,
         # Thread the envelope's resolved agent_id into the runner-

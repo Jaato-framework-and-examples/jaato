@@ -2285,14 +2285,9 @@ class JaatoServer:
                     self._profile.completion_payload_schema
                 )
 
-            if self._profile.completion_artifacts:
-                kwargs["completion_artifacts"] = (
-                    self._profile.completion_artifacts
-                )
-
-            if self._profile.completion_validators:
-                kwargs["completion_validators"] = (
-                    self._profile.completion_validators
+            if self._profile.completion_processors:
+                kwargs["completion_processors"] = (
+                    self._profile.completion_processors
                 )
 
         # Per-turn model-tier config: profile-declared model_tiers win;

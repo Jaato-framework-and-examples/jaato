@@ -569,49 +569,59 @@ class TestCompletionPayloadSchema:
         assert env.completion_payload_schema is None
 
 
-class TestCompletionValidators:
-    """Pin: envelope.completion_validators is sourced from
-    ``profile.completion_validators`` instead of being silently dropped.
+class TestCompletionProcessorsPassdown:
+    """Pin: ``profile.completion_processors`` flow through to the
+    envelope as a list of wire-friendly dicts.
 
-    Regression guard (server 0.6.122+): pre-0.6.122 the envelope
-    dataclass declared the field but ``build_session_envelope`` never
-    populated it.  Runner-side ``runtime.create_session`` always got
-    an empty list, so the kb-authored semantic validators silently
-    didn't fire.  kb-enablement-2.0 v118 evidence: validator module
-    loaded fine in isolation but never invoked during cascade runs.
-    Same bug class as the 2026-05-12 ``completion_payload_schema``
-    omission.
+    Unified surface (server 0.6.125+) replacing the prior
+    ``completion_validators`` + ``completion_artifacts`` envelope
+    fields.  Each entry in the wire dict carries ``script`` (kb
+    Python path) + optional ``output`` (path template for render
+    surface) + ``on_error`` + ``description``.  Runner-side
+    ``_processors_from_envelope`` reconstructs the
+    ``CompletionProcessor`` dataclass.
     """
 
-    def test_validators_pass_through(self) -> None:
-        profile = _stub_profile(
-            completion_validators=[
-                "scripts/validators/codegen_files_exist.py",
-                "scripts/validators/codegen_render_succeeded.py",
-            ],
+    def test_processors_pass_through_as_dict(self) -> None:
+        from types import SimpleNamespace
+        proc1 = SimpleNamespace(
+            script="scripts/processors/codegen_files_exist.py",
+            output=None,
+            on_error="fail_completion",
+            description="Cross-check files[] against tool calls",
         )
+        proc2 = SimpleNamespace(
+            script="scripts/processors/render_report.py",
+            output="report.md",
+            on_error="warn",
+            description=None,
+        )
+        profile = _stub_profile(completion_processors=[proc1, proc2])
         env = _build_session_envelope(
             server=_stub_server(profile=profile),
             session_id="s",
             workspace_path="/tmp/ws",
             profile_name="x",
         )
-        assert env.completion_validators == [
-            "scripts/validators/codegen_files_exist.py",
-            "scripts/validators/codegen_render_succeeded.py",
-        ]
+        assert len(env.completion_processors) == 2
+        assert env.completion_processors[0]["script"] == (
+            "scripts/processors/codegen_files_exist.py"
+        )
+        assert env.completion_processors[0]["output"] is None
+        assert env.completion_processors[1]["output"] == "report.md"
+        assert env.completion_processors[1]["on_error"] == "warn"
 
-    def test_empty_list_when_profile_has_no_validators(self) -> None:
+    def test_empty_list_when_profile_has_no_processors(self) -> None:
         """Profile without the attribute → envelope carries empty
-        list (default).  Runner-side LifecycleTools skips invocation."""
-        profile = _stub_profile()  # no completion_validators set
+        list (default).  Runner-side LifecycleTools skips the pipeline."""
+        profile = _stub_profile()  # no completion_processors set
         env = _build_session_envelope(
             server=_stub_server(profile=profile),
             session_id="s",
             workspace_path="/tmp/ws",
             profile_name="x",
         )
-        assert env.completion_validators == []
+        assert env.completion_processors == []
 
     def test_empty_list_when_no_profile_at_all(self) -> None:
         env = _build_session_envelope(
@@ -620,32 +630,7 @@ class TestCompletionValidators:
             workspace_path="/tmp/ws",
             profile_name="auto",
         )
-        assert env.completion_validators == []
-
-
-class TestCompletionArtifactsPassdown:
-    """Pin: ``profile.completion_artifacts`` flow through to the
-    envelope.  Same wire-gap class as the validators above —
-    discovered during the v118 diagnostic on 2026-05-18."""
-
-    def test_artifacts_pass_through_as_dict(self) -> None:
-        from types import SimpleNamespace
-        artifact = SimpleNamespace(
-            renderer="markdown",
-            output="report.md",
-            on_error="warn",
-            description="Final report",
-        )
-        profile = _stub_profile(completion_artifacts=[artifact])
-        env = _build_session_envelope(
-            server=_stub_server(profile=profile),
-            session_id="s",
-            workspace_path="/tmp/ws",
-            profile_name="x",
-        )
-        assert len(env.completion_artifacts) == 1
-        assert env.completion_artifacts[0]["renderer"] == "markdown"
-        assert env.completion_artifacts[0]["output"] == "report.md"
+        assert env.completion_processors == []
 
 
 class TestModelTiersPassdown:
