@@ -2865,6 +2865,37 @@ class JaatoServer:
                         mode="write",
                     ))
 
+                # Enrich tool_args with a TUI-only display name for
+                # hashed identifiers (server 0.6.120+).  ``template_id``
+                # hashes by design (so the LLM can't pattern-match on the
+                # filename — see PR #136); the TUI needs the human name
+                # for the user-facing rendering.  Underscore prefix marks
+                # the field as UI-metadata, not a real tool argument.
+                # The executor never reads ``_template_name_display``.
+                #
+                # Same pattern would extend to any future hashed-id
+                # surface (subagent_id → display name, etc.) — keep the
+                # naming convention.
+                if tool_args and isinstance(tool_args, dict):
+                    template_id = tool_args.get("template_id")
+                    if (
+                        isinstance(template_id, str)
+                        and template_id.startswith("tpl_")
+                        and "_template_name_display" not in tool_args
+                    ):
+                        from shared.tool_id_map import id_to_name as _id_to_name
+                        resolved = _id_to_name(template_id)
+                        # When the id is unknown to this process,
+                        # ``id_to_name`` round-trips the id unchanged —
+                        # skip the enrichment in that case so the TUI
+                        # falls back to showing the raw id rather than
+                        # showing a "name" that's actually the id.
+                        if resolved != template_id:
+                            tool_args = {
+                                **tool_args,
+                                "_template_name_display": resolved,
+                            }
+
                 server.emit(ToolCallStartEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
