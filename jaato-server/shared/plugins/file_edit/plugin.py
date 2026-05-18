@@ -131,17 +131,50 @@ class FileEditPlugin(RunnerForwardingMixin):
         else:
             self._workspace_root = _detect_workspace_root()
 
-        # Initialize backup manager
-        # Priority: explicit backup_dir > session-scoped path > global default
+        # Initialize backup manager.  Priority: explicit backup_dir >
+        # session-scoped path > global default.
+        #
+        # Server 0.6.126+: when the plugin derives the backup path
+        # (no explicit ``backup_dir`` config), it anchors on
+        # ``self._workspace_root`` so backups live under
+        # ``<workspace>/.jaato/`` — where the AppArmor-confined runner
+        # actually has write permission.  Pre-0.6.126 the path was
+        # relative (``.jaato/sessions/<id>/backups``), and
+        # ``BackupManager.__init__`` resolved it against the daemon's
+        # CWD via ``Path(...).resolve()``.  On a daemon started from
+        # the jaato source tree, that produced
+        # ``<jaato-source>/.jaato/sessions/...`` — outside the runner's
+        # AppArmor grant.  v122 evidence: updateFile + findAndReplace
+        # both failed PermissionError; the agent had no honest path
+        # forward until the completion processor enforced honesty.
+        # Explicit ``backup_dir`` config still wins (absolute path
+        # honored as-is for operators who want a custom location).
         backup_dir = config.get("backup_dir")
         session_id = config.get("session_id")
         if backup_dir:
             self._backup_manager = BackupManager(Path(backup_dir))
-        elif session_id:
-            # Session-scoped backups align with session-scoped waypoints
-            session_backup_dir = Path(f".jaato/sessions/{session_id}/backups")
+        elif self._workspace_root and session_id:
+            # Session-scoped backups align with session-scoped waypoints.
+            session_backup_dir = (
+                Path(self._workspace_root) / ".jaato" / "sessions"
+                / session_id / "backups"
+            )
             self._backup_manager = BackupManager(session_backup_dir)
+        elif self._workspace_root:
+            self._backup_manager = BackupManager(
+                Path(self._workspace_root) / ".jaato" / "backups",
+            )
         else:
+            # No workspace root resolved (rare — daemon startup with
+            # no JAATO_WORKSPACE_ROOT env var and no workspace_root
+            # config).  Fall back to the legacy CWD-relative default
+            # so the plugin doesn't crash; operator must inspect.
+            logger.warning(
+                "file_edit: no workspace_root resolved; falling back "
+                "to CWD-relative .jaato/backups.  Set workspace_root "
+                "in plugin config or JAATO_WORKSPACE_ROOT env var to "
+                "anchor backups inside the workspace.",
+            )
             self._backup_manager = BackupManager()
 
         # Ensure .jaato is in .gitignore
