@@ -33,17 +33,57 @@ class TestFileEditPluginInitialization:
         assert plugin._initialized is True
         assert plugin._backup_manager._base_dir == backup_dir
 
-    def test_initialize_with_session_id(self, tmp_path, monkeypatch):
-        """Test that session_id creates session-scoped backup directory."""
-        # Change to tmp_path so relative paths work
-        monkeypatch.chdir(tmp_path)
+    def test_initialize_with_session_id(self, tmp_path):
+        """Server 0.6.126+: session_id creates session-scoped backup
+        directory anchored on ``workspace_root`` (NOT on the daemon's
+        CWD).  v122 evidence: pre-0.6.126 the path was relative and
+        resolved against the daemon's CWD, landing outside the
+        AppArmor-confined runner's grant when the daemon ran from the
+        jaato source tree.
+        """
+        plugin = FileEditPlugin()
+        plugin.initialize({
+            "workspace_root": str(tmp_path),
+            "session_id": "test-session-123",
+        })
+        assert plugin._initialized is True
+        expected_path = (
+            tmp_path / ".jaato" / "sessions" / "test-session-123" / "backups"
+        ).resolve()
+        assert plugin._backup_manager._base_dir == expected_path
+
+    def test_initialize_session_id_ignores_cwd(self, tmp_path, monkeypatch):
+        """Pin: when workspace_root is set, the daemon's CWD does NOT
+        influence backup-path resolution.  Regression guard for the
+        v122 wire-gap (CWD-relative resolution).
+        """
+        # Set CWD to a path DIFFERENT from workspace_root — backup
+        # path must still anchor on workspace_root.
+        decoy_dir = tmp_path / "decoy_cwd"
+        workspace_dir = tmp_path / "real_workspace"
+        decoy_dir.mkdir()
+        workspace_dir.mkdir()
+        monkeypatch.chdir(decoy_dir)
 
         plugin = FileEditPlugin()
-        plugin.initialize({"session_id": "test-session-123"})
-        assert plugin._initialized is True
-        # Should use session-scoped path
-        expected_path = (tmp_path / ".jaato/sessions/test-session-123/backups").resolve()
-        assert plugin._backup_manager._base_dir == expected_path
+        plugin.initialize({
+            "workspace_root": str(workspace_dir),
+            "session_id": "sess-1",
+        })
+        assert plugin._backup_manager._base_dir == (
+            workspace_dir / ".jaato" / "sessions" / "sess-1" / "backups"
+        ).resolve()
+        # Sanity: NOT under the decoy CWD.
+        assert decoy_dir not in plugin._backup_manager._base_dir.parents
+
+    def test_initialize_no_session_id_anchors_on_workspace(self, tmp_path):
+        """Pin: even without session_id, the default ``.jaato/backups``
+        path anchors on workspace_root (not CWD)."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+        assert plugin._backup_manager._base_dir == (
+            tmp_path / ".jaato" / "backups"
+        ).resolve()
 
     def test_initialize_backup_dir_takes_precedence_over_session_id(self, tmp_path):
         """Test that explicit backup_dir takes precedence over session_id."""
