@@ -496,6 +496,85 @@ class TestCompletionPayloadSchema:
         assert env.completion_payload_schema is None
 
 
+class TestCompletionValidators:
+    """Pin: envelope.completion_validators is sourced from
+    ``profile.completion_validators`` instead of being silently dropped.
+
+    Regression guard (server 0.6.122+): pre-0.6.122 the envelope
+    dataclass declared the field but ``build_session_envelope`` never
+    populated it.  Runner-side ``runtime.create_session`` always got
+    an empty list, so the kb-authored semantic validators silently
+    didn't fire.  kb-enablement-2.0 v118 evidence: validator module
+    loaded fine in isolation but never invoked during cascade runs.
+    Same bug class as the 2026-05-12 ``completion_payload_schema``
+    omission.
+    """
+
+    def test_validators_pass_through(self) -> None:
+        profile = _stub_profile(
+            completion_validators=[
+                "scripts/validators/codegen_files_exist.py",
+                "scripts/validators/codegen_render_succeeded.py",
+            ],
+        )
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert env.completion_validators == [
+            "scripts/validators/codegen_files_exist.py",
+            "scripts/validators/codegen_render_succeeded.py",
+        ]
+
+    def test_empty_list_when_profile_has_no_validators(self) -> None:
+        """Profile without the attribute → envelope carries empty
+        list (default).  Runner-side LifecycleTools skips invocation."""
+        profile = _stub_profile()  # no completion_validators set
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert env.completion_validators == []
+
+    def test_empty_list_when_no_profile_at_all(self) -> None:
+        env = _build_session_envelope(
+            server=_stub_server(profile=None),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="auto",
+        )
+        assert env.completion_validators == []
+
+
+class TestCompletionArtifactsPassdown:
+    """Pin: ``profile.completion_artifacts`` flow through to the
+    envelope.  Same wire-gap class as the validators above —
+    discovered during the v118 diagnostic on 2026-05-18."""
+
+    def test_artifacts_pass_through_as_dict(self) -> None:
+        from types import SimpleNamespace
+        artifact = SimpleNamespace(
+            renderer="markdown",
+            output="report.md",
+            on_error="warn",
+            description="Final report",
+        )
+        profile = _stub_profile(completion_artifacts=[artifact])
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="x",
+        )
+        assert len(env.completion_artifacts) == 1
+        assert env.completion_artifacts[0]["renderer"] == "markdown"
+        assert env.completion_artifacts[0]["output"] == "report.md"
+
+
 class TestModelTiersPassdown:
     """v3 (2026-05-14): ``profile.model_tiers`` must be forwarded
     on the envelope so the runner-side ``_build_session`` can resolve

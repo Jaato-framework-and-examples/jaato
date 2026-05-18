@@ -925,6 +925,9 @@ def _build_session(
         completion_artifacts=(
             envelope.completion_artifacts or None
         ),
+        completion_validators=(
+            envelope.completion_validators or None
+        ),
         tier_config=tier_config,
         # Thread the envelope's resolved agent_id into the runner-
         # side JaatoSession so AgentCompletedEvent.agent_id carries

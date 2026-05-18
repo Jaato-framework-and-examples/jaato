@@ -180,6 +180,17 @@ class SessionInitEnvelope:
     gc: Optional[Dict[str, Any]] = None
     completion_payload_schema: Optional[Any] = None
     completion_artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    # Profile-declared completion validators (server 0.6.121+).  Each
+    # entry is a path string (absolute, ``<config_root>/<path>``, or
+    # ``~/.jaato/<path>``) to a kb-authored Python module exposing
+    # ``validate(payload, tool_calls, workspace_path, ctx) -> list[str]``.
+    # Runner-side ``LifecycleTools._execute_signal_completion`` invokes
+    # them AFTER ``jsonschema.validate`` passes; non-empty error list
+    # returns the same ``validation_failed`` shape as a schema failure.
+    # Empty list = no semantic checks (legacy behaviour).  See
+    # ``shared/completion_validators.py`` for the loader + ledger
+    # builder.
+    completion_validators: List[str] = field(default_factory=list)
     agent_params: Dict[str, str] = field(default_factory=dict)
     config_root: Optional[str] = None
     env_overrides: Dict[str, str] = field(default_factory=dict)
@@ -227,6 +238,7 @@ class SessionInitEnvelope:
             "gc": dict(self.gc) if self.gc is not None else None,
             "completion_payload_schema": self.completion_payload_schema,
             "completion_artifacts": [dict(a) for a in self.completion_artifacts],
+            "completion_validators": list(self.completion_validators),
             "agent_params": dict(self.agent_params),
             "config_root": self.config_root,
             "env_overrides": dict(self.env_overrides),
@@ -279,6 +291,10 @@ class SessionInitEnvelope:
             agent_id=str(d.get("agent_id", "main")),
             gc=dict(d["gc"]) if d.get("gc") else None,
             completion_payload_schema=d.get("completion_payload_schema"),
+            completion_validators=[
+                str(v) for v in (d.get("completion_validators") or [])
+                if isinstance(v, str)
+            ],
             completion_artifacts=[
                 dict(a) for a in (d.get("completion_artifacts") or [])
             ],

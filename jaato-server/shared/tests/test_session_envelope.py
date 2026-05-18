@@ -71,6 +71,10 @@ def test_full_envelope_round_trip() -> None:
         completion_artifacts=[
             {"renderer": "markdown", "output": "report.md"},
         ],
+        completion_validators=[
+            "scripts/validators/codegen_files_exist.py",
+            "scripts/validators/codegen_render_succeeded.py",
+        ],
         agent_params={"case_id": "case-42"},
         config_root="/srv/operator/.jaato",
         env_overrides={"JAATO_PROVIDER": "anthropic"},
@@ -78,6 +82,44 @@ def test_full_envelope_round_trip() -> None:
     d = e.to_dict()
     back = SessionInitEnvelope.from_dict(d)
     assert back == e
+
+
+def test_completion_validators_round_trip() -> None:
+    """``completion_validators`` must survive to_dict/from_dict.
+
+    Regression guard for the wire-envelope wiring gap (server 0.6.122+):
+    pre-0.6.122 the field existed on the dataclass but was silently
+    dropped at the wire boundary because to_dict / from_dict didn't
+    serialize it.  The runner-side ``LifecycleTools`` saw empty
+    validators and skipped invocation even when the profile declared
+    them.  kb-enablement-2.0 v118 evidence.
+    """
+    e = SessionInitEnvelope(
+        session_id="sess-validators",
+        workspace_path="/tmp/ws",
+        profile_name="codegen",
+        provider_name="openrouter",
+        model_name="claude-sonnet-4.5",
+        completion_validators=["scripts/validators/codegen_files_exist.py"],
+    )
+    back = SessionInitEnvelope.from_dict(e.to_dict())
+    assert back.completion_validators == [
+        "scripts/validators/codegen_files_exist.py",
+    ]
+
+
+def test_completion_validators_default_empty() -> None:
+    """Old wire payloads (without the field) decode to empty list."""
+    e = SessionInitEnvelope.from_dict({
+        "schema_version": SESSION_ENVELOPE_VERSION,
+        "session_id": "old",
+        "workspace_path": None,
+        "profile_name": None,
+        "provider_name": "anthropic",
+        "model_name": "claude-sonnet-4-6",
+        # No completion_validators key — pre-0.6.122 wire shape
+    })
+    assert e.completion_validators == []
 
 
 def test_envelope_carries_model_tiers() -> None:
