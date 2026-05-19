@@ -1009,6 +1009,73 @@ class JaatoServer:
                 else:
                     os.environ[key] = previous
 
+    def create_registry_and_discover(self) -> None:
+        """Create the plugin registry + discover plugins, early.
+
+        Server 0.6.131+ (PR-148) structural fix.  The per-session
+        AppArmor profile composition runs in
+        ``SessionManager._provision_ipc_apparmor_and_spawn_runner``
+        BEFORE :meth:`initialize` — but pre-PR-148, the registry was
+        created INSIDE :meth:`initialize`.  When the composer at
+        :func:`server.apparmor.resolve_plugin_apparmor_rules` ran,
+        ``server.registry`` was ``None``, the entire
+        ``profile.plugins`` iteration was silently skipped, and ZERO
+        plugin-contributed AppArmor rules ever landed in the rendered
+        profile — for ANY plugin (``memory``, ``references``,
+        ``subagent``, ``prompt_library``, ``service_connector``,
+        ``file_edit``).  The bug was latent for plugins whose typical
+        writes didn't get exercised under cascade-spawned AppArmor
+        confinement; ``file_edit``'s backup writes (PR-144 anchor on
+        ``<config_root>/sessions/<id>/backups/``) first surfaced it
+        in v126/v128.
+
+        Fix: this method extracts the registry-creation + discover
+        steps from :meth:`initialize`'s "load_plugins" stage and
+        makes them callable independently from the apparmor
+        provisioning path.  :meth:`initialize` is idempotent on
+        registry presence — calling it after this method runs is a
+        no-op for the registry-setup step.
+
+        Also pre-populates the registry with framework-known values
+        (``workspace_path``, ``config_root``, ``session_id``,
+        ``agent_name``) so :func:`resolve_plugin_apparmor_rules` can
+        query plugins under a properly-configured registry context —
+        mirrors what PR-146's pre-init injection does inside
+        :meth:`initialize`'s expose_all flow, just earlier.
+
+        Idempotent: safe to call multiple times; subsequent calls
+        skip the create + discover steps when the registry is
+        already populated.
+        """
+        if self.registry is not None and self.registry._plugins:
+            return  # Already done; idempotent.
+
+        model_name = (
+            self._model_name
+            or self.get_session_env("MODEL_NAME")
+            or os.environ.get("MODEL_NAME")
+        )
+        if self.registry is None:
+            self.registry = PluginRegistry(model_name=model_name)
+        if not self.registry._plugins:
+            self.registry.discover()
+
+        # Pre-populate registry with framework-known values so the
+        # apparmor composer (called next from
+        # _provision_ipc_apparmor_and_spawn_runner) can query
+        # plugins with the right context AND so the eventual
+        # plugin.initialize calls inherit them via PR-146's
+        # _augment_plugin_config helper.
+        if self._workspace_path:
+            self.registry.set_workspace_path(self._workspace_path)
+        if self._config_root:
+            self.registry.set_config_root(self._config_root)
+        if self._session_id:
+            self.registry.set_session_id(self._session_id)
+        agent_name = getattr(self, "_main_agent_id", None) or "main"
+        if agent_name:
+            self.registry.set_agent_name(agent_name)
+
     def get_session_env(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Get a session-specific environment variable.
 
@@ -1702,10 +1769,21 @@ class JaatoServer:
                         "Loading plugins", "running", 3, total_steps
                     )
                     with _timer.stage("load_plugins") as _s3:
+                        # Server 0.6.131+ (PR-148): registry + discover
+                        # may have run earlier via
+                        # :meth:`create_registry_and_discover` (called
+                        # by ``SessionManager._construct_and_initialize_server``
+                        # BEFORE ``_provision_ipc_apparmor_and_spawn_runner``
+                        # so the apparmor composer can query plugins
+                        # for their ``get_apparmor_rules`` contributions).
+                        # Both steps are idempotent — re-entering this
+                        # block when registry already exists is a no-op.
                         with _s3.sub("create_registry"):
-                            self.registry = PluginRegistry(model_name=model_name)
+                            if self.registry is None:
+                                self.registry = PluginRegistry(model_name=model_name)
                         with _s3.sub("discover"):
-                            self.registry.discover()
+                            if not self.registry._plugins:
+                                self.registry.discover()
 
                         plugin_configs = {
                             "todo": {
