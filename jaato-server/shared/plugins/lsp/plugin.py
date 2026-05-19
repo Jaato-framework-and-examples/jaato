@@ -2216,8 +2216,19 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 # Open document with LSP server
                 await client.open_document(temp_file, code)
 
-                # Wait a bit for server to analyze (jedi/pylsp needs time)
-                await asyncio.sleep(0.5)
+                # Wait for the server's first `publishDiagnostics` batch
+                # via the same bounded-poll mechanism the
+                # `get_diagnostics` dispatch path uses (PR-3, server
+                # 0.6.134).  Pre-0.6.135 this branch had a hard-coded
+                # `asyncio.sleep(0.5)` that PR-3 missed when porting
+                # the dispatch path — fast servers wasted 500ms,
+                # heavy-init servers (jdtls cold on Maven workspace
+                # snippets) starved without ever waiting long enough.
+                await client.await_diagnostics(
+                    temp_file,
+                    max_wait=self._diagnostics_max_wait_seconds,
+                    min_wait=self._diagnostics_min_wait_seconds,
+                )
 
                 # Get diagnostics
                 diagnostics = client.get_diagnostics(temp_file)

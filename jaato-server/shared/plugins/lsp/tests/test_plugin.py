@@ -1430,3 +1430,60 @@ class TestAwaitDiagnostics:
         # Cache survives:
         assert len(client._diagnostics[uri]) == 1
         assert client._diagnostics[uri][0].message == "test diagnostic"
+
+
+class TestValidateSnippetUsesAwaitDiagnostics:
+    """Pin server-0.6.135 fix: `lsp_validate_snippet` was missed by
+    PR-3 and continued to use `await asyncio.sleep(0.5)` even after
+    the dispatch path was converted to bounded poll. PR-4 closes
+    that wait-window gap for the validate_snippet branch too,
+    inheriting the same `diagnostics_{max,min}_wait_seconds` knobs.
+    """
+
+    def test_validate_snippet_source_no_longer_hardcodes_sleep(self):
+        """Pin: the `validate_snippet` branch in `_call_lsp_method`
+        no longer contains `asyncio.sleep(0.5)`. Catches a future
+        refactor that accidentally reintroduces the hardcoded sleep.
+        """
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        # Locate the validate_snippet branch
+        start = src.index("elif method == 'validate_snippet':")
+        # End at the next `elif method == ` or `else:` at the same
+        # indent level — bounded scan is fine since the branch is
+        # ~50 lines.
+        end_marker_a = src.find("elif method ==", start + 1)
+        end_marker_b = src.find("\n        else:", start + 1)
+        end_candidates = [m for m in (end_marker_a, end_marker_b) if m != -1]
+        end = min(end_candidates) if end_candidates else start + 4000
+        branch_src = src[start:end]
+        # Match actual code (`await asyncio.sleep(...)`), not the
+        # explanatory comment which references the historical literal.
+        assert "await asyncio.sleep(0.5)" not in branch_src, (
+            "validate_snippet branch still contains hardcoded "
+            "`await asyncio.sleep(0.5)`; should use "
+            "`await client.await_diagnostics(...)` with the "
+            "configured knobs (PR-4 / server 0.6.135 fix)."
+        )
+
+    def test_validate_snippet_source_uses_await_diagnostics(self):
+        """Pin: the validate_snippet branch calls
+        `client.await_diagnostics(...)` with the plugin's knobs."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        start = src.index("elif method == 'validate_snippet':")
+        end_marker_a = src.find("elif method ==", start + 1)
+        end_marker_b = src.find("\n        else:", start + 1)
+        end_candidates = [m for m in (end_marker_a, end_marker_b) if m != -1]
+        end = min(end_candidates) if end_candidates else start + 4000
+        branch_src = src[start:end]
+        assert "await client.await_diagnostics(" in branch_src, (
+            "validate_snippet branch should call "
+            "`await client.await_diagnostics(...)` to wait for the "
+            "first publishDiagnostics batch (PR-4)."
+        )
+        # Both knobs must be passed in — not hard-coded values.
+        assert "self._diagnostics_max_wait_seconds" in branch_src
+        assert "self._diagnostics_min_wait_seconds" in branch_src
