@@ -1487,3 +1487,152 @@ class TestValidateSnippetUsesAwaitDiagnostics:
         # Both knobs must be passed in — not hard-coded values.
         assert "self._diagnostics_max_wait_seconds" in branch_src
         assert "self._diagnostics_min_wait_seconds" in branch_src
+
+
+class TestDebugLogPathKnob:
+    """Pin server-0.6.136 fix: pre-fix, the diagnostic log was hard-
+    coded to `tempfile.gettempdir()/lsp_debug.log` (e.g.
+    /tmp/lsp_debug.log) which apparmor-confined runners couldn't
+    write.  The outer try/except in `_load_config_cache` misclassified
+    the apparmor PermissionError as a JSON-load failure, reset
+    `_config_cache = {}`, and the entire LSP enrichment chain
+    silently broke for v141-v144.
+
+    Fix: operator-configurable path knob defaulting to
+    `.jaato/logs/lsp_debug.log` (workspace-relative).
+    `get_apparmor_rules` emits the matching rw grant.  Symmetric
+    path resolution at write site + apparmor composer.
+    """
+
+    def test_default_path_is_workspace_relative(self):
+        from ..plugin import DEFAULT_DEBUG_LOG_PATH
+        assert DEFAULT_DEBUG_LOG_PATH == ".jaato/logs/lsp_debug.log"
+        plugin = LSPToolPlugin()
+        assert plugin._debug_log_path_raw == DEFAULT_DEBUG_LOG_PATH
+
+    def test_initialize_applies_config_value(self):
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"debug_log_path": "/var/log/jaato/lsp.log"})
+        assert plugin._debug_log_path_raw == "/var/log/jaato/lsp.log"
+
+    def test_initialize_empty_string_disables_log(self):
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"debug_log_path": ""})
+        assert plugin._debug_log_path_raw == ""
+
+    def test_initialize_none_disables_log(self):
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"debug_log_path": None})
+        assert plugin._debug_log_path_raw == ""
+
+    def test_resolve_absolute_path_passthrough(self):
+        result = LSPToolPlugin._resolve_debug_log_path(
+            "/var/log/lsp.log", workspace_path="/workspace"
+        )
+        assert result == "/var/log/lsp.log"
+
+    def test_resolve_relative_joins_workspace(self):
+        result = LSPToolPlugin._resolve_debug_log_path(
+            ".jaato/logs/lsp_debug.log", workspace_path="/workspace"
+        )
+        assert result == "/workspace/.jaato/logs/lsp_debug.log"
+
+    def test_resolve_empty_returns_none(self):
+        result = LSPToolPlugin._resolve_debug_log_path(
+            "", workspace_path="/workspace"
+        )
+        assert result is None
+
+    def test_resolve_relative_without_workspace_returns_none(self):
+        """Pin: writing a workspace-relative path without a workspace
+        is meaningless — return None to suppress the diagnostic
+        rather than fall back to daemon cwd (no-hardcoded-fallback
+        rule)."""
+        result = LSPToolPlugin._resolve_debug_log_path(
+            ".jaato/logs/lsp_debug.log", workspace_path=None
+        )
+        assert result is None
+
+    def test_apparmor_fragment_grants_resolved_parent_dir(self):
+        """Pin: get_apparmor_rules emits the rules for the parent dir
+        of the resolved log path.  Two-rule subtree (PR-147 file_edit
+        pattern) covers the mkdir chain + descendants."""
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path="/workspace",
+            session_id="test-session",
+            config_root=None,
+            plugin_config={"debug_log_path": ".jaato/logs/lsp_debug.log"},
+        )
+        assert "/workspace/.jaato/logs/    rw," in rules
+        assert "/workspace/.jaato/logs/**  rw," in rules
+
+    def test_apparmor_fragment_uses_default_when_not_in_config(self):
+        """Pin: composer uses DEFAULT_DEBUG_LOG_PATH when operator
+        does not set the knob.  Same path as the write site falls
+        through to."""
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path="/workspace",
+            session_id="test-session",
+            config_root=None,
+            plugin_config={},
+        )
+        # Default is .jaato/logs/lsp_debug.log
+        assert "/workspace/.jaato/logs/    rw," in rules
+
+    def test_apparmor_fragment_handles_absolute_path(self):
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path="/workspace",
+            session_id="test-session",
+            config_root=None,
+            plugin_config={"debug_log_path": "/var/log/jaato/lsp.log"},
+        )
+        assert "/var/log/jaato/    rw," in rules
+        assert "/var/log/jaato/**  rw," in rules
+
+    def test_apparmor_fragment_empty_path_emits_no_rules(self):
+        """Pin: operator disables the log → no rules emitted (their
+        responsibility per no-fallback rule)."""
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path="/workspace",
+            session_id="test-session",
+            config_root=None,
+            plugin_config={"debug_log_path": ""},
+        )
+        assert rules == []
+
+    def test_load_config_cache_does_not_abort_on_debug_write_failure(self):
+        """Pin: the actual bug.  Pre-0.6.136, a debug-log write
+        failure (PermissionError under apparmor, etc.) was caught by
+        the outer try/except, misclassified as a config-load failure,
+        and `_config_cache = {}` was set → "No LSP servers
+        configured" → enrichment dead.  Post-fix, the write failure
+        is scoped to its own try/except so config_cache survives."""
+        plugin = LSPToolPlugin()
+        plugin._workspace_path = None  # avoid workspace_path resolution
+        plugin._debug_log_path_raw = "/dev/full"  # simulate write-fails-everywhere
+        # Build an in-memory .lsp.json via a temp file
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".lsp.json", delete=False, encoding="utf-8"
+        ) as f:
+            json.dump({"languageServers": {"java": {"command": "jdtls"}}}, f)
+            config_file = f.name
+        try:
+            plugin._custom_config_path = config_file
+            plugin._load_config_cache()
+            # The CRITICAL assertion: config_cache survives even though
+            # the debug-write path is unwritable.  Pre-fix, this would
+            # be empty.
+            assert plugin._config_cache.get("languageServers", {}).get("java"), (
+                "config_cache was cleared by a debug-write failure — "
+                "regression of the v141-v144 bug class."
+            )
+        finally:
+            os.unlink(config_file)
+
+    def test_config_schema_exposes_debug_log_path(self):
+        plugin = LSPToolPlugin()
+        names = [s.name for s in plugin.get_config_schema()]
+        assert "debug_log_path" in names
