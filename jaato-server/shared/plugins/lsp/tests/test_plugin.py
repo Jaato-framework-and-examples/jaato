@@ -1150,3 +1150,78 @@ class TestSystemInstructions:
         assert "lsp_get_code_actions" in instructions
         assert "lsp_apply_code_action" in instructions
         assert "apply=True" in instructions or "apply=true" in instructions.lower()
+
+
+class TestConnectTimeoutKnob:
+    """Pin behavior of plugin_configs.lsp.connect_timeout_seconds.
+
+    Pre-server-0.6.133 the per-server LSP `initialize` timeout was a
+    hard-coded 15.0 at lsp/plugin.py:1699 — enough for pyright /
+    typescript-language-server (5s cold-start typical) but starves
+    Eclipse JDT LS (jdtls) on Maven workspaces where the full
+    initialize + workspace import easily exceeds 30s.  The knob lets
+    profiles tune per workspace.
+    """
+
+    def test_default_is_thirty_seconds(self):
+        """Pin: unconfigured plugin uses the documented default."""
+        from ..plugin import DEFAULT_CONNECT_TIMEOUT_SECONDS
+        plugin = LSPToolPlugin()
+        # We must not touch _ensure_thread; just verify initial state +
+        # configure() does the right thing without starting LSP servers.
+        assert plugin._connect_timeout_seconds == DEFAULT_CONNECT_TIMEOUT_SECONDS
+        assert DEFAULT_CONNECT_TIMEOUT_SECONDS == 30.0
+
+    def test_initialize_applies_config_value(self):
+        """Pin: an explicit value flows from config to the instance attr."""
+        plugin = LSPToolPlugin()
+        # Skip the background thread spawn by pre-marking _initialized
+        # AFTER we run initialize() — initialize() itself does not start
+        # threads; _ensure_thread() does, and we don't call that here.
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"connect_timeout_seconds": 60.0})
+        assert plugin._connect_timeout_seconds == 60.0
+
+    def test_initialize_clamps_below_min(self):
+        """Pin: values below MIN_CONNECT_TIMEOUT_SECONDS clamp up."""
+        from ..plugin import MIN_CONNECT_TIMEOUT_SECONDS
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"connect_timeout_seconds": 0.0})
+        assert plugin._connect_timeout_seconds == MIN_CONNECT_TIMEOUT_SECONDS
+
+    def test_initialize_clamps_above_max(self):
+        """Pin: values above MAX_CONNECT_TIMEOUT_SECONDS clamp down."""
+        from ..plugin import MAX_CONNECT_TIMEOUT_SECONDS
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"connect_timeout_seconds": 9999.0})
+        assert plugin._connect_timeout_seconds == MAX_CONNECT_TIMEOUT_SECONDS
+
+    def test_initialize_falls_back_on_non_numeric(self):
+        """Pin: non-numeric input does not break startup; default applies."""
+        from ..plugin import DEFAULT_CONNECT_TIMEOUT_SECONDS
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"connect_timeout_seconds": "not-a-number"})
+        assert plugin._connect_timeout_seconds == DEFAULT_CONNECT_TIMEOUT_SECONDS
+
+    def test_initialize_no_key_uses_default(self):
+        """Pin: omitting the key leaves the default in place (a profile
+        that only sets other lsp config must not reset the timeout)."""
+        from ..plugin import DEFAULT_CONNECT_TIMEOUT_SECONDS
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"workspace_path": "/tmp/foo"})
+        assert plugin._connect_timeout_seconds == DEFAULT_CONNECT_TIMEOUT_SECONDS
+
+    def test_config_schema_exposes_knob(self):
+        """Pin: the knob is discoverable via get_config_schema() so
+        profile managers / settings forms can surface it."""
+        plugin = LSPToolPlugin()
+        schema = plugin.get_config_schema()
+        names = [s.name for s in schema]
+        assert "connect_timeout_seconds" in names
+        entry = next(s for s in schema if s.name == "connect_timeout_seconds")
+        assert entry.type == "float"
+        assert entry.default == 30.0
