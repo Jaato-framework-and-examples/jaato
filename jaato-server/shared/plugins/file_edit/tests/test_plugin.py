@@ -20,11 +20,16 @@ class TestFileEditPluginInitialization:
         plugin = FileEditPlugin()
         assert plugin.name == "file_edit"
 
-    def test_initialize_without_config(self):
+    def test_initialize_without_config_raises(self):
+        """Server 0.6.130+ (PR-147): no config_root + no explicit
+        backup_dir → RuntimeError.  Pre-PR-147 a workspace-CWD
+        fallback masked this; per Daniel's "framework confined to
+        config_root, workspace belongs to tenant" rule, missing
+        config_root is now a configuration error (loud, not
+        silent)."""
         plugin = FileEditPlugin()
-        plugin.initialize()
-        assert plugin._initialized is True
-        assert plugin._backup_manager is not None
+        with pytest.raises(RuntimeError, match="cannot resolve backup base directory"):
+            plugin.initialize()
 
     def test_initialize_with_custom_backup_dir(self, tmp_path):
         plugin = FileEditPlugin()
@@ -96,21 +101,21 @@ class TestFileEditPluginInitialization:
             config_root_dir / "backups"
         ).resolve()
 
-    def test_initialize_no_config_root_falls_back_to_workspace_jaato(
-        self, tmp_path,
-    ):
-        """Pin: when config_root is unset BUT workspace_root is known,
-        anchor backups on ``<workspace>/.jaato/`` — typical interactive
-        sessions where the daemon hasn't pushed a config_root override.
+    def test_initialize_no_config_root_raises(self, tmp_path):
+        """Server 0.6.130+ (PR-147): no config_root → RuntimeError.
+
+        Per the framework architectural rule (Daniel, 2026-05-19):
+        framework + plugins are confined to config_root; workspace
+        is tenant territory and must not receive framework-side
+        writes.  Pre-PR-147 a workspace-fallback masked the missing
+        config_root; PR-147 makes the configuration error loud.
         """
         plugin = FileEditPlugin()
-        plugin.initialize({
-            "workspace_root": str(tmp_path),
-            "session_id": "sess-1",
-        })
-        assert plugin._backup_manager._base_dir == (
-            tmp_path / ".jaato" / "sessions" / "sess-1" / "backups"
-        ).resolve()
+        with pytest.raises(RuntimeError, match="cannot resolve backup base directory"):
+            plugin.initialize({
+                "workspace_root": str(tmp_path),
+                "session_id": "sess-1",
+            })
 
     def test_set_config_root_broadcast_reinit_backup_manager(self, tmp_path):
         """Pin: registry's set_config_root broadcast actually moves
@@ -140,26 +145,35 @@ class TestFileEditPluginInitialization:
             config_root_b / "sessions" / "sess-1" / "backups"
         ).resolve()
 
-    def test_set_workspace_path_broadcast_reinit_backup_manager(self, tmp_path):
-        """Pin: when only workspace_root is known (config_root unset),
-        ``set_workspace_path`` broadcast moves the backup root via
-        the workspace-fallback path."""
+    def test_set_workspace_path_does_not_affect_backup_anchor(self, tmp_path):
+        """Server 0.6.130+ (PR-147): backup anchor is config_root only.
+
+        Pre-PR-147 a ``set_workspace_path`` broadcast would re-anchor
+        backups on the workspace fallback when config_root was unset.
+        PR-147 drops the workspace-fallback per Daniel's
+        "framework confined to config_root" rule.  workspace changes
+        should NOT move the backup root.
+        """
+        config_root_a = tmp_path / "kb" / ".jaato"
+        config_root_a.mkdir(parents=True)
         ws_a = tmp_path / "ws_a"
         ws_a.mkdir()
         plugin = FileEditPlugin()
         plugin.initialize({
+            "config_root": str(config_root_a),
             "workspace_root": str(ws_a),
             "session_id": "sess-1",
         })
         assert plugin._backup_manager._base_dir == (
-            ws_a / ".jaato" / "sessions" / "sess-1" / "backups"
+            config_root_a / "sessions" / "sess-1" / "backups"
         ).resolve()
 
+        # Workspace change broadcast — backup root stays anchored on config_root.
         ws_b = tmp_path / "ws_b"
         ws_b.mkdir()
         plugin.set_workspace_path(str(ws_b))
         assert plugin._backup_manager._base_dir == (
-            ws_b / ".jaato" / "sessions" / "sess-1" / "backups"
+            config_root_a / "sessions" / "sess-1" / "backups"
         ).resolve()
 
     def test_explicit_backup_dir_wins_over_anchors(self, tmp_path):
@@ -183,62 +197,56 @@ class TestFileEditPluginInitialization:
 
 
 class TestFileEditApparmorRules:
-    """Pin: ``get_apparmor_rules`` declares write access to backup paths.
+    """Pin: ``get_apparmor_rules`` declares the full sessions/ subtree
+    grant for backup writes under config_root.
 
-    Server 0.6.128+ (PR-145): closes the AppArmor gap that PR-143/144
-    left latent — backup target was anchored correctly by PR-144 but
-    the runner's AppArmor profile had no grant unless the path
-    happened to fall under workspace/**.  In the handoff_test pattern
-    (config_root outside workspace) the cascade would have hit
-    PermissionError despite PR-144's anchor correction.
+    Server 0.6.130+ (PR-147): rule shape grants the full
+    ``<config_root>/sessions/`` subtree (parent + ``**`` descendants)
+    via AppArmor specificity to override the framework template's
+    read-only ``<config_root>/** r,`` baseline.  PR-145's leaf-only
+    rules failed because they didn't grant mkdir of the ``sessions/``
+    parent itself.  v126 evidence: PermissionError on
+    ``<config_root>/sessions`` (the parent, not the leaf).
+
+    Workspace branch dropped per Daniel's "framework + plugins
+    confined to config_root; workspace is tenant territory" rule —
+    file_edit's framework-side writes go in config_root only.
     """
 
-    def test_config_root_with_session_id_rules(self, tmp_path):
+    def test_config_root_grants_full_sessions_subtree(self, tmp_path):
+        """Pin the structural fix: grant the sessions/ dir + all
+        descendants.  Specificity wins over framework template's
+        ``<config_root>/** r,``."""
+        cr = str(tmp_path / "kb" / ".jaato")
         rules = FileEditPlugin.get_apparmor_rules(
             workspace_path=str(tmp_path / "ws"),
             session_id="sess-42",
-            config_root=str(tmp_path / "kb" / ".jaato"),
+            config_root=cr,
             plugin_config={},
         )
-        # Config-root-anchored backup path is covered
-        cr_base = f"{tmp_path}/kb/.jaato/sessions/sess-42/backups"
-        assert f"{cr_base}/    rw," in rules
-        assert f"{cr_base}/**  rw," in rules
-        # Workspace fallback path also covered (defense for runtime
-        # divergence: if set_config_root broadcast clears config_root
-        # post-init, _resolve_backup_base_dir falls back to workspace)
-        ws_base = f"{tmp_path}/ws/.jaato/sessions/sess-42/backups"
-        assert f"{ws_base}/    rw," in rules
-        assert f"{ws_base}/**  rw," in rules
+        # Two rules: sessions/ dir entry + ** descendants
+        assert f"{cr}/sessions/    rw," in rules
+        assert f"{cr}/sessions/**  rw," in rules
+        # NO workspace-anchored rules (workspace is tenant territory)
+        assert not any("/ws/" in r for r in rules)
 
-    def test_no_config_root_only_workspace_fallback(self, tmp_path):
+    def test_no_config_root_no_rules_emitted(self, tmp_path):
+        """When config_root is unset, no rules emitted.  Plugin
+        layer doesn't grant workspace writes — that's the framework
+        template's territory and is for AGENT-mediated tenant
+        operations, not framework-side backup writes."""
         rules = FileEditPlugin.get_apparmor_rules(
             workspace_path=str(tmp_path / "ws"),
             session_id="sess-1",
             config_root=None,
             plugin_config={},
         )
-        ws_base = f"{tmp_path}/ws/.jaato/sessions/sess-1/backups"
-        assert f"{ws_base}/    rw," in rules
-        # No config_root branch present
-        assert not any("/kb/" in r for r in rules)
+        assert rules == []
 
-    def test_no_session_id_uses_default_backups_path(self, tmp_path):
-        rules = FileEditPlugin.get_apparmor_rules(
-            workspace_path=str(tmp_path / "ws"),
-            session_id="",
-            config_root=str(tmp_path / "kb" / ".jaato"),
-            plugin_config={},
-        )
-        # No-session_id path
-        cr_base = f"{tmp_path}/kb/.jaato/backups"
-        assert f"{cr_base}/    rw," in rules
-        ws_base = f"{tmp_path}/ws/.jaato/backups"
-        assert f"{ws_base}/    rw," in rules
-        # No session-scoped path present
-        assert not any("/sessions/" in r for r in rules)
-
-    def test_explicit_backup_dir_in_config_emits_extra_rule(self, tmp_path):
+    def test_explicit_backup_dir_grants_operator_path(self, tmp_path):
+        """Operator-explicit ``backup_dir`` emits a grant for whatever
+        path the operator chose; operator owns ensuring it falls
+        under the active apparmor confinement."""
         explicit = str(tmp_path / "operator_chosen_backups")
         rules = FileEditPlugin.get_apparmor_rules(
             workspace_path=str(tmp_path / "ws"),
@@ -249,9 +257,10 @@ class TestFileEditApparmorRules:
         assert f"{explicit}/    rw," in rules
         assert f"{explicit}/**  rw," in rules
 
-    def test_rules_are_strings(self, tmp_path):
-        """Pin: rule entries are strings (apparmor template
-        concatenates them into the .rules file)."""
+    def test_rules_are_strings_with_trailing_comma(self, tmp_path):
+        """Pin: rule entries are strings ending with ','.  The
+        apparmor template concatenates them into the .rules file
+        verbatim, so syntax must be valid AppArmor rule lines."""
         rules = FileEditPlugin.get_apparmor_rules(
             workspace_path=str(tmp_path),
             session_id="s",
@@ -260,33 +269,31 @@ class TestFileEditApparmorRules:
         )
         assert all(isinstance(r, str) for r in rules)
         assert all(r.endswith(",") for r in rules)
+        # Pin the EXACT rule shape — subtree grants, not leaf-only.
+        cr = str(tmp_path / ".jaato")
+        assert rules == [
+            f"{cr}/sessions/    rw,",
+            f"{cr}/sessions/**  rw,",
+        ]
 
 
-class TestFileEditConfigDictNoWarning:
-    """Pin: when initialize receives workspace_path + config_root in
-    config dict (server 0.6.128+ wires them at core.py:1730), the
-    cosmetic WARN doesn't fire and the BackupManager anchors
-    correctly without needing a post-init broadcast."""
+class TestFileEditConfigDictAnchors:
+    """Pin: when initialize receives config_root in config dict (per
+    PR-146 PluginRegistry pre-init injection), the BackupManager
+    anchors directly on config_root without needing a post-init
+    broadcast.  Server 0.6.130+ (PR-147): no workspace-fallback —
+    missing config_root raises rather than masking with a CWD or
+    workspace path."""
 
-    def test_init_with_full_config_anchors_directly(self, tmp_path, caplog):
-        """Both anchors in config → no fallback to ContextVar /
-        env-var detection → no WARN."""
-        import logging
+    def test_init_with_config_root_anchors_directly(self, tmp_path):
+        """config_root in config → BackupManager anchored on it."""
         config_root_dir = tmp_path / ".jaato"
         config_root_dir.mkdir()
         plugin = FileEditPlugin()
-        with caplog.at_level(logging.WARNING, logger="shared.plugins.file_edit.plugin"):
-            plugin.initialize({
-                "workspace_path": str(tmp_path),
-                "config_root": str(config_root_dir),
-                "session_id": "sess-1",
-            })
-        # No "no config_root or workspace_root resolved" WARN.
-        assert not any(
-            "no config_root or workspace_root resolved" in rec.message
-            for rec in caplog.records
-        )
-        # Backup path lands on config_root anchor (no broadcast needed).
+        plugin.initialize({
+            "config_root": str(config_root_dir),
+            "session_id": "sess-1",
+        })
         assert plugin._backup_manager._base_dir == (
             config_root_dir / "sessions" / "sess-1" / "backups"
         ).resolve()
@@ -303,9 +310,11 @@ class TestFileEditConfigDictNoWarning:
         # Explicit backup_dir should win
         assert plugin._backup_manager._base_dir == custom_dir
 
-    def test_shutdown(self):
+    def test_shutdown(self, tmp_path):
         plugin = FileEditPlugin()
-        plugin.initialize()
+        # Use explicit backup_dir so initialize() doesn't require
+        # config_root (PR-147 makes config_root mandatory by default).
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
         plugin.shutdown()
         assert plugin._initialized is False
         assert plugin._backup_manager is None

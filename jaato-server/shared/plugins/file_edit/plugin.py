@@ -143,65 +143,70 @@ class FileEditPlugin(RunnerForwardingMixin):
         config_root: Optional[str],
         plugin_config: Dict[str, Any],
     ) -> List[str]:
-        """Contribute file_edit's backup-path rules to AppArmor.
+        """Contribute file_edit's backup-path apparmor fragment.
 
-        Server 0.6.128+ (PR-145): file_edit writes backups under
-        ``<config_root>/sessions/<session_id>/backups/`` (PR-144's
-        anchor) with fallback to
-        ``<workspace_path>/.jaato/sessions/<session_id>/backups/`` when
-        config_root is unset.  This method declares ``rw`` access to
-        BOTH branches so whichever ``_resolve_backup_base_dir`` picks
-        at runtime is covered by the AppArmor profile.  Also covers
-        the no-session_id default paths and the explicit operator
-        override (``plugin_config["backup_dir"]``).
+        Server 0.6.130+ (PR-147): grants ``rw`` on the full
+        ``<config_root>/sessions/`` subtree.  Two rules suffice via
+        AppArmor specificity:
 
-        Pre-PR-145 file_edit never exported rules.  Pre-PR-143 the
-        bug was invisible because BackupManager resolved to the
-        daemon's CWD (which typically had workspace-level grants).
-        PR-143 anchored on workspace_root (incidentally covered by
-        ``workspace/**`` grants); PR-144 corrected to config_root
-        (which can live OUTSIDE the workspace in the handoff_test
-        pattern, where no default grant covers).  PR-145 closes the
-        gap by declaring the rules explicitly per the established
-        plugin-apparmor-contribution pattern (memory, references,
-        subagent, prompt_library, service_connector already do this).
+        - ``<config_root>/sessions/    rw,`` — the dir entry itself
+          (covers mkdir of ``sessions/`` from the framework template's
+          read-only ``<config_root>/** r,`` baseline).
+        - ``<config_root>/sessions/**  rw,`` — all descendants
+          (``<session_id>/``, ``<session_id>/backups/``, all files
+          inside).
 
-        Caveat: each rule path is the BACKUP TARGET; AppArmor grants
-        rw inside the directory but the parent must already be
-        creatable.  The framework's session-apparmor template grants
-        ``<config_root>/**`` and ``<workspace>/.jaato/**`` rw so the
-        mkdir chain for nested ``sessions/<id>/backups/`` resolves
-        cleanly.  See ``memory/plugin.py:101-132`` for the canonical
-        pattern these rules follow.
+        Both rules are more specific than ``<config_root>/** r,`` from
+        the framework template, so they win via AppArmor's most-
+        specific-match resolution.  Together they cover the entire
+        mkdir chain for ``<config_root>/sessions/<session_id>/backups/``
+        plus all writes inside the backup directory.
 
-        See ``project_backlog_plugin_apparmor_rules_audit`` memory
-        for the 14-plugin gap class this PR documents.
+        **History.**  PR-145 emitted leaf-only rules
+        (``<config_root>/sessions/<session_id>/backups/ rw,``) which
+        failed because the rule didn't grant mkdir of the parent
+        ``sessions/`` directory.  v126 evidence: PermissionError on
+        ``<config_root>/sessions`` — the parent was never grantable.
+        PR-147 fixes the fragment shape to grant the full subtree.
+
+        **Workspace branch dropped** (server 0.6.130+).  Per Daniel's
+        framing: framework + plugins are confined to config_root;
+        workspace is tenant territory.  file_edit's framework-side
+        backup writes go in config_root, never in workspace.  The
+        ``workspace_path`` parameter is kept on the signature for
+        compatibility with the apparmor composer's contract, but
+        emitted rules don't reference it.
+
+        Operator-explicit ``plugin_config["backup_dir"]`` override
+        is honored — emits a grant for whatever path the operator
+        chose (their responsibility to ensure the path is reachable
+        under the active apparmor confinement).
+
+        See ``memory/plugin.py:101-132`` for the canonical pattern
+        these rules follow.  See
+        ``project_backlog_plugin_apparmor_rules_audit`` memory for
+        the broader plugin-fragment audit context.
         """
         rules: List[str] = []
 
-        def _add(base: str) -> None:
+        def _add_subtree(base: str) -> None:
             base = base.rstrip("/")
             rules.append(f"{base}/    rw,")
             rules.append(f"{base}/**  rw,")
 
-        # Branch 1: explicit operator override wins.
+        # Operator override wins.  Grant whatever the operator
+        # supplied; they own ensuring the apparmor template covers
+        # paths outside the framework's standard config_root tree.
         explicit_dir = plugin_config.get("backup_dir") if plugin_config else None
         if isinstance(explicit_dir, str) and explicit_dir.strip():
-            _add(explicit_dir.strip())
+            _add_subtree(explicit_dir.strip())
 
-        # Branch 2: config_root anchor (PR-144 primary).
+        # Framework-side backups go under config_root/sessions/.  Grant
+        # the full subtree (NOT just the leaf) so the mkdir chain
+        # resolves: <config_root>/sessions/ → <session_id>/ → backups/
+        # → files inside.
         if config_root:
-            if session_id:
-                _add(f"{config_root}/sessions/{session_id}/backups")
-            else:
-                _add(f"{config_root}/backups")
-
-        # Branch 3: workspace fallback (config_root unset at runtime).
-        if workspace_path:
-            if session_id:
-                _add(f"{workspace_path}/.jaato/sessions/{session_id}/backups")
-            else:
-                _add(f"{workspace_path}/.jaato/backups")
+            _add_subtree(f"{config_root}/sessions")
 
         return rules
 
@@ -277,34 +282,33 @@ class FileEditPlugin(RunnerForwardingMixin):
     def _resolve_backup_base_dir(self) -> Optional[Path]:
         """Resolve the backup base directory from current anchor state.
 
-        Priority:
-          1. ``self._explicit_backup_dir`` (operator override)
-          2. ``<config_root>/sessions/<session_id>/backups`` (session-scoped)
-          3. ``<config_root>/backups`` (when no session_id)
-          4. ``<workspace_root>/.jaato/sessions/<session_id>/backups``
-             (config_root unset — fallback to workspace convention)
-          5. ``<workspace_root>/.jaato/backups`` (config_root + session_id unset)
-          6. ``None`` — neither anchor known; caller falls back to
-             :class:`BackupManager`'s legacy CWD-relative behavior
-             with a WARNING.
+        Server 0.6.130+ (PR-147): backups go under ``config_root``
+        only.  Per the framework architectural rule (Daniel,
+        2026-05-19): framework + plugins are confined to
+        ``config_root``; ``workspace`` is tenant territory and must
+        not receive framework-side writes.
 
-        Returns the resolved path or ``None`` when neither anchor
-        is available.
+        Priority:
+          1. ``self._explicit_backup_dir`` (operator override —
+             operator owns ensuring the apparmor profile covers it).
+          2. ``<config_root>/sessions/<session_id>/backups``
+             (session-scoped — the typical path).
+          3. ``<config_root>/backups`` (when no session_id).
+          4. ``None`` — config_root unset AND no operator override.
+             Caller (``_reinit_backup_manager``) treats this as a
+             configuration error and raises.
+
+        The pre-PR-147 workspace-fallback branches were dropped: per
+        the framework rule, falling back to ``<workspace>/.jaato/...``
+        would write tenant territory for a framework-side concern.
+        Instead, the framework requires config_root to be set
+        (PluginRegistry pre-init injection ensures this in normal
+        operation; cf. PR-146 layer fix).
         """
         if self._explicit_backup_dir:
             return Path(self._explicit_backup_dir)
         if self._config_root:
             base = Path(self._config_root)
-            if self._session_id:
-                return base / "sessions" / self._session_id / "backups"
-            return base / "backups"
-        if self._workspace_root:
-            # config_root unset → fall back to the workspace-convention
-            # ``<workspace>/.jaato/...``.  Typical interactive sessions
-            # where the daemon hasn't pushed a config_root override land
-            # here; the path collapses to the same physical location as
-            # config_root would in that setup.
-            base = Path(self._workspace_root) / ".jaato"
             if self._session_id:
                 return base / "sessions" / self._session_id / "backups"
             return base / "backups"
@@ -315,25 +319,33 @@ class FileEditPlugin(RunnerForwardingMixin):
 
         Called from :meth:`initialize` and from the
         :meth:`set_config_root` / :meth:`set_workspace_path`
-        broadcast handlers so a workspace/config-root change after
-        plugin init actually moves the backup root — not just the
-        in-memory copy of the value.
+        broadcast handlers so a config-root change after plugin init
+        actually moves the backup root — not just the in-memory copy
+        of the value.
+
+        Raises:
+            RuntimeError: when ``_resolve_backup_base_dir`` returns
+                ``None`` (no config_root resolved AND no operator
+                override).  This is a configuration error — the
+                operator must set ``config_root`` in plugin config
+                or via :func:`shared.session_context.set_config_root`.
+                Pre-PR-147 a workspace-fallback masked this; per
+                Daniel's "framework confined to config_root, workspace
+                belongs to tenant" rule, falling back to workspace
+                is incorrect.
         """
         base = self._resolve_backup_base_dir()
-        if base is not None:
-            self._backup_manager = BackupManager(base)
-            return
-        # No anchor known — log loud and use BackupManager's legacy
-        # CWD-relative default so the plugin doesn't crash.  The
-        # operator should set ``workspace_root`` / ``config_root`` in
-        # plugin config or via the ContextVar.
-        logger.warning(
-            "file_edit: no config_root or workspace_root resolved; "
-            "falling back to CWD-relative .jaato/backups.  Set "
-            "workspace_root / config_root in plugin config or via "
-            "JAATO_WORKSPACE_ROOT / JAATO_CONFIG_ROOT env vars.",
-        )
-        self._backup_manager = BackupManager()
+        if base is None:
+            raise RuntimeError(
+                "file_edit: cannot resolve backup base directory — "
+                "no config_root set AND no operator override "
+                "(plugin_config['backup_dir']) supplied.  The framework "
+                "writes backups under <config_root>/sessions/<id>/backups/; "
+                "set config_root in plugin config or ensure "
+                "PluginRegistry.set_config_root has fired before "
+                "expose_all (cf. PR-146).",
+            )
+        self._backup_manager = BackupManager(base)
 
         # Log .jaato symlink detection for visibility
         if self._workspace_root:
