@@ -116,6 +116,23 @@ DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS = 0.5
 MIN_DIAGNOSTICS_MAX_WAIT_SECONDS = 0.0  # 0 = legacy "no wait, read cache now"
 MAX_DIAGNOSTICS_MAX_WAIT_SECONDS = 60.0
 
+# Default path for the lsp plugin's cross-session diagnostic log.
+# Pre-0.6.136 this was hard-coded to ``tempfile.gettempdir()/lsp_debug.log``
+# (e.g. ``/tmp/lsp_debug.log``) which broke silently on apparmor-confined
+# runners (PR-148 made the write fail; the outer try/except in
+# ``_load_config_cache`` misclassified the failure as a config-load error
+# and reset ``_config_cache = {}`` → "No LSP servers configured" → 100%
+# enrichment dead).  The new default resolves under the workspace root
+# (where apparmor already covers writes via the per-session profile
+# composed by ``get_apparmor_rules``), and operators can override the
+# path via ``plugin_configs.lsp.debug_log_path``.
+#
+# Path semantics: relative values are resolved against ``workspace_path``
+# at write time + at apparmor-fragment-composition time (same resolver
+# either side, so the granted path always matches what the plugin
+# actually writes to).  Absolute values pass through unchanged.
+DEFAULT_DEBUG_LOG_PATH = ".jaato/logs/lsp_debug.log"
+
 
 def _uri_to_file_path(uri: str) -> str:
     """Convert a file URI to a local file path."""
@@ -397,6 +414,13 @@ class LSPToolPlugin(RunnerForwardingMixin):
         # plugin_configs.lsp.diagnostics_{max,min}_wait_seconds.
         self._diagnostics_max_wait_seconds: float = DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS
         self._diagnostics_min_wait_seconds: float = DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS
+        # Operator-configurable path for the cross-session diagnostic
+        # log.  Relative paths resolve against `workspace_path`;
+        # absolute paths pass through.  Default is workspace-relative
+        # so the apparmor fragment can grant write access through the
+        # standard per-session profile.  See DEFAULT_DEBUG_LOG_PATH +
+        # `get_apparmor_rules` below for the symmetric composition.
+        self._debug_log_path_raw: str = DEFAULT_DEBUG_LOG_PATH
 
     def _log_event(
         self,
@@ -498,10 +522,117 @@ class LSPToolPlugin(RunnerForwardingMixin):
             'diagnostics_min_wait_seconds',
         )
 
+        # Diagnostic-log path knob.  Operator-set strings pass through
+        # verbatim (resolved against workspace at use site); unset
+        # falls back to the workspace-relative default.  Empty string
+        # disables the diagnostic log entirely.
+        debug_log_raw = config.get('debug_log_path', DEFAULT_DEBUG_LOG_PATH)
+        if debug_log_raw is None:
+            debug_log_raw = ''
+        self._debug_log_path_raw = str(debug_log_raw)
+
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
+
+    @staticmethod
+    def _resolve_debug_log_path(
+        raw_path: str,
+        workspace_path: Optional[str],
+    ) -> Optional[str]:
+        """Resolve the diagnostic-log path knob to a concrete path.
+
+        Symmetric helper used at TWO sites:
+
+        - **Write site** (`_load_config_cache`) — picks where the
+          plugin actually appends the log line.
+        - **Apparmor-fragment site** (`get_apparmor_rules` classmethod)
+          — picks what path to grant write access to.
+
+        Both sites MUST agree on the resolved path, otherwise the
+        composer would grant access to a path the plugin doesn't use
+        (or vice-versa).  Centralising the resolution here avoids
+        that drift class.
+
+        Semantics:
+            - Empty string → returns None (operator disabled the log).
+            - Absolute path → returned verbatim.
+            - Relative path + workspace_path set → joined.
+            - Relative path + no workspace_path → returns None
+              (writing to a workspace-relative path is meaningless
+              without a workspace; better to suppress the diagnostic
+              than write to the daemon's cwd silently).
+
+        Args:
+            raw_path: The operator-configured value (or default).
+            workspace_path: Session's workspace root if known.
+
+        Returns:
+            Absolute path the plugin will write to, or None to skip
+            the diagnostic write entirely.
+        """
+        if not raw_path:
+            return None
+        if os.path.isabs(raw_path):
+            return raw_path
+        if not workspace_path:
+            return None
+        return os.path.join(workspace_path, raw_path)
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute the diagnostic-log apparmor fragment.
+
+        The lsp plugin appends per-session config-load events to a
+        shared diagnostic log.  Pre-0.6.136 the path was hard-coded
+        to ``tempfile.gettempdir()/lsp_debug.log`` (e.g.
+        ``/tmp/lsp_debug.log``), which apparmor-confined runners
+        couldn't write — and the outer try/except in
+        ``_load_config_cache`` misclassified the failure as a
+        config-load error.  Symptom (v141-v144): every LSP enrichment
+        call returned "no servers connected" because ``_config_cache``
+        was reset to ``{}`` by the misclassified handler.
+
+        This fragment grants ``rw`` on whichever path
+        ``plugin_configs.lsp.debug_log_path`` resolves to (default
+        ``<workspace>/.jaato/logs/lsp_debug.log``).  Two rules cover
+        the full mkdir chain following the file_edit pattern (PR-147):
+
+        - ``<parent_dir>/   rw,`` — the dir entry itself (for the
+          mkdir of ``.jaato/logs/`` if it doesn't exist yet).
+        - ``<parent_dir>/** rw,`` — all descendants (the log file
+          plus any future siblings the plugin might write).
+
+        When the operator sets ``debug_log_path: ""`` or to an
+        absolute path outside any reachable directory, no rules are
+        emitted — the operator owns that consequence per Daniel's
+        rule against hardcoded fallbacks.
+        """
+        raw_path = plugin_config.get('debug_log_path', DEFAULT_DEBUG_LOG_PATH)
+        if raw_path is None:
+            raw_path = ''
+        raw_path = str(raw_path)
+        resolved = cls._resolve_debug_log_path(raw_path, workspace_path)
+        if not resolved:
+            return []
+        parent_dir = os.path.dirname(resolved)
+        if not parent_dir:
+            return []
+        # The parent-dir entry plus subtree rules cover the mkdir
+        # chain + every file inside.  Same shape as file_edit's
+        # ``<config_root>/sessions/`` fragment (PR-147).
+        return [
+            f"{parent_dir}/    rw,",
+            f"{parent_dir}/**  rw,",
+        ]
 
     def _parse_wait_knob(
         self,
@@ -1467,6 +1598,20 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     "[0, diagnostics_max_wait_seconds]."
                 ),
             ),
+            PluginSetting(
+                name="debug_log_path",
+                type="str",
+                default=DEFAULT_DEBUG_LOG_PATH,
+                description=(
+                    "Path to the lsp plugin's diagnostic log "
+                    "(append-only).  Relative paths resolve against "
+                    "the session's workspace_path; absolute paths "
+                    "pass through.  Default is workspace-relative so "
+                    "the per-session apparmor profile composed by "
+                    "`get_apparmor_rules` covers the write.  Empty "
+                    "string disables the diagnostic log entirely."
+                ),
+            ),
         ]
 
     def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
@@ -1804,20 +1949,56 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                         self._config_cache = json.load(f)
                     self._config_path = path
                     self._log_event(LOG_INFO, f"Loaded config from {path}")
-                    # Debug: write directly to a known file
-                    import tempfile
-                    debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
-                    session_tag = f":{self._session_id}" if self._session_id else ""
-                    with open(debug_path, "a") as df:
-                        df.write(f"[LSP{session_tag}] Config loaded from: {path}\n")
-                        servers = self._config_cache.get('languageServers', {})
-                        for name, spec in servers.items():
-                            df.write(f"[LSP{session_tag}]   Server '{name}': command={spec.get('command')}, args={spec.get('args', [])}\n")
-                        df.flush()
-                    return
-                except Exception as e:
+                except (OSError, json.JSONDecodeError) as e:
+                    # Real config-load failure (file unreadable / not
+                    # JSON).  Reset the cache that the json.load may
+                    # have partially populated, then try the next
+                    # path.  This branch is now scoped to actual JSON
+                    # errors — diagnostic-log write failures used to
+                    # be swallowed here too (pre-0.6.136) which made
+                    # apparmor-blocked writes look like config-load
+                    # failures and silently broke the entire
+                    # enrichment chain.
+                    self._config_cache = {}
                     self._log_event(LOG_WARN, f"Failed to load {path}: {e}")
                     continue
+
+                # Diagnostic side-channel: write the load event to
+                # the operator-configured diagnostic log.  This MUST
+                # NOT abort config loading if it fails — the log is
+                # for human inspection, not load-bearing.  Pre-0.6.136
+                # this was wrapped in the same outer try/except as the
+                # json.load, which silently broke the entire LSP
+                # enrichment chain when apparmor denied the write.
+                debug_path = self._resolve_debug_log_path(
+                    self._debug_log_path_raw, self._workspace_path
+                )
+                if debug_path:
+                    try:
+                        parent_dir = os.path.dirname(debug_path)
+                        if parent_dir:
+                            os.makedirs(parent_dir, exist_ok=True)
+                        session_tag = f":{self._session_id}" if self._session_id else ""
+                        with open(debug_path, "a") as df:
+                            df.write(f"[LSP{session_tag}] Config loaded from: {path}\n")
+                            servers = self._config_cache.get('languageServers', {})
+                            for name, spec in servers.items():
+                                df.write(
+                                    f"[LSP{session_tag}]   Server '{name}': "
+                                    f"command={spec.get('command')}, "
+                                    f"args={spec.get('args', [])}\n"
+                                )
+                            df.flush()
+                    except OSError as e:
+                        # Apparmor-denied, disk full, parent missing,
+                        # etc.  Surface the failure via the in-memory
+                        # log so `lsp logs` shows it, but do NOT abort
+                        # the load — the config is already cached.
+                        self._log_event(
+                            LOG_WARN,
+                            f"Failed to write debug log to {debug_path}: {e}",
+                        )
+                return
         self._config_cache = {}
 
     def _ensure_thread(self) -> None:
