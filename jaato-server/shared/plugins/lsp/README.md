@@ -253,6 +253,24 @@ You can specify a custom `.lsp.json` path per subagent using `plugin_configs`:
 This allows different subagents to use different LSP server configurations
 for the same codebase or different projects.
 
+### Plugin Configuration Reference
+
+Settings live under `plugin_configs.lsp` in a profile:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `config_path` | string | _(unset — falls back to `<workspace>/.lsp.json` then `~/.lsp.json`)_ | Override `.lsp.json` discovery path. |
+| `connect_timeout_seconds` | float | `30.0` | Per-server LSP `initialize` handshake timeout. Raise for heavy-init servers — Eclipse JDT LS (jdtls) on Maven / Gradle workspaces typically needs 30-60s; default `15.0` (pre server-version-bump) starves it. Clamped to `[1.0, 300.0]`; out-of-range values are clamped and logged in the trace, not rejected. |
+
+Example codegen profile snippet:
+
+```yaml
+plugin_configs:
+  lsp:
+    config_path: "${workspaceRoot}/.lsp.json"
+    connect_timeout_seconds: 60.0
+```
+
 ## Tools
 
 The LSP tools use a **symbol-based API** - just provide the symbol name instead of

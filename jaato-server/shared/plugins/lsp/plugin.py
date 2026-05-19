@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.plugins.base import (
     UserCommand, CommandParameter, CommandCompletion,
-    ToolResultEnrichmentResult, HelpLines
+    ToolResultEnrichmentResult, HelpLines, PluginSetting
 )
 from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
 from ..subagent.config import expand_variables
@@ -91,6 +91,18 @@ LOG_ERROR = 'ERROR'
 LOG_WARN = 'WARN'
 
 MAX_LOG_ENTRIES = 500
+
+# Default per-server LSP connect timeout (seconds).  The previous
+# hard-coded value of 15.0 was sufficient for lightweight servers like
+# pyright / typescript-language-server (which initialize in under 5s),
+# but starves Eclipse JDT LS (jdtls) on Maven / Gradle workspaces where
+# cold-start `initialize` + workspace import routinely takes 30-60s.
+# Operators with very large Java workspaces or other heavy-init servers
+# can raise this further via `plugin_configs.lsp.connect_timeout_seconds`
+# in their profile (capped at MAX_CONNECT_TIMEOUT_SECONDS).
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
+MIN_CONNECT_TIMEOUT_SECONDS = 1.0
+MAX_CONNECT_TIMEOUT_SECONDS = 300.0
 
 
 def _uri_to_file_path(uri: str) -> str:
@@ -362,6 +374,11 @@ class LSPToolPlugin(RunnerForwardingMixin):
         self._session_id: Optional[str] = None
         # Stderr capture for LSP server output
         self._errlog: Optional[LogCapture] = None
+        # Per-server connect timeout (seconds). Configurable via
+        # plugin_configs.lsp.connect_timeout_seconds; jdtls on a cold
+        # Maven workspace + first-time mvn resolve typically needs 30-60s,
+        # while pyright / typescript-language-server start in under 5s.
+        self._connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
 
     def _log_event(
         self,
@@ -409,6 +426,35 @@ class LSPToolPlugin(RunnerForwardingMixin):
         self._session_id = config.get('session_id')
         self._custom_config_path = config.get('config_path')
         self._workspace_path = config.get('workspace_path')
+
+        # Resolve per-server connect timeout knob.  Values outside the
+        # supported range are clamped (and logged) rather than rejected —
+        # a profile typo should not break LSP entirely; the trace makes
+        # the clamp visible at startup so it gets caught.
+        raw_timeout = config.get(
+            'connect_timeout_seconds', DEFAULT_CONNECT_TIMEOUT_SECONDS
+        )
+        try:
+            timeout_value = float(raw_timeout)
+        except (TypeError, ValueError):
+            self._trace(
+                f"initialize: connect_timeout_seconds={raw_timeout!r} is not a "
+                f"number — falling back to default "
+                f"{DEFAULT_CONNECT_TIMEOUT_SECONDS}s"
+            )
+            timeout_value = DEFAULT_CONNECT_TIMEOUT_SECONDS
+        clamped = max(
+            MIN_CONNECT_TIMEOUT_SECONDS,
+            min(timeout_value, MAX_CONNECT_TIMEOUT_SECONDS),
+        )
+        if clamped != timeout_value:
+            self._trace(
+                f"initialize: connect_timeout_seconds={timeout_value} "
+                f"clamped to {clamped} "
+                f"(range [{MIN_CONNECT_TIMEOUT_SECONDS}, "
+                f"{MAX_CONNECT_TIMEOUT_SECONDS}])"
+            )
+        self._connect_timeout_seconds = clamped
 
         self._trace("initialize: starting background thread")
         self._ensure_thread()
@@ -1297,6 +1343,31 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             )
         ]
 
+    def get_config_schema(self) -> List[PluginSetting]:
+        return [
+            PluginSetting(
+                name="config_path",
+                type="str",
+                default="",
+                description=(
+                    "Override path to .lsp.json. Defaults to "
+                    "<workspace>/.lsp.json then ~/.lsp.json."
+                ),
+            ),
+            PluginSetting(
+                name="connect_timeout_seconds",
+                type="float",
+                default=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+                description=(
+                    "Per-server LSP `initialize` handshake timeout. "
+                    "Raise for heavy-init servers (jdtls on Maven / Gradle "
+                    "workspaces typically needs 30-60s). Clamped to "
+                    f"[{MIN_CONNECT_TIMEOUT_SECONDS}, "
+                    f"{MAX_CONNECT_TIMEOUT_SECONDS}]."
+                ),
+            ),
+        ]
+
     def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
         if command != 'lsp':
             return []
@@ -1696,7 +1767,9 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     )
                     self._trace(f"Starting LSP server '{name}': command={config.command}, args={config.args}")
                     client = LSPClient(config, errlog=self._errlog)
-                    await asyncio.wait_for(client.start(), timeout=15.0)
+                    await asyncio.wait_for(
+                        client.start(), timeout=self._connect_timeout_seconds
+                    )
                     self._clients[name] = client
                     self._connected_servers.add(name)
                     self._failed_servers.pop(name, None)
