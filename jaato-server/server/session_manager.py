@@ -2534,6 +2534,25 @@ class SessionManager:
         # docs/design/phase4_env_propagation_audit.md for the bug
         # this closes (workspace .env pass:// URIs not reaching the
         # runner post-§7c seat-flip).
+        # Server 0.6.131+ (PR-148): create the plugin registry + run
+        # discover BEFORE the apparmor profile is composed.  The
+        # composer at ``resolve_plugin_apparmor_rules`` walks
+        # ``profile.plugins`` and queries each via
+        # ``registry.get_plugin`` — without a registry, the loop is
+        # silently skipped and ZERO plugin-contributed apparmor
+        # rules land in the rendered profile.  Pre-PR-148, the
+        # registry was created inside ``server.initialize()`` which
+        # runs AFTER this provisioning step (~line 2571 below) —
+        # too late.  Discovered v126/v128: file_edit's backup-path
+        # rules never made it into the profile despite PR-145's
+        # ``get_apparmor_rules`` export.
+        #
+        # ``create_registry_and_discover`` is idempotent — the
+        # ``server.initialize()`` call below skips its own
+        # registry-setup step when the registry already exists.
+        with server._with_session_env(), server._in_workspace():
+            server.create_registry_and_discover()
+
         with server._with_session_env():
             ipc_sandbox_mode = self._provision_ipc_apparmor_and_spawn_runner(
                 server,
