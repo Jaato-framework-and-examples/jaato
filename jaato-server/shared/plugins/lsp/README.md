@@ -261,6 +261,8 @@ Settings live under `plugin_configs.lsp` in a profile:
 |-----|------|---------|-------------|
 | `config_path` | string | _(unset — falls back to `<workspace>/.lsp.json` then `~/.lsp.json`)_ | Override `.lsp.json` discovery path. |
 | `connect_timeout_seconds` | float | `30.0` | Per-server LSP `initialize` handshake timeout. Raise for heavy-init servers — Eclipse JDT LS (jdtls) on Maven / Gradle workspaces typically needs 30-60s; default `15.0` (pre server-version-bump) starves it. Clamped to `[1.0, 300.0]`; out-of-range values are clamped and logged in the trace, not rejected. |
+| `diagnostics_max_wait_seconds` | float | `5.0` | Upper bound on the post-`didOpen` / post-`didChange` wait for the server's first `textDocument/publishDiagnostics` batch. The framework awaits a per-URI `asyncio.Event` signalled by the JSON-RPC reader, so calls return AS SOON AS the batch arrives — raising the max costs nothing in the fast-server case. Pre-0.6.134 this was a hard-coded `0.8s` sleep that starved jdtls (Maven cold cache: 3-8s first batch). Clamped to `[0.0, 60.0]`; `0` disables the await entirely (legacy "read cache as-is" behavior). |
+| `diagnostics_min_wait_seconds` | float | `0.5` | Floor on the same wait. Even when an early `publishDiagnostics` arrives, we wait at least this long so multi-stage analysis pipelines (parser → compiler → linter) have a chance to deliver their later batches before the cache read. Clamped to `[0.0, diagnostics_max_wait_seconds]`. |
 
 Example codegen profile snippet:
 
@@ -269,6 +271,8 @@ plugin_configs:
   lsp:
     config_path: "${workspaceRoot}/.lsp.json"
     connect_timeout_seconds: 60.0
+    diagnostics_max_wait_seconds: 10.0   # raise for cold Maven workspaces
+    diagnostics_min_wait_seconds: 1.0    # let jdtls multi-stage settle
 ```
 
 ## Tools

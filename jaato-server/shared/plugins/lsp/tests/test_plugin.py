@@ -1225,3 +1225,208 @@ class TestConnectTimeoutKnob:
         entry = next(s for s in schema if s.name == "connect_timeout_seconds")
         assert entry.type == "float"
         assert entry.default == 30.0
+
+
+class TestDiagnosticsWaitKnobs:
+    """Pin behavior of plugin_configs.lsp.diagnostics_{max,min}_wait_seconds.
+
+    Pre-server-0.6.134 the post-didOpen wait was a hard-coded
+    `asyncio.sleep(0.8)` at lsp/plugin.py:1962.  Sufficient for
+    pyright / typescript-language-server but starved jdtls on Maven
+    workspaces (3-8s first publishDiagnostics).  The 0.6.134 knobs
+    let profiles raise the upper bound — without paying the cost in
+    the fast-server case, because the framework now awaits a per-URI
+    `asyncio.Event` signalled by the JSON-RPC reader.
+    """
+
+    def test_defaults_are_five_and_half(self):
+        from ..plugin import (
+            DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS,
+            DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS,
+        )
+        plugin = LSPToolPlugin()
+        assert plugin._diagnostics_max_wait_seconds == DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS
+        assert plugin._diagnostics_min_wait_seconds == DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS
+        assert DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS == 5.0
+        assert DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS == 0.5
+
+    def test_initialize_applies_max_wait_config(self):
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"diagnostics_max_wait_seconds": 10.0})
+        assert plugin._diagnostics_max_wait_seconds == 10.0
+
+    def test_initialize_applies_min_wait_config(self):
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"diagnostics_min_wait_seconds": 1.5})
+        assert plugin._diagnostics_min_wait_seconds == 1.5
+
+    def test_min_wait_clamped_to_max_wait(self):
+        """Pin: min_wait cannot exceed max_wait. If operator sets
+        min=10 but max=5, min is silently clamped to 5 (and traced)."""
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({
+                "diagnostics_max_wait_seconds": 5.0,
+                "diagnostics_min_wait_seconds": 10.0,
+            })
+        assert plugin._diagnostics_max_wait_seconds == 5.0
+        assert plugin._diagnostics_min_wait_seconds == 5.0
+
+    def test_max_wait_clamps_above_ceiling(self):
+        from ..plugin import MAX_DIAGNOSTICS_MAX_WAIT_SECONDS
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({"diagnostics_max_wait_seconds": 9999.0})
+        assert plugin._diagnostics_max_wait_seconds == MAX_DIAGNOSTICS_MAX_WAIT_SECONDS
+
+    def test_max_wait_zero_disables_await(self):
+        """Pin: 0 is valid and means 'legacy read-cache-as-is'."""
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({
+                "diagnostics_max_wait_seconds": 0.0,
+                "diagnostics_min_wait_seconds": 0.0,
+            })
+        assert plugin._diagnostics_max_wait_seconds == 0.0
+        assert plugin._diagnostics_min_wait_seconds == 0.0
+
+    def test_non_numeric_falls_back_to_default(self):
+        from ..plugin import (
+            DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS,
+            DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS,
+        )
+        plugin = LSPToolPlugin()
+        with patch.object(plugin, "_ensure_thread"):
+            plugin.initialize({
+                "diagnostics_max_wait_seconds": "not-a-number",
+                "diagnostics_min_wait_seconds": "also-not",
+            })
+        assert plugin._diagnostics_max_wait_seconds == DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS
+        assert plugin._diagnostics_min_wait_seconds == DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS
+
+    def test_config_schema_exposes_both_knobs(self):
+        plugin = LSPToolPlugin()
+        names = [s.name for s in plugin.get_config_schema()]
+        assert "diagnostics_max_wait_seconds" in names
+        assert "diagnostics_min_wait_seconds" in names
+
+
+class TestAwaitDiagnostics:
+    """Pin LSPClient.await_diagnostics semantics — the bounded-poll
+    primitive that replaced the 0.8s sleep at _call_lsp_method:1962."""
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_publishdiagnostics_arrives(self):
+        """Pin: simulate the JSON-RPC reader firing the event mid-await;
+        the coroutine returns True and is unblocked immediately."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+        uri = client.uri_from_path(path)
+
+        async def fire_event_soon():
+            await asyncio.sleep(0.05)
+            # Simulate what the reader does on publishDiagnostics:
+            ev = client._diagnostics_events.get(uri)
+            if ev is None:
+                ev = asyncio.Event()
+                client._diagnostics_events[uri] = ev
+            ev.set()
+
+        firer = asyncio.create_task(fire_event_soon())
+        result = await client.await_diagnostics(
+            path, max_wait=2.0, min_wait=0.0
+        )
+        await firer
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_timeout(self):
+        """Pin: no notification within max_wait → returns False; caller
+        must still get_diagnostics afterwards in case earlier batches
+        landed."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        result = await client.await_diagnostics(
+            "/tmp/foo.py", max_wait=0.1, min_wait=0.0
+        )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_min_wait_enforced(self):
+        """Pin: even if event fires immediately, await blocks at least
+        min_wait. Multi-stage analysis pipelines (parser → compiler →
+        linter) get room to deliver later batches."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+        uri = client.uri_from_path(path)
+        # Pre-set the event so it fires "before" the await call
+        ev = asyncio.Event()
+        ev.set()
+        client._diagnostics_events[uri] = ev
+
+        start = asyncio.get_event_loop().time()
+        await client.await_diagnostics(path, max_wait=1.0, min_wait=0.2)
+        elapsed = asyncio.get_event_loop().time() - start
+        assert elapsed >= 0.2, f"min_wait floor not enforced: elapsed={elapsed}"
+
+    @pytest.mark.asyncio
+    async def test_max_wait_zero_short_circuits(self):
+        """Pin: max_wait=0 returns immediately reporting only whether
+        the event was already set (legacy read-cache-as-is)."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+
+        # Event not pre-set → returns False without any waiting
+        start = asyncio.get_event_loop().time()
+        result = await client.await_diagnostics(path, max_wait=0.0, min_wait=0.0)
+        elapsed = asyncio.get_event_loop().time() - start
+        assert result is False
+        assert elapsed < 0.05  # truly no wait
+
+    @pytest.mark.asyncio
+    async def test_event_cleared_for_next_cycle(self):
+        """Pin: after one successful await, the per-URI Event is
+        cleared so a subsequent didChange + await cycle works
+        correctly for in-session re-renders."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+        uri = client.uri_from_path(path)
+        ev = asyncio.Event()
+        ev.set()
+        client._diagnostics_events[uri] = ev
+
+        await client.await_diagnostics(path, max_wait=1.0, min_wait=0.0)
+        # Event was cleared by await_diagnostics; second call without
+        # another publishDiagnostics will time out.
+        result = await client.await_diagnostics(path, max_wait=0.1, min_wait=0.0)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_cache_not_cleared(self):
+        """Pin: await_diagnostics clears the Event but NOT the
+        diagnostic cache — readers must still see the batch."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+        uri = client.uri_from_path(path)
+        # Simulate a publishDiagnostics arrival populating both:
+        from ..lsp_client import Diagnostic, Range, Position
+        ev = asyncio.Event()
+        ev.set()
+        client._diagnostics_events[uri] = ev
+        client._diagnostics[uri] = [
+            Diagnostic(
+                range=Range(start=Position(0, 0), end=Position(0, 5)),
+                message="test diagnostic",
+            ),
+        ]
+        await client.await_diagnostics(path, max_wait=1.0, min_wait=0.0)
+        # Cache survives:
+        assert len(client._diagnostics[uri]) == 1
+        assert client._diagnostics[uri][0].message == "test diagnostic"

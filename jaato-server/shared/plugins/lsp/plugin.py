@@ -104,6 +104,18 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
 MIN_CONNECT_TIMEOUT_SECONDS = 1.0
 MAX_CONNECT_TIMEOUT_SECONDS = 300.0
 
+# Bounded-poll knobs for `await_diagnostics` (replaces the pre-0.6.134
+# hard-coded 0.8s sleep at `_call_lsp_method`).  The framework now
+# waits on a per-URI asyncio.Event signalled by the JSON-RPC reader
+# when the server pushes `textDocument/publishDiagnostics`.  The
+# defaults are sized for the empirically-measured worst case (jdtls
+# on a cold Maven workspace ~3-8s first batch); operators can shrink
+# them per-profile for lightweight servers.
+DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS = 5.0
+DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS = 0.5
+MIN_DIAGNOSTICS_MAX_WAIT_SECONDS = 0.0  # 0 = legacy "no wait, read cache now"
+MAX_DIAGNOSTICS_MAX_WAIT_SECONDS = 60.0
+
 
 def _uri_to_file_path(uri: str) -> str:
     """Convert a file URI to a local file path."""
@@ -379,6 +391,12 @@ class LSPToolPlugin(RunnerForwardingMixin):
         # Maven workspace + first-time mvn resolve typically needs 30-60s,
         # while pyright / typescript-language-server start in under 5s.
         self._connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
+        # Bounded-poll knobs for awaiting `publishDiagnostics` after
+        # didOpen / didChange (consumed by `_call_lsp_method` via
+        # `LSPClient.await_diagnostics`).  Configurable via
+        # plugin_configs.lsp.diagnostics_{max,min}_wait_seconds.
+        self._diagnostics_max_wait_seconds: float = DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS
+        self._diagnostics_min_wait_seconds: float = DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS
 
     def _log_event(
         self,
@@ -456,10 +474,65 @@ class LSPToolPlugin(RunnerForwardingMixin):
             )
         self._connect_timeout_seconds = clamped
 
+        # Same parse + clamp pattern for the diagnostics-wait knobs.
+        self._diagnostics_max_wait_seconds = self._parse_wait_knob(
+            config.get(
+                'diagnostics_max_wait_seconds',
+                DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS,
+            ),
+            DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS,
+            MIN_DIAGNOSTICS_MAX_WAIT_SECONDS,
+            MAX_DIAGNOSTICS_MAX_WAIT_SECONDS,
+            'diagnostics_max_wait_seconds',
+        )
+        # min_wait is clamped to [0, max_wait] so the floor cannot
+        # exceed the upper bound the operator just set.
+        self._diagnostics_min_wait_seconds = self._parse_wait_knob(
+            config.get(
+                'diagnostics_min_wait_seconds',
+                DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS,
+            ),
+            DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS,
+            0.0,
+            self._diagnostics_max_wait_seconds,
+            'diagnostics_min_wait_seconds',
+        )
+
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
+
+    def _parse_wait_knob(
+        self,
+        raw: Any,
+        default: float,
+        floor: float,
+        ceiling: float,
+        knob_name: str,
+    ) -> float:
+        """Parse + clamp a `plugin_configs.lsp.*_wait_seconds` value.
+
+        Non-numeric input falls back to the default (with a trace);
+        in-range numeric input passes through unchanged; out-of-range
+        values are clamped (with a trace).  Mirrors the connect_timeout
+        knob shape so the operator-facing contract stays uniform.
+        """
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            self._trace(
+                f"initialize: {knob_name}={raw!r} is not a number — "
+                f"falling back to default {default}s"
+            )
+            return default
+        clamped = max(floor, min(value, ceiling))
+        if clamped != value:
+            self._trace(
+                f"initialize: {knob_name}={value} clamped to {clamped} "
+                f"(range [{floor}, {ceiling}])"
+            )
+        return clamped
 
     def set_workspace_path(self, path: str) -> None:
         """Set the workspace path for finding config files.
@@ -1366,6 +1439,34 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     f"{MAX_CONNECT_TIMEOUT_SECONDS}]."
                 ),
             ),
+            PluginSetting(
+                name="diagnostics_max_wait_seconds",
+                type="float",
+                default=DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS,
+                description=(
+                    "Upper bound on the post-didOpen / post-didChange "
+                    "wait for the server's first "
+                    "`textDocument/publishDiagnostics` batch. Returns "
+                    "as soon as the batch arrives. Raise for heavy "
+                    "servers (jdtls cold Maven: 3-8s). "
+                    f"Clamped to [{MIN_DIAGNOSTICS_MAX_WAIT_SECONDS}, "
+                    f"{MAX_DIAGNOSTICS_MAX_WAIT_SECONDS}]; 0 = no "
+                    "wait, read cache as-is."
+                ),
+            ),
+            PluginSetting(
+                name="diagnostics_min_wait_seconds",
+                type="float",
+                default=DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS,
+                description=(
+                    "Floor on the post-didOpen wait. Even when an "
+                    "early `publishDiagnostics` arrives, we wait at "
+                    "least this long so multi-stage analysis pipelines "
+                    "(parser → compiler → linter) deliver later "
+                    "batches before the cache read. Clamped to "
+                    "[0, diagnostics_max_wait_seconds]."
+                ),
+            ),
         ]
 
     def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
@@ -2022,17 +2123,39 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         """Call an LSP method on the client."""
         file_path = args.get('file_path')
 
-        # Methods that require full parsing need more time
-        # get_diagnostics also needs time for server to analyze and publish diagnostics
-        needs_parsing = method in ('hover', 'document_symbols', 'goto_definition', 'find_references', 'get_diagnostics')
+        # Methods that require full parsing need to wait for the server
+        # to emit `textDocument/publishDiagnostics` (or the equivalent
+        # post-parse symbol index, in the case of document_symbols /
+        # goto_definition / find_references / hover).  Pre-0.6.134 this
+        # was a fixed `asyncio.sleep(0.8)` that timed out before
+        # heavy-init servers (Eclipse JDT LS on Maven workspaces) had
+        # delivered their first diagnostic batch.  Now we wait on a
+        # per-URI asyncio.Event signalled by the JSON-RPC reader, so
+        # fast servers return in <500ms and slow servers get up to
+        # `diagnostics_max_wait_seconds` (operator-configurable).
+        needs_parsing = method in (
+            'hover', 'document_symbols', 'goto_definition',
+            'find_references', 'get_diagnostics',
+        )
 
         # Ensure document is open and up-to-date
         # update_document opens if not open, or sends didChange if already open
         if file_path and method not in ('workspace_symbols',):
             await client.update_document(file_path)
-            # Wait for server to process the document
-            # Longer delay for operations that need full parsing/diagnostics
-            await asyncio.sleep(0.8 if needs_parsing else 0.2)
+            # Wait for server to process the document.  Bounded poll
+            # for parsing-heavy methods; small fixed delay for
+            # lightweight ones (workspace_symbols already excluded
+            # above).  The min_wait floor gives multi-stage analysis
+            # pipelines (parser → compiler → linter) room to deliver
+            # later batches before the cache read.
+            if needs_parsing:
+                await client.await_diagnostics(
+                    file_path,
+                    max_wait=self._diagnostics_max_wait_seconds,
+                    min_wait=self._diagnostics_min_wait_seconds,
+                )
+            else:
+                await asyncio.sleep(0.2)
 
         if method == 'goto_definition':
             locations = await client.goto_definition(

@@ -361,6 +361,13 @@ class LSPClient:
         self._initialized = False
         self._capabilities: Optional[ServerCapabilities] = None
         self._diagnostics: Dict[str, List[Diagnostic]] = {}  # uri -> diagnostics
+        # Per-URI asyncio.Event signalled whenever the server pushes a
+        # `textDocument/publishDiagnostics` notification for that URI.
+        # Used by `await_diagnostics()` so callers can wait for the
+        # first batch instead of sleeping a fixed interval.  The event
+        # is recreated on each `await_diagnostics()` consume cycle so
+        # subsequent didChange + await pairs work correctly.
+        self._diagnostics_events: Dict[str, asyncio.Event] = {}
         self._open_documents: Dict[str, int] = {}  # uri -> version
         self._configured_extra_paths: Set[str] = set()  # paths already sent to server
         self._workspace_folders: Set[str] = set()  # workspace folder URIs added
@@ -533,6 +540,16 @@ class LSPClient:
                 uri = params.get('uri', '')
                 diagnostics = [Diagnostic.from_dict(d) for d in params.get('diagnostics', [])]
                 self._diagnostics[uri] = diagnostics
+                # Signal any caller awaiting first batch via
+                # `await_diagnostics(path, ...)`.  We lazily create the
+                # Event so URIs the server pushes for spontaneously
+                # (e.g. cross-file analysis ripples) also get a signal
+                # if a future awaiter shows up.
+                event = self._diagnostics_events.get(uri)
+                if event is None:
+                    event = asyncio.Event()
+                    self._diagnostics_events[uri] = event
+                event.set()
 
     # Public API methods
 
@@ -967,6 +984,85 @@ class LSPClient:
         """Get cached diagnostics for a file."""
         uri = self.uri_from_path(path)
         return self._diagnostics.get(uri, [])
+
+    async def await_diagnostics(
+        self,
+        path: str,
+        max_wait: float,
+        min_wait: float = 0.0,
+    ) -> bool:
+        """Block until the server pushes a `publishDiagnostics` batch for ``path``.
+
+        Replaces the historical "sleep N seconds and hope" pattern in
+        the enrichment dispatch.  Returns AS SOON AS the first
+        diagnostic batch arrives (the moment the per-URI
+        `asyncio.Event` fires in the JSON-RPC reader), or after
+        ``max_wait`` seconds — whichever comes first.
+
+        Args:
+            path: file path the caller wants diagnostics for.
+            max_wait: upper bound on wait time.  For heavy-init servers
+                (Eclipse JDT LS on a cold Maven workspace) the first
+                publishDiagnostics typically arrives 3-8s after
+                ``didOpen`` / ``didChange``; for lightweight servers
+                (pyright, typescript-language-server) it's under 500ms.
+            min_wait: floor on wait time.  Even when an Event fires
+                early (e.g. the server emitted a "diagnostic batch is
+                empty" notification while still parsing imports), we
+                wait at least this long so a multi-stage analysis
+                pipeline (parser → compiler → linter) has a chance to
+                deliver its later batches before the caller reads the
+                cache.
+
+        Returns:
+            True if a `publishDiagnostics` notification arrived within
+            the window, False if ``max_wait`` expired without any
+            notification.  The caller is expected to ``get_diagnostics``
+            afterwards regardless of return value — a False just tells
+            them the cache may be stale.
+
+        Implementation notes:
+            - The Event is reset after this method returns, so a
+              subsequent ``didChange`` + ``await_diagnostics`` cycle
+              works correctly for in-session re-renders.
+            - If a notification already arrived BEFORE this method was
+              called (server pushed it during connect / first
+              ``didOpen`` analysis), the Event is already set and we
+              return immediately (after ``min_wait``).
+            - ``max_wait`` of 0 disables the await entirely (legacy
+              "fire and forget — read cache now" behavior).
+        """
+        uri = self.uri_from_path(path)
+        event = self._diagnostics_events.get(uri)
+        if event is None:
+            event = asyncio.Event()
+            self._diagnostics_events[uri] = event
+
+        if max_wait <= 0:
+            return event.is_set()
+
+        if min_wait > 0:
+            await asyncio.sleep(min_wait)
+
+        remaining = max(0.0, max_wait - min_wait)
+        if remaining <= 0:
+            # min_wait already consumed the entire budget; just report
+            # whatever state the event is in (may be set if a
+            # notification arrived during the sleep).
+            signalled = event.is_set()
+        else:
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+                signalled = True
+            except asyncio.TimeoutError:
+                signalled = False
+
+        # Clear the event so a subsequent didChange + await cycle works
+        # correctly for in-session re-renders.  We deliberately do NOT
+        # clear `self._diagnostics[uri]` — readers may still want the
+        # cached batch via `get_diagnostics`.
+        event.clear()
+        return signalled
 
     async def get_code_actions(
         self,
