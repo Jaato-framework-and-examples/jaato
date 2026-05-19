@@ -1133,12 +1133,34 @@ class JaatoRuntime:
         # their profile knobs sit under ``plugin_configs[provider_name]``.
         # Child keys override the stored ProviderConfig.extra so a profile
         # can tune host, context length, load params, etc. per-session.
+        #
+        # Server 0.6.132+ (PR-149): ``api_key`` is promoted from the
+        # provider_overrides dict to the top-level ``ProviderConfig.api_key``
+        # field BEFORE the rest is merged into ``extra``.  Pre-PR-149 the
+        # whole dict landed in ``extra``, so ``plugin_configs.<provider>.api_key:
+        # pass://...`` was silently ignored by every provider's
+        # ``initialize()`` (which reads ``config.api_key``, not
+        # ``config.extra["api_key"]``).  Discovered v135 — openrouter
+        # cascade failed APIKeyNotFoundError despite a correctly resolved
+        # pass:// URI in plugin_configs.openrouter.api_key.  Same latent
+        # bug for zhipuai (its working path was the stored-credential
+        # fallback ``~/.jaato/zhipuai_auth.json``, not the documented
+        # plugin_configs surface).
         if plugin_configs:
             provider_overrides = plugin_configs.get(effective_provider)
             if provider_overrides:
                 from dataclasses import replace
-                merged_extra = {**config.extra, **provider_overrides}
-                config = replace(config, extra=merged_extra)
+                overrides = dict(provider_overrides)
+                # api_key is a top-level ProviderConfig field — promote
+                # so providers reading ``config.api_key`` (the universal
+                # auth-field contract across openrouter / zhipuai /
+                # anthropic / nim / etc.) see the profile-supplied value.
+                promoted_api_key = overrides.pop("api_key", None)
+                merged_extra = {**config.extra, **overrides}
+                replace_kwargs: Dict[str, Any] = {"extra": merged_extra}
+                if promoted_api_key:
+                    replace_kwargs["api_key"] = promoted_api_key
+                config = replace(config, **replace_kwargs)
 
         t0 = time.perf_counter()
         provider = load_provider(effective_provider, config)
