@@ -2250,3 +2250,157 @@ class TestServerDataDirApparmorGrants:
         # No data-dir rules; relative path can't resolve
         assert not any(".jaato/jdtls-data" in r and r.endswith(" rw,")
                        for r in rules)
+
+
+class TestExtractFirstDataDirFromArgs:
+    """Pin server-0.6.139 fix (PR-156): runtime helper that returns
+    the FIRST -data path from args, used by `connect_server` to
+    inject TMPDIR into the LSP subprocess env.
+
+    Motivating case (v147 on server 0.6.138): PR-155 apparmor grants
+    landed correctly but jdtls Python wrapper still crashed at
+    `bin/jdtls.py:74` because `tempfile.gettempdir()` is computed
+    EAGERLY as the default-value for the `-data` argparse arg —
+    BEFORE argparse parses CLI input.  Even passing `-data <path>`
+    on the command line doesn't help; the gettempdir() call fires
+    first.  Python's tempfile honors TMPDIR before /tmp, so
+    injecting it makes line 74 succeed.
+
+    Upstream jdtls fixed this in commit `d871e83` (Oct 2025) by
+    replacing gettempdir() with `$HOME/.cache` on Linux.  Our
+    injection is forward-compatible (no-op on post-d871e83 builds).
+    """
+
+    def test_returns_data_path_space_separated(self):
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["-data", "${workspaceRoot}/.jaato/jdtls-data"],
+            workspace_path="/ws",
+        )
+        assert result == "/ws/.jaato/jdtls-data"
+
+    def test_returns_data_dir_path(self):
+        """Pin: `--data-dir` flag also recognised."""
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["--data-dir", ".cache/pyright"],
+            workspace_path="/ws",
+        )
+        assert result == "/ws/.cache/pyright"
+
+    def test_returns_equals_form(self):
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["-data=.jaato/jdtls"],
+            workspace_path="/ws",
+        )
+        assert result == "/ws/.jaato/jdtls"
+
+    def test_absolute_path_passthrough(self):
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["-data", "/abs/data"],
+            workspace_path="/ws",
+        )
+        assert result == "/abs/data"
+
+    def test_no_data_flag_returns_none(self):
+        """Pin: servers without -data flag (e.g. just `--stdio`)
+        return None — no TMPDIR to inject."""
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["--stdio"],
+            workspace_path="/ws",
+        )
+        assert result is None
+
+    def test_no_workspace_returns_none(self):
+        """Pin: relative paths cannot resolve without workspace_path.
+        Return None rather than emit a wrong path."""
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["-data", ".jaato/jdtls"],
+            workspace_path=None,
+        )
+        assert result is None
+
+    def test_returns_first_when_multiple_data_flags(self):
+        """Pin: multiple -data flags → return the FIRST one (TMPDIR
+        is a single value; multiple flags would only confuse
+        the wrapper anyway)."""
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["-data", ".jaato/first", "--data-dir", ".jaato/second"],
+            workspace_path="/ws",
+        )
+        assert result == "/ws/.jaato/first"
+
+    def test_trailing_data_flag_no_value_returns_none(self):
+        """Pin: `args` ending in `-data` without a value → None
+        (malformed; runtime spawn will fail loudly with the same
+        EACCES it currently does, which is more diagnosable than
+        a silent wrong TMPDIR)."""
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["--stdio", "-data"],
+            workspace_path="/ws",
+        )
+        assert result is None
+
+    def test_non_list_args_returns_none(self):
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            None, workspace_path="/ws",
+        )
+        assert result is None
+
+    def test_workspace_root_variable_expanded(self):
+        """Pin: `${workspaceRoot}` expanded same way runtime does."""
+        result = LSPToolPlugin._extract_first_data_dir_from_args(
+            ["-data", "${workspaceRoot}/.cache/jdtls"],
+            workspace_path="/ws/proj",
+        )
+        # Result has workspace prefix resolved
+        assert "/ws/proj" in result
+        assert ".cache/jdtls" in result
+
+
+class TestConnectServerTmpdirInjection:
+    """Pin server-0.6.139: connect_server auto-injects TMPDIR into
+    the LSP subprocess env when a -data path is detected, respecting
+    operator-explicit TMPDIR (never overrides).
+
+    These tests exercise the env-merge logic via source-pinning
+    rather than running an actual subprocess (which would require
+    mocking asyncio.create_subprocess_exec, the LSP handshake, etc.).
+    """
+
+    def test_connect_server_source_calls_extract_helper(self):
+        """Pin: connect_server invokes
+        `_extract_first_data_dir_from_args` to compute TMPDIR.
+        Catches future refactors that accidentally remove the
+        TMPDIR injection."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        # Locate the connect_server async def
+        start = src.index("async def connect_server(name: str, spec: dict)")
+        end = src.find("async def disconnect_server", start)
+        if end == -1:
+            end = start + 4000
+        body = src[start:end]
+        assert "_extract_first_data_dir_from_args" in body, (
+            "connect_server should call "
+            "`LSPToolPlugin._extract_first_data_dir_from_args(...)` "
+            "to compute TMPDIR injection (PR-156 / server 0.6.139)."
+        )
+
+    def test_connect_server_source_respects_operator_tmpdir(self):
+        """Pin: operator-explicit TMPDIR is NEVER overridden by the
+        auto-injection (`'TMPDIR' not in augmented_env` check)."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        start = src.index("async def connect_server(name: str, spec: dict)")
+        end = src.find("async def disconnect_server", start)
+        if end == -1:
+            end = start + 4000
+        body = src[start:end]
+        # The membership check ensures operator-explicit TMPDIR wins
+        assert "'TMPDIR' not in augmented_env" in body or \
+               '"TMPDIR" not in augmented_env' in body, (
+            "connect_server should check `'TMPDIR' not in augmented_env` "
+            "before auto-injecting, so operator-explicit TMPDIR is "
+            "honored (PR-156)."
+        )

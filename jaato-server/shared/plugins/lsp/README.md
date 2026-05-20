@@ -346,9 +346,33 @@ This causes the composer to emit:
 <workspace>/.jaato/jdtls-data/**  rw,
 ```
 
-…in the per-session apparmor profile. jdtls's wrapper sees the
-explicit `-data` arg and never calls `tempfile.gettempdir()`,
-sidestepping the confinement crash.
+…in the per-session apparmor profile.
+
+**Runtime side (server 0.6.139+, PR-156):** at subprocess spawn
+time, the lsp plugin's `connect_server` also auto-injects
+`TMPDIR=<resolved_data_path>` into the LSP server's environment.
+This sidesteps an upstream **jdtls Python wrapper bug** (line 74 of
+`bin/jdtls.py` pre-commit `d871e83`) where the wrapper computes
+`tempfile.gettempdir()` *eagerly* as the default value for the
+`-data` argparse argument — BEFORE argparse parses CLI input.
+Under apparmor confinement that gettempdir() call crashes because
+`/tmp` / `/var/tmp` / `/usr/tmp` aren't reachable, even if `-data`
+is passed on the command line.
+
+Python's `tempfile.gettempdir()` honors `TMPDIR` first per its
+documented precedence chain, so injecting it makes the wrapper's
+line 74 succeed and the wrapper continues into normal startup.
+
+If the operator already sets `"env": {"TMPDIR": "..."}` in
+`.lsp.json`, the plugin **does NOT override it** — operator-explicit
+TMPDIR always wins.
+
+Forward-compatibility: upstream jdtls fixed this in commit
+`d871e83` (Oct 2025) by replacing `gettempdir()` with
+`$HOME/.cache` on Linux. After that fix lands in packaged releases,
+our TMPDIR injection becomes a no-op for jdtls on Linux (the
+wrapper no longer reads TMPDIR), so the framework injection is
+harmless for any operator who upgrades.
 
 **Limitations:**
 
