@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import queue
+import shutil
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -616,23 +617,229 @@ class LSPToolPlugin(RunnerForwardingMixin):
         emitted — the operator owns that consequence per Daniel's
         rule against hardcoded fallbacks.
         """
+        rules: List[str] = []
+
+        # Part 1 (PR-153, server 0.6.136): debug_log_path grants.
+        # The diagnostic log location is operator-configurable; the
+        # fragment grants rw on the resolved parent dir (mkdir +
+        # subtree pattern, same shape as file_edit PR-147).
         raw_path = plugin_config.get('debug_log_path', DEFAULT_DEBUG_LOG_PATH)
         if raw_path is None:
             raw_path = ''
         raw_path = str(raw_path)
         resolved = cls._resolve_debug_log_path(raw_path, workspace_path)
-        if not resolved:
+        if resolved:
+            parent_dir = os.path.dirname(resolved)
+            if parent_dir:
+                rules.append(f"{parent_dir}/    rw,")
+                rules.append(f"{parent_dir}/**  rw,")
+
+        # Part 2 (PR-154, server 0.6.137): server-binary exec grants.
+        # The lsp plugin's `connect_server` coroutine spawns each
+        # configured server via `asyncio.create_subprocess_exec` —
+        # under PR-148 confinement, the per-session apparmor profile
+        # must grant `ix` (inherit-exec) on the canonical binary
+        # path or the spawn fails with EACCES.  Symptom (v145):
+        # `lsp logs` shows `Connection failed - [Errno 13] Permission
+        # denied: jdtls` despite the daemon-side (unconfined)
+        # instance happily spawning the same binary.  Closed by
+        # reading the runtime .lsp.json at composer time + emitting
+        # matching grants.
+        rules.extend(
+            cls._compose_lsp_server_exec_rules(workspace_path, plugin_config)
+        )
+
+        return rules
+
+    @classmethod
+    def _load_lsp_config_static(
+        cls,
+        workspace_path: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Read `.lsp.json` at apparmor composer time.
+
+        Replicates the runtime path-search of `_load_config_cache`
+        (lsp/plugin.py:1815-1834) WITHOUT touching instance state and
+        WITHOUT writing the diagnostic log entry (that's a runtime
+        concern; the composer only needs to know which servers will
+        be configured so it can emit exec grants for them).
+
+        Search order matches the instance method exactly:
+            1. ``plugin_config["config_path"]`` if set
+            2. ``<workspace_path>/.lsp.json`` if workspace set
+            3. ``~/.lsp.json`` fallback
+
+        Returns the parsed JSON dict on first success, or None if no
+        config file was found / loadable.  Composer callers MUST
+        tolerate None (operator may legitimately not have a
+        `.lsp.json` yet — apparmor fragment just emits no server
+        rules in that case).
+        """
+        candidate_paths: List[str] = []
+        custom = plugin_config.get('config_path')
+        if custom:
+            candidate_paths.append(str(custom))
+        if workspace_path:
+            candidate_paths.append(os.path.join(workspace_path, '.lsp.json'))
+        candidate_paths.append(os.path.expanduser('~/.lsp.json'))
+
+        for path in candidate_paths:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (FileNotFoundError, IsADirectoryError):
+                continue
+            except (OSError, json.JSONDecodeError):
+                # Unreadable / malformed — skip silently at composer
+                # time.  The runtime _load_config_cache will hit the
+                # same error and log it via _log_event there.
+                continue
+        return None
+
+    @classmethod
+    def _compose_lsp_server_exec_rules(
+        cls,
+        workspace_path: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Emit `ix` grants for each LSP server configured in `.lsp.json`.
+
+        For each server entry:
+
+        1. Resolve `spec["command"]` to a canonical absolute path via
+           ``shutil.which`` + ``os.path.realpath`` (handles relative
+           command names + symlinks).
+        2. Emit ``<canonical> ix,`` so the runner can exec the binary.
+        3. Emit ``<install-dir>/** r,`` for read-only access to
+           bundled plugins, jars, config files (derived as the
+           binary's grandparent dir — typical layout
+           ``<install-dir>/bin/<command>``).
+        4. If the binary's shebang is Python, emit the Python
+           interpreter's path with ``ix,`` too — Python-wrapper
+           scripts (e.g. jdtls) need both the wrapper AND the
+           interpreter to be exec-permitted.
+
+        Limitations (documented in README):
+
+        - Apparmor profiles are composed per-session at bootstrap.
+          Operator changes to `.lsp.json` mid-session don't update
+          the profile.  Session restart required to pick up new
+          servers.
+        - Servers whose entry-point execs further binaries (e.g.
+          jdtls's Python wrapper execs `java`) need additional
+          grants for those execs.  This composer covers entry +
+          (if Python wrapper) interpreter; further chain depths
+          require operator-supplied grants via a future
+          `apparmor_extra_rules` knob.
+        """
+        config = cls._load_lsp_config_static(workspace_path, plugin_config)
+        if not isinstance(config, dict):
             return []
-        parent_dir = os.path.dirname(resolved)
-        if not parent_dir:
+        servers = config.get('languageServers')
+        if not isinstance(servers, dict):
             return []
-        # The parent-dir entry plus subtree rules cover the mkdir
-        # chain + every file inside.  Same shape as file_edit's
-        # ``<config_root>/sessions/`` fragment (PR-147).
-        return [
-            f"{parent_dir}/    rw,",
-            f"{parent_dir}/**  rw,",
-        ]
+
+        rules: List[str] = []
+        seen_canonicals: set = set()  # de-dupe shared interpreters
+
+        for _name, spec in servers.items():
+            if not isinstance(spec, dict):
+                continue
+            command = spec.get('command', '')
+            if not isinstance(command, str) or not command:
+                continue
+
+            canonical = cls._resolve_command_canonical(command)
+            if not canonical or canonical in seen_canonicals:
+                continue
+            seen_canonicals.add(canonical)
+
+            rules.append(f"{canonical} ix,")
+
+            # Install-dir glob: binary's grandparent ("bin/" pattern).
+            # If layout doesn't match (binary at /usr/bin/...) fall
+            # back to the binary's parent dir for the read grant.
+            install_dir = os.path.dirname(os.path.dirname(canonical))
+            if install_dir and install_dir not in ('/', '/usr', '/usr/bin', '/usr/local'):
+                rules.append(f"{install_dir}/** r,")
+
+            # Shebang detection for Python-wrapper scripts.  jdtls
+            # is the canonical case (`#!/usr/bin/env python3`); also
+            # covers pylsp, pyright wrapper variants, etc.
+            interpreter_path = cls._detect_shebang_interpreter(canonical)
+            if interpreter_path and interpreter_path not in seen_canonicals:
+                seen_canonicals.add(interpreter_path)
+                rules.append(f"{interpreter_path} ix,")
+
+        return rules
+
+    @staticmethod
+    def _resolve_command_canonical(command: str) -> Optional[str]:
+        """Resolve an LSP server command to a canonical absolute path.
+
+        Handles:
+            - Absolute path commands — returned via realpath.
+            - Bare names (`jdtls`, `pyright-langserver`) — resolved
+              via shutil.which against the composer's PATH.
+            - Returns None if the command cannot be resolved (the
+              composer skips that server's grants; the runtime
+              connect will fail loudly with the same EACCES it
+              currently does, which is more diagnosable than a
+              silent missing grant).
+        """
+        if os.path.isabs(command):
+            target = command
+        else:
+            target = shutil.which(command)
+            if not target:
+                return None
+        try:
+            return os.path.realpath(target)
+        except OSError:
+            return None
+
+    @staticmethod
+    def _detect_shebang_interpreter(script_path: str) -> Optional[str]:
+        """Read the script's shebang and resolve its interpreter.
+
+        Returns the canonical path to the interpreter if the script
+        starts with `#!` AND the interpreter is Python (covers the
+        common LSP-wrapper-script case).  Returns None for binaries,
+        non-Python scripts, unreadable files, etc.
+
+        Why Python-specific: the standing motivating case is jdtls
+        (Eclipse JDT LS) which ships as a `#!/usr/bin/env python3`
+        wrapper script.  Other interpreter languages would need
+        analogous handling but are deferred until evidence supports
+        them — bare-name LSP servers in the wild are overwhelmingly
+        either compiled binaries (rust-analyzer, gopls, clangd) or
+        Python wrappers (jdtls, pylsp).
+        """
+        try:
+            with open(script_path, 'rb') as f:
+                first_line = f.readline()
+        except OSError:
+            return None
+        if not first_line.startswith(b'#!'):
+            return None
+        try:
+            shebang = first_line[2:].decode('utf-8', errors='replace').strip()
+        except UnicodeDecodeError:
+            return None
+        # Handle `#!/usr/bin/env python3` and `#!/usr/bin/python3`
+        if 'python' not in shebang.lower():
+            return None
+        # If the shebang uses /usr/bin/env, the actual interpreter
+        # name is the next token.  Otherwise the shebang itself is
+        # the interpreter path.
+        parts = shebang.split()
+        if parts and parts[0].endswith('/env') and len(parts) > 1:
+            interpreter_name = parts[1].split('=')[0]  # strip flags
+            return shutil.which(interpreter_name)
+        if parts:
+            return os.path.realpath(parts[0]) if os.path.exists(parts[0]) else parts[0]
+        return None
 
     def _parse_wait_knob(
         self,
