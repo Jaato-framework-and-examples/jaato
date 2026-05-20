@@ -428,32 +428,51 @@ def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]
 def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
     """Transition the runner to ``envelope.profile_name`` if needed.
 
-    Pool PR 5a.  Pool slots fork from the template unconfined; this
-    step transitions them to the session's AppArmor profile BEFORE
+    Pool PR 5a (initial).  Pool slots fork from the template unconfined;
+    this step transitions them to the session's AppArmor profile BEFORE
     runtime construction, plugin initialize, and prefetch run — so
-    workspace access + tool execution honor the per-session
-    confinement.
+    workspace access + tool execution honor the per-session confinement.
+
+    Phase 3 cascade-sharing (server 0.6.146+).  When a pool slot is
+    REUSED across sessions of a cascade, this step also handles the
+    cross-session transition (P_N → P_{N+1}).  The per-session profile
+    template carries ``change_profile -> jaato-ws-*,`` in the main
+    runner scope (apparmor.py template v28) authorising the
+    inter-session transition.  The transition space is closed — every
+    ``jaato-ws-*`` profile is framework-composed, so this rule does NOT
+    open an escape vector.  See docs/design/runner-cascade-sharing.md
+    §4.4 for the full lifecycle.
+
+    Path by initial state:
+      - ``unconfined`` → P1  (cold-spawn or first session of cascade)
+      - P_N → P_{N+1}  (Phase 3: reused slot, session N+1 of same
+                       cascade; requires the v28 template rule)
+      - P → P  (idempotent skip — same profile, no transition)
+      - empty profile_name  (operator opted out; unconfined session)
 
     Cold-spawn runners self-confined in ``__main__.py`` step 2 BEFORE
     ``bootstrap_session`` was called, so the kernel already reports
     the target profile in ``/proc/self/attr/current``.  This function
-    detects that and skips the redundant transition (it would also
-    fail anyway — ``aa_change_profile`` from ``P → P`` requires
-    ``change_profile -> P`` in P itself, which the per-session
-    profiles deliberately omit per §6.1 escape-vector hardening).
+    detects that and skips the redundant transition (``aa_change_profile``
+    from ``P → P`` requires ``change_profile -> P`` in P itself, which
+    the per-session profiles deliberately omit per §6.1 escape-vector
+    hardening; only the glob rule covers cross-session targets).
 
     No-op cases:
       - ``envelope.profile_name`` is empty (operator opted out of
         confinement; runner runs unconfined).
-      - The kernel already reports the target profile (cold-spawn
-        idempotency).
+      - The kernel already reports the target profile (idempotency).
 
     Raises:
         BootstrapError: confinement attempt failed (kernel refused
             the transition, libapparmor unavailable, or
             ``/proc/self/attr/current`` disagrees post-transition).
             Daemon-side spawn helper translates this into a session
-            failure via the bootstrap RPC's error envelope.
+            failure via the bootstrap RPC's error envelope.  Phase 3
+            ``P_N → P_{N+1}`` denial almost always means the kernel
+            template was loaded pre-v28 (no glob rule) — surface this
+            in the error message so operators know to restart the
+            daemon to pick up the new template.
     """
     target_profile = envelope.profile_name or ""
     if not target_profile:
@@ -516,15 +535,37 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
     try:
         confine_to_profile(target_profile)
     except ConfinementMismatchError as exc:
+        # Phase 3 cascade-sharing diagnostic: an empty/non-jaato-ws
+        # current profile usually means daemon-side provisioning
+        # didn't fire; a jaato-ws-* current profile means the
+        # transition was denied — almost always because the kernel
+        # has an old template loaded (pre-v28, no
+        # ``change_profile -> jaato-ws-*,`` rule).  Restart the
+        # daemon to pick up the new template.
+        current = actual.split(" ", 1)[0]  # strip mode suffix
+        likely_cause: str
+        if current.startswith("jaato-ws-"):
+            likely_cause = (
+                f"current profile {current!r} doesn't permit "
+                f"``change_profile -> {exc.expected}``.  Almost "
+                f"always means the kernel has a pre-v28 template "
+                f"loaded (no cascade-sharing glob rule).  Restart "
+                f"the daemon to reload all per-session profiles "
+                f"against the current template."
+            )
+        else:
+            likely_cause = (
+                f"pool slot's current profile ({current!r}) "
+                f"doesn't permit ``change_profile -> {exc.expected}``.  "
+                f"Verify daemon-side ``AppArmorManager.provision_profile`` "
+                f"loaded {exc.expected} before the bootstrap RPC was "
+                f"dispatched."
+            )
         raise BootstrapError(
             "confine",
             f"AppArmor confinement mismatch — kernel reports "
             f"{exc.actual!r} but we requested {exc.expected!r}.  "
-            f"Likely cause: pool slot's current profile (typically "
-            f"``unconfined``) doesn't permit ``change_profile -> "
-            f"{exc.expected}``.  Verify daemon-side "
-            f"``AppArmorManager.provision_profile`` loaded "
-            f"{exc.expected} before the bootstrap RPC was dispatched.",
+            f"Likely cause: {likely_cause}",
         ) from exc
     except RuntimeError as exc:
         raise BootstrapError(

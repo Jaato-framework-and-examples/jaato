@@ -970,6 +970,80 @@ class SessionManager:
 
         return apparmor.get_profile_name(session_id), "apparmor"
 
+    def _teardown_prior_apparmor_profile_after_transition(
+        self,
+        *,
+        server: 'JaatoServer',
+        current_session_id: str,
+        current_profile_name: str,
+    ) -> None:
+        """Phase 3 cascade-sharing: unload the prior session's
+        apparmor profile after the runner has transitioned to the
+        current session's profile.
+
+        Called from :meth:`_spawn_session_runner_unconditional` right
+        after :func:`dispatch_bootstrap_envelope` returns success.  By
+        the time this fires, the runner's main thread has already
+        called ``aa_change_profile(current_profile_name)`` (bootstrap
+        step 1c, re-entry path) — so the prior session's profile is
+        no longer the runner's active profile and is safe to unload.
+
+        No-op when:
+          - ``current_profile_name`` is empty (operator opted out of
+            apparmor; no transition occurred; nothing to unload).
+          - The session was NOT pool-served (no ``pool_slot`` on the
+            SpawnedRunner; this is the first session in the runner's
+            life, no prior profile exists).
+          - ``slot.last_session_id`` is unset (first cascade session
+            on this slot — no prior profile to unload).
+          - ``slot.last_session_id == current_session_id`` (defensive
+            self-check; shouldn't happen because session_ids are
+            unique).
+
+        Best-effort: any unload failure (EBUSY because of lingering
+        references, apparmor unavailable, etc.) is logged at WARNING
+        and tolerated.  The cascade-idle teardown sweep will reap
+        leftover profiles when the slot itself is torn down.
+        """
+        if not current_profile_name:
+            return
+        spawned = getattr(server, "_spawned_runner", None)
+        pool_slot = getattr(spawned, "pool_slot", None) if spawned else None
+        if pool_slot is None:
+            return
+        prior_session_id = pool_slot.last_session_id
+        if not prior_session_id or prior_session_id == current_session_id:
+            return
+
+        apparmor = getattr(self, "_apparmor_manager", None)
+        if apparmor is None or not apparmor.is_available():
+            return
+
+        try:
+            ok = apparmor.teardown_profile(prior_session_id)
+            if ok:
+                logger.info(
+                    "AppArmor: cascade-sharing transition complete — "
+                    "unloaded prior profile for session=%s after slot "
+                    "transitioned to session=%s",
+                    prior_session_id, current_session_id,
+                )
+            else:
+                logger.warning(
+                    "AppArmor: cascade-sharing transition — "
+                    "teardown_profile returned False for prior "
+                    "session=%s (current=%s); kernel may EBUSY or "
+                    "the profile file is already removed",
+                    prior_session_id, current_session_id,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "AppArmor: cascade-sharing teardown_profile raised "
+                "for prior session=%s (current=%s): %s — leaving the "
+                "kernel profile loaded; cascade-idle sweep will reap",
+                prior_session_id, current_session_id, exc,
+            )
+
     def _spawn_session_runner_unconditional(
         self,
         server: 'JaatoServer',
@@ -1047,6 +1121,24 @@ class SessionManager:
                     session_id=session_id,
                     workspace_path=workspace_path,
                     profile_name=profile_name,
+                )
+                # Phase 3 cascade-sharing: if this session inherited a
+                # pool slot that previously served session
+                # ``slot.last_session_id``, the runner just transitioned
+                # away from that prior session's profile via
+                # aa_change_profile (in the bootstrap step 1c re-entry
+                # path).  The prior profile is now unreferenced — unload
+                # it via apparmor_parser --remove so the kernel doesn't
+                # accumulate stale per-session profiles across the
+                # cascade's lifetime.  Best-effort: failure (EBUSY,
+                # apparmor unavailable, etc.) logs a warning and
+                # continues; the cascade-idle teardown sweep will reap
+                # any leftovers.  Skipped for unconfined sessions
+                # (profile_name empty) and non-pool sessions (no slot
+                # reference to read last_session_id from).
+                self._teardown_prior_apparmor_profile_after_transition(
+                    server=server, current_session_id=session_id,
+                    current_profile_name=profile_name,
                 )
             except Exception as exc:  # noqa: BLE001 — best-effort
                 logger.warning(
