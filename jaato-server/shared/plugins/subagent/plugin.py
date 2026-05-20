@@ -342,6 +342,50 @@ class SubagentPlugin:
         self._initialized = False
         logger.info("Subagent plugin shutdown (running subagents preserved)")
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+).
+
+        Per Daniel's litmus test: subagent registry tracks the
+        parent→child relationships of the CURRENT session.  Cascade-
+        sharing means session B has a different parent agent context
+        than session A; carrying A's active_sessions into B's view
+        would be confusing.
+
+        Per-session state CLEARED:
+        - ``_active_sessions``: subagent registry (parent's view of
+          its spawned children).  Next session has its own parent
+          identity and tracks its own spawns.
+        - ``_owner_counters``: per-owner sub-counters (owner =
+          session id).  Next session has a different owner id.
+        - ``_subagent_counter``: global counter for ID generation.
+        - ``_parent_session``: JaatoSession reference (re-wired by
+          next session's lifecycle hooks).
+        - ``_parent_agent_id``: defaults back to "main".
+        - ``_termination_callbacks``: re-registered per session.
+
+        Survives the reset:
+        - ``_config``, ``_runtime``, ``_ui_hooks``, ``_registry_class``,
+          ``_client_class``: workspace-tier / framework wiring.
+        - ``_executor``: ThreadPoolExecutor — re-used across sessions.
+        - ``_termination_callbacks`` retains its container; if those
+          are needed cleared, that's handled per-session via the
+          set-callback lifecycle, not reset_for_next_session.
+        - ``_permission_plugin``, ``_retry_callback``: re-wired by
+          next session as needed.
+
+        Note: per ``shutdown()``'s docstring, RUNNING subagents are
+        preserved (they're independent sessions).  Same here — we
+        don't kill their underlying JaatoSession objects, just clear
+        the parent-side bookkeeping.  Subagents finish naturally.
+        """
+        logger.info("Subagent plugin reset_for_next_session: clearing per-session bookkeeping")
+        with self._sessions_lock:
+            self._active_sessions.clear()
+        self._owner_counters.clear()
+        self._subagent_counter = 0
+        self._parent_session = None
+        self._parent_agent_id = "main"
+
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
         return {

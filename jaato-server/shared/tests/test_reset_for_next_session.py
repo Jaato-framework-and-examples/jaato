@@ -251,6 +251,159 @@ class TestAcrossSessionByDesignPlugins:
 
 
 # =============================================================================
+# Phase 1b plugins (server 0.6.143+)
+# =============================================================================
+
+
+class TestMCPPluginReset:
+    """Pin: MCP is a cascade-sharing target like LSP — connections +
+    tool cache survive."""
+
+    def test_mcp_reset_preserves_manager_and_cache(self):
+        from shared.plugins.mcp.plugin import MCPToolPlugin
+        plugin = MCPToolPlugin()
+        plugin._manager = MagicMock()
+        plugin._tool_cache = {"server_a": ["tool1", "tool2"]}
+        plugin._connected_servers = {"server_a"}
+        plugin._config_cache = {"mcpServers": {"server_a": {"command": "x"}}}
+        plugin.reset_for_next_session()
+        # All cascade-sharing target state survives
+        assert plugin._manager is not None
+        assert plugin._tool_cache == {"server_a": ["tool1", "tool2"]}
+        assert plugin._connected_servers == {"server_a"}
+        assert plugin._config_cache != {}
+
+
+class TestInteractiveShellPluginReset:
+    """Pin: PTY sessions are CLOSED + cleared between cascade sessions."""
+
+    def test_reset_closes_and_clears_sessions(self):
+        from shared.plugins.interactive_shell.plugin import InteractiveShellPlugin
+        plugin = InteractiveShellPlugin()
+        # Simulate previous session having spawned a PTY
+        fake_session = MagicMock()
+        plugin._sessions["1"] = fake_session
+        plugin._session_counter = 5
+        plugin._agent_name = "previous-agent"
+        plugin._tool_output_callback = lambda s: None
+        plugin.reset_for_next_session()
+        # PTY close called + map cleared
+        fake_session.close.assert_called_once()
+        assert plugin._sessions == {}
+        assert plugin._session_counter == 0
+        assert plugin._agent_name is None
+        assert plugin._tool_output_callback is None
+
+    def test_reset_preserves_workspace_root_and_config(self):
+        from shared.plugins.interactive_shell.plugin import InteractiveShellPlugin
+        plugin = InteractiveShellPlugin()
+        plugin._workspace_root = "/my/workspace"
+        plugin._max_sessions = 16
+        plugin._max_lifetime = 1200
+        plugin.reset_for_next_session()
+        # Workspace + config survive
+        assert plugin._workspace_root == "/my/workspace"
+        assert plugin._max_sessions == 16
+        assert plugin._max_lifetime == 1200
+
+
+class TestSandboxManagerPluginReset:
+    """Pin: per-session sandbox path declarations CLEARED; workspace
+    registry SURVIVES (paths authorized by session A may benefit B)."""
+
+    def test_reset_clears_session_id_and_paths(self):
+        from shared.plugins.sandbox_manager.plugin import SandboxManagerPlugin
+        plugin = SandboxManagerPlugin()
+        plugin._session_id = "previous-session"
+        plugin._profile_paths = [MagicMock(), MagicMock()]
+        plugin._pending_programmatic_paths = [("path1", "rw")]
+        plugin.reset_for_next_session()
+        assert plugin._session_id is None
+        assert plugin._profile_paths == []
+        assert plugin._pending_programmatic_paths == []
+
+    def test_reset_preserves_registry_and_workspace_config(self):
+        from shared.plugins.sandbox_manager.plugin import SandboxManagerPlugin
+        plugin = SandboxManagerPlugin()
+        plugin._registry = MagicMock()
+        plugin._workspace_path = "/my/workspace"
+        plugin._config = MagicMock()
+        plugin.reset_for_next_session()
+        # Workspace-tier survives
+        assert plugin._registry is not None
+        assert plugin._workspace_path == "/my/workspace"
+        assert plugin._config is not None
+
+
+class TestSubagentPluginReset:
+    """Pin: parent-side bookkeeping CLEARED; running subagents preserved
+    via independent JaatoSession objects (matches existing `shutdown`
+    docstring policy)."""
+
+    def test_reset_clears_parent_side_bookkeeping(self):
+        from shared.plugins.subagent.plugin import SubagentPlugin
+        plugin = SubagentPlugin()
+        plugin._active_sessions = {"sub_a": {"info": "x"}, "sub_b": {"info": "y"}}
+        plugin._owner_counters = {1: 2, 2: 1}
+        plugin._subagent_counter = 5
+        plugin._parent_session = MagicMock()
+        plugin._parent_agent_id = "stage_a"
+        plugin.reset_for_next_session()
+        assert plugin._active_sessions == {}
+        assert plugin._owner_counters == {}
+        assert plugin._subagent_counter == 0
+        assert plugin._parent_session is None
+        assert plugin._parent_agent_id == "main"
+
+    def test_reset_preserves_runtime_and_config(self):
+        from shared.plugins.subagent.plugin import SubagentPlugin
+        plugin = SubagentPlugin()
+        plugin._runtime = MagicMock()
+        plugin._config = MagicMock()
+        plugin._executor = MagicMock()
+        plugin.reset_for_next_session()
+        assert plugin._runtime is not None
+        assert plugin._config is not None
+        assert plugin._executor is not None
+
+
+class TestWaypointPluginReset:
+    """Pin: waypoint MANAGER survives (cross-session debug/replay value);
+    per-session callbacks + ids cleared."""
+
+    def test_reset_clears_session_state_and_callbacks(self):
+        from shared.plugins.waypoint.plugin import WaypointPlugin
+        plugin = WaypointPlugin()
+        plugin._session_id = "prev-session"
+        plugin._pending_restore_notification = {"some": "signal"}
+        plugin._get_history = lambda: []
+        plugin._serialize_history = lambda h: ""
+        plugin._get_turn_index = lambda: 0
+        plugin._get_session_state = lambda: {}
+        plugin.reset_for_next_session()
+        assert plugin._session_id is None
+        assert plugin._pending_restore_notification is None
+        assert plugin._get_history is None
+        assert plugin._serialize_history is None
+        assert plugin._get_turn_index is None
+        assert plugin._get_session_state is None
+
+    def test_reset_preserves_manager_and_storage(self):
+        from shared.plugins.waypoint.plugin import WaypointPlugin
+        plugin = WaypointPlugin()
+        plugin._manager = MagicMock()
+        plugin._backup_manager = MagicMock()
+        plugin._storage_path = MagicMock()
+        plugin._workspace_path = MagicMock()
+        plugin.reset_for_next_session()
+        # Waypoint manager + storage survive (cross-session by design)
+        assert plugin._manager is not None
+        assert plugin._backup_manager is not None
+        assert plugin._storage_path is not None
+        assert plugin._workspace_path is not None
+
+
+# =============================================================================
 # Source-pin tests: the implemented overrides include the litmus-test
 # rationale in their docstrings (catches future refactors that strip
 # the documentation).
@@ -263,6 +416,7 @@ class TestImplementationsDocumentLitmusTest:
     refactors that strip the rationale and leave behavior unjustified."""
 
     @pytest.mark.parametrize("plugin_module,plugin_class_name,expected_marker", [
+        # Phase 1a — 8 plugins (server 0.6.142)
         ("shared.plugins.session.file_session", "FileSessionPlugin", "litmus test"),
         ("shared.plugins.permission.plugin", "PermissionPlugin", "litmus test"),
         ("shared.plugins.thinking.plugin", "ThinkingPlugin", "litmus test"),
@@ -271,6 +425,12 @@ class TestImplementationsDocumentLitmusTest:
         ("shared.plugins.lsp.plugin", "LSPToolPlugin", "cascade-sharing target"),
         ("shared.plugins.memory.plugin", "MemoryPlugin", "litmus test"),
         ("shared.plugins.artifact_tracker.plugin", "ArtifactTrackerPlugin", "litmus test"),
+        # Phase 1b — 5 plugins (server 0.6.143)
+        ("shared.plugins.mcp.plugin", "MCPToolPlugin", "cascade-sharing target"),
+        ("shared.plugins.interactive_shell.plugin", "InteractiveShellPlugin", "litmus test"),
+        ("shared.plugins.sandbox_manager.plugin", "SandboxManagerPlugin", "litmus test"),
+        ("shared.plugins.subagent.plugin", "SubagentPlugin", "litmus test"),
+        ("shared.plugins.waypoint.plugin", "WaypointPlugin", "litmus test"),
     ])
     def test_docstring_references_litmus_or_design_target(
         self, plugin_module, plugin_class_name, expected_marker

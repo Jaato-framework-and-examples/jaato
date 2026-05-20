@@ -358,6 +358,43 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._connected_servers = set()
         self._failed_servers = {}
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+) — NO-OP.
+
+        Mirrors :meth:`LSPToolPlugin.reset_for_next_session`: MCP is a
+        sibling "cascade-sharing target plugin".  Per Daniel's litmus
+        test (2026-05-20), every piece of MCP state survives between
+        sessions of the same cascade because the next session DIRECTLY
+        BENEFITS from:
+
+        - ``_manager``: already-connected MCPClientManager + the per-server
+          subprocess connections it owns.  Reconnecting between cascade
+          stages would re-pay MCP server start-up cost (similar to
+          jdtls cold-start the lsp arc closed).
+        - ``_tool_cache``: per-server tool catalogs already populated.
+          Re-fetching costs an MCP `tools/list` RPC per server.
+        - ``_connected_servers`` / ``_failed_servers``: connection state
+          the enrichment + tool-execution chains consult.  Clearing
+          would re-create the v151 multi-instance state-isolation
+          symptom for MCP tools.
+        - ``_config_cache``: parsed ``.mcp.json`` — workspace constant.
+        - Background thread + request_queue / response_queue: machinery
+          owning client lifecycles.
+        - ``_streaming_servers``: workspace-tier capability flags.
+
+        Per-session-only attributes (``_agent_name``, ``_session_id``)
+        are re-set by the next session's ``initialize()`` call — no
+        explicit clear needed here (overwrite naturally on next entry).
+
+        ``shutdown()`` (final teardown at cascade end) tears down the
+        manager + thread + clears caches.
+        """
+        self._trace(
+            "reset_for_next_session: NO-OP — MCP server connections + "
+            "tool cache MUST survive across cascade sessions "
+            "(cascade-sharing target plugin, sibling of lsp)"
+        )
+
     def _normalize_tool_name(self, server_name: str, tool_name: str) -> str:
         """Normalize MCP tool name to include server prefix if not present.
 

@@ -179,6 +179,48 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
 
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+).
+
+        Per Daniel's litmus test: PTY sessions are typically per-agent,
+        per-session.  The next session's agent has no awareness of the
+        prior session's spawns and cannot meaningfully address them.
+        Carrying them across the boundary leaves orphan PTYs accumulating
+        — bounded by the reaper's max_lifetime/max_idle, but still
+        operator-confusing.
+
+        Per-session state CLEARED:
+        - ``_sessions``: PTY shell session map.  CLOSE each session
+          + clear the dict.  Same logic as ``shutdown()`` per-session
+          cleanup but without stopping the reaper thread (reaper
+          persists across cascade sessions).
+        - ``_session_counter``: per-session counter reset to 0.
+        - ``_agent_name``: re-set by next session's ``initialize()``.
+        - ``_tool_output_callback``: re-wired by next session.
+
+        Survives the reset:
+        - ``_max_sessions``, ``_max_idle``, ``_max_lifetime``,
+          ``_idle_timeout``: workspace-tier config.
+        - ``_workspace_root``: constant within cascade.
+        - ``_initialized``: stays True (reaper still running).
+        - Reaper thread + control flags: keep alive between sessions.
+        - ``_cgroup_attach``, ``_runtime_limits``,
+          ``_apparmor_child_transition``: lifecycle hooks (re-wired
+          on next session).
+
+        """
+        self._trace("reset_for_next_session: closing per-session PTYs, keeping reaper")
+        with self._lock:
+            for session_id in list(self._sessions.keys()):
+                try:
+                    self._sessions[session_id].close()
+                except Exception:
+                    pass
+            self._sessions.clear()
+        self._session_counter = 0
+        self._agent_name = None
+        self._tool_output_callback = None
+
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
         return {
