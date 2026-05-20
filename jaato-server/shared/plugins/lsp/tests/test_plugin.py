@@ -1922,3 +1922,331 @@ class TestServerBinaryApparmorGrants:
         )
         ix_rules = [r for r in rules if r.endswith(" ix,") and str(stub) in r]
         assert len(ix_rules) == 1, f"expected 1 ix rule for shared binary, got: {ix_rules}"
+
+
+class TestServerDataDirApparmorGrants:
+    """Pin server-0.6.138 fix (PR-155): the apparmor composer also
+    walks each server's `args` and emits rw grants for any
+    operator-passed ``-data <path>`` / ``--data-dir <path>`` flags.
+
+    Motivating case (v146-redo on server 0.6.137 with PR-154 applied):
+    jdtls Python wrapper crashed at `tempfile.gettempdir()` under
+    apparmor confinement before invoking java — wrapper's default
+    data dir computation reached for /tmp / /var/tmp / /usr/tmp, all
+    denied.  Operator unblock: pass `-data <workspace-relative-path>`
+    in `.lsp.json args` so the wrapper uses an explicit dir.  This
+    composer auto-emits the matching rw grant.
+    """
+
+    def test_data_flag_with_space_separator(self, tmp_path):
+        """Pin: `args: ["-data", "<path>"]` emits rw grants for the
+        resolved path."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        data_dir = ".jaato/jdtls-data"  # workspace-relative
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": ["-data", data_dir],
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        expected_resolved = str(tmp_path / data_dir)
+        assert f"{expected_resolved}/    rw," in rules
+        assert f"{expected_resolved}/**  rw," in rules
+
+    def test_data_dir_flag_with_space_separator(self, tmp_path):
+        """Pin: `--data-dir <path>` recognised (pyright convention)."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": ["--data-dir", ".jaato/pyright-data"],
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        expected = str(tmp_path / ".jaato/pyright-data")
+        assert f"{expected}/    rw," in rules
+        assert f"{expected}/**  rw," in rules
+
+    def test_data_flag_with_equals_separator(self, tmp_path):
+        """Pin: `args: ["-data=<path>"]` (combined form) recognised."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": ["-data=.jaato/jdtls-data"],
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        expected = str(tmp_path / ".jaato/jdtls-data")
+        assert f"{expected}/    rw," in rules
+        assert f"{expected}/**  rw," in rules
+
+    def test_workspace_root_variable_expansion(self, tmp_path):
+        """Pin: `${workspaceRoot}/.jaato/jdtls-data` expands at
+        composer time to match what runtime expand_variables
+        produces."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": ["-data", "${workspaceRoot}/.jaato/jdtls-data"],
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        expected = str(tmp_path / ".jaato/jdtls-data")
+        assert any(expected in r for r in rules), (
+            f"workspaceRoot expansion failed; rules: {rules}"
+        )
+
+    def test_absolute_data_path_passthrough(self, tmp_path):
+        """Pin: absolute `-data /abs/path` granted as-is."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        abs_data = "/var/lib/jdtls-data"
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": ["-data", abs_data],
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        assert f"{abs_data}/    rw," in rules
+        assert f"{abs_data}/**  rw," in rules
+
+    def test_no_data_flag_emits_no_data_rules(self, tmp_path):
+        """Pin: servers without -data flags emit no data-dir rules
+        (still get the binary ix grant from PR-154 — orthogonal)."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": ["--stdio"],  # no data flag
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # binary ix grant still present
+        assert any(r.endswith(" ix,") for r in rules)
+        # but NO rw rules from a -data flag (the only rw rules
+        # should be the debug_log path grants from PR-153)
+        data_rw = [r for r in rules if "jdtls-data" in r or "pyright-data" in r]
+        assert data_rw == []
+
+    def test_data_flag_without_value_skipped(self, tmp_path):
+        """Pin: a trailing `-data` with no following arg is silently
+        ignored — composer doesn't crash, just doesn't emit a rule
+        for the malformed flag."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": ["--stdio", "-data"],  # -data with no value
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # No data-dir rules emitted; binary ix still present
+        assert any(r.endswith(" ix,") for r in rules)
+        # No rule should reference the literal "-data" string
+        assert not any("-data" in r for r in rules)
+
+    def test_multiple_data_flags_all_granted(self, tmp_path):
+        """Pin: a server with multiple data-style flags emits grants
+        for each unique path."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": [
+                        "-data", ".jaato/d1",
+                        "--data-dir", ".jaato/d2",
+                    ],
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        d1_resolved = str(tmp_path / ".jaato/d1")
+        d2_resolved = str(tmp_path / ".jaato/d2")
+        assert f"{d1_resolved}/    rw," in rules
+        assert f"{d2_resolved}/    rw," in rules
+
+    def test_duplicate_data_paths_dedupe(self, tmp_path):
+        """Pin: same path passed twice (e.g. via two server entries)
+        emits ONE pair of rules, not two."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        shared_data = "${workspaceRoot}/.jaato/shared-data"
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "first": {
+                    "command": str(stub),
+                    "args": ["-data", shared_data],
+                },
+                "second": {
+                    "command": str(stub),  # same binary too
+                    "args": ["-data", shared_data],
+                },
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # Only ONE pair of rules for the shared path
+        resolved = str(tmp_path / ".jaato/shared-data")
+        matching = [r for r in rules if resolved in r]
+        assert len(matching) == 2, (
+            f"expected exactly 2 rules (rw + rw**) for shared path, "
+            f"got: {matching}"
+        )
+
+    def test_no_workspace_path_no_data_rules(self, tmp_path):
+        """Pin: data-dir rules require workspace_path (relative paths
+        can't resolve without it).  No grants emitted."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        # write .lsp.json to home so _load_lsp_config_static finds it
+        # without workspace_path
+        home_lsp = tmp_path / "home.lsp.json"
+        home_lsp.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "args": ["-data", ".jaato/jdtls-data"],
+                }
+            }
+        }))
+
+        # Compose with workspace_path=None
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=None,  # type: ignore[arg-type]
+            session_id="test",
+            config_root=None,
+            plugin_config={"config_path": str(home_lsp)},
+        )
+        # No data-dir rules; relative path can't resolve
+        assert not any(".jaato/jdtls-data" in r and r.endswith(" rw,")
+                       for r in rules)

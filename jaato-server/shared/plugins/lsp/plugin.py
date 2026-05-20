@@ -772,6 +772,136 @@ class LSPToolPlugin(RunnerForwardingMixin):
                 seen_canonicals.add(interpreter_path)
                 rules.append(f"{interpreter_path} ix,")
 
+            # Server-supplied data-directory grants (PR-155, server
+            # 0.6.138).  When the operator passes ``-data <path>`` or
+            # ``--data-dir <path>`` in the server's args, the binary
+            # expects to write to that path — we auto-emit the
+            # matching rw fragment so apparmor permits the writes.
+            # Variable expansion (`${workspaceRoot}` etc.) matches
+            # the runtime's `expand_variables` call so the granted
+            # path always lines up with the path the binary actually
+            # writes to.
+            rules.extend(
+                cls._compose_lsp_server_data_dir_rules(
+                    spec.get('args', []), workspace_path
+                )
+            )
+
+        return rules
+
+    @classmethod
+    def _compose_lsp_server_data_dir_rules(
+        cls,
+        args: Any,
+        workspace_path: Optional[str],
+    ) -> List[str]:
+        """Detect ``-data <path>`` style flags in args + emit rw grants.
+
+        Motivating case (v146-redo, server 0.6.137): the jdtls Python
+        wrapper crashes at ``tempfile.gettempdir()`` before it can
+        even invoke ``java``, because the apparmor-confined runner
+        has no writable temp dir in the search list (``/tmp``,
+        ``/var/tmp``, ``/usr/tmp`` all denied).  The wrapper would
+        normally compute a data dir at ``/tmp/jdtls-<sha1(cwd)>``
+        but can't reach /tmp.
+
+        Operator fix: pass ``args: ["-data",
+        "${workspaceRoot}/.jaato/jdtls-data"]`` in ``.lsp.json`` so
+        the wrapper uses an explicit data dir.  This composer then
+        auto-emits the matching apparmor grant (no separate
+        operator action on the apparmor side).
+
+        Recognised flags (covers the common LSP server conventions):
+        - ``-data <path>`` — jdtls
+        - ``--data-dir <path>`` — pyright, several others
+        - ``--data <path>`` — alternate jdtls syntax
+
+        Both forms are also accepted (apparmor-spec'd) when the
+        flag uses ``=`` (``-data=<path>`` / ``--data-dir=<path>``)
+        — operator convenience for shell-quoting.
+
+        Variable expansion at composer time mirrors runtime
+        `expand_variables` (workspace_root_override=workspace_path)
+        so the granted path always matches what the binary writes.
+
+        Emits two rules per recognised path following the file_edit
+        PR-147 subtree pattern: ``<path>/ rw,`` + ``<path>/** rw,``.
+        """
+        if not isinstance(args, list) or not workspace_path:
+            return []
+
+        # Import here (not at module top) to avoid pulling subagent
+        # plumbing into the lsp plugin's import path unnecessarily.
+        try:
+            from ..subagent.config import expand_variables
+        except ImportError:
+            # Older deployments without subagent in import path —
+            # degrade gracefully (no variable expansion, raw value
+            # used as-is if it happens to be absolute).
+            expand_variables = lambda v, **_kw: v  # noqa: E731
+
+        DATA_FLAGS = {'-data', '--data-dir', '--data'}
+        rules: List[str] = []
+        seen_paths: set = set()
+
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if not isinstance(arg, str):
+                i += 1
+                continue
+
+            data_path_raw: Optional[str] = None
+
+            # Form 1: `-data <path>` (next arg is the value)
+            if arg in DATA_FLAGS:
+                if i + 1 < len(args) and isinstance(args[i + 1], str):
+                    data_path_raw = args[i + 1]
+                    i += 2
+                    if data_path_raw is None:
+                        continue
+                else:
+                    i += 1
+                    continue
+            # Form 2: `-data=<path>` / `--data-dir=<path>` (combined)
+            elif '=' in arg:
+                flag, sep, value = arg.partition('=')
+                if flag in DATA_FLAGS and value:
+                    data_path_raw = value
+                    i += 1
+                else:
+                    i += 1
+                    continue
+            else:
+                i += 1
+                continue
+
+            # Expand ${workspaceRoot}, ${HOME}, etc. — same as
+            # runtime so the apparmor grant matches what the binary
+            # writes to.
+            try:
+                expanded = expand_variables(
+                    data_path_raw,
+                    workspace_root_override=workspace_path,
+                )
+            except Exception:  # noqa: BLE001 — composer boundary
+                continue
+            if not isinstance(expanded, str) or not expanded:
+                continue
+
+            # Resolve relative paths against workspace_path.
+            if os.path.isabs(expanded):
+                resolved = expanded
+            else:
+                resolved = os.path.join(workspace_path, expanded)
+
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+
+            rules.append(f"{resolved}/    rw,")
+            rules.append(f"{resolved}/**  rw,")
+
         return rules
 
     @staticmethod
