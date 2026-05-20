@@ -108,10 +108,12 @@ These four decisions are inputs to the design (Daniel call, 2026-05-20):
    cascade's sessions, then tears down when the cascade ends (or goes idle).
    It does NOT persist across cascade re-runs.
 
-3. **Apparmor**: ONE profile per cascade, shared across all sessions of
-   that cascade.  Profile name shifts from `jaato-ws-{session_id}` to
-   `jaato-cascade-{cascade_driver_id}`.  Composed once at cascade start,
-   reused for every session of that cascade, torn down at cascade end.
+3. **Apparmor**: per-session profiles preserved; slot transitions
+   between profiles via `aa_change_profile` on each session boundary.
+   ~~Original decision (withdrawn 2026-05-20 — see Amendment below): ONE
+   profile per cascade, shared across all sessions of that cascade.~~
+   Profile naming stays `jaato-ws-{session_id}` (NOT `jaato-cascade-{id}`).
+   See §4.4 + the Amendment at the head of §4 for the revised model.
 
 4. **Cascade-driver ID propagation**: IPC client supplies it at the FIRST
    session of the cascade via a new field on `session.new`.  Subsequent
@@ -131,6 +133,42 @@ These four decisions are inputs to the design (Daniel call, 2026-05-20):
 ---
 
 ## 4. Concepts
+
+### Amendment 2026-05-20 — per-session apparmor preserved
+
+The original §3 decision 3 ("one apparmor profile per cascade") assumed
+all sessions of a cascade share the same apparmor requirements.  In
+practice this is wrong: a multi-stage cascade uses DIFFERENT profiles
+per stage (discovery agent, codegen agent, build agent, ...), each
+with its own plugin set, `apparmor_fragments` override, and
+plugin-contributed `get_apparmor_rules` output.  A single per-cascade
+profile is either too narrow (session N+1 lacks rules N+2 needed) or
+too broad (UNION-of-all-stages widens the security boundary
+monotonically).
+
+**Revised model (Phase 3 Shape ε, sign-off 2026-05-20):**
+
+- Per-session apparmor profile preserved: each session keeps its own
+  `jaato-ws-{session_id}` profile, freshly composed against its
+  profile's plugin set + fragments.
+- Slot transitions via `aa_change_profile` on each
+  `session.bootstrap` (initial AND re-entry for subsequent sessions
+  of the same cascade-reused slot).  Today bootstrap step 1c calls
+  `aa_change_profile` exactly once; the new path detects re-entry
+  + transitions to the next session's profile.
+- Per-session profile template carries a
+  `change_profile -> jaato-ws-*,` rule so the runner's main thread
+  can transition between any two `jaato-ws-*` profiles.  All
+  `jaato-ws-*` profiles are framework-composed or operator-authored
+  — there's no untrusted profile in the transition space.
+- Old session's profile is unloaded via `apparmor_parser --remove`
+  after the change_profile succeeds (or at cascade-idle teardown if
+  the slot tears down without a successor).
+
+§4.4 below describes the lifecycle in detail.  §6 Phase 3 carries
+the revised implementation scope (~250 LoC vs the original ~500
+LoC — no per-cascade composition logic, no plugin
+`get_apparmor_rules` signature change).
 
 ### 4.1 Cascade-driver ID
 
@@ -248,28 +286,115 @@ marking which need reset_for_next_session implementation.  Per-attribute
 litmus-test application; "TBD" plugins above resolved by attribute-level
 classification, not whole-plugin categorisation.
 
-### 4.4 Per-cascade apparmor profile
+### 4.4 Per-session apparmor with cross-session transitions
 
-**Profile naming shift**: `jaato-ws-{session_id}` → `jaato-cascade-{cascade_driver_id}`.
+(Revised 2026-05-20 — see Amendment at head of §4.)
 
-**Composition lifecycle**:
-- First session of cascade: compose profile + load via apparmor_parser
-- Subsequent sessions of same cascade: REUSE the loaded profile, no
-  recompose
-- Cascade end (after final teardown): unload profile
+**Profile naming**: stays `jaato-ws-{session_id}`.  Each session has
+its own apparmor profile, composed against that session's profile's
+plugins + fragments — identical to the pre-cascade-sharing model.
+No `get_apparmor_rules` signature change.
 
-**Rule-shape implications**:
-- Session-specific paths in rules (e.g. file_edit's
-  `<config_root>/sessions/<session_id>/`) need to become cascade-specific or
-  session-globbed:
-  - Option A: `<config_root>/sessions/<cascade_id>/<session_id>/`
-    rw, — cascade tier in path, session per subdirectory
-  - Option B: `<config_root>/sessions/*/` rw, — wildcard session
-    (less specific, broader grant within cascade)
-- Plugin `get_apparmor_rules` classmethods receive `cascade_driver_id`
-  in addition to `session_id` so they can choose the right shape.
-- Lsp plugin's per-session rules (debug log path, jdtls data dir) become
-  per-cascade rules (one set of grants per cascade, all sessions share).
+**Slot lifecycle vs apparmor profile lifecycle:**
+
+```
+slot states              apparmor state
+─────────────────        ──────────────────────────────
+[fresh from template]    unconfined
+                          │
+                          ▼
+session 1 acquires       compose jaato-ws-S1; load via apparmor_parser
+                          │
+slot.bootstrap_session   step 1c: aa_change_profile(jaato-ws-S1)
+                          │ runner main thread now confined to S1
+session 1 runs           │
+                          │
+session 1 ends           runner stays under jaato-ws-S1
+slot returns to pool     (transition deferred until session 2 acquires)
+                          │
+session 2 acquires       compose jaato-ws-S2; load via apparmor_parser
+                          │
+slot.bootstrap_session   step 1c: aa_change_profile(jaato-ws-S2)
+                          │ — allowed because S1's profile has
+                          │   `change_profile -> jaato-ws-*,`
+                          │
+                          ▼
+                         apparmor_parser --remove jaato-ws-S1
+                         (kernel unloads the old profile; no longer
+                         referenced by any running process)
+```
+
+**Per-session profile template addition:**
+
+Every `jaato-ws-{session_id}` profile carries a single new rule in
+the runner-main scope:
+
+```
+change_profile -> jaato-ws-*,
+```
+
+This permits the runner's main thread to transition between any two
+`jaato-ws-*` profiles.  The transition space is closed — all profiles
+matching the pattern are framework-composed (no operator-untrusted
+profile in scope).  The `//child` sub-profile (the LLM-driven scope)
+does NOT inherit this rule: the LLM cannot trigger `change_profile`.
+
+**Re-entry detection in bootstrap step 1c:**
+
+The runner-side `session.bootstrap` handler today calls
+`aa_change_profile(envelope.profile_name)` exactly once on first
+bootstrap.  Phase 3 modifies it to detect re-entry (a subsequent
+session of the same slot):
+
+```python
+# bootstrap_session step 1c (Phase 3 revised)
+if self._current_apparmor_profile is None:
+    # First bootstrap — transition from unconfined to S1.
+    aa_change_profile(envelope.profile_name)
+    self._current_apparmor_profile = envelope.profile_name
+elif self._current_apparmor_profile != envelope.profile_name:
+    # Re-entry — transition from S(N) to S(N+1).
+    aa_change_profile(envelope.profile_name)
+    old = self._current_apparmor_profile
+    self._current_apparmor_profile = envelope.profile_name
+    # Schedule kernel unload of `old` once we know no other thread
+    # is in it (today: runner is single-process so this is safe to
+    # request immediately; tomorrow: §4.x will revisit if //child
+    # sub-profile transitions need coordination).
+# else: same profile (re-bootstrap with identical session_id —
+# shouldn't happen in cascade reuse since session_ids are unique).
+```
+
+**Unload-old-profile lifecycle:**
+
+After `aa_change_profile` succeeds:
+
+1. Slot returns control to daemon (bootstrap completes).
+2. Daemon's `apparmor` helper calls `apparmor_parser --remove
+   jaato-ws-{old_session_id}` to free the kernel slot.
+3. If the unload fails (kernel busy, profile still referenced), log
+   a warning and continue.  The kernel will eventually evict stale
+   profiles; the unload is best-effort cleanup.
+
+This unload is daemon-side because `apparmor_parser` is unconfined
++ requires `CAP_MAC_ADMIN` — runner-side execution would fail.
+
+**Existing per-session security model preserved:**
+
+The §4.4 revision does NOT change:
+
+- Per-session profile composition (today's `_provision_apparmor_for_session`)
+- Plugin `get_apparmor_rules` signatures or contributions
+- The `//child` sub-profile model (LLM-driven tool exec under tightening)
+- The `tool_hat` sub-profile (runner main during tool-exec)
+
+What changes:
+
+- A new template rule (`change_profile -> jaato-ws-*,`) in the
+  per-session profile's main scope.
+- Bootstrap step 1c gains re-entry detection.
+- Daemon's session-teardown path adds an old-profile unload step
+  (after change_profile succeeds for session N+1).
 
 ### 4.5 Daemon-side IPC additions
 
@@ -385,18 +510,41 @@ it.
 - **Sign-off gate**: behavior validated end-to-end with a stub plugin
   that tracks reuse hits
 
-### Phase 3: Per-cascade apparmor profile
-**Scope**: ~500 LOC
-- Profile name format: `jaato-cascade-{cascade_driver_id}`
-- `get_apparmor_rules` signature gains `cascade_driver_id` kwarg
-- Audit existing plugins for session-id-tied paths → migrate to
-  cascade-id-tied OR session-globbed
-- Profile load/unload lifecycle moves from session-end to cascade-end
-- Profile composition runs ONCE per cascade
-- Pin tests: first session of cascade composes + loads; subsequent
-  sessions skip; cascade end unloads
-- **Sign-off gate**: kernel apparmor logs show one load per cascade,
-  one unload per cascade
+### Phase 3: Per-session apparmor with cross-session transitions
+
+(Revised 2026-05-20 — see Amendment at head of §4 + the revised §4.4.)
+
+**Scope**: ~250 LOC (down from the original ~500 LOC — no
+per-cascade composition logic, no plugin `get_apparmor_rules`
+signature change).
+
+- Per-session profile template gains
+  `change_profile -> jaato-ws-*,` rule in the runner-main scope.
+- Runner-side `session.bootstrap` step 1c gains re-entry detection
+  + `aa_change_profile` for subsequent sessions of the same slot.
+- Daemon-side: after `aa_change_profile` succeeds for session N+1,
+  call `apparmor_parser --remove jaato-ws-{old_session_id}` to free
+  the kernel slot.  Best-effort (kernel may report busy if
+  references linger; log + continue).
+- No plugin `get_apparmor_rules` signature change — per-session
+  profiles continue to receive `session_id` only.  Plugins do NOT
+  need cascade-awareness.
+- Pin tests: rendered profile carries the change_profile rule;
+  bootstrap step 1c re-entry path fires aa_change_profile + logs
+  the transition; --remove called daemon-side after successful
+  transition.
+- **Sign-off gate**: kernel apparmor audit logs show clean
+  PROFILE_LOAD on each new session AND clean PROFILE_REMOVE on
+  the prior session.  Cascade-sharing demo (kb-enablement-2.0
+  workload) runs cleanly with N profiles loaded + N-1 removed
+  across a single slot's lifetime.
+
+**What this does NOT change** (preserved):
+
+- Per-session profile composition (today's `_provision_apparmor_for_session`)
+- Plugin `get_apparmor_rules` signatures or contributions
+- The `//child` sub-profile model (LLM-driven tool-exec scope)
+- The `tool_hat` sub-profile (runner main during tool-exec)
 
 ### Phase 4: lsp plugin lifecycle adjustment
 **Scope**: ~150 LOC
@@ -404,9 +552,13 @@ it.
   `_clients`, `_config_cache` intact
 - `shutdown()`: still tears down on slot-teardown (cascade-end), full
   cleanup
-- **Side effect**: most of PR-154/155/156/158's lsp-specific apparmor
-  grants stay relevant (jdtls still lives runner-side under the
-  per-cascade profile).  No major rewrite.
+- **Side effect**: PR-154/155/156/158's lsp-specific apparmor
+  grants stay relevant (jdtls lives runner-side under the FIRST
+  session's `jaato-ws-{session_id}` profile; child processes
+  inherit that profile when forked, and `aa_change_profile` on
+  the parent runner thread does NOT propagate to existing
+  children — jdtls keeps the rules it was spawned with).  No
+  rewrite needed.
 - Pin tests: `_connected_servers` survives `reset_for_next_session()`;
   cleared on `shutdown()`
 - **Sign-off gate**: cascade-sharing demo shows ONE jdtls subprocess
@@ -437,7 +589,7 @@ All Phase 0 decisions are locked.  Phase 1 can begin without further input.
 |---|---|
 | Tenant identifier | `cascade_driver_id` |
 | Reuse scope | within ONE cascade only |
-| Apparmor model | one profile per cascade, shared across sessions |
+| Apparmor model | per-session profiles preserved; slot transitions via `aa_change_profile` on each session boundary (revised 2026-05-20 — see §4 Amendment) |
 | Cascade ID propagation | IPC client supplies at first session, auto-inherits to subagents |
 | Cascade end signaling | idle timeout (`cascade_idle_timeout_seconds`, default 300s) |
 | Slot allocation when no match | spawn fresh from pool (no waiting) |
@@ -480,10 +632,17 @@ All Phase 0 decisions are locked.  Phase 1 can begin without further input.
   enforces in `runtime.create_session()` — subagent spawn API doesn't expose
   a cascade_id kwarg; it's always inherited.
 
-- **Apparmor reload semantics**: kernel apparmor_parser behavior under
-  same-profile-name reload differs from first-load.  Mitigation: Phase 3
-  uses `apparmor_parser --replace` for the per-cascade profile;
-  validate on Ubuntu 22.04 + 24.04 + AppArmor 3.x/4.x.
+- **Apparmor change_profile rejection**: kernel may reject the
+  `aa_change_profile` transition if the calling thread's current
+  profile doesn't permit it (rule absent OR malformed).  Mitigation:
+  Phase 3 adds `change_profile -> jaato-ws-*,` to the per-session
+  template; pin tests verify the rule is present in every rendered
+  profile.  Validate on Ubuntu 22.04 + 24.04 + AppArmor 3.x/4.x.
+
+- **Old-profile reference linger**: `apparmor_parser --remove` may
+  return EBUSY if any process (or future thread) still references the
+  profile.  Mitigation: best-effort unload; log + continue.  Kernel
+  eventually evicts stale profiles via LRU.
 
 - **The reset protocol is itself the source of new bugs**: a plugin's
   `reset_for_next_session()` could miss state OR clear too much.
