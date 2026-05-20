@@ -299,6 +299,57 @@ For each server entry, the composer emits:
    wrapper itself execs the interpreter. Canonical case: jdtls
    ships as a Python wrapper script.
 
+### Data-directory grants (server 0.6.138+)
+
+Some LSP servers persist runtime state to a data directory
+specified via a CLI flag. Eclipse JDT LS (jdtls) is the canonical
+case — its Python wrapper crashes at `tempfile.gettempdir()` under
+apparmor confinement if no writable temp dir is reachable, so
+operators pass an explicit `-data <path>` to redirect it.
+
+Since server 0.6.138, the lsp plugin's apparmor composer
+auto-detects these flags in each server's `args` and emits matching
+rw grants. Recognised flags (covering the common LSP server
+conventions):
+
+| Flag | Server |
+|---|---|
+| `-data <path>` | jdtls |
+| `--data-dir <path>` | pyright, several others |
+| `--data <path>` | alternate jdtls syntax |
+
+Both space-separated (`-data <path>`) and equals-separated
+(`-data=<path>`) forms are recognised. Variable expansion
+(`${workspaceRoot}`, `${HOME}`, etc.) at composer time mirrors
+the runtime exactly so the granted path always lines up with what
+the binary writes to.
+
+**Example `.lsp.json` snippet** to unblock jdtls under apparmor
+confinement:
+
+```json
+{
+  "languageServers": {
+    "java": {
+      "command": "jdtls",
+      "args": ["-data", "${workspaceRoot}/.jaato/jdtls-data"],
+      "languageId": "java"
+    }
+  }
+}
+```
+
+This causes the composer to emit:
+
+```
+<workspace>/.jaato/jdtls-data/    rw,
+<workspace>/.jaato/jdtls-data/**  rw,
+```
+
+…in the per-session apparmor profile. jdtls's wrapper sees the
+explicit `-data` arg and never calls `tempfile.gettempdir()`,
+sidestepping the confinement crash.
+
 **Limitations:**
 
 - **AppArmor profiles compose at session bootstrap.** Operator
