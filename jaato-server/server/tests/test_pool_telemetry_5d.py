@@ -19,11 +19,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from server.runner_pool import PoolManager
+from server.runner_pool import PoolManager, PoolSlot
 
 
 def _fake_handle(pid: int):
+    """Return a raw tuple shaped like ``request_fork_slot`` produces."""
     return (pid, MagicMock(name=f"sock_{pid}"))
+
+
+def _fake_slot(pid: int, cascade_id=None):
+    """Return a ``PoolSlot`` dataclass — what ``_idle_slots`` holds."""
+    return PoolSlot(
+        pid=pid, sock=MagicMock(name=f"sock_{pid}"),
+        cascade_id=cascade_id,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -41,6 +50,10 @@ def test_telemetry_starts_at_zero() -> None:
         "pool_replenish_failures_total": 0,
         "template_respawn_attempts_total": 0,
         "template_respawn_failures_total": 0,
+        # Phase 2 cascade-sharing counters (server 0.6.144+).
+        "cascade_slot_reuse_hits_total": 0,
+        "cascade_slot_reuse_misses_total": 0,
+        "cascade_slots_idle_torndown_total": 0,
     }
 
 
@@ -61,7 +74,7 @@ def test_telemetry_returns_a_copy() -> None:
 
 def test_acquire_slot_hit_increments_acquired_total() -> None:
     pool = PoolManager(template_manager=MagicMock(), target_size=2)
-    pool._idle_slots = [_fake_handle(10001), _fake_handle(10002)]
+    pool._idle_slots = [_fake_slot(10001), _fake_slot(10002)]
     pool.acquire_slot()
     pool.acquire_slot()
     counters = pool.get_telemetry()
@@ -82,7 +95,7 @@ def test_acquire_slot_miss_increments_miss_total() -> None:
 
 def test_acquire_slot_mixed_hit_miss() -> None:
     pool = PoolManager(template_manager=MagicMock(), target_size=2)
-    pool._idle_slots = [_fake_handle(10001)]
+    pool._idle_slots = [_fake_slot(10001)]
     pool.acquire_slot()  # hit
     pool.acquire_slot()  # miss (only one was seeded)
     pool.acquire_slot()  # miss
@@ -110,8 +123,9 @@ def test_replenish_success_increments_on_fork_slot_return() -> None:
     # request_fork_slot returned a handle.
     handle = tm.request_fork_slot()
     if handle is not None:
+        pid, sock = handle
         with pool._lock:
-            pool._idle_slots.append(handle)
+            pool._idle_slots.append(PoolSlot(pid=pid, sock=sock))
         pool._incr("pool_replenish_success_total")
     counters = pool.get_telemetry()
     assert counters["pool_replenish_success_total"] == 1

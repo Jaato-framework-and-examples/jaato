@@ -94,6 +94,7 @@ def spawn_session_runner(
     disable_confine: bool = False,
     cgroup_attach: Optional[Callable[[], None]] = None,
     pool_manager: Any = None,
+    cascade_driver_id: Optional[str] = None,
 ) -> None:
     """Spawn the per-session runner subprocess and wire its RPC handle
     onto the JaatoServer.
@@ -135,6 +136,12 @@ def spawn_session_runner(
             after provisioning the cgroup.  ``None`` means no
             cgroup attach — the IPC session path (no cgroup
             provisioned) passes ``None``.
+        cascade_driver_id: Phase 2 cascade-sharing tenant ID.  When
+            non-None, the pool acquire walks for a slot already
+            affined to this cascade (warm plugin state, warm LSP
+            connections from prior sessions).  ``None`` (default)
+            means standalone session — pool acquires any PURE IDLE
+            slot, no cascade affinity stamped.
         pool_manager: Pool PR 4 — the daemon's
             :class:`server.runner_pool.PoolManager`.  When non-None
             AND the pool routing flag is enabled AND the pool has an
@@ -195,24 +202,27 @@ def spawn_session_runner(
         and _pool_enabled()
         and cgroup_attach is None
     ):
-        handle = pool_manager.acquire_slot()
-        if handle is not None:
-            slot_pid, daemon_sock = handle
+        slot = pool_manager.acquire_slot(
+            cascade_driver_id=cascade_driver_id,
+        )
+        if slot is not None:
             spawned = SpawnedRunner(
-                pid=slot_pid,
-                parent_socket=daemon_sock,
+                pid=slot.pid,
+                parent_socket=slot.sock,
                 # Slot will transition to ``profile_name`` itself in
                 # bootstrap_session step 1c.  Record the target on
                 # the SpawnedRunner for audit / diagnostic surfaces.
                 profile_name=profile_name,
                 session_id=session_id,
             )
+            spawned.pool_slot = slot  # Phase 2: keep ref for return path.
             pool_served = True
             logger.info(
                 "spawn_session_runner: session %s served by pool slot "
-                "pid=%d (warm imports inherited; slot will self-confine "
-                "to profile=%s)",
-                session_id, slot_pid, profile_name or "(unconfined)",
+                "pid=%d cascade=%s (warm imports inherited; slot will "
+                "self-confine to profile=%s)",
+                session_id, slot.pid, slot.cascade_id or "(standalone)",
+                profile_name or "(unconfined)",
             )
         else:
             logger.info(

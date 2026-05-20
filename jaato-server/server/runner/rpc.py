@@ -55,7 +55,7 @@ import traceback
 import concurrent.futures as _concurrent_futures
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from shared.framing import (
     FrameTooLargeError,
@@ -469,6 +469,14 @@ class RunnerRPC:
             # JaatoSession host and stashes it for downstream
             # dispatch (Phase 4+ removes the daemon-side seat).
             return self._handle_session_bootstrap(env.args)
+
+        if env.method == "session.end":
+            # Phase 2 cascade-sharing: daemon signals end of one
+            # cascade-session.  Runner calls plugin.reset_for_next_session()
+            # on every initialized plugin so the slot's plugin state
+            # is clean before the next session of the same cascade
+            # claims this slot.  See docs/design/runner-cascade-sharing.md.
+            return self._handle_session_end()
 
         if env.method == "subagent.forward_event":
             # Phase 4 §4.3.6b: daemon forwards an event from an
@@ -1176,6 +1184,70 @@ class RunnerRPC:
             "ready": host.is_ready,
             "session_id": host.session_id,
             "tool_count": tool_count,
+        }
+
+    def _handle_session_end(self) -> "tuple[bool, Any]":
+        """Cascade-sharing session boundary — reset per-session plugin state.
+
+        Phase 2.  Called once by the daemon at session teardown for
+        sessions served from the pool slot.  Iterates every plugin
+        registered in the runner-side session's plugin registry and
+        invokes ``reset_for_next_session()`` on it.  Per-plugin
+        decisions about what to reset / preserve are owned by the
+        plugin (Phase 1 audit shipped in PR #160 + #161).
+
+        On any per-plugin reset exception, the plugin's name + the
+        exception text are appended to the ``errors`` list and the
+        sweep continues.  Caller (daemon) treats a non-empty
+        ``errors`` list as a slot-poisoning signal: the slot must
+        NOT be returned to the pool because its plugin state is
+        partially-reset (undefined).
+
+        Returns:
+            ``(True, {"plugins_reset": int, "errors": List[str]})`` —
+            ``ok`` stays True even when individual plugin resets
+            fail; daemon branches on ``errors``.  ``(False, error)``
+            only on the structural "no session host" case (which is
+            a programmer error: daemon shouldn't call session.end
+            when no session was bootstrapped).
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        if registry is None:
+            return False, {
+                "error": (
+                    "session.end: runner-side session has no plugin "
+                    "registry — cannot fire reset_for_next_session"
+                ),
+                "stage": "no_registry",
+            }
+
+        plugins_reset = 0
+        errors: List[str] = []
+        for name in registry.list_available():
+            plugin = registry.get_plugin(name)
+            if plugin is None:
+                continue
+            reset = getattr(plugin, "reset_for_next_session", None)
+            if reset is None:
+                # Plugin is on an older base class — default no-op
+                # behavior (skip silently).  This is rare: Phase 1
+                # added reset_for_next_session to both ToolPlugin
+                # and EnrichmentPlugin protocols.
+                continue
+            try:
+                reset()
+                plugins_reset += 1
+            except Exception as exc:  # noqa: BLE001 — per-plugin boundary
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+
+        return True, {
+            "plugins_reset": plugins_reset,
+            "errors": errors,
         }
 
     def _require_ready_session(

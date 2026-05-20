@@ -27,7 +27,7 @@ import socket
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -57,12 +57,21 @@ class SpawnedRunner:
     end (which closes the parent socket end, waits for the runner
     to exit, then SIGTERM/SIGKILL escalates per §4.6 "Death — daemon
     shutdown").
+
+    ``pool_slot`` (Phase 2) is the :class:`~server.runner_pool.PoolSlot`
+    handle when this runner was served from the pool — ``None`` for
+    cold-spawned runners.  Carried so the session-teardown path can
+    return the slot to the pool after a successful ``session_end``
+    RPC.  Forward-typed as ``Any`` to avoid an import cycle (the pool
+    module imports nothing from this one, but the runtime path
+    imports both).
     """
 
     pid: int
     parent_socket: socket.socket
     profile_name: str
     session_id: str
+    pool_slot: "Any" = None  # Optional[server.runner_pool.PoolSlot]
 
 
 class RunnerSpawner:

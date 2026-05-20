@@ -31,14 +31,57 @@ import logging
 import os
 import socket
 import threading
+import time
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
 
 
-# Per-slot handle: (pid, daemon-side socket).
-SlotHandle = Tuple[int, socket.socket]
+# Cascade-sharing idle timeout (Phase 2).  An IDLE_FOR_CASCADE slot
+# whose last_session_end_ts is older than this gets torn down by the
+# replenish loop.  Default matches design doc §3 decision 5 (300s).
+DEFAULT_CASCADE_IDLE_TIMEOUT_SECONDS = 300.0
+
+
+@dataclass
+class PoolSlot:
+    """Pre-warm pool slot — daemon's handle on a template-forked child.
+
+    Replaces the Phase 1 ``Tuple[int, socket.socket]`` shape.  Carries
+    cascade-affinity bookkeeping for Phase 2 slot reuse.
+
+    Attributes:
+        pid: Slot process id.  Template-child; reaped via waitpid by
+            the daemon's subreaper bit (or by shutdown_all on exit).
+        sock: Daemon-side end of the slot's RPC socket.  Closing this
+            socket signals the slot to exit (peer-EOF).
+        cascade_id: Optional cascade-driver ID this slot is currently
+            affined to.  ``None`` for a fresh slot or a slot that has
+            never served a session (PURE IDLE).  Set when a session
+            with ``cascade_driver_id != None`` is acquired against
+            this slot; cleared only on slot teardown (slots never
+            switch cascades mid-life).
+        last_session_end_ts: Wall-clock monotonic timestamp of the
+            most recent ``session_end`` RPC for this slot.  ``None``
+            until the slot has served (+ returned from) at least one
+            session.  Used by the idle-teardown sweep to detect
+            cascades that have gone idle longer than
+            ``cascade_idle_timeout_seconds``.
+    """
+
+    pid: int
+    sock: socket.socket
+    cascade_id: Optional[str] = None
+    last_session_end_ts: Optional[float] = None
+
+
+# Phase 1 alias.  All in-tree callers were updated in Phase 2 to use
+# ``PoolSlot``; the alias remains so external imports of
+# ``server.runner_pool.SlotHandle`` keep type-checking.  No tuple
+# semantics — ``PoolSlot`` is a dataclass with ``.pid`` / ``.sock``.
+SlotHandle = PoolSlot
 
 
 class PoolManager:
@@ -76,6 +119,7 @@ class PoolManager:
         template_manager,
         target_size: int = 2,
         replenish_interval: float = 0.5,
+        cascade_idle_timeout_seconds: float = DEFAULT_CASCADE_IDLE_TIMEOUT_SECONDS,
     ) -> None:
         """Initialize the pool manager.
 
@@ -96,15 +140,23 @@ class PoolManager:
                 doesn't perceive replenishment latency, slow enough
                 that the thread doesn't burn CPU when the pool is at
                 target size.  Pool PR 4.
+            cascade_idle_timeout_seconds: Phase 2 — how long an
+                IDLE_FOR_CASCADE slot may sit idle before the
+                replenish loop tears it down.  Default 300s (per
+                design doc §3 decision 5).  Override for tests that
+                exercise the teardown path without sleeping for 5
+                minutes.
         """
         self._template_manager = template_manager
         self.target_size = max(0, int(target_size))
-        self._idle_slots: List[SlotHandle] = []
+        self._idle_slots: List[PoolSlot] = []
         self._lock = threading.Lock()
         # Pool PR 4 replenishment thread state.
         self._replenish_interval = float(replenish_interval)
         self._replenish_stop = threading.Event()
         self._replenish_thread: Optional[threading.Thread] = None
+        # Phase 2 cascade-sharing idle timeout.
+        self._cascade_idle_timeout = float(cascade_idle_timeout_seconds)
         # Pool PR 5d telemetry counters.  Monotonically-incrementing
         # process-lifetime totals.  Snapshot via :meth:`get_telemetry`
         # for diagnostic surfaces (logs, admin commands, OTel
@@ -131,6 +183,24 @@ class PoolManager:
             # retries on next iteration, so attempts >> failures is
             # normal during a flaky-template incident.
             "template_respawn_failures_total": 0,
+            # Phase 2 cascade-sharing.  Number of times acquire_slot
+            # found a slot already affined to the requested cascade
+            # and reused it (warm pool slot AND warm plugin state
+            # AND warm LSP server connections).
+            "cascade_slot_reuse_hits_total": 0,
+            # Phase 2.  Number of times acquire_slot received a
+            # cascade_driver_id but no IDLE_FOR_CASCADE(C) slot
+            # existed — fell through to a PURE-IDLE slot or to
+            # cold-spawn.  Pairs with hits_total to measure
+            # cascade-reuse efficacy on the workload.
+            "cascade_slot_reuse_misses_total": 0,
+            # Phase 2.  Number of cascade-affined idle slots torn
+            # down by the replenish-loop sweep because they exceeded
+            # ``cascade_idle_timeout_seconds`` without serving a new
+            # session.  Should match the number of cascades that
+            # actually finished (long-pause cascades within timeout
+            # don't count).
+            "cascade_slots_idle_torndown_total": 0,
         }
         self._counters_lock = threading.Lock()
 
@@ -161,8 +231,8 @@ class PoolManager:
         forked = 0
         with self._lock:
             for i in range(self.target_size):
-                handle = self._template_manager.request_fork_slot()
-                if handle is None:
+                raw = self._template_manager.request_fork_slot()
+                if raw is None:
                     logger.warning(
                         "PoolManager: fork-slot %d/%d failed; pool "
                         "will be smaller than target.  Sessions fall "
@@ -170,7 +240,8 @@ class PoolManager:
                         "empty.", i + 1, self.target_size,
                     )
                     break
-                self._idle_slots.append(handle)
+                pid, sock = raw
+                self._idle_slots.append(PoolSlot(pid=pid, sock=sock))
                 forked += 1
 
         logger.info(
@@ -184,29 +255,122 @@ class PoolManager:
         with self._lock:
             return len(self._idle_slots)
 
-    def acquire_slot(self) -> Optional[SlotHandle]:
-        """Pop an idle slot off the pool.
+    def acquire_slot(
+        self, cascade_driver_id: Optional[str] = None,
+    ) -> Optional[PoolSlot]:
+        """Pop an idle slot off the pool — cascade-affinity aware (Phase 2).
+
+        Affinity routing (per design doc §4.2 claim flow):
+
+        1. If ``cascade_driver_id`` is provided, walk the idle list
+           for the first slot whose ``cascade_id`` matches.  Match
+           → return it (slot stays affined to its cascade; reuse hit).
+        2. Else (no cascade requested OR no match), take any PURE
+           IDLE slot (``cascade_id is None``).  If the caller did
+           supply a cascade_id, stamp it on the returned slot — the
+           slot is now affined to that cascade for the rest of its
+           life.
+        3. If no idle slot exists, return ``None``.  Caller falls
+           back to cold-spawn (which spawns a fresh session-mode
+           runner, NOT a pool slot).
 
         Caller becomes responsible for the slot — must either send
         a bootstrap envelope (the daemon's spawn_session_runner path)
         or close the daemon-side socket (which signals the slot to
         exit).
 
-        Increments either ``pool_slot_acquired_total`` (hit) or
-        ``pool_acquire_miss_total`` (empty pool) for telemetry — see
-        :meth:`get_telemetry`.
+        Telemetry (in addition to the Phase 1 counters):
+          - ``cascade_slot_reuse_hits_total`` incremented on path (1).
+          - ``cascade_slot_reuse_misses_total`` incremented when
+            ``cascade_driver_id`` is supplied but path (1) didn't fire
+            (whether or not we fell through to a PURE IDLE on path
+            (2)).  Pairs with hits_total to score cascade-reuse
+            efficacy on the workload.
+
+        Args:
+            cascade_driver_id: Optional cascade tenant ID.  ``None``
+                (default) means "no cascade affinity" — behaves like
+                Phase 1 (any IDLE slot, FIFO).
 
         Returns:
-            ``(pid, sock)`` of an idle slot, or ``None`` if the pool
-            is empty (session-mode fallback applies).
+            A :class:`PoolSlot` (with ``cascade_id`` set to the
+            requested cascade if reuse fired OR if a PURE IDLE slot
+            was stamped) or ``None`` if the pool is empty.
         """
         with self._lock:
-            if not self._idle_slots:
+            # Path (1): cascade-affinity match.
+            if cascade_driver_id is not None:
+                for i, slot in enumerate(self._idle_slots):
+                    if slot.cascade_id == cascade_driver_id:
+                        slot = self._idle_slots.pop(i)
+                        self._incr("pool_slot_acquired_total")
+                        self._incr("cascade_slot_reuse_hits_total")
+                        logger.info(
+                            "PoolManager.acquire_slot: cascade reuse "
+                            "HIT — slot pid=%d cascade=%s",
+                            slot.pid, cascade_driver_id,
+                        )
+                        return slot
+                # Cascade requested but no match.
+                self._incr("cascade_slot_reuse_misses_total")
+
+            # Path (2) / (3): any PURE IDLE slot, else None.  PURE
+            # IDLE is preferred over cascade-affined-to-other-cascade
+            # because cross-cascade reuse is forbidden by design
+            # (warm plugin state belongs to the original cascade).
+            pure_idle_idx = next(
+                (i for i, s in enumerate(self._idle_slots)
+                 if s.cascade_id is None),
+                None,
+            )
+            if pure_idle_idx is None:
                 self._incr("pool_acquire_miss_total")
                 return None
-            handle = self._idle_slots.pop()
+            slot = self._idle_slots.pop(pure_idle_idx)
+
+        # Stamp cascade affinity if caller supplied one.  Slot is
+        # now affined for the rest of its life.
+        if cascade_driver_id is not None:
+            slot.cascade_id = cascade_driver_id
+            logger.info(
+                "PoolManager.acquire_slot: cascade reuse MISS — fresh "
+                "slot pid=%d stamped cascade=%s",
+                slot.pid, cascade_driver_id,
+            )
         self._incr("pool_slot_acquired_total")
-        return handle
+        return slot
+
+    def return_slot_after_session(self, slot: PoolSlot) -> None:
+        """Return a slot to the idle pool after its session ended (Phase 2).
+
+        Pre-condition: caller has ALREADY invoked the slot's
+        ``session_end`` RPC successfully (which fired
+        ``reset_for_next_session`` on each plugin).  This method is
+        purely the pool-side bookkeeping — it does NOT call the
+        slot's RPC.  On ``session_end`` failure, caller must NOT
+        invoke this method; the slot should be torn down via
+        ``slot.sock.close()`` + waitpid (the slot is in undefined
+        state and cannot be reused).
+
+        Stamps ``last_session_end_ts`` to the current monotonic
+        wall-clock for the idle-teardown sweep.
+
+        Args:
+            slot: The slot to return.  ``slot.cascade_id`` controls
+                whether the slot becomes IDLE_FOR_CASCADE (cascade_id
+                set) or PURE IDLE (cascade_id None — only legal if
+                the slot was never stamped with a cascade, i.e. it
+                served a standalone session).
+        """
+        slot.last_session_end_ts = time.monotonic()
+        with self._lock:
+            self._idle_slots.append(slot)
+        logger.info(
+            "PoolManager.return_slot_after_session: slot pid=%d "
+            "returned to pool (cascade=%s; idle_count=%d/%d)",
+            slot.pid, slot.cascade_id or "(pure)",
+            len(self._idle_slots), self.target_size,
+        )
 
     def _incr(self, key: str, delta: int = 1) -> None:
         """Atomic-ish bump of a telemetry counter.  Internal helper."""
@@ -275,15 +439,15 @@ class PoolManager:
             slots = list(self._idle_slots)
             self._idle_slots.clear()
 
-        for slot_pid, slot_sock in slots:
+        for slot in slots:
             try:
-                slot_sock.close()
+                slot.sock.close()
             except OSError:
                 pass
             # 3. Reap.  Slots are template-children; ChildProcessError
             # is expected and benign.
             try:
-                os.waitpid(slot_pid, 0)
+                os.waitpid(slot.pid, 0)
             except ChildProcessError:
                 pass
 
@@ -393,25 +557,34 @@ class PoolManager:
                     self._handle_template_death()
                     continue
 
+                # Phase 2: cascade-idle teardown sweep.  Reaps slots
+                # that have sat IDLE_FOR_CASCADE longer than the
+                # configured timeout — these are cascades that
+                # finished (no further sessions arriving) or stalled
+                # past the operator's tolerance.
+                self._sweep_cascade_idle()
+
                 # Cheap check: pool already at target, sleep.
                 if self.idle_count() >= self.target_size:
                     self._replenish_stop.wait(self._replenish_interval)
                     continue
-                handle = self._template_manager.request_fork_slot()
-                if handle is None:
+                raw = self._template_manager.request_fork_slot()
+                if raw is None:
                     # request_fork_slot already logged the cause; back
                     # off briefly so we don't tight-loop on a flaky
                     # template.
                     self._incr("pool_replenish_failures_total")
                     self._replenish_stop.wait(self._replenish_interval)
                     continue
+                pid, sock = raw
+                new_slot = PoolSlot(pid=pid, sock=sock)
                 with self._lock:
-                    self._idle_slots.append(handle)
+                    self._idle_slots.append(new_slot)
                 self._incr("pool_replenish_success_total")
                 logger.info(
                     "PoolManager replenish: forked slot pid=%d "
                     "(idle_count=%d/%d)",
-                    handle[0], len(self._idle_slots), self.target_size,
+                    new_slot.pid, len(self._idle_slots), self.target_size,
                 )
             except Exception:  # noqa: BLE001 — boundary surface
                 logger.exception(
@@ -419,6 +592,60 @@ class PoolManager:
                     "and continuing",
                 )
                 self._replenish_stop.wait(self._replenish_interval)
+
+    def _sweep_cascade_idle(self) -> None:
+        """Tear down IDLE_FOR_CASCADE slots whose idle window expired.
+
+        Phase 2.  An IDLE_FOR_CASCADE(C) slot is one that returned
+        from a session (``last_session_end_ts`` set) AND has a
+        ``cascade_id`` set.  If the elapsed monotonic-time since
+        the last session end exceeds ``cascade_idle_timeout_seconds``,
+        the cascade is considered finished (or paused longer than
+        the operator's tolerance).  We close the daemon-side socket
+        (slot sees EOF, exits), waitpid it, and let the
+        replenishment loop top the pool back up.
+
+        Acquired (in-use) slots are NEVER in ``_idle_slots`` so this
+        sweep cannot race with an active session.  PURE IDLE slots
+        (``cascade_id is None``) are also exempt — they have no
+        cascade affinity to time out.
+
+        Called every replenish iteration (~0.5s).  Cheap when the
+        pool has no IDLE_FOR_CASCADE entries.
+        """
+        now = time.monotonic()
+        timeout = self._cascade_idle_timeout
+        to_reap: List[PoolSlot] = []
+        with self._lock:
+            survivors: List[PoolSlot] = []
+            for slot in self._idle_slots:
+                if (
+                    slot.cascade_id is not None
+                    and slot.last_session_end_ts is not None
+                    and (now - slot.last_session_end_ts) > timeout
+                ):
+                    to_reap.append(slot)
+                else:
+                    survivors.append(slot)
+            if to_reap:
+                self._idle_slots = survivors
+
+        for slot in to_reap:
+            try:
+                slot.sock.close()
+            except OSError:
+                pass
+            try:
+                os.waitpid(slot.pid, 0)
+            except ChildProcessError:
+                pass
+            self._incr("cascade_slots_idle_torndown_total")
+            logger.info(
+                "PoolManager cascade-idle sweep: torn down slot pid=%d "
+                "cascade=%s (idle %.1fs > timeout %.0fs)",
+                slot.pid, slot.cascade_id,
+                now - (slot.last_session_end_ts or now), timeout,
+            )
 
     def _handle_template_death(self) -> None:
         """Recover from template-subprocess death (pool PR 5b watchdog).
@@ -448,16 +675,16 @@ class PoolManager:
             stale = list(self._idle_slots)
             self._idle_slots.clear()
 
-        for slot_pid, slot_sock in stale:
+        for slot in stale:
             try:
-                slot_sock.close()
+                slot.sock.close()
             except OSError:
                 pass
             # Subreaper re-parented slot to daemon → waitpid works.
             # If subreaper wasn't set OR if init already reaped, we
             # get ChildProcessError — tolerate it.
             try:
-                os.waitpid(slot_pid, 0)
+                os.waitpid(slot.pid, 0)
             except ChildProcessError:
                 pass
 
