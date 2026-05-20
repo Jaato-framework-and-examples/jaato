@@ -294,6 +294,29 @@ class TodoPlugin(RunnerForwardingMixin):
         """
         self._trace("shutdown: cleaning up (preserving plan tracking and storage)")
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+) — NO-OP.
+
+        Per Daniel's litmus test: "A plugin's state should SURVIVE this
+        call if a subsequent session within the SAME cascade might
+        benefit from it."
+
+        Todo's per-session state is structured as a PER-AGENT dict
+        (``_current_plan_ids: Dict[agent_name → plan_id]``).  When a
+        new session in the same cascade runs under a different agent,
+        it gets its own dict entry — no interference with prior
+        sessions' plans.  When a new session is the SAME agent
+        re-entering, accessing the prior plan IS the right behavior
+        (cascade-stage handoff).
+
+        Therefore the litmus test resolves to NO-OP — todo's
+        cross-session state is by-design preserved.  This matches
+        the existing ``shutdown()`` preservation policy (the docstring
+        above already documents the principle for the non-cascade
+        case).
+        """
+        self._trace("reset_for_next_session: NO-OP (per-agent plan map is cross-session by design)")
+
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
         return {

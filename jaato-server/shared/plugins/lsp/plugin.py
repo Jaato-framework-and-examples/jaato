@@ -1273,6 +1273,47 @@ class LSPToolPlugin(RunnerForwardingMixin):
         self._connected_servers = set()
         self._failed_servers = {}
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+) — NO-OP.
+
+        **This is THE cascade-sharing target plugin.**  Per Daniel's
+        litmus test, EVERY piece of this plugin's state must survive
+        between sessions of the same cascade because the next session
+        DIRECTLY BENEFITS from:
+
+        - ``_clients``: ALREADY-CONNECTED LSP server clients.  Closing
+          them between sessions would re-trigger the multi-minute
+          jdtls cold-start tax every cascade stage pays today.  The
+          v141-v151 onion-peeling exists precisely because per-session
+          teardown was the wrong shape.
+        - ``_connected_servers``: the membership set the enrichment
+          chain consults.  Clearing it would re-create the v151
+          multi-instance state-isolation symptom (enrichment instance
+          sees empty set while connect instance had the server
+          registered).
+        - ``_config_cache``: parsed ``.lsp.json`` — the workspace
+          config doesn't change within a cascade.
+        - Background thread + request_queue + response_queue: the
+          machinery owning LSP client lifecycles — tearing them down
+          + re-creating would discard exactly the LSP state we want
+          to preserve.
+        - ``_diagnostics_events`` (on each LSPClient): the per-URI
+          asyncio.Event signal store — cleared per-URI on each
+          ``await_diagnostics()`` consume cycle (PR-151), not
+          per-session.
+
+        Nothing held by this plugin instance is per-session-only.
+        ``reset_for_next_session()`` is the framework's contract for
+        "between cascade sessions"; for lsp specifically, the contract
+        is "don't touch anything".  ``shutdown()`` is the final
+        cascade-end teardown — still tears down clients + thread.
+        """
+        self._trace(
+            "reset_for_next_session: NO-OP — LSP client connections + "
+            "_connected_servers set + config cache MUST survive across "
+            "cascade sessions (cascade-sharing target plugin)"
+        )
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return ToolSchemas for LSP tools."""
         if not self._initialized:

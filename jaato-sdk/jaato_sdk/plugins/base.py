@@ -350,6 +350,16 @@ class EnrichmentPlugin(Protocol):
         """Called when the plugin is disabled. Clean up resources here."""
         ...
 
+    def reset_for_next_session(self) -> None:
+        """Clear per-session state in preparation for the next session
+        of the same cascade.
+
+        See :class:`ToolPlugin.reset_for_next_session` for the full
+        contract.  Default is no-op; override when the plugin holds
+        per-session state that the litmus test says should be cleared.
+        """
+        ...
+
     # ==================== Optional Extensions ====================
     #
     # Configuration Schema:
@@ -437,6 +447,45 @@ class ToolPlugin(Protocol):
 
     def shutdown(self) -> None:
         """Called when the plugin is disabled. Clean up resources here."""
+        ...
+
+    def reset_for_next_session(self) -> None:
+        """Clear per-session state in preparation for the next session
+        of the same cascade.
+
+        Introduced for the runner cascade-sharing arc (Phase 1, server
+        0.6.142+ / see ``docs/design/runner-cascade-sharing.md``).
+        When the pool slot survives across multiple sessions of one
+        cascade (cascade-driver-id slot affinity), the framework calls
+        this method between sessions so per-session state is wiped
+        BUT warm imports + across-session-by-design state survive.
+
+        **Litmus test for what to clear vs keep** (Daniel rule
+        2026-05-20):
+
+            A plugin's state should SURVIVE this call if a
+            subsequent session within the SAME cascade might benefit
+            from it.
+
+        Examples (per-attribute application):
+
+        - ``conversation_history`` — clear (next session writes its own)
+        - ``LSP server connections`` — keep (whole point of sharing)
+        - ``cached config files`` — keep (workspace doesn't change)
+        - ``per-turn telemetry counters`` — clear (next session starts fresh)
+        - ``model memories written to disk`` — KEEP (next stage reads them)
+        - ``artifact dependency graph`` — KEEP (cross-session validation)
+
+        **Default contract**: no-op.  Most plugins are
+        stateless-after-initialize or hold only across-session-by-design
+        state.  Override only when the plugin holds per-session state
+        that the litmus test says should be cleared.
+
+        Called by the pool slot's session-teardown path, AFTER
+        ``shutdown()`` would have been called in the pre-cascade-sharing
+        architecture.  ``shutdown()`` is reserved for the FINAL
+        teardown at slot-end (cascade idle timeout).
+        """
         ...
 
     def get_system_instructions(self) -> Optional[str]:

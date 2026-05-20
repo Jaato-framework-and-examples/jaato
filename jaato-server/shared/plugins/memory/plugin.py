@@ -173,6 +173,38 @@ class MemoryPlugin(RunnerForwardingMixin):
             self._indexer.clear()
         self._storage = None
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+) — NO-OP.
+
+        **Daniel-corrected (2026-05-20)**: this plugin was initially
+        categorised as needing reset between cascade sessions; that
+        was wrong.  Per Daniel's litmus test:
+
+            "A plugin's state should SURVIVE this call if a subsequent
+            session within the SAME cascade might benefit from it."
+
+        Memories written by the model in session A of a cascade are
+        EXACTLY the kind of context session B should be able to read.
+        Wiping them between cascade stages would silently discard
+        the persistence layer the model was authoring against — a
+        textbook framework-side defeat of the model's intent.
+
+        Survives the reset (the entire plugin state):
+        - ``_storage``: per-workspace memory file pointers.
+        - ``_indexer``: built memory index (search/recall structures).
+        - ``_global_storage`` / ``_global_indexer``: cross-workspace
+          memories (constant within any session).
+        - Workspace + global path resolution + config — all
+          constant within a cascade.
+
+        ``shutdown()`` (final teardown at cascade end) still clears
+        the index + drops the storage handle.
+        """
+        self._trace(
+            "reset_for_next_session: NO-OP — memories are cross-session "
+            "by-design (Daniel litmus test, 2026-05-20)"
+        )
+
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
         return {

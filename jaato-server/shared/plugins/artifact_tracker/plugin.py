@@ -257,6 +257,35 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
         self._workspace_root = None
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+) — NO-OP.
+
+        **Daniel-corrected (2026-05-20)**: artifact tracking state is
+        cross-session by design.  Per Daniel's litmus test:
+
+            "A plugin's state should SURVIVE this call if a subsequent
+            session within the SAME cascade might benefit from it."
+
+        Artifacts produced by session A (rendered files, build outputs,
+        dependency graph edges) become inputs for session B's validation
+        / further dependency tracking.  Clearing the registry between
+        cascade sessions would break the cross-stage data flow this
+        plugin was built to support.
+
+        Survives the reset (the entire plugin state):
+        - ``_registry``: the in-memory artifact + dependency graph
+          (persisted to disk on shutdown).
+        - ``_workspace_root``: workspace-tier, constant within cascade.
+        - ``_storage_path``: where state persists.
+
+        ``shutdown()`` (final teardown at cascade end) saves state +
+        drops references.
+        """
+        self._trace(
+            "reset_for_next_session: NO-OP — artifact graph is cross-session "
+            "by-design (Daniel litmus test, 2026-05-20)"
+        )
+
     def _to_display_path(self, path: str) -> str:
         """Convert an absolute path to a display path relative to workspace_root.
 
