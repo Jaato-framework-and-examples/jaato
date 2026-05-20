@@ -98,6 +98,26 @@ class ClarificationPlugin(RunnerForwardingMixin):
         self._channel = None
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+) — NO-OP.
+
+        Per Daniel's litmus test: this plugin holds no per-session
+        state that warrants clearing.  The plugin is a routing layer
+        between agent code and the active clarification channel:
+
+        - ``_channel``: ClarificationChannel object — re-wired by the
+          next session's ``initialize()`` call (which creates a fresh
+          channel from config).
+        - ``_agent_name``: re-set by next session's ``initialize()``.
+        - Callbacks: re-wired by next session's
+          ``set_clarification_hooks()`` lifecycle invocation.
+        - ``_thread_local.channel``: per-thread, auto-cleaned.
+
+        No Q&A history accumulates in the plugin instance — the
+        channel manages pending questions and clears them on answer.
+        """
+        self._trace("reset_for_next_session: NO-OP (no per-session state)")
+
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
         return {

@@ -317,6 +317,43 @@ class PermissionPlugin(RunnerForwardingMixin):
         # different) registry's ``runner_rpc_client`` attribute.
         self._runner_rpc_channel = None
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+).
+
+        Per Daniel's litmus test: per-session APPROVAL state should
+        NOT survive into the next session.  If the user said "yes,
+        always" / "yes, this turn" / "suspend until idle" in session
+        A, those decisions are intentionally session-scoped — the
+        next cascade stage should re-prompt based on its own tool
+        usage, not silently inherit prior approvals.
+
+        Per-session state CLEARED:
+        - ``_allow_all``: per-session "approve all" flag.
+        - ``_turn_suspended``: per-turn allow-all flag.
+        - ``_idle_suspended``: per-session-until-idle flag.
+        - ``_execution_log``: per-session tool-execution audit log.
+        - ``_agent_name``: per-session identity.
+
+        Survives the reset:
+        - ``_config``: workspace-tier policy.
+        - ``_policy``: same.
+        - ``_channel``: re-wired by next session's lifecycle hooks.
+        - ``_workspace_path``: constant within cascade.
+        - ``_wrapped_executors`` / ``_original_executors``: re-wired
+          by next session's expose-hook.
+        - Persistent operator-set whitelist/blacklist on
+          ``_policy``: by-design preserved (operator decision, not
+          per-session).
+        """
+        self._trace(
+            "reset_for_next_session: clearing per-session approval flags"
+        )
+        self._allow_all = False
+        self._turn_suspended = False
+        self._idle_suspended = False
+        self._execution_log.clear()
+        self._agent_name = None
+
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
         return {

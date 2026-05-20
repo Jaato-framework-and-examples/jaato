@@ -132,6 +132,38 @@ class FileSessionPlugin:
         """Clean up resources."""
         pass
 
+    def reset_for_next_session(self) -> None:
+        """Clear per-session state for the cascade-sharing arc (Phase 1).
+
+        Per Daniel's litmus test (2026-05-20): a plugin's state should
+        SURVIVE this call if a subsequent session within the SAME cascade
+        might benefit from it.  For the session plugin, the
+        session-specific identity / counters do NOT benefit the next
+        session — each cascade stage has its own session id and turn
+        count.  The workspace-tier config DOES survive.
+
+        Per-session attributes (CLEAR — next session has its own):
+        - ``_current_session_id``: identifies the current session.
+        - ``_description_requested``: per-session description flow flag.
+        - ``_turn_count``: per-session turn counter.
+        - ``_session_description``: per-session display string.
+
+        Survives the reset (workspace/cascade-scoped):
+        - ``_storage_path``: workspace-tier path, constant within cascade.
+        - ``_config``: plugin config from profile YAML.
+        - ``_client``: re-wired by next session's ``set_client()`` hook.
+        - callbacks (``_on_description_changed``): re-wired by next session.
+
+        Note: ``initialize()`` already resets these same attributes; this
+        method exists as a NAMED contract for the cascade-sharing pool
+        slot to call between sessions WITHOUT re-running config-loading
+        (which ``initialize()`` does).
+        """
+        self._current_session_id = None
+        self._description_requested = False
+        self._turn_count = 0
+        self._session_description = None
+
     # ==================== SessionPlugin: Core Persistence ====================
 
     def save(
