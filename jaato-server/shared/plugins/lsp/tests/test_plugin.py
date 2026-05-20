@@ -2404,3 +2404,137 @@ class TestConnectServerTmpdirInjection:
             "before auto-injecting, so operator-explicit TMPDIR is "
             "honored (PR-156)."
         )
+
+
+class TestWorkspaceRootSymmetricResolution:
+    """Pin server-0.6.140 fix (PR-157): symmetric workspace_path
+    resolution at connect_server time matches the composer (PR-155).
+
+    Motivating evidence (v148 on server 0.6.139): PR-155 composer
+    correctly resolved `${workspaceRoot}` to cascade workspace, but
+    PR-156 connect_server resolved to daemon cwd because
+    `self._workspace_path` was None at connect time (initial
+    auto-connect runs inside `initialize()` BEFORE the framework's
+    `set_workspace_path()` broadcast fires after `expose_all()`).
+
+    Fix: (1) defer initial auto-connect when `_workspace_path` is
+    None; (2) `set_workspace_path()` dispatches MSG_RETRY_AUTOCONNECT;
+    (3) request loop handles it by re-attempting connect for any
+    not-yet-connected server with the now-correct workspace_path;
+    (4) `expand_variables(raw_args)` call gains
+    `workspace_root_override=self._workspace_path` for symmetric
+    `${workspaceRoot}` resolution.
+    """
+
+    def test_connect_server_passes_workspace_root_override(self):
+        """Pin: `expand_variables(raw_args, ...)` call at line 2373
+        (post-PR-157) passes `workspace_root_override=self._workspace_path`
+        so `${workspaceRoot}` in args resolves to session workspace,
+        not daemon cwd auto-detect."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        start = src.index("async def connect_server(name: str, spec: dict)")
+        end = src.find("async def disconnect_server", start)
+        if end == -1:
+            end = start + 6000
+        body = src[start:end]
+        # The expand_variables call MUST include the override kwarg
+        assert "workspace_root_override=self._workspace_path" in body, (
+            "connect_server's `expand_variables(raw_args, ...)` call "
+            "must pass `workspace_root_override=self._workspace_path` "
+            "(PR-157) so `${workspaceRoot}` in args resolves to the "
+            "session workspace symmetric with PR-155 composer."
+        )
+
+    def test_set_workspace_path_dispatches_retry(self):
+        """Pin: set_workspace_path() posts MSG_RETRY_AUTOCONNECT to
+        the background thread's request_queue when workspace_path
+        changes (and the plugin is initialized)."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        start = src.index("def set_workspace_path(self, path: str)")
+        # Find the next def to bound the method
+        end = src.find("\n    def ", start + 1)
+        if end == -1:
+            end = start + 3000
+        body = src[start:end]
+        assert "MSG_RETRY_AUTOCONNECT" in body, (
+            "set_workspace_path should dispatch MSG_RETRY_AUTOCONNECT "
+            "via request_queue (PR-157) so the background thread "
+            "retries connect for any not-yet-connected server with "
+            "the now-correct workspace_path."
+        )
+
+    def test_msg_retry_autoconnect_constant_defined(self):
+        """Pin: the new message type is exported as a module-level
+        constant so source-pin tests can grep for it + the request
+        loop handler can dispatch on it."""
+        from ..plugin import MSG_RETRY_AUTOCONNECT
+        assert MSG_RETRY_AUTOCONNECT == 'retry_autoconnect'
+
+    def test_msg_retry_autoconnect_handler_present(self):
+        """Pin: the request loop in _thread_main handles
+        MSG_RETRY_AUTOCONNECT. Catches a future refactor that
+        accidentally removes the handler."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        # The handler appears in the request loop in _thread_main
+        assert "elif msg_type == MSG_RETRY_AUTOCONNECT:" in src, (
+            "_thread_main's request loop should have a handler for "
+            "MSG_RETRY_AUTOCONNECT (PR-157)."
+        )
+
+    def test_initial_autoconnect_deferred_when_no_workspace(self):
+        """Pin: the initial auto-connect loop in run_lsp skips when
+        self._workspace_path is None. set_workspace_path triggers
+        the deferred retry via MSG_RETRY_AUTOCONNECT."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        # Find the auto-connect block in run_lsp
+        anchor = "# Auto-connect to configured servers"
+        start = src.index(anchor)
+        # ~30-40 lines of context
+        body = src[start:start + 2000]
+        assert "self._workspace_path is None" in body, (
+            "run_lsp's auto-connect block should check "
+            "`self._workspace_path is None` and defer if so (PR-157)."
+        )
+        assert "Auto-connect deferred" in body, (
+            "run_lsp should log a clear 'Auto-connect deferred' "
+            "message when workspace_path isn't yet set."
+        )
+
+    def test_retry_handler_clears_failed_servers(self):
+        """Pin: the MSG_RETRY_AUTOCONNECT handler clears
+        `_failed_servers[name]` BEFORE retrying connect, so a
+        previous failure (from the initial run with workspace=None)
+        doesn't short-circuit the retry."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        handler_start = src.index("elif msg_type == MSG_RETRY_AUTOCONNECT:")
+        handler_end = src.find("except queue.Empty", handler_start)
+        body = src[handler_start:handler_end]
+        assert "_failed_servers.pop(name, None)" in body, (
+            "MSG_RETRY_AUTOCONNECT handler should clear "
+            "_failed_servers[name] before retrying (PR-157)."
+        )
+
+    def test_retry_handler_does_not_push_response_queue(self):
+        """Pin: MSG_RETRY_AUTOCONNECT is fire-and-forget. The handler
+        must NOT put on response_queue (would desync the next
+        sync request's response read)."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        handler_start = src.index("elif msg_type == MSG_RETRY_AUTOCONNECT:")
+        handler_end = src.find("except queue.Empty", handler_start)
+        body = src[handler_start:handler_end]
+        assert "self._response_queue.put" not in body, (
+            "MSG_RETRY_AUTOCONNECT handler must be fire-and-forget — "
+            "no response_queue push (PR-157)."
+        )
