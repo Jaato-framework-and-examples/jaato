@@ -380,13 +380,48 @@ harmless for any operator who upgrades.
   changes to `.lsp.json` mid-session do NOT update the
   profile — session restart required to pick up new servers.
 - **Chained execs beyond one level need operator-supplied
-  grants.** Example: jdtls's Python wrapper execs `java` from
-  the system JDK; the composer covers `jdtls ix,` +
-  `python3 ix,` but does NOT auto-emit `java ix,` or
-  `/usr/lib/jvm/** r,`. Operators with JVM-backed LSP servers
-  may need to extend their apparmor policy externally OR open
-  a separate operator-supplied-rules knob (future work — file
-  a backlog memory if you hit this).
+  grants** — addressed by `plugin_configs.lsp.apparmor_extra_rules`
+  in the profile YAML (server 0.6.141+, see below).
+
+### Operator-supplied AppArmor rules (`apparmor_extra_rules`)
+
+For chained execs the framework cannot auto-detect (e.g. jdtls's
+Python wrapper execs `java` from the system JDK), operators can
+supply raw apparmor rules via the **profile YAML**:
+
+```yaml
+# .jaato/profiles/_base_codegen.yaml — NOT .lsp.json
+plugin_configs:
+  lsp:
+    apparmor_extra_rules:
+      - "/usr/bin/java ix,"
+      - "/usr/lib/jvm/** r,"
+      - "/etc/java-*/** r,"
+```
+
+Each rule is variable-expanded (`${workspaceRoot}`, `${HOME}`,
+etc.) and emitted verbatim into the per-session apparmor profile.
+
+#### Critical: trust boundary
+
+This knob lives in **`.jaato/profiles/<name>.yaml`** — not in
+the workspace's `.lsp.json`. The framework's apparmor template
+denies writes to `.jaato/profiles/**` from BOTH the runner main
+thread AND the //child sub-profile (where LLM-driven tool
+subprocesses run):
+
+```
+audit deny <workspace>/.jaato/profiles/** wlk,
+```
+
+So profile YAMLs are operator-only territory: the framework
+won't honor runtime tampering. By contrast, `.lsp.json` lives
+at the workspace root and IS writable from inside confinement
+(it's tenant territory). **Putting `apparmor_extra_rules` in
+`.lsp.json` would create a cross-session privilege-escalation
+vector** — an LLM-driven tool could inject `["/** rwklix,"]` and
+the framework would honor it on the next session. The knob is
+deliberately scoped to profile YAML to close this class.
 
 **Verification:** after restart, run `lsp logs` in a session.
 A successful exec emits:
