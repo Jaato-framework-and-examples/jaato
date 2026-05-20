@@ -732,6 +732,46 @@ class RunnerRPCClient:
             "session.health_check", {}, timeout=timeout,
         )
 
+    async def session_end(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        """Cascade-sharing session boundary — Phase 2.
+
+        Tells the runner-side session host to fire
+        ``reset_for_next_session()`` on every initialized plugin.
+        Caller (daemon's session-teardown path) uses the returned
+        dict to decide whether the slot is safe to return to the
+        pool:
+
+          - ``errors == []`` → slot is fully reset, safe to
+            ``pool_manager.return_slot_after_session(slot)``.
+          - ``errors != []`` → at least one plugin's reset raised;
+            slot is in undefined state, MUST be torn down
+            (``slot.sock.close()`` + waitpid), not pooled.
+
+        Returns ``{"plugins_reset": int, "errors": List[str]}``.
+
+        Default 10s timeout: plugin reset is per-plugin in-memory
+        work (clearing dicts, dropping callbacks).  Allow some
+        slack for plugins like ``interactive_shell`` whose reset
+        closes PTY sessions (which may flush buffers).
+        """
+        return await self._call_named(
+            "session.end", {}, timeout=timeout,
+        )
+
+    def session_end_threadsafe(
+        self, *, timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        """Synchronous wrapper for ``session_end`` from worker
+        threads.  Mirrors ``bootstrap_session_threadsafe`` —
+        session teardown runs synchronously inside the daemon's
+        per-session worker thread.
+        """
+        return self._run_threadsafe(
+            self.session_end(timeout=timeout), timeout=timeout,
+        )
+
     def session_health_check_threadsafe(
         self, *, timeout: Optional[float] = 5.0,
     ) -> Dict[str, Any]:

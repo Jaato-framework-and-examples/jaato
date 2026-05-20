@@ -387,11 +387,11 @@ class TestPoolManager:
 
             # Clean up the acquired slots ourselves (PR 4 will do this
             # via session bootstrap; PR 3 the test does it manually).
-            for slot_pid, sock in [h1, h2]:
-                sock.sendall(b"SHUTDOWN\n")
-                sock.close()
+            for slot in [h1, h2]:
+                slot.sock.sendall(b"SHUTDOWN\n")
+                slot.sock.close()
                 try:
-                    os.waitpid(slot_pid, 0)
+                    os.waitpid(slot.pid, 0)
                 except ChildProcessError:
                     pass
         finally:
@@ -462,10 +462,9 @@ class TestPoolReplenishment:
                 )
             finally:
                 # Clean up the acquired slot.
-                slot_pid, sock = handle
-                sock.close()
+                handle.sock.close()
                 try:
-                    os.waitpid(slot_pid, 0)
+                    os.waitpid(handle.pid, 0)
                 except ChildProcessError:
                     pass
                 pool.shutdown_all()

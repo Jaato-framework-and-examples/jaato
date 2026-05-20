@@ -465,15 +465,21 @@ class _FakePoolManager:
 
     Controls the acquire_slot return value per-test so the routing
     branches are pinned without spawning real subprocesses.
+
+    Phase 2 (server 0.6.144+): ``acquire_slot`` now accepts
+    ``cascade_driver_id`` (recorded for assertion) and returns a
+    :class:`PoolSlot` instead of a raw tuple.
     """
 
-    def __init__(self, slot_handle: Optional[Tuple[int, Any]] = None) -> None:
-        self.slot_handle = slot_handle
+    def __init__(self, slot=None) -> None:
+        self.slot = slot
         self.acquire_calls = 0
+        self.last_cascade_id = None
 
-    def acquire_slot(self) -> Optional[Tuple[int, Any]]:
+    def acquire_slot(self, cascade_driver_id=None):
         self.acquire_calls += 1
-        return self.slot_handle
+        self.last_cascade_id = cascade_driver_id
+        return self.slot
 
 
 def _stub_socket() -> Any:
@@ -490,7 +496,8 @@ def test_pool_routing_uses_slot_when_flag_enabled(
 
     monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "true")
     server = _FakeJaatoServer()
-    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+    from server.runner_pool import PoolSlot
+    pool = _FakePoolManager(slot=PoolSlot(pid=99999, sock=_stub_socket()))
 
     spawn_session_runner(
         server=server,
@@ -523,7 +530,8 @@ def test_pool_routing_falls_back_when_flag_explicitly_disabled(
 
     monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "false")
     server = _FakeJaatoServer()
-    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+    from server.runner_pool import PoolSlot
+    pool = _FakePoolManager(slot=PoolSlot(pid=99999, sock=_stub_socket()))
 
     spawn_session_runner(
         server=server,
@@ -549,7 +557,8 @@ def test_pool_routing_enabled_by_default(
 
     monkeypatch.delenv("JAATO_RUNNER_POOL_ENABLED", raising=False)
     server = _FakeJaatoServer()
-    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+    from server.runner_pool import PoolSlot
+    pool = _FakePoolManager(slot=PoolSlot(pid=99999, sock=_stub_socket()))
 
     spawn_session_runner(
         server=server,
@@ -573,7 +582,7 @@ def test_pool_routing_falls_back_when_pool_empty(
 
     monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "1")
     server = _FakeJaatoServer()
-    pool = _FakePoolManager(slot_handle=None)  # empty
+    pool = _FakePoolManager(slot=None)  # empty
 
     spawn_session_runner(
         server=server,
@@ -602,7 +611,8 @@ def test_pool_routing_consumes_slot_when_apparmor_opted_in(
 
     monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "true")
     server = _FakeJaatoServer()
-    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+    from server.runner_pool import PoolSlot
+    pool = _FakePoolManager(slot=PoolSlot(pid=99999, sock=_stub_socket()))
 
     spawn_session_runner(
         server=server,
@@ -629,7 +639,8 @@ def test_pool_routing_skipped_when_cgroup_attach_set(
 
     monkeypatch.setenv("JAATO_RUNNER_POOL_ENABLED", "true")
     server = _FakeJaatoServer()
-    pool = _FakePoolManager(slot_handle=(99999, _stub_socket()))
+    from server.runner_pool import PoolSlot
+    pool = _FakePoolManager(slot=PoolSlot(pid=99999, sock=_stub_socket()))
 
     spawn_session_runner(
         server=server,
