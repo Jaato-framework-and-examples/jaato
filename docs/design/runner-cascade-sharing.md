@@ -212,16 +212,41 @@ def reset_for_next_session(self) -> None:
     """
 ```
 
-**Audit categories** (cursory — Phase 1 deepens):
+**Litmus test for the categorization** (Daniel rule 2026-05-20):
+
+> **A plugin's state should survive `reset_for_next_session()` if a
+> subsequent session within the SAME cascade might benefit from it.**
+
+This rule prevents the framework from silently discarding context that
+the next cascade stage was meant to consume.  Examples:
+- `memory` — model writes memories in session A; the next cascade stage
+  reads them.  Survive.
+- `artifact_tracker` — artifacts produced by session A become inputs for
+  session B's validation / dependency tracking.  Survive.
+- `todo` — each cascade stage typically has its own task focus; carrying
+  todos across stages confuses the agent.  Reset.
+
+**Audit categories** (cursory — Phase 1 deepens by applying the litmus
+test to every `_self.*` attribute of every plugin):
 
 | Category | Plugins | Reset needed? |
 |---|---|---|
 | Stateless / warm-import-only | `cli`, `web_fetch`, `web_search`, `filesystem_query`, `calculator`, `multimodal`, `ast_search`, `bundle`, `environment`, `notebook`, `prompt_library`, `references`, `reliability`, `service_connector`, `webhook` | NO-OP |
-| Holds per-session state | `session`, `todo`, `clarification`, `subagent`, `waypoint`, `thinking`, `memory`, `artifact_tracker`, `permission` | YES — needs explicit clear |
-| Holds across-session state by design (cascade-sharing PR target) | `lsp`, `mcp`, `interactive_shell`, `sandbox_manager` | NO-OP (state SHOULD survive) |
+| Holds per-session state that next session does NOT benefit from | `session` (conversation history), `todo` (per-stage tasks), `clarification` (per-session Q&A), `thinking` (per-turn ephemeral), `permission` (per-session approvals — see Phase 1 review) | YES — needs explicit clear |
+| Holds across-session state by design (cascade-sharing PR target — next session BENEFITS from carry-over per Daniel's litmus test) | `lsp` (LSP server connections), `mcp` (MCP server connections + tool catalogs), `interactive_shell` (PTY session map — Phase 1 review whether SHOULD survive), `sandbox_manager`, **`memory`** (cross-session model memories), **`artifact_tracker`** (cross-session artifact dependency graph) | NO-OP (state SHOULD survive) |
 | Holds workspace-scoped state (constant within cascade) | `file_edit`, `template`, `introspection` | NO-OP (workspace doesn't change within cascade) |
+| **Phase 1 review required** — could go either way depending on workload | `subagent` (subagent registry — cross-session reuse?), `waypoint` (cross-session debug/replay?), `permission` (session-scoped vs cascade-scoped approvals?) | TBD per Phase 1 audit |
 
-Phase 1 deliverable: deep audit of each plugin's `_self.*` attributes, marking which need reset_for_next_session implementation.
+**Daniel's correction (2026-05-20)**: `memory` and `artifact_tracker` were
+initially in the "reset needed" bucket — moved to "across-session by
+design" because subsequent cascade stages clearly benefit from prior
+stages' memories and tracked artifacts.  The litmus test surfaced via
+this correction generalises: apply it to every plugin in Phase 1 audit.
+
+Phase 1 deliverable: deep audit of each plugin's `_self.*` attributes,
+marking which need reset_for_next_session implementation.  Per-attribute
+litmus-test application; "TBD" plugins above resolved by attribute-level
+classification, not whole-plugin categorisation.
 
 ### 4.4 Per-cascade apparmor profile
 
