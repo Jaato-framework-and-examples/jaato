@@ -1636,3 +1636,289 @@ class TestDebugLogPathKnob:
         plugin = LSPToolPlugin()
         names = [s.name for s in plugin.get_config_schema()]
         assert "debug_log_path" in names
+
+
+class TestServerBinaryApparmorGrants:
+    """Pin server-0.6.137 fix (PR-154): `get_apparmor_rules` also
+    emits `ix` grants for each LSP server's canonical binary path,
+    plus a `<install-dir>/** r,` glob, plus a Python interpreter
+    `ix,` grant when the binary is a shebang script.
+
+    Motivating evidence (v145, server 0.6.136 with PR-153 applied):
+    `lsp logs` showed `Connection failed - [Errno 13] Permission
+    denied: jdtls` despite the daemon-side (unconfined) instance
+    happily spawning the same binary.  PR-148 confinement requires
+    explicit `ix` grants on the canonical binary path for the
+    runner's `asyncio.create_subprocess_exec` to succeed.
+    """
+
+    def test_no_lsp_json_yields_only_debug_log_rules(self, tmp_path):
+        """Pin: composer tolerates missing `.lsp.json` (no servers
+        to grant).  The debug_log_path rules still come through."""
+        workspace = str(tmp_path)
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=workspace,
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # Debug log rules present
+        assert any(f"{workspace}/.jaato/logs/" in r for r in rules)
+        # No `ix,` rules emitted (no servers)
+        assert not any(" ix," in r for r in rules)
+
+    def test_resolves_absolute_command_path(self, tmp_path):
+        """Pin: an absolute command path is emitted directly."""
+        # Write a stub server binary
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {
+                    "command": str(stub),
+                    "languageId": "stub",
+                }
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # Canonical path appears with ix,
+        assert any(
+            r.startswith(str(stub)) and r.endswith(" ix,")
+            for r in rules
+        )
+
+    def test_resolves_bare_command_name_via_path(self, tmp_path, monkeypatch):
+        """Pin: a bare command name (e.g. `jdtls`) is resolved via
+        `shutil.which` against the composer's PATH."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "fake-server"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir))
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        lsp_json = workspace / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "fake": {"command": "fake-server", "languageId": "fake"}
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(workspace),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        assert any(
+            r.startswith(str(stub)) and r.endswith(" ix,")
+            for r in rules
+        )
+
+    def test_unresolved_command_silently_skipped(self, tmp_path, monkeypatch):
+        """Pin: a bare-name command that doesn't exist on PATH is
+        skipped (no rule emitted; runtime spawn will fail loudly
+        with the same EACCES it currently does — more diagnosable
+        than a silent missing grant)."""
+        # PATH doesn't contain the target
+        monkeypatch.setenv("PATH", "/nonexistent")
+
+        workspace = tmp_path
+        lsp_json = workspace / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "absent": {"command": "i-do-not-exist-on-path"}
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(workspace),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # No `ix,` rule for the absent command
+        assert not any("i-do-not-exist-on-path" in r for r in rules)
+
+    def test_python_shebang_emits_interpreter_grant(self, tmp_path, monkeypatch):
+        """Pin: jdtls case.  A `#!/usr/bin/env python3` wrapper
+        script gets BOTH the wrapper AND the Python interpreter as
+        `ix,` grants."""
+        # Create a Python-wrapper-shaped stub
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        wrapper = bin_dir / "jdtls-stub"
+        wrapper.write_text("#!/usr/bin/env python3\nprint('jdtls')\n")
+        wrapper.chmod(0o755)
+
+        # Ensure python3 is resolvable on PATH for the test
+        # (composer uses shutil.which to find the interpreter).
+        # Use whatever the test environment's PATH has.
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {"command": str(wrapper)}
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # Wrapper itself granted ix
+        assert any(
+            r.startswith(str(wrapper)) and r.endswith(" ix,")
+            for r in rules
+        )
+        # Python interpreter ALSO granted ix
+        python_grants = [r for r in rules if "python" in r and r.endswith(" ix,")]
+        assert python_grants, f"expected python ix grant, got: {rules}"
+
+    def test_install_dir_glob_emitted(self, tmp_path):
+        """Pin: install-dir glob (`<grandparent>/** r,`) emitted so
+        the binary can read its bundled plugins / jars."""
+        bin_dir = tmp_path / "myapp" / "bin"
+        bin_dir.mkdir(parents=True)
+        stub = bin_dir / "stub-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "stub": {"command": str(stub)}
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # Install dir is binary's grandparent (myapp/), read glob
+        install_dir = str(tmp_path / "myapp")
+        assert any(
+            r == f"{install_dir}/** r,"
+            for r in rules
+        )
+
+    def test_load_lsp_config_static_search_order(self, tmp_path):
+        """Pin: composer's path-search matches runtime's exactly.
+        plugin_config.config_path wins; workspace .lsp.json next;
+        ~/.lsp.json last."""
+        # Just verify config_path wins when set
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        ws_config = ws / ".lsp.json"
+        ws_config.write_text(json.dumps({"languageServers": {"a": {}}}))
+
+        custom_config = tmp_path / "custom.lsp.json"
+        custom_config.write_text(json.dumps({"languageServers": {"b": {}}}))
+
+        result = LSPToolPlugin._load_lsp_config_static(
+            workspace_path=str(ws),
+            plugin_config={"config_path": str(custom_config)},
+        )
+        assert result is not None
+        assert "b" in result["languageServers"]
+        assert "a" not in result["languageServers"]
+
+    def test_load_lsp_config_static_tolerates_missing(self, tmp_path):
+        """Pin: composer doesn't crash if no .lsp.json exists
+        anywhere.  Returns None; caller emits no server grants."""
+        result = LSPToolPlugin._load_lsp_config_static(
+            workspace_path=str(tmp_path),
+            plugin_config={},
+        )
+        # tmp_path has no .lsp.json; ~/.lsp.json may or may not exist
+        # on the test host.  If it doesn't, result is None; if it
+        # does, result is its content.  Either way, no crash.
+        assert result is None or isinstance(result, dict)
+
+    def test_resolve_command_canonical_absolute(self, tmp_path):
+        """Pin: absolute path passes through realpath."""
+        stub = tmp_path / "bin-stub"
+        stub.write_text("")
+        result = LSPToolPlugin._resolve_command_canonical(str(stub))
+        assert result == str(stub)
+
+    def test_resolve_command_canonical_bare_not_found(self, monkeypatch):
+        """Pin: bare name not on PATH returns None."""
+        monkeypatch.setenv("PATH", "/nonexistent")
+        result = LSPToolPlugin._resolve_command_canonical("doesnotexist")
+        assert result is None
+
+    def test_detect_shebang_python_env_style(self, tmp_path):
+        """Pin: `#!/usr/bin/env python3` recognised, env-resolved."""
+        script = tmp_path / "wrapper"
+        script.write_text("#!/usr/bin/env python3\n")
+        result = LSPToolPlugin._detect_shebang_interpreter(str(script))
+        # Should resolve to wherever shutil.which finds python3
+        assert result is not None
+        assert "python" in result
+
+    def test_detect_shebang_python_direct_style(self, tmp_path):
+        """Pin: `#!/usr/bin/python3` recognised, returned as-is."""
+        script = tmp_path / "wrapper"
+        script.write_text("#!/usr/bin/python3\n")
+        result = LSPToolPlugin._detect_shebang_interpreter(str(script))
+        assert result is not None
+        assert "python" in result
+
+    def test_detect_shebang_non_python_ignored(self, tmp_path):
+        """Pin: non-Python shebangs return None (deferred until
+        evidence supports them)."""
+        script = tmp_path / "wrapper"
+        script.write_text("#!/bin/bash\n")
+        result = LSPToolPlugin._detect_shebang_interpreter(str(script))
+        assert result is None
+
+    def test_detect_shebang_no_shebang(self, tmp_path):
+        """Pin: binary without shebang returns None."""
+        binary = tmp_path / "compiled-binary"
+        binary.write_bytes(b"\x7fELF\x02\x01\x01")  # ELF magic, not a script
+        result = LSPToolPlugin._detect_shebang_interpreter(str(binary))
+        assert result is None
+
+    def test_duplicate_servers_dedupe_canonical(self, tmp_path):
+        """Pin: two server entries pointing at the same canonical
+        binary emit ONE `ix,` grant, not two."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "shared-lsp"
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+
+        lsp_json = tmp_path / ".lsp.json"
+        lsp_json.write_text(json.dumps({
+            "languageServers": {
+                "first": {"command": str(stub)},
+                "second": {"command": str(stub)},  # same binary
+            }
+        }))
+
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        ix_rules = [r for r in rules if r.endswith(" ix,") and str(stub) in r]
+        assert len(ix_rules) == 1, f"expected 1 ix rule for shared binary, got: {ix_rules}"

@@ -276,6 +276,56 @@ plugin_configs:
     diagnostics_min_wait_seconds: 1.0    # let jdtls multi-stage settle
 ```
 
+### AppArmor Exec Grants for Configured Servers
+
+Since server 0.6.137, the lsp plugin's `get_apparmor_rules`
+classmethod also emits `ix` (inherit-exec) grants for each LSP
+server configured in `.lsp.json`. Under PR-148 apparmor
+confinement, the runner-side `connect_server` call uses
+`asyncio.create_subprocess_exec` to launch the configured
+server — without an `ix` grant on the canonical binary path,
+the spawn fails with EACCES and `connected_servers` stays
+empty.
+
+For each server entry, the composer emits:
+
+1. `<canonical_path> ix,` — resolved via `shutil.which` +
+   `os.path.realpath`. Symlinks followed.
+2. `<install-dir>/** r,` — derived as the binary's grandparent
+   (standard `<install-dir>/bin/<command>` layout). Read-only
+   access to bundled plugins, jars, config files.
+3. **For Python-wrapper scripts** (`#!/usr/bin/env python3`
+   shebang): also emits `<python-interpreter> ix,` because the
+   wrapper itself execs the interpreter. Canonical case: jdtls
+   ships as a Python wrapper script.
+
+**Limitations:**
+
+- **AppArmor profiles compose at session bootstrap.** Operator
+  changes to `.lsp.json` mid-session do NOT update the
+  profile — session restart required to pick up new servers.
+- **Chained execs beyond one level need operator-supplied
+  grants.** Example: jdtls's Python wrapper execs `java` from
+  the system JDK; the composer covers `jdtls ix,` +
+  `python3 ix,` but does NOT auto-emit `java ix,` or
+  `/usr/lib/jvm/** r,`. Operators with JVM-backed LSP servers
+  may need to extend their apparmor policy externally OR open
+  a separate operator-supplied-rules knob (future work — file
+  a backlog memory if you hit this).
+
+**Verification:** after restart, run `lsp logs` in a session.
+A successful exec emits:
+
+```
+[java] Connecting to server
+[java] Connected successfully
+```
+
+A denied exec still surfaces the EACCES message clearly (PR-153
+fix kept the error surface honest), which is the operator's
+signal to extend the apparmor policy or add a missing server
+binary.
+
 ## Tools
 
 The LSP tools use a **symbol-based API** - just provide the symbol name instead of
