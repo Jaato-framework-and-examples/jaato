@@ -53,7 +53,16 @@ from typing import Any, Callable, Dict, List, Optional
 # suppressing ``enter_tier`` tool registration for every pool-served
 # session.  v3 carries the tier mapping on the envelope so the runner
 # can resolve ``ModelTierConfig`` and register the tool.
-SESSION_ENVELOPE_VERSION = 3
+#
+# v4 (2026-05-20): added ``cascade_driver_id``.  Phase 2 of the
+# cascade-sharing arc (docs/design/runner-cascade-sharing.md): IPC
+# client supplies an opaque cascade tenant ID at session.new; the
+# daemon threads it through to ``pool_manager.acquire_slot`` so the
+# slot can reuse a previously-affined pool slot when one is idle.
+# Runner-side bootstrap stashes the value onto ``JaatoSession`` so
+# subagent spawns can inherit the parent cascade via the existing
+# ``runtime.create_session()`` path.
+SESSION_ENVELOPE_VERSION = 4
 
 
 @dataclass
@@ -219,6 +228,14 @@ class SessionInitEnvelope:
     # mode (no ``enter_tier`` tool, no per-tier system-prompt line).
     # See ``shared/model_tiers.py`` for the resolver and schema.
     model_tiers: Optional[Dict[str, Any]] = None
+    # v4 (2026-05-20): cascade-sharing tenant ID.  Opaque UTF-8
+    # string supplied by the IPC client at session.new (or
+    # auto-inherited from parent for subagent sessions).  ``None``
+    # = standalone session (no slot reuse).  Runner stashes onto
+    # JaatoSession so subagent spawns can inherit via existing
+    # runtime.create_session() path.  See
+    # docs/design/runner-cascade-sharing.md §4.1.
+    cascade_driver_id: Optional[str] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
@@ -250,6 +267,7 @@ class SessionInitEnvelope:
             "model_tiers": (
                 dict(self.model_tiers) if self.model_tiers else None
             ),
+            "cascade_driver_id": self.cascade_driver_id,
         }
 
     @classmethod
@@ -306,6 +324,7 @@ class SessionInitEnvelope:
             model_tiers=(
                 dict(d["model_tiers"]) if d.get("model_tiers") else None
             ),
+            cascade_driver_id=d.get("cascade_driver_id"),
         )
 
 
@@ -404,6 +423,15 @@ class BootstrapEnvelope:
     # two-PR migration plan (PR-A: surface + back-compat False default;
     # PR-B: flip profile default to True).
     apparmor: Optional[bool] = None
+
+    # Phase 2 cascade-sharing (server 0.6.144+): opaque tenant ID
+    # identifying the cascade this session belongs to.  Daemon
+    # threads it to ``pool_manager.acquire_slot`` so a prior
+    # session of the same cascade's slot (with its warm plugin
+    # state + LSP connections) is reused.  ``None`` = standalone
+    # session, no slot reuse.  See
+    # ``docs/design/runner-cascade-sharing.md`` §4.1.
+    cascade_driver_id: Optional[str] = None
 
     # -- Session record --------------------------------------------------
     provisioned: bool = False
