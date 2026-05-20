@@ -450,6 +450,7 @@ class IPCRecoveryClient:
         profile: Optional[Union[str, Dict[str, Any]]] = None,
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> Optional[str]:
         """Create a new session.
 
@@ -464,6 +465,9 @@ class IPCRecoveryClient:
                 becomes the session's system instructions.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.
+            cascade_driver_id: Phase 2 cascade-sharing tenant ID; see
+                ``IPCClient.create_session`` for the contract.  Pass
+                the same opaque ID across every session of one cascade.
 
         Returns:
             Session ID if created, None otherwise.
@@ -477,7 +481,9 @@ class IPCRecoveryClient:
 
         if self._client:
             session_id = await self._client.create_session(
-                name, profile=profile, agent=agent, agent_params=agent_params,
+                name, profile=profile, agent=agent,
+                agent_params=agent_params,
+                cascade_driver_id=cascade_driver_id,
             )
             if session_id:
                 self._session_id = session_id

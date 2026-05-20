@@ -1229,6 +1229,7 @@ class IPCClient:
         profile: Optional[Union[str, Dict[str, Any]]] = None,
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
+        cascade_driver_id: Optional[str] = None,
         timeout: float = 60.0,
     ) -> Optional[str]:
         """Create a new session on the server.
@@ -1261,6 +1262,19 @@ class IPCClient:
                 profile describes its capabilities; they compose freely.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.  Only used when *agent* is specified.
+            cascade_driver_id: Phase 2 cascade-sharing (server
+                0.6.144+) tenant ID identifying the cascade this
+                session belongs to.  Opaque UTF-8 string; UUID
+                recommended.  Sessions sharing the same ID reuse
+                the same pool slot — warm imports + warm plugin
+                state + warm LSP server connections survive across
+                cascade stages.  ``None`` (default) = standalone
+                session, no slot reuse.  Generate one ID per
+                cascade (``uuid.uuid4().hex``) and pass it on every
+                ``session.new`` for that cascade.  Subagent sessions
+                inherit automatically via the shared runner — only
+                the top-level cascade-driver supplies the ID.  See
+                ``docs/design/runner-cascade-sharing.md``.
             timeout: Maximum seconds to wait for session creation when
                 blocking.  The server may need time to initialise the
                 provider, so the default is generous.
@@ -1290,6 +1304,13 @@ class IPCClient:
         if agent_params:
             for key, value in agent_params.items():
                 args.append(f"{key}={value}")
+        # Phase 2 cascade-sharing (server 0.6.144+): forward the
+        # cascade tenant ID so the daemon's PoolManager can reuse a
+        # slot already affined to this cascade.  Append AFTER agent
+        # + agent_params so the argv flag sits at a stable position
+        # for log diffing.  Server-side parser accepts any order.
+        if cascade_driver_id:
+            args.extend(["--cascade-driver-id", cascade_driver_id])
         await self._send_event(CommandRequest(
             command="session.new",
             args=args,

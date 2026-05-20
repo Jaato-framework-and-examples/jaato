@@ -140,3 +140,73 @@ async def test_profile_invalid_type_raises():
 
     with pytest.raises(TypeError):
         await client.create_session(profile=["not", "a", "spec"])
+
+
+# ----------------------------------------------------------------------
+# Phase 2 cascade-sharing (server 0.6.144+, SDK 0.13.X+)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cascade_driver_id_emits_argv_flag():
+    """``cascade_driver_id=<id>`` appends ``--cascade-driver-id <id>`` to
+    the session.new argv.  Server-side command_router parses it +
+    threads through to PoolManager.acquire_slot for affinity routing."""
+    client, captured = _make_client_capture()
+
+    await client.create_session(cascade_driver_id="cascade-abc123")
+
+    cmd = captured[0]
+    assert "--cascade-driver-id" in cmd.args
+    idx = cmd.args.index("--cascade-driver-id")
+    assert cmd.args[idx + 1] == "cascade-abc123"
+
+
+@pytest.mark.asyncio
+async def test_cascade_driver_id_none_omits_flag():
+    """Default (cascade_driver_id=None) — no flag emitted.  Preserves
+    Phase 1 semantics for non-cascade sessions."""
+    client, captured = _make_client_capture()
+
+    await client.create_session()
+
+    cmd = captured[0]
+    assert "--cascade-driver-id" not in cmd.args
+
+
+@pytest.mark.asyncio
+async def test_cascade_driver_id_composes_with_profile_agent_params():
+    """All four kwargs (profile, agent, agent_params, cascade_driver_id)
+    coexist on one create_session call without colliding."""
+    client, captured = _make_client_capture()
+
+    await client.create_session(
+        name="my-session",
+        profile="researcher",
+        agent="discovery",
+        agent_params={"target": "kb"},
+        cascade_driver_id="cascade-xyz789",
+    )
+
+    cmd = captured[0]
+    # Name first; flags + agent_params follow.
+    assert "my-session" in cmd.args
+    assert "--profile" in cmd.args
+    assert "researcher" in cmd.args
+    assert "--agent" in cmd.args
+    assert "discovery" in cmd.args
+    assert "target=kb" in cmd.args
+    assert "--cascade-driver-id" in cmd.args
+    assert "cascade-xyz789" in cmd.args
+
+
+@pytest.mark.asyncio
+async def test_cascade_driver_id_empty_string_omits_flag():
+    """Falsy values (empty string) also omit the flag — defensive
+    treatment, matches the ``if cascade_driver_id:`` gate."""
+    client, captured = _make_client_capture()
+
+    await client.create_session(cascade_driver_id="")
+
+    cmd = captured[0]
+    assert "--cascade-driver-id" not in cmd.args
