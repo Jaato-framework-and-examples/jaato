@@ -3725,6 +3725,7 @@ class SessionManager:
         config_root: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
         apparmor: Optional[bool] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -3769,6 +3770,20 @@ class SessionManager:
                 reflects live values (registered providers are
                 invoked), not stale set-state.
             session_name: Optional human-readable name.
+            cascade_driver_id: Phase 2 cascade-sharing tenant ID
+                (server 0.6.144+).  When non-None, the spawned
+                runner's pool slot is acquired with cascade-affinity
+                routing — sessions sharing the same ID reuse the
+                same slot (warm imports + warm plugin state + warm
+                LSP server connections survive across cascade
+                stages).  ``None`` (default) = standalone session,
+                no slot reuse.  Forwarded verbatim to
+                :meth:`_create_session_impl` → BootstrapEnvelope
+                → spawn_session_runner → PoolManager.acquire_slot.
+                Premium ``ActionContext.create_session`` passes
+                this through from the originating reactor handler
+                (`cascade_after_*.py`).  See
+                ``docs/design/runner-cascade-sharing.md``.
 
         Returns:
             The session ID (empty string on failure).
@@ -3783,6 +3798,7 @@ class SessionManager:
             initial_session_state=initial_session_state,
             config_root=config_root,
             apparmor=apparmor,
+            cascade_driver_id=cascade_driver_id,
         )
         if not session_id:
             # Server 0.6.50.1+: log at WARNING so reactor callers
