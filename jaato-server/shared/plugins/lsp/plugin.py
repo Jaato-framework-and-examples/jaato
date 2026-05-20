@@ -905,6 +905,92 @@ class LSPToolPlugin(RunnerForwardingMixin):
         return rules
 
     @staticmethod
+    def _extract_first_data_dir_from_args(
+        args: Any,
+        workspace_path: Optional[str],
+    ) -> Optional[str]:
+        """Return the first resolved ``-data`` / ``--data-dir`` path.
+
+        Used at runtime by ``connect_server`` to compute the TMPDIR
+        value injected into the LSP server's subprocess environment
+        (PR-156, server 0.6.139).  Sidesteps the upstream jdtls
+        eager-tempdir bug — ``jdtls.py:74`` computes
+        ``tempfile.gettempdir()`` as the default value for the
+        ``-data`` argparse arg BEFORE argparse parses CLI input.
+        Under apparmor confinement that gettempdir() call crashes
+        because /tmp / /var/tmp / /usr/tmp aren't reachable.
+        Python's ``tempfile.gettempdir()`` honors TMPDIR first per
+        its documented precedence — so injecting TMPDIR makes the
+        wrapper's line 74 succeed.
+
+        Pairs with :meth:`_compose_lsp_server_data_dir_rules` (PR-155,
+        composer side): same args walk, same expansion, same
+        resolution.  Composer emits an rw grant; runtime injects
+        TMPDIR.  Both reach the same path so the wrapper's first
+        write succeeds inside the apparmor profile.
+
+        Differences from the composer helper:
+        - Returns the FIRST recognized data path (TMPDIR is a
+          single value; multiple ``-data`` flags would only
+          confuse the wrapper anyway).
+        - Returns ``None`` if no recognized flag is present OR
+          workspace_path is None.
+
+        Variable expansion mirrors the composer's call exactly via
+        ``expand_variables(value, workspace_root_override=workspace_path)``.
+
+        Forward-compatibility: upstream jdtls fixed this at commit
+        ``d871e83`` (Oct 2025) by replacing gettempdir() with
+        ``$HOME/.cache`` on Linux.  After that fix is widespread,
+        our TMPDIR injection becomes a no-op for jdtls on Linux
+        (the wrapper no longer reads TMPDIR) — harmless.  See
+        ``feedback_lsp_jdtls_tempdir_eager_default_d871e83``.
+        """
+        if not isinstance(args, list) or not workspace_path:
+            return None
+
+        try:
+            from ..subagent.config import expand_variables
+        except ImportError:
+            expand_variables = lambda v, **_kw: v  # noqa: E731
+
+        DATA_FLAGS = {'-data', '--data-dir', '--data'}
+
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if not isinstance(arg, str):
+                i += 1
+                continue
+
+            candidate: Optional[str] = None
+            if arg in DATA_FLAGS:
+                if i + 1 < len(args) and isinstance(args[i + 1], str):
+                    candidate = args[i + 1]
+            elif '=' in arg:
+                flag, _, value = arg.partition('=')
+                if flag in DATA_FLAGS and value:
+                    candidate = value
+
+            if candidate:
+                try:
+                    expanded = expand_variables(
+                        candidate,
+                        workspace_root_override=workspace_path,
+                    )
+                except Exception:  # noqa: BLE001 — runtime boundary
+                    return None
+                if not isinstance(expanded, str) or not expanded:
+                    return None
+                if os.path.isabs(expanded):
+                    return expanded
+                return os.path.join(workspace_path, expanded)
+
+            i += 1
+
+        return None
+
+    @staticmethod
     def _resolve_command_canonical(command: str) -> Optional[str]:
         """Resolve an LSP server command to a canonical absolute path.
 
@@ -2375,11 +2461,38 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     root_uri = spec.get('rootUri')
                     if not root_uri and self._workspace_path:
                         root_uri = f"file://{self._workspace_path}"
+
+                    # PR-156 (server 0.6.139): auto-inject TMPDIR from
+                    # an operator-supplied `-data <path>` arg.
+                    # Sidesteps the upstream jdtls eager-tempdir bug
+                    # (`jdtls.py:74` computes `tempfile.gettempdir()`
+                    # before argparse parses `-data`; under apparmor
+                    # confinement this crashes if /tmp et al denied).
+                    # Python's `tempfile.gettempdir()` reads TMPDIR
+                    # first per its documented precedence chain — so
+                    # injecting it makes line 74 succeed.  Operator
+                    # `env.TMPDIR` always wins (never overridden).
+                    # See feedback_lsp_jdtls_tempdir_eager_default_d871e83
+                    # memory; upstream fix landed in commit d871e83
+                    # (Oct 2025) but pre-fix builds remain in the wild.
+                    augmented_env = dict(spec.get('env') or {})
+                    if 'TMPDIR' not in augmented_env:
+                        data_dir = LSPToolPlugin._extract_first_data_dir_from_args(
+                            expanded_args, self._workspace_path
+                        )
+                        if data_dir:
+                            augmented_env['TMPDIR'] = data_dir
+                            self._trace(
+                                f"connect_server '{name}': "
+                                f"auto-injected TMPDIR={data_dir} "
+                                f"from -data arg (PR-156 jdtls eager-tempdir workaround)"
+                            )
+
                     config = ServerConfig(
                         name=name,
                         command=spec.get('command', ''),
                         args=expanded_args,
-                        env=spec.get('env'),
+                        env=augmented_env if augmented_env else None,
                         root_uri=root_uri,
                         language_id=spec.get('languageId'),
                         extra_paths_key=spec.get('extraPathsKey'),
