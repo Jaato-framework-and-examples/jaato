@@ -33,7 +33,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,22 @@ class PoolSlot:
     # AFTER its own ``aa_change_profile`` transition succeeds.
     # ``None`` for slots that have never served a session.
     last_session_id: Optional[str] = None
+    # Phase 3 cascade-sharing hotfix (server 0.6.150+): the
+    # ``RunnerRPCClient`` adopted onto this slot's socket.  Created
+    # ONCE per slot lifetime by the first session's spawn helper;
+    # reset via ``reset_for_slot_reuse`` between cascade sessions;
+    # closed at slot teardown (cascade-idle sweep OR daemon shutdown).
+    #
+    # Why the rpc lives on the slot, not on JaatoServer: the asyncio
+    # transport that ``RunnerRPCClient.start`` adopts via
+    # ``loop.connect_accepted_socket`` binds the socket exclusively.
+    # Creating a second ``RunnerRPCClient`` on the same socket fails;
+    # session 2 spawn falls back to in-process and ``server._runner_rpc``
+    # is None — observed v152-retry-4 as
+    # ``NoneType.session_send_message_threadsafe``.  See PR #173.
+    #
+    # Typed ``Any`` to avoid the cycle through ``runner_rpc_client``.
+    rpc: Optional[Any] = None
 
 
 # Phase 1 alias.  All in-tree callers were updated in Phase 2 to use
@@ -641,10 +657,45 @@ class PoolManager:
                 self._idle_slots = survivors
 
         for slot in to_reap:
-            try:
-                slot.sock.close()
-            except OSError:
-                pass
+            # Phase 3 hotfix (server 0.6.150+): close the slot's rpc
+            # client before tearing down the socket.  rpc.close()
+            # closes the writer + sigterm-ladder the runner pid;
+            # doing it via the rpc rather than bare ``sock.close()``
+            # cancels the read task + drains in-flight futures
+            # cleanly.  Falls back to bare sock.close() if no rpc
+            # was ever stashed (rare — slot has run zero sessions).
+            rpc = slot.rpc
+            if rpc is not None:
+                # Best-effort close via the daemon loop; we run
+                # close synchronously here because we're already
+                # in the replenish thread, not the daemon loop.
+                try:
+                    import asyncio as _asyncio
+                    loop = getattr(rpc, "_loop", None)
+                    if loop is not None and loop.is_running():
+                        fut = _asyncio.run_coroutine_threadsafe(
+                            rpc.close(timeout=5.0), loop,
+                        )
+                        fut.result(timeout=8.0)
+                    else:
+                        # No loop running — fall back to bare
+                        # socket close.  Runner gets EOF + dies.
+                        slot.sock.close()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "PoolManager cascade-idle sweep: rpc.close "
+                        "raised for pid=%d: %s — falling back to "
+                        "bare sock.close()", slot.pid, exc,
+                    )
+                    try:
+                        slot.sock.close()
+                    except OSError:
+                        pass
+            else:
+                try:
+                    slot.sock.close()
+                except OSError:
+                    pass
             try:
                 os.waitpid(slot.pid, 0)
             except ChildProcessError:

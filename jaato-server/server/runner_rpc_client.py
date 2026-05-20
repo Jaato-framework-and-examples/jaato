@@ -186,6 +186,67 @@ class RunnerRPCClient:
             name=f"runner-rpc-read-{self._runner_pid}",
         )
 
+    def reset_for_slot_reuse(self) -> None:
+        """Phase 2 cascade-sharing: clear per-session RPC state while
+        keeping the transport (socket + read task + writer) alive.
+
+        Called by the daemon's cascade-teardown path when a pool slot
+        is returned to the pool.  The slot's socket lives on (the
+        runner subprocess stays alive, ready for the next session),
+        so the asyncio transport that adopted the socket via
+        :meth:`start`'s ``connect_accepted_socket`` must NOT be torn
+        down — doing so would close the socket and EOF the runner.
+
+        What this clears (per-session state safe to drop between
+        cascade sessions):
+
+          - ``_in_flight``: in-flight RPC futures fail with
+            ``RunnerCallError`` (no in-flight calls should exist
+            at this point — the session_end RPC has already
+            resolved — but defensive cleanup catches any stragglers).
+          - ``_dispatch_tasks``: any in-flight daemon-side handlers
+            for runner→daemon requests are cancelled.
+          - ``_stream_cbs``, ``_notification_cbs``: per-session
+            output/notification subscribers are dropped — the next
+            session installs fresh callbacks via session_send_message.
+
+        What this preserves (transport state tied to the socket):
+
+          - ``_reader``, ``_writer``, ``_read_task``: the asyncio
+            transport adopted by :meth:`start` stays running.  When
+            the next session's ``session.bootstrap`` arrives, the
+            same reader/writer carry the bytes.
+
+        Symmetric to :meth:`close`'s "tear down per-session state"
+        block but stops short of closing the socket / killing the
+        runner.  Call this between cascade sessions; call
+        :meth:`close` at cascade-end (slot teardown).
+        """
+        # In-flight futures fail loudly so any awaiter sees a clean
+        # error rather than hanging.  (At this point session_end has
+        # already resolved, so this should be a no-op in practice.)
+        for fut in list(self._in_flight.values()):
+            if not fut.done():
+                fut.set_exception(
+                    RunnerCallError(
+                        "runner RPC reset for slot reuse "
+                        "(in-flight call dropped between cascade sessions)"
+                    )
+                )
+        self._in_flight.clear()
+        for task in list(self._dispatch_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._dispatch_tasks.clear()
+        self._stream_cbs.clear()
+        self._notification_cbs.clear()
+        logger.debug(
+            "RunnerRPCClient.reset_for_slot_reuse: cleared per-session "
+            "state; transport (sock fd=%s pid=%d) stays alive",
+            self._raw_sock.fileno() if self._raw_sock else "?",
+            self._runner_pid,
+        )
+
     async def close(self, *, timeout: float = 5.0) -> None:
         """Close the parent socket and wait for the runner to exit.
 
