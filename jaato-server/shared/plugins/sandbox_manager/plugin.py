@@ -185,6 +185,40 @@ class SandboxManagerPlugin(RunnerForwardingMixin):
         self._profile_paths.clear()
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+).
+
+        Per Daniel's litmus test: sandbox profile path declarations are
+        per-session — each cascade stage's profile YAML declares its
+        own paths.  Pending programmatic adds (paths the agent added
+        at runtime via tools) are per-session too.
+
+        Per-session state CLEARED:
+        - ``_session_id``: re-set by next session's ``initialize()``.
+        - ``_profile_paths``: declared by next session's profile YAML.
+        - ``_pending_programmatic_paths``: runtime-added paths from
+          the previous session.  Each new session starts with a
+          clean slate.
+
+        Survives the reset:
+        - ``_registry``: workspace-tier authorized/denied paths
+          registry (sessions share it; sandbox_manager.shutdown
+          clears its OWN namespace from the registry, but for the
+          cascade-sharing case we leave the registry intact across
+          sessions — paths authorized by session A may legitimately
+          benefit session B).
+        - ``_workspace_path``: constant within cascade.
+        - ``_config``: workspace-tier config.
+        - ``_initialized``: True (next session's initialize will be a
+          no-op for the workspace-tier portion).
+        - ``_on_readwrite_paths_changed``: callback re-wired by next
+          session.
+        """
+        self._trace("reset_for_next_session: clearing per-session profile paths")
+        self._session_id = None
+        self._profile_paths.clear()
+        self._pending_programmatic_paths.clear()
+
     def set_on_readwrite_paths_changed(
         self,
         callback: Optional[Callable[[List[str]], None]],

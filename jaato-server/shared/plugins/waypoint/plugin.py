@@ -235,6 +235,43 @@ class WaypointPlugin(RunnerForwardingMixin):
         self._plugin_registry = None
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+).
+
+        Per Daniel's litmus test: waypoints themselves are persisted
+        to disk by ``_manager``; the IN-MEMORY plugin state has minor
+        per-session bits worth clearing but the bulk of state survives
+        naturally.
+
+        Per-session state CLEARED:
+        - ``_session_id``: re-set by next session's ``initialize()``.
+        - ``_pending_restore_notification``: per-session restore
+          signal — only meaningful for the session that requested it.
+        - Session-callback function refs (``_get_history``,
+          ``_serialize_history``, ``_get_turn_index``,
+          ``_get_session_state``): re-wired by next session's
+          ``set_session_callbacks()`` lifecycle call.  Clearing
+          defensively to avoid stale refs invoking previous
+          session's accessors.
+
+        Survives the reset:
+        - ``_manager`` (WaypointManager): owns the persisted waypoint
+          collection — cross-session by-design (operators may use
+          waypoints for cross-stage debug / replay).
+        - ``_backup_manager``: cross-session backup state.
+        - ``_storage_path``, ``_workspace_path``: workspace-tier
+          constants.
+        - ``_plugin_registry``: re-wired by next session's hook.
+        - ``_initialized``: True (manager + backup_manager survive).
+        """
+        self._trace("reset_for_next_session: clearing per-session bookkeeping")
+        self._session_id = None
+        self._pending_restore_notification = None
+        self._get_history = None
+        self._serialize_history = None
+        self._get_turn_index = None
+        self._get_session_state = None
+
     def set_session_callbacks(
         self,
         get_history: Callable[[], List["Message"]],
