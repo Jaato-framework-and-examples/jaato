@@ -278,6 +278,20 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         self._initialized = False
         self._prompt_cache.clear()
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     def set_workspace_path(self, path: str) -> None:
         """Set the workspace root path (called by registry)."""
         self._workspace_path = path
