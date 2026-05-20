@@ -292,6 +292,7 @@ class CommandRouter:
         system_instruction_override: Optional[str] = None
         suppress_base_instructions: bool = False
         agent_params: Dict[str, str] = {}
+        cascade_driver_id: Optional[str] = None
         args_iter = iter(args)
         for arg in args_iter:
             if arg == "--profile":
@@ -315,6 +316,14 @@ class CommandRouter:
                     return  # error already emitted
             elif arg == "--no-instructions":
                 suppress_base_instructions = True
+            elif arg == "--cascade-driver-id":
+                # Phase 2 cascade-sharing (server 0.6.144+): opaque
+                # tenant ID identifying the cascade this session
+                # belongs to.  Subsequent sessions of the same cascade
+                # can reuse this session's pool slot (warm plugin
+                # state + warm LSP server connections) — see
+                # docs/design/runner-cascade-sharing.md.
+                cascade_driver_id = next(args_iter, None)
             elif "=" in arg:
                 key, _, value = arg.partition("=")
                 agent_params[key] = value
@@ -337,6 +346,7 @@ class CommandRouter:
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=suppress_base_instructions,
             inline_profile_data=inline_profile_data,
+            cascade_driver_id=cascade_driver_id,
         )
         if new_session_id:
             # Update logging context now that session_id is known.

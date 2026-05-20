@@ -353,6 +353,15 @@ class JaatoServer:
         # (DONE / NOW / DAEMON / INTERNAL / WIRING / §7b.2 / TRUTHINESS).
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
+        # Phase 2 cascade-sharing (server 0.6.144+): pool manager
+        # reference for the cascade-aware teardown path in shutdown().
+        # When the runner was served from the pool AND the cascade
+        # session_end RPC succeeds, shutdown returns the slot to the
+        # pool instead of closing the transport.  ``None`` for sessions
+        # spawned cold (no pool reuse possible).  Set by
+        # ``runner_spawn.spawn_session_runner`` alongside the
+        # ``SpawnedRunner.pool_slot`` field.
+        self._pool_manager_ref: Optional[Any] = None
         # Phase 3 §7c Step 7.1: daemon-side ``client.prompt_operator``
         # handler — relays runner-fired permission ASKs to the
         # connected client via emit(PermissionRequestedEvent) and
@@ -5080,8 +5089,66 @@ class JaatoServer:
         # ``shutdown`` doesn't block.
         rpc = self._runner_rpc
         spawned = self._spawned_runner
+        pool_manager = self._pool_manager_ref
         self._runner_rpc = None
         self._spawned_runner = None
+        self._pool_manager_ref = None
+
+        # Phase 2 cascade-sharing: when the runner was served from
+        # the pool, attempt to return the slot instead of closing the
+        # transport.  Flow per docs/design/runner-cascade-sharing.md §4.2:
+        #
+        #   1. Call session.end RPC — runner fires
+        #      reset_for_next_session() on every initialized plugin.
+        #   2. If errors == [] — slot is fully reset; return to pool.
+        #      The runner keeps running, ready for the next session
+        #      of the same cascade.
+        #   3. If errors != [] — slot is in undefined state; fall
+        #      through to the cold close path (close transport +
+        #      reap the runner).
+        #
+        # Only fires for pool-served sessions (``spawned.pool_slot``
+        # set) AND when the pool_manager ref is wired.  Standalone /
+        # cold-spawned sessions take the existing close path.
+        pool_slot = getattr(spawned, "pool_slot", None) if spawned else None
+        cascade_returned = False
+        if rpc is not None and pool_slot is not None and pool_manager is not None:
+            session_end = getattr(rpc, "session_end_threadsafe", None)
+            if callable(session_end):
+                try:
+                    result = session_end(timeout=10.0)
+                    errors = result.get("errors") if isinstance(result, dict) else None
+                    if errors == []:
+                        pool_manager.return_slot_after_session(pool_slot)
+                        cascade_returned = True
+                        logger.info(
+                            "JaatoServer.shutdown: pool slot pid=%d "
+                            "returned to pool after session_end "
+                            "(plugins_reset=%d cascade=%s)",
+                            pool_slot.pid,
+                            result.get("plugins_reset", 0),
+                            pool_slot.cascade_id or "(standalone)",
+                        )
+                    else:
+                        logger.warning(
+                            "JaatoServer.shutdown: pool slot pid=%d "
+                            "session_end returned errors %r — slot will "
+                            "be torn down (not returned to pool)",
+                            pool_slot.pid, errors,
+                        )
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "JaatoServer.shutdown: session_end RPC failed "
+                        "(%s); falling through to runner close",
+                        exc,
+                    )
+
+        if cascade_returned:
+            # Slot is back in the pool serving the next session.  Do
+            # NOT close the transport / waitpid the runner — both
+            # belong to the slot now.
+            return
+
         if rpc is not None:
             # Phase 3 §3.3c precursor: call session.shutdown FIRST so
             # the runner-side host calls close_session on the
