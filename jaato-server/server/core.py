@@ -5119,15 +5119,21 @@ class JaatoServer:
                     result = session_end(timeout=10.0)
                     errors = result.get("errors") if isinstance(result, dict) else None
                     if errors == []:
+                        # Phase 3 cascade-sharing: stamp the session_id
+                        # we just served so the NEXT session to acquire
+                        # this slot can apparmor_parser --remove our
+                        # apparmor profile after its own transition.
+                        pool_slot.last_session_id = self._session_id
                         pool_manager.return_slot_after_session(pool_slot)
                         cascade_returned = True
                         logger.info(
                             "JaatoServer.shutdown: pool slot pid=%d "
                             "returned to pool after session_end "
-                            "(plugins_reset=%d cascade=%s)",
+                            "(plugins_reset=%d cascade=%s last_session=%s)",
                             pool_slot.pid,
                             result.get("plugins_reset", 0),
                             pool_slot.cascade_id or "(standalone)",
+                            self._session_id,
                         )
                     else:
                         logger.warning(

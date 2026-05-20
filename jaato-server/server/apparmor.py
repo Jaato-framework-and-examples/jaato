@@ -267,7 +267,15 @@ class AppArmorManager:
     # kernel) rather than the expected complain-mode AVC log entries.
     # The flag knob now does what its name implies — entire profile
     # chain is complain when set.
-    _TEMPLATE_VERSION = 27
+    # v28 (2026-05-20): Phase 3 cascade-sharing — added
+    # ``change_profile -> jaato-ws-*,`` rule to the main runner scope
+    # so a reused pool slot can ``aa_change_profile`` to the next
+    # session's profile during ``session.bootstrap`` step 1c re-entry.
+    # See docs/design/runner-cascade-sharing.md §4.4.  The ``//child``
+    # sub-profile does NOT inherit this rule; only the runner main
+    # thread can trigger the transition (the LLM-driven scope can't
+    # cross profile boundaries).
+    _TEMPLATE_VERSION = 28
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -536,6 +544,18 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # the rule must be granted explicitly.
   change_profile -> unconfined,
   change_profile -> jaato-ws-{session_id}//child,
+  # Phase 3 cascade-sharing (server 0.6.146+): permit transitions
+  # between any two ``jaato-ws-*`` profiles so a reused pool slot can
+  # re-confine to the next session's profile via ``aa_change_profile``
+  # during ``session.bootstrap`` step 1c re-entry.  The transition
+  # space is closed — every ``jaato-ws-*`` profile is framework-
+  # composed against a per-session template; there's no operator-
+  # untrusted profile matching the glob.  The ``//child`` sub-profile
+  # does NOT inherit this rule: the LLM-driven scope cannot trigger
+  # ``change_profile`` (no kernel-level capability + sandbox_utils
+  # path validation denies /proc/**/attr/** writes).  See
+  # docs/design/runner-cascade-sharing.md §4.4.
+  change_profile -> jaato-ws-*,
   owner /proc/*/attr/current      rw,
   owner /proc/*/task/*/attr/current rw,
 

@@ -75,6 +75,16 @@ class PoolSlot:
     sock: socket.socket
     cascade_id: Optional[str] = None
     last_session_end_ts: Optional[float] = None
+    # Phase 3 cascade-sharing (server 0.6.146+): identifier of the
+    # most recent session this slot served.  Set when the slot
+    # returns to the pool after a successful ``session_end`` RPC
+    # (JaatoServer.shutdown sets it via the
+    # ``return_slot_after_session`` call site).  The NEXT session
+    # to acquire this slot uses this value to
+    # ``apparmor_parser --remove`` the prior session's profile
+    # AFTER its own ``aa_change_profile`` transition succeeds.
+    # ``None`` for slots that have never served a session.
+    last_session_id: Optional[str] = None
 
 
 # Phase 1 alias.  All in-tree callers were updated in Phase 2 to use
