@@ -277,14 +277,44 @@ def spawn_session_runner(
             cgroup_attach=cgroup_attach,
         )
 
-    rpc = RunnerRPCClient(
-        spawned.parent_socket,
-        runner_pid=spawned.pid,
-        loop=daemon_loop,
-    )
-
-    fut = asyncio.run_coroutine_threadsafe(rpc.start(), daemon_loop)
-    fut.result(timeout=10.0)
+    # Phase 3 cascade-sharing hotfix (server 0.6.150+): reuse the
+    # slot's existing RunnerRPCClient when it's a returned pool slot.
+    # Creating a second RunnerRPCClient on the same socket fails —
+    # the asyncio transport adopted by ``rpc.start`` binds the
+    # socket exclusively.  Subsequent ``start`` calls on the same
+    # socket fail; ``server._runner_rpc`` ends up None; sessions
+    # crash with ``NoneType.session_send_message_threadsafe``.
+    # See PR #173.
+    pool_slot = getattr(spawned, "pool_slot", None) if pool_served else None
+    existing_rpc = getattr(pool_slot, "rpc", None) if pool_slot else None
+    if existing_rpc is not None:
+        # Returned slot — reuse the rpc client.  Per-session state
+        # was cleared by the slot-return path's
+        # reset_for_slot_reuse call (see core.py shutdown cascade
+        # branch).  Transport (reader/writer/read_task) stays
+        # bound to the slot's socket.
+        rpc = existing_rpc
+        logger.info(
+            "spawn_session_runner: session %s reused slot's rpc client "
+            "(no new transport adopt needed)", session_id,
+        )
+    else:
+        rpc = RunnerRPCClient(
+            spawned.parent_socket,
+            runner_pid=spawned.pid,
+            loop=daemon_loop,
+        )
+        fut = asyncio.run_coroutine_threadsafe(rpc.start(), daemon_loop)
+        fut.result(timeout=10.0)
+        # First session on this slot — stash the rpc on the slot
+        # so subsequent same-cascade sessions can reuse it.
+        if pool_slot is not None:
+            pool_slot.rpc = rpc
+            logger.debug(
+                "spawn_session_runner: session %s — new rpc client "
+                "created + stashed on pool slot pid=%d",
+                session_id, pool_slot.pid,
+            )
 
     server.set_runner_rpc(rpc, spawned)
     logger.info(

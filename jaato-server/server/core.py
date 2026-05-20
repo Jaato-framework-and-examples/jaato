@@ -5124,12 +5124,37 @@ class JaatoServer:
                         # this slot can apparmor_parser --remove our
                         # apparmor profile after its own transition.
                         pool_slot.last_session_id = self._session_id
+                        # Phase 3 hotfix (server 0.6.150+): the rpc
+                        # client lives on the slot (asyncio transport
+                        # binds the socket exclusively; can't create
+                        # a fresh rpc per session).  Clear per-session
+                        # state on the rpc but KEEP the transport
+                        # bound to the socket.  Next session reuses
+                        # this same rpc client.  See PR #173.
+                        reset_method = getattr(
+                            rpc, "reset_for_slot_reuse", None,
+                        )
+                        if callable(reset_method):
+                            try:
+                                reset_method()
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "JaatoServer.shutdown: rpc."
+                                    "reset_for_slot_reuse raised %s — "
+                                    "slot may still be usable; "
+                                    "monitoring", exc,
+                                )
+                        pool_slot.rpc = rpc  # idempotent — first
+                                              # session stashed it here;
+                                              # subsequent sessions
+                                              # re-affirm the binding.
                         pool_manager.return_slot_after_session(pool_slot)
                         cascade_returned = True
                         logger.info(
                             "JaatoServer.shutdown: pool slot pid=%d "
                             "returned to pool after session_end "
-                            "(plugins_reset=%d cascade=%s last_session=%s)",
+                            "(plugins_reset=%d cascade=%s last_session=%s; "
+                            "rpc reset, transport preserved)",
                             pool_slot.pid,
                             result.get("plugins_reset", 0),
                             pool_slot.cascade_id or "(standalone)",
