@@ -2538,3 +2538,217 @@ class TestWorkspaceRootSymmetricResolution:
             "MSG_RETRY_AUTOCONNECT handler must be fire-and-forget — "
             "no response_queue push (PR-157)."
         )
+
+
+class TestApparmorExtraRulesKnob:
+    """Pin server-0.6.141 fix (PR-158): operator-supplied apparmor
+    rules via `plugin_configs.lsp.apparmor_extra_rules` in the
+    profile YAML.
+
+    **Trust boundary**: this knob is read from `plugin_config` (=
+    profile YAML, `.jaato/profiles/`), NOT from the workspace's
+    `.lsp.json`.  Probe-confirmed 2026-05-20: `.lsp.json` lives at
+    workspace root and is writable from BOTH runner main AND
+    //child sub-profile (via `cascade_smoke/** rwkl,`).  An
+    LLM-driven tool could inject arbitrary rules into `.lsp.json`
+    → cross-session privilege escalation.
+
+    `.jaato/profiles/**` has `audit deny ... wlk,` on both layers
+    — operator-only territory.  PR-158 scopes the knob to
+    profile YAML deliberately.
+
+    Motivating case (v149, server 0.6.140): PR-157 closed the
+    asymmetric resolution layer; jdtls wrapper proceeded past
+    argparse and tried `subprocess.check_output(["java",
+    "-version"])` — apparmor denied the `java` exec.  Operator
+    fix: add `/usr/bin/java ix,` + `/usr/lib/jvm/** r,` to
+    `apparmor_extra_rules` in the codegen profile.
+    """
+
+    def test_single_rule_emitted_verbatim(self, tmp_path):
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={
+                "apparmor_extra_rules": ["/usr/bin/java ix,"],
+            },
+        )
+        assert "/usr/bin/java ix," in rules
+
+    def test_multiple_rules_emitted_in_order(self, tmp_path):
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={
+                "apparmor_extra_rules": [
+                    "/usr/bin/java ix,",
+                    "/usr/lib/jvm/** r,",
+                    "/etc/java-*/** r,",
+                ],
+            },
+        )
+        assert "/usr/bin/java ix," in rules
+        assert "/usr/lib/jvm/** r," in rules
+        assert "/etc/java-*/** r," in rules
+
+    def test_workspace_root_expansion(self, tmp_path):
+        """Pin: ${workspaceRoot} expands at composer time."""
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={
+                "apparmor_extra_rules": [
+                    "${workspaceRoot}/.cache/extra/** rw,",
+                ],
+            },
+        )
+        expected = f"{tmp_path}/.cache/extra/** rw,"
+        assert expected in rules
+
+    def test_empty_list_yields_no_rules(self, tmp_path):
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={"apparmor_extra_rules": []},
+        )
+        # Only the debug_log_path rules remain (no extra rules)
+        assert not any(r == "/usr/bin/java ix," for r in rules)
+
+    def test_non_list_silently_skipped(self, tmp_path):
+        """Pin: non-list value silently skipped (no crash, no
+        rules)."""
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={
+                "apparmor_extra_rules": "not a list",
+            },
+        )
+        # No "not a list" appearing as a rule
+        assert not any("not a list" in r for r in rules)
+
+    def test_non_string_entries_skipped(self, tmp_path):
+        """Pin: list with mixed types — strings emitted, non-string
+        entries skipped silently."""
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={
+                "apparmor_extra_rules": [
+                    "/usr/bin/java ix,",
+                    123,           # not a string
+                    None,          # not a string
+                    {"key": "value"},  # not a string
+                    "/etc/java-*/** r,",
+                ],
+            },
+        )
+        assert "/usr/bin/java ix," in rules
+        assert "/etc/java-*/** r," in rules
+
+    def test_whitespace_only_entries_skipped(self, tmp_path):
+        """Pin: empty / whitespace-only strings skipped."""
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={
+                "apparmor_extra_rules": [
+                    "",
+                    "   ",
+                    "\t\n",
+                    "/usr/bin/java ix,",
+                ],
+            },
+        )
+        assert "/usr/bin/java ix," in rules
+        # No blank rule entries
+        assert "" not in rules
+        assert "   " not in rules
+
+    def test_duplicate_rules_deduped(self, tmp_path):
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={
+                "apparmor_extra_rules": [
+                    "/usr/bin/java ix,",
+                    "/usr/bin/java ix,",  # duplicate
+                    "  /usr/bin/java ix,  ",  # duplicate (whitespace)
+                ],
+            },
+        )
+        # Only ONE instance of the rule, even though specified 3x
+        count = sum(1 for r in rules if r == "/usr/bin/java ix,")
+        assert count == 1, f"expected 1 dedup, got {count}"
+
+    def test_absent_knob_no_rules(self, tmp_path):
+        """Pin: plugin_config without apparmor_extra_rules key
+        emits zero extra rules (other parts of get_apparmor_rules
+        still emit their grants)."""
+        rules = LSPToolPlugin.get_apparmor_rules(
+            workspace_path=str(tmp_path),
+            session_id="test",
+            config_root=None,
+            plugin_config={},
+        )
+        # Debug log rules still present (PR-153)
+        assert any(".jaato/logs" in r for r in rules)
+        # No java grants (no apparmor_extra_rules)
+        assert not any("/usr/bin/java" in r for r in rules)
+
+    def test_source_pin_reads_from_plugin_config_not_lsp_json(self):
+        """Pin (trust boundary): the `apparmor_extra_rules` source
+        is `plugin_config` (profile YAML), NEVER `.lsp.json`.
+        Catches a future refactor that accidentally moves the knob
+        to `.lsp.json` — which is writable from inside confinement
+        and would be a cross-session privilege escalation."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        # Find the helper method
+        helper_start = src.index("def _compose_lsp_apparmor_extra_rules(")
+        helper_end = src.find("\n    @classmethod", helper_start + 1)
+        if helper_end == -1:
+            helper_end = src.find("\n    @staticmethod", helper_start + 1)
+        if helper_end == -1:
+            helper_end = helper_start + 4000
+        body = src[helper_start:helper_end]
+        assert "plugin_config.get('apparmor_extra_rules')" in body or \
+               'plugin_config.get("apparmor_extra_rules")' in body, (
+            "_compose_lsp_apparmor_extra_rules MUST read from "
+            "plugin_config (profile YAML), NOT from .lsp.json. "
+            "Trust boundary: .jaato/profiles/ is write-protected "
+            "by audit deny rules; .lsp.json is writable from "
+            "//child sub-profile (LLM-driven tools)."
+        )
+        # Anti-pattern check: helper should NOT call _load_lsp_config_static
+        assert "_load_lsp_config_static" not in body, (
+            "_compose_lsp_apparmor_extra_rules must NOT read from "
+            "`.lsp.json` — that file is writable from inside "
+            "confinement.  Cross-session privilege escalation."
+        )
+
+    def test_get_apparmor_rules_calls_extra_rules_composer(self):
+        """Pin: get_apparmor_rules dispatches to the extra-rules
+        composer.  Catches a future refactor that drops the call."""
+        from pathlib import Path
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        src = plugin_path.read_text(encoding="utf-8")
+        outer_start = src.index("def get_apparmor_rules(")
+        outer_end = src.find("\n    @classmethod", outer_start + 1)
+        if outer_end == -1:
+            outer_end = outer_start + 4000
+        body = src[outer_start:outer_end]
+        assert "_compose_lsp_apparmor_extra_rules" in body, (
+            "get_apparmor_rules must call "
+            "_compose_lsp_apparmor_extra_rules to emit operator-"
+            "supplied rules (PR-158)."
+        )

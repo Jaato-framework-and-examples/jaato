@@ -655,6 +655,107 @@ class LSPToolPlugin(RunnerForwardingMixin):
             cls._compose_lsp_server_exec_rules(workspace_path, plugin_config)
         )
 
+        # Part 3 (PR-158, server 0.6.141): operator-supplied extra
+        # apparmor rules from `plugin_configs.lsp.apparmor_extra_rules`
+        # in the profile YAML.  Closes the chained-exec layer (e.g.
+        # jdtls's Python wrapper execs `java` from the system JDK;
+        # PR-154 covers `jdtls ix,` + `python3 ix,` but not `java ix,`
+        # or `/usr/lib/jvm/** r,`).
+        #
+        # **CRITICAL TRUST BOUNDARY**: this knob is read from
+        # `plugin_config` (= the profile YAML, `.jaato/profiles/*.yaml`)
+        # — NOT from the workspace's `.lsp.json`.  Probe-confirmed
+        # 2026-05-20: `.lsp.json` lives at workspace root and is
+        # writable from BOTH runner main AND //child sub-profile (per
+        # the `cascade_smoke/** rwkl,` rule emitted by the workspace-
+        # tier fragment).  An LLM-driven tool could inject arbitrary
+        # apparmor rules into `.lsp.json`, and the framework would
+        # honor them on the next session — cross-session privilege
+        # escalation.
+        #
+        # `.jaato/profiles/**` has `audit deny ... wlk,` on BOTH main
+        # AND //child layers — operator-only territory, runtime-
+        # tamper-proof.  So profile YAML is the safe location for
+        # operator-supplied apparmor rules.
+        rules.extend(
+            cls._compose_lsp_apparmor_extra_rules(workspace_path, plugin_config)
+        )
+
+        return rules
+
+    @classmethod
+    def _compose_lsp_apparmor_extra_rules(
+        cls,
+        workspace_path: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Emit operator-supplied apparmor rules from profile YAML.
+
+        Reads ``plugin_config["apparmor_extra_rules"]`` — a list of raw
+        apparmor rule strings the operator wants spliced into the
+        per-session profile.  Each rule is:
+
+        1. **Type-checked** — non-string entries are silently skipped.
+        2. **Stripped + emptiness-checked** — whitespace-only entries
+           skipped.
+        3. **Variable-expanded** via ``expand_variables(rule,
+           workspace_root_override=workspace_path)`` so
+           ``${workspaceRoot}`` and friends resolve to the session
+           workspace (symmetric with PR-155 + PR-157 args resolution).
+        4. **Emitted verbatim** — the operator-supplied rule is the
+           final string the apparmor composer splices in.
+
+        **Trust model** (recorded above in `get_apparmor_rules`): this
+        knob is ONLY safe because profile YAMLs (`.jaato/profiles/`)
+        are write-protected by the per-session apparmor profile's
+        `audit deny .../.jaato/profiles/** wlk,` rules.  An attacker
+        in the runner cannot modify the profile YAML to inject rules.
+
+        If `apparmor_extra_rules` is absent / empty / non-list →
+        returns empty list (degrades silently).
+
+        Typical operator use case (jdtls JVM exec chain):
+
+        ```yaml
+        # .jaato/profiles/_base_codegen.yaml
+        plugin_configs:
+          lsp:
+            apparmor_extra_rules:
+              - "/usr/bin/java ix,"
+              - "/usr/lib/jvm/** r,"
+        ```
+        """
+        extra = plugin_config.get('apparmor_extra_rules')
+        if not isinstance(extra, list):
+            return []
+
+        try:
+            from ..subagent.config import expand_variables
+        except ImportError:
+            expand_variables = lambda v, **_kw: v  # noqa: E731
+
+        rules: List[str] = []
+        seen: set = set()  # de-dupe identical rules
+        for rule in extra:
+            if not isinstance(rule, str):
+                continue
+            stripped = rule.strip()
+            if not stripped:
+                continue
+            try:
+                expanded = expand_variables(
+                    stripped,
+                    workspace_root_override=workspace_path,
+                )
+            except Exception:  # noqa: BLE001 — composer boundary
+                continue
+            if not isinstance(expanded, str) or not expanded.strip():
+                continue
+            expanded = expanded.strip()
+            if expanded in seen:
+                continue
+            seen.add(expanded)
+            rules.append(expanded)
         return rules
 
     @classmethod
