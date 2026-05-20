@@ -84,6 +84,12 @@ MSG_CALL_METHOD = 'call_method'
 MSG_CONNECT_SERVER = 'connect_server'
 MSG_DISCONNECT_SERVER = 'disconnect_server'
 MSG_RELOAD_CONFIG = 'reload_config'
+# PR-157 (server 0.6.140): retry connect for any server not yet
+# in self._connected_servers.  Dispatched by `set_workspace_path()`
+# when it lands AFTER the initial auto-connect loop has already
+# run with workspace_path=None.  Fire-and-forget — no response
+# pushed to response_queue (the sender doesn't wait).
+MSG_RETRY_AUTOCONNECT = 'retry_autoconnect'
 
 # Log levels
 LOG_INFO = 'INFO'
@@ -1093,6 +1099,21 @@ class LSPToolPlugin(RunnerForwardingMixin):
 
         This should be called when the client's working directory changes.
         It will trigger a reload of the config file from the new location.
+
+        PR-157 (server 0.6.140): also dispatches MSG_RETRY_AUTOCONNECT
+        to the background thread so any server NOT yet in
+        ``self._connected_servers`` gets a fresh connect attempt
+        with the now-correct ``self._workspace_path``.  Closes the
+        lifecycle gap where the initial auto-connect loop runs
+        BEFORE the framework's ``set_workspace_path()`` broadcast
+        fires (broadcast happens after ``expose_all()`` which calls
+        ``initialize()``; the lsp background thread starts inside
+        ``initialize()``).  Without this retry, the initial connect
+        attempts use ``self._workspace_path = None`` →
+        ``expand_variables(...)`` auto-detects to daemon cwd → wrong
+        TMPDIR + wrong `-data` arg path.  See
+        feedback_advisor_outcome_pings_push_not_pull (kb-side) and
+        the v148 evidence chain.
         """
         if path != self._workspace_path:
             self._workspace_path = path
@@ -1100,6 +1121,16 @@ class LSPToolPlugin(RunnerForwardingMixin):
             # Force reload config on next access
             if self._initialized:
                 self._load_config_cache(force=True)
+                # PR-157: trigger connect-retry for any not-yet-connected
+                # server.  Fire-and-forget — the request loop handles
+                # MSG_RETRY_AUTOCONNECT without pushing to response_queue
+                # (see _thread_main's request loop).
+                if self._request_queue is not None:
+                    self._trace(
+                        "set_workspace_path: dispatching MSG_RETRY_AUTOCONNECT "
+                        "to retry any not-yet-connected server"
+                    )
+                    self._request_queue.put((MSG_RETRY_AUTOCONNECT, {}))
 
     def _resolve_path(self, path: str) -> str:
         """Resolve a path to an absolute path.
@@ -2454,9 +2485,21 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 """Connect to a language server."""
                 self._log_event(LOG_INFO, "Connecting to server", server=name)
                 try:
-                    # Expand variables in args (e.g., ${workspaceRoot})
+                    # Expand variables in args (e.g., ${workspaceRoot}).
+                    # PR-157 (server 0.6.140): pass
+                    # workspace_root_override=self._workspace_path so
+                    # ${workspaceRoot} resolves to the session workspace
+                    # — NOT the daemon cwd auto-detect fallback.  Without
+                    # this, `args: ["-data", "${workspaceRoot}/.jaato/jdtls-data"]`
+                    # would expand to the daemon source tree at
+                    # connect_server time (the auto-detect path), even
+                    # though PR-155's composer correctly used the session
+                    # workspace.  Asymmetric resolution closed.
                     raw_args = spec.get('args', [])
-                    expanded_args = expand_variables(raw_args)
+                    expanded_args = expand_variables(
+                        raw_args,
+                        workspace_root_override=self._workspace_path,
+                    )
                     # Use workspace-based root_uri when config doesn't specify one
                     root_uri = spec.get('rootUri')
                     if not root_uri and self._workspace_path:
@@ -2526,10 +2569,28 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     del self._clients[name]
                 self._connected_servers.discard(name)
 
-            # Auto-connect to configured servers
-            for name, spec in servers.items():
-                if spec.get('autoConnect', True):
-                    await connect_server(name, spec)
+            # Auto-connect to configured servers.
+            # PR-157 (server 0.6.140): defer if workspace_path isn't
+            # set yet.  This thread starts inside `initialize()` —
+            # BEFORE the framework's `set_workspace_path()` broadcast
+            # fires (which happens after `expose_all()`).  If
+            # workspace_path is None, `${workspaceRoot}` in server
+            # args + the TMPDIR injection helper both fall back to
+            # daemon-cwd auto-detect, producing wrong-path connects.
+            # `set_workspace_path()` will dispatch
+            # MSG_RETRY_AUTOCONNECT once available; the request loop
+            # picks it up and retries each server with the now-correct
+            # workspace_path.
+            if self._workspace_path is None:
+                self._log_event(
+                    LOG_INFO,
+                    "Auto-connect deferred: workspace_path not set yet; "
+                    "will retry on set_workspace_path()",
+                )
+            else:
+                for name, spec in servers.items():
+                    if spec.get('autoConnect', True):
+                        await connect_server(name, spec)
 
             self._log_event(LOG_INFO, f"Initialization complete: {len(self._connected_servers)} connected")
 
@@ -2600,6 +2661,41 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                             'connected': connected,
                             'failed': failed,
                         }))
+
+                    elif msg_type == MSG_RETRY_AUTOCONNECT:
+                        # PR-157 (server 0.6.140): set_workspace_path
+                        # arrived after the initial auto-connect loop.
+                        # Re-attempt connect for any server NOT in
+                        # self._connected_servers using the freshly-set
+                        # self._workspace_path so ${workspaceRoot}
+                        # resolves correctly + TMPDIR auto-inject
+                        # targets the session workspace.
+                        #
+                        # Clear failed_servers so a retry isn't
+                        # short-circuited by a previous failure state.
+                        # Fire-and-forget — no response_queue push (the
+                        # sender doesn't wait).
+                        retry_servers = self._config_cache.get('languageServers', {})
+                        self._log_event(
+                            LOG_INFO,
+                            f"Retry auto-connect: workspace_path now set, "
+                            f"re-attempting {len(retry_servers)} configured server(s)",
+                        )
+                        for name, spec in retry_servers.items():
+                            if name in self._connected_servers:
+                                continue
+                            if not spec.get('autoConnect', True):
+                                continue
+                            # Clear any prior failure to ensure a
+                            # clean retry attempt.
+                            self._failed_servers.pop(name, None)
+                            try:
+                                await connect_server(name, spec)
+                            except Exception as e:  # noqa: BLE001
+                                self._log_event(
+                                    LOG_ERROR,
+                                    f"Retry connect raised: {name}: {e}",
+                                )
 
                 except queue.Empty:
                     await asyncio.sleep(0.01)
