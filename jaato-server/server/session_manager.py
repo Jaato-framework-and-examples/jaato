@@ -634,6 +634,7 @@ class SessionManager:
         config_root_override: Optional[str] = None,
         env_file_override: Optional[str] = None,
         apparmor_fragments_override: Optional[List[str]] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> Optional[str]:
         """Provision IPC AppArmor (opt-in) + spawn the per-session runner.
 
@@ -809,6 +810,7 @@ class SessionManager:
             workspace_path=workspace_path,
             client_id=client_id,
             profile_name=profile_name,
+            cascade_driver_id=cascade_driver_id,
         )
         if not spawn_ok:
             # Spawn failed.  If apparmor was opted-in, downgrade
@@ -975,6 +977,7 @@ class SessionManager:
         workspace_path: str,
         client_id: str,
         profile_name: str,
+        cascade_driver_id: Optional[str] = None,
     ) -> bool:
         """Spawn the per-session runner subprocess (Phase 3 §7a —
         always-called for IPC sessions with a workspace).
@@ -1008,6 +1011,7 @@ class SessionManager:
                 daemon_loop=getattr(self, "_daemon_loop", None),
                 disable_confine=(profile_name == ""),
                 pool_manager=getattr(self, "_pool_manager_ref", None),
+                cascade_driver_id=cascade_driver_id,
             )
             # Phase 3 post-Step-7 regression fix (Path B):
             # synchronously dispatch ``session.bootstrap`` so the
@@ -2507,6 +2511,13 @@ class SessionManager:
         # the envelope-build window.
         server._agent_params = dict(envelope.agent_params or {})
 
+        # Phase 2 cascade-sharing (server 0.6.144+): stash the cascade
+        # tenant ID on the per-session server.  Picked up by
+        # ``build_session_envelope`` so it lands on the wire envelope,
+        # and by WS pre-init hook so it threads to spawn_session_runner.
+        # Same per-session-handle pattern as ``_agent_params`` above.
+        server._cascade_driver_id = envelope.cascade_driver_id
+
         # Phase 4 §B: resolve workspace .env + profile.env + overrides
         # BEFORE the runner-spawn fork so secret URIs (pass://,
         # vault://, awssm://, sops://, keyring://) reach the runner
@@ -2568,6 +2579,7 @@ class SessionManager:
                 # that historically populated ``client_config[client_id]``.
                 config_root_override=envelope.config_root,
                 env_file_override=envelope.env_file,
+                cascade_driver_id=envelope.cascade_driver_id,
             )
 
         # Pre-initialize hooks fire BEFORE initialize() — gives
@@ -3163,6 +3175,7 @@ class SessionManager:
         inline_profile_data: Optional[Dict[str, Any]] = None,
         config_root: Optional[str] = None,
         apparmor: Optional[bool] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> str:
         """Implementation of session creation, called via ``Context().run()``.
 
@@ -3487,6 +3500,11 @@ class SessionManager:
             # client_config then profile.apparmor); True/False short-
             # circuits that chain.
             apparmor=apparmor,
+            # Phase 2 cascade-sharing (server 0.6.144+): forward the
+            # opaque cascade tenant ID supplied by the IPC client.
+            # ``None`` = standalone session.  See
+            # docs/design/runner-cascade-sharing.md §4.1.
+            cascade_driver_id=cascade_driver_id,
             # During init, emit directly to requesting client (not
             # yet attached to session).
             on_event_during_init=lambda e: self._emit_to_client(client_id, e),

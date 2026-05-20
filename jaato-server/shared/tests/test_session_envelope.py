@@ -169,6 +169,59 @@ def test_envelope_model_tiers_defaults_none() -> None:
     assert back.model_tiers is None
 
 
+def test_envelope_carries_cascade_driver_id() -> None:
+    """v4 (2026-05-20): ``cascade_driver_id`` round-trips so the
+    runner can stash it on JaatoSession for cascade-sharing slot reuse.
+    See docs/design/runner-cascade-sharing.md §4.1."""
+    e = SessionInitEnvelope(
+        session_id="sess-cascade",
+        workspace_path="/tmp/ws",
+        profile_name="cascade-test",
+        provider_name="anthropic",
+        model_name="claude-sonnet-4-6",
+        cascade_driver_id="cascade-X-abc123",
+    )
+    d = e.to_dict()
+    assert d["cascade_driver_id"] == "cascade-X-abc123"
+    back = SessionInitEnvelope.from_dict(d)
+    assert back == e
+    assert back.cascade_driver_id == "cascade-X-abc123"
+
+
+def test_envelope_cascade_driver_id_defaults_none() -> None:
+    """Standalone sessions leave ``cascade_driver_id=None``; absence
+    in the wire dict round-trips as ``None`` (treated as 'no cascade
+    affinity' by ``PoolManager.acquire_slot``)."""
+    e = SessionInitEnvelope(
+        session_id="s",
+        workspace_path=None,
+        profile_name=None,
+        provider_name="anthropic",
+        model_name="m",
+    )
+    d = e.to_dict()
+    assert d["cascade_driver_id"] is None
+    back = SessionInitEnvelope.from_dict(d)
+    assert back.cascade_driver_id is None
+
+
+def test_envelope_v4_omits_cascade_field_back_compat() -> None:
+    """A wire payload without the cascade_driver_id key decodes
+    cleanly with the field defaulting to None — back-compat for
+    older daemons rolling out v4 envelopes against runners that
+    encoded v3-shaped dicts in cache / replay logs."""
+    e = SessionInitEnvelope.from_dict({
+        "schema_version": SESSION_ENVELOPE_VERSION,
+        "session_id": "old",
+        "workspace_path": None,
+        "profile_name": None,
+        "provider_name": "anthropic",
+        "model_name": "claude-sonnet-4-6",
+        # No cascade_driver_id key
+    })
+    assert e.cascade_driver_id is None
+
+
 def test_envelope_jsonable() -> None:
     """``to_dict`` produces a JSON-serializable structure (no
     callables, datetimes, etc.).  Phase 3 §3.3a explicitly requires

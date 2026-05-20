@@ -217,6 +217,13 @@ def spawn_session_runner(
             )
             spawned.pool_slot = slot  # Phase 2: keep ref for return path.
             pool_served = True
+            # Phase 2 cascade-sharing teardown path: server.shutdown()
+            # needs the pool_manager to return the slot after a
+            # successful session_end RPC.  Stash it alongside the
+            # SpawnedRunner so JaatoServer.shutdown() can find it.
+            # Only set when the slot actually came from the pool; cold-
+            # spawn paths leave it None.
+            server._pool_manager_ref = pool_manager
             logger.info(
                 "spawn_session_runner: session %s served by pool slot "
                 "pid=%d cascade=%s (warm imports inherited; slot will "
@@ -541,6 +548,12 @@ def build_session_envelope(
         completion_payload_schema=profile_completion_schema,
         completion_processors=profile_completion_processors,
         model_tiers=model_tiers_dict,
+        # Phase 2 cascade-sharing (envelope v4): forward the cascade
+        # tenant ID stashed on the server by
+        # ``SessionManager._construct_and_initialize_server``.  Runner
+        # stashes onto JaatoSession so subagent create_session calls
+        # auto-inherit via runtime.create_session().
+        cascade_driver_id=getattr(server, "_cascade_driver_id", None),
     )
 
 

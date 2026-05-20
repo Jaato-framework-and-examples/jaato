@@ -686,6 +686,11 @@ class JaatoWSServer:
                     disable_confine=(profile_name == ""),
                     cgroup_attach=cgroup_attach,
                     pool_manager=getattr(ws_server, "_pool_manager_ref", None),
+                    # Phase 2 cascade-sharing (server 0.6.144+):
+                    # cascade_driver_id stashed on the server during
+                    # _construct_and_initialize_server (see
+                    # session_manager.py — same pattern as _agent_params).
+                    cascade_driver_id=getattr(server, "_cascade_driver_id", None),
                 )
             except Exception as exc:  # noqa: BLE001 — spawn boundary
                 logger.warning(
