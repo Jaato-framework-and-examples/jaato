@@ -1844,6 +1844,137 @@ class IPCClient:
             self._unsubscribe_events(q)
             logger.debug("events(): unsubscribed")
 
+    async def cascade_events(
+        self,
+        cascade_driver_id: str,
+        event_types: Optional[List[str]] = None,
+        role: str = "observer",
+    ) -> AsyncIterator[Event]:
+        """Phase 2 cascade-as-client (server 0.6.156+, SDK 0.13.2+):
+        async iterator over events from any session stamped with
+        ``cascade_driver_id``.
+
+        Sends ``cascade.register`` to the daemon at iterator start;
+        yields matching events received via the existing event
+        channel; sends ``cascade.unregister`` on iterator close
+        (``break``, exception, or natural completion).
+
+        Server-side filtering: only events from sessions whose
+        ``cascade_driver_id`` matches AND whose type-name is in
+        ``event_types`` reach this iterator.  Other events on the
+        connection (e.g., from sessions the same client also
+        created interactively) still flow to ``events()`` but are
+        NOT yielded by this iterator — caveat: if the same client
+        subscribes to both ``events()`` AND ``cascade_events()``,
+        cascade events arrive on BOTH channels (both subscribers
+        see them).
+
+        Args:
+            cascade_driver_id: The cid this iterator observes.
+                Sessions stamped with this cid will route their
+                events to the iterator.
+            event_types: Optional list of event type-names to
+                filter for (e.g., ``["SessionTerminatedEvent",
+                "AgentCompletedEvent"]``).  ``None`` (default)
+                subscribes to all event types.  Empty list also
+                subscribes to all (no filter).
+            role: ``"owner"`` (lifecycle authority; single per cid)
+                or ``"observer"`` (read-only; multiple allowed).
+                Default ``"observer"`` for the common observe-only
+                case.  See ``docs/design/cascade-as-client.md``
+                Decision 5.
+
+        Yields:
+            Events received by this connection that originated from
+            a session stamped with ``cascade_driver_id`` and whose
+            type matches the ``event_types`` filter.
+
+        Raises:
+            ValueError: when the server rejects the registration
+                (duplicate owner, invalid role, etc.).  Surfaced
+                via an ``ErrorEvent`` from the daemon; this
+                iterator translates it into ValueError + exits.
+
+        Example::
+
+            import uuid
+            cid = uuid.uuid4().hex
+            async for event in client.cascade_events(
+                cid,
+                event_types=["SessionTerminatedEvent"],
+            ):
+                if event.reason == "error":
+                    logger.error(f"Cascade failed at session {event.session_id}")
+                    break  # see "Cleanup contract" below
+
+        **Cleanup contract**: the iterator sends ``cascade.unregister``
+        in its ``finally`` block, but Python's async-generator
+        semantics mean ``finally`` only runs when the generator is
+        explicitly closed (``await gen.aclose()``) OR garbage-
+        collected.  ``async for ... break`` does NOT trigger
+        ``aclose()`` synchronously.  For deterministic cleanup the
+        user can:
+
+        - Use ``async with contextlib.aclosing(client.cascade_events(...))``
+        - Or rely on the server-side disconnect-cleanup backstop
+          (Phase 2.2): when the IPC connection drops, the daemon
+          removes ALL cascade-client registrations for that
+          connection within 50ms.
+
+        For typical kb-cascade smoke-driver use, the server-side
+        backstop is sufficient — the driver disconnects when the
+        cascade ends + cleanup fires automatically.
+        """
+        logger.debug(
+            "cascade_events(): subscribing cid=%s role=%s event_types=%s",
+            cascade_driver_id, role, event_types,
+        )
+        # Build CommandRequest args: [cid, role, *event_types].
+        # Server-side _handle_cascade_register parses this shape.
+        args = [cascade_driver_id, role]
+        if event_types:
+            args.extend(event_types)
+        # Subscribe to the event queue BEFORE sending the register
+        # command so we don't miss the confirmation SystemMessageEvent
+        # or any early events for fast-arriving sessions.
+        q = self._subscribe_events()
+        try:
+            await self._send_event(CommandRequest(
+                command="cascade.register",
+                args=args,
+            ))
+            while True:
+                event = await q.get()
+                if event is None:
+                    # Connection drain loop ended.
+                    logger.debug(
+                        "cascade_events(): drain loop ended; "
+                        "iterator exiting cid=%s", cascade_driver_id,
+                    )
+                    break
+                yield event
+        finally:
+            self._unsubscribe_events(q)
+            # Best-effort unregister.  If the connection is already
+            # gone (drain loop ended), the send is a no-op; the
+            # server-side disconnect handler already cleaned up the
+            # registration via
+            # ``unregister_all_cascade_clients_for_connection``.
+            try:
+                await self._send_event(CommandRequest(
+                    command="cascade.unregister",
+                    args=[cascade_driver_id],
+                ))
+            except Exception as exc:  # noqa: BLE001 — cleanup boundary
+                logger.debug(
+                    "cascade_events(): unregister send failed "
+                    "(connection likely closed): %s", exc,
+                )
+            logger.debug(
+                "cascade_events(): unsubscribed cid=%s",
+                cascade_driver_id,
+            )
+
     async def drain_events(self) -> None:
         """Drive the event loop, dispatching to subscribed handlers.
 
