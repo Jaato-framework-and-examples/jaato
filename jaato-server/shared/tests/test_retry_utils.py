@@ -41,6 +41,57 @@ class TestClassifyError(unittest.TestCase):
         except ImportError:
             self.skipTest("Anthropic provider not available")
 
+    def test_anthropic_sdk_api_connection_error_classified_transient(self):
+        """PR #175 (2026-05-21): bare ``anthropic.APIConnectionError``
+        from the SDK is classified as transient/infra so
+        ``with_retry`` exponential-backoffs.  Pre-fix the framework
+        outer-retry loop surfaced it as MODEL_THREAD_TERMINAL_ERROR
+        (zhipuai endpoint TCP drops 2026-05-21)."""
+        try:
+            import anthropic
+        except ImportError:
+            self.skipTest("anthropic SDK not available")
+        try:
+            # Realistic construction signature: APIConnectionError takes
+            # the request as a kwarg; we synthesize one with a minimal mock.
+            from unittest.mock import MagicMock
+            request = MagicMock()
+            exc = anthropic.APIConnectionError(request=request)
+        except TypeError:
+            # SDK shape variance — try minimal Exception fallback.
+            exc = anthropic.APIConnectionError("connection refused")
+        result = classify_error(exc)
+        self.assertTrue(
+            result["transient"],
+            f"anthropic.APIConnectionError must be classified transient "
+            f"so with_retry exponential-backoffs; got {result!r}",
+        )
+        self.assertFalse(result["rate_limit"])
+        self.assertTrue(result["infra"])
+
+    def test_anthropic_sdk_api_timeout_error_classified_transient(self):
+        """PR #175: ``anthropic.APITimeoutError`` (request never got
+        a response within the timeout window) is transient — same
+        rationale as APIConnectionError."""
+        try:
+            import anthropic
+        except ImportError:
+            self.skipTest("anthropic SDK not available")
+        try:
+            from unittest.mock import MagicMock
+            request = MagicMock()
+            exc = anthropic.APITimeoutError(request=request)
+        except TypeError:
+            exc = anthropic.APITimeoutError("request timeout")
+        result = classify_error(exc)
+        self.assertTrue(
+            result["transient"],
+            f"anthropic.APITimeoutError must be classified transient; "
+            f"got {result!r}",
+        )
+        self.assertFalse(result["rate_limit"])
+        self.assertTrue(result["infra"])
+
     def test_rate_limit_string_detection(self):
         """Detects rate limit from error message."""
         exc = Exception("429 Too Many Requests")
