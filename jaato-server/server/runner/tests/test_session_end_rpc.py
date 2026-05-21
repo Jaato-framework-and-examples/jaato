@@ -194,6 +194,97 @@ def test_session_end_empty_registry_returns_zero() -> None:
     assert result == {"plugins_reset": 0, "errors": []}
 
 
+def test_session_end_clears_session_host() -> None:
+    """PR #174 hotfix: ``_handle_session_end`` must clear
+    ``self._session_host`` so the next ``session.bootstrap`` on a
+    reused slot is NOT rejected by the already-bootstrapped guard.
+
+    Pre-fix: session_end only reset plugins; _session_host stayed
+    installed; next bootstrap returned ``ToolError: runner already
+    hosting session_id=...; refusing to re-bootstrap with different
+    envelope``.  Old session's model loop kept running on the
+    runner.  Surfaced as duplicate reactor fire 30s after slot
+    reuse (kb-orchestrator v152-retry-7, 2026-05-21).
+    """
+    rpc = _make_lone_runner()
+    _install_session(rpc, {"plugin-a": _FakePlugin("plugin-a")})
+    assert rpc._session_host is not None  # baseline
+
+    ok, result = rpc._handle_session_end()
+
+    assert ok is True
+    assert rpc._session_host is None, (
+        "session_end must clear _session_host or the next "
+        "session.bootstrap on a reused slot will be refused"
+    )
+    # plugin reset still counted
+    assert result["plugins_reset"] == 1
+
+
+def test_session_end_fires_close_session_hook() -> None:
+    """PR #174: session_end calls session.close_session() BEFORE
+    plugin resets so on_session_end hooks see live state.  Mirrors
+    session.shutdown semantics."""
+    rpc = _make_lone_runner()
+    p1 = _FakePlugin("plugin-a")
+    _install_session(rpc, {"plugin-a": p1})
+
+    # Track call order: close_session must fire BEFORE plugin.reset.
+    call_order: List[str] = []
+    session = rpc._session_host.session
+    session.close_session = lambda: call_order.append("close_session")
+
+    # Wrap reset to record order without disturbing the count.
+    original_reset = p1.reset_for_next_session
+    def tracking_reset():
+        call_order.append("plugin.reset")
+        return original_reset()
+    p1.reset_for_next_session = tracking_reset
+
+    ok, result = rpc._handle_session_end()
+
+    assert ok is True
+    assert call_order == ["close_session", "plugin.reset"]
+    # close_session firing should NOT add to errors when it succeeds.
+    assert result["errors"] == []
+
+
+def test_session_end_close_session_exception_captured_in_errors() -> None:
+    """If close_session raises, the exception is captured in
+    ``errors`` (slot-poisoning signal to daemon) but the sweep
+    still runs the plugin resets."""
+    rpc = _make_lone_runner()
+    p1 = _FakePlugin("plugin-a")
+    _install_session(rpc, {"plugin-a": p1})
+
+    def raising_close():
+        raise RuntimeError("close failed")
+    rpc._session_host.session.close_session = raising_close
+
+    ok, result = rpc._handle_session_end()
+
+    assert ok is True
+    assert any("close_session" in e for e in result["errors"])
+    # Plugin reset still ran despite close_session failure
+    assert p1.reset_calls == 1
+    # But _session_host still cleared — slot must transition cleanly
+    # regardless of close_session outcome.
+    assert rpc._session_host is None
+
+
+def test_session_end_clear_host_under_lock() -> None:
+    """``_session_host`` clearing happens under ``self._session_lock``
+    so parallel handlers see the post-end state atomically.
+    Lightweight pin: verify the attribute is None after the call;
+    the locking is implicit in the with-block structure."""
+    rpc = _make_lone_runner()
+    _install_session(rpc, {})  # empty plugins, simplest path
+
+    rpc._handle_session_end()
+
+    assert rpc._session_host is None
+
+
 def test_session_end_dispatch_routes_to_handler(monkeypatch) -> None:
     """``_dispatch_method`` routes method=='session.end' to
     ``_handle_session_end``."""
