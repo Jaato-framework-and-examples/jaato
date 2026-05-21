@@ -3010,6 +3010,50 @@ class SessionManager:
                     return True
         return False
 
+    def unregister_all_cascade_clients_for_connection(
+        self, connection_client_id: str,
+    ) -> int:
+        """Phase 2 cascade-as-client: remove every cascade-client
+        entry registered by the given IPC/WS connection.
+
+        Called from the transport-level disconnect handler
+        (command_router.handle_client_disconnect) to clean up
+        registrations on connection loss.  Matches entries by the
+        namespaced suffix convention: cascade-client client_ids are
+        formatted as ``f"_cascade:{cid}:{connection_client_id}"``
+        when registered via IPC; this method strips entries whose
+        client_id ends with ``f":{connection_client_id}"``.
+
+        Idempotent — returns 0 if no entries match.
+
+        Args:
+            connection_client_id: The IPC/WS client_id that
+                disconnected.
+
+        Returns:
+            Number of entries removed.
+        """
+        suffix = f":{connection_client_id}"
+        removed = 0
+        with self._cascade_clients_lock:
+            for cid in list(self._cascade_clients.keys()):
+                survivors = [
+                    e for e in self._cascade_clients[cid]
+                    if not e.client_id.endswith(suffix)
+                ]
+                removed += len(self._cascade_clients[cid]) - len(survivors)
+                if survivors:
+                    self._cascade_clients[cid] = survivors
+                else:
+                    self._cascade_clients.pop(cid, None)
+        if removed > 0:
+            logger.info(
+                "unregister_all_cascade_clients_for_connection: "
+                "removed %d entries for client %s",
+                removed, connection_client_id,
+            )
+        return removed
+
     def _dispatch_to_cascade_clients(
         self, session: 'Session', event: Event,
     ) -> None:

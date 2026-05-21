@@ -79,8 +79,17 @@ class CommandRouter:
         ``workspace_manager.remove_client`` /
         ``event_sink_adapter.remove_client``) stays in the transport
         server — only the session-detachment step is transport-agnostic.
+
+        Phase 2 cascade-as-client (server 0.6.156+): also clean up
+        any cascade-client registrations this client made.  Without
+        this, IPC client crash → registrations leak until the GC
+        sweep timeout (300s default).  Explicit cleanup ensures
+        immediate resource release.
         """
         self._session_manager.detach_client(client_id)
+        self._session_manager.unregister_all_cascade_clients_for_connection(
+            client_id
+        )
 
     def handle_request(
         self,
@@ -203,6 +212,14 @@ class CommandRouter:
 
             elif cmd == "session.snapshot_workspace":
                 self._handle_snapshot_workspace(client_id, event.args, workspace_path)
+                return
+
+            elif cmd == "cascade.register":
+                self._handle_cascade_register(client_id, event.args)
+                return
+
+            elif cmd == "cascade.unregister":
+                self._handle_cascade_unregister(client_id, event.args)
                 return
 
             # Tools commands - handled per-session
@@ -477,6 +494,125 @@ class CommandRouter:
         else:
             # Session creation failed (e.g., missing MODEL_NAME).
             self._hint_available_auth_providers(client_id)
+
+    def _handle_cascade_register(self, client_id: str, args: list) -> None:
+        """Handle ``cascade.register`` command (Phase 2 cascade-as-client).
+
+        Wire format: ``args = [cascade_driver_id, role, *event_types]``
+        where role is ``"owner"`` or ``"observer"`` and event_types is
+        a list of event type-names (empty list = subscribe to all).
+
+        Server-side: registers an in-process cascade-client via
+        SessionManager whose callback routes matching events back to
+        this connected client via the existing event_sink.  The
+        registration entry uses a namespaced client_id
+        ``_cascade:{cid}:{connection_client_id}`` so disconnect
+        cleanup can match by suffix.
+
+        Errors (bad args / duplicate registration / owner conflict)
+        surface as ErrorEvent to the requesting client and the
+        registration is dropped.
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args or len(args) < 2:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=(
+                    "cascade.register requires args: "
+                    "[cascade_driver_id, role, *event_types]"
+                ),
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        cascade_driver_id = args[0]
+        role = args[1]
+        event_types = set(args[2:]) if len(args) > 2 else None
+
+        # The cascade-client registration identifier — namespaced so
+        # disconnect cleanup can match by suffix (one client may
+        # register for multiple cids).
+        cascade_client_id = f"_cascade:{cascade_driver_id}:{client_id}"
+
+        # Callback closure routes events back to this connected
+        # client via the existing event_sink.  Capture client_id by
+        # value so multiple registrations don't shadow each other.
+        connection_client_id = client_id
+
+        def _cascade_event_callback(event):
+            self._event_sink.send_event(connection_client_id, event)
+
+        try:
+            self._session_manager.register_in_process_client(
+                client_id=cascade_client_id,
+                callback=_cascade_event_callback,
+                cascade_driver_id=cascade_driver_id,
+                role=role,
+                event_types=event_types,
+            )
+        except ValueError as exc:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=str(exc),
+                error_type="CascadeRegistrationError",
+                recoverable=True,
+            ))
+            return
+
+        # Confirm registration so the SDK iterator can start yielding.
+        # Uses SystemMessageEvent (existing typed event) to avoid a
+        # new event class for Phase 2 — Phase 3 may upgrade to a
+        # typed CascadeRegisteredEvent if downstream code wants it.
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=(
+                f"cascade.register: registered cid={cascade_driver_id} "
+                f"role={role} event_types="
+                f"{sorted(event_types) if event_types else 'ALL'}"
+            ),
+            style="system",
+        ))
+        logger.info(
+            "cascade.register: client=%s cid=%s role=%s event_types=%s",
+            client_id, cascade_driver_id, role,
+            sorted(event_types) if event_types else "ALL",
+        )
+
+    def _handle_cascade_unregister(self, client_id: str, args: list) -> None:
+        """Handle ``cascade.unregister`` command (Phase 2).
+
+        Wire format: ``args = [cascade_driver_id]``.
+
+        Removes this client's registration for the given cid.
+        Idempotent — silent no-op if already unregistered (e.g., the
+        SDK iterator's auto-cleanup fired after disconnect cleanup
+        already ran).
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="cascade.unregister requires args: [cascade_driver_id]",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        cascade_driver_id = args[0]
+        cascade_client_id = f"_cascade:{cascade_driver_id}:{client_id}"
+        removed = self._session_manager.unregister_cascade_client(
+            cascade_driver_id, cascade_client_id,
+        )
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=(
+                f"cascade.unregister: cid={cascade_driver_id} "
+                f"{'removed' if removed else 'not-found (idempotent)'}"
+            ),
+            style="system",
+        ))
+        logger.info(
+            "cascade.unregister: client=%s cid=%s removed=%s",
+            client_id, cascade_driver_id, removed,
+        )
 
     def _handle_session_end(self, client_id: str, session_id: str) -> None:
         """Handle ``session.end`` command.
