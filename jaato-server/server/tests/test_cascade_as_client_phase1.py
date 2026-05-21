@@ -122,16 +122,75 @@ class TestRegister:
                 cascade_driver_id="abc", role="owner",
             )
 
-    def test_duplicate_client_id_rejected(self):
+    def test_duplicate_client_id_idempotent_on_match(self):
+        """PR #182 (2026-05-21): re-register with same client_id +
+        same config is a silent no-op.  Matches GateRegistry.get_or_create
+        semantics so reactor / IPC callers can retry / re-register
+        during reconnect cycles without try/except wrapping."""
+        sm = _make_sm()
+        cb = MagicMock()
+        sm.register_in_process_client(
+            client_id="obs", callback=cb,
+            cascade_driver_id="abc", role="observer",
+            event_types={"X", "Y"},
+        )
+        # Second call with IDENTICAL args — silent no-op.
+        sm.register_in_process_client(
+            client_id="obs", callback=cb,  # same callback identity
+            cascade_driver_id="abc", role="observer",
+            event_types={"X", "Y"},
+        )
+        # Only one entry persists.
+        assert len(sm._cascade_clients["abc"]) == 1
+        # First-wins: entry holds the original callback + config.
+        assert sm._cascade_clients["abc"][0].callback is cb
+        assert sm._cascade_clients["abc"][0].event_types == {"X", "Y"}
+
+    def test_duplicate_client_id_mismatched_config_warns_keeps_first(self, caplog):
+        """PR #182: re-register with same client_id but different
+        config (callback / event_types / role) warns + keeps first.
+        Matches GateRegistry's 'mismatched re-registration → log
+        warning, keep original' pattern at registry.py:128."""
+        import logging
+        sm = _make_sm()
+        original_cb = MagicMock(name="original")
+        sm.register_in_process_client(
+            client_id="obs", callback=original_cb,
+            cascade_driver_id="abc", role="observer",
+            event_types={"X"},
+        )
+        # Second call with DIFFERENT callback + event_types — warn + keep first.
+        with caplog.at_level(logging.WARNING):
+            sm.register_in_process_client(
+                client_id="obs", callback=MagicMock(name="different"),
+                cascade_driver_id="abc", role="observer",
+                event_types={"Y"},
+            )
+        # Warning emitted.
+        assert any(
+            "different config" in r.message
+            for r in caplog.records
+        )
+        # First registration preserved.
+        assert len(sm._cascade_clients["abc"]) == 1
+        assert sm._cascade_clients["abc"][0].callback is original_cb
+        assert sm._cascade_clients["abc"][0].event_types == {"X"}
+
+    def test_different_client_id_owner_conflict_still_raises(self):
+        """PR #182 preserves the single-owner-per-cid rule for
+        DIFFERENT client_ids.  Same-client_id idempotency above
+        ONLY applies when client_id matches.  Two DIFFERENT callers
+        both trying to own the same cid → real conflict → raise."""
         sm = _make_sm()
         sm.register_in_process_client(
-            client_id="obs", callback=MagicMock(),
-            cascade_driver_id="abc", role="observer",
+            client_id="_cascade:abc:conn-1", callback=MagicMock(),
+            cascade_driver_id="abc", role="owner",
         )
-        with pytest.raises(ValueError, match="already registered"):
+        with pytest.raises(ValueError, match="owner already registered"):
             sm.register_in_process_client(
-                client_id="obs", callback=MagicMock(),
-                cascade_driver_id="abc", role="observer",
+                client_id="_cascade:abc:conn-2",  # DIFFERENT client_id
+                callback=MagicMock(),
+                cascade_driver_id="abc", role="owner",
             )
 
     def test_invalid_role_rejected(self):
