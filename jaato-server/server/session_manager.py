@@ -2936,11 +2936,27 @@ class SessionManager:
                 (e.g., ``{"SessionTerminatedEvent", "AgentCompletedEvent"}``).
                 ``None`` (default) subscribes to all event types.
 
+        Idempotency (PR #182, 2026-05-21):
+            Re-registration with the SAME ``client_id`` is idempotent —
+            mirrors ``GateRegistry.get_or_create`` semantics.  First
+            registration wins; subsequent calls with the same client_id:
+              - Silent no-op if config (role + callback + event_types)
+                matches exactly.
+              - Warn-but-keep-first if config diverges (caller should
+                ``unregister_cascade_client`` first if they want to
+                re-register with different config).
+
+            This contract lets callers (reactor extension, IPC handlers)
+            re-call ``register_in_process_client`` during retry /
+            reconnect / cascade-restart cycles without wrapping every
+            call in try/except.
+
         Raises:
-            ValueError: when ``role == "owner"`` AND an owner is
-                already registered for this cid (single-owner rule).
-            ValueError: when ``client_id`` is already registered for
-                this cid (silent-shadowing prevention).
+            ValueError: when ``role == "owner"`` AND a DIFFERENT
+                client_id already holds owner for this cid (single-
+                owner rule per Decision 5).  Same-client_id re-register
+                with role="owner" is idempotent, NOT a raise.
+            ValueError: when ``role`` is neither "owner" nor "observer".
         """
         if role not in ("owner", "observer"):
             raise ValueError(
@@ -2956,16 +2972,57 @@ class SessionManager:
             entries = self._cascade_clients.setdefault(cascade_driver_id, [])
             for existing in entries:
                 if existing.client_id == client_id:
-                    raise ValueError(
-                        f"cascade-client client_id={client_id!r} "
-                        f"already registered for cid={cascade_driver_id!r}"
+                    # PR #182 (Phase 1.1, 2026-05-21): re-registration
+                    # with the same client_id is IDEMPOTENT.  Matches
+                    # ``GateRegistry.get_or_create`` semantics
+                    # (jaato_premium/reactors/gates/registry.py:97) —
+                    # first registration wins; subsequent calls with
+                    # the same client_id are silent no-ops if config
+                    # matches, or warn-but-keep-first if config
+                    # diverges.
+                    #
+                    # Why this contract: cascade-client registration
+                    # is a "get_or_create" primitive.  Callers
+                    # (premium reactor extension, IPC handlers) may
+                    # re-call with the same client_id during retry /
+                    # reconnect / cascade-restart cycles.  Strict-mode
+                    # raise (Phase 1 original behavior) forced callers
+                    # to wrap every call in try/except — duplicating
+                    # what the registry should own.  See PR #182.
+                    config_matches = (
+                        existing.role == role
+                        and existing.callback is callback
+                        and existing.event_types == event_types
                     )
+                    if not config_matches:
+                        logger.warning(
+                            "register_in_process_client: client_id=%r "
+                            "already registered for cid=%r with different "
+                            "config; keeping the original.  "
+                            "(existing role=%s callback=%r event_types=%s; "
+                            "new role=%s callback=%r event_types=%s).  "
+                            "Callers should re-register with matching "
+                            "config or call unregister first.",
+                            client_id, cascade_driver_id,
+                            existing.role,
+                            getattr(existing.callback, "__qualname__", existing.callback),
+                            sorted(existing.event_types) if existing.event_types else "ALL",
+                            role,
+                            getattr(callback, "__qualname__", callback),
+                            sorted(event_types) if event_types else "ALL",
+                        )
+                    return  # idempotent — no-op (silent on match, warn on mismatch)
                 if role == "owner" and existing.role == "owner":
                     raise ValueError(
                         f"cascade-client owner already registered for "
                         f"cid={cascade_driver_id!r} "
                         f"(existing client_id={existing.client_id!r}); "
-                        f"only ONE owner permitted per cid (Decision 5)"
+                        f"only ONE owner permitted per cid (Decision 5).  "
+                        f"This is a DIFFERENT-client-id conflict — two "
+                        f"separate callers both trying to own the cid.  "
+                        f"Idempotent re-registration with the SAME "
+                        f"client_id no-ops; this raise covers genuine "
+                        f"ownership-conflict."
                     )
             entries.append(entry)
         # Lazy-start the GC sweep thread on first registration.
