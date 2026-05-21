@@ -81,10 +81,33 @@ try:
         ContextLimitError as AnthropicContextLimitError,
     )
     ANTHROPIC_RATE_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (AnthropicRateLimitError,)
+    # PR #175 (2026-05-21): include the anthropic SDK's network-layer
+    # exception classes so the framework's outer ``with_retry`` loop
+    # recognises them as transient + applies exponential backoff.
+    # These are bare classes from the ``anthropic`` package — the
+    # SDK raises them when the SDK's INTERNAL retry budget
+    # (max_retries, default 2) is exhausted on a connection failure.
+    # Without these in the transient set, the framework surfaced
+    # APIConnectionError to the model thread as a terminal error;
+    # observed on Zhipu AI's anthropic-compatible endpoint during
+    # 24h of intermittent TCP drops (kb-orchestrator 2026-05-21).
+    _anthropic_sdk_transient: Tuple[Type[Exception], ...] = ()
+    try:
+        import anthropic as _anthropic_sdk
+        _anthropic_sdk_transient = (
+            _anthropic_sdk.APIConnectionError,
+            _anthropic_sdk.APITimeoutError,
+        )
+    except (ImportError, AttributeError):
+        # SDK not installed (test env) OR an older anthropic version
+        # without these classes — leave the SDK-error tuple empty;
+        # jaato-typed transient classes still cover the rate-limit /
+        # overloaded paths.
+        pass
     ANTHROPIC_TRANSIENT_CLASSES: Tuple[Type[Exception], ...] = (
         AnthropicRateLimitError,
         AnthropicOverloadedError,
-    )
+    ) + _anthropic_sdk_transient
     ANTHROPIC_CONTEXT_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (AnthropicContextLimitError,)
 except ImportError:
     ANTHROPIC_RATE_LIMIT_CLASSES = ()
