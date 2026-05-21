@@ -412,6 +412,65 @@ class TestErrorHandling:
         with pytest.raises(ContextLimitError):
             provider.complete(messages)
 
+    @patch('anthropic.Anthropic')
+    def test_api_connection_error_propagates_to_caller(self, mock_client_class):
+        """PR #177 (2026-05-21): anthropic SDK network-layer errors
+        (APIConnectionError, APITimeoutError) must escape
+        ``provider.complete()`` so ``with_retry`` sees them and
+        exponential-backoffs.  Pre-fix, the SDK error was swallowed
+        into ``TurnResult.from_exception()``; ``with_retry`` saw
+        fn() return normally and never retried.  Surfaced by peer's
+        kb-orchestrator v152-retry-11 (Finding C)."""
+        import anthropic
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        # Real anthropic.APIConnectionError (the actual SDK class, not
+        # a jaato-typed wrapper).  Constructed with a mock request per
+        # the SDK's expected signature; fallback to bare-string ctor
+        # if SDK shape varies.
+        try:
+            request = MagicMock()
+            conn_err = anthropic.APIConnectionError(request=request)
+        except TypeError:
+            conn_err = anthropic.APIConnectionError("Connection error")
+        mock_client.messages.create.side_effect = conn_err
+        messages = [Message.from_text(Role.USER, "Test")]
+
+        # MUST escape — NOT swallowed into TurnResult.
+        with pytest.raises(anthropic.APIConnectionError):
+            provider.complete(messages)
+
+    @patch('anthropic.Anthropic')
+    def test_api_timeout_error_propagates_to_caller(self, mock_client_class):
+        """PR #177: anthropic.APITimeoutError follows the same path
+        as APIConnectionError — both must escape provider.complete
+        so with_retry can classify them transient."""
+        import anthropic
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        try:
+            request = MagicMock()
+            timeout_err = anthropic.APITimeoutError(request=request)
+        except TypeError:
+            timeout_err = anthropic.APITimeoutError("Request timeout")
+        mock_client.messages.create.side_effect = timeout_err
+        messages = [Message.from_text(Role.USER, "Test")]
+
+        with pytest.raises(anthropic.APITimeoutError):
+            provider.complete(messages)
+
 
 class TestTokenManagement:
     """Tests for token counting and context limits."""

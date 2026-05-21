@@ -1237,6 +1237,31 @@ class AnthropicProvider:
             from .errors import RateLimitError as _RL, OverloadedError as _OL
             if isinstance(complete_exception, (_RL, _OL)):
                 raise complete_exception
+            # PR #177 (2026-05-21): anthropic SDK network-layer errors
+            # (APIConnectionError, APITimeoutError) must ALSO propagate
+            # to with_retry — they're classified as transient by
+            # ANTHROPIC_TRANSIENT_CLASSES post-PR-175.  Without this
+            # re-raise the SDK error gets swallowed into
+            # ``TurnResult.from_exception`` below, ``with_retry`` sees
+            # fn() return normally, no retry fires, the caller
+            # surfaces it as MODEL_THREAD_TERMINAL_ERROR.  Surfaced by
+            # kb-orchestrator v152-retry-11 (Finding C, 2026-05-21):
+            # streaming chunk read raised APIConnectionError ~2s after
+            # the SDK's internal retry succeeded with 200 OK — that
+            # mid-stream disconnect never reached the classifier.
+            #
+            # Mirrors the _RL/_OL pattern above.  Defensive inner
+            # try/except so older anthropic SDK versions (or test envs
+            # without the SDK) don't break the existing _RL/_OL path.
+            try:
+                import anthropic as _anthropic_sdk
+                if isinstance(complete_exception, (
+                    _anthropic_sdk.APIConnectionError,
+                    _anthropic_sdk.APITimeoutError,
+                )):
+                    raise complete_exception
+            except (ImportError, AttributeError):
+                pass
             return TurnResult.from_exception(complete_exception)
 
         # Update last_usage (this is per-call accounting, not conversation state)
