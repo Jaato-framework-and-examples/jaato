@@ -22,6 +22,7 @@ import re
 import sys
 import pathlib
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -172,6 +173,55 @@ class SubRunnerHandle:
     )
 
 
+@dataclass
+class CascadeClientEntry:
+    """Phase 1 cascade-as-client: one cascade-client registration entry.
+
+    See ``docs/design/cascade-as-client.md`` §4.1.  Multiple entries
+    per ``cascade_driver_id`` are allowed — one ``owner`` + N
+    ``observer`` per Decision 5 in the design doc.
+
+    Fields:
+        client_id: Namespaced identifier for this registration.
+            Convention: ``_cascade:{cid}`` for the owner; observer
+            client_ids may be anything (e.g., the IPC connection's
+            UUID, an extension-supplied label).  Decision 1 locks the
+            namespaced shape.
+        role: ``"owner"`` (single per cid; has lifecycle authority)
+            or ``"observer"`` (multiple per cid; read-only event
+            subscription).  Decision 5.
+        callback: In-process callable invoked when an event matching
+            ``event_types`` arrives for a session stamped with this
+            cid.  Signature: ``Callable[[Event], None]``.  Runs
+            synchronously inside ``_emit_to_session`` — callback
+            MUST NOT re-enter SessionManager methods that take
+            ``_lock`` (avoid deadlock).  Phase 2 will add an
+            IPC-RPC variant where callback dispatches to the
+            connected client's event channel.
+        event_types: Set of event-type names this entry subscribes
+            to.  ``None`` = subscribe to all.  Decision 3 (subscriber-
+            defined filter).  Type name comparison via
+            ``type(event).__name__`` for cheap dispatch.
+        registered_at: Wall-clock monotonic timestamp at registration.
+        last_event_ts: Monotonic timestamp of the most recent event
+            dispatched to this entry.  ``None`` until the first event.
+            Used by the GC backstop sweep (Decision 6).
+    """
+    client_id: str
+    role: str
+    callback: Callable[[Any], None]  # Callable[[Event], None]
+    event_types: Optional[Set[str]] = None
+    registered_at: float = field(default_factory=time.monotonic)
+    last_event_ts: Optional[float] = None
+
+    def event_type_match(self, event: Any) -> bool:
+        """Return True iff this entry's event-type filter matches
+        the given event.  ``event_types=None`` matches all."""
+        if self.event_types is None:
+            return True
+        return type(event).__name__ in self.event_types
+
+
 class SessionManager:
     """Manages multiple named sessions with persistence.
 
@@ -224,6 +274,27 @@ class SessionManager:
         self._sessions: Dict[str, Session] = {}
         # Use RLock (reentrant) because initialize() may emit events during session load
         self._lock = threading.RLock()
+
+        # Phase 1 cascade-as-client (server 0.6.154+): registry of
+        # cascade-clients keyed by cascade_driver_id.  See
+        # docs/design/cascade-as-client.md §4.1-§4.3.  Each entry is a
+        # :class:`CascadeClientEntry`.  Multiple entries per cid are
+        # allowed (one owner + N observers per Decision 5 in the
+        # design doc).  Guarded by its own lock to avoid coupling
+        # with ``_lock`` (which is held during _emit_to_session and
+        # would deadlock if a cascade-client callback re-entered
+        # SessionManager).
+        self._cascade_clients: Dict[str, List["CascadeClientEntry"]] = {}
+        self._cascade_clients_lock = threading.Lock()
+        # GC backstop: cascade-client entries with no event for this
+        # many seconds + no active sessions in their cid get reaped
+        # by the periodic sweep.  Matches the Phase 2 cascade-idle
+        # slot teardown timeout for design coherence.
+        self._cascade_client_idle_timeout = 300.0
+        # Sweep thread for cascade-client GC; lazily started on first
+        # registration.  Stopped on shutdown.
+        self._cascade_client_sweep_stop: Optional[threading.Event] = None
+        self._cascade_client_sweep_thread: Optional[threading.Thread] = None
 
         # Phase 4 §4.3.6a: bookkeeping for isolated-subagent sub-runners.
         # Keyed by isolated_session_id (``{parent}__sub_{subagent}``).
@@ -2819,6 +2890,321 @@ class SessionManager:
         else:
             logger.warning(f"  NO event_callback set!")
 
+    # ------------------------------------------------------------------
+    # Cascade-as-client (Phase 1, server 0.6.154+)
+    # ------------------------------------------------------------------
+    # See docs/design/cascade-as-client.md.  Decisions locked
+    # 2026-05-21; Phase 1 adds the daemon-side registry + dispatch +
+    # default lifecycle policy + GC backstop.  Phase 2 adds the
+    # IPC-RPC variant for SDK clients.
+
+    def register_in_process_client(
+        self,
+        client_id: str,
+        callback: Callable[[Any], None],
+        cascade_driver_id: str,
+        role: str = "observer",
+        event_types: Optional[Set[str]] = None,
+    ) -> None:
+        """Register an in-process cascade-client (Phase 1).
+
+        Subscribes ``callback`` to events fanned out by
+        :meth:`_emit_to_session` for any session stamped with
+        ``cascade_driver_id``.  Filtered by ``event_types`` (type-name
+        match; ``None`` = subscribe to all).
+
+        Args:
+            client_id: Unique identifier for this registration.
+                Convention: ``f"_cascade:{cascade_driver_id}"`` for the
+                cascade owner; observers may use any string (e.g., an
+                extension-supplied label).  Multiple entries with the
+                same client_id are rejected to avoid silent shadowing.
+            callback: Invoked with one positional argument (the
+                event) when an event matching the filter arrives.
+                Runs synchronously inside ``_emit_to_session`` —
+                callback MUST NOT re-enter ``SessionManager`` methods
+                that take ``_lock`` (deadlock).  Quick handlers only;
+                offload heavy work to a thread.
+            cascade_driver_id: The cid this registration observes.
+                Sessions stamped with this cid will route their
+                events to ``callback``.
+            role: ``"owner"`` (single per cid; lifecycle authority) or
+                ``"observer"`` (multiple per cid; read-only).
+                Default ``"observer"`` for the common observe-only
+                case.
+            event_types: Set of event type-names to subscribe to
+                (e.g., ``{"SessionTerminatedEvent", "AgentCompletedEvent"}``).
+                ``None`` (default) subscribes to all event types.
+
+        Raises:
+            ValueError: when ``role == "owner"`` AND an owner is
+                already registered for this cid (single-owner rule).
+            ValueError: when ``client_id`` is already registered for
+                this cid (silent-shadowing prevention).
+        """
+        if role not in ("owner", "observer"):
+            raise ValueError(
+                f"role must be 'owner' or 'observer'; got {role!r}"
+            )
+        entry = CascadeClientEntry(
+            client_id=client_id,
+            role=role,
+            callback=callback,
+            event_types=event_types,
+        )
+        with self._cascade_clients_lock:
+            entries = self._cascade_clients.setdefault(cascade_driver_id, [])
+            for existing in entries:
+                if existing.client_id == client_id:
+                    raise ValueError(
+                        f"cascade-client client_id={client_id!r} "
+                        f"already registered for cid={cascade_driver_id!r}"
+                    )
+                if role == "owner" and existing.role == "owner":
+                    raise ValueError(
+                        f"cascade-client owner already registered for "
+                        f"cid={cascade_driver_id!r} "
+                        f"(existing client_id={existing.client_id!r}); "
+                        f"only ONE owner permitted per cid (Decision 5)"
+                    )
+            entries.append(entry)
+        # Lazy-start the GC sweep thread on first registration.
+        self._ensure_cascade_client_sweep_running()
+        logger.info(
+            "register_in_process_client: registered %s (role=%s) "
+            "for cid=%s event_types=%s",
+            client_id, role, cascade_driver_id,
+            sorted(event_types) if event_types else "ALL",
+        )
+
+    def unregister_cascade_client(
+        self,
+        cascade_driver_id: str,
+        client_id: str,
+    ) -> bool:
+        """Remove a cascade-client registration (Phase 1, explicit
+        unregister per Decision 6).
+
+        Args:
+            cascade_driver_id: The cid the entry was registered under.
+            client_id: The client_id used at register time.
+
+        Returns:
+            True if an entry was removed; False if no match (already
+            unregistered, GC'd, or never registered).  Idempotent.
+        """
+        with self._cascade_clients_lock:
+            entries = self._cascade_clients.get(cascade_driver_id, [])
+            for i, entry in enumerate(entries):
+                if entry.client_id == client_id:
+                    entries.pop(i)
+                    if not entries:
+                        # Last entry for this cid — drop the dict key
+                        # so the registry doesn't grow unbounded with
+                        # empty cid entries.
+                        self._cascade_clients.pop(cascade_driver_id, None)
+                    logger.info(
+                        "unregister_cascade_client: removed %s "
+                        "from cid=%s", client_id, cascade_driver_id,
+                    )
+                    return True
+        return False
+
+    def _dispatch_to_cascade_clients(
+        self, session: 'Session', event: Event,
+    ) -> None:
+        """Phase 1: fan out an event to cascade-clients matching
+        ``session.cascade_driver_id``.
+
+        Dispatch order: owners first, then observers (so an owner
+        can call ``session_manager.delete_session(...)`` and preempt
+        observer notifications for a now-deleted session — the
+        observer loop's ``_sessions.get(sid)`` would return None
+        next time around).
+
+        Callback exceptions are logged but never propagate: one
+        misbehaving observer must not break the dispatch chain.
+        ``last_event_ts`` is updated regardless so GC doesn't reap
+        an actively-firing entry just because its callback raises.
+        """
+        cid = getattr(session, "cascade_driver_id", None)
+        if cid is None:
+            return
+        # Snapshot under lock to avoid mutation-during-iteration if
+        # a callback unregisters concurrently.
+        with self._cascade_clients_lock:
+            entries = list(self._cascade_clients.get(cid, []))
+        now = time.monotonic()
+        # Owners first, observers second — see docstring.
+        for entry in sorted(entries, key=lambda e: 0 if e.role == "owner" else 1):
+            if not entry.event_type_match(event):
+                continue
+            entry.last_event_ts = now
+            try:
+                entry.callback(event)
+            except Exception as exc:  # noqa: BLE001 — callback boundary
+                logger.warning(
+                    "_dispatch_to_cascade_clients: callback for %s "
+                    "(role=%s) raised %s — continuing dispatch chain",
+                    entry.client_id, entry.role,
+                    type(exc).__name__, exc_info=True,
+                )
+
+    def _apply_default_cascade_policy(
+        self, session: 'Session', event: Event,
+    ) -> None:
+        """Phase 1 default lifecycle policy (Decision 4): on
+        ``SessionTerminatedEvent(reason="error")`` for a session
+        that is headless OR has a registered cascade-owner, force
+        an unload (closes Finding B from the design doc).
+
+        Real-client sessions (interactive UI / TUI) are NOT unloaded
+        — the client may reconnect to view the error history before
+        an explicit ``session.delete`` command.
+
+        Runs AFTER ``_dispatch_to_cascade_clients`` so a cascade-owner
+        handler can preempt: if the owner deletes the session, the
+        default's ``_maybe_unload_session_forced`` call becomes a
+        no-op (session already gone from ``self._sessions``).
+        """
+        # Local import to avoid widening the module-level import
+        # graph; SessionTerminatedEvent is a small SDK type.
+        from jaato_sdk.events import SessionTerminatedEvent
+        if not isinstance(event, SessionTerminatedEvent):
+            return
+        if getattr(event, "reason", None) != "error":
+            return
+
+        is_headless = (
+            session.attached_clients == {self._HEADLESS_CLIENT_ID}
+        )
+        cid = getattr(session, "cascade_driver_id", None)
+        has_cascade_owner = False
+        if cid is not None:
+            with self._cascade_clients_lock:
+                entries = self._cascade_clients.get(cid, [])
+                has_cascade_owner = any(e.role == "owner" for e in entries)
+
+        if not (is_headless or has_cascade_owner):
+            return
+
+        # Pop the synthetic _HEADLESS_CLIENT_ID so the existing
+        # _maybe_unload_session gate (`if session.attached_clients`)
+        # passes through.  Real-client sessions don't reach here
+        # because is_headless is False AND, if has_cascade_owner,
+        # this is a cascade-driven session whose attached_clients
+        # was the synthetic placeholder in the first place.
+        session.attached_clients.discard(self._HEADLESS_CLIENT_ID)
+        self._client_to_session.pop(self._HEADLESS_CLIENT_ID, None)
+        try:
+            self._maybe_unload_session(session.session_id)
+            logger.info(
+                "_apply_default_cascade_policy: triggered unload for "
+                "headless/cascade session %s after "
+                "SessionTerminatedEvent(reason=error) "
+                "(closes Finding B)", session.session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            logger.warning(
+                "_apply_default_cascade_policy: _maybe_unload_session "
+                "raised for %s: %s — cascade may stall; investigate",
+                session.session_id, exc, exc_info=True,
+            )
+
+    def _ensure_cascade_client_sweep_running(self) -> None:
+        """Lazy-start the cascade-client GC backstop sweep thread on
+        first registration.  Idempotent."""
+        if (
+            self._cascade_client_sweep_thread is not None
+            and self._cascade_client_sweep_thread.is_alive()
+        ):
+            return
+        self._cascade_client_sweep_stop = threading.Event()
+        self._cascade_client_sweep_thread = threading.Thread(
+            target=self._cascade_client_sweep_loop,
+            name="cascade-client-gc-sweep",
+            daemon=True,
+        )
+        self._cascade_client_sweep_thread.start()
+        logger.info(
+            "Cascade-client GC sweep thread started "
+            "(idle_timeout=%.0fs)",
+            self._cascade_client_idle_timeout,
+        )
+
+    def _cascade_client_sweep_loop(self) -> None:
+        """Phase 1 GC backstop (Decision 6): periodically reap
+        cascade-client entries with no recent events AND no active
+        sessions in their cid.
+
+        Runs every ``cascade_client_idle_timeout / 10`` seconds
+        (default 30s for the 300s timeout) so each entry is checked
+        ~10 times across its idle window — fast enough to free
+        resources without burning CPU.
+
+        Stops cleanly on ``_cascade_client_sweep_stop.set()``
+        (daemon shutdown path).
+        """
+        check_interval = max(1.0, self._cascade_client_idle_timeout / 10.0)
+        while not self._cascade_client_sweep_stop.is_set():
+            try:
+                self._cascade_client_sweep_once()
+            except Exception:  # noqa: BLE001 — sweep boundary
+                logger.exception(
+                    "cascade-client GC sweep: unhandled error; continuing",
+                )
+            self._cascade_client_sweep_stop.wait(check_interval)
+
+    def _cascade_client_sweep_once(self) -> None:
+        """Single sweep pass: reap stale cascade-client entries.
+
+        Stale = (now - last_event_ts) > timeout AND no active
+        sessions in the cid.  An entry that has never fired
+        (``last_event_ts is None``) uses ``registered_at`` as the
+        reference instead — covers registrations that outlive their
+        sessions without any event activity.
+        """
+        now = time.monotonic()
+        timeout = self._cascade_client_idle_timeout
+        cids_to_reap: List[Tuple[str, str]] = []
+
+        # Snapshot active-cid set under _lock to avoid racing
+        # session-record creation.
+        with self._lock:
+            active_cids = {
+                getattr(s, "cascade_driver_id", None)
+                for s in self._sessions.values()
+            } - {None}
+
+        with self._cascade_clients_lock:
+            for cid, entries in list(self._cascade_clients.items()):
+                if cid in active_cids:
+                    continue  # cascade still active; skip
+                survivors: List[CascadeClientEntry] = []
+                for entry in entries:
+                    ref_ts = (
+                        entry.last_event_ts
+                        if entry.last_event_ts is not None
+                        else entry.registered_at
+                    )
+                    if (now - ref_ts) > timeout:
+                        cids_to_reap.append((cid, entry.client_id))
+                    else:
+                        survivors.append(entry)
+                if survivors:
+                    self._cascade_clients[cid] = survivors
+                else:
+                    self._cascade_clients.pop(cid, None)
+
+        for cid, client_id in cids_to_reap:
+            logger.info(
+                "cascade-client GC sweep: reaped %s (cid=%s) — "
+                "idle > %.0fs + no active sessions",
+                client_id, cid, timeout,
+            )
+
+    # ------------------------------------------------------------------
+
     def _emit_to_session(self, session_id: str, event: Event) -> None:
         """Emit an event to all clients attached to a session."""
         with self._lock:
@@ -2836,6 +3222,18 @@ class SessionManager:
 
                 for client_id in session.attached_clients:
                     self._emit_to_client(client_id, event)
+
+                # Phase 1 cascade-as-client: dispatch to cascade-clients
+                # registered for this session's cascade_driver_id.
+                # Owners fire first (lifecycle authority); observers
+                # follow.  See docs/design/cascade-as-client.md §4.3.
+                self._dispatch_to_cascade_clients(session, event)
+
+                # Phase 1 default lifecycle policy: on terminal-error
+                # for headless / cascade-owned sessions, trigger
+                # unload (closes Finding B).  Runs AFTER cascade-
+                # client dispatch so owner handlers can preempt.
+                self._apply_default_cascade_policy(session, event)
 
     # ------------------------------------------------------------------
     # Workspace file monitoring
