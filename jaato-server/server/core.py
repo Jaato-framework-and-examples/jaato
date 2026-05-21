@@ -4423,6 +4423,59 @@ class JaatoServer:
                     clear_logging_context()
                     return  # new thread handles idle/done status
 
+                # PR #179 (Finding D, 2026-05-21): nudge-exhaust
+                # detection.  When the agent has been nudged
+                # MAX_COMPLETION_NUDGES times and still didn't call
+                # ``signal_completion``, the session has effectively
+                # failed.  Pre-fix the only event was
+                # AgentStatusChangedEvent(status="done") — which fires
+                # ON NORMAL COMPLETION TOO — so cascade observers
+                # couldn't distinguish success from nudge-exhaust
+                # failure.  Surfaced by kb-orchestrator
+                # v152-retry-12 cascade 2026-05-21: transform
+                # step 5 looped 201 turns + exhausted nudges +
+                # observer saw no terminal signal + 90-min poll
+                # timeout.
+                #
+                # Distinguishing condition: ``nudges_fired >=
+                # MAX_COMPLETION_NUDGES`` AND signal_completion was
+                # in the surface (so the agent COULD have called it
+                # but didn't).  Emit ErrorEvent (for clients
+                # subscribed to errors) + SessionTerminatedEvent
+                # (for cascade-clients per Phase 1 default policy
+                # — auto-unloads headless / cascade-owned sessions).
+                #
+                # AgentStatusChangedEvent(status="done") still fires
+                # below for backward compat with consumers that
+                # don't watch SessionTerminatedEvent.
+                if (
+                    nudges_fired >= MAX_COMPLETION_NUDGES
+                    and signal_completion_in_surface
+                ):
+                    from jaato_sdk.events import (
+                        ErrorEvent as _ErrorEvent,
+                        SessionTerminatedEvent as _SessionTerminatedEvent,
+                    )
+                    server._trace(
+                        f"NUDGE_EXHAUSTED: agent looped "
+                        f"{nudges_fired}/{MAX_COMPLETION_NUDGES} "
+                        f"nudges without calling signal_completion — "
+                        f"emitting terminal events"
+                    )
+                    server.emit(_ErrorEvent(
+                        error=(
+                            f"Agent loop exhausted "
+                            f"{MAX_COMPLETION_NUDGES} completion nudges "
+                            f"without calling signal_completion"
+                        ),
+                        error_type="NudgeExhausted",
+                    ))
+                    server.emit(_SessionTerminatedEvent(
+                        session_id=server.session_id or "",
+                        agent_id=server._main_agent_id,
+                        reason="error",
+                    ))
+
                 server.emit(AgentStatusChangedEvent(
                     agent_id=server._main_agent_id,
                     status=status,
