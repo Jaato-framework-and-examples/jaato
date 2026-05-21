@@ -1228,6 +1228,26 @@ class RunnerRPC:
 
         plugins_reset = 0
         errors: List[str] = []
+        # Fire on_session_end hooks BEFORE clearing plugin state.
+        # ``close_session`` snapshots the current session state +
+        # notifies the session_plugin's ``on_session_end`` hook.
+        # Doing this before ``reset_for_next_session`` means hooks
+        # see the live, pre-reset state of every plugin (matches
+        # ``session.shutdown`` semantics at L3450).
+        close = getattr(session, "close_session", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 — boundary
+                # Best-effort: close_session failing must not block
+                # the slot return.  Append to errors so the daemon
+                # branches on it; the slot won't be returned to the
+                # pool (cascade_returned stays False on errors !=
+                # []).  See JaatoServer.shutdown cascade-return path.
+                errors.append(
+                    f"close_session: {type(exc).__name__}: {exc}"
+                )
+
         for name in registry.list_available():
             plugin = registry.get_plugin(name)
             if plugin is None:
@@ -1244,6 +1264,28 @@ class RunnerRPC:
                 plugins_reset += 1
             except Exception as exc:  # noqa: BLE001 — per-plugin boundary
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
+
+        # PR #174 hotfix (server 0.6.151+): clear the runner-side
+        # session host so the next ``session.bootstrap`` on this slot
+        # (cascade reuse path) is NOT rejected by the
+        # already-bootstrapped guard at line 1077.  Pre-fix: cascade
+        # reuse succeeded at the daemon-side slot routing layer but
+        # the runner's bootstrap handler refused with
+        # ``ToolError: runner already hosting session_id=...; refusing
+        # to re-bootstrap with different envelope`` (because the old
+        # session_host stayed installed).  The old session's model
+        # loop kept running on the runner instead of being replaced;
+        # surfaced by peer's kb-orchestrator v152-retry-7 cascade
+        # 2026-05-21 as a duplicate ``cascade_after_discovery`` fire
+        # 30s after the supposed reuse.
+        #
+        # Mirrors ``_handle_session_shutdown`` at L3439 — drop the
+        # session_host reference under the session_lock so parallel
+        # handlers see the post-end state.  Done AFTER plugin reset
+        # so any reset() that reads ``self._session_host`` (e.g. for
+        # logging context) still sees the right value.
+        with self._session_lock:
+            self._session_host = None
 
         return True, {
             "plugins_reset": plugins_reset,
