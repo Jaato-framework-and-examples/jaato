@@ -279,50 +279,106 @@ async for event in client.cascade_events(
 ### 4.6 Migration from `_HEADLESS_CLIENT_ID`
 
 Per §3.7: `_HEADLESS_CLIENT_ID` kept for genuinely-one-off headless
-sessions.  Reactor extension migrates:
+sessions.  Reactor extension migrates from the synthetic placeholder
+to cascade-client registration.
+
+**Correction (2026-05-21, Codex)**: `_HEADLESS_CLIENT_ID` lives
+SERVER-SIDE in `SessionManager.create_headless_session` — that
+helper sets `session.attached_clients = {"_headless"}`.  Premium's
+`ActionContext.create_session` doesn't TOUCH the placeholder; it
+just calls the helper with `cascade_driver_id=...`.
+
+Phase 3 premium-side scope is therefore narrower than initially
+sketched: ActionContext / ReactorExtension register a
+**cascade-client callback** so events for sessions stamped with a
+given `cascade_driver_id` reach the reactor's event handler.  The
+synthetic `_headless` placeholder remains in `session.attached_clients`
+during normal operation; Phase 1's `_apply_default_cascade_policy`
+already handles the cleanup case (pops the placeholder before
+`_maybe_unload_session` for cascade-owned sessions, see
+session_manager.py:`_apply_default_cascade_policy`).
 
 ```python
-# OLD (premium reactor today):
+# OLD (premium reactor pre-Phase 3):
 class ActionContext:
     def create_session(self, ..., cascade_driver_id: Optional[str] = None):
         sid = self.session_manager.create_headless_session(
             cascade_driver_id=cascade_driver_id, ...
         )
-        # Session attached to _HEADLESS_CLIENT_ID synthetic placeholder.
-        # No event sink.  Lifecycle gaps (Finding A + B).
+        # `create_headless_session` (server-side) sets
+        # session.attached_clients = {"_headless"} — no real event
+        # sink for the reactor.  Events from this session reach
+        # the synthetic client_id and get dropped.  Source of
+        # Finding A (observability) + Finding B (cascade stall).
 
-# NEW (after Phase 3):
+# NEW (Phase 3 — shape locked by Codex's PR):
+# Two candidate shapes; Codex picks one in the implementation PR:
+#
+# Shape (a) — extension-start callback factory:
 class ReactorExtension:
     def start(self):
-        # Register the reactor as cascade-client owner for ALL cids
-        # spawned during this extension's lifetime.  Dispatch uses a
-        # per-cid lookup table to route events to the right cascade
-        # handler.
-        # ... per-cid registration happens at cascade-start ...
+        # Wire the cascade-client callback factory alongside
+        # gate_registry (extension.py:178 idiom).
+        self._cascade_callback = self._make_cascade_callback()
+        # Per-cid registrations happen JIT inside ActionContext when
+        # a new cid arrives at create_session.
 
+# Shape (b) — cascade-start lazy registration:
 class ActionContext:
     def create_session(self, ..., cascade_driver_id: Optional[str] = None):
-        # Ensure cascade-client is registered for this cid.
-        if cascade_driver_id and not self.session_manager.has_cascade_client(
-            cascade_driver_id, role="owner"
-        ):
-            self.session_manager.register_in_process_client(
-                client_id=f"_cascade:{cascade_driver_id}",
-                role="owner",
-                callback=self._reactor_event_handler,
-                event_types=ALL_LIFECYCLE_EVENTS,
-            )
-        sid = self.session_manager.create_headless_session(
-            cascade_driver_id=cascade_driver_id, ...
-        )
-        # Session attached to cascade-client (NOT _HEADLESS_CLIENT_ID).
-        # Lifecycle gaps closed: cascade-client handler + framework
-        # default policy fire on terminal events.
+        # First session of a cascade triggers the registration;
+        # subsequent sessions in the same cid are idempotent
+        # (Phase 1 register_in_process_client rejects duplicates,
+        # so caller catches + skips).
+        ...
+
+# In either shape, the per-cid registration call is:
+self.session_manager.register_in_process_client(
+    client_id=f"_cascade:{cascade_driver_id}",
+    callback=self._reactor_event_handler,
+    cascade_driver_id=cascade_driver_id,
+    role="owner",
+    event_types={"SessionTerminatedEvent", "AgentCompletedEvent", ...},
+)
+sid = self.session_manager.create_headless_session(
+    cascade_driver_id=cascade_driver_id, ...
+)
+# Session still attached to `_headless` placeholder server-side,
+# but Phase 1's default policy + the reactor's event handler now
+# both see SessionTerminatedEvent and react appropriately.
 ```
+
+**Graceful degradation** (Codex's premium-side considerations
+2026-05-21): use a runtime gate, NOT a hard pyproject version pin:
+
+```python
+register = getattr(
+    session_manager, "register_in_process_client", None,
+)
+if register is None:
+    # Older jaato-server without cascade-as-client support — fall
+    # back to legacy behavior (cascade-driver-id still threaded
+    # for slot-affinity routing per Phase 2 cascade-sharing).
+    logger.info(
+        "ReactorExtension: jaato-server lacks "
+        "register_in_process_client; cascade-client observability "
+        "disabled, slot-sharing still active",
+    )
+    return
+register(client_id=..., callback=..., ...)
+```
+
+**Existing reactor primitives for abort policy** (Codex's
+recommendation 2026-05-21): when the reactor's event handler
+detects terminal failure for a cascade, prefer existing primitives
+over introducing a new "kill cascade" verb:
+- `ctx.emit_event(...)` for downstream reactor-rule dispatch
+- Gate-release pathway for waiting consumers
+- `session_manager.delete_session(sid)` for explicit per-session teardown
 
 `_HEADLESS_CLIENT_ID` callers without a `cascade_driver_id`
 continue working unchanged (the placeholder path remains for
-non-cascade headless use cases).
+non-cascade headless use cases per §3.7 Decision 7).
 
 ---
 
