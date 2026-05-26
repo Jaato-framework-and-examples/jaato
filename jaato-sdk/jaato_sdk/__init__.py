@@ -27,6 +27,7 @@ from jaato_sdk.templates import (
     classify_template_evaluation_kind,
 )
 from jaato_sdk.completion_processors import ToolCallEntry
+from jaato_sdk.cascade_authoring import ProcessorResult
 from jaato_sdk.trace import (
     trace,
     provider_trace,
@@ -57,6 +58,8 @@ __all__ = [
     "classify_template_evaluation_kind",
     # Completion-processor context shape (server 0.6.158+ / SDK 0.14.0+)
     "ToolCallEntry",
+    # Completion-processor return contract (server 0.6.160+ / SDK 0.14.2+)
+    "ProcessorResult",
     # Trace
     "trace",
     "provider_trace",

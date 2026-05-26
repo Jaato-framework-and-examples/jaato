@@ -256,7 +256,129 @@ class TestInvokeProcessors:
         )
         result = invoke_processors([lp], payload={}, context=_ctx(tmp_path))
         assert len(result.failed) == 1
-        assert "expected list[str]" in result.failed[0][1]
+        # Server 0.6.160+ accepts list[str] OR ProcessorResult TypedDict;
+        # the error message names both.
+        assert "list[str] or ProcessorResult" in result.failed[0][1]
+
+    def test_validate_processorresult_typeddict_shape_errors_route_to_failed(
+        self, tmp_path,
+    ):
+        """Server 0.6.160+: validate can return the
+        ``ProcessorResult`` TypedDict shape from
+        ``jaato_sdk.cascade_authoring``.  ``errors[]`` entries land
+        in ``result.failed`` (subject to ``on_error`` policy, same
+        as the legacy ``list[str]`` path)."""
+        proc = CompletionProcessor(script="p.py")  # default on_error=fail_completion
+        lp = LoadedProcessor(
+            processor=proc,
+            validate_fn=lambda payload, ctx: {
+                "errors": ["fatal-1", "fatal-2"],
+                "warnings": [],
+            },
+        )
+        result = invoke_processors([lp], payload={}, context=_ctx(tmp_path))
+        assert len(result.failed) == 2
+        assert result.warned == []
+        assert "[p.py] fatal-1" == result.failed[0][1]
+        assert "[p.py] fatal-2" == result.failed[1][1]
+
+    def test_validate_processorresult_warnings_never_escalate(
+        self, tmp_path,
+    ):
+        """Server 0.6.160+: ``warnings[]`` from the
+        ``ProcessorResult`` TypedDict always land in ``result.warned``
+        regardless of the processor's ``on_error`` policy — they're
+        advisory by definition.
+
+        Compare with the ``on_error="fail_completion"`` (default)
+        proc here: a legacy ``list[str]`` return would route entries
+        to ``result.failed``, but warnings explicitly bypass the
+        bucket and stay advisory."""
+        proc = CompletionProcessor(script="p.py")  # default on_error=fail_completion
+        lp = LoadedProcessor(
+            processor=proc,
+            validate_fn=lambda payload, ctx: {
+                "errors": [],
+                "warnings": ["advisory-1", "advisory-2"],
+            },
+        )
+        result = invoke_processors([lp], payload={}, context=_ctx(tmp_path))
+        assert result.failed == [], (
+            "warnings[] must NEVER produce failed entries — they're "
+            "advisory regardless of on_error policy"
+        )
+        assert len(result.warned) == 2
+        assert "[p.py] advisory-1" == result.warned[0][1]
+        assert "[p.py] advisory-2" == result.warned[1][1]
+
+    def test_validate_processorresult_mixed_errors_and_warnings(
+        self, tmp_path,
+    ):
+        """The full expressiveness gain — one processor returns
+        both fatal errors AND advisory warnings in a single call."""
+        proc = CompletionProcessor(script="p.py")
+        lp = LoadedProcessor(
+            processor=proc,
+            validate_fn=lambda payload, ctx: {
+                "errors": ["agent must retry: X"],
+                "warnings": ["audit-only: Y"],
+            },
+        )
+        result = invoke_processors([lp], payload={}, context=_ctx(tmp_path))
+        assert len(result.failed) == 1
+        assert len(result.warned) == 1
+        assert "X" in result.failed[0][1]
+        assert "Y" in result.warned[0][1]
+
+    def test_validate_processorresult_partial_keys_accepted(
+        self, tmp_path,
+    ):
+        """``ProcessorResult`` is ``TypedDict(total=False)`` — authors
+        can return only ``errors`` or only ``warnings``.  Framework
+        treats missing keys as empty lists."""
+        proc = CompletionProcessor(script="p.py")
+        # errors-only
+        lp = LoadedProcessor(
+            processor=proc,
+            validate_fn=lambda payload, ctx: {"errors": ["e1"]},
+        )
+        result = invoke_processors([lp], payload={}, context=_ctx(tmp_path))
+        assert len(result.failed) == 1
+        assert result.warned == []
+        # warnings-only
+        lp2 = LoadedProcessor(
+            processor=proc,
+            validate_fn=lambda payload, ctx: {"warnings": ["w1"]},
+        )
+        result2 = invoke_processors([lp2], payload={}, context=_ctx(tmp_path))
+        assert result2.failed == []
+        assert len(result2.warned) == 1
+
+    def test_validate_processorresult_warnings_with_on_error_warn_proc(
+        self, tmp_path,
+    ):
+        """When the processor declares ``on_error="warn"`` AND
+        returns the new TypedDict shape: errors[] downgrade via the
+        proc-level policy to ``result.warned`` (existing _bucket
+        behavior), and warnings[] also land in ``result.warned``.
+        Net: no entry should ever reach ``result.failed``."""
+        proc = CompletionProcessor(script="p.py", on_error="warn")
+        lp = LoadedProcessor(
+            processor=proc,
+            validate_fn=lambda payload, ctx: {
+                "errors": ["downgraded-1"],
+                "warnings": ["advisory-1"],
+            },
+        )
+        result = invoke_processors([lp], payload={}, context=_ctx(tmp_path))
+        assert result.failed == []
+        # Both the downgraded error AND the warning land in result.warned
+        assert len(result.warned) == 2
+        # Order: errors processed first, then warnings (matches the
+        # implementation in invoke_processors).
+        warned_msgs = [msg for (_proc, msg) in result.warned]
+        assert any("downgraded-1" in m for m in warned_msgs)
+        assert any("advisory-1" in m for m in warned_msgs)
 
     def test_render_with_output_writes_file(self, tmp_path):
         proc = CompletionProcessor(
