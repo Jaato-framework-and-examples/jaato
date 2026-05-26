@@ -3154,26 +3154,43 @@ class SessionManager:
     def _apply_default_cascade_policy(
         self, session: 'Session', event: Event,
     ) -> None:
-        """Phase 1 default lifecycle policy (Decision 4): on
-        ``SessionTerminatedEvent(reason="error")`` for a session
-        that is headless OR has a registered cascade-owner, force
-        an unload (closes Finding B from the design doc).
+        """Default lifecycle policy: on ``SessionTerminatedEvent`` for
+        a session that is headless OR has a registered cascade-owner,
+        force an unload.
+
+        ``SessionTerminatedEvent`` is by definition a terminal-state
+        signal (see :class:`jaato_sdk.events.SessionTerminatedEvent`
+        — "Session has fully wound down — safe to disconnect").  All
+        four current reasons (``natural``, ``error``, ``stopped``,
+        ``client_request``) are terminal; any of them on a headless /
+        cascade-owned session means it's safe to unload now, which
+        triggers ``JaatoServer.shutdown()`` → ``session_end`` RPC →
+        ``pool_manager.return_slot_after_session(...)``.  Without this
+        unload, the runner subprocess stays alive and the pool slot
+        never returns to ``_idle_slots`` — next same-cascade acquire
+        MISSES instead of HITs.
+
+        Originally shipped (Phase 1, PR #178) handling only
+        ``reason="error"`` to close Finding B (cascade-stall on terminal
+        error).  Server 0.6.158 extends to all four reasons after
+        retry-17 evidence showed natural-completion cascades
+        accumulated 9 concurrent runners + 1h37min runner-exit lag
+        because the prior ``reason != "error"`` guard let
+        natural-completion sessions stay loaded indefinitely.
 
         Real-client sessions (interactive UI / TUI) are NOT unloaded
-        — the client may reconnect to view the error history before
-        an explicit ``session.delete`` command.
+        — the client may reconnect to view history before an explicit
+        ``session.delete`` command.
 
         Runs AFTER ``_dispatch_to_cascade_clients`` so a cascade-owner
         handler can preempt: if the owner deletes the session, the
-        default's ``_maybe_unload_session_forced`` call becomes a
-        no-op (session already gone from ``self._sessions``).
+        default's ``_maybe_unload_session`` call becomes a no-op
+        (session already gone from ``self._sessions``).
         """
         # Local import to avoid widening the module-level import
         # graph; SessionTerminatedEvent is a small SDK type.
         from jaato_sdk.events import SessionTerminatedEvent
         if not isinstance(event, SessionTerminatedEvent):
-            return
-        if getattr(event, "reason", None) != "error":
             return
 
         is_headless = (
@@ -3197,13 +3214,14 @@ class SessionManager:
         # was the synthetic placeholder in the first place.
         session.attached_clients.discard(self._HEADLESS_CLIENT_ID)
         self._client_to_session.pop(self._HEADLESS_CLIENT_ID, None)
+        reason = getattr(event, "reason", "unknown")
         try:
             self._maybe_unload_session(session.session_id)
             logger.info(
                 "_apply_default_cascade_policy: triggered unload for "
                 "headless/cascade session %s after "
-                "SessionTerminatedEvent(reason=error) "
-                "(closes Finding B)", session.session_id,
+                "SessionTerminatedEvent(reason=%s)",
+                session.session_id, reason,
             )
         except Exception as exc:  # noqa: BLE001 — defensive
             logger.warning(

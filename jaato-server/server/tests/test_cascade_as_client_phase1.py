@@ -386,17 +386,6 @@ class TestDefaultPolicy:
         sm._apply_default_cascade_policy(session, _FakeEvent())
         assert unload_calls == []
 
-    def test_terminal_non_error_reason_no_op(self):
-        from jaato_sdk.events import SessionTerminatedEvent
-        sm = _make_sm()
-        unload_calls = self._setup_sm_with_unload_stub(sm)
-        session = _make_session("s1", cid="abc")
-        event = SessionTerminatedEvent(
-            session_id="s1", agent_id="main", reason="client_request",
-        )
-        sm._apply_default_cascade_policy(session, event)
-        assert unload_calls == []
-
     def test_headless_terminal_error_triggers_unload(self):
         from jaato_sdk.events import SessionTerminatedEvent
         sm = _make_sm()
@@ -432,6 +421,64 @@ class TestDefaultPolicy:
         )
         sm._apply_default_cascade_policy(session, event)
         assert unload_calls == ["s1"]
+
+    @pytest.mark.parametrize(
+        "reason", ["natural", "client_request", "stopped"],
+    )
+    def test_headless_terminal_non_error_reasons_trigger_unload(
+        self, reason,
+    ):
+        """Server 0.6.158: natural/client_request/stopped reasons on a
+        headless session also trigger unload — closes the cascade-pool
+        reuse miss + 1h37min runner-exit lag observed in retry-17.
+
+        ``SessionTerminatedEvent`` is by definition terminal; the old
+        ``reason != "error"`` guard let natural-completion sessions
+        stay loaded indefinitely, which kept the pool slot busy +
+        the runner subprocess alive."""
+        from jaato_sdk.events import SessionTerminatedEvent
+        sm = _make_sm()
+        unload_calls = self._setup_sm_with_unload_stub(sm)
+        session = _make_session(
+            "s1", cid=None, attached_clients={"_headless"},
+        )
+        sm._sessions["s1"] = session
+        event = SessionTerminatedEvent(
+            session_id="s1", agent_id="main", reason=reason,
+        )
+        sm._apply_default_cascade_policy(session, event)
+        assert unload_calls == ["s1"], (
+            f"reason={reason!r} should trigger unload for headless"
+        )
+
+    @pytest.mark.parametrize(
+        "reason", ["natural", "client_request", "stopped"],
+    )
+    def test_cascade_owner_terminal_non_error_reasons_trigger_unload(
+        self, reason,
+    ):
+        """Same as the headless case but for cascade-owned sessions —
+        any cascade-owner registration + any terminal reason → unload.
+        This is the path that fires for ReactorExtension's
+        register_in_process_client(role="owner") sessions."""
+        from jaato_sdk.events import SessionTerminatedEvent
+        sm = _make_sm()
+        unload_calls = self._setup_sm_with_unload_stub(sm)
+        sm.register_in_process_client(
+            client_id="_cascade:abc", callback=MagicMock(),
+            cascade_driver_id="abc", role="owner",
+        )
+        session = _make_session(
+            "s1", cid="abc", attached_clients={"_headless"},
+        )
+        sm._sessions["s1"] = session
+        event = SessionTerminatedEvent(
+            session_id="s1", agent_id="main", reason=reason,
+        )
+        sm._apply_default_cascade_policy(session, event)
+        assert unload_calls == ["s1"], (
+            f"reason={reason!r} should trigger unload for cascade-owned"
+        )
 
     def test_interactive_session_terminal_error_no_unload(self):
         """Real-client sessions (UI/TUI) NOT unloaded on terminal-
