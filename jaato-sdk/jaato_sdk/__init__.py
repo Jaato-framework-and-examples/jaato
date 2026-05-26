@@ -26,6 +26,7 @@ from jaato_sdk.templates import (
     HELPER_KEYWORDS,
     classify_template_evaluation_kind,
 )
+from jaato_sdk.completion_processors import ToolCallEntry
 from jaato_sdk.trace import (
     trace,
     provider_trace,
@@ -54,6 +55,8 @@ __all__ = [
     # Template walker helpers (server 0.6.58+)
     "HELPER_KEYWORDS",
     "classify_template_evaluation_kind",
+    # Completion-processor context shape (server 0.6.158+ / SDK 0.14.0+)
+    "ToolCallEntry",
     # Trace
     "trace",
     "provider_trace",
