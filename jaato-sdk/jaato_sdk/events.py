@@ -391,6 +391,16 @@ class SessionTerminatedEvent(Event):
     The ``reason`` field distinguishes the two paths so consumers
     can handle them differently if needed.
 
+    When ``reason="error"``, the framework populates
+    ``error_summary`` + ``error_type`` from the underlying
+    ``Exception`` at the emit site (server 0.6.159+ / SDK 0.14.1+).
+    Cascade observers can read these to surface the failure cause
+    without grepping the daemon log — e.g.
+    ``error_type="AnthropicAPIError"`` +
+    ``error_summary="402 Payment Required ..."``.  Both fields stay
+    ``None`` for the non-error reasons (``natural`` /
+    ``client_request`` / ``stopped``).
+
     Canonical pattern (test harness):
 
         client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
@@ -403,6 +413,8 @@ class SessionTerminatedEvent(Event):
     session_id: str = ""
     agent_id: Optional[str] = None
     reason: str = "natural"  # "natural" | "client_request" | "stopped" | "error"
+    error_summary: Optional[str] = None  # populated when reason="error"
+    error_type: Optional[str] = None     # Python exception class name (e.g. "AnthropicAPIError")
 
 
 class SessionRestoredEvent(Event):

@@ -3,5 +3,7 @@
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
   "agent_id": null,
-  "reason": "natural"
+  "reason": "natural",
+  "error_summary": null,
+  "error_type": null
 }

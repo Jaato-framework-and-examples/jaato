@@ -86,6 +86,21 @@ def test_core_py_emits_session_terminated_on_nudge_exhaust():
         "use reason=\"error\" so the Phase 1 default policy gate "
         "(reason==error → unload) fires.  See PR #179."
     )
+    # Server 0.6.159+ (Q2): the nudge-exhaust SessionTerminatedEvent
+    # must also carry error_summary + error_type so cascade observers
+    # can distinguish nudge-exhaust from a provider error without
+    # grepping the daemon log.
+    assert "error_summary=" in window and "error_type=" in window, (
+        "core.py nudge-exhaust SessionTerminatedEvent emission must "
+        "carry error_summary + error_type (server 0.6.159+).  Without "
+        "these, cascade observers can't distinguish NudgeExhausted "
+        "from a provider error class without log-grep.  See PR for Q2."
+    )
+    assert '"NudgeExhausted"' in window, (
+        "core.py nudge-exhaust SessionTerminatedEvent emission must "
+        "carry error_type=\"NudgeExhausted\" so observers can match "
+        "on the class string.  See PR for Q2."
+    )
 
 
 def test_core_py_nudge_exhaust_distinguishing_condition():
@@ -134,4 +149,39 @@ def test_core_py_emits_agent_status_done_for_backward_compat():
         "SessionTerminatedEvent must be emitted BEFORE "
         "AgentStatusChangedEvent on the nudge-exhaust path so "
         "observers receive the terminal signal first."
+    )
+
+
+def test_core_py_provider_error_path_carries_error_context():
+    """Server 0.6.159+ (Q2): the provider-error fallthrough path
+    (the ``finally`` block guarded by ``terminal_error is not None``)
+    must populate ``error_summary`` + ``error_type`` from the live
+    Exception so cascade observers can surface the failure cause
+    without grepping the daemon log.
+
+    Together with the nudge-exhaust assertion above, this covers
+    BOTH error-path SessionTerminatedEvent emit sites.
+    """
+    src = _core_py_source()
+    # Locate the terminal_error guard block — emits
+    # SessionTerminatedEvent in the finally clause after the model
+    # thread's terminal Exception escaped with_retry.
+    marker = "if terminal_error is not None:"
+    assert marker in src, (
+        f"core.py missing terminal_error guard {marker!r}.  Was the "
+        f"provider-error path refactored?  Update this test."
+    )
+    marker_idx = src.index(marker)
+    window = src[marker_idx:marker_idx + 1500]
+    # The emit must reference the Exception variable for both fields.
+    assert "error_summary=str(terminal_error)" in window, (
+        "core.py provider-error path must populate "
+        "error_summary=str(terminal_error) on SessionTerminatedEvent "
+        "(server 0.6.159+).  Cascade observers depend on this for "
+        "log-grep-free error surfacing."
+    )
+    assert "error_type=type(terminal_error).__name__" in window, (
+        "core.py provider-error path must populate "
+        "error_type=type(terminal_error).__name__ on "
+        "SessionTerminatedEvent (server 0.6.159+)."
     )
