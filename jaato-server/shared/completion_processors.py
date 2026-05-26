@@ -345,6 +345,21 @@ def invoke_processors(
     either path are bucketed into ``failed`` / ``warned`` per the
     processor's ``on_error`` policy.
 
+    **Validate return shapes** (server 0.6.160+).  The ``validate``
+    callable can return EITHER:
+
+    - **Legacy** ``list[str]``: every entry is an error, subject to
+      the processor's ``on_error`` bucket policy.
+    - **New** ``ProcessorResult`` TypedDict from
+      ``jaato_sdk.cascade_authoring`` —
+      ``{"errors": list[str], "warnings": list[str]}``.  ``errors``
+      go through ``_bucket`` (subject to ``on_error``); ``warnings``
+      go DIRECTLY to ``result.warned`` regardless of policy
+      (advisory entries never escalate).
+
+    Both shapes coexist indefinitely; legacy processors don't need
+    to migrate.
+
     Errors are NEVER short-circuited: every processor runs even if
     a prior one failed.  The agent sees the full picture on retry
     rather than playing whack-a-mole one error at a time.
@@ -384,21 +399,55 @@ def invoke_processors(
                 )
                 raw = None
             if raw is not None:
-                if not isinstance(raw, list):
+                # Server 0.6.160+: accept BOTH legacy ``list[str]`` AND
+                # the new ``ProcessorResult`` TypedDict from
+                # ``jaato_sdk.cascade_authoring``.  Legacy returns are
+                # treated as all-errors (backwards-compat).  TypedDict
+                # returns split errors → ``_bucket`` (subject to
+                # ``on_error`` policy) and warnings → ``result.warned``
+                # (always advisory, never escalates regardless of
+                # policy).  See ``ProcessorResult`` docstring for the
+                # full contract.
+                errors_iter: List[str] = []
+                warnings_iter: List[str] = []
+                shape_ok = True
+                if isinstance(raw, list):
+                    errors_iter = raw  # type: ignore[assignment]
+                elif isinstance(raw, dict):
+                    errors_iter = raw.get("errors", []) or []
+                    warnings_iter = raw.get("warnings", []) or []
+                else:
+                    shape_ok = False
                     _bucket(result, proc, (
                         f"completion_processor {script_ref!r} validate "
-                        f"returned {type(raw).__name__}; expected list[str]"
+                        f"returned {type(raw).__name__}; expected "
+                        f"list[str] or ProcessorResult TypedDict "
+                        f"({{'errors': [...], 'warnings': [...]}})"
                     ))
-                else:
-                    for item in raw:
+
+                if shape_ok:
+                    # Errors path: subject to on_error policy via _bucket.
+                    for item in errors_iter:
                         if not isinstance(item, str):
                             _bucket(result, proc, (
                                 f"completion_processor {script_ref!r} "
-                                f"validate returned a non-string entry: "
-                                f"{item!r}"
+                                f"validate returned a non-string error "
+                                f"entry: {item!r}"
                             ))
                         else:
                             _bucket(result, proc, f"[{script_ref}] {item}")
+                    # Warnings path: always advisory, bypasses _bucket.
+                    for item in warnings_iter:
+                        if not isinstance(item, str):
+                            result.warned.append((proc, (
+                                f"completion_processor {script_ref!r} "
+                                f"validate returned a non-string warning "
+                                f"entry: {item!r}"
+                            )))
+                        else:
+                            result.warned.append(
+                                (proc, f"[{script_ref}] {item}")
+                            )
 
         # 2. Render (and maybe write) — runs even when validate already
         #    queued failures; processors are independent surfaces.
