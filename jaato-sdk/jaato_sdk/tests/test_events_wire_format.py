@@ -156,3 +156,50 @@ def test_baseline_directory_has_no_orphans():
         f"Orphaned baseline files for unknown event types: {orphans}.  "
         f"Delete them or restore the corresponding EventType."
     )
+
+
+def test_session_terminated_error_context_round_trips():
+    """``error_summary`` + ``error_type`` (server 0.6.159+ / SDK 0.14.1+)
+    must round-trip through serialise → deserialise unchanged.
+
+    Cascade observers depend on these fields to surface the failure
+    cause without grepping the daemon log.  A deserialiser regression
+    that dropped them would re-open the visibility gap that Q2 closed.
+    """
+    from jaato_sdk.events import SessionTerminatedEvent
+
+    original = SessionTerminatedEvent(
+        session_id="20260526_181603",
+        agent_id="codegen_step_2",
+        reason="error",
+        error_summary="402 Payment Required - credit balance is too low",
+        error_type="AnthropicAPIError",
+    )
+    restored = deserialize_event(serialize_event(original))
+
+    assert isinstance(restored, SessionTerminatedEvent)
+    assert restored.session_id == "20260526_181603"
+    assert restored.reason == "error"
+    assert restored.error_summary == (
+        "402 Payment Required - credit balance is too low"
+    )
+    assert restored.error_type == "AnthropicAPIError"
+
+
+def test_session_terminated_natural_reason_keeps_error_fields_none():
+    """Backwards-compat: natural-completion / client-request / stopped
+    paths emit ``error_summary=None`` + ``error_type=None``.  Existing
+    consumers that don't read these fields see no behavior change.
+    """
+    from jaato_sdk.events import SessionTerminatedEvent
+
+    for reason in ("natural", "client_request", "stopped"):
+        ev = SessionTerminatedEvent(
+            session_id="s1", agent_id="main", reason=reason,
+        )
+        assert ev.error_summary is None, (
+            f"reason={reason!r} should keep error_summary=None"
+        )
+        assert ev.error_type is None, (
+            f"reason={reason!r} should keep error_type=None"
+        )

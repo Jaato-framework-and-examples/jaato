@@ -4283,10 +4283,17 @@ class JaatoServer:
                 # waiting for AGENT_COMPLETED that will never arrive.
                 if terminal_error is not None:
                     from jaato_sdk.events import SessionTerminatedEvent
+                    # Server 0.6.159+: carry the terminal error onto the
+                    # SessionTerminatedEvent so cascade observers can
+                    # surface the failure cause without grepping the
+                    # daemon log.  terminal_error is the Exception that
+                    # escaped with_retry above.
                     server.emit(SessionTerminatedEvent(
                         session_id=server.session_id or "",
                         agent_id=server._main_agent_id,
                         reason="error",
+                        error_summary=str(terminal_error),
+                        error_type=type(terminal_error).__name__,
                     ))
                     clear_logging_context()
                     return
@@ -4462,18 +4469,25 @@ class JaatoServer:
                         f"nudges without calling signal_completion — "
                         f"emitting terminal events"
                     )
+                    nudge_exhaust_summary = (
+                        f"Agent loop exhausted "
+                        f"{MAX_COMPLETION_NUDGES} completion nudges "
+                        f"without calling signal_completion"
+                    )
                     server.emit(_ErrorEvent(
-                        error=(
-                            f"Agent loop exhausted "
-                            f"{MAX_COMPLETION_NUDGES} completion nudges "
-                            f"without calling signal_completion"
-                        ),
+                        error=nudge_exhaust_summary,
                         error_type="NudgeExhausted",
                     ))
+                    # Server 0.6.159+: same error context flows to the
+                    # cascade observer via SessionTerminatedEvent so
+                    # nudge-exhaust is distinguishable from a provider
+                    # error without log-grep.
                     server.emit(_SessionTerminatedEvent(
                         session_id=server.session_id or "",
                         agent_id=server._main_agent_id,
                         reason="error",
+                        error_summary=nudge_exhaust_summary,
+                        error_type="NudgeExhausted",
                     ))
 
                 server.emit(AgentStatusChangedEvent(
