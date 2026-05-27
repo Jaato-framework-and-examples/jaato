@@ -52,6 +52,7 @@ def _make_sm() -> SessionManager:
     sm._cascade_client_idle_timeout = 300.0
     sm._cascade_client_sweep_stop = None
     sm._cascade_client_sweep_thread = None
+    sm._cid_last_session_ts = {}  # Bug B fix, server 0.6.161+
     sm._HEADLESS_CLIENT_ID = "_headless"
     return sm
 
@@ -563,3 +564,68 @@ class TestSweep:
         # Stale entry reaped; fresh entry survives.
         assert len(sm._cascade_clients.get("abc", [])) == 1
         assert sm._cascade_clients["abc"][0].client_id == "fresh"
+
+    def test_sweep_skips_entries_with_recent_cid_session_activity(self):
+        """Server 0.6.161+ (Bug B fix): the sweep must NOT reap an
+        observer whose cascade has had a recent session creation,
+        even if no session is currently loaded.
+
+        Empirical motivation (peer 7:1 retry-27, 2026-05-26 22:03:57):
+        the sweep landed in the 23-second window between codegen
+        step 1 unloading (per PR-183 default policy) and codegen
+        step 2 spawning.  Pre-fix the observer got reaped because
+        the "any currently-loaded session" check failed during that
+        gap.  Cascades are SERIAL under PR-183 — these gaps are
+        normal, not idle."""
+        sm = _make_sm()
+        sm._cascade_client_idle_timeout = 1.0
+        sm.register_in_process_client(
+            client_id="obs", callback=MagicMock(),
+            cascade_driver_id="abc", role="observer",
+        )
+        # Mark observer's registration as stale by both metrics that
+        # the old sweep predicate used (last_event_ts AND
+        # registered_at older than timeout).
+        entry = sm._cascade_clients["abc"][0]
+        entry.registered_at = time.monotonic() - 10.0
+        entry.last_event_ts = time.monotonic() - 10.0
+        # No session currently loaded with cid="abc" — pre-fix this
+        # would reap.
+        assert not any(
+            getattr(s, "cascade_driver_id", None) == "abc"
+            for s in sm._sessions.values()
+        )
+        # But a session WAS created with cid="abc" recently — the
+        # new sweep predicate must keep the observer alive.
+        sm._record_cid_session_activity("abc")
+        sm._cascade_client_sweep_once()
+        assert "abc" in sm._cascade_clients, (
+            "Bug B fix: sweep must skip reap when "
+            "_cid_last_session_ts[cid] is recent, even if no session "
+            "is currently loaded"
+        )
+
+    def test_sweep_reaps_when_cid_session_activity_also_stale(self):
+        """Bug B fix: when BOTH the registration AND the cid's
+        last-session-creation timestamp are older than timeout, the
+        sweep still reaps (cascade is genuinely done).
+
+        Also verifies cleanup: ``_cid_last_session_ts[cid]`` is
+        removed when the last registration for that cid is reaped.
+        """
+        sm = _make_sm()
+        sm._cascade_client_idle_timeout = 0.05
+        sm.register_in_process_client(
+            client_id="obs", callback=MagicMock(),
+            cascade_driver_id="abc", role="observer",
+        )
+        # Both metrics stale.
+        entry = sm._cascade_clients["abc"][0]
+        entry.registered_at = time.monotonic() - 1.0
+        entry.last_event_ts = time.monotonic() - 1.0
+        sm._cid_last_session_ts["abc"] = time.monotonic() - 1.0
+        sm._cascade_client_sweep_once()
+        assert "abc" not in sm._cascade_clients
+        # Cleanup: the cid-activity dict was pruned when its last
+        # registration was reaped.
+        assert "abc" not in sm._cid_last_session_ts

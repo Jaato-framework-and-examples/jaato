@@ -295,6 +295,16 @@ class SessionManager:
         # registration.  Stopped on shutdown.
         self._cascade_client_sweep_stop: Optional[threading.Event] = None
         self._cascade_client_sweep_thread: Optional[threading.Thread] = None
+        # Server 0.6.161+: monotonic timestamp of the most recent
+        # session creation per cascade_driver_id.  Used by the
+        # cascade-client GC sweep as an "is this cascade alive?"
+        # signal alongside the "any currently-loaded session" check —
+        # closes the mid-cascade-reap bug where the sweep landed in
+        # the brief window between session N unloading (per PR-183
+        # default policy) and session N+1 spawning, reaped the
+        # observer registration even though the cascade was actively
+        # progressing.  See ``_record_cid_session_activity``.
+        self._cid_last_session_ts: Dict[str, float] = {}
 
         # Phase 4 §4.3.6a: bookkeeping for isolated-subagent sub-runners.
         # Keyed by isolated_session_id (``{parent}__sub_{subagent}``).
@@ -3230,6 +3240,26 @@ class SessionManager:
                 session.session_id, exc, exc_info=True,
             )
 
+    def _record_cid_session_activity(self, cid: Optional[str]) -> None:
+        """Stamp the most-recent-session-creation timestamp for a
+        cascade_driver_id.  No-op when ``cid`` is None (standalone
+        session).
+
+        The cascade-client GC sweep consults this dict to keep an
+        observer registration alive across the brief window between
+        session N unloading (default policy) and session N+1 spawning
+        — without this, the sweep would reap the observer mid-cascade.
+
+        Called from every site that adds a session with a cid to
+        ``self._sessions``.  Cleanup happens in the sweep when the
+        last registration for the cid is reaped.
+
+        Server 0.6.161+ (Bug B fix).
+        """
+        if cid is None:
+            return
+        self._cid_last_session_ts[cid] = time.monotonic()
+
     def _ensure_cascade_client_sweep_running(self) -> None:
         """Lazy-start the cascade-client GC backstop sweep thread on
         first registration.  Idempotent."""
@@ -3299,6 +3329,17 @@ class SessionManager:
             for cid, entries in list(self._cascade_clients.items()):
                 if cid in active_cids:
                     continue  # cascade still active; skip
+                # Server 0.6.161+ (Bug B): also treat the cascade as
+                # alive if a session with this cid was created within
+                # ``timeout`` seconds, even if no session is currently
+                # loaded (PR-183 default policy unloads each stage
+                # before the next spawns — brief gaps are normal).
+                last_session_ts = self._cid_last_session_ts.get(cid)
+                if (
+                    last_session_ts is not None
+                    and (now - last_session_ts) <= timeout
+                ):
+                    continue  # cascade alive recently; skip
                 survivors: List[CascadeClientEntry] = []
                 for entry in entries:
                     ref_ts = (
@@ -3314,6 +3355,10 @@ class SessionManager:
                     self._cascade_clients[cid] = survivors
                 else:
                     self._cascade_clients.pop(cid, None)
+                    # Server 0.6.161+ (Bug B): clean up the
+                    # cid-activity dict when its last registration
+                    # is reaped — bounds growth.
+                    self._cid_last_session_ts.pop(cid, None)
 
         for cid, client_id in cids_to_reap:
             logger.info(
@@ -4157,6 +4202,13 @@ class SessionManager:
             self._sessions[session_id] = session
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
+            # Server 0.6.161+ (Bug B): record cid activity so the
+            # cascade-client GC sweep treats this cascade as alive
+            # across inter-stage gaps.  See
+            # :meth:`_record_cid_session_activity`.
+            self._record_cid_session_activity(
+                getattr(session, "cascade_driver_id", None),
+            )
 
         # Seed session-attached state BEFORE hooks fire.  Consumer
         # hooks (e.g. premium pseudonymization) read these keys via
