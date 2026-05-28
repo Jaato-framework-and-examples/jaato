@@ -3233,12 +3233,32 @@ class SessionManager:
 
         # Pop the synthetic _HEADLESS_CLIENT_ID so the existing
         # _maybe_unload_session gate (`if session.attached_clients`)
-        # passes through.  Real-client sessions don't reach here
-        # because is_headless is False AND, if has_cascade_owner,
-        # this is a cascade-driven session whose attached_clients
-        # was the synthetic placeholder in the first place.
+        # passes through.
         session.attached_clients.discard(self._HEADLESS_CLIENT_ID)
         self._client_to_session.pop(self._HEADLESS_CLIENT_ID, None)
+        # Server 0.6.165+ (γ'): when the session is cascade-stamped
+        # (cascade_driver_id != None), ALSO pop real IPC clients
+        # attached via ``client.create_session(cascade_driver_id=...)``.
+        # Rationale: presence of cascade_driver_id IS the semantic
+        # signal the client is participating in a cascade (observer
+        # role by design); the IPC attachment is incidental to the
+        # cascade-kickoff API, not a request to keep the session
+        # loaded.  Without this, the cascade-driver's
+        # ``client.create_session("discovery", cascade_driver_id=...)``
+        # pinned the discovery slot for the entire IPC connection
+        # lifetime — peer 7:1's retry-46 held a discovery slot 6m43s
+        # past SessionTerminated until the driver was killed.  TUI
+        # interactive sessions don't pass cascade_driver_id so they
+        # keep the current "stay-loaded-for-history-inspection"
+        # behavior; only cascade sessions auto-detach here.
+        if cid is not None:
+            for client_id in list(session.attached_clients):
+                session.attached_clients.discard(client_id)
+                # Only pop client_to_session if it still points at
+                # this session — the client may have attached
+                # elsewhere since.
+                if self._client_to_session.get(client_id) == session.session_id:
+                    self._client_to_session.pop(client_id, None)
         reason = getattr(event, "reason", "unknown")
         try:
             self._maybe_unload_session(session.session_id)
