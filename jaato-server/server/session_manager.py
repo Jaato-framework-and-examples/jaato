@@ -3142,6 +3142,32 @@ class SessionManager:
         """Phase 1: fan out an event to cascade-clients matching
         ``session.cascade_driver_id``.
 
+        Post-bootstrap entry point — extracts the cid from the Session
+        object then delegates to :meth:`_dispatch_to_cascade_clients_by_cid`.
+        Bootstrap-time emit paths (where the Session object isn't yet in
+        ``self._sessions`` because bootstrap is still in flight) call the
+        by-cid helper directly via :meth:`_route_bootstrap_event` — see
+        that method for the rationale and the duplicate-delivery caveat
+        for direct-attached cascade observers.
+        """
+        cid = getattr(session, "cascade_driver_id", None)
+        self._dispatch_to_cascade_clients_by_cid(cid, event)
+
+    def _dispatch_to_cascade_clients_by_cid(
+        self, cid: Optional[str], event: Event,
+    ) -> None:
+        """Phase 1 dispatch core — fan out an event to cascade-clients
+        registered for ``cid``.
+
+        Extracted from :meth:`_dispatch_to_cascade_clients` (server
+        0.6.166+) so bootstrap-time emit paths can reach cascade
+        observers without requiring a Session object — the Session
+        isn't in ``self._sessions`` during bootstrap, so the previous
+        ``getattr(session, "cascade_driver_id", None)`` lookup would
+        succeed (PR-192 stamps the dataclass field) but the
+        :meth:`_emit_to_session` event-routing chain that hosts the
+        post-bootstrap call site doesn't fire during init.
+
         Dispatch order: owners first, then observers (so an owner
         can call ``session_manager.delete_session(...)`` and preempt
         observer notifications for a now-deleted session — the
@@ -3152,8 +3178,11 @@ class SessionManager:
         misbehaving observer must not break the dispatch chain.
         ``last_event_ts`` is updated regardless so GC doesn't reap
         an actively-firing entry just because its callback raises.
+
+        ``cid is None`` is a no-op: standalone (non-cascade) sessions
+        emit through here at post-bootstrap dispatch + standalone
+        bootstrap, and neither needs cascade fan-out.
         """
-        cid = getattr(session, "cascade_driver_id", None)
         if cid is None:
             return
         # Snapshot under lock to avoid mutation-during-iteration if
@@ -3170,11 +3199,69 @@ class SessionManager:
                 entry.callback(event)
             except Exception as exc:  # noqa: BLE001 — callback boundary
                 logger.warning(
-                    "_dispatch_to_cascade_clients: callback for %s "
+                    "_dispatch_to_cascade_clients_by_cid: callback for %s "
                     "(role=%s) raised %s — continuing dispatch chain",
                     entry.client_id, entry.role,
                     type(exc).__name__, exc_info=True,
                 )
+
+    def _route_bootstrap_event(
+        self,
+        direct_client_id: Optional[str],
+        cascade_driver_id: Optional[str],
+        event: Event,
+    ) -> None:
+        """Centralized bootstrap-time event router (server 0.6.166+).
+
+        Replaces the previous ``on_event_during_init`` lambda pattern
+        which routed ONLY to the requesting client via
+        ``_emit_to_client``, silently bypassing the cascade-client
+        dispatch chain for the window between session-creation request
+        and ``set_event_callback`` wiring (when the regular
+        :meth:`_emit_to_session` path takes over).
+
+        Empirical motivation (peer 7:1, retry-47, 2026-05-28): cascade
+        observers subscribed to ``AgentCreatedEvent`` for downstream
+        reactor-spawned sessions (context / host_validator / codegen)
+        never received the event because it fires DURING bootstrap
+        with ``client_id = _HEADLESS_CLIENT_ID`` — the synthetic
+        client whose transport drops the event.  ``SessionTerminatedEvent``
+        fires AFTER bootstrap so the post-bootstrap path delivered it
+        correctly; that asymmetry made the bug seem random.
+
+        The audit identified TWO call sites with the same pattern
+        (``create_session`` main path at line ~4199; ``_load_session``
+        disk-restore path at line ~4857).  This helper centralizes the
+        routing so neither site can silently drop cascade observer
+        delivery.
+
+        Args:
+            direct_client_id: requesting client of the bootstrap.
+                ``None`` for some restore paths.  When set, the event
+                is emitted to this client via
+                :meth:`_emit_to_client` (existing behavior).
+            cascade_driver_id: if set, the event is also dispatched to
+                cascade-clients registered for this cid via
+                :meth:`_dispatch_to_cascade_clients_by_cid` — reaches
+                cascade observers regardless of whether the Session is
+                in ``self._sessions`` yet.
+            event: the event being emitted.
+
+        **Known duplicate-delivery caveat**: for the narrow case where
+        ``direct_client_id`` is a real IPC client AND that same
+        client has a cascade observer subscription via
+        ``IPCClient.cascade_events()``, the bootstrap-time event
+        arrives twice on that connection's SDK queue (once via direct
+        IPC, once via cascade-callback IPC route-back).  For typical
+        cascade-driver usage this only affects the brief direct-attach
+        lifetime before γ' auto-detaches (server 0.6.165+).  If it
+        becomes a real issue, client-side de-dup via event identity
+        is a follow-up.
+        """
+        if direct_client_id is not None:
+            self._emit_to_client(direct_client_id, event)
+        if cascade_driver_id is not None:
+            self._dispatch_to_cascade_clients_by_cid(cascade_driver_id, event)
 
     def _apply_default_cascade_policy(
         self, session: 'Session', event: Event,
@@ -4194,9 +4281,17 @@ class SessionManager:
             # ``None`` = standalone session.  See
             # docs/design/runner-cascade-sharing.md §4.1.
             cascade_driver_id=cascade_driver_id,
-            # During init, emit directly to requesting client (not
-            # yet attached to session).
-            on_event_during_init=lambda e: self._emit_to_client(client_id, e),
+            # Server 0.6.166+: bootstrap-time emit now routes through
+            # :meth:`_route_bootstrap_event` so cascade observers
+            # receive events fired during init (AgentCreatedEvent,
+            # initial AgentStatusChangedEvent, etc.) — pre-0.6.166
+            # these went only to ``client_id`` via _emit_to_client,
+            # which transport-dropped them for headless cascade
+            # sessions (client_id == _HEADLESS_CLIENT_ID).  See the
+            # _route_bootstrap_event docstring for the audit context.
+            on_event_during_init=lambda e: self._route_bootstrap_event(
+                client_id, cascade_driver_id, e,
+            ),
         )
         server, session = self._bootstrap_session(envelope)
         if server is None or session is None:
@@ -4811,9 +4906,20 @@ class SessionManager:
         # Create JaatoServer and restore state
         logger.debug(f"_load_session: creating JaatoServer for {session_id}...")
 
-        # During init, emit directly to requesting client if provided
+        # Server 0.6.166+: centralized bootstrap-time routing via
+        # :meth:`_route_bootstrap_event`.  Disk-restore doesn't
+        # currently thread a cascade_driver_id (sessions being
+        # restored from disk aren't part of an active cascade
+        # observer subscription), so the cascade dispatch piece is
+        # a no-op for this path — but routing through the same
+        # helper means future cascade-restoration support drops in
+        # without re-introducing the bypass.  When client_id is
+        # provided, route to that client; otherwise fall through to
+        # _emit_to_session (covers the no-client restore branch).
         if client_id:
-            init_callback = lambda e: self._emit_to_client(client_id, e)
+            init_callback = lambda e: self._route_bootstrap_event(
+                client_id, None, e,
+            )
         else:
             init_callback = lambda e: self._emit_to_session(session_id, e)
 

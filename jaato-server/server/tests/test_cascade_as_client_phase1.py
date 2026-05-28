@@ -725,3 +725,120 @@ class TestSweep:
         # Cleanup: the cid-activity dict was pruned when its last
         # registration was reaped.
         assert "abc" not in sm._cid_last_session_ts
+
+
+# ======================================================================
+# _route_bootstrap_event  (server 0.6.166+)
+# ======================================================================
+
+
+class TestRouteBootstrapEvent:
+    """Server 0.6.166+ centralized bootstrap-time event router.
+
+    Closes the gap where events emitted during ``_bootstrap_session``
+    bypassed the cascade-dispatch chain because the regular
+    ``set_event_callback`` wires AFTER bootstrap.  Empirical motivation:
+    peer 7:1 retry-47 — AgentCreatedEvent for reactor-spawned headless
+    cascade sessions (context / host_validator / codegen) never reached
+    cascade observers because they emit during init via
+    ``on_event_during_init`` which previously routed only to
+    ``_emit_to_client(_HEADLESS_CLIENT_ID, ...)`` (transport-dropped).
+    """
+
+    def _setup_sm_with_emit_stubs(self, sm: SessionManager):
+        """Stub _emit_to_client + the cascade dispatch helper to
+        record their calls.  Returns the two recording lists."""
+        client_emits: List[tuple] = []  # (client_id, event)
+        cascade_dispatches: List[tuple] = []  # (cid, event)
+        sm._emit_to_client = lambda cid, ev: client_emits.append((cid, ev))
+        sm._dispatch_to_cascade_clients_by_cid = (
+            lambda cid, ev: cascade_dispatches.append((cid, ev))
+        )
+        return client_emits, cascade_dispatches
+
+    def test_routes_to_both_client_and_cascade_when_both_set(self):
+        """When direct_client_id AND cascade_driver_id are both set,
+        the event reaches both the requesting client AND cascade
+        observers.  Note: this is the case where duplicate delivery
+        can occur for a same-client cascade subscriber — documented
+        in _route_bootstrap_event docstring."""
+        sm = _make_sm()
+        client_emits, cascade_dispatches = self._setup_sm_with_emit_stubs(sm)
+        event = MagicMock()
+        sm._route_bootstrap_event("ipc_1", "cid-abc", event)
+        assert client_emits == [("ipc_1", event)]
+        assert cascade_dispatches == [("cid-abc", event)]
+
+    def test_routes_only_to_client_when_no_cascade(self):
+        """Standalone (non-cascade) session bootstrap: cascade
+        dispatch is a no-op (cascade_driver_id is None), direct
+        client gets the event."""
+        sm = _make_sm()
+        client_emits, cascade_dispatches = self._setup_sm_with_emit_stubs(sm)
+        event = MagicMock()
+        sm._route_bootstrap_event("real-client", None, event)
+        assert client_emits == [("real-client", event)]
+        assert cascade_dispatches == []
+
+    def test_routes_only_to_cascade_when_client_id_is_none(self):
+        """Restore-without-client path: cascade dispatch fires if
+        cid is set, direct client emit is skipped."""
+        sm = _make_sm()
+        client_emits, cascade_dispatches = self._setup_sm_with_emit_stubs(sm)
+        event = MagicMock()
+        sm._route_bootstrap_event(None, "cid-abc", event)
+        assert client_emits == []
+        assert cascade_dispatches == [("cid-abc", event)]
+
+    def test_headless_cascade_bootstrap_reaches_cascade_observers(self):
+        """The empirical scenario peer 7:1 hit: reactor-spawned
+        downstream cascade session bootstraps with
+        client_id=_HEADLESS_CLIENT_ID (transport-dropped).  Before
+        0.6.166 the AgentCreatedEvent was lost.  Now the route_helper
+        delivers it to cascade observers via the cid path."""
+        sm = _make_sm()
+        client_emits, cascade_dispatches = self._setup_sm_with_emit_stubs(sm)
+        event = MagicMock()
+        sm._route_bootstrap_event(sm._HEADLESS_CLIENT_ID, "cid-abc", event)
+        # Direct emit still fires (the transport drops it; the
+        # helper doesn't second-guess the transport's job).
+        assert client_emits == [(sm._HEADLESS_CLIENT_ID, event)]
+        # Critical: cascade observers reached via the cid path.
+        assert cascade_dispatches == [("cid-abc", event)]
+
+    def test_dispatch_by_cid_no_op_on_none(self):
+        """``_dispatch_to_cascade_clients_by_cid(None, event)`` is
+        a no-op — standalone sessions emit through this path during
+        post-bootstrap dispatch + standalone bootstrap, neither
+        needs cascade fan-out."""
+        sm = _make_sm()
+        sm.register_in_process_client(
+            client_id="observer", callback=MagicMock(),
+            cascade_driver_id="abc", role="observer",
+        )
+        cb = sm._cascade_clients["abc"][0].callback
+        # No-op: cid is None, no entries should be touched.
+        sm._dispatch_to_cascade_clients_by_cid(None, MagicMock())
+        cb.assert_not_called()
+
+    def test_dispatch_by_cid_fans_out_to_matching_entries(self):
+        """End-to-end through the extracted helper: events fan out
+        to all entries registered for the matching cid, owners
+        first, observers second.  Compose-check that the helper
+        behaves identically to the pre-refactor
+        _dispatch_to_cascade_clients on the cid-matching path."""
+        sm = _make_sm()
+        owner_cb = MagicMock()
+        observer_cb = MagicMock()
+        sm.register_in_process_client(
+            client_id="_cascade:abc", callback=owner_cb,
+            cascade_driver_id="abc", role="owner",
+        )
+        sm.register_in_process_client(
+            client_id="obs-1", callback=observer_cb,
+            cascade_driver_id="abc", role="observer",
+        )
+        event = MagicMock()
+        sm._dispatch_to_cascade_clients_by_cid("abc", event)
+        owner_cb.assert_called_once_with(event)
+        observer_cb.assert_called_once_with(event)
