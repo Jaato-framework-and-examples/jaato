@@ -109,6 +109,21 @@ class Session:
     provisioned: bool = False  # True if workspace was auto-provisioned by server
     created_by: Optional[str] = None  # Authenticated user who created the session
     sandbox_mode: Optional[str] = None  # "apparmor" or "soft" when workspace sandboxing is active
+    # Server 0.6.164+ (Bug B real root cause): opaque cascade tenant
+    # ID stamped at session creation.  Consumed by
+    # :meth:`_dispatch_to_cascade_clients` (Phase 1 cascade-as-client
+    # dispatch) and :meth:`_record_cid_session_activity` (Bug B GC
+    # sweep cid-scoped activity tracker).  Pre-0.6.164 BOTH paths
+    # called ``getattr(session, "cascade_driver_id", None)`` which
+    # silently returned None because the Session dataclass didn't
+    # have the field — dispatch never fired for cascade sessions and
+    # PR-188's GC sweep cid-skip never engaged for downstream
+    # reactor-spawned stages.  See peer 7:1's retry-45 diagnostic
+    # (2026-05-28): cascade-stamped runner-pool slots showed cid
+    # propagation working at the pool layer, but session-level cid
+    # was never set, so the GC reaped the observer at 22:07:25
+    # despite host_validator having spawned 85s earlier.
+    cascade_driver_id: Optional[str] = None
     # Phase 3 §3.12 disk-restore + peer-review M5/N1: True when this
     # Session was loaded from disk and is awaiting its first
     # client-attach.  While True, ``check_permission`` ASK paths
@@ -4199,6 +4214,14 @@ class SessionManager:
         server.set_auth_complete_callback(on_auth_complete)
 
         with self._lock:
+            # Server 0.6.164+ (Bug B real root cause): stamp the
+            # session-object's cid BEFORE adding to ``_sessions`` so
+            # both ``_dispatch_to_cascade_clients`` (Phase 1) and
+            # ``_record_cid_session_activity`` (PR-188) read the
+            # correct value.  Pre-0.6.164 the dataclass had no
+            # ``cascade_driver_id`` field; getattr returned None for
+            # every cascade session, defeating dispatch + GC-skip.
+            session.cascade_driver_id = cascade_driver_id
             self._sessions[session_id] = session
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
@@ -4207,7 +4230,7 @@ class SessionManager:
             # across inter-stage gaps.  See
             # :meth:`_record_cid_session_activity`.
             self._record_cid_session_activity(
-                getattr(session, "cascade_driver_id", None),
+                session.cascade_driver_id,
             )
 
         # Seed session-attached state BEFORE hooks fire.  Consumer
