@@ -138,6 +138,15 @@ _SERVER_TO_BUS: Dict[EventType, BusEventType] = {
     EventType.CONTEXT_UPDATED: BusEventType.CONTEXT_UPDATED,
     EventType.PERMISSION_INPUT_MODE: BusEventType.PERMISSION_REQUESTED,
     EventType.PERMISSION_RESOLVED: BusEventType.PERMISSION_RESOLVED,
+    # Server 0.6.162+ (Bug C fix): bridge SessionTerminatedEvent to
+    # the bus so reactor rules matching event_type=session.terminated
+    # actually fire.  Pre-0.6.162 the event bypassed the bus entirely
+    # (went directly to IPC/WS clients via _on_event), which meant
+    # the reactor engine — which subscribes via bus.subscribe — never
+    # saw terminal events.  premium 0.1.188's build_merged_view fix
+    # (Bug A) made `reason` JMESPath-visible, but the event wasn't
+    # reaching the matcher at all.  See PR for diagnosis trace.
+    EventType.SESSION_TERMINATED: BusEventType.SESSION_TERMINATED,
 }
 
 
