@@ -212,3 +212,105 @@ async def test_cascade_events_multiple_event_types():
     queue = next(iter(client._event_subscribers))
     await queue.put(None)
     await task
+
+
+@pytest.mark.asyncio
+async def test_cascade_events_filters_by_event_type_client_side():
+    """SDK 0.14.4+: cascade_events applies a client-side type-name
+    filter so events of types NOT in ``event_types`` are not yielded.
+
+    Pre-fix the SDK relied entirely on server-side filtering at the
+    cascade-client callback path.  But events reaching the IPC queue
+    via other paths (the normal events() stream is unfiltered) were
+    yielded unfiltered, breaking the docstring contract.
+
+    Empirical motivation (peer 7:1, 2026-05-28): 42 AGENT_CREATED
+    events reached the handler despite the cascade registration
+    only matching SessionTerminatedEvent.
+    """
+    from jaato_sdk.events import (
+        AgentCreatedEvent,
+        AgentCompletedEvent,
+    )
+    client, captured = _make_client_capture()
+
+    yielded: list = []
+
+    async def driver():
+        async for event in client.cascade_events(
+            "cascade-F",
+            event_types=["SessionTerminatedEvent"],
+        ):
+            yielded.append(event)
+
+    task = asyncio.create_task(driver())
+
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if captured:
+            break
+
+    queue = next(iter(client._event_subscribers))
+    # Push a mix: AgentCreated (not subscribed), SessionTerminated
+    # (subscribed), AgentCompleted (not subscribed), SessionTerminated
+    # (subscribed).
+    await queue.put(AgentCreatedEvent(
+        agent_id="a1", name="discovery", agent_type="main",
+    ))
+    await queue.put(SessionTerminatedEvent(
+        session_id="s1", agent_id="main", reason="natural",
+    ))
+    await queue.put(AgentCompletedEvent(agent_id="a1"))
+    await queue.put(SessionTerminatedEvent(
+        session_id="s2", agent_id="main", reason="error",
+    ))
+    await queue.put(None)  # drain
+    await task
+
+    # Only the two SessionTerminatedEvent instances should be yielded.
+    assert len(yielded) == 2, (
+        f"client-side filter regressed: expected 2 yields, got "
+        f"{len(yielded)} ({[type(e).__name__ for e in yielded]})"
+    )
+    assert all(
+        type(e).__name__ == "SessionTerminatedEvent" for e in yielded
+    )
+    assert yielded[0].reason == "natural"
+    assert yielded[1].reason == "error"
+
+
+@pytest.mark.asyncio
+async def test_cascade_events_no_filter_yields_all():
+    """Backwards-compat: ``event_types=None`` (default) yields every
+    event arriving on the IPC queue — no client-side filter applied.
+    """
+    from jaato_sdk.events import AgentCreatedEvent
+    client, captured = _make_client_capture()
+
+    yielded: list = []
+
+    async def driver():
+        async for event in client.cascade_events("cascade-NF"):
+            yielded.append(event)
+
+    task = asyncio.create_task(driver())
+
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if captured:
+            break
+
+    queue = next(iter(client._event_subscribers))
+    await queue.put(AgentCreatedEvent(
+        agent_id="a", name="x", agent_type="main",
+    ))
+    await queue.put(SessionTerminatedEvent(
+        session_id="s", agent_id="main", reason="natural",
+    ))
+    await queue.put(None)
+    await task
+
+    assert len(yielded) == 2
+    assert {type(e).__name__ for e in yielded} == {
+        "AgentCreatedEvent", "SessionTerminatedEvent",
+    }

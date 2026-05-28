@@ -1943,6 +1943,19 @@ class IPCClient:
                 command="cascade.register",
                 args=args,
             ))
+            # SDK 0.14.4+: client-side type-name filter honors the
+            # docstring contract.  Server-side dispatch via the
+            # cascade-client callback path already filters on
+            # ``event_types`` (session_manager.py:217-222
+            # ``event_type_match``), but the SDK's
+            # ``_subscribe_events()`` queue receives EVERY event on
+            # this IPC connection — including events arriving via
+            # other paths (e.g. normal session events the client also
+            # observes).  Without this filter, multi-event-subscription
+            # callers saw events of types they didn't subscribe to
+            # leak through (peer 7:1 empirical: 42 AGENT_CREATED
+            # arrived despite registering only SessionTerminatedEvent).
+            filter_set = set(event_types) if event_types else None
             while True:
                 event = await q.get()
                 if event is None:
@@ -1952,6 +1965,10 @@ class IPCClient:
                         "iterator exiting cid=%s", cascade_driver_id,
                     )
                     break
+                if filter_set is not None and (
+                    type(event).__name__ not in filter_set
+                ):
+                    continue
                 yield event
         finally:
             self._unsubscribe_events(q)
