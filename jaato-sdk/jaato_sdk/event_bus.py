@@ -52,6 +52,9 @@ class EventType(Enum):
     AGENT_COMPLETED = "agent.completed"
     AGENT_OUTPUT = "agent.output"          # Model text, system text, plugin text
 
+    # Session lifecycle events (bridged from server events)
+    SESSION_TERMINATED = "session.terminated"  # Server 0.6.162+ / SDK 0.14.3+
+
     # Tool execution events (bridged from server events)
     TOOL_CALL_STARTED = "tool.call_started"
     TOOL_CALL_COMPLETED = "tool.call_completed"
