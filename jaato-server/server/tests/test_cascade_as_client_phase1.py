@@ -499,6 +499,102 @@ class TestDefaultPolicy:
         # Real client present, no cascade-owner → no unload
         assert unload_calls == []
 
+    def test_cascade_session_auto_detaches_real_ipc_clients(self):
+        """Server 0.6.165+ (γ'): cascade-stamped sessions
+        (cascade_driver_id != None) auto-detach IPC clients on
+        terminal events so unload proceeds even when the
+        cascade-driver's IPCClient is still connected.
+
+        Empirical motivation (peer 7:1, retry-46, 2026-05-28):
+        cascade.py driver called client.create_session("discovery",
+        cascade_driver_id=...).  The driver's ipc_1 became attached
+        to the discovery session.  After natural completion at
+        22:27:28, SessionTerminatedEvent fired + policy triggered
+        unload — but _maybe_unload_session was a no-op because
+        attached_clients still contained ipc_1.  Slot held 6m43s
+        until the driver was killed.  γ' makes cascade-stamped
+        sessions auto-detach real IPC clients here so the unload
+        chain proceeds.
+
+        TUI / interactive sessions don't pass cascade_driver_id so
+        they're unaffected — covered by
+        test_interactive_session_terminal_error_no_unload above.
+        """
+        from jaato_sdk.events import SessionTerminatedEvent
+        sm = _make_sm()
+        unload_calls = self._setup_sm_with_unload_stub(sm)
+        # In the empirical scenario, the premium reactor extension
+        # auto-registers as owner for cascade-driver-id sessions
+        # (Phase 3, premium 0.1.187+).  Mirror that so the policy
+        # gate passes through to the γ' auto-detach code.
+        sm.register_in_process_client(
+            client_id="_cascade:abc",
+            callback=MagicMock(),
+            cascade_driver_id="abc",
+            role="owner",
+        )
+        # Cascade-stamped session with a REAL IPC client attached
+        # (NOT just the synthetic _HEADLESS_CLIENT_ID — here ipc_1
+        # is the live cascade-driver IPC connection).
+        session = _make_session(
+            "s1", cid="abc",
+            attached_clients={"ipc_1"},
+        )
+        sm._sessions["s1"] = session
+        sm._client_to_session["ipc_1"] = "s1"
+        event = SessionTerminatedEvent(
+            session_id="s1", agent_id="main", reason="natural",
+        )
+        sm._apply_default_cascade_policy(session, event)
+        # Policy must (a) detach ipc_1 from session attached_clients,
+        # (b) pop ipc_1 from _client_to_session, and (c) trigger
+        # _maybe_unload_session (recorded in unload_calls).
+        assert "ipc_1" not in session.attached_clients, (
+            "γ' must detach IPC clients from cascade-stamped sessions "
+            "on terminal events so unload can proceed"
+        )
+        assert "ipc_1" not in sm._client_to_session, (
+            "γ' must pop the client_to_session reverse mapping"
+        )
+        assert unload_calls == ["s1"], (
+            "γ' must reach _maybe_unload_session for cascade sessions "
+            "with real IPC clients attached"
+        )
+
+    def test_cascade_session_auto_detach_preserves_other_session_attachments(
+        self,
+    ):
+        """γ' must not pop ``_client_to_session`` entries that
+        point at a DIFFERENT session — the client may have attached
+        somewhere else since this cascade started.
+        """
+        from jaato_sdk.events import SessionTerminatedEvent
+        sm = _make_sm()
+        unload_calls = self._setup_sm_with_unload_stub(sm)
+        sm.register_in_process_client(
+            client_id="_cascade:abc",
+            callback=MagicMock(),
+            cascade_driver_id="abc",
+            role="owner",
+        )
+        session = _make_session(
+            "s1", cid="abc",
+            attached_clients={"ipc_1"},
+        )
+        sm._sessions["s1"] = session
+        # ipc_1's _client_to_session points elsewhere (the client
+        # re-attached mid-cascade or the bookkeeping diverged).
+        sm._client_to_session["ipc_1"] = "other-session"
+        event = SessionTerminatedEvent(
+            session_id="s1", agent_id="main", reason="natural",
+        )
+        sm._apply_default_cascade_policy(session, event)
+        # ipc_1 still removed from THIS session's attached_clients ...
+        assert "ipc_1" not in session.attached_clients
+        # ... but client_to_session entry is preserved (it pointed
+        # at a different session).
+        assert sm._client_to_session["ipc_1"] == "other-session"
+
 
 # ======================================================================
 # GC sweep
