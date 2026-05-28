@@ -345,7 +345,18 @@ def load_script_symbol(
 
     fn = getattr(module, symbol, None)
     if fn is None:
-        logger.warning(
+        # Server 0.6.163+: DEBUG, not WARNING.  Callers probe this
+        # function for multiple optional symbols (e.g.
+        # ``completion_processors.load_processors`` probes both
+        # ``render`` and ``validate`` at the same path; validate-only
+        # processors naturally miss the ``render`` lookup).  The
+        # caller decides whether a missing symbol is an error and
+        # emits its own contextual WARNING when so —
+        # completion_processors.py:239-247 fires when BOTH lookups
+        # miss; dynamic_instructions.py:243-248 fires via ``_fail``
+        # for its single-symbol probe.  Loader-level WARNING here
+        # produces noise on every validate-only processor probe.
+        logger.debug(
             "Script %s has no '%s' function", file_path, symbol,
         )
         return None
