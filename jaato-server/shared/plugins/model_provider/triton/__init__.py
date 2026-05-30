@@ -1,0 +1,60 @@
+"""NVIDIA Triton Inference Server provider — OpenAI-compatible chat
++ KServe v2 model lifecycle control.
+
+Triton serves models via two cooperating processes:
+
+- ``openai_frontend`` exposes ``POST /v1/chat/completions`` (and the rest
+  of the OpenAI Chat API surface) on its own port (default 9000).
+- ``tritonserver`` exposes the native KServe v2 protocol on a separate
+  port (default 8000), including the model repository extension at
+  ``POST /v2/repository/models/<name>/load`` and ``/unload``.
+
+This provider drives both: chat goes through the OpenAI URL, model
+lifecycle control goes through the Triton control URL. When
+``plugin_configs.triton.load`` is supplied, ``connect()`` loads (or
+reloads) the model with the requested parameters before the first
+chat — the same active/passive pattern as the LM Studio provider.
+
+Compared to the bare ``tensorrt_llm`` provider, Triton adds:
+
+- **Real in-band model loading** — no process supervision needed
+- **Multi-model concurrent serving** on a single Triton instance
+- **Backend-agnostic** — TRT-LLM, vLLM, PyTorch, ONNX, Python, etc.
+  all behind the same wire format
+
+Profile example (``plugin_configs`` keyed by provider name):
+
+    {
+      "provider": "triton",
+      "model": "llama-3.1-8b-instruct",
+      "plugin_configs": {
+        "triton": {
+          "openai_url": "http://gpu-box:9000",
+          "control_url": "http://gpu-box:8000",
+          "context_length": 131072,
+          "load": {
+            "parameters": {
+              "config": "{\\"max_batch_size\\": 8}"
+            }
+          }
+        }
+      }
+    }
+
+Environment variables:
+    TRITON_OPENAI_URL: OpenAI frontend URL (default: http://localhost:9000)
+    TRITON_CONTROL_URL: Triton native HTTP URL for model control
+        (default: http://localhost:8000)
+    TRITON_HOST: Shorthand — when set without explicit URLs, both
+        OpenAI and control URLs use this host with the default ports
+    TRITON_MODEL: Default model name
+    TRITON_CONTEXT_LENGTH: Override context window size (Triton's
+        per-model config is too backend-specific for reliable
+        auto-discovery)
+    TRITON_API_TOKEN: Optional bearer token (only when behind an auth
+        proxy — Triton itself relies on reverse-proxy auth)
+"""
+
+from .provider import TritonProvider, create_provider
+
+__all__ = ["TritonProvider", "create_provider"]
