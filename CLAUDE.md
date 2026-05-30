@@ -133,6 +133,7 @@ Four plugin types:
 - `model_provider/ollama/`: Ollama local models (Anthropic-compatible API)
 - `model_provider/lmstudio/`: LM Studio local models (OpenAI-compat chat + native load-control)
 - `model_provider/nim/`: NVIDIA NIM (OpenAI-compatible API, hosted + self-hosted)
+- `model_provider/tensorrt_llm/`: NVIDIA TensorRT-LLM via `trtllm-serve` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
 
 ### Tool Execution Flow
@@ -616,6 +617,36 @@ session profile — see "Profile schema" below for the plumbing):
 3. **Self-hosted**: Set `JAATO_NIM_BASE_URL` to a local endpoint (no key needed)
 
 Available models include Llama 3.3/3.1, DeepSeek-R1, Nemotron, and other NIM catalog models.
+
+### NVIDIA TensorRT-LLM (`trtllm-serve`)
+| Variable | Purpose |
+|----------|---------|
+| `TENSORRT_LLM_HOST` | trtllm-serve URL (default: `http://localhost:8000`) |
+| `TENSORRT_LLM_MODEL` | Default model name (matches the engine's `id` in `/v1/models`) |
+| `TENSORRT_LLM_CONTEXT_LENGTH` | Override context window size (trtllm-serve does not surface `max_seq_len` in `/v1/models`) |
+| `TENSORRT_LLM_API_TOKEN` | Optional bearer token (only when fronted by an auth proxy — trtllm-serve has no built-in API key mechanism) |
+
+Talks to a `trtllm-serve` instance the user has already launched. Each `trtllm-serve` process hosts exactly one engine, built out-of-band with `trtllm-build`. Provider is **passive** — no in-band load endpoint analogous to LM Studio's `/api/v1/models/load`.
+
+Profile knobs under `plugin_configs.tensorrt_llm`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `host` | str | Override `TENSORRT_LLM_HOST` |
+| `context_length` | int | Context window override (required for long-context engines) |
+| `api_token` | str | Bearer token override |
+
+Quick start:
+```bash
+trtllm-serve meta-llama/Llama-3.1-8B-Instruct --host 0.0.0.0 --port 8000
+export TENSORRT_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
+export TENSORRT_LLM_CONTEXT_LENGTH=131072  # match the engine's max_seq_len
+```
+
+Benefits:
+- Maximum throughput on NVIDIA GPUs (FP8/INT4 quant, in-flight batching, KV-cache reuse, speculative decoding)
+- Self-hosted — no API costs, data never leaves your hardware
+- DIY counterpart to NIM: NIM is essentially TensorRT-LLM productized; this provider serves users who build their own engines
 
 ### OpenRouter
 | Variable | Purpose |
