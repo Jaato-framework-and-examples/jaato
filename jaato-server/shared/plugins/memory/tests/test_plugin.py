@@ -686,5 +686,150 @@ class TestSplitStorage(unittest.TestCase):
         self.assertEqual(gl_raw_ids, {"mem_gl"})
 
 
+class TestSetSessionAutoWiring(unittest.TestCase):
+    """Server 0.6.167+ — ``set_session(session)`` auto-wiring + the
+    ``source_session`` provenance field on stored memories.
+
+    Pre-0.6.167 the plugin defined ``set_session_context(session_id)``
+    but the framework's canonical wiring is
+    ``plugin.set_session(session)`` (five call sites in
+    ``shared/jaato_session.py``).  Method-name mismatch meant the
+    plugin's ``_session_id`` stayed None forever → every memory ever
+    written had ``source_session=null``.
+
+    Empirical motivation (peer 7:1, 2026-05-28): jq audit of
+    kb-enablement-2.0 store showed 25/25 memories with
+    source_session=null despite source_agent populated.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.storage_path = str(Path(self.temp_dir) / "mem.jsonl")
+        self.global_storage_path = str(
+            Path(self.temp_dir) / "global_mem.jsonl"
+        )
+        self.plugin = MemoryPlugin()
+        self.plugin.initialize({
+            "storage_path": self.storage_path,
+            "global_storage_path": self.global_storage_path,
+        })
+
+    def tearDown(self):
+        self.plugin.shutdown()
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _promote(self, memory_id: str, maturity: str = "validated"):
+        return self.plugin.get_executors()["update_memory"]({
+            "id": memory_id,
+            "maturity": maturity,
+        })
+
+    def test_set_session_stashes_daemon_session_id(self):
+        """``set_session(session)`` extracts ``_daemon_session_id``
+        and stashes it on the plugin instance."""
+        fake_session = type("FakeSession", (), {})()
+        fake_session._daemon_session_id = "20260528_223344"
+        self.plugin.set_session(fake_session)
+        self.assertEqual(self.plugin._session_id, "20260528_223344")
+
+    def test_set_session_none_clears_session_id(self):
+        """Passing None tolerates teardown / detach — clears the
+        stashed session_id without raising."""
+        self.plugin._session_id = "stale-id"
+        self.plugin.set_session(None)
+        self.assertIsNone(self.plugin._session_id)
+
+    def test_set_session_missing_attr_stashes_none(self):
+        """A session without ``_daemon_session_id`` (defensive
+        fallback) stashes None rather than raising."""
+        bare_session = type("BareSession", (), {})()
+        self.plugin.set_session(bare_session)
+        self.assertIsNone(self.plugin._session_id)
+
+    def test_store_memory_carries_source_session_after_set_session(self):
+        """End-to-end pin: after ``set_session(session)`` wires the
+        session_id, a subsequent ``store_memory`` call persists the
+        Memory record with ``source_session`` populated.
+
+        Checks the on-disk Memory dataclass directly via
+        ``_storage.raw.get(mid)`` — the on-disk format carries the
+        full field set (verified empirically in peer's jq audit
+        showing source_session=null in raw/*.json + curated.jsonl).
+        retrieve_memories API output deliberately omits
+        source_session today; storage-side is the authoritative
+        view of what the cascade memory loop / curator sees.
+        """
+        fake_session = type("FakeSession", (), {})()
+        fake_session._daemon_session_id = "20260528_223344"
+        self.plugin.set_session(fake_session)
+
+        store_result = self.plugin.get_executors()["store_memory"]({
+            "content": "session-id propagation pin",
+            "description": "verifies source_session populated",
+            "tags": ["pin-test"],
+        })
+        self.assertEqual(store_result["status"], "success")
+        mid = store_result["memory_id"]
+
+        # Read the persisted Memory dataclass directly — this is
+        # what peer's jq audit inspects on disk.
+        persisted = self.plugin._storage.raw.get(mid)
+        self.assertIsNotNone(persisted, f"memory {mid} not in raw store")
+        self.assertEqual(
+            persisted.source_session, "20260528_223344",
+            "source_session must be populated post-set_session; pre-"
+            "0.6.167 this field was None for every memory ever "
+            "written (peer 7:1 empirical: 25/25 memories had "
+            "source_session=null).",
+        )
+
+    def test_store_memory_source_session_is_none_when_set_session_not_called(self):
+        """Backwards-compat: if no caller invokes set_session, the
+        plugin keeps the pre-0.6.167 behavior (source_session=None
+        on persisted memories).  Standalone plugin constructors
+        (kb-side scripts, premium extensions) keep working
+        unchanged."""
+        store_result = self.plugin.get_executors()["store_memory"]({
+            "content": "no-wire fallback pin",
+            "description": "verifies fallback to None",
+            "tags": ["pin-test-no-wire"],
+        })
+        mid = store_result["memory_id"]
+        persisted = self.plugin._storage.raw.get(mid)
+        self.assertIsNotNone(persisted)
+        self.assertIsNone(persisted.source_session)
+
+
+class TestMemoryPluginFrameworkWiring(unittest.TestCase):
+    """Pin that the framework's set_session(plugin, session) call
+    sites actually exercise the memory plugin's set_session.  Source-
+    level grep — confirms the wiring isn't broken by a future
+    refactor that, e.g., renames set_session or drops one of the
+    five jaato_session.py call sites."""
+
+    def test_jaato_session_calls_plugin_set_session(self):
+        """At least one ``plugin.set_session(self)`` call exists in
+        ``shared/jaato_session.py`` — the canonical wiring memory
+        plugin's set_session relies on."""
+        from pathlib import Path
+        here = Path(__file__).resolve()
+        repo_root = here.parents[5]  # tests/ → memory/ → plugins/ → shared/ → jaato-server/ → repo
+        js = repo_root / "jaato-server" / "shared" / "jaato_session.py"
+        self.assertTrue(js.is_file(), f"jaato_session.py not found at {js}")
+        src = js.read_text()
+        # ``plugin.set_session(self)`` is the canonical pattern in
+        # jaato_session.py — five call sites at time of writing
+        # (1927/5405/5678/8295/8358).  At least one must exist or
+        # the framework wiring is broken.
+        self.assertIn(
+            "plugin.set_session(self)", src,
+            "jaato_session.py missing 'plugin.set_session(self)' — "
+            "the canonical plugin auto-wiring pattern.  Memory "
+            "plugin's set_session won't fire without it; "
+            "source_session will silently regress to None.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

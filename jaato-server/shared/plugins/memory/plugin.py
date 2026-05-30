@@ -89,8 +89,46 @@ class MemoryPlugin(RunnerForwardingMixin):
         """Return the current session ID if available."""
         return self._session_id
 
+    def set_session(self, session: Any) -> None:
+        """Auto-wiring hook called by the framework after plugin
+        configure() (server 0.6.167+).
+
+        Extracts the daemon session_id from the JaatoSession's
+        ``_daemon_session_id`` attribute (the session-manager ID
+        used for telemetry correlation — see
+        ``jaato_session.py:442``) and stashes it so subsequent
+        ``store_memory`` calls populate the ``source_session``
+        field on the persisted ``Memory`` record.
+
+        Pre-0.6.167 the plugin defined ``set_session_context(
+        session_id: str)`` but the framework's canonical wiring is
+        ``plugin.set_session(session)`` (called from five sites in
+        ``shared/jaato_session.py``).  The method-name mismatch
+        meant the framework never reached this plugin → every
+        memory ever written had ``source_session=null``.  Peer
+        7:1 empirical audit (2026-05-28) over the
+        kb-enablement-2.0 store: 25/25 memories had
+        source_session=null despite source_agent being populated.
+
+        Args:
+            session: The JaatoSession instance.  ``None`` is
+                tolerated (clears the stashed session_id).
+        """
+        session_id = (
+            getattr(session, "_daemon_session_id", None)
+            if session is not None
+            else None
+        )
+        self._session_id = session_id
+        if session_id:
+            self._trace(f"set_session: session_id={session_id}")
+
     def set_session_context(self, session_id: str) -> None:
-        """Set the session ID for provenance tracking on stored memories."""
+        """Legacy compat shim — pre-0.6.167 callers may still use
+        this method.  No framework code reaches it; safe to remove
+        in a future release once any external callers (premium
+        extensions, kb-side scripts) confirm they don't depend on it.
+        """
         self._session_id = session_id
 
     @property
