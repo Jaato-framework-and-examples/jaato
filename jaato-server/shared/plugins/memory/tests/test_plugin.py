@@ -800,6 +800,132 @@ class TestSetSessionAutoWiring(unittest.TestCase):
         self.assertIsNotNone(persisted)
         self.assertIsNone(persisted.source_session)
 
+    # ------------------------------------------------------------------
+    # Server 0.6.168+ — runner-side wiring via config + registry
+    # ------------------------------------------------------------------
+
+    def test_initialize_reads_session_id_from_config(self):
+        """Server 0.6.168+: the canonical runner-side wiring path.
+        ``registry.set_session_id(envelope.session_id)`` is called
+        at ``runner/session.py:271``; the registry's
+        ``_augment_plugin_config`` injects it into the plugin's
+        config dict at ``initialize()`` time.  This is what
+        actually fires for cascade sessions — memory is
+        ``PLUGIN_TIER="runner"``.
+
+        PR-196's ``set_session(session)`` reads
+        ``session._daemon_session_id`` which is set only by
+        JaatoClient (daemon-side facade), never on runner-side
+        JaatoSession.  Empirical: peer 7:1 retry-49 post-PR-196
+        still showed source_session=null on 4/4 memories.  This
+        path (config injection) IS reached for runner-side init.
+        """
+        sub_plugin = MemoryPlugin()
+        sub_plugin.initialize({
+            "storage_path": str(Path(self.temp_dir) / "sub_mem.jsonl"),
+            "global_storage_path": str(
+                Path(self.temp_dir) / "sub_global.jsonl"
+            ),
+            "session_id": "20260530_223344",
+        })
+        try:
+            self.assertEqual(sub_plugin._session_id, "20260530_223344")
+        finally:
+            sub_plugin.shutdown()
+
+    def test_get_session_id_prefers_registry_over_cached(self):
+        """Server 0.6.168+: cascade-pool reuse (PR #173) reuses
+        the SAME plugin instance across multiple sessions on a HIT
+        slot.  ``plugin.initialize()`` only fires on MISS (first
+        session per slot); subsequent HIT-reused sessions don't
+        re-run initialize, so the cached ``self._session_id``
+        stays at the FIRST session's id.
+
+        Registry's ``_session_id`` IS updated per-bootstrap via
+        ``registry.set_session_id(envelope.session_id)`` for every
+        session on the reused slot.  ``_get_session_id`` MUST
+        prefer the registry value when wired via
+        ``set_plugin_registry`` so source_session matches the
+        currently-running session, not the slot's first one.
+        """
+        fake_registry = type("FakeRegistry", (), {})()
+        fake_registry._session_id = "20260530_session2"
+        self.plugin._session_id = "20260530_session1"  # stale cache
+        self.plugin.set_plugin_registry(fake_registry)
+        # Live registry value wins.
+        self.assertEqual(
+            self.plugin._get_session_id(), "20260530_session2"
+        )
+        # Simulate registry advancing to a third session (HIT reuse
+        # iter-3 firing registry.set_session_id again).
+        fake_registry._session_id = "20260530_session3"
+        self.assertEqual(
+            self.plugin._get_session_id(), "20260530_session3"
+        )
+
+    def test_get_session_id_falls_back_to_cached_when_no_registry(self):
+        """Standalone plugin (no set_plugin_registry call) reads
+        the cached value — preserves existing behavior for tests
+        and kb-side scripts that construct the plugin directly."""
+        self.plugin._session_id = "20260530_standalone"
+        # _plugin_registry stays None from __init__.
+        self.assertIsNone(self.plugin._plugin_registry)
+        self.assertEqual(
+            self.plugin._get_session_id(), "20260530_standalone"
+        )
+
+    def test_store_memory_under_hit_reused_slot_picks_live_session_id(self):
+        """End-to-end pin for cascade-pool-reuse HIT path: simulate
+        a registry whose ``_session_id`` advances mid-flight (as
+        happens on every HIT-reused session bootstrap).  Each
+        store_memory call must persist source_session matching the
+        registry's CURRENT value, not the first-session value
+        cached at plugin init.
+
+        This is the empirical scenario peer 7:1 hit at retry-49:
+        slot 198523 served sessions 172701/172720/172752/.../173811,
+        all with source_session=null because the cached _session_id
+        never matched the bootstrap-time registry value.
+        """
+        fake_registry = type("FakeRegistry", (), {})()
+        # Slot first acquired with session_1.
+        fake_registry._session_id = "session_1"
+        self.plugin.set_plugin_registry(fake_registry)
+        r1 = self.plugin.get_executors()["store_memory"]({
+            "content": "first store under HIT-reused slot",
+            "description": "session_1 memory",
+            "tags": ["pin-hit-1"],
+        })
+        # Pool reuses the slot for session_2 — bootstrap updates
+        # the registry's _session_id (no plugin.initialize re-run).
+        fake_registry._session_id = "session_2"
+        r2 = self.plugin.get_executors()["store_memory"]({
+            "content": "second store under HIT-reused slot",
+            "description": "session_2 memory",
+            "tags": ["pin-hit-2"],
+        })
+        # And again for session_3.
+        fake_registry._session_id = "session_3"
+        r3 = self.plugin.get_executors()["store_memory"]({
+            "content": "third store under HIT-reused slot",
+            "description": "session_3 memory",
+            "tags": ["pin-hit-3"],
+        })
+        for rid, expected in [
+            (r1["memory_id"], "session_1"),
+            (r2["memory_id"], "session_2"),
+            (r3["memory_id"], "session_3"),
+        ]:
+            persisted = self.plugin._storage.raw.get(rid)
+            self.assertIsNotNone(persisted)
+            self.assertEqual(
+                persisted.source_session, expected,
+                f"HIT-reused slot: memory {rid} should carry "
+                f"source_session={expected!r} (the registry's "
+                f"current value at call time), not the slot's "
+                f"first-session value.",
+            )
+
 
 class TestMemoryPluginFrameworkWiring(unittest.TestCase):
     """Pin that the framework's set_session(plugin, session) call

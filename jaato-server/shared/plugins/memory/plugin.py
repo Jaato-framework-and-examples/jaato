@@ -73,6 +73,10 @@ class MemoryPlugin(RunnerForwardingMixin):
         self._global_indexer: Optional[MemoryIndexer] = None
         self._agent_name: Optional[str] = None
         self._session_id: Optional[str] = None
+        # Server 0.6.168+: stashed by ``set_plugin_registry`` so
+        # ``_get_session_id`` can read the always-fresh
+        # ``registry._session_id`` for cascade-pool-reused slots.
+        self._plugin_registry: Optional[Any] = None
         self._storage_path_template: str = ".jaato/memories.jsonl"
         # Memory IDs whose hint bullet has already been injected into the
         # model's context during this session.  Prevents the same "💡
@@ -86,8 +90,42 @@ class MemoryPlugin(RunnerForwardingMixin):
         _trace_write("MEMORY", msg)
 
     def _get_session_id(self) -> Optional[str]:
-        """Return the current session ID if available."""
+        """Return the current session ID if available.
+
+        Server 0.6.168+: prefer the registry's live ``_session_id``
+        over the plugin's cached value.  Rationale: cascade-pool
+        reuse (PR #173 / runner_pool) reuses the SAME plugin
+        instance across multiple sessions on a HIT slot.
+        ``plugin.initialize()`` only fires on MISS (first session
+        per slot); subsequent HIT-reused sessions don't re-run
+        initialize so the cached ``self._session_id`` stays at the
+        FIRST session's id (or None pre-0.6.168).  The registry's
+        ``_session_id`` IS updated per-bootstrap via
+        ``registry.set_session_id(envelope.session_id)`` at
+        ``runner/session.py:271``, so reading from the registry
+        at call time gives the always-current value.
+
+        Falls back to ``self._session_id`` when the registry
+        reference isn't wired (tests that construct the plugin
+        standalone without going through expose_tool).
+        """
+        if self._plugin_registry is not None:
+            registry_sid = getattr(
+                self._plugin_registry, "_session_id", None,
+            )
+            if registry_sid:
+                return registry_sid
         return self._session_id
+
+    def set_plugin_registry(self, registry: Any) -> None:
+        """Auto-wiring hook called by the registry at
+        ``expose_tool()`` time (registry.py:957-958).  Stashes a
+        reference so ``_get_session_id`` can read the always-current
+        ``registry._session_id`` at store_memory call time (handles
+        cascade-pool-reuse HIT slots — see ``_get_session_id``
+        docstring).
+        """
+        self._plugin_registry = registry
 
     def set_session(self, session: Any) -> None:
         """Auto-wiring hook called by the framework after plugin
@@ -179,6 +217,25 @@ class MemoryPlugin(RunnerForwardingMixin):
         """
         config = config or {}
         self._agent_name = config.get("agent_name")
+        # Server 0.6.168+ (real Bug B-class fix): read session_id
+        # from config.  The registry's _augment_plugin_config
+        # (registry.py:1337-1386) injects session_id via setdefault
+        # at expose_tool() time after runner-side
+        # ``registry.set_session_id(envelope.session_id)`` fires
+        # (runner/session.py:271).  Mirrors how ``agent_name`` is
+        # wired above — same framework-injection mechanism.
+        #
+        # PR-196 added ``set_session(session)`` reading
+        # ``session._daemon_session_id`` as the wiring path.  That
+        # attribute is set ONLY by JaatoClient (daemon-side wrapper)
+        # via ``set_daemon_session_id`` — never on runner-side
+        # JaatoSession.  Plugin auto-wiring runs on the RUNNER side
+        # (memory is PLUGIN_TIER = "runner"), so PR-196 read None
+        # for every cascade session.  Empirical: peer 7:1 retry-49
+        # post-PR-196 still showed source_session=null on 4/4
+        # memories.  This path (config injection) IS reached for
+        # runner-side plugin init.
+        self._session_id = config.get("session_id")
         self._storage_path_template = config.get("storage_path", ".jaato/memories.jsonl")
 
         self._storage = MemoryStorage(self._storage_path_template)
