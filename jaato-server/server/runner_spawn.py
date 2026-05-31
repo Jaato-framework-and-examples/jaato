@@ -632,6 +632,26 @@ def dispatch_bootstrap_envelope(
             "session %s — skipping bootstrap (spawn likely failed)",
             session_id,
         )
+        # Server 0.6.169+ (bootstrap-time visibility): surface this
+        # as a terminal event so cascade observers + reactor rules on
+        # ``session.terminated where reason='error'`` can react.
+        # Without this, spawn-helper failures dead-end the cascade
+        # silently (driver hits IPC timeout instead of getting the
+        # actionable error_type/error_summary).  See
+        # ``_emit_bootstrap_terminated`` helper for the exception-safe
+        # emit + the rationale memory
+        # ``project_backlog_bootstrap_time_visibility_gap``.
+        _emit_bootstrap_terminated(
+            server=server,
+            session_id=session_id,
+            exc=RuntimeError(
+                "spawn_session_runner did not populate "
+                "server.runner_rpc — session never reached bootstrap "
+                "phase.  Check earlier ERROR logs in this turn for "
+                "the spawn-helper failure (apparmor compose, slot "
+                "acquisition, runner-spawn fork, etc.)."
+            ),
+        )
         return
 
     try:
@@ -657,4 +677,63 @@ def dispatch_bootstrap_envelope(
             "runner session.bootstrap failed for %s: error_type=%s error=%s — "
             "daemon-side JaatoSession remains authoritative",
             session_id, type(exc).__name__, exc, exc_info=True,
+        )
+        # Server 0.6.169+ (bootstrap-time visibility): emit
+        # SessionTerminatedEvent so cascade observers + reactor rules
+        # see the failure.  Covers ANY bootstrap-time failure class
+        # (SecretResolutionError, apparmor compose, runner RPC timeout,
+        # plugin discovery errors) — generic ``except Exception``
+        # mechanically catches everything that escapes the bootstrap
+        # RPC.  Empirical motivation (peer 7:1, 2026-05-31): gpg-agent
+        # passphrase expiry → SecretResolutionError → bootstrap WARNING
+        # logged but cascade.py hung 3min on IPC timeout because no
+        # terminal event surfaced.
+        _emit_bootstrap_terminated(
+            server=server, session_id=session_id, exc=exc,
+        )
+
+
+def _emit_bootstrap_terminated(
+    *, server: Any, session_id: str, exc: BaseException,
+) -> None:
+    """Emit ``SessionTerminatedEvent(reason="error")`` for a
+    bootstrap-time failure.
+
+    Server 0.6.169+ helper used by :func:`dispatch_bootstrap_envelope`
+    at both failure paths (spawn-didn't-populate-rpc + bootstrap-rpc-
+    raised).  By the time ``dispatch_bootstrap_envelope`` is invoked,
+    ``server.set_event_callback`` has already been wired by
+    ``session_manager.create_session`` (line ~4217), so emitted events
+    flow through ``_emit_to_session`` → ``_dispatch_to_cascade_clients``
+    and reach cascade observers + reactor rules.
+
+    Reuses PR-186 ``error_summary`` / ``error_type`` fields on
+    SessionTerminatedEvent.  ``agent_id`` is read defensively from
+    ``server._main_agent_id`` (set during ``server.initialize``); falls
+    back to ``"main"`` so the field is always populated for
+    downstream consumers.
+
+    The emit itself is wrapped in a defensive try/except: a failure
+    of the visibility path must not mask the underlying bootstrap
+    failure or disrupt the session-creation caller's error handling.
+    Logs the failure to keep the audit trail intact.
+    """
+    try:
+        from jaato_sdk.events import SessionTerminatedEvent
+        server.emit(SessionTerminatedEvent(
+            session_id=session_id,
+            agent_id=getattr(server, "_main_agent_id", None) or "main",
+            reason="error",
+            error_summary=str(exc),
+            error_type=type(exc).__name__,
+        ))
+    except Exception as emit_exc:  # noqa: BLE001 — defensive
+        logger.warning(
+            "_emit_bootstrap_terminated: SessionTerminatedEvent emit "
+            "failed for session %s (root cause was %s: %s); cascade "
+            "observers will not see the bootstrap failure for this "
+            "session — investigate emit chain.  Emit error: %s: %s",
+            session_id, type(exc).__name__, exc,
+            type(emit_exc).__name__, emit_exc,
+            exc_info=True,
         )
