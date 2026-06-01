@@ -4504,6 +4504,234 @@ class TestPerItemRequiredKeyCoverage:
         assert result is None  # well-formed; no fallback triggered
 
 
+# ==================== Helper-Exclusivity A2 (server 0.6.170+) ====================
+
+class TestHelperExclusivityA2:
+    """``_validate_render_inputs_against_structure`` rejects helper-
+    source variables that are not Python bool, AND rejects rows where
+    more than one member of a helper sibling-family is True (A2:
+    at-most-one True; all-False is permitted).
+
+    Closes the iter-3 cascade evidence (kb-enablement-2.0,
+    2026-06-01): agent emitted ``entityFields[*].isString = []``
+    (Mustache-falsy empty list) on a String field where the
+    ``{{#isString}}"{{/isString}}`` quote-gate was expected to fire.
+    Mustache silently coerced ``[]`` to falsy, the gate didn't fire,
+    bare value landed on disk, 54 javac "cannot find symbol" errors
+    surfaced 25 minutes later.  Iter 4 cleaned up non-
+    deterministically (same model, same session shape, different
+    bool-vs-list emission round-to-round).
+
+    Persona prose alone is insufficient per
+    ``feedback_kernel_scoping_beats_persona_prose``: codegen.md
+    explicitly says ``isId: True`` not ``isId: [True]`` and the
+    agent still emits list-form some iterations.  Kernel-enforced
+    rejection at the tool boundary closes the variance.
+    """
+
+    # NOTE on template syntax: the parser only classifies a variable
+    # as ``source="helper"`` when it appears as the ARGUMENT of a
+    # Handlebars conditional helper (``{{#if X}}``, ``{{#unless X}}``,
+    # ``{{#each X}}``, ``{{#with X}}``, ``{{#lookup X}}``).  Plain
+    # Mustache sections like ``{{#X}}...{{/X}}`` are classified as
+    # ``source="section"`` (required=True) — not helpers.  The actual
+    # kb java-spring templates use ``{{#if isString}}...{{/if}}`` form
+    # (see kb/modules/mod-code-017-persistence-systemapi/templates/
+    # mapper/SystemApiMapper.java.tpl), so these fixtures mirror that
+    # syntax to actually trigger the helper-source classification.
+
+    def test_iter3_repro_isString_empty_list_rejected(self, plugin):
+        """Exact reproduction of cascade iter-3: agent emits
+        ``isString=[]`` on an actually-String field.  Must reject on
+        type-check half (list, not bool)."""
+        template = textwrap.dedent("""\
+            {{#entityFields}}
+            {{#if isString}}"{{/if}}{{value}}{{#if isString}}"{{/if}},
+            {{/entityFields}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "entityFields": [
+                    {"value": "test-value", "isString": []},
+                ],
+            },
+        )
+        assert result is not None, "validator should have flagged"
+        assert result.get("validation_layer") == "shape_check"
+        assert any(
+            "isString" in e and "MUST be Python bool" in e
+            for e in result["validation_errors"]
+        ), result
+
+    def test_iter3_grounded_multiple_empty_lists_rejected(self, plugin):
+        """Generalised iter-3 shape: multiple helpers emitted as
+        ``[]`` in the same row.  Should produce a type-error per
+        non-bool helper variable, NOT a spurious exclusivity error
+        on top (exclusivity is suppressed when type-check fails for
+        the row)."""
+        template = textwrap.dedent("""\
+            {{#entityFields}}
+            {{#if isString}}STRING{{/if}}{{#if isEnum}}ENUM{{/if}}{{value}},
+            {{/entityFields}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "entityFields": [
+                    {"value": "x", "isString": [], "isEnum": []},
+                ],
+            },
+        )
+        assert result is not None
+        assert result.get("validation_layer") == "shape_check"
+        errs = result["validation_errors"]
+        assert any(
+            "isString" in e and "MUST be Python bool" in e for e in errs
+        ), errs
+        assert any(
+            "isEnum" in e and "MUST be Python bool" in e for e in errs
+        ), errs
+        assert not any(
+            "multiple helper-source variables set True" in e for e in errs
+        ), (
+            "exclusivity check must be suppressed when type-check "
+            "rejects the same row — otherwise the agent sees double-"
+            "attribution noise"
+        )
+
+    def test_exactly_one_True_passes(self, plugin):
+        """Canonical correct emission: one helper True, siblings
+        False.  Validator must accept."""
+        template = textwrap.dedent("""\
+            {{#entityFields}}
+            {{#if isString}}STRING{{/if}}{{#if isEnum}}ENUM{{/if}}{{value}},
+            {{/entityFields}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "entityFields": [
+                    {"value": "x", "isString": True, "isEnum": False},
+                ],
+            },
+        )
+        assert result is None, result
+
+    def test_all_False_passes_A2_lenient(self, plugin):
+        """A2 contract: all-False is a legitimate Mustache idiom
+        ("none of these branches fires").  Permitted even when the
+        template's helper-sibling family has multiple members."""
+        template = textwrap.dedent("""\
+            {{#entityFields}}
+            {{#if isString}}S{{/if}}{{#if isEnum}}E{{/if}}{{value}},
+            {{/entityFields}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "entityFields": [
+                    {"value": "x", "isString": False, "isEnum": False},
+                ],
+            },
+        )
+        assert result is None, result
+
+    def test_two_True_rejected_exclusivity(self, plugin):
+        """Two helper siblings both True in the same row —
+        meaningless (which branch is this row?).  Rejected on
+        exclusivity half."""
+        template = textwrap.dedent("""\
+            {{#entityFields}}
+            {{#if isString}}S{{/if}}{{#if isEnum}}E{{/if}}{{value}},
+            {{/entityFields}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "entityFields": [
+                    {"value": "x", "isString": True, "isEnum": True},
+                ],
+            },
+        )
+        assert result is not None
+        assert result.get("validation_layer") == "shape_check"
+        assert any(
+            "multiple helper-source variables set True" in e
+            and "isString" in e and "isEnum" in e
+            for e in result["validation_errors"]
+        ), result
+
+    def test_string_for_helper_rejected(self, plugin):
+        """Non-bool, non-list shape (string) also rejected.  Same
+        type-check fires."""
+        template = textwrap.dedent("""\
+            {{#entityFields}}
+            {{#if isString}}S{{/if}}{{value}},
+            {{/entityFields}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "entityFields": [
+                    {"value": "x", "isString": "yes"},
+                ],
+            },
+        )
+        assert result is not None
+        assert any(
+            "isString" in e and "MUST be Python bool" in e
+            for e in result["validation_errors"]
+        ), result
+
+    def test_truthy_list_True_inside_also_rejected(self, plugin):
+        """``[True]`` is Mustache-truthy but the agent contract is
+        bool.  Rejected on type-check half — the agent cannot rely
+        on Mustache's coercion."""
+        template = textwrap.dedent("""\
+            {{#entityFields}}
+            {{#if isString}}S{{/if}}{{value}},
+            {{/entityFields}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "entityFields": [
+                    {"value": "x", "isString": [True]},
+                ],
+            },
+        )
+        assert result is not None
+        assert any(
+            "isString" in e and "MUST be Python bool" in e
+            for e in result["validation_errors"]
+        ), result
+
+    def test_helper_absent_from_row_allowed(self, plugin):
+        """A helper sibling absent from the row entirely is
+        Mustache's absence-is-falsy contract — must NOT be flagged
+        as missing.  Only present-but-wrong-shape variables are
+        validated.  Helper sources are ``required=False`` in the
+        parser's per-key metadata so the upstream required-key
+        check does not fire either."""
+        template = textwrap.dedent("""\
+            {{#entityFields}}
+            {{#if isString}}S{{/if}}{{#if isEnum}}E{{/if}}{{value}},
+            {{/entityFields}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "entityFields": [
+                    # Only isString set; isEnum absent.  Mustache
+                    # treats isEnum absence as falsy — fine.
+                    {"value": "x", "isString": True},
+                ],
+            },
+        )
+        assert result is None, result
+
+
 # ==================== Template Evaluation Kind + Helper Siblings (server 0.6.44+) ====================
 
 class TestTemplateEvaluationKindAndHelperSiblings:
