@@ -3346,6 +3346,149 @@ Template rendering writes files to the workspace."""
                                     f"provide all required keys or the "
                                     f"call must fail loudly."
                                 )
+                            # Per-item helper-exclusivity check (server
+                            # 0.6.170+).  When an item_key has
+                            # source="helper", it's the argument of a
+                            # Handlebars conditional helper
+                            # (``{{#isString}}...{{/isString}}``).
+                            # Mustache treats ``[], [False], None,
+                            # False`` as falsy and ``True, [True], 1,
+                            # non-empty-string`` as truthy — accepts
+                            # many shapes silently.  When two helper-
+                            # tagged variables share scope (sibling
+                            # discriminators — ``isString``, ``isLong``,
+                            # ``isId``, ``isBoolean``), the agent's job
+                            # is to set exactly ONE truthy and all
+                            # others falsy.  Persona prose says "use
+                            # bool True/False"; the agent sometimes
+                            # emits ``[]`` (Mustache-falsy list) or
+                            # ``[True]`` (Mustache-truthy list).
+                            # Surfaced empirically by cascade iter 3
+                            # (2026-06-01, entityFields[*].isString = []
+                            # on actually-String field): Mustache
+                            # treated [] as falsy, the
+                            # ``{{#isString}}"{{/isString}}`` quote-gate
+                            # did not fire, bare value landed on disk,
+                            # 54 javac "cannot find symbol" errors
+                            # surfaced 25 minutes later.
+                            #
+                            # Contract enforced (A2 — at-most-one True):
+                            #   1. Every helper-source variable PRESENT
+                            #      in the row MUST be Python bool (True
+                            #      / False).  Lists, strings, dicts,
+                            #      None are rejected — the agent cannot
+                            #      rely on Mustache's truthy-list /
+                            #      falsy-empty-list coercion.
+                            #   2. Within each helper's sibling-set
+                            #      (``[name] + helper_siblings``), AT
+                            #      MOST ONE member may be True.  Two-
+                            #      or-more True is structurally
+                            #      meaningless (which branch is this
+                            #      row?) and rejected.
+                            #   3. All-False is permitted (Mustache
+                            #      idiom: "none of these branches
+                            #      fires").  Tighten to "exactly-one
+                            #      True" only if future evidence shows
+                            #      all-False is hiding bugs.
+                            #   4. Helper siblings absent from the row
+                            #      entirely are Mustache's absence-is-
+                            #      falsy contract — NOT flagged.
+                            #
+                            # Memory cross-ref:
+                            # ``feedback_kernel_scoping_beats_persona_prose``
+                            # — kernel-layer gate over persona prose
+                            # reinforcement.
+                            #
+                            # Top-level scope NOT covered: the current
+                            # parser does not tag top-level entries
+                            # with ``source=helper`` (a top-level
+                            # ``{{#if X}}`` is emitted as kind=section
+                            # without source-helper metadata; see
+                            # ``_parse_mustache_structure`` docstring).
+                            # Future enhancement: extend the parser to
+                            # surface helper source at top level, then
+                            # add a symmetric check outside this list-
+                            # iteration branch.
+                            helper_keys_in_row = [
+                                k for k in item_keys
+                                if isinstance(k, dict)
+                                and k.get("source") == "helper"
+                                and k.get("name") in item
+                            ]
+                            if helper_keys_in_row:
+                                # Group helpers by sibling-set so each
+                                # discriminated-union family is checked
+                                # independently.  Two unrelated helper
+                                # families in the same row (e.g.
+                                # ``isString`` family + standalone
+                                # ``isOptional``) must not cross-
+                                # contaminate the exclusivity check.
+                                checked_families: Set[Tuple[str, ...]] = set()
+                                for hk in helper_keys_in_row:
+                                    name_h = hk["name"]
+                                    siblings = hk.get("helper_siblings") or []
+                                    family = tuple(sorted(
+                                        [name_h] + list(siblings)
+                                    ))
+                                    if family in checked_families:
+                                        continue
+                                    checked_families.add(family)
+
+                                    # Pass 1: type-check every helper
+                                    # in the family that's PRESENT in
+                                    # the row.  Any non-bool is
+                                    # rejected.  Missing siblings are
+                                    # allowed (Mustache absence-is-
+                                    # falsy contract).
+                                    truthy_members: List[str] = []
+                                    type_errors: List[str] = []
+                                    for member in family:
+                                        if member not in item:
+                                            continue
+                                        v = item[member]
+                                        if not isinstance(v, bool):
+                                            type_errors.append(
+                                                f"variable {name!r} "
+                                                f"item[{i}].{member} = "
+                                                f"{v!r} (type "
+                                                f"{type(v).__name__}); "
+                                                f"helper-source "
+                                                f"variables MUST be "
+                                                f"Python bool (True or "
+                                                f"False).  Mustache "
+                                                f"accepts ``[]`` and "
+                                                f"``[True]`` silently "
+                                                f"but with unstable "
+                                                f"truthiness — emit the "
+                                                f"bool explicitly."
+                                            )
+                                        elif v is True:
+                                            truthy_members.append(member)
+                                    errors.extend(type_errors)
+
+                                    # Pass 2: exclusivity.  Only fires
+                                    # when type-check passed for this
+                                    # row; otherwise the second error
+                                    # would be double-attribution noise
+                                    # on top of the type rejection.
+                                    if (
+                                        not type_errors
+                                        and len(truthy_members) > 1
+                                    ):
+                                        errors.append(
+                                            f"variable {name!r} "
+                                            f"item[{i}] has multiple "
+                                            f"helper-source variables "
+                                            f"set True: "
+                                            f"{sorted(truthy_members)}. "
+                                            f"Helper siblings encode a "
+                                            f"discriminated union "
+                                            f"(exactly one branch "
+                                            f"fires per row); set AT "
+                                            f"MOST ONE of "
+                                            f"{list(family)} to True "
+                                            f"and all others to False."
+                                        )
                 elif isinstance(actual, (bool, dict)) or actual is None:
                     # bool / None — boolean-conditional idiom.
                     # dict — single-context render idiom.
