@@ -4504,6 +4504,302 @@ class TestPerItemRequiredKeyCoverage:
         assert result is None  # well-formed; no fallback triggered
 
 
+# ==================== Recursive Item-Keys Traversal (server 0.6.171+) ====================
+
+class TestRecursiveItemKeysValidation:
+    """``_validate_render_inputs_against_structure`` now drills into
+    nested ``item_keys`` produced by ``_parse_mustache_structure``.
+    Pre-0.6.171 the validator stopped at the outermost section's
+    item_keys; agents could pass a list-of-dicts at the outer layer
+    AND have the inner dicts be missing every nested required key —
+    Mustache silently rendered empty, broken files landed on disk,
+    cascade caught it 25+ minutes later via downstream compile.
+
+    Closes the iter-3 cascade evidence (kb-enablement-2.0,
+    2026-06-02): mod-019 ControllerTest-hateoas.java.tpl patched
+    form ``{{#hasRequestBody}}.content(...{{#testBodyFields}}
+    Map.entry("{{name}}", "{{value}}"){{^last}},{{/last}}
+    {{/testBodyFields}})){{/hasRequestBody}}`` — agent
+    (haiku-4.5/openrouter, strict-mode-unenforced) emitted
+    ``hasRequestBody = [{name, value, last, first, @index} × 4]``
+    instead of the bool ``true`` / ``false`` the kb-author intended
+    OR list-of-dicts each containing ``testBodyFields``.  Mustache
+    iterated the section body 4 times, each iteration's
+    ``{{#testBodyFields}}`` looked up ``testBodyFields`` in a
+    context that didn't have it, rendered nothing → 4 cascading
+    ``.content(objectMapper.writeValueAsString(Map.ofEntries()))``
+    empties → 4 cascading javac errors.
+
+    Empirical finding from Advisor's pre-implementation check: the
+    parser ALREADY produces 3-level-deep nested item_keys with
+    ``required`` flags at every layer; the validator just wasn't
+    consuming them.  This test class pins that the recursive
+    traversal closes the gap end-to-end.
+
+    Memory cross-ref:
+    ``feedback_kernel_scoping_beats_persona_prose`` — the parser's
+    metadata IS the kernel-layer source-of-truth; the fix is
+    fully-consuming-existing-metadata, not adding new heuristics.
+    """
+
+    def test_iter3_repro_nested_missing_testBodyFields_rejected(self, plugin):
+        """Exact iter-3 reproduction (2026-06-02, mod-019): agent
+        emits ``hasRequestBody`` as list-of-dicts whose inner dicts
+        are missing ``testBodyFields``.  Pre-0.6.171: validator
+        passed.  Post-0.6.171: validator descends into
+        ``hasRequestBody``'s nested item_keys and rejects on the
+        missing required key.
+
+        Payload reconstructed verbatim from the rendered
+        CustomerControllerHateoasTest.java REQUIRED VARIABLES echo
+        line 7 (captured pre-workspace-wipe in
+        /tmp/advisor-repros/task234-hasrequestbody/)."""
+        template = textwrap.dedent("""\
+            {{#apiEndpoints}}
+            void {{methodName}}() {
+            mockMvc.perform({{methodLower}}("{{testPath}}")
+              .contentType(JSON){{#hasRequestBody}}
+              .content(objectMapper.writeValueAsString(Map.ofEntries({{#testBodyFields}}
+                Map.entry("{{name}}", "{{value}}"){{^last}},{{/last}}{{/testBodyFields}}
+              ))){{/hasRequestBody}})
+            }
+            {{/apiEndpoints}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "apiEndpoints": [
+                    {
+                        "method": "POST",
+                        "methodLower": "post",
+                        "methodName": "createCustomer",
+                        "subPath": "/customers",
+                        "testPath": "/api/v1/customers",
+                        "hasRequestBody": [
+                            {"name": "firstName", "value": "John",
+                             "last": False, "first": True, "@index": 0},
+                            {"name": "lastName", "value": "Doe",
+                             "last": False, "first": False, "@index": 1},
+                            {"name": "email", "value": "john@x.com",
+                             "last": False, "first": False, "@index": 2},
+                            {"name": "status", "value": "ACTIVE",
+                             "last": True, "first": False, "@index": 3},
+                        ],
+                        "first": True, "last": False, "@index": 0,
+                    },
+                ],
+            },
+        )
+        assert result is not None, (
+            "validator should have flagged the nested missing "
+            "testBodyFields"
+        )
+        assert result.get("validation_layer") == "shape_check"
+        errs = result["validation_errors"]
+        # Breadcrumb preserves the top-level ``item[i]`` format
+        # (back-compat with pre-0.6.171 error messages); nested
+        # layers extend it as ``item[i].<nested-name>[j]``.  The
+        # iter-3 case: apiEndpoints[0].hasRequestBody[N] missing
+        # testBodyFields.
+        assert any(
+            "item[0].hasRequestBody" in e
+            and "testBodyFields" in e
+            and "missing required keys" in e
+            for e in errs
+        ), errs
+        # Variable identity is in the message too.
+        assert any("apiEndpoints" in e for e in errs), errs
+
+    def test_well_formed_nested_passes(self, plugin):
+        """Canonical correct emission: each hasRequestBody item
+        carries its testBodyFields list, each testBodyFields item
+        carries name + value.  Validator must accept end-to-end."""
+        template = textwrap.dedent("""\
+            {{#apiEndpoints}}
+            void {{methodName}}() {
+            mockMvc.perform({{methodLower}}("{{testPath}}")
+              .contentType(JSON){{#hasRequestBody}}
+              .content(objectMapper.writeValueAsString(Map.ofEntries({{#testBodyFields}}
+                Map.entry("{{name}}", "{{value}}"){{^last}},{{/last}}{{/testBodyFields}}
+              ))){{/hasRequestBody}})
+            }
+            {{/apiEndpoints}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "apiEndpoints": [
+                    {
+                        "methodName": "createCustomer",
+                        "methodLower": "post",
+                        "testPath": "/api/v1/customers",
+                        "hasRequestBody": [
+                            {
+                                "testBodyFields": [
+                                    {"name": "firstName", "value": "John"},
+                                    {"name": "email", "value": "x@y.com"},
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+        assert result is None, result
+
+    def test_boolean_gate_form_still_passes(self, plugin):
+        """When the kb-author intends ``hasRequestBody`` as a boolean
+        gate (Mustache section over bool=True renders body once in
+        parent context), the validator must accept bool inputs.  No
+        recursion fires because the value is not a list."""
+        template = textwrap.dedent("""\
+            {{#apiEndpoints}}
+            void {{methodName}}() {
+            mockMvc.perform({{methodLower}}("{{testPath}}")
+              .contentType(JSON){{#hasRequestBody}}
+              .content(objectMapper.writeValueAsString(Map.ofEntries({{#testBodyFields}}
+                Map.entry("{{name}}", "{{value}}"){{^last}},{{/last}}{{/testBodyFields}}
+              ))){{/hasRequestBody}})
+            }
+            {{/apiEndpoints}}
+        """)
+        # Case 1: hasRequestBody=True with parent-context testBodyFields.
+        result_true = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "apiEndpoints": [
+                    {
+                        "methodName": "createCustomer",
+                        "methodLower": "post",
+                        "testPath": "/api/v1/customers",
+                        "hasRequestBody": True,
+                        # When True, Mustache renders the section
+                        # body once with the parent apiEndpoints[0]
+                        # context — testBodyFields looked up from
+                        # there.
+                        "testBodyFields": [
+                            {"name": "firstName", "value": "John"},
+                        ],
+                    },
+                ],
+            },
+        )
+        assert result_true is None, result_true
+
+        # Case 2: hasRequestBody=False — section doesn't fire; no
+        # inner data needed.
+        result_false = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "apiEndpoints": [
+                    {
+                        "methodName": "getCustomer",
+                        "methodLower": "get",
+                        "testPath": "/api/v1/customers/1",
+                        "hasRequestBody": False,
+                    },
+                ],
+            },
+        )
+        assert result_false is None, result_false
+
+    def test_two_levels_deep_nested_validates(self, plugin):
+        """Validator descends all the way: third-level (testBodyFields
+        items) must carry name + value.  An inner item missing
+        ``value`` is caught with the full breadcrumb path."""
+        template = textwrap.dedent("""\
+            {{#apiEndpoints}}
+            void {{methodName}}() {
+            mockMvc.perform({{methodLower}}("{{testPath}}")
+              .contentType(JSON){{#hasRequestBody}}
+              .content(objectMapper.writeValueAsString(Map.ofEntries({{#testBodyFields}}
+                Map.entry("{{name}}", "{{value}}"){{^last}},{{/last}}{{/testBodyFields}}
+              ))){{/hasRequestBody}})
+            }
+            {{/apiEndpoints}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "apiEndpoints": [
+                    {
+                        "methodName": "createCustomer",
+                        "methodLower": "post",
+                        "testPath": "/api/v1/customers",
+                        "hasRequestBody": [
+                            {
+                                "testBodyFields": [
+                                    {"name": "firstName", "value": "John"},
+                                    # Missing 'value' on second item.
+                                    {"name": "lastName"},
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+        assert result is not None
+        assert result.get("validation_layer") == "shape_check"
+        errs = result["validation_errors"]
+        assert any(
+            "testBodyFields" in e
+            and "value" in e
+            and "missing required keys" in e
+            for e in errs
+        ), errs
+
+    def test_error_path_prefix_includes_full_breadcrumb(self, plugin):
+        """Recursive errors must carry the full path-prefix breadcrumb
+        so the agent can locate the failing position in the payload
+        tree.  Format:
+        ``<outer-var>[<i>].<nested-name>[<j>]``."""
+        template = textwrap.dedent("""\
+            {{#apiEndpoints}}
+            {{#hasRequestBody}}{{#testBodyFields}}{{name}}={{value}}{{/testBodyFields}}{{/hasRequestBody}}
+            {{/apiEndpoints}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "apiEndpoints": [
+                    # apiEndpoints[0] — has hasRequestBody=False so
+                    # section doesn't fire; no nested error here.
+                    {"hasRequestBody": False},
+                    # apiEndpoints[1] — has hasRequestBody list-of-
+                    # dicts; nested testBodyFields[1] missing
+                    # required scalars.  Breadcrumb must locate the
+                    # failure at apiEndpoints[1].hasRequestBody[0].testBodyFields[1].
+                    {
+                        "hasRequestBody": [
+                            {
+                                "testBodyFields": [
+                                    {"name": "k", "value": "v"},
+                                    {},  # missing both scalars
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+        assert result is not None
+        errs = result["validation_errors"]
+        # Breadcrumb format: top-level ``item[i]`` for back-compat
+        # with pre-0.6.171 error messages; nested layers append
+        # ``.<nested-name>[j]``.  The full path for the missing
+        # scalars at the third level reads
+        # ``item[1].hasRequestBody[0].testBodyFields[1]`` — locator
+        # substring must appear unbroken so the agent can grep / parse.
+        assert any(
+            "item[1].hasRequestBody[0].testBodyFields[1]" in e
+            and "missing required keys" in e
+            for e in errs
+        ), errs
+        # Outer variable name is in the message too.
+        assert any("apiEndpoints" in e for e in errs), errs
+
+
 # ==================== Helper-Exclusivity A2 (server 0.6.170+) ====================
 
 class TestHelperExclusivityA2:
