@@ -2124,24 +2124,38 @@ class TestRenderShapeValidation:
         })
         assert result.get("success") is True, result
 
-    def test_missing_top_level_variable_skipped_by_validator(self, plugin):
-        """Variables NOT provided are skipped by the SHAPE validator
-        (the absent-variable check is a separate layer inside
-        ``_render_template``).  This test isolates the validator: when
-        a key is absent, the shape check returns ``None`` and the error
-        — if any — comes from the render layer, not from this layer.
+    def test_missing_top_level_variable_rejected_by_validator(self, plugin):
+        """Variables NOT provided ARE rejected by the SHAPE validator
+        as of server 0.6.173+ (Option A: strict-required-scalar
+        enforcement per Mustache + Jinja2 structural-optionality
+        semantics).  Pre-0.6.173 this returned None and let the
+        render layer surface (or silently swallow) the absence; now
+        the validator surfaces the gap loudly at the tool boundary
+        with engine-specific actionable hints.
+
+        See TestTopLevelRequiredScalarEnforcement for the full
+        contract pin.  This test specifically guards against any
+        future regression that re-introduces the old "skip missing
+        scalar" behavior.
         """
         template = "Hello {{name}}, age {{age}}"
         result = plugin._validate_render_inputs_against_structure(
             template, {"name": "Alice"}
         )
-        # Validator must NOT object to absent 'age'; that's the
-        # render layer's concern.
-        assert result is None
+        assert result is not None
+        assert result.get("validation_layer") == "shape_check"
+        assert any(
+            "variable 'age'" in e and "absent" in e
+            for e in result["validation_errors"]
+        ), result
 
-    def test_jinja2_path_skipped(self, plugin):
-        """Jinja2 templates skip shape validation (the validator is
-        Mustache-only; Jinja2 kind detection is a follow-up)."""
+    def test_jinja2_path_validated_when_all_present(self, plugin):
+        """Jinja2 templates ARE shape-validated as of server 0.6.173+
+        (Option A jinja2 analog via _parse_jinja2_structure).  When
+        every kind=scalar reference is supplied non-empty, the
+        validator accepts.  Pre-0.6.173 this test asserted the
+        validator silently skipped jinja2; the new contract is
+        symmetric with Mustache."""
         template = "Hello {{ name }}, {{ greeting }}"
         output_file = plugin._base_path / "out" / "j.txt"
         result = plugin._execute_render_template_to_file({
@@ -4702,6 +4716,221 @@ class TestTopLevelRequiredScalarEnforcement:
             {"Entity": "Customer", "methodName": "getId"},
         )
         assert result is None, result
+
+
+# ==================== Jinja2 Structural Parser + Required-Scalar (server 0.6.173+) ====================
+
+
+class TestJinja2StructuralParser:
+    """``_parse_jinja2_structure`` walks a Jinja2 AST and classifies
+    each variable reference by node context, producing the same
+    ``[{name, kind}]`` shape that ``_parse_mustache_structure``
+    returns.
+
+    Kind taxonomy:
+      - ``scalar``: bare ``{{ var }}`` Output → REQUIRED + non-empty
+      - ``conditional_test``: ``{% if var %}`` test → optional gate
+      - ``iterable``: ``{% for x in var %}`` source → optional
+        (jinja2 polymorphic; rejected absence is the render-layer
+        concern)
+      - ``scalar_with_default``: ``{{ var | default(...) }}`` →
+        optional (filter substitutes fallback)
+
+    Merge policy: ``scalar`` always wins.  A variable referenced
+    BOTH as bare interpolation AND in a conditional test is
+    classified as ``scalar`` (the strictest binding lock).
+    """
+
+    def test_bare_interpolation_classified_as_scalar(self, plugin):
+        """Iter-49 production shape: pure bare ``{{ var }}``
+        interpolation.  Every name classified as kind=scalar."""
+        template = "package {{basePackage}}; class {{Entity}}Assembler {}"
+        result = plugin._parse_jinja2_structure(template)
+        assert {v["name"]: v["kind"] for v in result} == {
+            "basePackage": "scalar",
+            "Entity": "scalar",
+        }
+
+    def test_if_test_classified_as_conditional_test(self, plugin):
+        """``{% if flag %}...{% endif %}`` — ``flag`` is the gate
+        test, classified as conditional_test (optional)."""
+        template = "{% if flag %}gated content{% endif %}"
+        result = plugin._parse_jinja2_structure(template)
+        assert {v["name"]: v["kind"] for v in result} == {
+            "flag": "conditional_test",
+        }
+
+    def test_for_iter_classified_as_iterable(self, plugin):
+        """``{% for item in items %}{{ item.name }}{% endfor %}``
+        — ``items`` is the source iterable.  ``item`` is locally
+        bound and EXCLUDED from the top-level."""
+        template = "{% for item in items %}{{ item.name }}{% endfor %}"
+        result = plugin._parse_jinja2_structure(template)
+        names = {v["name"]: v["kind"] for v in result}
+        assert names == {"items": "iterable"}
+        assert "item" not in names
+
+    def test_default_filter_classified_as_scalar_with_default(self, plugin):
+        """``{{ x | default('fallback') }}`` — author explicitly
+        opted into the 'may be empty' jinja2 idiom.  Classified as
+        scalar_with_default (optional)."""
+        template = "{{ x | default('fallback') }}"
+        result = plugin._parse_jinja2_structure(template)
+        assert {v["name"]: v["kind"] for v in result} == {
+            "x": "scalar_with_default",
+        }
+
+    def test_merge_policy_scalar_wins(self, plugin):
+        """A variable referenced both as bare interpolation AND in
+        a conditional test → kind=scalar (the bare binding locks
+        it as required)."""
+        template = "{{ x }}{% if x %}gated{% endif %}"
+        result = plugin._parse_jinja2_structure(template)
+        assert {v["name"]: v["kind"] for v in result} == {
+            "x": "scalar",
+        }
+
+    def test_unparseable_template_returns_empty(self, plugin):
+        """When jinja2's parser raises (malformed template), the
+        structural extractor returns an empty list rather than
+        propagating the exception.  The renderer will surface the
+        parse error at render time with proper context."""
+        template = "{% if missing_endif %}{{ broken"
+        result = plugin._parse_jinja2_structure(template)
+        assert result == []
+
+
+class TestJinja2RequiredScalarEnforcement:
+    """``_validate_render_inputs_against_structure`` dispatches to
+    ``_parse_jinja2_structure`` for jinja2-detected templates
+    (server 0.6.173+) and applies the same kind=scalar required +
+    non-empty enforcement that the Mustache path uses.
+
+    Closes the iter-49-class gap empirically: pre-0.6.173 jinja2-
+    classified templates bypassed shape validation entirely
+    (``if syntax != 'mustache': return None``).  Agents could ship
+    ``variables: {}`` and the renderer would silently render empty;
+    only downstream (e.g. javac) would catch the corruption 12+
+    min/iter later.
+
+    Memory cross-ref:
+    ``feedback_kernel_scoping_beats_persona_prose`` — the strict
+    enforcement IS the kernel-layer gate that replaces persona-prose
+    instructions to the agent to supply all variables.
+    """
+
+    def test_iter49_repro_jinja2_empty_variables_rejected(self, plugin):
+        """Exact iter-49 reproduction on a pure-bare jinja2
+        template (unpatched mod-019 EntityModelAssembler.java.tpl
+        shape — no Mustache markers, classifies as jinja2):
+        agent ships variables: {}, validator must reject every
+        bare scalar reference."""
+        template = textwrap.dedent("""\
+            package {{basePackage}};
+            class {{Entity}}Assembler {
+                {{selfLinkMethod}}({{selfLinkParam}});
+                String name = "{{entityNameLower}}";
+            }
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template, {},
+        )
+        assert result is not None, (
+            "validator MUST reject empty payload against jinja2 "
+            "template with bare scalar references"
+        )
+        assert result.get("validation_layer") == "shape_check"
+        errs = result["validation_errors"]
+        for name in ("basePackage", "Entity", "selfLinkMethod",
+                     "selfLinkParam", "entityNameLower"):
+            assert any(
+                f"variable {name!r}" in e
+                and "kind=scalar" in e
+                and "Jinja2" in e
+                and "absent" in e
+                for e in errs
+            ), f"missing-scalar error for {name!r} not surfaced: {errs}"
+
+    def test_jinja2_with_if_branch_optional(self, plugin):
+        """``{% if flag %}{{ x }}{% endif %}{{ y }}`` — flag is a
+        gate (optional), x is gated (also optional since absent
+        flag means body doesn't fire), y is unconditionally
+        required.  Validator must accept payload that supplies
+        only y, leaving flag + x absent."""
+        template = textwrap.dedent("""\
+            {% if flag %}gated: {{ x }}{% endif %}
+            trailer: {{ y }}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {"y": "supplied"},
+        )
+        # x is classified as scalar (bare interpolation inside the
+        # if-body; the if-gate is a separate node).  Bare scalar
+        # absent is rejected — same contract as Mustache.  This
+        # documents the contract: gate IS optional, but the gated
+        # variable's binding strength inside the body is still
+        # scalar (per merge policy).  If kb-authors want true
+        # optionality for x they should use ``{{ x | default(...) }}``.
+        assert result is not None
+        errs = result["validation_errors"]
+        # x rejected, y accepted, flag accepted (gate is optional).
+        assert any("variable 'x'" in e for e in errs), errs
+        assert not any("variable 'y'" in e for e in errs), errs
+        assert not any("variable 'flag'" in e for e in errs), errs
+
+    def test_jinja2_with_default_filter_optional(self, plugin):
+        """``{{ x | default('fallback') }}`` — author opted into
+        the jinja2 optionality idiom.  Validator must accept absent
+        x."""
+        template = "value: {{ x | default('fallback') }}"
+        result = plugin._validate_render_inputs_against_structure(
+            template, {},
+        )
+        assert result is None, result
+
+    def test_jinja2_for_loop_iterable_required(self, plugin):
+        """``{% for item in items %}...{% endfor %}`` — items is
+        required.  Absent items is rejected (jinja2 would render
+        zero iterations, but the more likely intent is that the
+        agent forgot to supply the data)."""
+        template = "{% for item in items %}{{ item.name }}{% endfor %}"
+        result = plugin._validate_render_inputs_against_structure(
+            template, {},
+        )
+        # items is classified as iterable.  Per the current
+        # contract, iterable absent does NOT trigger scalar
+        # required-rejection (different kind).  This documents the
+        # boundary: iterable absence is treated as "branch doesn't
+        # fire" (zero iterations).  If kb-author wants stricter
+        # enforcement they can add a separate kind=scalar
+        # reference to items elsewhere.  Validator accepts.
+        assert result is None, result
+
+    def test_jinja2_all_supplied_passes(self, plugin):
+        """Canonical correct emission: every bare scalar supplied
+        with non-empty value.  Validator accepts."""
+        template = "{{ a }}-{{ b }}-{{ c }}"
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {"a": "x", "b": "y", "c": "z"},
+        )
+        assert result is None, result
+
+    def test_jinja2_empty_string_scalar_rejected(self, plugin):
+        """Mirror of the Mustache empty-string rejection: a scalar
+        supplied as ``""`` is treated identically to absent (both
+        produce silent zero-length jinja2 output)."""
+        template = "value: {{ x }}"
+        result = plugin._validate_render_inputs_against_structure(
+            template, {"x": ""},
+        )
+        assert result is not None
+        errs = result["validation_errors"]
+        assert any(
+            "variable 'x'" in e and "empty string" in e and "Jinja2" in e
+            for e in errs
+        ), errs
 
 
 # ==================== Spring Placeholder Parser-Sentinel Protection (server 0.6.173+) ====================

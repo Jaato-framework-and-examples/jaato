@@ -3431,8 +3431,20 @@ Template rendering writes files to the workspace."""
         validates Mustache templates; Jinja2 path is skipped (its
         kind detection is a follow-up).
         """
-        # Only Mustache has rich structural info; Jinja2 path is skipped.
-        if self._detect_template_syntax(template_content) != "mustache":
+        # Dispatch to the engine-specific structural parser (server
+        # 0.6.173+).  Pre-0.6.173 only Mustache was validated; the
+        # Jinja2 path returned None unconditionally, leaving the
+        # iter-49 class (bare-only templates → agent ships
+        # ``variables: {}`` → silent empty render → 12+ min/iter
+        # downstream compile error) wide open.  Daniel auth'd the
+        # combined Mustache + Jinja2 strict-required enforcement
+        # 2026-06-02.
+        syntax = self._detect_template_syntax(template_content)
+        if syntax == "mustache":
+            structured = self._parse_mustache_structure(template_content)
+        elif syntax == "jinja2":
+            structured = self._parse_jinja2_structure(template_content)
+        else:
             return None
 
         if not isinstance(variables, dict):
@@ -3448,7 +3460,8 @@ Template rendering writes files to the workspace."""
                 "validation_layer": "shape_check",
             }
 
-        structured = self._parse_mustache_structure(template_content)
+        # ``structured`` already populated above via syntax-dispatched
+        # parser call.
         errors: List[str] = []
 
         for var in structured:
@@ -3476,21 +3489,50 @@ Template rendering writes files to the workspace."""
                 # section / inverted-section contract.
                 #
                 # So: scalar → must be present.  Sections /
-                # inverted-sections → absence is the Mustache idiom for
-                # "branch doesn't fire", skip silently.
+                # inverted-sections / conditional-test /
+                # iterable / scalar_with_default → absence is the
+                # engine-specific idiom for "branch doesn't fire",
+                # skip silently.
                 if kind == "scalar":
-                    errors.append(
-                        f"variable {name!r} (kind=scalar) is referenced "
-                        f"by the template body but absent from the "
-                        f"variables payload.  Mustache has no syntax "
-                        f"for 'may be empty' bare interpolation — "
-                        f"``{{{{{name}}}}}`` semantically MEANS 'always "
-                        f"supplied'.  Either supply a non-empty value, "
-                        f"or wrap the reference in a section "
-                        f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) to "
-                        f"signal the variable is optional and the "
-                        f"block should render only when present."
-                    )
+                    if syntax == "mustache":
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) is "
+                            f"referenced by the template body but "
+                            f"absent from the variables payload.  "
+                            f"Mustache has no syntax for 'may be "
+                            f"empty' bare interpolation — "
+                            f"``{{{{{name}}}}}`` semantically MEANS "
+                            f"'always supplied'.  Either supply a "
+                            f"non-empty value, or wrap the reference "
+                            f"in a section "
+                            f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
+                            f"to signal the variable is optional and "
+                            f"the block should render only when "
+                            f"present."
+                        )
+                    else:
+                        # Jinja2 missing-scalar message (server
+                        # 0.6.173+).  Jinja2 has TWO optionality
+                        # idioms (default filter + if-control-flow);
+                        # surface both as actionable alternatives so
+                        # the agent picks the one matching the
+                        # template author's intent.
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) is "
+                            f"referenced by the Jinja2 template body "
+                            f"as bare ``{{{{ {name} }}}}`` but absent "
+                            f"from the variables payload.  Bare Jinja2 "
+                            f"interpolation has no built-in 'may be "
+                            f"empty' semantics — author committed to "
+                            f"supplying.  Either supply a non-empty "
+                            f"value, OR (if the template author "
+                            f"intends optionality) edit the template "
+                            f"to use ``{{{{ {name} | default('...') "
+                            f"}}}}`` (filter-based default) or wrap "
+                            f"the reference in "
+                            f"``{{% if {name} %}}...{{% endif %}}`` "
+                            f"(control-flow gate)."
+                        )
                 continue
 
             actual = variables[name]
@@ -3512,23 +3554,37 @@ Template rendering writes files to the workspace."""
                     # identically to absent (both produce silent zero-
                     # length output), so apply the same gate.  The agent
                     # cannot ship ``{"selfLinkMethod": ""}`` and rely on
-                    # Mustache rendering empty — that's the exact
+                    # the engine rendering empty — that's the exact
                     # silent-failure mode this validator exists to
-                    # close.  Optional sections (``{{#var}}...{{/var}}``)
-                    # are unaffected: bool False / empty list correctly
-                    # render zero times, which is the Mustache idiom for
-                    # "branch doesn't fire".
-                    errors.append(
-                        f"variable {name!r} (kind=scalar) was supplied "
-                        f"as an empty string.  Mustache renders this "
-                        f"identically to a missing variable (silent "
-                        f"zero-length output).  Either supply a non-"
-                        f"empty value, or wrap the reference in a "
-                        f"section (``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
-                        f"to signal the variable is optional and the "
-                        f"block should render only when present and "
-                        f"non-empty."
-                    )
+                    # close.  Optional engine idioms (Mustache section
+                    # ``{{#var}}``, Jinja2 ``default()`` filter or
+                    # ``{% if var %}``) are unaffected because they
+                    # would have classified the entry as something
+                    # other than kind=scalar.
+                    if syntax == "mustache":
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) was "
+                            f"supplied as an empty string.  Mustache "
+                            f"renders this identically to a missing "
+                            f"variable (silent zero-length output).  "
+                            f"Either supply a non-empty value, or "
+                            f"wrap the reference in a section "
+                            f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
+                            f"to signal the variable is optional and "
+                            f"the block should render only when "
+                            f"present and non-empty."
+                        )
+                    else:
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) was "
+                            f"supplied as an empty string.  Jinja2 "
+                            f"renders bare ``{{{{ {name} }}}}`` "
+                            f"identically to a missing variable "
+                            f"(silent zero-length output).  Either "
+                            f"supply a non-empty value, OR use "
+                            f"``{{{{ {name} | default('...') }}}}`` "
+                            f"in the template to signal optionality."
+                        )
             elif kind == "section":
                 # Mustache treats section markers polymorphically:
                 #   - list           → iterate body once per item
@@ -3621,6 +3677,30 @@ Template rendering writes files to the workspace."""
             elif kind == "inverted_section":
                 # Any value works (truthy/falsy distinction handled by
                 # Mustache at render time).  No type check needed.
+                pass
+            elif kind == "conditional_test":
+                # Jinja2 ``{% if var %}...{% endif %}`` test position
+                # (server 0.6.173+).  Analog of the Mustache section
+                # gate — any value is acceptable, jinja2 evaluates
+                # truthiness at render time.  No type check needed.
+                pass
+            elif kind == "iterable":
+                # Jinja2 ``{% for x in items %}`` iter position
+                # (server 0.6.173+).  Required-source semantically,
+                # but the missing-variable branch above already fires
+                # when absent (this path runs only when the variable
+                # IS present).  No additional type check — jinja2
+                # accepts strings, lists, dicts, generators, etc. as
+                # iterables; rejecting non-iterable here would be
+                # stricter than jinja2 itself.
+                pass
+            elif kind == "scalar_with_default":
+                # Jinja2 ``{{ var | default(fallback) }}`` (server
+                # 0.6.173+).  Author explicitly opted into the
+                # "may be empty" idiom via the ``default()`` filter.
+                # Any value (including empty / None) is acceptable
+                # because the filter substitutes the fallback.  No
+                # type check.
                 pass
 
         if errors:
@@ -3934,10 +4014,26 @@ Template rendering writes files to the workspace."""
                 "output_path": str(out_path)
             }
 
-        # Validate variables shape against template structure (Mustache only).
-        # Catches the silent-garbage failure mode where a section
-        # variable is passed as a string or scalar — Mustache renders
-        # one bogus block instead of the intended N-item iteration.
+        # Strip @generated annotation lines BEFORE shape validation
+        # (server 0.6.173+).  The strip removes lines like
+        # ``@generated {{skillId}} v{{skillVersion}}`` that the
+        # generator pipeline injects; these reference variables the
+        # agent is not expected to supply.  Pre-0.6.173 the strip
+        # ran only inside ``_render_template``, but the new strict-
+        # required-scalar enforcement at the validator layer needs
+        # the stripped template too — otherwise it would reject
+        # legitimate calls for missing ``skillId`` / ``skillVersion``
+        # before the renderer even gets a chance to strip them.
+        # Applying the strip once here (and again redundantly inside
+        # ``_render_template`` for callers that don't go through this
+        # path) is the simplest fix; the strip is idempotent.
+        template = self._strip_generated_annotations(template)
+
+        # Validate variables shape against template structure
+        # (Mustache + Jinja2 since server 0.6.173+).  Catches the
+        # silent-garbage failure modes (Mustache: section variable
+        # passed as scalar; Jinja2: bare interpolation absent or
+        # empty-string).
         shape_error = self._validate_render_inputs_against_structure(
             template, variables
         )
@@ -4185,6 +4281,198 @@ Template rendering writes files to the workspace."""
             else:
                 result.append(line)
         return ''.join(result), stripped_line_numbers
+
+    def _parse_jinja2_structure(self, content: str) -> List[Dict[str, Any]]:
+        """Walk a Jinja2 template, classify each variable by AST context.
+
+        Jinja2 analog of ``_parse_mustache_structure`` (server 0.6.173+).
+        Produces the same ``[{name, kind, ...}]`` shape so the
+        ``_validate_render_inputs_against_structure`` loop can consume
+        both engines uniformly.
+
+        Returns a deduplicated list of variable descriptors per the
+        following kind taxonomy:
+
+        - ``"scalar"``: variable appears as bare ``{{ var }}`` Output
+          (no ``default()`` filter).  Per Jinja2 spec semantics, a
+          bare interpolation REQUIRES the variable to be supplied;
+          the only "may be empty" idiom available in Jinja2 syntax
+          is ``{{ var | default(...) }}`` (filter) or wrapping in
+          ``{% if var %}{{ var }}{% endif %}`` (control flow).
+          Maps onto the same Mustache ``scalar`` enforcement applied
+          by ``_validate_render_inputs_against_structure``: REQUIRED
+          + non-empty.
+        - ``"conditional_test"``: variable appears in ``{% if var %}``
+          test position.  Analog of the Mustache section gate
+          (``{{#var}}...{{/var}}``).  Optional — absence means the
+          branch doesn't fire.
+        - ``"iterable"``: variable appears in ``{% for x in var %}``
+          iter position.  Analog of the Mustache list-iterating
+          section.  Required at the iterable source, but the
+          per-iteration loop variable (``x``) is locally bound and
+          NOT surfaced as a top-level variable.
+        - ``"scalar_with_default"``: variable appears with a
+          ``| default(...)`` filter.  Jinja2 idiom for "may be
+          empty".  Optional — the filter substitutes the fallback
+          when the variable is absent.
+
+        Merge policy when one name appears in multiple contexts:
+        ``scalar`` always wins (the strictest classification).
+        Example: ``{{ x }}{% if x %}gated{% endif %}`` — ``x`` is
+        classified as ``scalar`` (the bare interpolation locks it
+        in as required), not ``conditional_test``.
+
+        Loop variables (e.g. ``item`` in ``{% for item in items %}``)
+        are excluded from the result — they're locally scoped and
+        not part of the agent's variables payload contract.
+
+        Args:
+            content: Jinja2 template source.
+
+        Returns:
+            List of ``{"name": str, "kind": str}`` dicts, sorted by
+            name for stable ordering.  Empty list when the template
+            fails to parse (jinja2's own parser is the source of
+            truth; if it can't read the template, no validation is
+            possible — surface as zero entries and let the renderer
+            raise the parse error at render time).
+        """
+        try:
+            from jinja2 import Environment, nodes as jnodes
+        except ImportError:
+            # Jinja2 not installed (shouldn't happen in production —
+            # it's a hard dep — but defensive for unit tests with
+            # minimal envs).
+            return []
+
+        env = Environment()
+        try:
+            ast = env.parse(content)
+        except Exception:
+            # Template doesn't parse.  Renderer would also fail; let
+            # it surface the error there with the proper context.
+            return []
+
+        # Step 1: collect loop-bound variable names.  Jinja2's
+        # ``{% for x in items %}`` binds ``x`` locally; references
+        # to ``x`` inside the loop body are not agent-payload
+        # contributions.  ``find_undeclared_variables`` already
+        # excludes these but we re-derive here because we classify
+        # via Name nodes directly (find_undeclared returns just
+        # names, no AST positions).  Tuple-unpacking forms
+        # (``{% for a, b in pairs %}``) are also handled.
+        loop_bound: set = set()
+        for for_node in ast.find_all(jnodes.For):
+            target = for_node.target
+            if isinstance(target, jnodes.Name):
+                loop_bound.add(target.name)
+            elif isinstance(target, jnodes.Tuple):
+                for inner in target.items:
+                    if isinstance(inner, jnodes.Name):
+                        loop_bound.add(inner.name)
+
+        # Step 2: build a parent map so each Name can walk up to its
+        # semantic context (If.test / For.iter / Filter[default] /
+        # plain Output).  Jinja2 AST nodes don't carry parent
+        # references natively.
+        parent_map: Dict[int, Any] = {}
+
+        def build_parent_map(node: Any, parent: Any = None) -> None:
+            parent_map[id(node)] = parent
+            for child in node.iter_child_nodes():
+                build_parent_map(child, node)
+
+        build_parent_map(ast)
+
+        # Step 3: walk every Name node, classify by context, merge.
+        # ``scalar`` is the strictest kind and wins on merge.
+        by_name: Dict[str, str] = {}
+
+        for name_node in ast.find_all(jnodes.Name):
+            name = name_node.name
+            if name in loop_bound:
+                continue
+
+            kind = self._classify_jinja2_name_context(
+                name_node, parent_map,
+            )
+
+            existing = by_name.get(name)
+            if existing is None:
+                by_name[name] = kind
+            elif kind == "scalar":
+                # Scalar wins — strictest classification.
+                by_name[name] = "scalar"
+            # else: keep existing (already at the equal-or-stricter
+            # level).
+
+        return [
+            {"name": n, "kind": k}
+            for n, k in sorted(by_name.items())
+        ]
+
+    def _classify_jinja2_name_context(
+        self,
+        name_node: Any,
+        parent_map: Dict[int, Any],
+    ) -> str:
+        """Determine the semantic kind of a Jinja2 Name reference by
+        walking up the parent chain (server 0.6.173+).
+
+        Walks from the Name node toward the AST root, returning the
+        first semantically-meaningful ancestor's contribution:
+
+        - ``If.test`` ancestor → ``"conditional_test"``: the Name
+          is part of the conditional gate (e.g.
+          ``{% if user.is_admin and flag %}`` — both ``user`` and
+          ``flag`` walk up through ``And`` to find ``If.test``).
+        - ``For.iter`` ancestor → ``"iterable"``: the Name is the
+          loop's source iterable (e.g. ``{% for x in items %}`` —
+          ``items`` walks up to find ``For.iter``).
+        - ``Filter`` ancestor with ``name == "default"`` →
+          ``"scalar_with_default"``: the Name is being defaulted
+          (e.g. ``{{ x | default('fallback') }}``).
+        - Otherwise → ``"scalar"``: bare Output reference or any
+          other context not covered above.
+
+        Args:
+            name_node: A ``jinja2.nodes.Name`` node from the AST.
+            parent_map: Pre-built ``id(node) -> parent`` map from
+                ``_parse_jinja2_structure``.
+
+        Returns:
+            One of ``"scalar"``, ``"conditional_test"``,
+            ``"iterable"``, ``"scalar_with_default"``.
+        """
+        from jinja2 import nodes as jnodes
+
+        current = name_node
+        while True:
+            parent = parent_map.get(id(current))
+            if parent is None:
+                # Reached the AST root.  Default to scalar — bare
+                # interpolation in an Output node OR a Name used in
+                # some other position we haven't explicitly mapped.
+                return "scalar"
+
+            # Inside an If node's test expression?
+            if isinstance(parent, jnodes.If) and current is parent.test:
+                return "conditional_test"
+
+            # Inside a For node's iter expression?
+            if isinstance(parent, jnodes.For) and current is parent.iter:
+                return "iterable"
+
+            # Inside a Filter node?  Check filter name for the
+            # ``default()`` "may be empty" idiom.
+            if isinstance(parent, jnodes.Filter):
+                if parent.name == "default":
+                    return "scalar_with_default"
+                # Other filters (e.g. ``upper``, ``trim``) don't
+                # grant optionality — keep walking up to see if
+                # we're in a larger gated context.
+
+            current = parent
 
     def _parse_mustache_structure(self, content: str) -> List[Dict[str, Any]]:
         """Walk a Mustache template, classify each variable by kind.
