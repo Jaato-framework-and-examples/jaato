@@ -145,6 +145,23 @@ class RenderContext:
             ``result`` / ``success`` / ``call_id`` / ``turn_index``.
             See :func:`shared.completion_processors.build_tool_call_ledger`
             for the contract.
+        session_id: Daemon-side session identifier resolved at
+            construction time with the parent-walk fallback (server
+            0.6.172+).  Mirrors the resolution at
+            ``JaatoSession._daemon_session_id`` lookup in
+            ``jaato_session.py:621-628``: prefers the immediate
+            session's value but walks up the ``_parent_session``
+            chain so subagent sessions inherit the root daemon
+            session_id.  ``None`` when the session has not been
+            registered with a daemon (e.g. unit tests with bare
+            ``JaatoSession`` instances).  Kb-side processors and
+            prefetch scripts read this for per-session disk
+            artifact paths (e.g.
+            ``cascade_state/audit/<session_id>.jsonl``) WITHOUT a
+            defensive fallback — None here means the kb caller
+            should treat the session as non-daemon-attached and
+            either skip the artifact or fail loudly per the
+            no-fallback rule.
     """
 
     session: Any
@@ -160,6 +177,7 @@ class RenderContext:
         )
     )
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    session_id: Optional[str] = None
 
 
 def expand_py_placeholders(content: str, context: RenderContext) -> str:
@@ -326,6 +344,7 @@ def build_render_context(
         getattr(session, "_config_root", None)
         or (getattr(runtime, "_config_root", None) if runtime else None)
     )
+    session_id = _resolve_session_id(session)
     return RenderContext(
         session=session,
         runtime=runtime,
@@ -335,4 +354,50 @@ def build_render_context(
         agent_params=dict(agent_params or {}),
         env=dict(os.environ),
         tool_calls=list(tool_calls) if tool_calls else [],
+        session_id=session_id,
     )
+
+
+def _resolve_session_id(session: Any) -> Optional[str]:
+    """Resolve the daemon session_id with parent-walk fallback
+    (server 0.6.172+).
+
+    Mirrors the canonical resolution at
+    ``JaatoSession._daemon_session_id`` lookup in
+    ``shared.jaato_session:621-628``: prefer the immediate session's
+    ``_daemon_session_id`` value, but walk up the ``_parent_session``
+    chain when None so subagent sessions inherit the root daemon's
+    session_id.
+
+    Subagents are spawned with a fresh JaatoSession that doesn't
+    receive its own ``_daemon_session_id`` (the daemon-side session
+    manager only registers the root agent's session).  Without the
+    walk, every subagent's ``RenderContext.session_id`` would be
+    None, breaking per-session artifact paths and audit ledger
+    naming for any kb-side code that relies on a non-None
+    session_id.  The walk closes that gap deterministically — same
+    contract as the telemetry-side resolver, single source of
+    behavioral truth.
+
+    Defensive ``getattr`` reads tolerate non-JaatoSession callers
+    (e.g. unit tests passing a bare object as ``session``) so this
+    helper returns None cleanly rather than raising.
+
+    Args:
+        session: A ``JaatoSession`` instance (or any object;
+            non-session inputs return None).
+
+    Returns:
+        The resolved daemon session_id, or None when no ancestor in
+        the parent chain has one set.
+    """
+    sid = getattr(session, "_daemon_session_id", None)
+    if sid:
+        return sid
+    parent = getattr(session, "_parent_session", None)
+    while parent is not None:
+        sid = getattr(parent, "_daemon_session_id", None)
+        if sid:
+            return sid
+        parent = getattr(parent, "_parent_session", None)
+    return None
