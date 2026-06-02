@@ -4676,6 +4676,85 @@ class TestTopLevelRequiredScalarEnforcement:
             for e in errs
         ), errs
 
+    def test_v152_retry49_repro_None_scalar_rejected_mustache(self, plugin):
+        """Empirical falsification repro (server 0.6.174+).
+        v152-retry-49-on-0.6.173 (cascade 2026-06-02): mod-019
+        codegen agent shipped ``selfLinkMethod: null`` (and other
+        nulls) in renderTemplateToFile variables.  Validator
+        passed the call through because the empty-string check
+        only caught ``actual == ""`` — None passed as a valid
+        scalar value.  Mustache then rendered bare
+        ``{{selfLinkMethod}}`` as empty (None identical to absent
+        + empty-string at render time), syntactically broken Java
+        landed on disk, javac errored 12+ min later.
+
+        Closes the third empty-equivalent state.  The full triplet
+        (absent | "" | None) is now uniformly rejected at the
+        tool boundary.
+        """
+        template = textwrap.dedent("""\
+            {{#_marker}}{{/_marker}}
+            class {{Entity}}Assembler {
+                .{{selfLinkMethod}}(entity.getId().toString());
+            }
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {
+                "Entity": "Customer",
+                "selfLinkMethod": None,  # exact iter-49 shape
+            },
+        )
+        assert result is not None, (
+            "validator MUST reject None-valued kind=scalar (Mustache "
+            "renders identically to absent + empty-string)"
+        )
+        assert result.get("validation_layer") == "shape_check"
+        errs = result["validation_errors"]
+        assert any(
+            "variable 'selfLinkMethod'" in e
+            and "None" in e
+            and "Mustache" in e
+            for e in errs
+        ), errs
+
+    def test_None_scalar_rejected_jinja2(self, plugin):
+        """Same None-rejection contract on the Jinja2 path.  Bare
+        ``{{ var }}`` in a Jinja2 template with var=None must
+        reject — Jinja2's StrictUndefined would raise at render
+        time but only when ``var`` is missing entirely; explicit
+        None bypasses that check, producing silent empty output
+        identical to Mustache."""
+        template = "{{ x }} - {{ y }}"  # pure-bare → detected as jinja2
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {"x": "supplied", "y": None},
+        )
+        assert result is not None
+        errs = result["validation_errors"]
+        assert any(
+            "variable 'y'" in e and "None" in e and "Jinja2" in e
+            for e in errs
+        ), errs
+
+    def test_None_value_in_section_idiom_still_passes(self, plugin):
+        """Sections accept None as the Mustache falsy idiom
+        ("branch doesn't fire").  The new None-rejection contract
+        applies ONLY to kind=scalar.  A section variable supplied
+        as None remains a valid Mustache idiom and must NOT be
+        rejected."""
+        template = textwrap.dedent("""\
+            {{#hasField}}
+              this body skipped when hasField is None
+            {{/hasField}}
+            {{Entity}}
+        """)
+        result = plugin._validate_render_inputs_against_structure(
+            template,
+            {"Entity": "Customer", "hasField": None},
+        )
+        assert result is None, result
+
     def test_section_idiom_unaffected_by_strict_scalar_check(self, plugin):
         """Sections (``kind=section``) and inverted sections
         (``kind=inverted_section``) are the Mustache idioms for

@@ -3538,13 +3538,52 @@ Template rendering writes files to the workspace."""
             actual = variables[name]
 
             if kind == "scalar":
-                if actual is not None and not isinstance(
-                    actual, (str, int, float, bool)
-                ):
+                if actual is None:
+                    # None-equivalent rejection (server 0.6.174+).
+                    # Closes the third empty-equivalent state:
+                    # Mustache + Jinja2 both render ``None`` identically
+                    # to absent and to ``""`` (silent zero-length
+                    # output).  Pre-0.6.174 the kind=scalar branch
+                    # accepted None as a valid value type — empirically
+                    # falsified by v152-retry-49-on-0.6.173:
+                    # mod-019 codegen agent shipped
+                    # ``{"selfLinkMethod": null, ...}``; validator
+                    # passed; Mustache rendered the bare
+                    # ``{{selfLinkMethod}}`` reference as empty; javac
+                    # errored 12+ min later.  Option A contract
+                    # requires REJECTING all three empty-equivalents
+                    # (absent | "" | None) at the tool boundary.
+                    if syntax == "mustache":
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) was "
+                            f"supplied as None / null.  Mustache "
+                            f"renders this identically to a missing "
+                            f"variable or empty string (silent zero-"
+                            f"length output).  Either supply a non-"
+                            f"empty value, or wrap the reference in "
+                            f"a section "
+                            f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
+                            f"to signal the variable is optional and "
+                            f"the block should render only when "
+                            f"present and non-empty."
+                        )
+                    else:
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) was "
+                            f"supplied as None / null.  Jinja2 "
+                            f"renders bare ``{{{{ {name} }}}}`` "
+                            f"identically to a missing variable or "
+                            f"empty string (silent zero-length "
+                            f"output).  Either supply a non-empty "
+                            f"value, OR use "
+                            f"``{{{{ {name} | default('...') }}}}`` "
+                            f"in the template to signal optionality."
+                        )
+                elif not isinstance(actual, (str, int, float, bool)):
                     errors.append(
                         f"variable {name!r} declared kind=scalar but "
                         f"received {type(actual).__name__} — expected "
-                        f"str / int / float / bool / None"
+                        f"str / int / float / bool"
                     )
                 elif isinstance(actual, str) and actual == "":
                     # Empty-string check (server 0.6.173+).  Mirrors the
