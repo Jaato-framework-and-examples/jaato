@@ -3456,11 +3456,41 @@ Template rendering writes files to the workspace."""
             kind = var["kind"]
 
             if name not in variables:
-                # Missing top-level variable — Mustache renders missing
-                # as empty string for scalars and empty list for
-                # sections.  Skip validation for absent variables; only
-                # validate ones the agent actually provided (so the
-                # check is opt-in via providing the variable).
+                # Top-level required-scalar enforcement (server 0.6.173+).
+                # Pre-0.6.173 the validator skipped missing top-level
+                # variables on the theory "Mustache renders missing as
+                # empty for scalars / empty list for sections, opt-in
+                # validation."  Empirical evidence (v152-retry-49,
+                # 2026-06-02, mod-019 codegen agent shipped
+                # ``variables: {}`` for all 8 files; cascade burned 12+
+                # min/iter to surface as a javac error) showed that
+                # default is wrong for cascade-grade work.
+                #
+                # The principled fix per Mustache structural-optionality
+                # semantics: ``{{var}}`` (kind=scalar) has NO Mustache
+                # syntax for "may be empty" — author committed to
+                # supplying.  Optionality is expressed via section
+                # idioms ``{{#var}}...{{/var}}`` (kind=section) and
+                # ``{{^var}}...{{/var}}`` (kind=inverted_section), which
+                # remain "skip when absent" per the polymorphic Mustache
+                # section / inverted-section contract.
+                #
+                # So: scalar → must be present.  Sections /
+                # inverted-sections → absence is the Mustache idiom for
+                # "branch doesn't fire", skip silently.
+                if kind == "scalar":
+                    errors.append(
+                        f"variable {name!r} (kind=scalar) is referenced "
+                        f"by the template body but absent from the "
+                        f"variables payload.  Mustache has no syntax "
+                        f"for 'may be empty' bare interpolation — "
+                        f"``{{{{{name}}}}}`` semantically MEANS 'always "
+                        f"supplied'.  Either supply a non-empty value, "
+                        f"or wrap the reference in a section "
+                        f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) to "
+                        f"signal the variable is optional and the "
+                        f"block should render only when present."
+                    )
                 continue
 
             actual = variables[name]
@@ -3473,6 +3503,31 @@ Template rendering writes files to the workspace."""
                         f"variable {name!r} declared kind=scalar but "
                         f"received {type(actual).__name__} — expected "
                         f"str / int / float / bool / None"
+                    )
+                elif isinstance(actual, str) and actual == "":
+                    # Empty-string check (server 0.6.173+).  Mirrors the
+                    # path-template side at ``_validate_resolved_output_path``
+                    # which already rejects empty-substitution for path
+                    # variables.  Empty body interpolation renders
+                    # identically to absent (both produce silent zero-
+                    # length output), so apply the same gate.  The agent
+                    # cannot ship ``{"selfLinkMethod": ""}`` and rely on
+                    # Mustache rendering empty — that's the exact
+                    # silent-failure mode this validator exists to
+                    # close.  Optional sections (``{{#var}}...{{/var}}``)
+                    # are unaffected: bool False / empty list correctly
+                    # render zero times, which is the Mustache idiom for
+                    # "branch doesn't fire".
+                    errors.append(
+                        f"variable {name!r} (kind=scalar) was supplied "
+                        f"as an empty string.  Mustache renders this "
+                        f"identically to a missing variable (silent "
+                        f"zero-length output).  Either supply a non-"
+                        f"empty value, or wrap the reference in a "
+                        f"section (``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
+                        f"to signal the variable is optional and the "
+                        f"block should render only when present and "
+                        f"non-empty."
                     )
             elif kind == "section":
                 # Mustache treats section markers polymorphically:
@@ -4205,7 +4260,32 @@ Template rendering writes files to the workspace."""
         Triple-brace ``{{{x}}}`` is normalised to ``{{x}}`` before
         parsing — they're the same variable from a structural
         perspective; only the render-time escaping differs.
+
+        Spring Boot ``${{{X}}:default}`` placeholders (server 0.6.173+)
+        are protected by the same sentinel mechanism the renderer uses
+        (see ``_protect_spring_placeholders``) BEFORE parsing.  Without
+        this, the parser mis-tokenises the ``${`` outer brace into the
+        Mustache identifier (e.g., extracting ``"{BASE_URL_ENV"`` —
+        leading-``{`` garbage entry — for
+        ``${{{BASE_URL_ENV}}:http://localhost}``).  Pre-0.6.173 the
+        garbage entry was invisible because no consumer of parser
+        metadata enforced top-level required-scalar presence; today's
+        strict enforcement (Daniel-auth'd 2026-06-02) surfaces the
+        latent parser bug.  The sentinel substitution closes both
+        at the same layer.
         """
+        # Spring Boot placeholder collision protection (server
+        # 0.6.173+).  Same mechanism the renderer uses at
+        # ``_protect_spring_placeholders``: substitute ``${{{`` →
+        # ``$<sentinel>{{`` so the Mustache parser sees a clean double-
+        # brace.  Restoration is unnecessary because parser output is
+        # structural metadata, not rendered content — the substituted
+        # input produces the same kind / item_keys / source taxonomy
+        # for the legitimate Mustache variables INSIDE the Spring
+        # placeholder, without emitting a garbage top-level entry for
+        # the mis-tokenised ``${`` outer brace.
+        content = self._protect_spring_placeholders(content)
+
         # Strip ``//`` host-language comment lines first.  References
         # inside such lines are documentation, not live Mustache
         # references — see ``_strip_host_comment_lines`` docstring.
