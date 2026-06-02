@@ -3127,6 +3127,232 @@ Template rendering writes files to the workspace."""
             },
         }
 
+    def _check_item_against_item_keys(
+        self,
+        var_name: str,
+        item: Any,
+        item_keys: List[Any],
+        item_idx: int,
+        path_prefix: Optional[str],
+        errors: List[str],
+    ) -> None:
+        """Validate one dict ``item`` against the section's ``item_keys``
+        metadata.  Recursive — server 0.6.171+.
+
+        Drives three checks on the item:
+          1. **Type-check**: item must be a dict (non-dict items can't
+             carry the section's per-item fields).
+          2. **Required-key coverage** (server 0.6.43+): every item_key
+             with ``source ∈ {scalar, section}`` must be present in
+             the item; missing → silent corruption mode in Mustache,
+             surfaced loudly here.
+          3. **Helper-exclusivity** (server 0.6.170+): helper-source
+             item_keys must be Python bool, and within each sibling-
+             family AT MOST ONE may be True (A2 contract).
+
+        After all three checks, **recurses** into nested item_keys
+        (server 0.6.171+).  For each item_key K declared on this
+        section whose value in ``item`` is a list AND whose own
+        ``item_keys`` is non-empty, drill into each inner element of
+        that list and apply the same three checks again.  This is the
+        load-bearing closure of the iter-3 visibility gap: the parser
+        already produces nested item_keys metadata (verify with
+        ``_parse_mustache_structure``); pre-0.6.171 the validator
+        stopped at the outermost section and never consumed the
+        nested layer.
+
+        Empirical motivation: cascade iter-3 (2026-06-01, mod-019
+        ControllerTest-hateoas.java.tpl).  Template
+        ``{{#hasRequestBody}}.content(...{{#testBodyFields}}Map.entry(
+        "{{name}}", "{{value}}"){{^last}},{{/last}}{{/testBodyFields}}
+        )){{/hasRequestBody}}`` —
+        ``hasRequestBody`` is a Mustache section with one nested
+        required item_key ``testBodyFields`` (which itself has
+        required scalars ``name`` / ``value``).  Agent emitted
+        ``hasRequestBody = [{name, value, last, first, @index} × 4]``
+        — 4 dicts missing ``testBodyFields``.  Pre-fix: validator
+        passed (no nested traversal); Mustache iterated the section
+        body 4 times, each time ``{{#testBodyFields}}`` looked up
+        ``testBodyFields`` in the current dict context (absent),
+        rendered nothing → 4 cascading ``.content(Map.ofEntries())``
+        empties → 4 cascading javac errors.
+
+        Args:
+            var_name: Top-level section variable name (e.g.
+                ``"apiEndpoints"``).  Used in error messages to
+                identify the outermost variable the agent supplied.
+            item: The dict being validated (one element of a list-of-
+                dicts iteration).
+            item_keys: The section's per-item metadata from
+                :meth:`_parse_mustache_structure`.
+            item_idx: Zero-based index of ``item`` within its list.
+            path_prefix: ``None`` at the top level (preserves
+                pre-0.6.171 error message format for back-compat with
+                existing test assertions); set to a breadcrumb like
+                ``"apiEndpoints[0].hasRequestBody"`` for recursive
+                calls so the agent sees the full path to the failing
+                location.
+            errors: List to append validation error strings to.
+        """
+        # Recompute required_names / all_names from item_keys.  Same
+        # logic as the pre-0.6.171 inline code: required = source in
+        # {scalar, section}; helper / inverted / dotted are optional
+        # Mustache idioms whose absence is part of the contract.
+        required_names: List[str] = []
+        all_names: List[str] = []
+        for k in item_keys:
+            if isinstance(k, dict):
+                all_names.append(k.get("name", ""))
+                if k.get("required"):
+                    required_names.append(k["name"])
+            else:
+                # Legacy flat-string entry — treat as required by
+                # default for forward-compat with pre-0.6.43 tooling.
+                all_names.append(str(k))
+                required_names.append(str(k))
+
+        # Error-message prefix.  Top-level keeps pre-0.6.171 wording
+        # so the kb-enablement-2.0 chunk-3 v3 regression test (and
+        # every other existing test on this validator) stays green.
+        # Recursive calls use a breadcrumb so the agent can locate
+        # nested failures without crawling the whole payload.
+        if path_prefix is None:
+            location = f"variable {var_name!r} kind=section item[{item_idx}]"
+            helper_path_prefix = f"variable {var_name!r}"
+        else:
+            location = f"{path_prefix}[{item_idx}]"
+            helper_path_prefix = path_prefix
+
+        # 1. Type-check.
+        if not isinstance(item, dict):
+            errors.append(
+                f"{location} is {type(item).__name__}, "
+                f"expected dict (each list item must be a dict "
+                f"carrying the section's per-item fields: "
+                f"{all_names})"
+            )
+            return  # can't run inner checks on a non-dict
+
+        # 2. Required-key coverage.
+        missing = [k for k in required_names if k not in item]
+        if missing:
+            got = sorted(item.keys())
+            errors.append(
+                f"{location} missing required keys "
+                f"{missing}.  Required item_keys "
+                f"(source = scalar / section): "
+                f"{required_names}.  Got: {got}.  "
+                f"Mustache would render empty for "
+                f"missing keys (silent corruption); "
+                f"provide all required keys or the "
+                f"call must fail loudly."
+            )
+
+        # 3. Helper-exclusivity (A2 — at-most-one True).  See full
+        # contract documented at the helper_keys_in_row check in
+        # _validate_render_inputs_against_structure.
+        helper_keys_in_row = [
+            k for k in item_keys
+            if isinstance(k, dict)
+            and k.get("source") == "helper"
+            and k.get("name") in item
+        ]
+        if helper_keys_in_row:
+            checked_families: Set[Tuple[str, ...]] = set()
+            for hk in helper_keys_in_row:
+                name_h = hk["name"]
+                siblings = hk.get("helper_siblings") or []
+                family = tuple(sorted([name_h] + list(siblings)))
+                if family in checked_families:
+                    continue
+                checked_families.add(family)
+
+                truthy_members: List[str] = []
+                type_errors: List[str] = []
+                for member in family:
+                    if member not in item:
+                        continue
+                    v = item[member]
+                    if not isinstance(v, bool):
+                        type_errors.append(
+                            f"{helper_path_prefix} "
+                            f"item[{item_idx}].{member} = "
+                            f"{v!r} (type "
+                            f"{type(v).__name__}); "
+                            f"helper-source "
+                            f"variables MUST be "
+                            f"Python bool (True or "
+                            f"False).  Mustache "
+                            f"accepts ``[]`` and "
+                            f"``[True]`` silently "
+                            f"but with unstable "
+                            f"truthiness — emit the "
+                            f"bool explicitly."
+                        )
+                    elif v is True:
+                        truthy_members.append(member)
+                errors.extend(type_errors)
+
+                if not type_errors and len(truthy_members) > 1:
+                    errors.append(
+                        f"{helper_path_prefix} "
+                        f"item[{item_idx}] has multiple "
+                        f"helper-source variables "
+                        f"set True: "
+                        f"{sorted(truthy_members)}. "
+                        f"Helper siblings encode a "
+                        f"discriminated union "
+                        f"(exactly one branch "
+                        f"fires per row); set AT "
+                        f"MOST ONE of "
+                        f"{list(family)} to True "
+                        f"and all others to False."
+                    )
+
+        # 4. Recursive descent into nested item_keys (server 0.6.171+).
+        # For each declared item_key K with non-empty nested item_keys,
+        # AND the value in ``item`` for K is a list, drill into each
+        # inner element and apply the same three checks again.
+        #
+        # Scope limit: only list-of-dicts recursion is supported.
+        # Dict-context (Mustache "render once with dict as context")
+        # and bool-context (Mustache conditional idiom) do not iterate
+        # — the section body fires once or zero times against the
+        # outer context.  The required-key check at this level
+        # already accepts non-list values; no nested traversal needed
+        # for those forms.  Future enhancement if a dict-context
+        # bug surfaces: extend recursion to handle isinstance(value,
+        # dict).
+        #
+        # Breadcrumb construction: the next level's path_prefix is
+        # ``{current_location}.{nested_key_name}`` so the agent sees
+        # the full path on a nested failure (e.g.
+        # ``apiEndpoints[0].hasRequestBody[2] missing required keys
+        # ['testBodyFields']``).
+        for k in item_keys:
+            if not isinstance(k, dict):
+                continue
+            nested_item_keys = k.get("item_keys")
+            if not nested_item_keys:
+                continue
+            nested_name = k.get("name")
+            if not nested_name or nested_name not in item:
+                continue
+            nested_value = item[nested_name]
+            if not isinstance(nested_value, list):
+                continue
+            # Build the next-level breadcrumb.
+            next_path_prefix = f"{location}.{nested_name}"
+            for j, inner_item in enumerate(nested_value[:5]):
+                self._check_item_against_item_keys(
+                    var_name=var_name,
+                    item=inner_item,
+                    item_keys=nested_item_keys,
+                    item_idx=j,
+                    path_prefix=next_path_prefix,
+                    errors=errors,
+                )
+
     def _validate_render_inputs_against_structure(
         self, template_content: str, variables: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
@@ -3311,184 +3537,14 @@ Template rendering writes files to the workspace."""
                         # systemic shape errors without expensive
                         # iteration.
                         for i, item in enumerate(actual[:5]):
-                            if not isinstance(item, dict):
-                                errors.append(
-                                    f"variable {name!r} kind=section "
-                                    f"item[{i}] is {type(item).__name__}, "
-                                    f"expected dict (each list item "
-                                    f"must be a dict carrying the "
-                                    f"section's per-item fields: "
-                                    f"{all_names})"
-                                )
-                                continue
-                            # Per-item required-key coverage check
-                            # (server 0.6.43+).  Catches the chunk-3
-                            # v3 drift class: agent reconstructs items
-                            # dropping a key declared with source =
-                            # scalar/section in the parser's view.
-                            # Mustache would render empty for the
-                            # missing key (silent corruption); we
-                            # surface it loudly with a clean hint.
-                            missing = [
-                                k for k in required_names
-                                if k not in item
-                            ]
-                            if missing:
-                                got = sorted(item.keys())
-                                errors.append(
-                                    f"variable {name!r} kind=section "
-                                    f"item[{i}] missing required keys "
-                                    f"{missing}.  Required item_keys "
-                                    f"(source = scalar / section): "
-                                    f"{required_names}.  Got: {got}.  "
-                                    f"Mustache would render empty for "
-                                    f"missing keys (silent corruption); "
-                                    f"provide all required keys or the "
-                                    f"call must fail loudly."
-                                )
-                            # Per-item helper-exclusivity check (server
-                            # 0.6.170+).  When an item_key has
-                            # source="helper", it's the argument of a
-                            # Handlebars conditional helper
-                            # (``{{#isString}}...{{/isString}}``).
-                            # Mustache treats ``[], [False], None,
-                            # False`` as falsy and ``True, [True], 1,
-                            # non-empty-string`` as truthy — accepts
-                            # many shapes silently.  When two helper-
-                            # tagged variables share scope (sibling
-                            # discriminators — ``isString``, ``isLong``,
-                            # ``isId``, ``isBoolean``), the agent's job
-                            # is to set exactly ONE truthy and all
-                            # others falsy.  Persona prose says "use
-                            # bool True/False"; the agent sometimes
-                            # emits ``[]`` (Mustache-falsy list) or
-                            # ``[True]`` (Mustache-truthy list).
-                            # Surfaced empirically by cascade iter 3
-                            # (2026-06-01, entityFields[*].isString = []
-                            # on actually-String field): Mustache
-                            # treated [] as falsy, the
-                            # ``{{#isString}}"{{/isString}}`` quote-gate
-                            # did not fire, bare value landed on disk,
-                            # 54 javac "cannot find symbol" errors
-                            # surfaced 25 minutes later.
-                            #
-                            # Contract enforced (A2 — at-most-one True):
-                            #   1. Every helper-source variable PRESENT
-                            #      in the row MUST be Python bool (True
-                            #      / False).  Lists, strings, dicts,
-                            #      None are rejected — the agent cannot
-                            #      rely on Mustache's truthy-list /
-                            #      falsy-empty-list coercion.
-                            #   2. Within each helper's sibling-set
-                            #      (``[name] + helper_siblings``), AT
-                            #      MOST ONE member may be True.  Two-
-                            #      or-more True is structurally
-                            #      meaningless (which branch is this
-                            #      row?) and rejected.
-                            #   3. All-False is permitted (Mustache
-                            #      idiom: "none of these branches
-                            #      fires").  Tighten to "exactly-one
-                            #      True" only if future evidence shows
-                            #      all-False is hiding bugs.
-                            #   4. Helper siblings absent from the row
-                            #      entirely are Mustache's absence-is-
-                            #      falsy contract — NOT flagged.
-                            #
-                            # Memory cross-ref:
-                            # ``feedback_kernel_scoping_beats_persona_prose``
-                            # — kernel-layer gate over persona prose
-                            # reinforcement.
-                            #
-                            # Top-level scope NOT covered: the current
-                            # parser does not tag top-level entries
-                            # with ``source=helper`` (a top-level
-                            # ``{{#if X}}`` is emitted as kind=section
-                            # without source-helper metadata; see
-                            # ``_parse_mustache_structure`` docstring).
-                            # Future enhancement: extend the parser to
-                            # surface helper source at top level, then
-                            # add a symmetric check outside this list-
-                            # iteration branch.
-                            helper_keys_in_row = [
-                                k for k in item_keys
-                                if isinstance(k, dict)
-                                and k.get("source") == "helper"
-                                and k.get("name") in item
-                            ]
-                            if helper_keys_in_row:
-                                # Group helpers by sibling-set so each
-                                # discriminated-union family is checked
-                                # independently.  Two unrelated helper
-                                # families in the same row (e.g.
-                                # ``isString`` family + standalone
-                                # ``isOptional``) must not cross-
-                                # contaminate the exclusivity check.
-                                checked_families: Set[Tuple[str, ...]] = set()
-                                for hk in helper_keys_in_row:
-                                    name_h = hk["name"]
-                                    siblings = hk.get("helper_siblings") or []
-                                    family = tuple(sorted(
-                                        [name_h] + list(siblings)
-                                    ))
-                                    if family in checked_families:
-                                        continue
-                                    checked_families.add(family)
-
-                                    # Pass 1: type-check every helper
-                                    # in the family that's PRESENT in
-                                    # the row.  Any non-bool is
-                                    # rejected.  Missing siblings are
-                                    # allowed (Mustache absence-is-
-                                    # falsy contract).
-                                    truthy_members: List[str] = []
-                                    type_errors: List[str] = []
-                                    for member in family:
-                                        if member not in item:
-                                            continue
-                                        v = item[member]
-                                        if not isinstance(v, bool):
-                                            type_errors.append(
-                                                f"variable {name!r} "
-                                                f"item[{i}].{member} = "
-                                                f"{v!r} (type "
-                                                f"{type(v).__name__}); "
-                                                f"helper-source "
-                                                f"variables MUST be "
-                                                f"Python bool (True or "
-                                                f"False).  Mustache "
-                                                f"accepts ``[]`` and "
-                                                f"``[True]`` silently "
-                                                f"but with unstable "
-                                                f"truthiness — emit the "
-                                                f"bool explicitly."
-                                            )
-                                        elif v is True:
-                                            truthy_members.append(member)
-                                    errors.extend(type_errors)
-
-                                    # Pass 2: exclusivity.  Only fires
-                                    # when type-check passed for this
-                                    # row; otherwise the second error
-                                    # would be double-attribution noise
-                                    # on top of the type rejection.
-                                    if (
-                                        not type_errors
-                                        and len(truthy_members) > 1
-                                    ):
-                                        errors.append(
-                                            f"variable {name!r} "
-                                            f"item[{i}] has multiple "
-                                            f"helper-source variables "
-                                            f"set True: "
-                                            f"{sorted(truthy_members)}. "
-                                            f"Helper siblings encode a "
-                                            f"discriminated union "
-                                            f"(exactly one branch "
-                                            f"fires per row); set AT "
-                                            f"MOST ONE of "
-                                            f"{list(family)} to True "
-                                            f"and all others to False."
-                                        )
+                            self._check_item_against_item_keys(
+                                var_name=name,
+                                item=item,
+                                item_keys=item_keys,
+                                item_idx=i,
+                                path_prefix=None,
+                                errors=errors,
+                            )
                 elif isinstance(actual, (bool, dict)) or actual is None:
                     # bool / None — boolean-conditional idiom.
                     # dict — single-context render idiom.
