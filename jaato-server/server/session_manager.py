@@ -221,6 +221,21 @@ class CascadeClientEntry:
         last_event_ts: Monotonic timestamp of the most recent event
             dispatched to this entry.  ``None`` until the first event.
             Used by the GC backstop sweep (Decision 6).
+        delivery_target_id: Raw connection identifier this entry's
+            ``callback`` delivers TO (server 0.6.178+).  Distinct
+            from ``client_id`` which is the namespaced REGISTRATION
+            identifier (e.g.
+            ``_cascade:eb3ed3d4c6f5474abbe78a27e9e93ab4:ipc_1``).
+            For IPC-bound cascade registrations the callback's
+            ``send_event`` target is the raw connection id (``ipc_1``);
+            ``_route_bootstrap_event`` uses this field to dedup
+            bootstrap-time delivery against the direct-IPC path.
+            ``None`` (default) for in-process callers (e.g. premium
+            reactor extension) where the callback is not tied to a
+            raw connection — the dedup branch in
+            :meth:`_dispatch_to_cascade_clients_by_cid` is a no-op
+            for those entries (skip never matches), preserving the
+            extension-callback delivery contract.
     """
     client_id: str
     role: str
@@ -228,6 +243,7 @@ class CascadeClientEntry:
     event_types: Optional[Set[str]] = None
     registered_at: float = field(default_factory=time.monotonic)
     last_event_ts: Optional[float] = None
+    delivery_target_id: Optional[str] = None
 
     def event_type_match(self, event: Any) -> bool:
         """Return True iff this entry's event-type filter matches
@@ -2930,6 +2946,7 @@ class SessionManager:
         cascade_driver_id: str,
         role: str = "observer",
         event_types: Optional[Set[str]] = None,
+        delivery_target_id: Optional[str] = None,
     ) -> None:
         """Register an in-process cascade-client (Phase 1).
 
@@ -2992,6 +3009,7 @@ class SessionManager:
             role=role,
             callback=callback,
             event_types=event_types,
+            delivery_target_id=delivery_target_id,
         )
         with self._cascade_clients_lock:
             entries = self._cascade_clients.setdefault(cascade_driver_id, [])
@@ -3184,17 +3202,34 @@ class SessionManager:
         emit through here at post-bootstrap dispatch + standalone
         bootstrap, and neither needs cascade fan-out.
 
-        ``skip_client_id`` (server 0.6.177+): when non-None, cascade
-        entries whose ``client_id`` matches are skipped.  Used by
+        ``skip_client_id`` (server 0.6.177+, semantics tightened in
+        0.6.178+): when non-None, cascade entries whose
+        ``delivery_target_id`` matches are skipped.  Used by
         :meth:`_route_bootstrap_event` to dedup bootstrap-time
         delivery when the same IPC client is BOTH the direct-attach
         client AND a cascade observer for the same cid
         (cascade_develop.py's canonical client-of-API pattern).
-        Without this, AgentCreatedEvent arrives twice on the SDK
-        queue — once via direct IPC, once via the cascade-callback
-        route-back.  ``last_event_ts`` is NOT updated for skipped
-        entries because they didn't actually fire; their next real
-        delivery resets the timer.
+
+        Pre-0.6.178 this compared against ``entry.client_id`` which
+        is the NAMESPACED registration id
+        (``_cascade:{cid}:{conn}``), not the raw connection id —
+        so the empirical dedup never fired for IPC-bound cascade
+        registrations.  Kb-side report 2026-06-03 from
+        cascade_develop.py walker against 0.6.177: discovery still
+        printed two ``↳ session <id>`` lines per AgentCreatedEvent
+        because ``_cascade:eb3...:ipc_1 == ipc_1`` is False.  Fix:
+        ``CascadeClientEntry`` now carries a separate
+        ``delivery_target_id`` field (set by command_router's
+        cascade.register handler to the raw connection client_id);
+        this skip-check compares against THAT.
+
+        In-process callers that don't set ``delivery_target_id``
+        (extensions wiring callbacks not tied to IPC) get None →
+        skip never matches → existing behavior preserved.
+
+        ``last_event_ts`` is NOT updated for skipped entries because
+        they didn't actually fire; their next real delivery resets
+        the timer.
         """
         if cid is None:
             return
@@ -3207,12 +3242,14 @@ class SessionManager:
         for entry in sorted(entries, key=lambda e: 0 if e.role == "owner" else 1):
             if (
                 skip_client_id is not None
-                and entry.client_id == skip_client_id
+                and entry.delivery_target_id is not None
+                and entry.delivery_target_id == skip_client_id
             ):
-                # Dedup branch (server 0.6.177+): this entry's client
-                # is also receiving the event via the direct-IPC
-                # path at the caller's site.  Skip to avoid double-
-                # delivery on the SDK queue.
+                # Dedup branch (server 0.6.177+, fixed comparand
+                # 0.6.178+): this entry's callback delivers to the
+                # same raw connection that the direct-IPC path at
+                # the caller's site is also delivering to.  Skip
+                # to avoid double-delivery on the SDK queue.
                 continue
             if not entry.event_type_match(event):
                 continue
