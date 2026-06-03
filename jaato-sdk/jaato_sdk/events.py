@@ -440,7 +440,7 @@ class SessionTerminatedEvent(Event):
     type: EventType = Field(default=EventType.SESSION_TERMINATED)
     session_id: str = ""
     agent_id: Optional[str] = None
-    reason: str = "natural"  # "natural" | "client_request" | "stopped" | "error"
+    reason: str = "natural"  # "natural" | "client_request" | "stopped" | "error" | "cascade_cancelled"
     error_summary: Optional[str] = None  # populated when reason="error"
     error_type: Optional[str] = None     # Python exception class name (e.g. "AnthropicAPIError")
 
