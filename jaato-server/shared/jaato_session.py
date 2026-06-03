@@ -8449,6 +8449,13 @@ NOTES
         # collapses to None so old persistence files round-trip
         # unchanged when nothing has been attached.
         attached_state = self.get_all_session_state()
+        # ``profile_name`` not threaded through this construction path
+        # — this branch fires on the runner-side standalone-client
+        # save flow where the profile binding lives on the daemon-side
+        # JaatoServer, not the runner-side JaatoSession.  SessionManager's
+        # save path (which has access to ``server._profile.name``)
+        # populates it correctly.  This path stays None; backward-
+        # compat path for non-SessionManager-managed sessions.
         return SessionState(
             session_id=session_id,
             history=self.get_history(),
@@ -8457,9 +8464,6 @@ NOTES
             turn_count=len(turn_accounting),
             turn_accounting=turn_accounting,
             user_inputs=user_inputs or [],
-            project=self._runtime.project,
-            location=self._runtime.location,
-            model=self._model_name,
             description=description,
             session_state=attached_state if attached_state else None,
         )
