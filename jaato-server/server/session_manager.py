@@ -3155,6 +3155,7 @@ class SessionManager:
 
     def _dispatch_to_cascade_clients_by_cid(
         self, cid: Optional[str], event: Event,
+        skip_client_id: Optional[str] = None,
     ) -> None:
         """Phase 1 dispatch core — fan out an event to cascade-clients
         registered for ``cid``.
@@ -3182,6 +3183,18 @@ class SessionManager:
         ``cid is None`` is a no-op: standalone (non-cascade) sessions
         emit through here at post-bootstrap dispatch + standalone
         bootstrap, and neither needs cascade fan-out.
+
+        ``skip_client_id`` (server 0.6.177+): when non-None, cascade
+        entries whose ``client_id`` matches are skipped.  Used by
+        :meth:`_route_bootstrap_event` to dedup bootstrap-time
+        delivery when the same IPC client is BOTH the direct-attach
+        client AND a cascade observer for the same cid
+        (cascade_develop.py's canonical client-of-API pattern).
+        Without this, AgentCreatedEvent arrives twice on the SDK
+        queue — once via direct IPC, once via the cascade-callback
+        route-back.  ``last_event_ts`` is NOT updated for skipped
+        entries because they didn't actually fire; their next real
+        delivery resets the timer.
         """
         if cid is None:
             return
@@ -3192,6 +3205,15 @@ class SessionManager:
         now = time.monotonic()
         # Owners first, observers second — see docstring.
         for entry in sorted(entries, key=lambda e: 0 if e.role == "owner" else 1):
+            if (
+                skip_client_id is not None
+                and entry.client_id == skip_client_id
+            ):
+                # Dedup branch (server 0.6.177+): this entry's client
+                # is also receiving the event via the direct-IPC
+                # path at the caller's site.  Skip to avoid double-
+                # delivery on the SDK queue.
+                continue
             if not entry.event_type_match(event):
                 continue
             entry.last_event_ts = now
@@ -3247,21 +3269,33 @@ class SessionManager:
                 in ``self._sessions`` yet.
             event: the event being emitted.
 
-        **Known duplicate-delivery caveat**: for the narrow case where
-        ``direct_client_id`` is a real IPC client AND that same
-        client has a cascade observer subscription via
-        ``IPCClient.cascade_events()``, the bootstrap-time event
-        arrives twice on that connection's SDK queue (once via direct
-        IPC, once via cascade-callback IPC route-back).  For typical
-        cascade-driver usage this only affects the brief direct-attach
-        lifetime before γ' auto-detaches (server 0.6.165+).  If it
-        becomes a real issue, client-side de-dup via event identity
-        is a follow-up.
+        **Bootstrap-time dedup (server 0.6.177+)**: for the case
+        where ``direct_client_id`` is a real IPC client AND that
+        same client has a cascade observer subscription via
+        ``IPCClient.cascade_events()`` (the canonical
+        cascade_develop.py / cascade.py pattern — client creates
+        the session AND subscribes to its own cid as observer), the
+        cascade-fan-out call below passes ``skip_client_id`` so the
+        direct-IPC delivery isn't duplicated through the cascade
+        route-back.  Pre-0.6.177 this manifested as
+        ``AgentCreatedEvent`` arriving twice on the SDK queue and
+        was empirically surfaced by cascade_develop.py's walker
+        printing two ``↳ session <id>`` lines per main-agent
+        bootstrap once PR-205 populated session_id.  The
+        ``_HEADLESS_CLIENT_ID`` case (reactor-spawned downstream
+        sessions where ``direct_client_id`` is the synthetic
+        headless id) is unaffected: the headless id will never
+        match a real cascade-observer's client_id, so the
+        skip-branch is a no-op for that load-bearing path.
         """
         if direct_client_id is not None:
             self._emit_to_client(direct_client_id, event)
         if cascade_driver_id is not None:
-            self._dispatch_to_cascade_clients_by_cid(cascade_driver_id, event)
+            self._dispatch_to_cascade_clients_by_cid(
+                cascade_driver_id,
+                event,
+                skip_client_id=direct_client_id,
+            )
 
     def _apply_default_cascade_policy(
         self, session: 'Session', event: Event,

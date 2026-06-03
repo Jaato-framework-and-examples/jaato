@@ -747,27 +747,36 @@ class TestRouteBootstrapEvent:
 
     def _setup_sm_with_emit_stubs(self, sm: SessionManager):
         """Stub _emit_to_client + the cascade dispatch helper to
-        record their calls.  Returns the two recording lists."""
+        record their calls.  Returns the two recording lists.
+
+        ``skip_client_id`` kwarg accepted (server 0.6.177+) so the
+        stub mirrors the real signature; recorded as part of the
+        tuple alongside cid + event for tests that care about it.
+        """
         client_emits: List[tuple] = []  # (client_id, event)
-        cascade_dispatches: List[tuple] = []  # (cid, event)
+        cascade_dispatches: List[tuple] = []  # (cid, event, skip_client_id)
         sm._emit_to_client = lambda cid, ev: client_emits.append((cid, ev))
         sm._dispatch_to_cascade_clients_by_cid = (
-            lambda cid, ev: cascade_dispatches.append((cid, ev))
+            lambda cid, ev, skip_client_id=None: cascade_dispatches.append(
+                (cid, ev, skip_client_id)
+            )
         )
         return client_emits, cascade_dispatches
 
     def test_routes_to_both_client_and_cascade_when_both_set(self):
         """When direct_client_id AND cascade_driver_id are both set,
         the event reaches both the requesting client AND cascade
-        observers.  Note: this is the case where duplicate delivery
-        can occur for a same-client cascade subscriber — documented
-        in _route_bootstrap_event docstring."""
+        observers.  Server 0.6.177+: the cascade-dispatch call also
+        passes ``skip_client_id=direct_client_id`` so the same-client
+        cascade subscriber doesn't double-deliver — see
+        TestRouteBootstrapEventDedup for the empirical pin."""
         sm = _make_sm()
         client_emits, cascade_dispatches = self._setup_sm_with_emit_stubs(sm)
         event = MagicMock()
         sm._route_bootstrap_event("ipc_1", "cid-abc", event)
         assert client_emits == [("ipc_1", event)]
-        assert cascade_dispatches == [("cid-abc", event)]
+        # 3-tuple shape (cid, event, skip_client_id) per server 0.6.177+.
+        assert cascade_dispatches == [("cid-abc", event, "ipc_1")]
 
     def test_routes_only_to_client_when_no_cascade(self):
         """Standalone (non-cascade) session bootstrap: cascade
@@ -782,20 +791,28 @@ class TestRouteBootstrapEvent:
 
     def test_routes_only_to_cascade_when_client_id_is_none(self):
         """Restore-without-client path: cascade dispatch fires if
-        cid is set, direct client emit is skipped."""
+        cid is set, direct client emit is skipped.  ``skip_client_id``
+        is None (no direct-attach to dedup against)."""
         sm = _make_sm()
         client_emits, cascade_dispatches = self._setup_sm_with_emit_stubs(sm)
         event = MagicMock()
         sm._route_bootstrap_event(None, "cid-abc", event)
         assert client_emits == []
-        assert cascade_dispatches == [("cid-abc", event)]
+        assert cascade_dispatches == [("cid-abc", event, None)]
 
     def test_headless_cascade_bootstrap_reaches_cascade_observers(self):
         """The empirical scenario peer 7:1 hit: reactor-spawned
         downstream cascade session bootstraps with
         client_id=_HEADLESS_CLIENT_ID (transport-dropped).  Before
         0.6.166 the AgentCreatedEvent was lost.  Now the route_helper
-        delivers it to cascade observers via the cid path."""
+        delivers it to cascade observers via the cid path.
+
+        Server 0.6.177+: ``skip_client_id`` is the headless id, but
+        the dedup branch is a no-op because no real cascade observer
+        has client_id == _HEADLESS_CLIENT_ID (only transport-side
+        synthetic).  Load-bearing for the PR-194 cascade-observer
+        delivery contract — see TestRouteBootstrapEventDedup
+        ``test_headless_direct_plus_real_observer_still_delivers``."""
         sm = _make_sm()
         client_emits, cascade_dispatches = self._setup_sm_with_emit_stubs(sm)
         event = MagicMock()
@@ -804,7 +821,11 @@ class TestRouteBootstrapEvent:
         # helper doesn't second-guess the transport's job).
         assert client_emits == [(sm._HEADLESS_CLIENT_ID, event)]
         # Critical: cascade observers reached via the cid path.
-        assert cascade_dispatches == [("cid-abc", event)]
+        # 3-tuple with skip_client_id=_HEADLESS_CLIENT_ID (no-op
+        # because no real observer matches that synthetic id).
+        assert cascade_dispatches == [
+            ("cid-abc", event, sm._HEADLESS_CLIENT_ID),
+        ]
 
     def test_dispatch_by_cid_no_op_on_none(self):
         """``_dispatch_to_cascade_clients_by_cid(None, event)`` is
@@ -842,3 +863,160 @@ class TestRouteBootstrapEvent:
         sm._dispatch_to_cascade_clients_by_cid("abc", event)
         owner_cb.assert_called_once_with(event)
         observer_cb.assert_called_once_with(event)
+
+
+# ======================================================================
+# Server 0.6.177 — _route_bootstrap_event dedup
+# ======================================================================
+
+
+class TestRouteBootstrapEventDedup:
+    """``_route_bootstrap_event`` dedup: when the same IPC client is
+    BOTH the direct-attach client AND a cascade observer for the
+    same cid, the bootstrap-time event arrives EXACTLY ONCE on the
+    SDK queue.
+
+    Surfaced empirically by cascade_develop.py walker against
+    0.6.176 (kb-side report 2026-06-03): main-agent stage printed
+    two ``↳ session <id>`` lines per AgentCreatedEvent because
+    cascade_develop's ipc_1 was BOTH the creating client (direct
+    attach) AND a cascade observer for its own cid.  Pre-PR-205
+    session_id was always "" so the dup was cosmetic-invisible to
+    walkers; PR-205 populated session_id → dup became visible.
+
+    Resolution: ``_dispatch_to_cascade_clients_by_cid`` accepts a
+    ``skip_client_id`` parameter; ``_route_bootstrap_event`` passes
+    ``direct_client_id`` so the direct-IPC delivery is not
+    duplicated via the cascade route-back.
+    """
+
+    def test_same_client_direct_attach_plus_observer_delivers_once(self):
+        """Empirical scenario: cascade_develop creates a session
+        (direct-attach as ipc_1) AND subscribes ipc_1 as a cascade
+        observer for the same cid.  Bootstrap event must arrive
+        EXACTLY ONCE on ipc_1's queue."""
+        sm = _make_sm()
+
+        # Capture direct-IPC deliveries.
+        direct_deliveries: List[Any] = []
+        sm._emit_to_client = lambda cid, evt: direct_deliveries.append(
+            (cid, evt)
+        )
+
+        # Register ipc_1 as cascade observer for cid-abc.
+        cascade_deliveries: List[Any] = []
+        sm.register_in_process_client(
+            client_id="ipc_1",
+            callback=lambda evt: cascade_deliveries.append(evt),
+            cascade_driver_id="cid-abc",
+            role="observer",
+        )
+
+        event = MagicMock()
+        sm._route_bootstrap_event(
+            direct_client_id="ipc_1",
+            cascade_driver_id="cid-abc",
+            event=event,
+        )
+
+        # Total deliveries (direct + cascade) for ipc_1: exactly 1.
+        assert len(direct_deliveries) == 1, (
+            "direct-IPC path must always deliver (load-bearing for "
+            "the client that initiated the session)"
+        )
+        assert direct_deliveries[0] == ("ipc_1", event)
+        assert len(cascade_deliveries) == 0, (
+            f"cascade route-back must be SKIPPED for the direct-"
+            f"attach client; got {len(cascade_deliveries)} "
+            f"unwanted dup delivery"
+        )
+
+    def test_headless_direct_plus_real_observer_still_delivers(self):
+        """Load-bearing path (PR-194 regression guard): when the
+        direct_client_id is ``_HEADLESS_CLIENT_ID`` (reactor-spawned
+        downstream session like context / host_validator / codegen)
+        and a separate real IPC client is registered as cascade
+        observer, the observer MUST still receive the event.  The
+        skip-branch is a no-op because the headless id never matches
+        a real cascade-observer's client_id.
+
+        This is the original cascade-as-client delivery contract;
+        regressing it would break the reactor-spawned downstream
+        observer fan-out (the v152-retry-47 motivation for PR-194)."""
+        sm = _make_sm()
+
+        direct_deliveries: List[Any] = []
+        sm._emit_to_client = lambda cid, evt: direct_deliveries.append(
+            (cid, evt)
+        )
+
+        cascade_deliveries: List[Any] = []
+        sm.register_in_process_client(
+            client_id="ipc_2",  # a real observer, different from headless
+            callback=lambda evt: cascade_deliveries.append(evt),
+            cascade_driver_id="cid-abc",
+            role="observer",
+        )
+
+        event = MagicMock()
+        sm._route_bootstrap_event(
+            direct_client_id=sm._HEADLESS_CLIENT_ID,
+            cascade_driver_id="cid-abc",
+            event=event,
+        )
+
+        # The headless direct-attach path still fires (existing
+        # contract — _emit_to_client called even for headless;
+        # transport drops it silently if no real subscriber).
+        assert len(direct_deliveries) == 1
+        assert direct_deliveries[0] == (sm._HEADLESS_CLIENT_ID, event)
+        # The real cascade observer receives it (NOT skipped).
+        assert len(cascade_deliveries) == 1, (
+            "cascade observer MUST still receive the event when "
+            "direct_client_id is headless (the skip branch is a "
+            "no-op for non-matching client_ids)"
+        )
+
+    def test_direct_attach_only_no_cascade_observer_delivers_once(self):
+        """Defensive: when there's no cascade observer registered
+        at all, the direct-IPC path still delivers; the cascade
+        dispatch is a no-op via the existing ``cid is None`` /
+        empty-entries-list check."""
+        sm = _make_sm()
+        direct_deliveries: List[Any] = []
+        sm._emit_to_client = lambda cid, evt: direct_deliveries.append(
+            (cid, evt)
+        )
+
+        event = MagicMock()
+        sm._route_bootstrap_event(
+            direct_client_id="ipc_1",
+            cascade_driver_id="cid-no-observer",
+            event=event,
+        )
+        assert len(direct_deliveries) == 1
+
+    def test_skip_client_id_param_default_preserves_old_behavior(self):
+        """Pin: existing direct callers of
+        ``_dispatch_to_cascade_clients_by_cid`` (no
+        ``skip_client_id`` arg) get the pre-0.6.177 behavior — all
+        registered observers receive the event, including any
+        client that happens to also be direct-attached elsewhere.
+        Default ``None`` preserves backward compatibility."""
+        sm = _make_sm()
+        cascade_deliveries: List[Any] = []
+        sm.register_in_process_client(
+            client_id="ipc_1",
+            callback=lambda evt: cascade_deliveries.append(evt),
+            cascade_driver_id="cid-abc",
+            role="observer",
+        )
+
+        event = MagicMock()
+        # Call WITHOUT skip_client_id (the post-bootstrap dispatch
+        # path's invocation pattern).
+        sm._dispatch_to_cascade_clients_by_cid("cid-abc", event)
+        assert len(cascade_deliveries) == 1, (
+            "default behavior MUST fire every registered observer; "
+            "skip_client_id=None is opt-in dedup only"
+        )
