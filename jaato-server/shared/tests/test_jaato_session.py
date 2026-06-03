@@ -1186,3 +1186,72 @@ class TestRestoreConversationBudget:
 
         # Should not raise.
         session.restore_conversation_budget({"tokens": 500})
+
+
+class TestJaatoSessionReplayMessagesLazyProvider:
+    """Tests for replay_messages's lazy-provider integration (PR-216).
+
+    Background: the 2026-05-13 lazy-provider-INIT refactor moved
+    provider construction out of ``configure()`` into a lazy
+    ``_ensure_provider()`` call triggered on first model use.
+    ``send_message`` was updated to call ``_ensure_provider()``
+    before checking ``self._provider``.  ``replay_messages`` missed
+    that refactor and kept a bare ``if not self._provider`` check —
+    which surfaces as ``"Session not configured — cannot replay"``
+    on a fully-configured session whose provider hasn't been
+    materialised yet.
+
+    Canonical caller hitting the bug: forensic-fork sessions created
+    via ``SessionManager.create_headless_session`` then invoked from
+    ``session_ops.interrogate_session.replay_messages`` — the fork
+    is configured, but no ``send_message`` ever fired on it so the
+    provider was never lazy-created.
+
+    Fix: call ``_ensure_provider()`` before the check, mirror
+    ``send_message:3560``'s pattern.
+    """
+
+    def test_ensure_provider_called_before_check(self):
+        """The fix: ``_ensure_provider`` MUST be called before the
+        ``if not self._provider`` check.  Pre-PR-216 it wasn't, so
+        fully-configured sessions with deferred-INIT providers
+        raised on every replay_messages call.
+
+        We assert on the call-ordering contract (the actual defect)
+        rather than driving the full ``provider.complete`` integration
+        — that's covered at the runner-RPC + provider-plugin layer
+        and would require deep mock-chain plumbing here for marginal
+        signal.
+        """
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "glm-5-turbo")
+        session._configured = True
+
+        # Patch _ensure_provider so we can assert it was called BEFORE
+        # the ``if not self._provider`` check.  Leave self._provider
+        # = None after the call so we short-circuit at the no-provider
+        # raise (the test pins the call-ordering contract; integration
+        # is covered elsewhere).
+        with patch.object(
+            session, "_ensure_provider", return_value=None,
+        ) as mock_ensure:
+            session._provider_lazy_pending = None  # skip_provider mode
+            with pytest.raises(RuntimeError, match="no provider"):
+                session.replay_messages([], timeout=1.0)
+
+        mock_ensure.assert_called_once()
+
+    def test_skip_provider_mode_still_raises_with_clearer_error(self):
+        """In skip_provider (auth-pending) mode,
+        ``_provider_lazy_pending`` is None → ``_ensure_provider``
+        returns None → replay_messages raises.  The error message
+        now points at the actual condition (no provider materialisable)
+        rather than the misleading 'Session not configured' from
+        pre-PR-216."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "glm-5-turbo")
+        session._configured = True  # session IS configured
+        session._provider_lazy_pending = None  # but no provider can be made
+
+        with pytest.raises(RuntimeError, match="no provider"):
+            session.replay_messages([], timeout=1.0)

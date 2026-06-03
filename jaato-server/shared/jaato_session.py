@@ -8541,10 +8541,30 @@ NOTES
         Raises:
             TimeoutError: If the provider is not available within
                 *timeout* seconds.
-            RuntimeError: If the session has no configured provider.
+            RuntimeError: If the session has no provider — typically
+                because the session was configured with
+                ``skip_provider=True`` (auth-pending mode) and auth
+                hasn't completed yet.
         """
+        # Lazy-init the provider on first model use (deferred-provider-INIT
+        # design 2026-05-13).  Mirrors send_message:3560 — provider
+        # construction is deferred from configure() to first model
+        # call to keep the bootstrap RPC critical path short.  Before
+        # this fix, replay_messages did a bare ``if not self._provider``
+        # check that surfaced as "Session not configured" on
+        # forensic-fork sessions where send_message never fired
+        # (canonical caller: ``session_ops.interrogate_session``
+        # against a create_headless_session fork — the fork is fully
+        # configured but its provider has never been materialised).
+        # Idempotent + thread-safe per ``_ensure_provider``.
+        self._ensure_provider()
         if not self._provider:
-            raise RuntimeError("Session not configured — cannot replay.")
+            raise RuntimeError(
+                "Session has no provider — "
+                "skip_provider (auth-pending) mode and auth has not "
+                "completed yet, OR _ensure_provider() returned "
+                "without setting one (check configure() succeeded)."
+            )
 
         self._fork_gate.clear()
         if not self._provider_idle.wait(timeout=timeout):
