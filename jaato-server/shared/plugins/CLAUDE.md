@@ -38,6 +38,13 @@ __all__ = ["MyPlugin", "create_plugin", "PLUGIN_KIND", "PLUGIN_TIER"]
 - `"runner"` — workspace FS access, subprocess spawn (cli, lsp, mcp,
   interactive_shell, notebook), per-session in-memory state
   (permission, references, memory, todo, etc.).
+- `"daemon_callable"` — **cross-tier**: the tool schema must surface
+  to the model (which runs runner-side post-seat-flip) BUT the body
+  must execute daemon-side because it needs daemon-only state
+  (canonical case: `SessionManager` access for cross-session
+  introspection).  The runner-side instance is a thin
+  `DaemonForwardingMixin` stub; the daemon-side instance holds the
+  real state and executes the body.  See "Cross-tier plugins" below.
 
 **Why this matters:** `PluginRegistry.discover(tier_filter="...")`
 filters discovery by tier.  Without `PLUGIN_TIER`, a plugin is
@@ -47,7 +54,82 @@ missing `PLUGIN_KIND`.
 The build-fail gate is in `shared/tests/test_plugin_tier_partition.py`:
 new plugins without an explicit tier fail
 `test_every_plugin_with_kind_has_tier`.  Daemon-runner overlap
-fails `test_daemon_and_runner_tiers_are_disjoint`.
+fails `test_daemon_and_runner_tiers_are_disjoint`.  Cross-tier
+plugins without `DaemonForwardingMixin` (or `"runner"`-tier plugins
+that declare `set_session_manager` without the mixin) fail the
+`test_daemon_callable_plugins_extend_daemon_forwarding_mixin` /
+`test_runner_tier_plugins_dont_secretly_need_daemon_state` gates.
+
+### Cross-tier plugins (`PLUGIN_TIER = "daemon_callable"`)
+
+The post-seat-flip architecture runs the model loop runner-side; tool
+schemas surface from the runner-side registry (loaded via
+`discover(tier_filter="runner")`).  For most plugins this aligns with
+where the body should run (runner-tier = filesystem / subprocess /
+per-session state).  **Cross-tier plugins** are the exception: they
+need the schema visible runner-side AND the body executed daemon-side
+because the body depends on daemon-only state (e.g. the
+`SessionManager` for cross-session introspection).
+
+**Pattern (mirror of `RunnerForwardingMixin` but reversed):**
+
+```python
+# __init__.py
+PLUGIN_KIND = "tool"
+PLUGIN_TIER = "daemon_callable"  # discovered both sides
+
+# plugin.py
+from shared.plugins.daemon_forwarding import DaemonForwardingMixin
+
+class MyCrossTierPlugin(DaemonForwardingMixin):
+    def __init__(self):
+        self._session_manager = None  # wired daemon-side only
+
+    def set_session_manager(self, sm) -> None:
+        self._session_manager = sm
+
+    def get_executors(self) -> Dict[str, Callable]:
+        raw = {
+            "my_tool": self._execute_my_tool,
+        }
+        # The wrapper self-routes:
+        # - runner-side: forwards via daemon.plugin_execute RPC
+        # - daemon-side: calls _execute_my_tool in-process
+        return self.wrap_executors_for_daemon_forwarding(raw)
+```
+
+**Why both instances?**  Discovery loads the plugin BOTH sides
+(daemon-side `discover()` with no filter + runner-side
+`discover(tier_filter="runner")` accepts `daemon_callable`).  The
+mixin self-routes by inspecting `registry.runner_rpc_client`:
+- Runner-side: attribute exists (set by `runner/rpc.py:1114`); mixin
+  forwards via `daemon.plugin_execute` RPC.
+- Daemon-side: attribute does NOT exist (the symmetric daemon→runner
+  client lives at `registry.runner_rpc`); mixin calls the in-process
+  body — including when re-entered by the daemon-side
+  `daemon.plugin_execute` handler.
+
+The mixin's mirror is `RunnerForwardingMixin`
+(`shared/plugins/runner_forwarding.py`) — same wrap-point pattern,
+opposite direction.
+
+**Gap #1 trap (saved-lesson history):** when adding a plugin that
+needs daemon-only state, the wrong move is to declare
+`PLUGIN_TIER = "runner"` and stop there.  The runner-side instance
+will execute against a `None` reference because daemon-side wire-up
+(`session_manager.py:4379` for `session_ops`) only mutates the
+daemon-side instance.  The empirical symptom is the runner-side body
+crashing or the model hallucinating that the tool is unavailable
+(empty schema from premature failure).  The fix is:
+
+1. Declare `PLUGIN_TIER = "daemon_callable"` (NOT `"runner"`).
+2. Extend `DaemonForwardingMixin` on the plugin class.
+3. Wrap `get_executors()` via `wrap_executors_for_daemon_forwarding(...)`.
+
+The build-fail gate
+`test_runner_tier_plugins_dont_secretly_need_daemon_state` catches the
+half-step variant (`"runner"` + `set_session_manager` without the
+mixin) so the next plugin to need this pattern can't silently land it.
 
 ## Critical: `SESSION_INDEPENDENT` for Auth Plugins
 

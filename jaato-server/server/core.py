@@ -5143,9 +5143,34 @@ class JaatoServer:
                 )
             else:
                 self._spawn_isolated_runner_handler = None
+            # Register the ``daemon.plugin_execute`` handler — the
+            # reverse-dispatch verb for cross-tier (``PLUGIN_TIER =
+            # "daemon_callable"``) plugins.  Runner-side tool stubs
+            # built via DaemonForwardingMixin route execution back
+            # through this handler so the daemon-side plugin
+            # instance (with its daemon-only state, e.g.
+            # session_ops's SessionManager reference) runs the body.
+            # See ``shared/plugins/daemon_forwarding.py`` for the
+            # mixin + ``shared/plugins/CLAUDE.md`` for the full
+            # cross-tier pattern.  Unguarded by session_id — the
+            # handler binds to ``self`` (the server's registry) not
+            # to a session_id, so it's safe even on bootstrap paths
+            # that lack a session id (test fakes via ``__new__``).
+            from server.runner_rpc_handlers.daemon_plugin_execute import (
+                DaemonPluginExecuteHandler,
+                register as register_daemon_plugin_execute,
+            )
+            self._daemon_plugin_execute_handler = (
+                DaemonPluginExecuteHandler(server=self)
+            )
+            register_daemon_plugin_execute(
+                rpc_client.rpc_server,
+                self._daemon_plugin_execute_handler,
+            )
         else:
             self._prompt_operator_handler = None
             self._spawn_isolated_runner_handler = None
+            self._daemon_plugin_execute_handler = None
 
     @property
     def runner_rpc(self) -> Optional["RunnerRPCClient"]:
@@ -5196,6 +5221,23 @@ class JaatoServer:
                     "spawn_isolated_runner_handler shutdown raised",
                 )
             self._spawn_isolated_runner_handler = None
+        # Tear down the daemon.plugin_execute handler.  Holds no
+        # in-flight state beyond the closed flag (worker-thread
+        # executor calls finish naturally; the plugin instances
+        # they touch are owned by the server's registry, which
+        # tears down on its own path).
+        plugin_exec_handler = getattr(
+            self, "_daemon_plugin_execute_handler", None,
+        )
+        if plugin_exec_handler is not None:
+            try:
+                plugin_exec_handler.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                logger.exception(
+                    "JaatoServer.shutdown: "
+                    "daemon_plugin_execute_handler shutdown raised",
+                )
+            self._daemon_plugin_execute_handler = None
         # Tear down the runner subprocess if one was spawned.  The
         # close ladder (parent EOF → wait → SIGTERM → SIGKILL) lives
         # inside ``RunnerRPCClient.close``; we run it on the daemon's
