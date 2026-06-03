@@ -185,7 +185,7 @@ class TestSessionStateSerialization:
 
         data = serialize_session_state(state)
 
-        assert data["version"] == "2.3"
+        assert data["version"] == "2.4"
         assert data["session_id"] == "20251207_143022"
         assert data["description"] == "Test session"
         assert data["turn_count"] == 1
@@ -221,6 +221,54 @@ class TestSessionStateSerialization:
         assert state.turn_count == 1
         assert state.profile_name == "discovery"
         assert len(state.history) == 1
+
+    def test_config_root_round_trip(self):
+        """2.4: ``config_root`` paired with ``profile_name`` so
+        disk-restore can hand the right config tier to
+        ``discover_profiles`` (needed for the JAATO_PROFILE_SET
+        subdir scan + workspace-tier scan)."""
+        state = SessionState(
+            session_id="cfg_root_test",
+            history=[],
+            created_at=datetime(2026, 6, 3, 20, 0, 0),
+            updated_at=datetime(2026, 6, 3, 20, 0, 0),
+            description="config_root test",
+            turn_count=0,
+            profile_name="discovery",
+            workspace_path="/repo/tests/runs/cascade_smoke",
+            config_root="/repo/.jaato",
+        )
+
+        data = serialize_session_state(state)
+        assert data["version"] == "2.4"
+        assert data["config_root"] == "/repo/.jaato"
+        assert data["profile_name"] == "discovery"
+
+        restored = deserialize_session_state(data)
+        assert restored.config_root == "/repo/.jaato"
+        assert restored.profile_name == "discovery"
+
+    def test_deserialize_pre_2_4_no_config_root(self):
+        """Pre-2.4 session JSONs lack ``config_root``.  Deserialize
+        cleanly with ``config_root=None``; ``_resolve_profile`` then
+        falls back to workspace_path-only resolution (works for
+        sessions where the profile lives under
+        ``<workspace>/.jaato/profiles/`` — not the multi-profile
+        cascade layout)."""
+        data = {
+            "version": "2.3",
+            "session_id": "pre_2_4_session",
+            "description": "Pre-2.4 session",
+            "created_at": "2026-06-03T19:30:00",
+            "updated_at": "2026-06-03T19:30:00",
+            "turn_count": 1,
+            "profile_name": "discovery",
+            "workspace_path": "/repo/tests/runs/cascade_smoke",
+            "history": [],
+        }
+        state = deserialize_session_state(data)
+        assert state.profile_name == "discovery"
+        assert state.config_root is None
 
     def test_deserialize_pre_2_3_backward_compat(self):
         """Pre-2.3 session JSONs carry a ``connection`` dict with

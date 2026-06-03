@@ -5258,13 +5258,18 @@ class SessionManager:
             restored_profile, profile_err = self._resolve_profile(
                 state.profile_name,
                 workspace_path=state.workspace_path or workspace_path or "",
+                config_root=state.config_root,
                 env_file=session_env_file,
             )
             if restored_profile is None:
                 logger.error(
                     "_load_session: profile %r for session %s not "
-                    "resolvable (%s) — initialize will likely fail",
+                    "resolvable (%s) — initialize will likely fail "
+                    "(workspace=%s config_root=%s) — verify the "
+                    "profile still exists at "
+                    "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
                     state.profile_name, session_id, profile_err,
+                    state.workspace_path, state.config_root,
                 )
 
         # Phase 3 §3.12 disk-restore migration: route the JaatoServer
@@ -5284,6 +5289,7 @@ class SessionManager:
             client_id=None,  # disk-restore path; no client-driven opt-in
             sandbox_mode=getattr(state, "sandbox_mode", None),
             profile=restored_profile,
+            config_root=state.config_root,
             restore_state={"loaded_state": state},
             env_file=session_env_file,
             instruction_token_cache=self._instruction_token_cache,
@@ -5942,6 +5948,7 @@ class SessionManager:
                 user_inputs=session.user_inputs,  # Command history for prompt restoration
                 profile_name=profile_name,
                 workspace_path=session.workspace_path,
+                config_root=session.config_root,
                 metadata=subagent_metadata,
                 budget_state=budget_state,
                 interrupted_turn=session.interrupted_turn,  # For recovery on restart
@@ -6697,7 +6704,13 @@ class SessionManager:
                     if norm:
                         known_workspaces.add(norm)
 
-        # Add persisted sessions from all known workspaces
+        # Add persisted sessions from all known workspaces.
+        # ``model_name`` left blank for persisted-only entries — the
+        # post-2.3 SessionInfo carries ``profile_name`` instead of
+        # ``model`` (profile is the post-multi-provider recipe
+        # source).  Clients that want the model resolve the profile
+        # registry on-demand rather than denormalising into the
+        # listing index.
         for wp in known_workspaces:
             for info in self._get_persisted_sessions(workspace_path=wp):
                 result[info.session_id] = RuntimeSessionInfo(
@@ -6707,7 +6720,7 @@ class SessionManager:
                     created_at=info.created_at.isoformat(),
                     last_activity=info.updated_at.isoformat(),
                     model_provider="",
-                    model_name=info.model or "",
+                    model_name="",
                     is_processing=False,
                     is_loaded=False,
                     client_count=0,
