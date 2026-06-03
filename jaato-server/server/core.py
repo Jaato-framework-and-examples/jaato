@@ -1329,6 +1329,7 @@ class JaatoServer:
                 profile_name=agent.profile_name,
                 parent_agent_id=agent.parent_agent_id,
                 created_at=agent.created_at,
+                session_id=self._session_id or "",
             ))
 
         # Replay conversation history as output events so reconnecting clients
@@ -1431,6 +1432,7 @@ class JaatoServer:
                 profile_name=profile.name if profile else "",
                 parent_agent_id=self._main_agent_id,
                 created_at=created_at,
+                session_id=self._session_id or "",
             ))
 
             # Emit context update for the subagent
@@ -2541,6 +2543,7 @@ class JaatoServer:
             profile_name=profile_name,
             parent_agent_id=None,
             created_at=agent.created_at,
+            session_id=self._session_id or "",
         ))
 
     def _setup_formatter_pipeline(self) -> None:
@@ -2729,6 +2732,7 @@ class JaatoServer:
                     profile_name=profile_name,
                     parent_agent_id=parent_agent_id,
                     created_at=agent.created_at,
+                    session_id=server._session_id or "",
                 ))
 
             def on_agent_output(self, agent_id, source, text, mode):

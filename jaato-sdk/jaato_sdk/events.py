@@ -320,7 +320,34 @@ class ConnectedEvent(Event):
 
 
 class AgentCreatedEvent(Event):
-    """Sent when a new agent (main or subagent) is created."""
+    """Sent when a new agent (main or subagent) is created.
+
+    Attributes:
+        agent_id: Logical agent identifier (e.g. ``"main"`` or a
+            subagent slot id).  This is the agent NAME slot, NOT the
+            daemon's session_id.
+        agent_name: Human-readable agent display name (typically the
+            agent's persona name from ``.jaato/agents/<name>.md``).
+        agent_type: ``"main"`` or ``"subagent"``.
+        profile_name: Optional profile name resolved at spawn time.
+        parent_agent_id: Optional logical id of the spawning agent
+            (None for top-level / main agents).
+        created_at: Optional ISO-8601 timestamp.
+        session_id: Daemon-side session identifier (server 0.6.175+).
+            Populated by every constructor site via the same parent-
+            walk resolution used by ``RenderContext.session_id``
+            (server 0.6.172+).  Subagent emit sites fall back to the
+            parent's session_id when the immediate session has no
+            ``_daemon_session_id`` of its own yet (subagent
+            JaatoSession instances inherit the root agent's session
+            via ``_parent_session``).  Empty string when no ancestor
+            in the parent chain has a session_id set
+            (e.g. ``main_agent_id`` emit during bootstrap before
+            ``set_daemon_session_id`` fires).  Cascade observers
+            use this for per-stage session_id correlation without
+            having to maintain their own ``agent_id → session_id``
+            map.
+    """
     type: EventType = Field(default=EventType.AGENT_CREATED)
     agent_id: str = ""
     agent_name: str = ""
@@ -328,6 +355,7 @@ class AgentCreatedEvent(Event):
     profile_name: Optional[str] = None
     parent_agent_id: Optional[str] = None
     created_at: Optional[str] = None
+    session_id: str = ""
 
 
 class AgentOutputEvent(Event):

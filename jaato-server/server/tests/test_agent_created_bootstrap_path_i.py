@@ -60,9 +60,18 @@ from jaato_sdk.events import AgentCreatedEvent
 # ----------------------------------------------------------------------
 
 
-def _make_server(profile=None, agent_id="main", display_name=None):
+def _make_server(profile=None, agent_id="main", display_name=None,
+                 session_id="20260603_120000"):
     """Construct a minimal JaatoServer with __new__ to avoid __init__'s
-    cost.  Sets only the fields ``_create_main_agent`` reads."""
+    cost.  Sets only the fields ``_create_main_agent`` reads.
+
+    ``session_id`` (server 0.6.175+): the daemon session_id ``JaatoServer``
+    binds at __init__ (line 315 ``self._session_id = session_id``).
+    ``_create_main_agent`` now reads ``self._session_id`` and stamps
+    it onto the emitted AgentCreatedEvent so cascade observers can
+    correlate the event to a daemon session_id without maintaining
+    their own ``agent_id → session_id`` map.
+    """
     from server.core import JaatoServer
 
     srv = JaatoServer.__new__(JaatoServer)
@@ -73,6 +82,7 @@ def _make_server(profile=None, agent_id="main", display_name=None):
     srv._profile = profile
     srv._agents = {}
     srv._selected_agent_id = None
+    srv._session_id = session_id
     return srv
 
 
@@ -245,3 +255,90 @@ def test_create_main_agent_source_contains_emit() -> None:
         "TUI has no agent registry at bootstrap and Layer 9 is "
         "back."
     )
+
+
+# ----------------------------------------------------------------------
+# Server 0.6.175 / SDK 0.14.5 — session_id field on AgentCreatedEvent
+# ----------------------------------------------------------------------
+
+
+def test_main_agent_event_carries_session_id() -> None:
+    """Pin: ``_create_main_agent`` stamps ``session_id`` onto the
+    emitted AgentCreatedEvent from ``self._session_id``.  Cascade
+    observers (e.g. cascade_develop.py walker) need this for per-
+    stage session_id correlation without maintaining their own
+    ``agent_id → session_id`` map.
+    """
+    srv = _make_server(session_id="20260603_120000")
+    srv._create_main_agent()
+
+    created_events = [
+        e for e in srv._emitted_events
+        if isinstance(e, AgentCreatedEvent)
+    ]
+    assert len(created_events) == 1
+    assert created_events[0].session_id == "20260603_120000", (
+        "session_id must be stamped on the bootstrap-scope "
+        "AgentCreatedEvent for cascade observer correlation"
+    )
+
+
+def test_main_agent_event_session_id_empty_when_unset() -> None:
+    """Pin: when ``self._session_id`` is None (defensive — shouldn't
+    happen in production but the path is reachable in tests), the
+    emit site falls back to empty string rather than passing None
+    through (the SDK schema declares ``session_id: str = ""``,
+    pydantic would coerce None to error)."""
+    srv = _make_server(session_id=None)
+    srv._create_main_agent()
+
+    created_events = [
+        e for e in srv._emitted_events
+        if isinstance(e, AgentCreatedEvent)
+    ]
+    assert len(created_events) == 1
+    assert created_events[0].session_id == ""
+
+
+def test_sdk_schema_has_session_id_field() -> None:
+    """Pin the schema contract: AgentCreatedEvent's pydantic model
+    has a ``session_id`` field with str default.  Catches accidental
+    schema regression that would silently drop the field via the
+    base Event's ``extra='ignore'`` config."""
+    fields = AgentCreatedEvent.model_fields
+    assert "session_id" in fields, (
+        "SDK schema regression: AgentCreatedEvent.session_id "
+        "missing.  Cascade observers (cascade_develop.py walker) "
+        "rely on this field — without it ``getattr(evt, 'session_id', "
+        "'')`` silently returns empty and per-stage correlation "
+        "breaks."
+    )
+    # Default must be empty string (not None) — older constructors
+    # that omit the kwarg still produce a valid event.
+    assert fields["session_id"].default == ""
+
+
+def test_sdk_constructor_accepts_session_id_kwarg() -> None:
+    """Pin: AgentCreatedEvent constructor accepts the session_id
+    kwarg and stores it.  Forwards-compat guarantee for callers
+    that explicitly pass it."""
+    evt = AgentCreatedEvent(
+        agent_id="main",
+        agent_name="Worker",
+        agent_type="main",
+        session_id="20260603_120000",
+    )
+    assert evt.session_id == "20260603_120000"
+    assert evt.agent_id == "main"
+
+
+def test_sdk_constructor_omitted_session_id_defaults_to_empty() -> None:
+    """Pin: callers that DON'T pass session_id (older code paths,
+    pre-0.6.175 callers) still construct a valid event with
+    session_id == ''."""
+    evt = AgentCreatedEvent(
+        agent_id="main",
+        agent_name="Worker",
+        agent_type="main",
+    )
+    assert evt.session_id == ""
