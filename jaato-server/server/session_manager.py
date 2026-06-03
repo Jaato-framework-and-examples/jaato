@@ -337,6 +337,20 @@ class SessionManager:
         # progressing.  See ``_record_cid_session_activity``.
         self._cid_last_session_ts: Dict[str, float] = {}
 
+        # cascade.cancel: set of cascade_driver_ids that have been
+        # cancelled by an operator (typically kb-side ^C → IPC verb
+        # ``cascade.cancel cid``).  Reactor extensions consult via
+        # :meth:`is_cid_cancelled` before firing on AgentCompletedEvent
+        # so a cancelled cascade stops spawning new sessions.
+        #
+        # Lifetime: entries persist until daemon shutdown.  Unbounded
+        # growth is bounded in practice by the operator-driven nature
+        # of cancellations (one entry per ^C, not per session).  No
+        # eviction logic — adding TTL/cap would be defensive
+        # programming with no concrete failure-mode evidence.
+        self._cancelled_cids: Set[str] = set()
+        self._cancelled_cids_lock = threading.Lock()
+
         # Phase 4 §4.3.6a: bookkeeping for isolated-subagent sub-runners.
         # Keyed by isolated_session_id (``{parent}__sub_{subagent}``).
         # Distinct from ``_sessions`` — these are off the top-level
@@ -3109,6 +3123,130 @@ class SessionManager:
                     )
                     return True
         return False
+
+    # ----------------------------- cascade.cancel ------------------------
+
+    def is_cid_cancelled(self, cascade_driver_id: str) -> bool:
+        """Whether *cascade_driver_id* has been cancelled by an operator.
+
+        Reactor extensions consult this predicate before firing on
+        ``AgentCompletedEvent`` so a cancelled cascade stops spawning
+        new sessions.  Predicate-only API (Shape A from the
+        brainstorm): the framework owns the cancelled-set; the reactor
+        polls.  Race-free because the cancel handler marks the cid
+        BEFORE iterating sessions to stop — by the time the reactor
+        sees AgentCompletedEvent from a cancelled session, the cid is
+        already marked.
+
+        Args:
+            cascade_driver_id: The cid to check.  Empty / None returns
+                False (no cid → cannot be cancelled).
+
+        Returns:
+            True if the cid was previously passed to
+            :meth:`cancel_cascade`; False otherwise.
+        """
+        if not cascade_driver_id:
+            return False
+        with self._cancelled_cids_lock:
+            return cascade_driver_id in self._cancelled_cids
+
+    def cancel_cascade(self, cascade_driver_id: str) -> Dict[str, Any]:
+        """Cancel every loaded session belonging to *cascade_driver_id*.
+
+        Implements the ``cascade.cancel cid`` IPC verb.  Three steps,
+        ordered for race-safety with the reactor:
+
+        1. **Mark the cid cancelled** — flips
+           :meth:`is_cid_cancelled` to True before any session is
+           stopped.  The reactor's consult-point sees the marker
+           before any AgentCompletedEvent from the stopping sessions
+           arrives, so suppression engages even for sessions that
+           complete naturally between this call and the stop().
+        2. **Iterate matching sessions + stop** — find every entry in
+           ``_sessions`` whose ``cascade_driver_id == cid`` and call
+           ``server.stop()`` (the canonical mid-turn cancel path,
+           same as session.end's stop).  Idle sessions get a no-op
+           stop; in-flight sessions get cancelled via the cancel
+           token.
+        3. **Emit SessionTerminatedEvent per cancelled session** with
+           ``reason="cascade_cancelled"`` so clients and observers
+           can distinguish operator-driven cascade cancel from
+           natural completion / individual session.end.
+
+        Idempotent for already-cancelled cids: marker stays set;
+        re-iterating finds zero matching sessions (the prior call
+        stopped them all); returns ``{"stopped_count": 0, ...}``.
+
+        Args:
+            cascade_driver_id: The cid to cancel.  Empty / None is a
+                no-op returning zero counts.
+
+        Returns:
+            ``{"cid": cid, "cancelled_session_ids": [...],
+            "stopped_count": int}`` — the list of session_ids
+            cancelled this call.  Caller emits a SystemMessageEvent
+            from this dict so the operator sees what got reaped.
+        """
+        if not cascade_driver_id:
+            return {
+                "cid": cascade_driver_id,
+                "cancelled_session_ids": [],
+                "stopped_count": 0,
+            }
+
+        # Step 1: mark cancelled BEFORE iterating sessions.  Race
+        # window between this and step 2 is safe because the reactor
+        # checks the marker, not the session list.
+        with self._cancelled_cids_lock:
+            self._cancelled_cids.add(cascade_driver_id)
+
+        # Step 2: collect matching sessions under _lock so we don't
+        # race with concurrent session creation / deletion.  Pop the
+        # list out of the lock — server.stop() can be slow + may
+        # re-enter SessionManager (via emit), so we release the lock
+        # before calling it.
+        with self._lock:
+            matching: List[Tuple[str, Session]] = [
+                (sid, sess) for sid, sess in self._sessions.items()
+                if getattr(sess, "cascade_driver_id", None) == cascade_driver_id
+            ]
+
+        # Step 3: stop + emit per matching session.  Same shape as
+        # session.end's stop + emit (command_router.py:_handle_session_end).
+        from jaato_sdk.events import SessionTerminatedEvent
+        cancelled_ids: List[str] = []
+        for sid, sess in matching:
+            if sess.server is None:
+                continue
+            agent_id = getattr(sess.server, "_main_agent_id", None) or "main"
+            try:
+                sess.server.stop()  # idempotent — returns False if idle
+            except Exception:  # noqa: BLE001 — best-effort cancel
+                logger.exception(
+                    "cancel_cascade: server.stop() raised for session=%s "
+                    "cid=%s — continuing with remaining sessions",
+                    sid, cascade_driver_id,
+                )
+            self._emit_to_session(
+                sid,
+                SessionTerminatedEvent(
+                    session_id=sid,
+                    agent_id=agent_id,
+                    reason="cascade_cancelled",
+                ),
+            )
+            cancelled_ids.append(sid)
+
+        logger.info(
+            "cancel_cascade: cid=%s cancelled %d session(s): %s",
+            cascade_driver_id, len(cancelled_ids), cancelled_ids,
+        )
+        return {
+            "cid": cascade_driver_id,
+            "cancelled_session_ids": cancelled_ids,
+            "stopped_count": len(cancelled_ids),
+        }
 
     def unregister_all_cascade_clients_for_connection(
         self, connection_client_id: str,

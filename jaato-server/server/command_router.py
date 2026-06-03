@@ -222,6 +222,10 @@ class CommandRouter:
                 self._handle_cascade_unregister(client_id, event.args)
                 return
 
+            elif cmd == "cascade.cancel":
+                self._handle_cascade_cancel(client_id, event.args)
+                return
+
             # Tools commands - handled per-session
             elif cmd.startswith("tools."):
                 self._handle_tools_command(client_id, cmd, event.args)
@@ -625,6 +629,63 @@ class CommandRouter:
         logger.info(
             "cascade.unregister: client=%s cid=%s removed=%s",
             client_id, cascade_driver_id, removed,
+        )
+
+    def _handle_cascade_cancel(self, client_id: str, args: list) -> None:
+        """Handle ``cascade.cancel`` command.
+
+        Wire format: ``args = [cascade_driver_id]``.
+
+        Cancels every loaded session whose ``cascade_driver_id``
+        matches.  Reactor extensions consult
+        :meth:`SessionManager.is_cid_cancelled` before firing on
+        ``AgentCompletedEvent`` so the cascade stops spawning new
+        sessions.  Designed for kb-side ^C → IPC verb ergonomic
+        (cascade_develop.py SIGINT handler).
+
+        Idempotent — re-cancelling an already-cancelled cid returns
+        zero counts but keeps the marker set so reactor suppression
+        stays active.
+
+        Args:
+            client_id: The IPC/WS client that sent the command.
+                Receives the SystemMessageEvent confirmation.
+            args: Single-element list containing the cascade_driver_id.
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="cascade.cancel requires args: [cascade_driver_id]",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        cascade_driver_id = args[0]
+        result = self._session_manager.cancel_cascade(cascade_driver_id)
+
+        # Confirmation message back to the caller — operator sees what
+        # got reaped without grepping logs.
+        if result["stopped_count"] == 0:
+            msg = (
+                f"cascade.cancel: cid={cascade_driver_id} "
+                f"no loaded sessions matched (cid marked cancelled — "
+                f"reactor suppression engaged)"
+            )
+        else:
+            msg = (
+                f"cascade.cancel: cid={cascade_driver_id} "
+                f"cancelled {result['stopped_count']} session(s): "
+                f"{result['cancelled_session_ids']}"
+            )
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=msg,
+            style="system",
+        ))
+        logger.info(
+            "cascade.cancel: client=%s cid=%s stopped_count=%d",
+            client_id, cascade_driver_id, result["stopped_count"],
         )
 
     def _handle_session_end(self, client_id: str, session_id: str) -> None:
