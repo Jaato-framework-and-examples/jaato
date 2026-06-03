@@ -43,6 +43,61 @@ PLUGIN_ENTRY_POINT_GROUPS = {
 }
 
 
+# Cross-tier plugin discovery.  ``PLUGIN_TIER = "daemon_callable"`` is
+# the third tier value (alongside ``"daemon"`` / ``"runner"``): the
+# plugin is discovered on BOTH sides, with the daemon-side instance
+# owning the body and the runner-side instance being a
+# ``DaemonForwardingMixin`` stub for schema-surfacing to the model.
+# See ``shared/plugins/CLAUDE.md`` for the full pattern + the
+# ``test_plugin_tier_partition`` static-analysis gate.
+#
+# Discovery semantics encoded here (consumed by
+# :func:`_tier_filter_matches`):
+#   - ``tier_filter="runner"`` accepts ``{"runner", "daemon_callable"}``
+#   - ``tier_filter="daemon"`` accepts ``{"daemon", "daemon_callable"}``
+#   - ``tier_filter=None`` accepts everything (Phase 2 behaviour)
+_TIER_FILTER_ACCEPTS: Dict[str, Set[str]] = {
+    "runner": {"runner", "daemon_callable"},
+    "daemon": {"daemon", "daemon_callable"},
+}
+
+
+def _tier_filter_matches(
+    plugin_tier: Optional[str], tier_filter: Optional[str],
+) -> bool:
+    """Whether *plugin_tier* should be loaded under *tier_filter*.
+
+    Encapsulates the cross-tier acceptance rule so both
+    ``_discover_via_entry_points`` and ``_discover_via_directory``
+    share one implementation.  Plugins lacking a ``PLUGIN_TIER``
+    annotation are excluded under ANY filter (the "annotate or be
+    excluded" contract from §3.3.5) — silent exclusion is what the
+    build-fail gate in ``test_plugin_tier_partition`` catches.
+
+    Args:
+        plugin_tier: Declared ``PLUGIN_TIER`` value, or ``None`` if
+            absent.  Must be one of ``"daemon"`` / ``"runner"`` /
+            ``"daemon_callable"`` for the filtered path to admit it.
+        tier_filter: Filter to apply.  ``None`` means "no filter"
+            and admits every annotated plugin.
+
+    Returns:
+        True iff the plugin should be loaded under this filter.
+    """
+    if tier_filter is None:
+        # No filter: any annotated plugin passes.  Unannotated ones
+        # (plugin_tier is None) still pass — the "annotate or be
+        # excluded" rule only fires when a filter IS set, matching
+        # the pre-§3.3.5 daemon-side behaviour where everything got
+        # loaded.
+        return True
+    if plugin_tier is None:
+        # Filter set but no annotation: skip per §3.3.5 contract.
+        return False
+    accepted = _TIER_FILTER_ACCEPTS.get(tier_filter, {tier_filter})
+    return plugin_tier in accepted
+
+
 def _trace(msg: str, include_traceback: bool = False) -> None:
     """Write trace message to log file for debugging.
 
@@ -521,16 +576,19 @@ class PluginRegistry:
                     # Phase 3 §3.3.5: tier filter — read PLUGIN_TIER from
                     # the entry-point's defining module.  ``ep.load()``
                     # imports the module already; we read the attr from
-                    # the loaded factory's module.
+                    # the loaded factory's module.  Cross-tier
+                    # ``"daemon_callable"`` plugins are admitted by
+                    # BOTH ``"runner"`` and ``"daemon"`` filters — see
+                    # :func:`_tier_filter_matches`.
                     create_plugin = ep.load()
                     if tier_filter is not None:
                         ep_module = getattr(create_plugin, "__module__", "")
                         ep_tier = self._lookup_module_tier(ep_module)
-                        if ep_tier != tier_filter:
+                        if not _tier_filter_matches(ep_tier, tier_filter):
                             _trace(
                                 f" Entry point '{ep.name}': PLUGIN_TIER "
-                                f"={ep_tier!r} != filter={tier_filter!r}; "
-                                f"skipping"
+                                f"={ep_tier!r} not accepted by "
+                                f"filter={tier_filter!r}; skipping"
                             )
                             continue
 
@@ -643,13 +701,17 @@ class PluginRegistry:
                 if getattr(module, 'PLUGIN_KIND', None) != plugin_kind:
                     continue
 
-                # Phase 3 §3.3.5: tier filter.
+                # Phase 3 §3.3.5: tier filter.  Cross-tier
+                # ``"daemon_callable"`` plugins are admitted by BOTH
+                # ``"runner"`` and ``"daemon"`` filters — see
+                # :func:`_tier_filter_matches`.
                 if tier_filter is not None:
                     module_tier = getattr(module, 'PLUGIN_TIER', None)
-                    if module_tier != tier_filter:
+                    if not _tier_filter_matches(module_tier, tier_filter):
                         _trace(
                             f" Plugin '{name}': PLUGIN_TIER={module_tier!r} "
-                            f"!= filter={tier_filter!r}; skipping"
+                            f"not accepted by filter={tier_filter!r}; "
+                            f"skipping"
                         )
                         continue
 

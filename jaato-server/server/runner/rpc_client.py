@@ -289,3 +289,76 @@ class RunnerRPCClient:
                 f"type {type(env.result).__name__}; expected dict"
             )
         return dict(env.result)
+
+    # --------------------- daemon_plugin_execute -----------------------
+
+    def daemon_plugin_execute(
+        self,
+        *,
+        plugin_name: str,
+        tool_name: str,
+        args: Dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Ask the daemon to execute a tool on a daemon-tier plugin
+        instance.
+
+        The runner-side counterpart for cross-tier plugins declared
+        with ``PLUGIN_TIER = "daemon_callable"``.  Such plugins are
+        discovered both sides — the runner-side instance is a
+        :class:`shared.plugins.daemon_forwarding.DaemonForwardingMixin`
+        stub whose executors call this method; the daemon-side
+        instance holds the real state (e.g. ``SessionManager``
+        reference for ``session_ops``) and executes the body.
+
+        Args:
+            plugin_name: Name of the target plugin as returned by
+                ``plugin.name`` (e.g. ``"session_ops"``).  Must
+                match an entry in the daemon-side
+                ``server.registry`` for the parent session.
+            tool_name: Name of the tool to dispatch within the
+                plugin (e.g. ``"interrogate_session"``).  Must
+                match a key in that plugin's
+                ``get_executors()`` dict.
+            args: Tool-arg dict — the same shape the in-process
+                executor would receive.  Serialised verbatim onto
+                the wire; values must be JSON-encodable.
+            timeout: Optional wall-clock cap.  ``None`` waits
+                indefinitely — the canonical use case
+                (``session_ops.interrogate_session``) forks another
+                session and may wait many seconds for the model
+                turn to complete.
+
+        Returns:
+            The executor's return value, unwrapped from the typed
+            envelope.  Plugins return dicts (``{"answer": ..., ...}``
+            for interrogate_session) but primitives + lists are also
+            supported.
+
+        Raises:
+            RunnerRPCError: when the daemon-side handler reports an
+                error (envelope ``ok=False``) — typically:
+                  - plugin not found in the daemon-side registry
+                    (cross-tier discovery skipped it)
+                  - tool not found in the plugin's executors
+                  - executor raised (traceback in ``err_msg``)
+                  - the channel was closed mid-call.
+            concurrent.futures.TimeoutError: when *timeout* fires.
+        """
+        env: ResponseEnvelope = self._rpc.outgoing_call(
+            "daemon.plugin_execute",
+            {
+                "plugin_name": plugin_name,
+                "tool_name": tool_name,
+                "args": dict(args),
+            },
+            timeout=timeout,
+        )
+        if not env.ok or env.error is not None:
+            err_type = env.error.type if env.error else "UnknownError"
+            err_msg = env.error.message if env.error else "no error message"
+            raise RunnerRPCError(
+                f"daemon.plugin_execute({plugin_name}.{tool_name}) "
+                f"failed: {err_type}: {err_msg}"
+            )
+        return env.result

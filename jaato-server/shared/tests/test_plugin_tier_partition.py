@@ -118,13 +118,13 @@ def test_every_plugin_with_kind_has_tier() -> None:
 
 
 def test_tier_values_are_valid() -> None:
-    """PLUGIN_TIER must be one of the two known values."""
+    """PLUGIN_TIER must be one of the three known values."""
     _missing, tiers = _collect_annotations()
-    valid = {"daemon", "runner"}
+    valid = {"daemon", "runner", "daemon_callable"}
     invalid = {n: t for n, t in tiers.items() if t not in valid}
     assert invalid == {}, (
-        f"PLUGIN_TIER values must be 'daemon' or 'runner'; got: "
-        f"{invalid}"
+        f"PLUGIN_TIER values must be 'daemon', 'runner', or "
+        f"'daemon_callable'; got: {invalid}"
     )
 
 
@@ -153,14 +153,15 @@ def test_daemon_and_runner_tiers_are_disjoint() -> None:
 
 
 def test_partition_covers_every_annotated_plugin() -> None:
-    """The daemon ∪ runner partition equals the full annotated
-    plugin set.  No plugin is silently omitted."""
+    """The daemon ∪ runner ∪ daemon_callable partition equals the
+    full annotated plugin set.  No plugin is silently omitted."""
     _missing, tiers = _collect_annotations()
     daemon = {n for n, t in tiers.items() if t == "daemon"}
     runner = {n for n, t in tiers.items() if t == "runner"}
-    assert daemon | runner == set(tiers), (
-        f"Plugins not in daemon ∪ runner: "
-        f"{sorted(set(tiers) - (daemon | runner))}"
+    cross = {n for n, t in tiers.items() if t == "daemon_callable"}
+    assert daemon | runner | cross == set(tiers), (
+        f"Plugins not in daemon ∪ runner ∪ daemon_callable: "
+        f"{sorted(set(tiers) - (daemon | runner | cross))}"
     )
 
 
@@ -254,4 +255,160 @@ def test_discover_daemon_filter_excludes_runner_plugins() -> None:
     assert leaked == set(), (
         f"Runner-tier plugins leaked into daemon-filtered discover: "
         f"{sorted(leaked)}"
+    )
+
+
+# ----------------------------------------------------------------------
+# Cross-tier (``daemon_callable``) plugin discipline
+# ----------------------------------------------------------------------
+
+
+def test_daemon_callable_plugins_extend_daemon_forwarding_mixin() -> None:
+    """Any plugin with ``PLUGIN_TIER = "daemon_callable"`` MUST extend
+    ``DaemonForwardingMixin``.
+
+    The cross-tier pattern requires the runner-side instance to route
+    execution back to the daemon via ``daemon.plugin_execute`` RPC.
+    Without the mixin, the runner-side instance would attempt to
+    execute the body in-runner — and the body typically depends on
+    daemon-only state (e.g. ``SessionManager`` reference), so the
+    runner-side call would crash with AttributeError or worse, silently
+    return wrong-data.
+
+    This test is the structural enforcement of the contract documented
+    in ``shared/plugins/CLAUDE.md`` § "Cross-tier plugins".
+    """
+    from shared.plugins.daemon_forwarding import DaemonForwardingMixin
+    from shared.plugins.registry import PluginRegistry
+
+    _missing, tiers = _collect_annotations()
+    cross_tier = {n for n, t in tiers.items() if t == "daemon_callable"}
+    if not cross_tier:
+        pytest.skip(
+            "No daemon_callable plugins under shared/plugins/ — the "
+            "premium-side session_ops plugin is the canonical caller "
+            "and lives in jaato-premium."
+        )
+
+    # Load each via the registry to get the actual class.
+    registry = PluginRegistry()
+    registry.discover(plugin_kind="tool", tier_filter=None)
+
+    offenders = []
+    for name in cross_tier:
+        plugin = registry.get_plugin(name)
+        if plugin is None:
+            offenders.append(f"{name} (failed to discover)")
+            continue
+        if not isinstance(plugin, DaemonForwardingMixin):
+            offenders.append(
+                f"{name} (class {type(plugin).__name__} does not "
+                f"extend DaemonForwardingMixin)"
+            )
+
+    assert offenders == [], (
+        f"Cross-tier plugins missing DaemonForwardingMixin: "
+        f"{offenders}.  Add the mixin to the plugin class (see "
+        f"shared/plugins/CLAUDE.md § 'Cross-tier plugins') OR change "
+        f"PLUGIN_TIER to 'daemon' or 'runner'."
+    )
+
+
+def test_runner_filter_loads_daemon_callable_plugins() -> None:
+    """``discover(tier_filter='runner')`` MUST load
+    ``daemon_callable`` plugins.
+
+    This is the production-shape integration test for the cross-tier
+    discovery contract — it calls the **actual** code path the runner
+    subprocess uses (``server/runner/session.py:205``).  Per
+    ``feedback_test_fixtures_must_mirror_production_caller_shape``:
+    a fixture that bypasses ``tier_filter="runner"`` would let the
+    PR-207-style silent-skip class re-surface for the next plugin
+    that forgets ``PLUGIN_TIER``.
+
+    Skipped if no ``daemon_callable`` plugins exist under
+    shared/plugins/ — the canonical caller (premium session_ops)
+    lives outside this tree.
+    """
+    from shared.plugins.registry import PluginRegistry
+
+    _missing, tiers = _collect_annotations()
+    cross_tier = {n for n, t in tiers.items() if t == "daemon_callable"}
+    if not cross_tier:
+        pytest.skip(
+            "No daemon_callable plugins under shared/plugins/ — the "
+            "tier-filter integration assertion is unconditionally "
+            "exercised by the daemon-side cross-tier test."
+        )
+
+    registry = PluginRegistry()
+    discovered = registry.discover(
+        plugin_kind="tool", tier_filter="runner",
+    )
+    missing_from_runner = cross_tier - set(discovered)
+    assert missing_from_runner == set(), (
+        f"daemon_callable plugins did NOT load under "
+        f"tier_filter='runner': {sorted(missing_from_runner)}.  "
+        f"This would cause an empty tool schema runner-side and the "
+        f"model would hallucinate that the tool is unavailable (the "
+        f"smoke-validation symptom that motivated this pattern).  "
+        f"Likely cause: _tier_filter_matches() lost the "
+        f"daemon_callable acceptance under 'runner'."
+    )
+
+
+def test_runner_tier_plugins_dont_secretly_need_daemon_state() -> None:
+    """Gap #1 trap guard: a plugin with ``PLUGIN_TIER = "runner"``
+    must NOT declare ``set_session_manager`` unless it also extends
+    ``DaemonForwardingMixin``.
+
+    The motivating incident: premium ``session_ops`` initially shipped
+    with no ``PLUGIN_TIER`` annotation.  After adding
+    ``PLUGIN_TIER = "runner"`` to make it discoverable runner-side,
+    the runner-side instance had ``_session_manager = None`` because
+    the daemon-side wire-up at ``session_manager.py:4379`` only mutates
+    the daemon-side instance.  The runner-side body executed against a
+    None reference.
+
+    The fix is to declare ``PLUGIN_TIER = "daemon_callable"`` AND
+    extend ``DaemonForwardingMixin``.  This test catches plugins that
+    take the half-step (``"runner"`` without the mixin) — the silent
+    failure mode is what cost us a cycle.
+    """
+    from shared.plugins.daemon_forwarding import DaemonForwardingMixin
+    from shared.plugins.registry import PluginRegistry
+
+    _missing, tiers = _collect_annotations()
+    runner_tier = {n for n, t in tiers.items() if t == "runner"}
+
+    registry = PluginRegistry()
+    # Load with no filter so we get every annotated plugin (not just
+    # the ones the runner-filter would admit).  Mirrors daemon-side
+    # discovery shape (``core.py:1079``).
+    registry.discover(plugin_kind="tool", tier_filter=None)
+
+    offenders = []
+    for name in runner_tier:
+        plugin = registry.get_plugin(name)
+        if plugin is None:
+            continue  # discovery failure handled by other tests
+        # The trap shape: takes a SessionManager via a setter (canonical
+        # signal that the body needs daemon-only state).  Any plugin
+        # exposing this contract on a runner-tier instance is in the
+        # bug class.
+        if not hasattr(plugin, "set_session_manager"):
+            continue
+        if isinstance(plugin, DaemonForwardingMixin):
+            continue  # has the escape hatch
+        offenders.append(name)
+
+    assert offenders == [], (
+        f"Runner-tier plugins declare set_session_manager but lack "
+        f"DaemonForwardingMixin: {offenders}.  Either: "
+        f"(a) change PLUGIN_TIER to 'daemon_callable' + extend "
+        f"DaemonForwardingMixin (cross-tier pattern), OR "
+        f"(b) remove set_session_manager (the runner-side body cannot "
+        f"reach SessionManager — daemon-only state).  See "
+        f"shared/plugins/CLAUDE.md § 'Cross-tier plugins' for the trap "
+        f"history."
     )
