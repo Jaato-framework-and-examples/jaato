@@ -5284,6 +5284,7 @@ class SessionManager:
                 profile_name=profile.name if profile else "",
                 parent_agent_id=server.main_agent_id,
                 created_at=created_at,
+                session_id=session_id,
             ))
 
             # Emit context update for restored subagent
