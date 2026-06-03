@@ -227,7 +227,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         JSON-compatible dictionary.
     """
     return {
-        'version': '2.3',  # Bumped for profile_name (retires project/location/model)
+        'version': '2.4',  # Bumped for config_root (paired with profile_name for disk-restore)
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -238,6 +238,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'metadata': state.metadata,
         'profile_name': state.profile_name,
         'workspace_path': state.workspace_path,
+        'config_root': state.config_root,
         'history': serialize_history(state.history),
         'budget_state': state.budget_state,
         'interrupted_turn': state.interrupted_turn,
@@ -278,6 +279,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         metadata=data.get('metadata', {}),
         profile_name=data.get('profile_name'),
         workspace_path=data.get('workspace_path'),
+        config_root=data.get('config_root'),
         budget_state=data.get('budget_state'),
         interrupted_turn=data.get('interrupted_turn'),
         session_state=data.get('session_state'),

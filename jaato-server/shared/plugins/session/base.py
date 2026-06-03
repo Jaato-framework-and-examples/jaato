@@ -70,6 +70,25 @@ class SessionState:
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""
 
+    config_root: Optional[str] = None
+    """Framework-config root override at session-creation time.
+
+    Persisted so disk-restore can hand it back to
+    :func:`discover_profiles` — the workspace tier and
+    ``JAATO_PROFILE_SET`` subdir scans both gate on
+    ``effective_config_root`` (see ``subagent/config.py:1685``).
+    Without this, restoring a session spawned with a profile that
+    lives under ``<config_root>/profiles/<set>/`` fails profile
+    resolution because ``discover_profiles`` falls back to
+    ``<workspace>/.jaato/profiles/`` which is the wrong directory
+    for multi-set workspaces (canonical kb-cascade case: profiles
+    live at ``<repo>/.jaato/profiles/zhipuai_glm5/``, sessions run
+    under ``<repo>/tests/runs/<run>/``).
+
+    None for sessions persisted before 2.4 OR sessions spawned
+    without a config_root override (default workspace-only layout).
+    """
+
     budget_state: Optional[Dict[str, Any]] = None
     """Serialized conversation budget for restoration."""
 
