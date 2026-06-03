@@ -594,14 +594,41 @@ class PluginRegistry:
 
                     plugin = create_plugin()
 
-                    # Verify protocol implementation
+                    # Verify protocol implementation.  Failing the
+                    # protocol check used to be a debug-only _trace,
+                    # which made plugins invisibly disappear from the
+                    # registry — same footgun as missing PLUGIN_KIND
+                    # and same footgun the directory-path side fixed
+                    # at PR #171.  Promote to a real warning that
+                    # names the missing methods so the author knows
+                    # exactly what to add.  Mirrors the directory-
+                    # path warning at ``_discover_via_directory``
+                    # (see ``_missing_protocol_methods``).
                     if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
-                        _trace(f" Entry point '{ep.name}': "
-                              f"plugin does not implement ToolPlugin protocol")
+                        missing = _missing_protocol_methods(plugin, ToolPlugin)
+                        logger.warning(
+                            "Entry point '%s' (%s): plugin does not "
+                            "implement the ToolPlugin protocol — it "
+                            "will be silently skipped. Missing "
+                            "methods: %s. Add them to the plugin "
+                            "class.",
+                            ep.name,
+                            getattr(ep, "value", "<unknown>"),
+                            ", ".join(missing) if missing else "(unknown)",
+                        )
                         continue
                     if plugin_kind == "enrichment" and not isinstance(plugin, EnrichmentPlugin):
-                        _trace(f" Entry point '{ep.name}': "
-                              f"plugin does not implement EnrichmentPlugin protocol")
+                        missing = _missing_protocol_methods(plugin, EnrichmentPlugin)
+                        logger.warning(
+                            "Entry point '%s' (%s): plugin does not "
+                            "implement the EnrichmentPlugin protocol "
+                            "— it will be silently skipped. Missing "
+                            "methods: %s. Add them to the plugin "
+                            "class.",
+                            ep.name,
+                            getattr(ep, "value", "<unknown>"),
+                            ", ".join(missing) if missing else "(unknown)",
+                        )
                         continue
 
                     self._plugins[plugin.name] = plugin
