@@ -550,6 +550,19 @@ class CommandRouter:
                 cascade_driver_id=cascade_driver_id,
                 role=role,
                 event_types=event_types,
+                # server 0.6.178+: pass the raw connection id so the
+                # routing-layer dedup at
+                # ``_dispatch_to_cascade_clients_by_cid`` can skip
+                # this entry when ``_route_bootstrap_event`` is
+                # already delivering via the direct-IPC path to the
+                # same connection.  Without this, the bootstrap-time
+                # AgentCreatedEvent arrives twice on cascade_develop
+                # walker's SDK queue (kb-side report 2026-06-03,
+                # 0.6.177 falsification: PR-207 compared the wrong
+                # identifier, ``cascade_client_id`` is the namespaced
+                # registration id, NOT the raw connection id this
+                # callback delivers to).
+                delivery_target_id=connection_client_id,
             )
         except ValueError as exc:
             self._event_sink.send_event(client_id, ErrorEvent(
