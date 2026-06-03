@@ -83,6 +83,11 @@ def _make_server(profile=None, agent_id="main", display_name=None,
     srv._agents = {}
     srv._selected_agent_id = None
     srv._session_id = session_id
+    # _setup_agent_hooks (server 0.6.176+ dedup test) walks
+    # ``self.registry.get_plugin("subagent")`` to register hooks
+    # for subagent UI events.  None short-circuits that branch
+    # cleanly so the fixture stays minimal.
+    srv.registry = None
     return srv
 
 
@@ -342,3 +347,106 @@ def test_sdk_constructor_omitted_session_id_defaults_to_empty() -> None:
         agent_type="main",
     )
     assert evt.session_id == ""
+
+
+# ----------------------------------------------------------------------
+# Server 0.6.176 — bootstrap/hook dedup (no double-emit on main agent)
+# ----------------------------------------------------------------------
+
+
+def test_main_agent_no_double_emit_when_hook_fires_after_bootstrap() -> None:
+    """Pin: when ``_create_main_agent`` daemon-side bootstrap emit
+    fires FIRST and the runner subsequently echoes the agent-creation
+    via ``ServerAgentHooks.on_agent_created``, the hook MUST detect
+    the agent is already in ``server._agents`` and SKIP its own emit
+    — total dispatches for the main agent must be exactly 1, not 2.
+
+    Surfaced empirically by cascade_develop.py walker on 0.6.175
+    (2026-06-03): post-PR-205 session_id populated → walker prints
+    ``↳ session <id>`` line per AgentCreatedEvent → main-agent
+    stage showed TWO consecutive lines on the same session_id.  Pre-
+    PR-205 session_id was always "" so the duplicate dispatch was
+    cosmetic-invisible; the dedup gap pre-dates PR-205, just got
+    surfaced by it."""
+    srv = _make_server(display_name="Worker")
+
+    # 1. Daemon-side bootstrap: _create_main_agent emits + registers
+    #    agent_id in _agents.
+    srv._create_main_agent()
+    assert "main" in srv._agents
+    bootstrap_emits = [
+        e for e in srv._emitted_events
+        if isinstance(e, AgentCreatedEvent)
+    ]
+    assert len(bootstrap_emits) == 1, (
+        "_create_main_agent must emit exactly once at bootstrap"
+    )
+
+    # 2. Setup hooks (the ServerAgentHooks class is defined inside
+    #    _setup_agent_hooks).  Then simulate the runner's echo of
+    #    the agent creation.
+    srv._setup_agent_hooks()
+    # Walk to retrieve hooks instance — set as side effect.
+    hooks = srv._agent_hooks
+    hooks.on_agent_created(
+        agent_id="main",
+        agent_name="Worker",
+        agent_type="main",
+        profile_name=None,
+        parent_agent_id=None,
+        created_at="2026-06-03T12:00:00+00:00",
+    )
+
+    # 3. TOTAL emits across bootstrap + hook: still 1, not 2.
+    total_emits = [
+        e for e in srv._emitted_events
+        if isinstance(e, AgentCreatedEvent)
+    ]
+    assert len(total_emits) == 1, (
+        f"Bootstrap/hook dedup regression: expected exactly 1 "
+        f"AgentCreatedEvent total for main-agent (bootstrap + "
+        f"runner-echo), got {len(total_emits)}.  Walker shows "
+        f"duplicate ``↳ session <id>`` lines when this regresses."
+    )
+
+
+def test_subagent_still_emits_via_hook_when_not_pre_registered() -> None:
+    """Pin: the dedup guard skips emit ONLY when the agent_id is
+    already in ``server._agents``.  Subagents created mid-run reach
+    this hook BEFORE any daemon-side bootstrap-emit (the daemon-side
+    path at ``_create_main_agent`` only runs once, for the main
+    agent), so ``agent_id`` is NOT in ``_agents`` and the emit
+    fires.
+
+    Without this branch, subagents would receive zero
+    AgentCreatedEvents and downstream consumers (TUI agent registry,
+    cascade observers tracking sub-flows) would drop all subsequent
+    subagent-keyed events.
+    """
+    srv = _make_server()
+    srv._setup_agent_hooks()
+    hooks = srv._agent_hooks
+
+    # Simulate a subagent creation via the hook.  agent_id is NOT
+    # pre-registered (no daemon-side bootstrap fires for subagents).
+    hooks.on_agent_created(
+        agent_id="researcher-1",
+        agent_name="Researcher",
+        agent_type="subagent",
+        profile_name="researcher",
+        parent_agent_id="main",
+        created_at="2026-06-03T12:00:01+00:00",
+    )
+
+    subagent_emits = [
+        e for e in srv._emitted_events
+        if isinstance(e, AgentCreatedEvent) and e.agent_id == "researcher-1"
+    ]
+    assert len(subagent_emits) == 1, (
+        f"Subagent emit regression: expected exactly 1 "
+        f"AgentCreatedEvent for subagent (hook-side path is "
+        f"load-bearing for subagents — they don't go through "
+        f"_create_main_agent), got {len(subagent_emits)}."
+    )
+    assert subagent_emits[0].agent_type == "subagent"
+    assert subagent_emits[0].parent_agent_id == "main"
