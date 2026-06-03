@@ -5238,6 +5238,35 @@ class SessionManager:
                 session_env_file = workspace_env
                 logger.debug(f"_load_session: using workspace env_file: {session_env_file}")
 
+        # Resolve the SubagentProfile from ``state.profile_name``
+        # (persisted post-2.3) so disk-restore re-binds the full
+        # recipe — model, provider, plugin_configs,
+        # system_instructions, GC strategy.  Without this, the
+        # restored server initializes from session env alone; in
+        # multi-profile workspaces (where MODEL_NAME / JAATO_PROVIDER
+        # live in the per-profile YAML, not workspace .env)
+        # ``JaatoServer.initialize`` raises ConfigurationError on
+        # missing MODEL_NAME (silently — the error event is emitted
+        # to the target session's sink which has no attached client).
+        # Pre-2.3 sessions deserialize with ``state.profile_name=None``;
+        # they fall through to env-only resolution as before, which
+        # only succeeds if the workspace .env carries MODEL_NAME +
+        # JAATO_PROVIDER — same constraint as fresh-spawn-without-
+        # profile.
+        restored_profile = None
+        if state.profile_name:
+            restored_profile, profile_err = self._resolve_profile(
+                state.profile_name,
+                workspace_path=state.workspace_path or workspace_path or "",
+                env_file=session_env_file,
+            )
+            if restored_profile is None:
+                logger.error(
+                    "_load_session: profile %r for session %s not "
+                    "resolvable (%s) — initialize will likely fail",
+                    state.profile_name, session_id, profile_err,
+                )
+
         # Phase 3 §3.12 disk-restore migration: route the JaatoServer
         # construction + pre-init hooks + initialize through the
         # unified ``_construct_and_initialize_server`` sub-helper that
@@ -5254,6 +5283,7 @@ class SessionManager:
             description=state.description,
             client_id=None,  # disk-restore path; no client-driven opt-in
             sandbox_mode=getattr(state, "sandbox_mode", None),
+            profile=restored_profile,
             restore_state={"loaded_state": state},
             env_file=session_env_file,
             instruction_token_cache=self._instruction_token_cache,
@@ -5891,7 +5921,16 @@ class SessionManager:
             if session.provisioned:
                 subagent_metadata['provisioned'] = True
 
-            # Create SessionState
+            # Create SessionState.  Post-2.3: persist ``profile_name``
+            # (denormalised from the server's bound SubagentProfile) so
+            # disk-restore can re-resolve the full provider recipe
+            # (model + provider + plugin_configs + system_instructions +
+            # GC) via the profile registry at load time.  The legacy
+            # ``model`` field on SessionState was retired alongside
+            # ``project`` / ``location`` — they were Google-GenAI-era
+            # connection scaffolding.
+            server_profile = getattr(session.server, "_profile", None) if session.server else None
+            profile_name = getattr(server_profile, "name", None) if server_profile else None
             state = SessionState(
                 session_id=session.session_id,
                 history=history,
@@ -5901,7 +5940,7 @@ class SessionManager:
                 turn_count=len(history) // 2,  # Approximate
                 turn_accounting=turn_accounting,
                 user_inputs=session.user_inputs,  # Command history for prompt restoration
-                model=session.server.model_name if session.server else None,
+                profile_name=profile_name,
                 workspace_path=session.workspace_path,
                 metadata=subagent_metadata,
                 budget_state=budget_state,

@@ -49,15 +49,23 @@ class SessionState:
     metadata: Dict[str, Any] = field(default_factory=dict)
     """Additional plugin-specific metadata."""
 
-    # Connection info for resumption
-    project: Optional[str] = None
-    """GCP project ID used for this session."""
+    profile_name: Optional[str] = None
+    """Name of the SubagentProfile this session was spawned with.
 
-    location: Optional[str] = None
-    """Vertex AI location used for this session."""
+    Persisted so disk-restore can re-bind the full provider recipe
+    (model + provider + plugin_configs + system_instructions + GC
+    strategy) at load time.  When the profile is absent / renamed /
+    deleted between save and restore, the restore path raises a
+    typed error rather than silently constructing a server with
+    incomplete config.
 
-    model: Optional[str] = None
-    """Model name used for this session."""
+    Replaces the pre-multi-provider trio of ``project`` / ``location`` /
+    ``model`` which carried Google-GenAI-shaped fields directly on
+    SessionState.  Those fields are tolerated on deserialize for
+    backward-compat with old session JSONs but are no longer written
+    or read by the framework — the profile is the authoritative
+    recipe source.
+    """
 
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""
@@ -115,8 +123,14 @@ class SessionInfo:
     turn_count: int
     """Number of conversation turns."""
 
-    model: Optional[str] = None
-    """Model name used for this session."""
+    profile_name: Optional[str] = None
+    """Name of the SubagentProfile this session was spawned with.
+
+    Denormalised at save time so session-list views can show recipe
+    binding without resolving the profile registry for every entry.
+    None for sessions persisted before this field landed OR for
+    sessions spawned without a profile (legacy / test paths).
+    """
 
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""

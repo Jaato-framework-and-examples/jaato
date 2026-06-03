@@ -159,7 +159,12 @@ class TestSessionStateSerialization:
     """Tests for SessionState serialization."""
 
     def test_serialize_session_state(self):
-        """Test serializing a complete session state."""
+        """Test serializing a complete session state.
+
+        Post-2.3: connection dict (project/location/model) retired in
+        favour of ``profile_name`` — the profile is the authoritative
+        recipe source for model + provider + plugin_configs.
+        """
         history = [
             Message(
                 role=Role.USER,
@@ -175,35 +180,32 @@ class TestSessionStateSerialization:
             description="Test session",
             turn_count=1,
             turn_accounting=[{"prompt": 10, "output": 20, "total": 30}],
-            project="my-project",
-            location="us-central1",
-            model="gemini-2.5-flash",
+            profile_name="discovery",
         )
 
         data = serialize_session_state(state)
 
-        assert data["version"] == "2.2"
+        assert data["version"] == "2.3"
         assert data["session_id"] == "20251207_143022"
         assert data["description"] == "Test session"
         assert data["turn_count"] == 1
-        assert data["connection"]["project"] == "my-project"
+        assert data["profile_name"] == "discovery"
+        assert "connection" not in data, (
+            "post-2.3 must NOT write connection dict — retired field"
+        )
         assert len(data["history"]) == 1
 
     def test_deserialize_session_state(self):
-        """Test deserializing a session state."""
+        """Test deserializing a session state (post-2.3 shape)."""
         data = {
-            "version": "2.0",
+            "version": "2.3",
             "session_id": "20251207_143022",
             "description": "Test session",
             "created_at": "2025-12-07T14:30:22",
             "updated_at": "2025-12-07T15:00:00",
             "turn_count": 1,
             "turn_accounting": [{"prompt": 10, "output": 20, "total": 30}],
-            "connection": {
-                "project": "my-project",
-                "location": "us-central1",
-                "model": "gemini-2.5-flash",
-            },
+            "profile_name": "discovery",
             "history": [
                 {
                     "role": "user",
@@ -217,8 +219,49 @@ class TestSessionStateSerialization:
         assert state.session_id == "20251207_143022"
         assert state.description == "Test session"
         assert state.turn_count == 1
-        assert state.project == "my-project"
+        assert state.profile_name == "discovery"
         assert len(state.history) == 1
+
+    def test_deserialize_pre_2_3_backward_compat(self):
+        """Pre-2.3 session JSONs carry a ``connection`` dict with
+        project/location/model.  Deserialization MUST tolerate them
+        — silently drops the retired fields, leaves ``profile_name``
+        as None so the disk-restore path falls through to env-only
+        resolution (same constraint as fresh-spawn-without-profile).
+        """
+        data = {
+            "version": "2.2",
+            "session_id": "old_session",
+            "description": "Pre-2.3 session",
+            "created_at": "2025-12-07T14:30:22",
+            "updated_at": "2025-12-07T15:00:00",
+            "turn_count": 1,
+            "connection": {
+                "project": "my-gcp-project",
+                "location": "us-central1",
+                "model": "gemini-2.5-flash",
+            },
+            "history": [],
+        }
+
+        state = deserialize_session_state(data)
+
+        # The connection dict is silently dropped — state has no
+        # project/location/model attributes anymore.
+        assert state.session_id == "old_session"
+        assert state.profile_name is None, (
+            "pre-2.3 sessions have no profile_name; disk-restore "
+            "falls through to env-only model resolution"
+        )
+        assert not hasattr(state, 'project'), (
+            "project field retired in 2.3 — Google-coupled"
+        )
+        assert not hasattr(state, 'location'), (
+            "location field retired in 2.3 — Google-coupled"
+        )
+        assert not hasattr(state, 'model'), (
+            "model field retired in 2.3 — superseded by profile_name"
+        )
 
     def test_round_trip_session_state(self):
         """Test round-trip serialization of session state."""
