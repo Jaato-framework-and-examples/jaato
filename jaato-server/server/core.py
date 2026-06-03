@@ -2532,10 +2532,24 @@ class JaatoServer:
 
         # Path I (cycle 11) Layer 9: emit AgentCreatedEvent daemon-
         # side at bootstrap time.  Mirrors the payload that
-        # ``ServerAgentHooks.on_agent_created`` (core.py:2508) would
+        # ``ServerAgentHooks.on_agent_created`` (core.py:2711) would
         # have emitted pre-§7c.  Bootstrap-scope event — fires
         # BEFORE the runner's first send_message, so it can't go
         # through the Path F per-RPC-request shim.
+        #
+        # Dedup interaction (server 0.6.176+): the runner subsequently
+        # echoes the agent-creation back via ``on_agent_created`` once
+        # it boots.  That hook now skips its own emit when ``agent_id``
+        # is ALREADY in ``server._agents`` (set at line 2529 below).
+        # Pre-PR-205 both emits carried ``session_id=""`` so the dup
+        # was cosmetic-invisible to cascade observers; post-PR-205
+        # (session_id populated) the duplicate became visible
+        # (double ``↳ session <id>`` lines in cascade_develop.py's
+        # walker, kb-side report 2026-06-03).  The bootstrap-side
+        # emit here is authoritative for the main agent; the hook-
+        # side emit at 2728 remains load-bearing for SUBAGENTS
+        # (which are NOT pre-registered in ``_agents`` at hook
+        # time — only the main agent is).
         self.emit(AgentCreatedEvent(
             agent_id=self._main_agent_id,
             agent_name=display_name,
@@ -2710,6 +2724,25 @@ class JaatoServer:
 
             def on_agent_created(self, agent_id, agent_name, agent_type, profile_name,
                                  parent_agent_id, created_at, **_kwargs):
+                # Dedup guard (server 0.6.176+).  ``_create_main_agent``
+                # at core.py:2539 emits ``AgentCreatedEvent`` daemon-side
+                # at bootstrap (Path I cycle 11 Layer 9 §7c).  When the
+                # runner subsequently echoes back the agent-creation via
+                # this hook, the agent_id is ALREADY in ``server._agents``
+                # because ``_create_main_agent`` (called by the daemon
+                # before any runner traffic) inserted it at line 2529.
+                # Pre-PR-205 both emits had ``session_id=""`` so the
+                # duplicate was invisible to cascade observers (they
+                # had no way to correlate the dup pair).  Post-PR-205
+                # (session_id populated) the dup became visible to
+                # walkers like cascade_develop.py and produced double
+                # ``↳ session <id>`` prints per main-agent bootstrap.
+                # Subagents created mid-run reach this hook BEFORE any
+                # daemon-side bootstrap-emit (the daemon-side path only
+                # fires for the main agent), so ``agent_id`` is NOT
+                # already in ``_agents`` for subagents — the emit still
+                # fires for them (load-bearing).
+                was_already_registered = agent_id in server._agents
                 agent = AgentState(
                     agent_id=agent_id,
                     name=agent_name,
@@ -2725,15 +2758,16 @@ class JaatoServer:
                         agent.created_at = str(created_at)
                 server._agents[agent_id] = agent
 
-                server.emit(AgentCreatedEvent(
-                    agent_id=agent_id,
-                    agent_name=agent_name,
-                    agent_type=agent_type,
-                    profile_name=profile_name,
-                    parent_agent_id=parent_agent_id,
-                    created_at=agent.created_at,
-                    session_id=server._session_id or "",
-                ))
+                if not was_already_registered:
+                    server.emit(AgentCreatedEvent(
+                        agent_id=agent_id,
+                        agent_name=agent_name,
+                        agent_type=agent_type,
+                        profile_name=profile_name,
+                        parent_agent_id=parent_agent_id,
+                        created_at=agent.created_at,
+                        session_id=server._session_id or "",
+                    ))
 
             def on_agent_output(self, agent_id, source, text, mode):
                 server._trace(f"ON_AGENT_OUTPUT agent={agent_id} source={source} len={len(text)} mode={mode}")
