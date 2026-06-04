@@ -2,18 +2,14 @@
 
 import asyncio
 import json
-import logging
 import os
 import queue
 import shutil
 import threading
-import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
-
-logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import (
     UserCommand, CommandParameter, CommandCompletion,
@@ -1735,70 +1731,24 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             ToolResultEnrichmentResult with diagnostics appended if applicable.
         """
         self._trace(f"enrich_tool_result: checking {tool_name}")
-        # TEMP PR-220 (a) ENTRY — peer falsified (B); LSP IS in subscriber
-        # list, so this method IS being invoked.  lsp_debug.log silence
-        # means either self._trace itself is broken inside this code path
-        # OR we early-return before any meaningful log emission.  These
-        # logger.info probes bypass self._trace and write to jaato.log.
-        try:
-            _result_keys: Any = "unparseable"
-            try:
-                _parsed = json.loads(result) if isinstance(result, str) else None
-                if isinstance(_parsed, dict):
-                    _result_keys = sorted(_parsed.keys())
-            except Exception:
-                pass
-            logger.info(
-                "ENRICH_LSP_ENTRY tool=%s has_args=%s connected_servers=%s "
-                "result_is_str=%s result_len=%s result_keys=%s",
-                tool_name,
-                tool_args is not None,
-                sorted(self._connected_servers),
-                isinstance(result, str),
-                len(result) if isinstance(result, str) else None,
-                _result_keys,
-            )
-        except Exception as _probe_exc:
-            logger.info("ENRICH_LSP_ENTRY_EXC tool=%s exc=%s", tool_name, _probe_exc)
 
         # Skip if no LSP servers are connected
         if not self._connected_servers:
             self._trace(f"enrich_tool_result: skipped - no servers connected")
-            # TEMP PR-220 — surface this branch in jaato.log
-            logger.info(
-                "ENRICH_LSP_EARLY_RETURN tool=%s reason=no_servers_connected",
-                tool_name,
-            )
             return ToolResultEnrichmentResult(result=result)
 
         # Parse the result to extract file paths
         file_paths = self._extract_file_paths_from_result(tool_name, result)
         if not file_paths:
             self._trace(f"enrich_tool_result: no file paths found in result")
-            # TEMP PR-220 (b) FILE-FILTER outcome — empty extraction
-            logger.info(
-                "ENRICH_LSP_EARLY_RETURN tool=%s reason=no_file_paths_in_result",
-                tool_name,
-            )
             return ToolResultEnrichmentResult(result=result)
 
         self._trace(f"enrich_tool_result: found files {file_paths}")
 
         # Filter to files that have LSP support
         supported_files = self._filter_supported_files(file_paths)
-        # TEMP PR-220 (b) FILE-FILTER outcome — extracted vs supported
-        logger.info(
-            "ENRICH_LSP_FILE_FILTER tool=%s extracted=%s supported=%s",
-            tool_name,
-            file_paths,
-            supported_files,
-        )
         if not supported_files:
             self._trace(f"enrich_tool_result: no supported file types")
-            logger.info(
-                "ENRICH_LSP_EARLY_RETURN tool=%s reason=no_supported_file_types",
-                tool_name,
-            )
             return ToolResultEnrichmentResult(result=result)
 
         self._trace(f"enrich_tool_result: checking diagnostics for {supported_files}")
@@ -1806,21 +1756,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         # Run diagnostics on each file and collect results
         all_diagnostics = {}
         for file_path in supported_files:
-            # TEMP PR-220 (c) JDTLS-QUERY-PRE
-            logger.info(
-                "ENRICH_LSP_QUERY_PRE tool=%s file=%s",
-                tool_name,
-                file_path,
-            )
             diags = self._get_diagnostics_for_file(file_path)
-            # TEMP PR-220 (d) JDTLS-QUERY-POST — count + first-3 sample
-            logger.info(
-                "ENRICH_LSP_QUERY_POST tool=%s file=%s diag_count=%s sample=%s",
-                tool_name,
-                file_path,
-                len(diags) if isinstance(diags, list) else "non_list",
-                diags[:3] if isinstance(diags, list) else None,
-            )
             if diags:
                 all_diagnostics[file_path] = diags
 
@@ -3134,40 +3070,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         # Ensure document is open and up-to-date
         # update_document opens if not open, or sends didChange if already open
         if file_path and method not in ('workspace_symbols',):
-            # TEMP PR-221 — entry trace: per-call state of the URI and the
-            # per-URI Event before update_document / await_diagnostics fire.
-            try:
-                _uri = client.uri_from_path(file_path)
-                _ev = client._diagnostics_events.get(_uri)
-                _cached = client._diagnostics.get(_uri)
-                logger.info(
-                    "ENRICH_LSP_GETDIAG_ENTRY method=%s file=%s uri=%s "
-                    "uri_in_open_documents=%s event_already_set=%s "
-                    "cached_diag_count=%s min_wait=%s max_wait=%s",
-                    method,
-                    file_path,
-                    _uri,
-                    _uri in client._open_documents,
-                    bool(_ev and _ev.is_set()),
-                    len(_cached) if _cached is not None else None,
-                    self._diagnostics_min_wait_seconds,
-                    self._diagnostics_max_wait_seconds,
-                )
-            except Exception as _exc:
-                logger.info("ENRICH_LSP_GETDIAG_ENTRY_EXC exc=%s", _exc)
-
-            _t0 = time.monotonic()
             await client.update_document(file_path)
-            _t1 = time.monotonic()
-            # TEMP PR-221 — update_document elapsed + URI now-open state
-            logger.info(
-                "ENRICH_LSP_GETDIAG_UPDATE_DONE method=%s file=%s "
-                "elapsed_ms=%.1f uri_in_open_documents=%s",
-                method,
-                file_path,
-                (_t1 - _t0) * 1000.0,
-                client.uri_from_path(file_path) in client._open_documents,
-            )
             # Wait for server to process the document.  Bounded poll
             # for parsing-heavy methods; small fixed delay for
             # lightweight ones (workspace_symbols already excluded
@@ -3175,8 +3078,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             # pipelines (parser → compiler → linter) room to deliver
             # later batches before the cache read.
             if needs_parsing:
-                _t2 = time.monotonic()
-                _signalled = await client.await_diagnostics(
+                await client.await_diagnostics(
                     file_path,
                     max_wait=self._diagnostics_max_wait_seconds,
                     min_wait=self._diagnostics_min_wait_seconds,
@@ -3184,28 +3086,6 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                         self._diagnostics_convergence_window_seconds
                     ),
                 )
-                _t3 = time.monotonic()
-                # TEMP PR-221 — await_diagnostics outcome.  This is the
-                # gate peer cornered: 1ms PRE→POST gap means either
-                # await_diagnostics short-circuited (max_wait<=0) or the
-                # whole branch is bypassed.
-                try:
-                    _uri2 = client.uri_from_path(file_path)
-                    _cached2 = client._diagnostics.get(_uri2)
-                    logger.info(
-                        "ENRICH_LSP_GETDIAG_AWAIT_DONE method=%s file=%s "
-                        "elapsed_ms=%.1f signalled=%s cached_diag_count=%s "
-                        "min_wait=%s max_wait=%s",
-                        method,
-                        file_path,
-                        (_t3 - _t2) * 1000.0,
-                        _signalled,
-                        len(_cached2) if _cached2 is not None else None,
-                        self._diagnostics_min_wait_seconds,
-                        self._diagnostics_max_wait_seconds,
-                    )
-                except Exception as _exc:
-                    logger.info("ENRICH_LSP_GETDIAG_AWAIT_DONE_EXC exc=%s", _exc)
             else:
                 await asyncio.sleep(0.2)
 
