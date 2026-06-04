@@ -109,6 +109,70 @@ class TestExpandVariables:
         assert result and os.path.isabs(result)
 
 
+class TestJdtlsStateRootTemplateVar:
+    """Family IV (PR-217): ``${jdtlsStateRoot}`` template variable.
+
+    Sibling-of-workspace path that holds framework-managed per-session
+    state which cannot live inside the project boundary (Eclipse
+    Platform Core forbids workspace_location ⊆ project_location).
+    Naming: ``<workspace.parent>/.<workspace.basename>-jdtls-state``.
+    """
+
+    def test_compute_jdtls_state_root_basic(self):
+        """Sibling-dotfile-suffix convention against a normal path."""
+        from shared.plugins.subagent.config import _compute_jdtls_state_root
+        result = _compute_jdtls_state_root("/foo/bar/cascade_smoke")
+        assert result == "/foo/bar/.cascade_smoke-jdtls-state"
+
+    def test_compute_jdtls_state_root_empty_input(self):
+        """Empty workspace_root → empty result.  Callers tolerate
+        the empty case (no-op when there's no workspace to compute
+        the sibling against)."""
+        from shared.plugins.subagent.config import _compute_jdtls_state_root
+        assert _compute_jdtls_state_root("") == ""
+
+    def test_compute_jdtls_state_root_resolves_relatives(self):
+        """Relative paths and ``.`` components get resolved before the
+        sibling computation, so the result is always absolute."""
+        from shared.plugins.subagent.config import _compute_jdtls_state_root
+        result = _compute_jdtls_state_root("/foo/./bar/cascade_smoke")
+        assert result == "/foo/bar/.cascade_smoke-jdtls-state"
+
+    def test_expand_jdtls_state_root_with_override(self):
+        """``${jdtlsStateRoot}`` expands via expand_variables when a
+        workspace_root_override is passed.  This is how the apparmor
+        composer + .lsp.json variable-expander reach the path."""
+        result = expand_variables(
+            "${jdtlsStateRoot}/jdtls-data",
+            workspace_root_override="/foo/bar/cascade_smoke",
+        )
+        assert result == "/foo/bar/.cascade_smoke-jdtls-state/jdtls-data"
+
+    def test_expand_jdtls_state_root_inside_dict(self):
+        """Apparmor rule lists arrive as dicts/lists from profile YAML;
+        verify recursive expansion handles ``${jdtlsStateRoot}`` the
+        same as ``${workspaceRoot}``."""
+        input_rules = {
+            "apparmor_extra_rules": [
+                "${jdtlsStateRoot}/jdtls-data/ rw,",
+                "${jdtlsStateRoot}/jdtls-data/** rwk,",
+                "/usr/bin/java ix,",
+            ],
+        }
+        result = expand_variables(
+            input_rules,
+            workspace_root_override="/foo/bar/cascade_smoke",
+        )
+        assert result["apparmor_extra_rules"][0] == (
+            "/foo/bar/.cascade_smoke-jdtls-state/jdtls-data/ rw,"
+        )
+        assert result["apparmor_extra_rules"][1] == (
+            "/foo/bar/.cascade_smoke-jdtls-state/jdtls-data/** rwk,"
+        )
+        # Non-jdtlsStateRoot rule untouched.
+        assert result["apparmor_extra_rules"][2] == "/usr/bin/java ix,"
+
+
 class TestExpandPluginConfigs:
     """Tests for expand_plugin_configs function."""
 

@@ -323,9 +323,23 @@ def expand_variables(
     # via the per-task ContextVar (race-free) → os.environ fallback.
     from shared.session_context import get_workspace_root
     effective_cwd = workspace_root_override or get_workspace_root() or os.getcwd()
+    workspace_root = _find_workspace_root(workspace_root_override)
     default_context = {
         'cwd': effective_cwd,
-        'workspaceRoot': _find_workspace_root(workspace_root_override),
+        'workspaceRoot': workspace_root,
+        # Family IV (PR-217): sibling-of-workspace path that holds
+        # framework-managed per-session state which cannot live inside
+        # the project boundary (e.g. Eclipse / jdtls workspace metadata
+        # — Eclipse Platform Core forbids workspace_location ⊆
+        # project_location).  Naming convention:
+        # ``<workspace.parent>/.<workspace.basename>-jdtls-state``
+        # (dotfile-prefix lowest-collision pattern, suffix scopes the
+        # data class so future framework-managed siblings can coexist).
+        # Sibling stays under the same per-session AppArmor profile
+        # → no data-leak (indexed source copies stay inside tenant
+        # confinement boundary, just not inside project-root subtree).
+        # Operator-facing template var symmetric with workspaceRoot.
+        'jdtlsStateRoot': _compute_jdtls_state_root(workspace_root),
         'HOME': os.environ.get('HOME', ''),
         'USER': os.environ.get('USER', ''),
     }
@@ -423,6 +437,53 @@ def _resolve_workspace_path(path: str) -> str:
         workspace = get_workspace_root() or os.getcwd()
         p = Path(workspace) / p
     return str(p.resolve())
+
+
+def _compute_jdtls_state_root(workspace_root: str) -> str:
+    """Compute the sibling jdtls state directory for *workspace_root*.
+
+    Family IV (PR-217) naming convention.  Given a workspace at
+    ``/foo/bar/cascade_smoke``, returns
+    ``/foo/bar/.cascade_smoke-jdtls-state``.
+
+    Why a sibling and not an in-workspace location: Eclipse Platform
+    Core forbids the workspace metadata directory (jdtls's ``-data``
+    arg) from being nested inside any imported project's root.  jdtls
+    imports the workspace as a Maven project (pom.xml at root), so
+    placing ``-data`` at ``<workspaceRoot>/.jaato/jdtls-data`` fires
+    ``Invalid project description ... overlaps the workspace location``
+    at ``ProjectsManager.importProjects``; no diagnostics flow.
+
+    Why a sibling and not ``~/.cache`` / ``/var/lib/jaato/jdtls/...``:
+    jdtls metadata is a transformed copy of source code (indexed
+    classpath data, syntax trees, etc.).  Keeping it inside the
+    tenant confinement boundary (per-session AppArmor profile) avoids
+    a data-leak class where the indexed copy survives in shared
+    system territory.  Sibling is under the same parent dir as the
+    workspace; the per-session AppArmor profile grants r/w to both.
+
+    Why dotfile-prefix + suffix: ``.<basename>-jdtls-state`` is:
+    - hidden in ``ls`` by default (operators don't see framework state)
+    - lowest-collision with operator-created directories (dotfile +
+      framework-specific suffix is unlikely to be picked accidentally)
+    - explicit about ownership (``-jdtls-state`` reads as
+      framework-managed, distinct from any operator-named
+      ``-jdtls`` / ``-state`` etc.)
+
+    Args:
+        workspace_root: Absolute workspace path.  Empty string returns
+            empty string (callers that compute on a missing workspace
+            get a no-op; the apparmor composer + LSP plugin both
+            tolerate the empty case).
+
+    Returns:
+        Absolute path to the sibling jdtls state directory, or empty
+        string when ``workspace_root`` is falsy.
+    """
+    if not workspace_root:
+        return ""
+    p = Path(workspace_root).resolve()
+    return str(p.parent / f".{p.name}-jdtls-state")
 
 
 def _find_workspace_root(override: Optional[str] = None) -> str:

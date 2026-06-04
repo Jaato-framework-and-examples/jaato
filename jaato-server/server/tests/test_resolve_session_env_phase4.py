@@ -123,12 +123,22 @@ def test_resolve_session_env_is_idempotent(env_file, tmp_path):
 
 
 def test_resolve_session_env_no_env_file(tmp_path):
-    """env_file=None path: ``_session_env`` stays {} (no profile, no
-    overrides) but flag flips so subsequent calls are no-ops."""
+    """env_file=None path: ``_session_env`` carries only framework-
+    managed keys (no profile.env, no env_overrides).  Pre-Family-IV
+    this was {} exactly; post-Family-IV (PR-217) the framework
+    populates ``JAATO_JDTLS_STATE_DIR`` whenever workspace_path is set.
+    The contract here is "no operator/profile-supplied values when
+    env_file=None", not "literally empty dict".
+    """
     server = JaatoServer(env_file=None, workspace_path=str(tmp_path))
     server._resolve_session_env()
     assert server._session_env_resolved is True
-    assert server._session_env == {}
+    # Strip framework-managed keys; what remains must be empty.
+    operator_keys = {
+        k: v for k, v in server._session_env.items()
+        if k != "JAATO_JDTLS_STATE_DIR"
+    }
+    assert operator_keys == {}
 
 
 # ----------------------------------------------------------------------
@@ -183,3 +193,110 @@ def test_initialize_step1_treats_pre_resolved_env_as_authoritative(
 
     server._resolve_session_env()  # second call — no-op
     assert server._session_env == snapshot
+
+
+# ----------------------------------------------------------------------
+# Family IV (PR-217): jdtls state sibling dir provisioning
+# ----------------------------------------------------------------------
+
+
+class TestFamilyIVJdtlsStateProvisioning:
+    """Pins the Family IV contract: _resolve_session_env provisions
+    the sibling jdtls state directory + exports JAATO_JDTLS_STATE_DIR
+    so runner-side LSP / .lsp.json finds it.
+
+    Family IV closes the 2026-06-04 smoke bug where jdtls's -data arg
+    pointed at <workspace>/.jaato/jdtls-data — Eclipse Platform Core
+    forbids workspace_location ⊆ project_location, so jdtls failed
+    project import and silently dropped publishDiagnostics.
+    Sibling-of-workspace location at
+    <workspace.parent>/.<workspace.basename>-jdtls-state/ satisfies
+    Eclipse + stays under the same per-session AppArmor profile (no
+    data-leak — indexed source copies stay inside tenant boundary).
+    """
+
+    def test_provisions_sibling_jdtls_state_dir(self, tmp_path):
+        """After _resolve_session_env, the sibling dir exists on disk."""
+        workspace = tmp_path / "cascade_smoke"
+        workspace.mkdir()
+        sibling_expected = tmp_path / ".cascade_smoke-jdtls-state"
+        assert not sibling_expected.exists()
+
+        server = JaatoServer(
+            env_file=None, workspace_path=str(workspace),
+        )
+        server._resolve_session_env()
+
+        assert sibling_expected.exists()
+        assert sibling_expected.is_dir()
+
+    def test_exports_jaato_jdtls_state_dir_env_var(self, tmp_path):
+        """After _resolve_session_env, JAATO_JDTLS_STATE_DIR is set in
+        self._session_env to the absolute sibling path.  This flows
+        to the runner via envelope.session_env."""
+        workspace = tmp_path / "cascade_smoke"
+        workspace.mkdir()
+
+        server = JaatoServer(
+            env_file=None, workspace_path=str(workspace),
+        )
+        server._resolve_session_env()
+
+        assert "JAATO_JDTLS_STATE_DIR" in server._session_env
+        assert server._session_env["JAATO_JDTLS_STATE_DIR"] == str(
+            tmp_path / ".cascade_smoke-jdtls-state",
+        )
+
+    def test_idempotent_provisioning(self, tmp_path):
+        """Sibling exists already → mkdir exist_ok=True succeeds without
+        error.  Second _resolve_session_env call is a no-op via the
+        idempotency flag (so the env var stays set, no re-provisioning
+        race)."""
+        workspace = tmp_path / "cascade_smoke"
+        workspace.mkdir()
+        sibling = tmp_path / ".cascade_smoke-jdtls-state"
+        sibling.mkdir()  # pre-existing
+
+        server = JaatoServer(
+            env_file=None, workspace_path=str(workspace),
+        )
+        server._resolve_session_env()
+        assert sibling.exists()
+
+        # Second call — idempotent via _session_env_resolved flag
+        snapshot = dict(server._session_env)
+        server._resolve_session_env()
+        assert server._session_env == snapshot
+
+    def test_no_provisioning_when_workspace_path_unset(self, tmp_path):
+        """No workspace_path → no sibling computation/provisioning.
+        Symmetric with the existing 'no env_file' path: degrade
+        cleanly, don't crash.  JAATO_JDTLS_STATE_DIR stays absent."""
+        server = JaatoServer(env_file=None, workspace_path=None)
+        server._resolve_session_env()
+
+        assert "JAATO_JDTLS_STATE_DIR" not in server._session_env
+
+    def test_sibling_dir_is_writable_post_provisioning(self, tmp_path):
+        """Sanity probe: the provisioned sibling dir is actually
+        writable (the inline write-probe in _resolve_session_env
+        confirmed this; here we re-verify externally for the test
+        harness).  Without write access, jdtls bootstrap would silently
+        drop publishDiagnostics — the failure mode Family IV closes."""
+        workspace = tmp_path / "cascade_smoke"
+        workspace.mkdir()
+
+        server = JaatoServer(
+            env_file=None, workspace_path=str(workspace),
+        )
+        server._resolve_session_env()
+
+        sibling_path = server._session_env.get("JAATO_JDTLS_STATE_DIR")
+        assert sibling_path
+        # Write a marker file post-provisioning to confirm writability.
+        marker = os.path.join(sibling_path, ".test-marker")
+        with open(marker, "w") as f:
+            f.write("ok")
+        with open(marker, "r") as f:
+            assert f.read() == "ok"
+        os.unlink(marker)
