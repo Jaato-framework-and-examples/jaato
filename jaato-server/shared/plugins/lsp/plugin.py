@@ -7,6 +7,7 @@ import os
 import queue
 import shutil
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -3073,7 +3074,40 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         # Ensure document is open and up-to-date
         # update_document opens if not open, or sends didChange if already open
         if file_path and method not in ('workspace_symbols',):
+            # TEMP PR-221 — entry trace: per-call state of the URI and the
+            # per-URI Event before update_document / await_diagnostics fire.
+            try:
+                _uri = client.uri_from_path(file_path)
+                _ev = client._diagnostics_events.get(_uri)
+                _cached = client._diagnostics.get(_uri)
+                logger.info(
+                    "ENRICH_LSP_GETDIAG_ENTRY method=%s file=%s uri=%s "
+                    "uri_in_open_documents=%s event_already_set=%s "
+                    "cached_diag_count=%s min_wait=%s max_wait=%s",
+                    method,
+                    file_path,
+                    _uri,
+                    _uri in client._open_documents,
+                    bool(_ev and _ev.is_set()),
+                    len(_cached) if _cached is not None else None,
+                    self._diagnostics_min_wait_seconds,
+                    self._diagnostics_max_wait_seconds,
+                )
+            except Exception as _exc:
+                logger.info("ENRICH_LSP_GETDIAG_ENTRY_EXC exc=%s", _exc)
+
+            _t0 = time.monotonic()
             await client.update_document(file_path)
+            _t1 = time.monotonic()
+            # TEMP PR-221 — update_document elapsed + URI now-open state
+            logger.info(
+                "ENRICH_LSP_GETDIAG_UPDATE_DONE method=%s file=%s "
+                "elapsed_ms=%.1f uri_in_open_documents=%s",
+                method,
+                file_path,
+                (_t1 - _t0) * 1000.0,
+                client.uri_from_path(file_path) in client._open_documents,
+            )
             # Wait for server to process the document.  Bounded poll
             # for parsing-heavy methods; small fixed delay for
             # lightweight ones (workspace_symbols already excluded
@@ -3081,11 +3115,34 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             # pipelines (parser → compiler → linter) room to deliver
             # later batches before the cache read.
             if needs_parsing:
-                await client.await_diagnostics(
+                _t2 = time.monotonic()
+                _signalled = await client.await_diagnostics(
                     file_path,
                     max_wait=self._diagnostics_max_wait_seconds,
                     min_wait=self._diagnostics_min_wait_seconds,
                 )
+                _t3 = time.monotonic()
+                # TEMP PR-221 — await_diagnostics outcome.  This is the
+                # gate peer cornered: 1ms PRE→POST gap means either
+                # await_diagnostics short-circuited (max_wait<=0) or the
+                # whole branch is bypassed.
+                try:
+                    _uri2 = client.uri_from_path(file_path)
+                    _cached2 = client._diagnostics.get(_uri2)
+                    logger.info(
+                        "ENRICH_LSP_GETDIAG_AWAIT_DONE method=%s file=%s "
+                        "elapsed_ms=%.1f signalled=%s cached_diag_count=%s "
+                        "min_wait=%s max_wait=%s",
+                        method,
+                        file_path,
+                        (_t3 - _t2) * 1000.0,
+                        _signalled,
+                        len(_cached2) if _cached2 is not None else None,
+                        self._diagnostics_min_wait_seconds,
+                        self._diagnostics_max_wait_seconds,
+                    )
+                except Exception as _exc:
+                    logger.info("ENRICH_LSP_GETDIAG_AWAIT_DONE_EXC exc=%s", _exc)
             else:
                 await asyncio.sleep(0.2)
 
