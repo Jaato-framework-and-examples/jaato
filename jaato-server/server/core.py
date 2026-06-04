@@ -984,6 +984,58 @@ class JaatoServer:
         if self._env_overrides:
             self._session_env.update(self._env_overrides)
 
+        # Family IV (PR-217): compute + provision the sibling jdtls state
+        # directory, export its path as ``JAATO_JDTLS_STATE_DIR`` so
+        # runner-side LSP / .lsp.json can resolve ``-data`` against it.
+        # Symmetric with the ``${jdtlsStateRoot}`` apparmor template var
+        # registered in ``shared.plugins.subagent.config.expand_variables``
+        # — both paths derive from the same algorithm so apparmor
+        # grants and the actual jdtls spawn-arg point at the same
+        # absolute path.
+        #
+        # Provisioned (mkdir -p) here, BEFORE apparmor profile
+        # composition AND BEFORE runner spawn, so:
+        # - apparmor composer's grant pattern resolves to an existing dir
+        # - LSP plugin's jdtls spawn at first model use finds the dir
+        # - sibling lifecycle is framework-owned (sanity-fail at
+        #   bootstrap if write doesn't survive apparmor; catches
+        #   missing-grant misconfigurations audibly rather than
+        #   silently dropping diagnostics like the pre-Family-IV bug
+        #   surfaced by 2026-06-04 smoke).
+        if self._workspace_path:
+            from shared.plugins.subagent.config import _compute_jdtls_state_root
+            jdtls_state_root = _compute_jdtls_state_root(self._workspace_path)
+            if jdtls_state_root:
+                try:
+                    os.makedirs(jdtls_state_root, exist_ok=True)
+                    # Sanity probe: confirm the dir is writable.
+                    # Catches apparmor-grant misconfigurations at
+                    # bootstrap rather than at first diagnostic poll
+                    # (which would silently return zero diagnostics —
+                    # the failure mode that motivated PR-217).
+                    _probe = os.path.join(jdtls_state_root, ".write-probe")
+                    with open(_probe, "w") as _f:
+                        _f.write("")
+                    os.unlink(_probe)
+                    self._session_env["JAATO_JDTLS_STATE_DIR"] = jdtls_state_root
+                except OSError as exc:  # noqa: BLE001
+                    # Fail-loud rather than silently degrade — LSP
+                    # diagnostics depend on this dir being writable.
+                    logger.error(
+                        "Family IV: failed to provision jdtls state root "
+                        "%r for session workspace %r: %s.  LSP "
+                        "diagnostics for tool-written files WILL NOT "
+                        "surface this session; jdtls bootstrap will "
+                        "either fail to write -data or silently drop "
+                        "publishDiagnostics.  Operator action: verify "
+                        "the per-session AppArmor profile grants r/w "
+                        "to ${jdtlsStateRoot} (see "
+                        "_base_codegen.yaml apparmor_extra_rules).",
+                        jdtls_state_root,
+                        self._workspace_path,
+                        exc,
+                    )
+
         self._session_env_resolved = True
 
     @contextlib.contextmanager
