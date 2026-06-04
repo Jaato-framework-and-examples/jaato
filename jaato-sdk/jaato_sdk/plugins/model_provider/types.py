@@ -232,12 +232,25 @@ class ToolResult:
         result: The result data (must be JSON-serializable).
         is_error: Whether this result represents an error.
         attachments: Optional multimodal attachments (images, files, etc.).
+        enrichment_metadata: Structured metadata from tool-result enrichment
+            plugins (e.g. LSP diagnostics, artifact tracking).  Keyed by
+            plugin name (e.g. ``{"lsp": {...}, "artifact_tracker": {...}}``).
+            Surfaced to completion processors via
+            ``context.tool_calls[i].enrichment_metadata`` (see
+            ``build_tool_call_ledger``).  ``None`` when no enrichment
+            plugin contributed metadata for this call.  NOT sent to the
+            model — the model's view of enrichment is the ``result`` dict
+            content (e.g. ``_lsp_diagnostics`` key, ``## LSP Diagnostics``
+            markdown section).  In-memory only; not persisted across
+            disk-restore (acceptable: processors fire in the same session
+            that produced the call).
     """
     call_id: str
     name: str
     result: Any
     is_error: bool = False
     attachments: Optional[List['Attachment']] = None
+    enrichment_metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass

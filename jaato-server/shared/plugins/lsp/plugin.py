@@ -1810,6 +1810,16 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             "files_with_diagnostics": list(all_diagnostics.keys()),
             "total_errors": total_errors,
             "total_warnings": total_warnings,
+            # Per-file structured diagnostics — same dicts the
+            # ``## LSP Diagnostics`` markdown summary is built from, but
+            # surfaced structured so completion-gate processors (consumers
+            # of ``context.tool_calls[i].enrichment_metadata["lsp"]``) can
+            # quote specific Error messages back to the agent for
+            # actionable retry instead of just "you have N errors".  Each
+            # entry has ``severity`` (str), ``line`` (int), ``message``
+            # (str), ``source`` (str), ``character`` (int), as produced
+            # by ``_format_diagnostics``.
+            "diagnostics": dict(all_diagnostics),
             "_telemetry": {
                 "jaato.enrichment.lsp.files_checked": len(supported_files),
                 "jaato.enrichment.lsp.total_errors": total_errors,

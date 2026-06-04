@@ -99,6 +99,20 @@ def build_tool_call_ledger(history: List[Any]) -> List[Dict[str, Any]]:
             "success": bool,        # True iff "error" not in result
             "call_id": str,         # provider call_id for cross-ref
             "turn_index": int,      # 0-based session turn
+            "enrichment_metadata": Optional[dict],
+                                    # Structured per-plugin metadata
+                                    # from tool-result enrichment
+                                    # (e.g. LSP diagnostics, artifact
+                                    # tracking).  Keyed by plugin name:
+                                    # ``{"lsp": {"files_with_diagnostics":
+                                    # [...], "total_errors": int,
+                                    # "diagnostics": {path: [...]}, ...}}``.
+                                    # ``None`` when enrichment didn't
+                                    # produce metadata for this call,
+                                    # or when the call is in the
+                                    # "no_response" pending state.
+                                    # In-memory only; not persisted
+                                    # across disk-restore.
         }
 
     Args:
@@ -111,8 +125,12 @@ def build_tool_call_ledger(history: List[Any]) -> List[Dict[str, Any]]:
     """
     # First pass: collect responses keyed by call_id.  ``Part.function_response``
     # is a ``ToolResult`` whose ``.result`` attribute carries the dict
-    # the tool returned.
-    responses_by_call_id: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+    # the tool returned, and whose ``.enrichment_metadata`` attribute
+    # carries the per-plugin structured metadata from tool-result
+    # enrichment (LSP, artifact_tracker, etc.).
+    responses_by_call_id: Dict[
+        str, Tuple[int, Dict[str, Any], Optional[Dict[str, Any]]]
+    ] = {}
     for turn_index, message in enumerate(history):
         parts = getattr(message, "parts", None) or []
         for part in parts:
@@ -126,7 +144,10 @@ def build_tool_call_ledger(history: List[Any]) -> List[Dict[str, Any]]:
                 # so validators see a consistent shape and can still
                 # use the ``"error" not in dict`` heuristic.
                 response_body = {"result": response_body}
-            responses_by_call_id[call_id] = (turn_index, response_body)
+            enrichment_metadata = getattr(fr, "enrichment_metadata", None)
+            responses_by_call_id[call_id] = (
+                turn_index, response_body, enrichment_metadata,
+            )
 
     ledger: List[Dict[str, Any]] = []
     for turn_index, message in enumerate(history):
@@ -143,8 +164,9 @@ def build_tool_call_ledger(history: List[Any]) -> List[Dict[str, Any]]:
             if paired is None:
                 result: Dict[str, Any] = {"error": "no_response"}
                 success = False
+                enrichment_metadata = None
             else:
-                _, result = paired
+                _, result, enrichment_metadata = paired
                 success = "error" not in result
             ledger.append({
                 "name": name,
@@ -153,6 +175,7 @@ def build_tool_call_ledger(history: List[Any]) -> List[Dict[str, Any]]:
                 "success": success,
                 "call_id": call_id,
                 "turn_index": turn_index,
+                "enrichment_metadata": enrichment_metadata,
             })
     return ledger
 
