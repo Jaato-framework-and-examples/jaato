@@ -6684,6 +6684,7 @@ NOTES
         # JSON-encode them (which would escape quotes, backslashes, etc.).
         if isinstance(result_data, str):
             # Run string-level enrichment (template extraction, etc.)
+            enrichment_metadata: Optional[Dict[str, Any]] = None
             if ok and self._runtime.registry:
                 enrichment = self._runtime.registry.enrich_tool_result(
                     fc.name,
@@ -6695,13 +6696,16 @@ NOTES
                 result_data = enrichment.result
                 # Check for preselected reference pinning signal
                 self._check_and_pin_reference(enrichment.metadata, result_data)
+                if enrichment.metadata:
+                    enrichment_metadata = enrichment.metadata
 
             return ToolResult(
                 call_id=fc.id,
                 name=fc.name,
                 result=result_data,
                 is_error=not ok,
-                attachments=attachments
+                attachments=attachments,
+                enrichment_metadata=enrichment_metadata,
             )
 
         # Build result dict
@@ -6761,17 +6765,24 @@ NOTES
             "ENRICH_CALLSITE tool=%s ok=%s registry=%s",
             fc.name, ok, self._runtime.registry is not None,
         )
+        enrichment_metadata: Optional[Dict[str, Any]] = None
         if ok and self._runtime.registry:
-            result_dict = self._enrich_tool_result_dict(
+            result_dict, enrichment_metadata = self._enrich_tool_result_dict(
                 fc.name, result_dict, tool_args=fc.args
             )
+            if not enrichment_metadata:
+                # Distinguish "enrichment ran, produced nothing" from
+                # "enrichment didn't run" — both leave None on the
+                # ToolResult so processors don't get a misleading {}.
+                enrichment_metadata = None
 
         return ToolResult(
             call_id=fc.id,
             name=fc.name,
             result=result_dict,
             is_error=not ok,
-            attachments=attachments
+            attachments=attachments,
+            enrichment_metadata=enrichment_metadata,
         )
 
     def _inject_synthetic_cancelled_results(self, fcs: List[FunctionCall]) -> None:
@@ -6809,7 +6820,7 @@ NOTES
         tool_name: str,
         result_dict: Dict[str, Any],
         tool_args: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Run tool result enrichment on tool results.
 
         Two enrichment modes:
@@ -6825,15 +6836,29 @@ NOTES
         critical for concurrent sessions (e.g., subagents running in parallel with
         the parent) that share the same registry.
 
+        Returns:
+            Tuple of ``(enriched_dict, combined_metadata)``.  ``combined_metadata``
+            is the per-plugin enrichment metadata dict (``{plugin_name: meta}``)
+            produced by ``registry.enrich_tool_result``.  Callers stash it on
+            ``ToolResult.enrichment_metadata`` so completion processors see it
+            via ``context.tool_calls[i].enrichment_metadata`` (see
+            ``build_tool_call_ledger``).
+
         Args:
             tool_name: Name of the tool that produced the result.
             result_dict: The result dictionary to enrich.
             tool_args: Optional tool call arguments for context-aware enrichment.
 
         Returns:
-            Enriched result dictionary.
+            Tuple ``(enriched_dict, combined_metadata)`` — see method docstring.
         """
         enriched_dict = result_dict.copy()
+        # Aggregate metadata across BOTH the file_writer single-call path
+        # and the text-fields multi-call path.  Later calls overwrite
+        # earlier per-plugin metadata for the same plugin name; in
+        # practice each plugin contributes once per call so this is
+        # last-write-wins on intentional duplicates only.
+        combined_metadata: Dict[str, Any] = {}
 
         # PR-218 TEMPORARY DIAGNOSTIC PROBE — see callsite at
         # _handle_tool_response for rationale.  Revert after probe.
@@ -6884,7 +6909,9 @@ NOTES
                     enriched_dict['_lsp_diagnostics'] = enrichment.result
             self._check_and_pin_reference(enrichment.metadata, result_json)
             self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
-            return enriched_dict
+            if enrichment.metadata:
+                combined_metadata.update(enrichment.metadata)
+            return enriched_dict, combined_metadata
 
         # For other tools: enrich large text fields
         text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
@@ -6907,8 +6934,10 @@ NOTES
                     # Check for pinning signal (only need first match)
                     self._check_and_pin_reference(enrichment.metadata, value)
                     self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
+                    if enrichment.metadata:
+                        combined_metadata.update(enrichment.metadata)
 
-        return enriched_dict
+        return enriched_dict, combined_metadata
 
     def _emit_enrichment_telemetry(
         self,

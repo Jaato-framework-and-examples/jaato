@@ -98,6 +98,85 @@ class TestBuildToolCallLedger:
         assert ledger[0]["success"] is False
         assert ledger[0]["result"] == {"error": "no_response"}
 
+    def test_enrichment_metadata_surfaces_on_ledger_entry(self):
+        """PR-223 (β1): ``ToolResult.enrichment_metadata`` propagates to the
+        ledger so completion processors can read structured per-plugin
+        enrichment (LSP diagnostics, artifact tracking, ...) via
+        ``context.tool_calls[i].enrichment_metadata`` instead of parsing
+        the agent-facing markdown blob in ``result["_lsp_diagnostics"]``.
+        """
+        lsp_meta = {
+            "files_checked": ["src/A.java"],
+            "files_with_diagnostics": ["src/A.java"],
+            "total_errors": 2,
+            "total_warnings": 0,
+            "diagnostics": {
+                "src/A.java": [
+                    {"severity": "Error", "line": 12,
+                     "message": "Syntax error on token", "source": "Java"},
+                    {"severity": "Error", "line": 45,
+                     "message": "Cannot resolve import", "source": "Java"},
+                ],
+            },
+        }
+        history = [
+            Message(role=Role.MODEL, parts=[Part.from_function_call(
+                FunctionCall(id="c3", name="renderTemplateToFile",
+                             args={"output_path": "src/A.java"}),
+            )]),
+            Message(role=Role.TOOL, parts=[Part.from_function_response(
+                ToolResult(
+                    call_id="c3", name="renderTemplateToFile",
+                    result={"path": "src/A.java"},
+                    enrichment_metadata={"lsp": lsp_meta},
+                ),
+            )]),
+        ]
+        ledger = build_tool_call_ledger(history)
+        assert len(ledger) == 1
+        entry = ledger[0]
+        assert "enrichment_metadata" in entry
+        assert entry["enrichment_metadata"] == {"lsp": lsp_meta}
+        # Per-file structured diagnostics survive intact — the processor's
+        # rejection message can quote specific Error messages.
+        assert entry["enrichment_metadata"]["lsp"]["total_errors"] == 2
+        assert entry["enrichment_metadata"]["lsp"]["diagnostics"]["src/A.java"][0][
+            "message"
+        ] == "Syntax error on token"
+
+    def test_enrichment_metadata_absent_yields_none_on_ledger_entry(self):
+        """When a tool produces no enrichment metadata, the ledger entry
+        carries ``enrichment_metadata=None`` (NOT ``{}``) — distinguishes
+        "no enrichment plugin contributed" from "enrichment plugin
+        contributed an empty dict".  Processors that key off
+        ``tc.enrichment_metadata`` truthiness see falsy in both cases but
+        keep the type contract honest.
+        """
+        history = [
+            Message(role=Role.MODEL, parts=[Part.from_function_call(
+                FunctionCall(id="c4", name="readFile", args={"path": "a"}),
+            )]),
+            Message(role=Role.TOOL, parts=[Part.from_function_response(
+                ToolResult(call_id="c4", name="readFile",
+                           result={"content": "hello"}),
+            )]),
+        ]
+        ledger = build_tool_call_ledger(history)
+        assert ledger[0]["enrichment_metadata"] is None
+
+    def test_no_response_pending_call_has_none_enrichment(self):
+        """Unpaired (still-pending) calls have no ToolResult yet, so
+        their enrichment_metadata is None — the same null as for
+        completed calls without enrichment, never KeyError on access.
+        """
+        history = [
+            Message(role=Role.MODEL, parts=[Part.from_function_call(
+                FunctionCall(id="pending", name="t", args={}),
+            )]),
+        ]
+        ledger = build_tool_call_ledger(history)
+        assert ledger[0]["enrichment_metadata"] is None
+
 
 # ---------------------------------------------------------------------------
 # load_processors
