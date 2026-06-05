@@ -124,6 +124,20 @@ MAX_CONNECT_TIMEOUT_SECONDS = 300.0
 # them per-profile for lightweight servers.
 DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS = 5.0
 DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS = 0.5
+# Convergence-loop window — seconds the bounded poll keeps listening
+# for follow-up publishDiagnostics after the first one lands, so
+# multi-stage jdtls analysis (parser → compiler → linter → import
+# resolver) has a chance to overwrite the cache with the SETTLED
+# state before the caller reads it.  ``0.0`` disables the loop and
+# returns on first publish (legacy semantics).  Default ``3.0`` is
+# evidence-grounded in the 2026-06-05 instrumented cascade analysis
+# (91 adjacent-publish races across 30 distinct ``.java`` URIs;
+# p50 = 1.46 s, p90 = 17.9 s — p90 dominated by edit-cycle re-races
+# which a window can't fix; 3.0 s captures the fresh-render cluster).
+# See ``/tmp/converge2.py`` (preserved in the PR-224 description).
+DEFAULT_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS = 3.0
+MIN_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS = 0.0
+MAX_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS = 30.0
 MIN_DIAGNOSTICS_MAX_WAIT_SECONDS = 0.0  # 0 = legacy "no wait, read cache now"
 MAX_DIAGNOSTICS_MAX_WAIT_SECONDS = 60.0
 
@@ -425,6 +439,9 @@ class LSPToolPlugin(RunnerForwardingMixin):
         # plugin_configs.lsp.diagnostics_{max,min}_wait_seconds.
         self._diagnostics_max_wait_seconds: float = DEFAULT_DIAGNOSTICS_MAX_WAIT_SECONDS
         self._diagnostics_min_wait_seconds: float = DEFAULT_DIAGNOSTICS_MIN_WAIT_SECONDS
+        self._diagnostics_convergence_window_seconds: float = (
+            DEFAULT_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS
+        )
         # Operator-configurable path for the cross-session diagnostic
         # log.  Relative paths resolve against `workspace_path`;
         # absolute paths pass through.  Default is workspace-relative
@@ -531,6 +548,20 @@ class LSPToolPlugin(RunnerForwardingMixin):
             0.0,
             self._diagnostics_max_wait_seconds,
             'diagnostics_min_wait_seconds',
+        )
+        # Convergence window — how long the bounded poll keeps
+        # listening for follow-up publishDiagnostics after the first
+        # one lands.  See module-level constant for the empirical
+        # rationale.  Clamped to [0, MAX_CONVERGENCE].
+        self._diagnostics_convergence_window_seconds = self._parse_wait_knob(
+            config.get(
+                'diagnostics_convergence_window_seconds',
+                DEFAULT_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS,
+            ),
+            DEFAULT_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS,
+            MIN_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS,
+            MAX_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS,
+            'diagnostics_convergence_window_seconds',
         )
 
         # Diagnostic-log path knob.  Operator-set strings pass through
@@ -2269,6 +2300,25 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 ),
             ),
             PluginSetting(
+                name="diagnostics_convergence_window_seconds",
+                type="float",
+                default=DEFAULT_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS,
+                description=(
+                    "After the first `publishDiagnostics` lands, keep "
+                    "listening for follow-up batches that overwrite "
+                    "the cache. Each follow-up resets the window. "
+                    "Closes the convergence race where the first "
+                    "publish carries transient errors (e.g. jdtls's "
+                    "intra-project imports still resolving) and a "
+                    "follow-up publish 1-3s later carries the settled "
+                    "state. `0.0` disables the loop (legacy "
+                    "first-publish semantics). Empirical default "
+                    "3.0s (2026-06-05 instrumented cascade analysis). "
+                    f"Clamped to [{MIN_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS}, "
+                    f"{MAX_DIAGNOSTICS_CONVERGENCE_WINDOW_SECONDS}]."
+                ),
+            ),
+            PluginSetting(
                 name="debug_log_path",
                 type="str",
                 default=DEFAULT_DEBUG_LOG_PATH,
@@ -3130,6 +3180,9 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     file_path,
                     max_wait=self._diagnostics_max_wait_seconds,
                     min_wait=self._diagnostics_min_wait_seconds,
+                    convergence_window=(
+                        self._diagnostics_convergence_window_seconds
+                    ),
                 )
                 _t3 = time.monotonic()
                 # TEMP PR-221 — await_diagnostics outcome.  This is the
@@ -3227,6 +3280,9 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     temp_file,
                     max_wait=self._diagnostics_max_wait_seconds,
                     min_wait=self._diagnostics_min_wait_seconds,
+                    convergence_window=(
+                        self._diagnostics_convergence_window_seconds
+                    ),
                 )
 
                 # Get diagnostics

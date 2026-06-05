@@ -1311,6 +1311,7 @@ class TestDiagnosticsWaitKnobs:
         names = [s.name for s in plugin.get_config_schema()]
         assert "diagnostics_max_wait_seconds" in names
         assert "diagnostics_min_wait_seconds" in names
+        assert "diagnostics_convergence_window_seconds" in names
 
 
 class TestAwaitDiagnostics:
@@ -1430,6 +1431,162 @@ class TestAwaitDiagnostics:
         # Cache survives:
         assert len(client._diagnostics[uri]) == 1
         assert client._diagnostics[uri][0].message == "test diagnostic"
+
+
+class TestAwaitDiagnosticsConvergenceLoop:
+    """Pin PR-224 (server 0.6.193): bounded-poll convergence wait.
+
+    Empirical motivation (2026-06-05 instrumented cascade):
+    jdtls publishes Customer.java with 12 errors at T+0, then
+    re-publishes with 0 errors at T+2.2s once intra-project imports
+    settle.  Pre-PR-224 `await_diagnostics` returned on the first
+    publish; the cache reader saw 12 phantom errors, the agent
+    rejected the (clean) file, NudgeExhausted aborted.
+
+    The convergence loop keeps listening for follow-up publishes
+    for ``convergence_window`` seconds after the first one lands.
+    Each follow-up resets the timer (jdtls's cascade may span
+    several re-publishes).  ``max_wait`` is a hard ceiling.
+
+    91 adjacent-publish races mapped in the cascade log; p50 = 1.46s,
+    p90 = 17.9s (edit-cycle tail, not jdtls indexing — a longer
+    window can't fix those).  Default 3.0s catches the fresh-render
+    cluster.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_window_preserves_legacy_first_publish_return(self):
+        """Pin: ``convergence_window=0`` (default for tests not opting
+        in) preserves the pre-PR-224 first-publish semantics — returns
+        as soon as the Event fires, no extra waiting."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+        uri = client.uri_from_path(path)
+
+        ev = asyncio.Event()
+        ev.set()  # Event pre-set, simulating publish already arrived
+        client._diagnostics_events[uri] = ev
+
+        start = asyncio.get_event_loop().time()
+        result = await client.await_diagnostics(
+            path, max_wait=5.0, min_wait=0.0, convergence_window=0.0,
+        )
+        elapsed = asyncio.get_event_loop().time() - start
+        assert result is True
+        assert elapsed < 0.05, (
+            f"convergence_window=0 should not wait; elapsed={elapsed}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_convergence_window_waits_for_followup_publish(self):
+        """Pin: after first publish, the loop keeps listening; a
+        follow-up publish within the window is observed and the loop
+        continues until the window elapses without a new publish."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+        uri = client.uri_from_path(path)
+
+        # First publish arrives immediately, then a follow-up after 100ms.
+        # The convergence window is 300ms — long enough that the
+        # follow-up arrives in time but no further publish follows.
+        async def publish_then_followup() -> None:
+            ev = client._diagnostics_events.setdefault(uri, asyncio.Event())
+            ev.set()  # T+0 — first publish
+            await asyncio.sleep(0.1)
+            ev.set()  # T+0.1s — follow-up publish
+
+        firer = asyncio.create_task(publish_then_followup())
+        start = asyncio.get_event_loop().time()
+        result = await client.await_diagnostics(
+            path, max_wait=2.0, min_wait=0.0, convergence_window=0.3,
+        )
+        elapsed = asyncio.get_event_loop().time() - start
+        await firer
+
+        assert result is True
+        # First publish at T+0, follow-up at T+0.1s, then 0.3s window
+        # elapses without further publish → exits around T+0.4s.
+        assert 0.35 <= elapsed < 0.6, (
+            f"expected ~0.4s (0.1 + 0.3 window), got {elapsed}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_convergence_window_exits_without_followup(self):
+        """Pin: first publish lands, no follow-up arrives within the
+        window — loop exits after exactly one window elapses."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+        uri = client.uri_from_path(path)
+
+        ev = asyncio.Event()
+        ev.set()
+        client._diagnostics_events[uri] = ev
+
+        start = asyncio.get_event_loop().time()
+        result = await client.await_diagnostics(
+            path, max_wait=5.0, min_wait=0.0, convergence_window=0.2,
+        )
+        elapsed = asyncio.get_event_loop().time() - start
+
+        assert result is True
+        # Single window with no follow-up → ~0.2s elapsed.
+        assert 0.18 <= elapsed < 0.4, (
+            f"expected ~0.2s window timeout, got {elapsed}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_max_wait_is_hard_ceiling_even_with_runaway_publishes(self):
+        """Pin: max_wait caps total elapsed time even when follow-up
+        publishes keep arriving — a runaway-republishing server can't
+        hang the call site."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        path = "/tmp/foo.py"
+        uri = client.uri_from_path(path)
+
+        # A pathological publisher that re-publishes every 50ms
+        # forever.  Without max_wait the convergence loop would
+        # never exit.
+        stop = asyncio.Event()
+
+        async def runaway() -> None:
+            ev = client._diagnostics_events.setdefault(uri, asyncio.Event())
+            while not stop.is_set():
+                ev.set()
+                await asyncio.sleep(0.05)
+
+        firer = asyncio.create_task(runaway())
+        start = asyncio.get_event_loop().time()
+        result = await client.await_diagnostics(
+            path, max_wait=0.5, min_wait=0.0, convergence_window=1.0,
+        )
+        elapsed = asyncio.get_event_loop().time() - start
+        stop.set()
+        await firer
+
+        assert result is True
+        # max_wait = 0.5s caps the total despite convergence_window=1.0
+        # and runaway publishes.
+        assert elapsed < 0.7, (
+            f"max_wait must cap total wait; got {elapsed}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_first_publish_within_max_wait_returns_false(self):
+        """Pin: max_wait expires before any first publish → False;
+        convergence loop is never entered."""
+        config = ServerConfig(name="test", command="dummy", args=[])
+        client = LSPClient(config)
+        result = await client.await_diagnostics(
+            "/tmp/foo.py",
+            max_wait=0.1,
+            min_wait=0.0,
+            convergence_window=2.0,
+        )
+        assert result is False
 
 
 class TestValidateSnippetUsesAwaitDiagnostics:

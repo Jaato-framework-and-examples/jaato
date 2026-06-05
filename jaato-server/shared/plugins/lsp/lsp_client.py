@@ -1002,47 +1002,77 @@ class LSPClient:
         path: str,
         max_wait: float,
         min_wait: float = 0.0,
+        convergence_window: float = 0.0,
     ) -> bool:
         """Block until the server pushes a `publishDiagnostics` batch for ``path``.
 
-        Replaces the historical "sleep N seconds and hope" pattern in
-        the enrichment dispatch.  Returns AS SOON AS the first
-        diagnostic batch arrives (the moment the per-URI
-        `asyncio.Event` fires in the JSON-RPC reader), or after
-        ``max_wait`` seconds — whichever comes first.
+        Returns AS SOON AS the first diagnostic batch arrives — and,
+        when ``convergence_window > 0``, keeps listening for follow-up
+        batches that overwrite the cache until ``convergence_window``
+        seconds pass without one.  Returns ``True`` if at least one
+        ``publishDiagnostics`` notification was observed within the
+        ``max_wait`` budget; ``False`` if the budget expired without
+        any notification.
+
+        ## Why a convergence loop?
+
+        Eclipse JDT LS (jdtls) on a cold Maven workspace publishes
+        multiple batches per URI as its multi-stage analysis pipeline
+        progresses.  Empirically (2026-06-05 instrumented cascade,
+        91 adjacent-publish races over 30 distinct ``.java`` URIs,
+        ``/tmp/converge2.py`` analysis):
+
+        - First publish is often an EMPTY batch (jdtls just accepted
+          ``didOpen``, parsing is in progress).  Median delay from
+          ``didOpen`` to first publish: ~500 ms.
+        - Real analysis (intra-project resolution, import settlement)
+          lands as a follow-up publish at ``+1500 ms`` median, ``+3 s``
+          p75 from the first publish.  ``Customer.java`` in the
+          concrete case study: ``12 errors`` at T+0 → ``0 errors`` at
+          T+2.2 s.  Returning on first-publish reads the cache before
+          jdtls converged — the agent sees phantom errors that don't
+          exist after settling.
+
+        Pre-server-0.6.193 behaviour (``convergence_window=0``) returns
+        on first publish — keeps the legacy fast path for tests and
+        for callers that want raw first-batch semantics.
 
         Args:
             path: file path the caller wants diagnostics for.
-            max_wait: upper bound on wait time.  For heavy-init servers
-                (Eclipse JDT LS on a cold Maven workspace) the first
-                publishDiagnostics typically arrives 3-8s after
-                ``didOpen`` / ``didChange``; for lightweight servers
-                (pyright, typescript-language-server) it's under 500ms.
-            min_wait: floor on wait time.  Even when an Event fires
-                early (e.g. the server emitted a "diagnostic batch is
-                empty" notification while still parsing imports), we
-                wait at least this long so a multi-stage analysis
-                pipeline (parser → compiler → linter) has a chance to
-                deliver its later batches before the caller reads the
-                cache.
+            max_wait: upper bound on TOTAL wait time (including
+                ``min_wait`` and any convergence loop).
+            min_wait: floor on the first-publish wait.  See
+                pre-existing behaviour for multi-stage analysis
+                rationale.
+            convergence_window: seconds to keep listening for
+                follow-up publishes AFTER the first publish arrives.
+                Each follow-up resets the window timer (jdtls's
+                re-publish cascade may span multiple cycles).
+                ``0.0`` disables the loop (legacy first-publish
+                semantics).  Recommended ``3.0`` for jdtls on Maven
+                projects (catches the ~75 % cluster of fresh-render
+                races per the 2026-06-05 analysis); raise for stacks
+                with a heavier multi-stage tail.
 
         Returns:
-            True if a `publishDiagnostics` notification arrived within
-            the window, False if ``max_wait`` expired without any
-            notification.  The caller is expected to ``get_diagnostics``
-            afterwards regardless of return value — a False just tells
-            them the cache may be stale.
+            ``True`` if a ``publishDiagnostics`` notification arrived
+            within ``max_wait``; ``False`` if the budget expired
+            without any.  The caller is expected to
+            ``get_diagnostics`` afterwards regardless — ``False``
+            just tells them the cache may be stale.
 
         Implementation notes:
-            - The Event is reset after this method returns, so a
-              subsequent ``didChange`` + ``await_diagnostics`` cycle
-              works correctly for in-session re-renders.
-            - If a notification already arrived BEFORE this method was
-              called (server pushed it during connect / first
-              ``didOpen`` analysis), the Event is already set and we
-              return immediately (after ``min_wait``).
+            - The Event is cleared on every observed publish so the
+              loop sees only NEW notifications, not the one that
+              ended the prior iteration.  The cache
+              (``self._diagnostics[uri]``) is NOT cleared — readers
+              still want the latest batch via ``get_diagnostics``.
             - ``max_wait`` of 0 disables the await entirely (legacy
-              "fire and forget — read cache now" behavior).
+              "read cache as-is" behavior).
+            - ``max_wait`` is a HARD ceiling.  Even if the convergence
+              loop is still seeing follow-up publishes, the call
+              returns once the cumulative budget elapses — a stack
+              that re-publishes forever won't hang the call site.
         """
         uri = self.uri_from_path(path)
         event = self._diagnostics_events.get(uri)
@@ -1053,28 +1083,57 @@ class LSPClient:
         if max_wait <= 0:
             return event.is_set()
 
+        start = time.monotonic()
+        deadline = start + max_wait
+
+        # Phase 1 — min_wait floor.  Multi-stage analysis pipelines
+        # may already have published one or more batches during this
+        # sleep; the cache holds the latest one when we wake.
         if min_wait > 0:
             await asyncio.sleep(min_wait)
 
-        remaining = max(0.0, max_wait - min_wait)
-        if remaining <= 0:
-            # min_wait already consumed the entire budget; just report
-            # whatever state the event is in (may be set if a
-            # notification arrived during the sleep).
-            signalled = event.is_set()
-        else:
+        # Phase 2 — wait for the first publish (or until the
+        # ``max_wait`` deadline).  When the Event was set during
+        # ``min_wait``, this returns immediately.
+        first_publish_seen = False
+        remaining = deadline - time.monotonic()
+        if event.is_set():
+            first_publish_seen = True
+        elif remaining > 0:
             try:
                 await asyncio.wait_for(event.wait(), timeout=remaining)
-                signalled = True
+                first_publish_seen = True
             except asyncio.TimeoutError:
-                signalled = False
+                event.clear()
+                return False
 
-        # Clear the event so a subsequent didChange + await cycle works
-        # correctly for in-session re-renders.  We deliberately do NOT
-        # clear `self._diagnostics[uri]` — readers may still want the
-        # cached batch via `get_diagnostics`.
+        if not first_publish_seen:
+            event.clear()
+            return False
+
+        # Phase 3 — convergence loop.  After the first publish, keep
+        # listening for follow-up publishes that overwrite the cache.
+        # Each observed publish RESETS the window timer because jdtls's
+        # multi-stage cascade may span several re-publishes.  Exits
+        # when ``convergence_window`` elapses without a new publish,
+        # or when the cumulative ``max_wait`` deadline hits.
+        while convergence_window > 0:
+            event.clear()
+            time_to_deadline = deadline - time.monotonic()
+            if time_to_deadline <= 0:
+                break
+            window_budget = min(convergence_window, time_to_deadline)
+            try:
+                await asyncio.wait_for(event.wait(), timeout=window_budget)
+                # Follow-up publish arrived — cache overwritten with
+                # newer state.  Loop to check for more.
+            except asyncio.TimeoutError:
+                # ``convergence_window`` elapsed with no new publish:
+                # jdtls has settled on this URI.
+                break
+
         event.clear()
-        return signalled
+        return True
 
     async def get_code_actions(
         self,

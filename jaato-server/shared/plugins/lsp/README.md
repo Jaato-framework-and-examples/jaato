@@ -263,6 +263,7 @@ Settings live under `plugin_configs.lsp` in a profile:
 | `connect_timeout_seconds` | float | `30.0` | Per-server LSP `initialize` handshake timeout. Raise for heavy-init servers — Eclipse JDT LS (jdtls) on Maven / Gradle workspaces typically needs 30-60s; default `15.0` (pre server-version-bump) starves it. Clamped to `[1.0, 300.0]`; out-of-range values are clamped and logged in the trace, not rejected. |
 | `diagnostics_max_wait_seconds` | float | `5.0` | Upper bound on the post-`didOpen` / post-`didChange` wait for the server's first `textDocument/publishDiagnostics` batch. The framework awaits a per-URI `asyncio.Event` signalled by the JSON-RPC reader, so calls return AS SOON AS the batch arrives — raising the max costs nothing in the fast-server case. Pre-0.6.134 this was a hard-coded `0.8s` sleep that starved jdtls (Maven cold cache: 3-8s first batch). Clamped to `[0.0, 60.0]`; `0` disables the await entirely (legacy "read cache as-is" behavior). |
 | `diagnostics_min_wait_seconds` | float | `0.5` | Floor on the same wait. Even when an early `publishDiagnostics` arrives, we wait at least this long so multi-stage analysis pipelines (parser → compiler → linter) have a chance to deliver their later batches before the cache read. Clamped to `[0.0, diagnostics_max_wait_seconds]`. |
+| `diagnostics_convergence_window_seconds` | float | `3.0` | After the first `publishDiagnostics` lands, keep listening for follow-up batches that overwrite the cache. Each follow-up resets the window timer (jdtls's multi-stage cascade may span several re-publishes). Closes the per-URI convergence race where the first publish carries transient errors (e.g. jdtls's intra-project imports still resolving) and a follow-up publish 1–3 s later carries the settled state. Pre-server-0.6.193 behaviour (`0.0`) returns on first publish. Empirical default `3.0` is grounded in the 2026-06-05 instrumented-cascade analysis: 91 adjacent-publish races across 30 distinct `.java` URIs; p50 = 1.46 s, p90 = 17.9 s. The p90 tail is dominated by edit-cycle re-races (the agent re-modified the file, triggering a new `didChange` cycle) — those can't be fixed by a longer convergence window, only by re-calling enrichment, which happens automatically. `3.0` captures the fresh-render cluster without paying the edit-cycle cost. `max_wait` is still a hard ceiling on the total wait. Clamped to `[0.0, 30.0]`. |
 | `debug_log_path` | string | `".jaato/logs/lsp_debug.log"` | Path to the plugin's cross-session diagnostic log (append-only). Relative paths resolve against the session's `workspace_path`; absolute paths pass through. Default is workspace-relative so the per-session AppArmor profile composed by `get_apparmor_rules` covers the write. Empty string disables the diagnostic log entirely. Pre-0.6.136 this was hardcoded to `tempfile.gettempdir()/lsp_debug.log` (e.g. `/tmp/lsp_debug.log`) which apparmor-confined runners couldn't write — the failure was misclassified as a config-load error and silently broke the entire LSP enrichment chain. |
 
 Example codegen profile snippet:
@@ -272,8 +273,11 @@ plugin_configs:
   lsp:
     config_path: "${workspaceRoot}/.lsp.json"
     connect_timeout_seconds: 60.0
-    diagnostics_max_wait_seconds: 10.0   # raise for cold Maven workspaces
-    diagnostics_min_wait_seconds: 1.0    # let jdtls multi-stage settle
+    diagnostics_max_wait_seconds: 10.0            # raise for cold Maven workspaces
+    diagnostics_min_wait_seconds: 1.0             # let jdtls multi-stage settle
+    diagnostics_convergence_window_seconds: 3.0   # wait for jdtls to settle
+                                                  # after the first publish; closes
+                                                  # the 12→0-errors-in-2.2s race
 ```
 
 ### AppArmor Exec Grants for Configured Servers
