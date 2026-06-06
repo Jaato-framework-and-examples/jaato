@@ -47,27 +47,43 @@ see step 2 below.
 - `curl http://REMOTE_HOST:PORT/v1/models` returns the model `id` you
   intend to test.
 
-## Quick path: `run_smoke.sh`
+## Quick path: `bootstrap.sh`
 
-The included bash helper bootstraps a workspace, fills the placeholders,
-and runs the harness in one command:
+The included bash helper sets up a self-contained smoke install at the
+target workspace — copies the smoke scripts + templates, sed-replaces
+the two placeholders, and prints a hint for running:
 
 ```bash
-./jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/run_smoke.sh \
+./jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/bootstrap.sh \
     --host http://192.168.1.50:8000 \
     --model Qwen/Qwen2.5-7B-Instruct
 ```
 
-For the tools smoke, add `--scenario tools`. Defaults: workspace at
-`/tmp/jaato-tensorrt-smoke`, python at the jaato repo's `.venv/bin/python`.
-See `--help` for the full surface.
+After it completes, the workspace looks like:
 
-Daemon must already be running at `/tmp/jaato.sock` (`jaato-server
---ipc-socket /tmp/jaato.sock --daemon`). The script doesn't manage
-daemon lifecycle.
+```
+/tmp/jaato-tensorrt-smoke/
+├── smoke.py             ← copied from the repo
+├── smoke_tools.py       ← copied from the repo
+└── .jaato/
+    ├── profiles/        ← placeholders already filled
+    └── agents/
+```
+
+Then run the smoke yourself:
+
+```bash
+cd /tmp/jaato-tensorrt-smoke
+<repo>/.venv/bin/python smoke.py         # chat smoke
+<repo>/.venv/bin/python smoke_tools.py   # tools smoke
+```
+
+The script doesn't manage daemon lifecycle — start the daemon separately
+with `jaato-server --ipc-socket /tmp/jaato.sock --daemon` before running
+the smoke.
 
 If you want full control over each step, the manual flow below shows
-what `run_smoke.sh` is doing under the hood.
+what `bootstrap.sh` is doing under the hood.
 
 ## Manual path
 
