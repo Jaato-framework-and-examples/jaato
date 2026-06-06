@@ -51,7 +51,9 @@ see step 2 below.
 
 The included bash helper sets up a self-contained smoke install at the
 target workspace — copies the smoke scripts + templates, sed-replaces
-the two placeholders, and prints a hint for running:
+the two placeholders, and (optionally) runs the smoke for you.
+
+### Bootstrap only
 
 ```bash
 ./jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/bootstrap.sh \
@@ -70,7 +72,7 @@ After it completes, the workspace looks like:
     └── agents/
 ```
 
-Then run the smoke yourself:
+Then run the smoke yourself from the workspace:
 
 ```bash
 cd /tmp/jaato-tensorrt-smoke
@@ -78,9 +80,20 @@ cd /tmp/jaato-tensorrt-smoke
 <repo>/.venv/bin/python smoke_tools.py   # tools smoke
 ```
 
-The script doesn't manage daemon lifecycle — start the daemon separately
-with `jaato-server --ipc-socket /tmp/jaato.sock --daemon` before running
-the smoke.
+### Bootstrap + run in one shot
+
+Pass `--run chat` or `--run tools` to also invoke the harness after the
+bootstrap step:
+
+```bash
+./bootstrap.sh --host http://192.168.1.50:8000 \
+               --model Qwen/Qwen2.5-7B-Instruct \
+               --run chat
+```
+
+The daemon must already be listening on `/tmp/jaato.sock` either way
+(`jaato-server --ipc-socket /tmp/jaato.sock --daemon` — the script
+doesn't manage daemon lifecycle).
 
 If you want full control over each step, the manual flow below shows
 what `bootstrap.sh` is doing under the hood.
