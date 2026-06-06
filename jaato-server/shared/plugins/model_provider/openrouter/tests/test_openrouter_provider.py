@@ -1230,6 +1230,61 @@ class TestConfigNamespacing:
         )
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_api_params_max_tokens_propagates_to_chat_completions(
+        self, mock_client_class,
+    ):
+        """``api_params.max_tokens`` must reach the wire as a top-level
+        ``max_tokens`` field on ``chat.completions.create``.
+
+        OpenRouter does a pre-flight credit-vs-max-tokens check before
+        running the request and rejects with 402 when the requested
+        ``max_tokens`` exceeds what the account's balance can afford.
+        Without this knob wired, low-balance accounts hit the 402 even
+        on smoke-test workloads that would only emit a few dozen tokens
+        of actual output.  See the smoke harness PR thread (2026-06-06).
+        """
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"max_tokens": 256}},
+        ))
+        provider.connect("anthropic/claude-3.5-sonnet", skip_model_test=True)
+        assert provider._max_tokens == 256
+        provider.complete([Message.from_text(Role.USER, "hi")])
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["max_tokens"] == 256
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_api_params_max_tokens_omitted_when_unset(self, mock_client_class):
+        """When ``api_params.max_tokens`` is not set, the request body must
+        not carry a ``max_tokens`` field — letting OpenRouter forward the
+        upstream's own default (e.g. the model's catalog max-output).
+
+        Matches the temperature / top_p contract: omitted when unset so
+        the upstream picks its own default rather than the framework
+        smuggling a value in.
+        """
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        provider.connect("openai/gpt-4o", skip_model_test=True)
+        assert provider._max_tokens is None
+        provider.complete([Message.from_text(Role.USER, "hi")])
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert "max_tokens" not in call_kwargs
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_legacy_flat_shape_still_works_with_warnings(
         self, mock_client_class, caplog,
     ):
