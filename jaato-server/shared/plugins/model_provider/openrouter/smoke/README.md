@@ -25,8 +25,8 @@ The smoke separates **profile knobs** (model, plugins, GC) from
 
 | Knob | Lives in | Why |
 |---|---|---|
-| `model` | profile JSON (literal) | Model choice IS the profile choice. To target a different model, edit the profile or copy it to a new file. |
-| `plugins`, `plugin_configs.*` | profile JSON | Pure profile concern. |
+| `model` | profile YAML (literal) | Model choice IS the profile choice. To target a different model, edit the profile or copy it to a new file. |
+| `plugins`, `plugin_configs.*` | profile YAML | Pure profile concern. |
 | `api_key` | workspace `.env` as `JAATO_OPENROUTER_API_KEY`, referenced from profile as `${JAATO_OPENROUTER_API_KEY}` | The key is the per-user / per-deployment secret, not a property of the profile. Resolved at profile-load time via the framework's `${VAR}` substitution chain (`shared/plugins/subagent/config.py:_expand_string`). |
 
 The profiles ship with `anthropic/claude-sonnet-4.5` baked in. OpenRouter
@@ -208,3 +208,6 @@ model (Claude Sonnet 4.5, GPT-4o, and Gemini 2.5 work well).
 | 2 | "connect failed" | Daemon isn't listening on `/tmp/jaato.sock` — re-run `jaato-server --status`. |
 | 3 | Timeout, no output | Upstream model is slow or hung. Bump `TURN_TIMEOUT_SECONDS` in the harness (the tools smoke uses 180s by default since tool round-trips take longer). |
 | 0 but no tool call (`smoke_tools.py`) | The model answered without calling `cli_based_tool` — usually a fidelity issue with smaller models. Try Claude Sonnet 4.5, GPT-4o, or Gemini 2.5. |
+| 1 with `APIStatusError 402: Prompt tokens limit exceeded: N > M` | Your OpenRouter account's remaining prompt-token credit (M) is below the framework's irreducible prompt-token floor (~15K for a `ClientType.API` session, even with `suppress_base_instructions: true` and `plugins: []` — the floor is the tool-schemas array: `signal_completion` + the always-on introspection tools `list_tools` / `get_tool_schemas` etc. — see saved-lesson `feedback_introspection_tools_in_array_by_design`). Top up credits at https://openrouter.ai/settings/credits and retry. |
+| 1 with `APIStatusError 402: You requested up to N tokens, but can only afford M` | The provider was asking for too many output tokens. The profile caps `api_params.max_tokens: 256` which avoids this — if you still see it, you're running an older daemon that pre-dates the `api_params.max_tokens` wiring fix (PR #233). |
+| 1 with `NudgeExhausted: Agent loop exhausted N completion nudges` | The model responded with text but didn't call `signal_completion` to end the turn. **The wire worked** — a coherent text reply proves provider connectivity. NudgeExhausted on a weak tool-caller (small models on local providers) is a **model-fidelity result, not a smoke failure**. Claude Sonnet 4.5 / GPT-4o / Gemini 2.5 follow the persona's `signal_completion` instruction cleanly. |
