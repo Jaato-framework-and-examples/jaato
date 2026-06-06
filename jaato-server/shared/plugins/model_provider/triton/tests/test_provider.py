@@ -523,3 +523,64 @@ class TestCapabilities:
 
     def test_does_not_advertise_thinking(self):
         assert TritonProvider().supports_thinking() is False
+
+
+# ============================================================
+# Error handling — mid-stream vs pre-flight connection failures
+# ============================================================
+
+
+class TestMidStreamErrorDistinction:
+    """Triton's OpenAI frontend wraps the same TRT-LLM engine as
+    trtllm-serve, so it surfaces the same class of mid-stream
+    connection-drop bug when the engine errors after HTTP 200 is
+    committed (prompt exceeds ``max_input_length``, KV-cache OOM,
+    internal exceptions).  ``_handle_api_error`` must distinguish
+    these from pre-flight failures the same way the tensorrt_llm
+    provider does — see the kb-orchestrator cascade incident
+    (2026-06-06) which falsely surfaced as a generic connection
+    error and burned forensics time.
+    """
+
+    def _make_apicon_error(self, message: str):
+        from shared.plugins.model_provider.triton.provider import (
+            get_openai_module,
+        )
+        openai = get_openai_module()
+        try:
+            return openai.APIConnectionError(message=message, request=None)
+        except TypeError:
+            return openai.APIConnectionError(message)
+
+    def test_remote_protocol_error_routes_to_mid_stream(self):
+        from shared.plugins.model_provider.triton.errors import (
+            TritonMidStreamError,
+        )
+        provider = TritonProvider()
+        provider._openai_url = "http://192.168.50.154:9000"
+        err = self._make_apicon_error(
+            "RemoteProtocolError: peer closed connection without "
+            "sending complete message body"
+        )
+        with pytest.raises(TritonMidStreamError) as ctx:
+            provider._handle_api_error(err)
+        msg = str(ctx.value)
+        assert "192.168.50.154:9000" in msg
+        assert "max_input_length" in msg
+        assert "trtllm-build" in msg
+
+    def test_clean_connection_failure_still_routes_to_connection_error(self):
+        from shared.plugins.model_provider.triton.errors import (
+            TritonConnectionError,
+            TritonMidStreamError,
+        )
+        provider = TritonProvider()
+        provider._openai_url = "http://192.168.50.154:9000"
+        err = self._make_apicon_error(
+            "Connection refused at http://192.168.50.154:9000"
+        )
+        with pytest.raises(TritonConnectionError) as ctx:
+            provider._handle_api_error(err)
+        assert not isinstance(ctx.value, TritonMidStreamError)
+        msg = str(ctx.value)
+        assert "max_input_length" not in msg
