@@ -47,7 +47,29 @@ see step 2 below.
 - `curl http://REMOTE_HOST:PORT/v1/models` returns the model `id` you
   intend to test.
 
-## Run it
+## Quick path: `run_smoke.sh`
+
+The included bash helper bootstraps a workspace, fills the placeholders,
+and runs the harness in one command:
+
+```bash
+./jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/run_smoke.sh \
+    --host http://192.168.1.50:8000 \
+    --model Qwen/Qwen2.5-7B-Instruct
+```
+
+For the tools smoke, add `--scenario tools`. Defaults: workspace at
+`/tmp/jaato-tensorrt-smoke`, python at the jaato repo's `.venv/bin/python`.
+See `--help` for the full surface.
+
+Daemon must already be running at `/tmp/jaato.sock` (`jaato-server
+--ipc-socket /tmp/jaato.sock --daemon`). The script doesn't manage
+daemon lifecycle.
+
+If you want full control over each step, the manual flow below shows
+what `run_smoke.sh` is doing under the hood.
+
+## Manual path
 
 ### 1. Copy the templates into your workspace
 
