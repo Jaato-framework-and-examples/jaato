@@ -45,8 +45,8 @@ smoke/
 ├── .env.example                           # workspace env template
 └── .jaato.example/                        # workspace .jaato/ template
     ├── profiles/
-    │   ├── openrouter-smoke.json          # pure chat, no tools, no GC
-    │   └── openrouter-tools.json          # cli plugin, default-allow permission
+    │   ├── openrouter-smoke.yaml          # pure chat, no tools, no GC
+    │   └── openrouter-tools.yaml          # cli plugin, default-allow permission
     └── agents/
         ├── openrouter-smoke.md            # one-sentence-responder persona
         └── openrouter-tools.md            # tool-using-then-summarize persona
@@ -142,7 +142,7 @@ mkdir -p "$WS/.jaato/profiles" "$WS/.jaato/agents"
 ```bash
 SMOKE=jaato-server/shared/plugins/model_provider/openrouter/smoke
 cp -f "$SMOKE/smoke.py" "$SMOKE/smoke_tools.py" "$WS/"
-cp -f "$SMOKE/.jaato.example/profiles/"*.json "$WS/.jaato/profiles/"
+cp -f "$SMOKE/.jaato.example/profiles/"*.yaml "$WS/.jaato/profiles/"
 cp -f "$SMOKE/.jaato.example/agents/"*.md "$WS/.jaato/agents/"
 cp -f "$SMOKE/.env.example" "$WS/.env"      # only if you don't already have .env
 ```
