@@ -87,16 +87,29 @@ Optional knobs (apply to both profiles):
 
 ### 4. Run the chat smoke first
 
+Either `cd` into the workspace and run the harness from there:
+
 ```bash
-.venv/bin/python jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke.py
+cd /path/to/your/workspace
+.venv/bin/python /path/to/jaato/jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke.py
+```
+
+…or pass the workspace path explicitly:
+
+```bash
+.venv/bin/python jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke.py \
+    --workspace /path/to/your/workspace
 ```
 
 Expected: one sentence of model output, exit 0.
 
 ### 5. Then run the tools smoke
 
+Same workspace-resolution rules as the chat smoke:
+
 ```bash
-.venv/bin/python jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke_tools.py
+.venv/bin/python jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke_tools.py \
+    --workspace /path/to/your/workspace
 ```
 
 Expected: a `cli_based_tool` call running `ls /tmp`, followed by a one-sentence
