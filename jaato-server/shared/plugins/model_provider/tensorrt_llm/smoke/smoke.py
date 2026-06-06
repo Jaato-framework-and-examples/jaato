@@ -18,11 +18,15 @@ Prerequisites:
 
 Run:
     .venv/bin/jaato-server --ipc-socket /tmp/jaato.sock --daemon
-    .venv/bin/python jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke.py
+    .venv/bin/python -m smoke --workspace /tmp/jaato-tensorrt-smoke
+    # or from inside the workspace:
+    cd /tmp/jaato-tensorrt-smoke && .venv/bin/python /path/to/smoke.py
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import os
 import sys
 
 from jaato_sdk.client.ipc import IPCClient
@@ -41,8 +45,12 @@ PROMPT = "Reply with exactly one short sentence saying hello."
 TURN_TIMEOUT_SECONDS = 120.0
 
 
-async def main() -> int:
-    client = IPCClient(socket_path=SOCKET, client_type=ClientType.API)
+async def main(workspace: str) -> int:
+    client = IPCClient(
+        socket_path=SOCKET,
+        client_type=ClientType.API,
+        workspace_path=workspace,
+    )
     if not await client.connect(timeout=10.0):
         print("[smoke] connect failed", file=sys.stderr)
         return 2
@@ -59,7 +67,7 @@ async def main() -> int:
         done.set()
 
     def on_error(e: ErrorEvent) -> None:
-        failure.append(e.message)
+        failure.append(f"{e.error_type}: {e.error}" if e.error_type else e.error)
         done.set()
 
     client.subscribe(EventType.AGENT_OUTPUT, on_output)
@@ -89,4 +97,15 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help=(
+            "Workspace path containing .jaato/profiles/ and .jaato/agents/. "
+            "Defaults to the current directory."
+        ),
+    )
+    args = parser.parse_args()
+    workspace = args.workspace or os.getcwd()
+    sys.exit(asyncio.run(main(workspace)))
