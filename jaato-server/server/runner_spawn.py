@@ -584,6 +584,22 @@ def build_session_envelope(
         # stashes onto JaatoSession so subagent create_session calls
         # auto-inherit via runtime.create_session().
         cascade_driver_id=getattr(server, "_cascade_driver_id", None),
+        # 2026-06-06: ferry the two daemon-resolved system-instruction
+        # knobs to the runner.  See SessionInitEnvelope field docstrings
+        # for the bug history — both knobs were set correctly on
+        # ``JaatoServer`` daemon-side but never reached the runner's
+        # ``JaatoSession.configure`` over the wire, making them silent
+        # no-ops.  ``getattr`` with the default keeps backward compat
+        # with daemons that predate these attributes (the attributes
+        # are set in JaatoServer.__init__ from BootstrapEnvelope so
+        # they should always be present, but the defaults are also the
+        # documented "no-op" values for both knobs).
+        suppress_base_instructions=getattr(
+            server, "_suppress_base_instructions", False,
+        ),
+        system_instruction_override=getattr(
+            server, "_system_instruction_override", None,
+        ),
     )
 
 

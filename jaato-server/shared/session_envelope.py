@@ -236,6 +236,37 @@ class SessionInitEnvelope:
     # runtime.create_session() path.  See
     # docs/design/runner-cascade-sharing.md §4.1.
     cascade_driver_id: Optional[str] = None
+    # 2026-06-06: profile-level ``suppress_base_instructions`` flag,
+    # ferried across the daemon → runner seat-flip.  Pre-fix the field
+    # existed on BootstrapEnvelope (daemon-internal) and on the
+    # daemon-side ``JaatoServer._suppress_base_instructions`` attribute,
+    # but the wire envelope had no field for it — so the runner-side
+    # JaatoSession always built its system instructions with the BASE
+    # layer included (``include_base=True`` default), and the profile
+    # knob was a silent no-op.  The empirical fingerprint was identical
+    # prompt-token counts before and after setting the flag in the
+    # profile JSON (40,953 tokens in both runs of the openrouter smoke,
+    # 36,005 in the trtllm smoke — the runtime's
+    # ``get_system_instructions(include_base=False)`` probe showed the
+    # drop WOULD be ~24K if honored).  See
+    # ``project_backlog_suppress_base_instructions_not_honored``
+    # memory for the falsification recipe + full evidence chain.
+    # ``False`` default keeps backward compat with envelopes built
+    # before this field landed.
+    suppress_base_instructions: bool = False
+    # 2026-06-06: symmetric fix for ``system_instruction_override`` —
+    # same shape of bug as ``suppress_base_instructions``.  The
+    # daemon-side ``JaatoServer._system_instruction_override`` was set
+    # correctly from BootstrapEnvelope, but the wire envelope had no
+    # field for it, so the runner-side JaatoSession always assembled
+    # its system instructions normally even when a client passed
+    # ``system_instruction_override`` via IPC ``create_session``.
+    # ``None`` default = no override (runner assembles instructions
+    # normally from profile + agent + plugins + framework).  Empty
+    # string is a legitimate value meaning "send no system message at
+    # all" (mirrors ``JaatoServer._build_session_overrides`` at
+    # core.py:2504, where ``override is not None`` is the gate).
+    system_instruction_override: Optional[str] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
@@ -268,6 +299,11 @@ class SessionInitEnvelope:
                 dict(self.model_tiers) if self.model_tiers else None
             ),
             "cascade_driver_id": self.cascade_driver_id,
+            # 2026-06-06: both knobs serialized on the wire so the
+            # runner-side from_dict() receives them.  See field
+            # docstrings for the bug history (silent no-op pre-fix).
+            "suppress_base_instructions": self.suppress_base_instructions,
+            "system_instruction_override": self.system_instruction_override,
         }
 
     @classmethod
@@ -325,6 +361,12 @@ class SessionInitEnvelope:
                 dict(d["model_tiers"]) if d.get("model_tiers") else None
             ),
             cascade_driver_id=d.get("cascade_driver_id"),
+            # 2026-06-06: defaults preserve backward compat with
+            # older daemons that don't carry these fields on the wire.
+            suppress_base_instructions=bool(
+                d.get("suppress_base_instructions", False)
+            ),
+            system_instruction_override=d.get("system_instruction_override"),
         )
 
 
