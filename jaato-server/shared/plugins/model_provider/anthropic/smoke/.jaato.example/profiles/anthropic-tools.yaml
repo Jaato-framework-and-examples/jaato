@@ -1,0 +1,23 @@
+name: anthropic-tools
+description: >
+  Tool-calling smoke test for the anthropic provider. Exercises the
+  Anthropic tool-use shape via the cli plugin — one tool call followed
+  by a one-sentence summary. Permission policy is default-allow so the
+  harness needs no interactive permission handling.
+
+model: claude-sonnet-4-6
+provider: anthropic
+
+max_turns: 4
+
+suppress_base_instructions: true
+
+plugins:
+  - cli
+
+plugin_configs:
+  anthropic:
+    api_key: "${ANTHROPIC_API_KEY}"
+  permission:
+    policy:
+      defaultPolicy: allow
