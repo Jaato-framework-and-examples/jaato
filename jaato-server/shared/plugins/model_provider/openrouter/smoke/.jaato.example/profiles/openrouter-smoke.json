@@ -1,0 +1,17 @@
+{
+  "name": "openrouter-smoke",
+  "description": "Pure chat smoke test for the openrouter provider against the OpenRouter cloud gateway. No tools, no GC — just round-trips /v1/chat/completions to validate the provider wire.",
+
+  "model": "anthropic/claude-sonnet-4.5",
+  "provider": "openrouter",
+
+  "max_turns": 1,
+
+  "plugins": [],
+
+  "plugin_configs": {
+    "openrouter": {
+      "api_key": "${JAATO_OPENROUTER_API_KEY}"
+    }
+  }
+}
