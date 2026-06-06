@@ -1,0 +1,18 @@
+{
+  "name": "nim-smoke",
+  "description": "Pure chat smoke test for the nim provider against NVIDIA's hosted NIM API (or a self-hosted container via JAATO_NIM_BASE_URL). No tools, no GC — just round-trips /v1/chat/completions to validate the provider wire.",
+
+  "model": "meta/llama-3.1-8b-instruct",
+  "provider": "nim",
+
+  "max_turns": 1,
+
+  "plugins": [],
+
+  "plugin_configs": {
+    "nim": {
+      "api_key": "${JAATO_NIM_API_KEY}",
+      "context_length": 8192
+    }
+  }
+}
