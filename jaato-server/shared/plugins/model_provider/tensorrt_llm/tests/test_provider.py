@@ -156,6 +156,36 @@ class TestInitialize:
         assert provider._host == "http://gpu-box:8000"
 
     @patch("shared.plugins.model_provider.tensorrt_llm.provider.httpx.get")
+    def test_initialize_reads_max_tokens_from_extra(self, mock_get):
+        """``extra.max_tokens`` populates ``provider._max_tokens`` so the
+        completion call forwards it as the OpenAI ``max_tokens`` field.
+
+        Without this knob trtllm-serve defaults the per-request output
+        budget to (``max_seq_len`` - prompt) which exhausts KV-cache
+        under sustained generation, surfacing as a mid-stream
+        ``RemoteProtocolError: peer closed connection``.  Empirically
+        demonstrated by the kb-orchestrator cascade hit on the
+        WSL2 trtllm-serve endpoint (2026-06-06).
+        """
+        mock_get.return_value = _health_response()
+        provider = TensorRTLLMProvider()
+        provider.initialize(ProviderConfig(extra={"max_tokens": 4096}))
+        assert provider._max_tokens == 4096
+
+    @patch("shared.plugins.model_provider.tensorrt_llm.provider.httpx.get")
+    def test_initialize_max_tokens_stays_none_when_absent(self, mock_get):
+        """When ``extra.max_tokens`` is not set, ``provider._max_tokens``
+        stays ``None`` so the completion call does NOT carry a
+        ``max_tokens`` field — letting trtllm-serve apply its own
+        default.  Mirrors the temperature / top_p contract elsewhere
+        in the provider stack.
+        """
+        mock_get.return_value = _health_response()
+        provider = TensorRTLLMProvider()
+        provider.initialize(ProviderConfig())
+        assert provider._max_tokens is None
+
+    @patch("shared.plugins.model_provider.tensorrt_llm.provider.httpx.get")
     def test_initialize_connection_failure_raises(self, mock_get):
         mock_get.side_effect = httpx.ConnectError("refused")
         provider = TensorRTLLMProvider()

@@ -125,6 +125,21 @@ class TensorRTLLMProvider:
 
         self._last_usage: TokenUsage = TokenUsage()
         self._context_length_override: Optional[int] = None
+        # Cap on the per-request output budget, forwarded as the OpenAI
+        # Chat Completions ``max_tokens`` top-level field.  ``None`` ⇒
+        # let the upstream apply its own default (which for trtllm-serve
+        # means "use whatever is left under max_seq_len after the
+        # prompt" — usually OK but exhausts KV-cache during sustained
+        # generation, surfacing as a mid-stream ``peer closed connection
+        # without sending complete message body``).  Setting this knob
+        # is required for cascade workloads with large prompts where
+        # max_seq_len minus prompt would not leave enough for the
+        # default-unbounded generation.  Empirically demonstrated by
+        # the kb-orchestrator cascade hit on the WSL2 trtllm-serve
+        # endpoint (2026-06-06, ~20K-token discovery prompt against
+        # the 32K max_seq_len engine — mid-stream connection drop
+        # without this cap).
+        self._max_tokens: Optional[int] = None
 
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
@@ -174,6 +189,14 @@ class TensorRTLLMProvider:
                 - ``context_length`` (int): Override context window size.
                 - ``api_token`` (str): Bearer token when an auth proxy
                   fronts ``trtllm-serve``.
+                - ``max_tokens`` (int): Cap on per-request output budget;
+                  forwarded as the OpenAI Chat Completions ``max_tokens``
+                  field.  Omit to let the upstream apply its own default
+                  (which on trtllm-serve is bounded only by
+                  ``max_seq_len`` minus prompt size — sufficient for
+                  short prompts but exhausts KV-cache under sustained
+                  generation, surfacing as a mid-stream
+                  ``RemoteProtocolError: peer closed connection``).
 
         Raises:
             TensorRTLLMConnectionError: Server not reachable.
@@ -191,6 +214,10 @@ class TensorRTLLMProvider:
             self._context_length_override = int(context_extra)
         else:
             self._context_length_override = resolve_context_length()
+
+        max_tokens_extra = config.extra.get("max_tokens")
+        if max_tokens_extra is not None:
+            self._max_tokens = int(max_tokens_extra)
 
         self._auth_info = (
             f"local ({self._host}, bearer)"
@@ -421,6 +448,8 @@ class TensorRTLLMProvider:
                 kwargs["tools"] = openai_tools
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
+        if self._max_tokens is not None:
+            kwargs["max_tokens"] = self._max_tokens
 
         try:
             if on_chunk:
