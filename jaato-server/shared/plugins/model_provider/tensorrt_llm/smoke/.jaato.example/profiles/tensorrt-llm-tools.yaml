@@ -1,0 +1,24 @@
+name: tensorrt-llm-tools
+description: >
+  Tool-calling smoke test for the tensorrt_llm provider. Exercises the
+  OpenAI tools shape via the cli plugin — one tool call followed by a
+  one-sentence summary. Permission policy is default-allow so the
+  harness needs no interactive permission handling.
+
+model: Qwen/Qwen2.5-7B-Instruct
+provider: tensorrt_llm
+
+max_turns: 4
+
+suppress_base_instructions: true
+
+plugins:
+  - cli
+
+plugin_configs:
+  tensorrt_llm:
+    host: "${TENSORRT_LLM_HOST}"
+    context_length: 8192
+  permission:
+    policy:
+      defaultPolicy: allow
