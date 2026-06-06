@@ -98,7 +98,7 @@ echo "==> Copying harness scripts"
 cp -f "$SMOKE_DIR/smoke.py" "$SMOKE_DIR/smoke_tools.py" "$WORKSPACE/"
 
 echo "==> Copying profile + agent templates"
-cp -f "$SMOKE_DIR/.jaato.example/profiles/"*.json "$WORKSPACE/.jaato/profiles/"
+cp -f "$SMOKE_DIR/.jaato.example/profiles/"*.yaml "$WORKSPACE/.jaato/profiles/"
 cp -f "$SMOKE_DIR/.jaato.example/agents/"*.md "$WORKSPACE/.jaato/agents/"
 
 if [[ -f "$WORKSPACE/.env" ]]; then
