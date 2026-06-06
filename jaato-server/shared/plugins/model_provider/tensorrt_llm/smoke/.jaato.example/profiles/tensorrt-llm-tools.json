@@ -1,0 +1,23 @@
+{
+  "name": "tensorrt-llm-tools",
+  "description": "Tool-calling smoke test for the tensorrt_llm provider. Exercises the OpenAI tools shape via the cli plugin — one tool call followed by a one-sentence summary. Permission policy is default-allow so the harness needs no interactive permission handling.",
+
+  "model": "REPLACE_WITH_MODEL_ID_FROM_v1_models",
+  "provider": "tensorrt_llm",
+
+  "max_turns": 4,
+
+  "plugins": ["cli"],
+
+  "plugin_configs": {
+    "tensorrt_llm": {
+      "host": "http://REMOTE_HOST:8000",
+      "context_length": 8192
+    },
+    "permission": {
+      "policy": {
+        "defaultPolicy": "allow"
+      }
+    }
+  }
+}

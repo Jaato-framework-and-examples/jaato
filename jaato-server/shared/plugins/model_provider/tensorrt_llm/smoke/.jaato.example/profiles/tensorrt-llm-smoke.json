@@ -1,0 +1,18 @@
+{
+  "name": "tensorrt-llm-smoke",
+  "description": "Pure chat smoke test for the tensorrt_llm provider against a remote trtllm-serve / Triton OpenAI frontend. No tools, no GC — just round-trips /v1/chat/completions to validate the provider wire.",
+
+  "model": "REPLACE_WITH_MODEL_ID_FROM_v1_models",
+  "provider": "tensorrt_llm",
+
+  "max_turns": 1,
+
+  "plugins": [],
+
+  "plugin_configs": {
+    "tensorrt_llm": {
+      "host": "http://REMOTE_HOST:8000",
+      "context_length": 8192
+    }
+  }
+}
