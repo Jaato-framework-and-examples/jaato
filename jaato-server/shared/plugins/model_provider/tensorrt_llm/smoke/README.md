@@ -5,7 +5,7 @@ Two end-to-end smokes for the `tensorrt_llm` provider:
 | Smoke | What it validates | Profile | Harness |
 |---|---|---|---|
 | **Chat** | Provider wire — daemon can reach the remote endpoint and round-trip `/v1/chat/completions`. No tools involved. | `tensorrt-llm-smoke` | `smoke.py` |
-| **Tools** | OpenAI tools shape — schema serialization, tool-call argument parsing, tool-result round-trip. Exercises the `cli` plugin. | `tensorrt-llm-tools` | `smoke_tools.py` |
+| **Tools** | OpenAI tools shape — schema serialization, tool-call argument parsing, tool-result round-trip. Exercises the `cli` plugin. The `permission` plugin is server-wired automatically (no need to list it in `plugins`), but its policy is set via `plugin_configs.permission`. | `tensorrt-llm-tools` | `smoke_tools.py` |
 
 Run the **chat** smoke first. If it's red, the wire is broken and tool-shape
 results would be meaningless. Once chat is green, the tools smoke tells you

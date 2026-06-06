@@ -7,7 +7,7 @@
 
   "max_turns": 4,
 
-  "plugins": ["cli", "permission"],
+  "plugins": ["cli"],
 
   "plugin_configs": {
     "tensorrt_llm": {
