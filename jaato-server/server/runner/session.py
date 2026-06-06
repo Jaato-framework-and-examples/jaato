@@ -1030,4 +1030,14 @@ def _build_session(
         # silently discarded here because create_session didn't
         # accept the kwarg).
         agent_id=envelope.agent_id,
+        # 2026-06-06: forward the two daemon-resolved system-instruction
+        # knobs to the runner-side JaatoSession.  Pre-fix these were
+        # silently dropped here — JaatoSession.configure defaulted to
+        # ``suppress_base_instructions=False`` and
+        # ``system_instruction_override=None`` regardless of what the
+        # profile / IPC client requested.  See SessionInitEnvelope field
+        # docstrings + ``project_backlog_suppress_base_instructions_not_honored``
+        # memory for the bug history.
+        suppress_base_instructions=envelope.suppress_base_instructions,
+        system_instruction_override=envelope.system_instruction_override,
     )
