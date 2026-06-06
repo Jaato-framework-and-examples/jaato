@@ -1,0 +1,22 @@
+{
+  "name": "github-models-tools",
+  "description": "Tool-calling smoke test for the github_models provider. Exercises the OpenAI tools shape via the cli plugin — one tool call followed by a one-sentence summary. Permission policy is default-allow so the harness needs no interactive permission handling.",
+
+  "model": "openai/gpt-4o",
+  "provider": "github_models",
+
+  "max_turns": 4,
+
+  "plugins": ["cli"],
+
+  "plugin_configs": {
+    "github_models": {
+      "api_key": "${GITHUB_TOKEN}"
+    },
+    "permission": {
+      "policy": {
+        "defaultPolicy": "allow"
+      }
+    }
+  }
+}
