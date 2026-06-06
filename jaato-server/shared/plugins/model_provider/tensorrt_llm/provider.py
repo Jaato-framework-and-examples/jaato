@@ -75,6 +75,7 @@ from .env import (
 from .errors import (
     TensorRTLLMAuthenticationError,
     TensorRTLLMConnectionError,
+    TensorRTLLMMidStreamError,
     TensorRTLLMModelNotFoundError,
 )
 
@@ -654,6 +655,31 @@ class TensorRTLLMProvider:
             ) from error
 
         if isinstance(error, openai.APIConnectionError):
+            # Distinguish mid-stream connection drops (engine error after
+            # HTTP 200 was committed) from pre-flight connection failures
+            # (host unreachable / firewall / DNS).  The first surfaces as
+            # httpx.RemoteProtocolError wrapped by openai.APIConnectionError
+            # AND the message contains "peer closed connection" or
+            # "incomplete chunked"; the second is a clean
+            # httpx.ConnectError / TimeoutException with no such phrasing.
+            #
+            # The distinction matters because pre-flight failures point
+            # the user at network / host debugging, while mid-stream
+            # drops point at server-side engine config (max_input_length,
+            # KV cache, etc.) — completely different fix trees.  Misrouting
+            # the user toward firewall investigation when the real issue
+            # is a 16K max_input_length burns 30+ minutes of forensics
+            # per the 2026-06-06 kb-orchestrator cascade incident.
+            error_msg = str(error).lower()
+            is_mid_stream = (
+                "peer closed connection" in error_msg
+                or "incomplete chunked" in error_msg
+                or "remoteprotocolerror" in error_msg
+            )
+            if is_mid_stream:
+                raise TensorRTLLMMidStreamError(
+                    self._host, original_error=str(error),
+                ) from error
             raise TensorRTLLMConnectionError(self._host, str(error)) from error
 
         # Other APIStatusError subclasses fall through — the caller sees

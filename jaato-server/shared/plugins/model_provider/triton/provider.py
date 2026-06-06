@@ -85,6 +85,7 @@ from .errors import (
     TritonAuthenticationError,
     TritonConnectionError,
     TritonLoadError,
+    TritonMidStreamError,
     TritonModelNotFoundError,
 )
 
@@ -756,6 +757,22 @@ class TritonProvider:
             ) from error
 
         if isinstance(error, openai.APIConnectionError):
+            # Same mid-stream-vs-pre-flight distinction as the
+            # tensorrt_llm provider — see TensorRTLLMMidStreamError
+            # docstring for the empirical incident (2026-06-06
+            # kb-orchestrator cascade against trtllm-serve, but the
+            # engine config bug surfaces identically on Triton's
+            # OpenAI frontend when it wraps the same engine).
+            error_msg = str(error).lower()
+            is_mid_stream = (
+                "peer closed connection" in error_msg
+                or "incomplete chunked" in error_msg
+                or "remoteprotocolerror" in error_msg
+            )
+            if is_mid_stream:
+                raise TritonMidStreamError(
+                    self._openai_url, original_error=str(error),
+                ) from error
             raise TritonConnectionError(
                 self._openai_url, str(error), surface="openai",
             ) from error

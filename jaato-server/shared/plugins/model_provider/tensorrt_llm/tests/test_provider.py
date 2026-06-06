@@ -425,3 +425,69 @@ class TestCapabilities:
     def test_does_not_advertise_thinking(self):
         """trtllm-serve's /v1 surface has no reasoning delta channel."""
         assert TensorRTLLMProvider().supports_thinking() is False
+
+
+# ============================================================
+# Error handling — mid-stream vs pre-flight connection failures
+# ============================================================
+
+
+class TestMidStreamErrorDistinction:
+    """``_handle_api_error`` must distinguish a mid-stream connection drop
+    (engine-error AFTER HTTP 200 — e.g. prompt exceeds engine
+    ``max_input_length``, KV-cache OOM) from a pre-flight connection
+    failure (host unreachable / firewall / DNS).  The two have completely
+    different fix trees — surfacing both as ``TensorRTLLMConnectionError``
+    misroutes the user toward network debugging when the real bug is
+    engine config.  Empirically demonstrated by the 2026-06-06
+    kb-orchestrator cascade incident (prompt 19,977 tokens against
+    engine ``max_input_length=16384``).
+    """
+
+    def _make_apicon_error(self, message: str):
+        """Construct an ``openai.APIConnectionError`` whose ``str()`` carries
+        the given text — that's the substring ``_handle_api_error``
+        regex-matches on.
+        """
+        from shared.plugins.model_provider.tensorrt_llm.provider import (
+            get_openai_module,
+        )
+        openai = get_openai_module()
+        try:
+            return openai.APIConnectionError(message=message, request=None)
+        except TypeError:
+            return openai.APIConnectionError(message)
+
+    def test_remote_protocol_error_routes_to_mid_stream(self):
+        from shared.plugins.model_provider.tensorrt_llm.errors import (
+            TensorRTLLMMidStreamError,
+        )
+        provider = TensorRTLLMProvider()
+        provider._host = "http://192.168.50.154:8000"
+        err = self._make_apicon_error(
+            "RemoteProtocolError: peer closed connection without "
+            "sending complete message body (incomplete chunked read)"
+        )
+        with pytest.raises(TensorRTLLMMidStreamError) as ctx:
+            provider._handle_api_error(err)
+        msg = str(ctx.value)
+        assert "192.168.50.154:8000" in msg
+        assert "max_input_length" in msg
+        assert "trtllm-build" in msg
+
+    def test_clean_connection_failure_still_routes_to_connection_error(self):
+        from shared.plugins.model_provider.tensorrt_llm.errors import (
+            TensorRTLLMConnectionError,
+            TensorRTLLMMidStreamError,
+        )
+        provider = TensorRTLLMProvider()
+        provider._host = "http://192.168.50.154:8000"
+        err = self._make_apicon_error(
+            "Connection refused at http://192.168.50.154:8000"
+        )
+        with pytest.raises(TensorRTLLMConnectionError) as ctx:
+            provider._handle_api_error(err)
+        assert not isinstance(ctx.value, TensorRTLLMMidStreamError)
+        msg = str(ctx.value)
+        assert "Cannot connect" in msg
+        assert "max_input_length" not in msg
