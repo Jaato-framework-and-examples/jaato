@@ -16,25 +16,37 @@ Qwen2.5-7B-Instruct or Llama-3.1-8B-Instruct).
 These are **not** unit tests — they require a live daemon and a live
 remote endpoint. Unit tests for the provider live in `../tests/`.
 
+## Configuration model
+
+The smoke separates **profile knobs** (model, plugins, GC) from
+**deployment knobs** (host):
+
+| Knob | Lives in | Why |
+|---|---|---|
+| `model` | profile JSON (literal) | Model choice IS the profile choice. To target a different model, edit the profile or copy it to a new file. |
+| `plugins`, `plugin_configs.*` | profile JSON | Pure profile concern. |
+| `host` | workspace `.env` as `TENSORRT_LLM_HOST`, referenced from profile as `${TENSORRT_LLM_HOST}` | Endpoint detail varies per deployment, not per profile. Resolved at profile-load time via the framework's `${VAR}` substitution chain (`shared/plugins/subagent/config.py:_expand_string`). |
+
+The profiles ship with `Qwen/Qwen2.5-7B-Instruct` baked in. If you serve
+a different model on your endpoint, edit the profile.
+
 ## What's in here
 
 ```
 smoke/
 ├── README.md                              # this file
+├── bootstrap.sh                           # one-shot workspace install
 ├── smoke.py                               # chat-only harness
 ├── smoke_tools.py                         # tool-calling harness
-└── .jaato.example/                        # workspace artifact templates
+├── .env.example                           # workspace env template
+└── .jaato.example/                        # workspace .jaato/ template
     ├── profiles/
     │   ├── tensorrt-llm-smoke.json        # pure chat, no tools, no GC
-    │   └── tensorrt-llm-tools.json        # cli + permission, default-allow
+    │   └── tensorrt-llm-tools.json        # cli plugin, default-allow permission
     └── agents/
         ├── tensorrt-llm-smoke.md          # one-sentence-responder persona
         └── tensorrt-llm-tools.md          # tool-using-then-summarize persona
 ```
-
-The `.jaato.example/` tree mirrors the structure of a real workspace's
-`.jaato/` dir. Templates are copied into the workspace before running —
-see step 2 below.
 
 ## Prerequisites
 
@@ -42,23 +54,20 @@ see step 2 below.
   frontend). See the parent provider's docstring (`../provider.py`)
   and the project `CLAUDE.md` for env vars.
 - `nvidia-smi` confirmed on the remote host.
-- `curl http://REMOTE_HOST:PORT/health` returns 200 from the jaato
-  host (firewall, WSL network mode, etc. all working).
-- `curl http://REMOTE_HOST:PORT/v1/models` returns the model `id` you
-  intend to test.
+- `curl http://<host>:<port>/health` returns 200 from the jaato host
+  (firewall, WSL network mode, etc. all working).
+- `curl http://<host>:<port>/v1/models` returns the model `id` that
+  matches the profile's `model` field (default `Qwen/Qwen2.5-7B-Instruct`).
+- Daemon listening on `/tmp/jaato.sock`:
+  `jaato-server --ipc-socket /tmp/jaato.sock --daemon`
 
 ## Quick path: `bootstrap.sh`
 
 The included bash helper sets up a self-contained smoke install at the
-target workspace — copies the smoke scripts + templates, sed-replaces
-the two placeholders, and (optionally) runs the smoke for you.
-
-### Bootstrap only
+target workspace (default `/tmp/jaato-tensorrt-smoke`):
 
 ```bash
-./jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/bootstrap.sh \
-    --host http://192.168.1.50:8000 \
-    --model Qwen/Qwen2.5-7B-Instruct
+./jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/bootstrap.sh
 ```
 
 After it completes, the workspace looks like:
@@ -67,12 +76,24 @@ After it completes, the workspace looks like:
 /tmp/jaato-tensorrt-smoke/
 ├── smoke.py             ← copied from the repo
 ├── smoke_tools.py       ← copied from the repo
+├── .env                 ← created from .env.example (only if absent)
 └── .jaato/
-    ├── profiles/        ← placeholders already filled
+    ├── profiles/        ← templates (Qwen baked in, host → ${TENSORRT_LLM_HOST})
     └── agents/
 ```
 
-Then run the smoke yourself from the workspace:
+### Configure the deployment
+
+Edit `<workspace>/.env` and set `TENSORRT_LLM_HOST` to your endpoint:
+
+```bash
+$EDITOR /tmp/jaato-tensorrt-smoke/.env
+# TENSORRT_LLM_HOST=http://192.168.1.50:8000
+```
+
+### Run the smoke
+
+Either run from the workspace:
 
 ```bash
 cd /tmp/jaato-tensorrt-smoke
@@ -80,103 +101,94 @@ cd /tmp/jaato-tensorrt-smoke
 <repo>/.venv/bin/python smoke_tools.py   # tools smoke
 ```
 
-### Bootstrap + run in one shot
-
-Pass `--run chat` or `--run tools` to also invoke the harness after the
-bootstrap step:
+…or re-invoke `bootstrap.sh` with `--run chat` / `--run tools` to do the
+bootstrap + run step in one command:
 
 ```bash
-./bootstrap.sh --host http://192.168.1.50:8000 \
-               --model Qwen/Qwen2.5-7B-Instruct \
-               --run chat
+./bootstrap.sh --run chat
+./bootstrap.sh --run tools
 ```
 
-The daemon must already be listening on `/tmp/jaato.sock` either way
-(`jaato-server --ipc-socket /tmp/jaato.sock --daemon` — the script
-doesn't manage daemon lifecycle).
+`bootstrap.sh` is idempotent — re-running never clobbers an existing
+workspace `.env` (your edits survive). The harness scripts and profile
+templates get re-copied each time.
 
-If you want full control over each step, the manual flow below shows
-what `bootstrap.sh` is doing under the hood.
+The script does not manage daemon lifecycle. Start the daemon
+separately before running the smoke.
 
 ## Manual path
 
-### 1. Copy the templates into your workspace
+If you want full control over each step (or you're scripting the
+bootstrap into a larger setup), here's what `bootstrap.sh` is doing
+under the hood.
 
-From the workspace root:
+### 1. Create the workspace dirs
 
 ```bash
-mkdir -p .jaato/profiles .jaato/agents
-cp jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/.jaato.example/profiles/*.json .jaato/profiles/
-cp jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/.jaato.example/agents/*.md .jaato/agents/
+WS=/tmp/jaato-tensorrt-smoke
+mkdir -p "$WS/.jaato/profiles" "$WS/.jaato/agents"
 ```
 
-### 2. Fill in the placeholders in **both** profiles
-
-Edit `.jaato/profiles/tensorrt-llm-smoke.json` and
-`.jaato/profiles/tensorrt-llm-tools.json`:
-
-| Placeholder | Replace with |
-|---|---|
-| `REPLACE_WITH_MODEL_ID_FROM_v1_models` | The exact `id` field returned by `GET /v1/models` on the remote endpoint. |
-| `http://REMOTE_HOST:8000` | The remote host's LAN address + port. |
-
-Optional knobs (apply to both profiles):
-
-- `context_length` (default 8192) — match the engine's `max_seq_len`.
-  `trtllm-serve`'s `/v1/models` does not surface this, so you must
-  set it explicitly for long-context engines.
-- `plugin_configs.tensorrt_llm.api_token` — only if the endpoint is
-  fronted by an auth proxy. A `pass://` URI resolves daemon-side; a
-  literal token also works but don't commit it.
-
-### 3. Start the daemon
+### 2. Copy the templates
 
 ```bash
-.venv/bin/jaato-server --ipc-socket /tmp/jaato.sock --daemon
-.venv/bin/jaato-server --status
+SMOKE=jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke
+cp -f "$SMOKE/smoke.py" "$SMOKE/smoke_tools.py" "$WS/"
+cp -f "$SMOKE/.jaato.example/profiles/"*.json "$WS/.jaato/profiles/"
+cp -f "$SMOKE/.jaato.example/agents/"*.md "$WS/.jaato/agents/"
+cp -f "$SMOKE/.env.example" "$WS/.env"      # only if you don't already have .env
+```
+
+### 3. Configure the deployment
+
+Edit `$WS/.env`:
+
+```
+TENSORRT_LLM_HOST=http://<your-host>:<your-port>
 ```
 
 ### 4. Run the chat smoke first
 
-Either `cd` into the workspace and run the harness from there:
-
 ```bash
-cd /path/to/your/workspace
-.venv/bin/python /path/to/jaato/jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke.py
-```
-
-…or pass the workspace path explicitly:
-
-```bash
-.venv/bin/python jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke.py \
-    --workspace /path/to/your/workspace
+cd "$WS"
+<repo>/.venv/bin/python smoke.py
 ```
 
 Expected: one sentence of model output, exit 0.
 
 ### 5. Then run the tools smoke
 
-Same workspace-resolution rules as the chat smoke:
-
 ```bash
-.venv/bin/python jaato-server/shared/plugins/model_provider/tensorrt_llm/smoke/smoke_tools.py \
-    --workspace /path/to/your/workspace
+cd "$WS"
+<repo>/.venv/bin/python smoke_tools.py
 ```
 
-Expected: a `cli_based_tool` call running `ls /tmp`, followed by a one-sentence
-summary, exit 0. The full conversation including the tool call streams to stdout
-via the SDK's output events.
+Expected: a `cli_based_tool` call running `ls /tmp`, followed by a
+one-sentence summary, exit 0. The full conversation including the tool
+call streams to stdout via the SDK's output events.
 
-If the model loops or refuses to call the tool, that's a **model fidelity**
-issue, not a provider bug — try a stronger tool-calling model (Qwen2.5-7B-Instruct
-and Llama-3.1-8B-Instruct work well; Mistral-7B-v0.3 is weak on tool calls).
+If the model loops or refuses to call the tool, that's a **model
+fidelity** issue, not a provider bug — try a stronger tool-calling
+model (Qwen2.5-7B-Instruct and Llama-3.1-8B-Instruct work well;
+Mistral-7B-v0.3 is weak on tool calls).
+
+### Other knobs
+
+- **`context_length`** (default 8192) — match the engine's `max_seq_len`.
+  `trtllm-serve`'s `/v1/models` does not surface this, so set it
+  explicitly for long-context engines.
+- **`plugin_configs.tensorrt_llm.api_token`** — only if the endpoint
+  is fronted by an auth proxy. A `pass://` URI resolves daemon-side; a
+  literal token also works but don't commit it.
+- **Different model** — edit `model` in the profile to whatever
+  `/v1/models` reports.
 
 ## Failure-class triage
 
 | Exit | Symptom | First thing to check |
 |---|---|---|
-| 1 | `TensorRTLLMConnectionError` | Network / firewall: `curl http://REMOTE_HOST:PORT/health` from the jaato host. |
-| 1 | `TensorRTLLMModelNotFoundError` | `model` in the profile doesn't match `/v1/models`. Copy the exact `id`. |
+| 1 | `TensorRTLLMConnectionError` | Network / firewall: `curl http://<host>:<port>/health` from the jaato host. Confirm `TENSORRT_LLM_HOST` in workspace `.env` matches. |
+| 1 | `TensorRTLLMModelNotFoundError` | `model` in the profile doesn't match `/v1/models`. Edit the profile. |
 | 1 | `TensorRTLLMAuthenticationError` | Token missing or wrong. Test the resolved bearer with `curl -H "Authorization: Bearer <token>" ...` before touching framework code. |
 | 2 | "connect failed" | Daemon isn't listening on `/tmp/jaato.sock` — re-run `jaato-server --status`. |
 | 3 | Timeout, no output | Engine is loading on the remote host (cold start), or the model is hung. Check `trtllm-serve` logs on the remote. Bump `TURN_TIMEOUT_SECONDS` in the harness if cold-start exceeds 120s (the tools smoke uses 180s by default since tool round-trips take longer). |
