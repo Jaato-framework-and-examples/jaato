@@ -1,0 +1,24 @@
+name: ollama-tools
+description: >
+  Tool-calling smoke test for the ollama provider. Exercises the
+  Anthropic tools shape via the cli plugin — one tool call followed
+  by a one-sentence summary. Permission policy is default-allow so
+  the harness needs no interactive permission handling.
+
+model: qwen3:8b
+provider: ollama
+
+max_turns: 4
+
+suppress_base_instructions: true
+
+plugins:
+  - cli
+
+plugin_configs:
+  ollama:
+    host: "${OLLAMA_HOST}"
+    context_length: 32768
+  permission:
+    policy:
+      defaultPolicy: allow

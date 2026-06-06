@@ -24,8 +24,8 @@ The smoke separates **profile knobs** (model, plugins, GC) from
 
 | Knob | Lives in | Why |
 |---|---|---|
-| `model` | profile JSON (literal) | Model choice IS the profile choice. To target a different model, edit the profile or copy it to a new file. |
-| `plugins`, `plugin_configs.*` | profile JSON | Pure profile concern. |
+| `model` | profile YAML (literal) | Model choice IS the profile choice. To target a different model, edit the profile or copy it to a new file. |
+| `plugins`, `plugin_configs.*` | profile YAML | Pure profile concern. |
 | `host` | workspace `.env` as `OLLAMA_HOST`, referenced from profile as `${OLLAMA_HOST}` | Endpoint detail varies per deployment (local vs LAN box vs proxy-fronted host), not per profile. Resolved at profile-load time via the framework's `${VAR}` substitution chain (`shared/plugins/subagent/config.py:_expand_string`). |
 
 The profiles ship with `qwen3:8b` baked in (a small instruct-tuned model
@@ -48,8 +48,8 @@ smoke/
 ├── .env.example                      # workspace env template
 └── .jaato.example/                   # workspace .jaato/ template
     ├── profiles/
-    │   ├── ollama-smoke.json         # pure chat, no tools, no GC
-    │   └── ollama-tools.json         # cli plugin, default-allow permission
+    │   ├── ollama-smoke.yaml         # pure chat, no tools, no GC
+    │   └── ollama-tools.yaml         # cli plugin, default-allow permission
     └── agents/
         ├── ollama-smoke.md           # one-sentence-responder persona
         └── ollama-tools.md           # tool-using-then-summarize persona
@@ -144,7 +144,7 @@ mkdir -p "$WS/.jaato/profiles" "$WS/.jaato/agents"
 ```bash
 SMOKE=jaato-server/shared/plugins/model_provider/ollama/smoke
 cp -f "$SMOKE/smoke.py" "$SMOKE/smoke_tools.py" "$WS/"
-cp -f "$SMOKE/.jaato.example/profiles/"*.json "$WS/.jaato/profiles/"
+cp -f "$SMOKE/.jaato.example/profiles/"*.yaml "$WS/.jaato/profiles/"
 cp -f "$SMOKE/.jaato.example/agents/"*.md "$WS/.jaato/agents/"
 cp -f "$SMOKE/.env.example" "$WS/.env"      # only if you don't already have .env
 ```
@@ -204,3 +204,4 @@ and base completions models tend to be weak on tool calls).
 | 2 | "connect failed" | Daemon isn't listening on `/tmp/jaato.sock` — re-run `jaato-server --status`. |
 | 3 | Timeout, no output | Model is loading from disk (cold start), or the model is hung. Check `ollama ps` on the remote. Bump `TURN_TIMEOUT_SECONDS` in the harness if cold-start exceeds 120s (the tools smoke uses 180s by default since tool round-trips take longer). |
 | 0 but no tool call (`smoke_tools.py`) | The model answered without calling `cli_based_tool` — usually a fidelity issue with smaller / non-instruct models. Try a stronger tool-calling model. |
+| 1 with `NudgeExhausted: Agent loop exhausted N completion nudges` | The model responded with text but didn't call `signal_completion` to end the turn. **The wire worked** — the smoke validates provider connectivity, and a coherent text reply proves the wire end-to-end. NudgeExhausted on a weak tool-caller (Qwen-7B on trtllm-serve, small ollama models, etc.) is a **model-fidelity result, not a smoke failure**. Capable models (Claude Sonnet 4.5, GPT-4o) follow the persona's `signal_completion` instruction cleanly. The persona pattern (instruct one sentence + signal_completion call) is the canonical shape; smaller models may need richer pattern (front-load imperative, forbid alternatives) but example payloads can backfire — weak models echo the example as natural text. |
