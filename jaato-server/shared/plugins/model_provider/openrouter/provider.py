@@ -331,6 +331,15 @@ class OpenRouterProvider:
         self._temperature: Optional[float] = None
         self._top_p: Optional[float] = None
         self._top_k: Optional[int] = None
+        # ``api_params.max_tokens`` — cap on response size, forwarded as the
+        # OpenAI Chat Completions ``max_tokens`` top-level field.  ``None``
+        # ⇒ let the upstream apply its own default (typically the model's
+        # full output budget, e.g. ~64K for Claude Sonnet 4.5).  Setting
+        # this is required to fit requests within OpenRouter's pre-flight
+        # credit-vs-max-tokens check on low-balance accounts (the
+        # 402 "you requested up to N tokens but can only afford M" error
+        # is driven by this knob, not by actual consumption).
+        self._max_tokens: Optional[int] = None
 
         # Strict tool-use mode (server 0.6.118+, 2026-05-16).  When True,
         # ``tool_schema_to_openai`` emits ``"strict": True`` as a sibling
@@ -676,6 +685,9 @@ class OpenRouterProvider:
         strict_tools_extra = _knob("strict_tools", layer=api_params)
         if strict_tools_extra is not None:
             self._strict_tools = bool(strict_tools_extra)
+        max_tokens_extra = _knob("max_tokens", layer=api_params)
+        if max_tokens_extra is not None:
+            self._max_tokens = int(max_tokens_extra)
 
         # Thinking knobs — framework abstractions that translate to
         # OpenRouter's ``reasoning`` extension on the wire.  Live under
@@ -1075,6 +1087,8 @@ class OpenRouterProvider:
             kwargs["top_p"] = self._top_p
         if self._top_k is not None:
             kwargs["extra_body"] = {"top_k": self._top_k}
+        if self._max_tokens is not None:
+            kwargs["max_tokens"] = self._max_tokens
 
         # OpenRouter request-body extras (e.g. ``provider`` routing).  The
         # OpenAI SDK has no typed parameter for these, so we pass them
