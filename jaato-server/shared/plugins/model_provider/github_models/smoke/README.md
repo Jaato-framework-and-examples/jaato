@@ -23,8 +23,8 @@ The smoke separates **profile knobs** (model, plugins, GC) from
 
 | Knob | Lives in | Why |
 |---|---|---|
-| `model` | profile JSON (literal) | Model choice IS the profile choice. To target a different model (e.g. `anthropic/claude-3.5-sonnet`, `meta/Llama-3.3-70B-Instruct`), edit the profile or copy it to a new file. |
-| `plugins`, `plugin_configs.*` | profile JSON | Pure profile concern. |
+| `model` | profile YAML (literal) | Model choice IS the profile choice. To target a different model (e.g. `anthropic/claude-3.5-sonnet`, `meta/Llama-3.3-70B-Instruct`), edit the profile or copy it to a new file. |
+| `plugins`, `plugin_configs.*` | profile YAML | Pure profile concern. |
 | `GITHUB_TOKEN` | workspace `.env`, referenced from profile as `${GITHUB_TOKEN}` in `plugin_configs.github_models.api_key` | Credential varies per deployment, not per profile. Resolved at profile-load time via the framework's `${VAR}` substitution chain (`shared/plugins/subagent/config.py:_expand_string`). |
 
 The profiles ship with `openai/gpt-4o` baked in. To target a different
@@ -44,8 +44,8 @@ smoke/
 ├── .env.example                           # workspace env template
 └── .jaato.example/                        # workspace .jaato/ template
     ├── profiles/
-    │   ├── github-models-smoke.json       # pure chat, no tools, no GC
-    │   └── github-models-tools.json       # cli plugin, default-allow permission
+    │   ├── github-models-smoke.yaml       # pure chat, no tools, no GC
+    │   └── github-models-tools.yaml       # cli plugin, default-allow permission
     └── agents/
         ├── github-models-smoke.md         # one-sentence-responder persona
         └── github-models-tools.md         # tool-using-then-summarize persona
@@ -142,7 +142,7 @@ mkdir -p "$WS/.jaato/profiles" "$WS/.jaato/agents"
 ```bash
 SMOKE=jaato-server/shared/plugins/model_provider/github_models/smoke
 cp -f "$SMOKE/smoke.py" "$SMOKE/smoke_tools.py" "$WS/"
-cp -f "$SMOKE/.jaato.example/profiles/"*.json "$WS/.jaato/profiles/"
+cp -f "$SMOKE/.jaato.example/profiles/"*.yaml "$WS/.jaato/profiles/"
 cp -f "$SMOKE/.jaato.example/agents/"*.md "$WS/.jaato/agents/"
 cp -f "$SMOKE/.env.example" "$WS/.env"      # only if you don't already have .env
 ```
@@ -204,3 +204,4 @@ model like `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`.
 | 2 | "connect failed" | Daemon isn't listening on `/tmp/jaato.sock` — re-run `jaato-server --status`. |
 | 3 | Timeout, no output | Cold-start latency or the model is hung. Bump `TURN_TIMEOUT_SECONDS` in the harness (the tools smoke uses 180s by default since tool round-trips take longer). |
 | 0 but no tool call (`smoke_tools.py`) | The model answered without calling `cli_based_tool` — usually a fidelity issue with weaker models. Try `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`. |
+| 1 with `NudgeExhausted: Agent loop exhausted N completion nudges` | The model responded with text but didn't call `signal_completion` to end the turn. **The wire worked** — the smoke validates provider connectivity, and a coherent text reply proves the wire end-to-end. NudgeExhausted on a weak tool-caller (smaller github_models entries, etc.) is a **model-fidelity result, not a smoke failure**. Capable models (Claude Sonnet 4.5, GPT-4o) follow the persona's `signal_completion` instruction cleanly. The persona pattern (instruct one sentence + signal_completion call) is the canonical shape; smaller models may need richer pattern (front-load imperative, forbid alternatives) but example payloads can backfire — weak models echo the example as natural text. |
