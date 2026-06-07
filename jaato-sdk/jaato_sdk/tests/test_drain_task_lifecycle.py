@@ -199,3 +199,63 @@ async def test_back_to_back_events_then_create_session_no_race():
     assert len(captured) == 1, (
         "create_session must still send the session.new CommandRequest"
     )
+
+
+# =====================================================================
+# Regression: ErrorEvent during session.new must terminate the wait
+# regardless of the ``recoverable`` flag (Bug-B, 2026-06-06).
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_await_session_info_terminates_on_recoverable_error_event():
+    """All ``session.new`` failures (profile-not-found, agent-not-found,
+    invalid spec, spawn-payload validation) are emitted by the daemon
+    with ``ErrorEvent.recoverable=True`` so the client connection
+    survives.  Pre-fix the SDK filtered for ``not recoverable`` and
+    silently swallowed those errors — create_session would hang until
+    the asyncio timeout fired, producing the "daemon stalled" symptom.
+    The fix treats ANY ``ErrorEvent`` as terminal for this wait.
+    """
+    client = _make_client()
+    task = asyncio.create_task(client._await_session_info())
+    await asyncio.sleep(0)
+
+    _broadcast(
+        client,
+        ErrorEvent(
+            error="Profile 'missing/profile' not found in any profile set",
+            error_type="ProfileNotFoundError",
+            recoverable=True,
+        ),
+    )
+
+    sid = await asyncio.wait_for(task, 1.0)
+    assert sid is None, (
+        "create_session must resolve to None when the daemon emits any "
+        "ErrorEvent during session.new — recoverable=True is the "
+        "daemon-side convention for 'connection survives' but is still "
+        "terminal for this single create_session call"
+    )
+
+
+@pytest.mark.asyncio
+async def test_await_session_info_terminates_on_non_recoverable_error_event():
+    """Symmetric regression: the original ``not recoverable`` filter
+    correctly terminated the wait; the fix must not regress that case.
+    """
+    client = _make_client()
+    task = asyncio.create_task(client._await_session_info())
+    await asyncio.sleep(0)
+
+    _broadcast(
+        client,
+        ErrorEvent(
+            error="Internal daemon failure",
+            error_type="RuntimeError",
+            recoverable=False,
+        ),
+    )
+
+    sid = await asyncio.wait_for(task, 1.0)
+    assert sid is None
