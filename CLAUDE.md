@@ -622,9 +622,9 @@ Available models include Llama 3.3/3.1, DeepSeek-R1, Nemotron, and other NIM cat
 ### NVIDIA TensorRT-LLM (`trtllm-serve`)
 | Variable | Purpose |
 |----------|---------|
-| `TENSORRT_LLM_HOST` | trtllm-serve URL (default: `http://localhost:8000`) |
+| `TENSORRT_LLM_HOST` | trtllm-serve URL (**required** — e.g. `http://localhost:8000`; no localhost fallback) |
 | `TENSORRT_LLM_MODEL` | Default model name (matches the engine's `id` in `/v1/models`) |
-| `TENSORRT_LLM_CONTEXT_LENGTH` | Override context window size (trtllm-serve does not surface `max_seq_len` in `/v1/models`) |
+| `TENSORRT_LLM_CONTEXT_LENGTH` | Context window size (**required** — trtllm-serve does not surface `max_seq_len` in `/v1/models`) |
 | `TENSORRT_LLM_API_TOKEN` | Optional bearer token (only when fronted by an auth proxy — trtllm-serve has no built-in API key mechanism) |
 
 Talks to a `trtllm-serve` instance the user has already launched. Each `trtllm-serve` process hosts exactly one engine, built out-of-band with `trtllm-build`. Provider is **passive** — no in-band load endpoint analogous to LM Studio's `/api/v1/models/load`.
@@ -652,9 +652,9 @@ Benefits:
 ### vLLM (`vllm serve`)
 | Variable | Purpose |
 |----------|---------|
-| `VLLM_HOST` | vLLM server URL (default: `http://localhost:8000`) |
+| `VLLM_HOST` | vLLM server URL (**required** — e.g. `http://localhost:8000`; no localhost fallback) |
 | `VLLM_MODEL` | Default model name (matches the model's `id` in `/v1/models`) |
-| `VLLM_CONTEXT_LENGTH` | Override context window size — required for long-context engines (vLLM's `/v1/models` does not surface `max_model_len`; verified against vLLM stable docs 2026-06-07 via context7) |
+| `VLLM_CONTEXT_LENGTH` | Context window size (**required** — vLLM's `/v1/models` does not surface `max_model_len`; verified against vLLM stable docs 2026-06-07 via context7) |
 | `VLLM_API_TOKEN` | Optional bearer token (only when the server was launched with `--api-key <token>` — vLLM's native bearer auth — or fronted by an auth proxy) |
 
 Talks to a vLLM OpenAI-compatible server (`vllm.entrypoints.openai.api_server`) the user has already launched. Provider is **passive** — no in-band model load endpoint; model choice (`--model`), context length (`--max-model-len`), and the tool-call parser (`--enable-auto-tool-choice --tool-call-parser <name>`) all live at server-launch boundary.

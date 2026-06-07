@@ -70,9 +70,9 @@ from ..nim.converters import (
     tool_schemas_to_openai,
 )
 from .env import (
-    DEFAULT_CONTEXT_LENGTH,
-    DEFAULT_CONTROL_URL,
-    DEFAULT_OPENAI_URL,
+    ENV_CONTEXT_LENGTH,
+    ENV_HOST,
+    ENV_OPENAI_URL,
     _origin_for_host,
     DEFAULT_CONTROL_PORT,
     DEFAULT_OPENAI_PORT,
@@ -148,8 +148,11 @@ class TritonProvider:
         self._client: Optional["OpenAI"] = None
         self._model_name: Optional[str] = None
 
-        self._openai_url: str = DEFAULT_OPENAI_URL
-        self._control_url: str = DEFAULT_CONTROL_URL
+        # URLs + context_length are required at session init time; the
+        # empty-string / None sentinels here are placeholders until
+        # ``initialize()`` validates them.  No localhost / 8K fallback.
+        self._openai_url: str = ""
+        self._control_url: str = ""
         self._api_token: Optional[str] = None
         self._auth_info: str = ""
 
@@ -231,6 +234,18 @@ class TritonProvider:
             self._context_length_override = int(context_extra)
         else:
             self._context_length_override = resolve_context_length()
+        if not self._context_length_override:
+            raise ValueError(
+                f"Triton provider: context_length is not configured.  "
+                f"Triton's model config does not carry a standard "
+                f"'context length' field (backend-specific — TRT-LLM "
+                f"has max_seq_len, vLLM has max_model_len, etc.), so the "
+                f"framework cannot auto-discover it.  Set "
+                f"{ENV_CONTEXT_LENGTH} in the environment, or "
+                f"plugin_configs.triton.context_length in the profile.  "
+                f"No hardcoded fallback exists per the project's "
+                f"no-fallback rule."
+            )
 
         load = config.extra.get("load")
         if load is not None and not isinstance(load, dict):
@@ -256,8 +271,11 @@ class TritonProvider:
     def _resolve_urls_from_config(self, config: ProviderConfig) -> None:
         """Pick OpenAI + control URLs from config.extra, falling back to env.
 
-        Precedence: explicit ``openai_url``/``control_url`` keys > the
-        ``host`` shorthand (with default ports) > env vars > defaults.
+        Precedence: explicit ``openai_url`` / ``control_url`` keys >
+        the ``host`` shorthand (with the canonical Triton ports) > env
+        vars.  When NEITHER explicit URLs NOR the host shorthand NOR
+        the env vars provide a value, ``ValueError`` is raised — no
+        localhost fallback per the project's no-fallback rule.
         """
         env_openai, env_control = resolve_urls()
 
@@ -269,15 +287,36 @@ class TritonProvider:
             self._openai_url = explicit_openai.rstrip("/")
         elif host_shorthand:
             self._openai_url = _origin_for_host(host_shorthand, DEFAULT_OPENAI_PORT)
-        else:
+        elif env_openai:
             self._openai_url = env_openai
+        else:
+            raise ValueError(
+                f"Triton provider: OpenAI frontend URL is not configured.  "
+                f"Set {ENV_OPENAI_URL} (or {ENV_HOST} for a shorthand "
+                f"using the canonical port {DEFAULT_OPENAI_PORT}) in the "
+                f"environment, or plugin_configs.triton.openai_url / "
+                f"plugin_configs.triton.host in the profile.  No "
+                f"hardcoded localhost fallback exists per the project's "
+                f"no-fallback rule."
+            )
 
         if explicit_control:
             self._control_url = explicit_control.rstrip("/")
         elif host_shorthand:
             self._control_url = _origin_for_host(host_shorthand, DEFAULT_CONTROL_PORT)
-        else:
+        elif env_control:
             self._control_url = env_control
+        else:
+            raise ValueError(
+                f"Triton provider: control (KServe v2) URL is not "
+                f"configured.  Set TRITON_CONTROL_URL (or {ENV_HOST} for "
+                f"a shorthand using the canonical port "
+                f"{DEFAULT_CONTROL_PORT}) in the environment, or "
+                f"plugin_configs.triton.control_url / "
+                f"plugin_configs.triton.host in the profile.  No "
+                f"hardcoded localhost fallback exists per the project's "
+                f"no-fallback rule."
+            )
 
     def _create_client(self) -> "OpenAI":
         """Build the OpenAI client pointing at Triton's OpenAI frontend.
@@ -793,18 +832,24 @@ class TritonProvider:
     def get_context_limit(self) -> int:
         """Return the context window size for the currently connected model.
 
-        Priority:
-            1. Explicit ``context_length`` override from profile/env
-            2. Conservative default (8192)
+        Returns the value validated at ``initialize()`` time (sourced
+        from ``plugin_configs.triton.context_length`` or
+        ``TRITON_CONTEXT_LENGTH``).  Triton's per-model config is too
+        backend-specific for reliable auto-discovery (TRT-LLM exposes
+        ``max_seq_len``, vLLM exposes ``max_model_len``, ONNX/PyTorch
+        backends have no equivalent concept), so the value must come
+        from the operator — ``initialize()`` raises if missing.
 
-        Triton's per-model config is too backend-specific for reliable
-        auto-discovery — TRT-LLM exposes ``max_seq_len``, vLLM exposes
-        ``max_model_len``, ONNX/PyTorch backends have no equivalent
-        concept.  Users set this explicitly.
+        Raises:
+            RuntimeError: When called before ``initialize()`` has run.
         """
-        if self._context_length_override:
-            return self._context_length_override
-        return DEFAULT_CONTEXT_LENGTH
+        if self._context_length_override is None:
+            raise RuntimeError(
+                "Triton provider: get_context_limit() called before "
+                "initialize() set the override.  This is a programmer "
+                "error — the provider must be connected first."
+            )
+        return self._context_length_override
 
     def get_token_usage(self) -> TokenUsage:
         """Token usage from the most recent completion."""

@@ -17,8 +17,6 @@ import pytest
 
 from shared.plugins.model_provider.base import ProviderConfig
 from shared.plugins.model_provider.tensorrt_llm.env import (
-    DEFAULT_CONTEXT_LENGTH,
-    DEFAULT_HOST,
     resolve_api_token,
     resolve_context_length,
     resolve_host,
@@ -83,6 +81,18 @@ def _route_get(*, health_resp=None, models_resp=None):
     return _route
 
 
+@pytest.fixture(autouse=True)
+def _trtllm_env_defaults(monkeypatch):
+    """Autouse: provide canonical env values so ``initialize()`` doesn't
+    fail-fast on missing host/context_length in tests that aren't
+    specifically exercising the no-fallback rule.  Tests that need to
+    assert the fail-fast behavior call ``monkeypatch.delenv(...)``
+    explicitly in their body to override this fixture.
+    """
+    monkeypatch.setenv("TENSORRT_LLM_HOST", "http://test.local:8000")
+    monkeypatch.setenv("TENSORRT_LLM_CONTEXT_LENGTH", "8192")
+
+
 # ============================================================
 # env.py
 # ============================================================
@@ -90,9 +100,13 @@ def _route_get(*, health_resp=None, models_resp=None):
 
 class TestEnv:
 
-    def test_host_default_when_env_missing(self, monkeypatch):
+    def test_host_returns_none_when_env_missing(self, monkeypatch):
+        """No hardcoded localhost fallback — ``resolve_host`` returns
+        ``None`` when the env var is unset, and the caller
+        (``TensorRTLLMProvider.initialize``) fails fast.  See the
+        project's "no fallback" rule."""
         monkeypatch.delenv("TENSORRT_LLM_HOST", raising=False)
-        assert resolve_host() == DEFAULT_HOST
+        assert resolve_host() is None
 
     def test_host_from_env(self, monkeypatch):
         monkeypatch.setenv("TENSORRT_LLM_HOST", "http://gpu-box:8000")
@@ -345,8 +359,11 @@ class TestConnect:
 
 
 class TestContextLimit:
-    """trtllm-serve's /v1/models doesn't surface max_seq_len, so the only
-    sources are explicit override and the conservative default."""
+    """trtllm-serve's /v1/models doesn't surface max_seq_len, so the
+    value must come from either the profile-level ``context_length``
+    override or the ``TENSORRT_LLM_CONTEXT_LENGTH`` env var.  No
+    hardcoded fallback exists per the project's no-fallback rule —
+    ``initialize()`` fails fast when neither is set."""
 
     @patch("shared.plugins.model_provider.tensorrt_llm.provider.httpx.get")
     def test_override_wins(self, mock_get):
@@ -357,16 +374,42 @@ class TestContextLimit:
         assert provider.get_context_limit() == 131072
 
     @patch("shared.plugins.model_provider.tensorrt_llm.provider.httpx.get")
-    def test_default_used_when_no_override(self, mock_get):
+    def test_env_value_used_when_no_config_override(self, mock_get):
+        """When ``ProviderConfig`` has no ``context_length`` override,
+        the value flows from ``TENSORRT_LLM_CONTEXT_LENGTH`` (autouse
+        fixture sets it to 8192).  No hardcoded fallback inside the
+        provider."""
         mock_get.side_effect = _route_get()
         provider = TensorRTLLMProvider()
         provider.initialize(ProviderConfig())
         provider.connect("meta-llama/Llama-3.1-8B-Instruct")
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LENGTH
+        assert provider.get_context_limit() == 8192
 
-    def test_default_used_before_connect(self):
+    def test_initialize_fails_fast_when_context_length_missing(
+        self, monkeypatch,
+    ):
+        """No hardcoded fallback for context_length — ``initialize``
+        raises ``ValueError`` when neither config nor env provides one."""
+        monkeypatch.delenv("TENSORRT_LLM_CONTEXT_LENGTH", raising=False)
         provider = TensorRTLLMProvider()
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LENGTH
+        with pytest.raises(ValueError, match="context_length is not configured"):
+            provider.initialize(ProviderConfig())
+
+    def test_initialize_fails_fast_when_host_missing(self, monkeypatch):
+        """No hardcoded fallback for host — ``initialize`` raises
+        ``ValueError`` when neither config nor env provides one."""
+        monkeypatch.delenv("TENSORRT_LLM_HOST", raising=False)
+        provider = TensorRTLLMProvider()
+        with pytest.raises(ValueError, match="host is not configured"):
+            provider.initialize(ProviderConfig())
+
+    def test_get_context_limit_raises_before_initialize(self):
+        """``get_context_limit`` raises ``RuntimeError`` when called on
+        an uninitialized provider — no silent fallback to a hardcoded
+        default."""
+        provider = TensorRTLLMProvider()
+        with pytest.raises(RuntimeError, match="before initialize"):
+            provider.get_context_limit()
 
 
 # ============================================================

@@ -21,9 +21,6 @@ import pytest
 
 from shared.plugins.model_provider.base import ProviderConfig
 from shared.plugins.model_provider.triton.env import (
-    DEFAULT_CONTEXT_LENGTH,
-    DEFAULT_CONTROL_URL,
-    DEFAULT_OPENAI_URL,
     resolve_api_token,
     resolve_context_length,
     resolve_urls,
@@ -84,6 +81,19 @@ def _load_response(status: int = 200, body: str = ""):
     return resp
 
 
+@pytest.fixture(autouse=True)
+def _triton_env_defaults(monkeypatch):
+    """Autouse: provide canonical env values so ``initialize()`` doesn't
+    fail-fast on missing URLs/context_length in tests that aren't
+    specifically exercising the no-fallback rule.  Tests that need to
+    assert the fail-fast behavior call ``monkeypatch.delenv(...)``
+    explicitly in their body to override this fixture.
+    """
+    monkeypatch.setenv("TRITON_OPENAI_URL", "http://test.local:9000")
+    monkeypatch.setenv("TRITON_CONTROL_URL", "http://test.local:8000")
+    monkeypatch.setenv("TRITON_CONTEXT_LENGTH", "8192")
+
+
 # ============================================================
 # env.py — URL resolution
 # ============================================================
@@ -91,12 +101,16 @@ def _load_response(status: int = 200, body: str = ""):
 
 class TestEnvUrls:
 
-    def test_defaults_when_no_env(self, monkeypatch):
+    def test_returns_none_when_no_env(self, monkeypatch):
+        """No hardcoded localhost fallback — ``resolve_urls`` returns
+        ``(None, None)`` when neither URL env vars nor HOST shorthand
+        are set, and the caller (``TritonProvider._resolve_urls_from_config``)
+        fails fast.  See the project's "no fallback" rule."""
         for var in ("TRITON_OPENAI_URL", "TRITON_CONTROL_URL", "TRITON_HOST"):
             monkeypatch.delenv(var, raising=False)
         openai, control = resolve_urls()
-        assert openai == DEFAULT_OPENAI_URL
-        assert control == DEFAULT_CONTROL_URL
+        assert openai is None
+        assert control is None
 
     def test_host_shorthand_derives_both_urls_with_default_ports(self, monkeypatch):
         for var in ("TRITON_OPENAI_URL", "TRITON_CONTROL_URL"):
@@ -453,6 +467,12 @@ class TestConnectActive:
 
 
 class TestContextLimit:
+    """Triton's model config doesn't carry a standard "context length"
+    field (backend-specific), so the value must come from either the
+    profile-level ``context_length`` override or the
+    ``TRITON_CONTEXT_LENGTH`` env var.  No hardcoded fallback exists
+    per the project's no-fallback rule — ``initialize()`` fails fast
+    when neither is set."""
 
     @patch("shared.plugins.model_provider.triton.provider.httpx.post")
     @patch("shared.plugins.model_provider.triton.provider.httpx.get")
@@ -464,9 +484,46 @@ class TestContextLimit:
         provider.connect("llama-3.1-8b-instruct")
         assert provider.get_context_limit() == 131072
 
-    def test_default_used_when_no_override(self):
+    @patch("shared.plugins.model_provider.triton.provider.httpx.post")
+    @patch("shared.plugins.model_provider.triton.provider.httpx.get")
+    def test_env_value_used_when_no_config_override(self, mock_get, mock_post):
+        """When ``ProviderConfig`` has no ``context_length`` override,
+        the value flows from ``TRITON_CONTEXT_LENGTH`` (autouse fixture
+        sets it to 8192).  No hardcoded fallback inside the provider."""
+        mock_get.return_value = _health_response()
+        mock_post.return_value = _index_response()
         provider = TritonProvider()
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LENGTH
+        provider.initialize(ProviderConfig())
+        provider.connect("llama-3.1-8b-instruct")
+        assert provider.get_context_limit() == 8192
+
+    def test_initialize_fails_fast_when_context_length_missing(
+        self, monkeypatch,
+    ):
+        """No hardcoded fallback for context_length — ``initialize``
+        raises ``ValueError`` when neither config nor env provides one."""
+        monkeypatch.delenv("TRITON_CONTEXT_LENGTH", raising=False)
+        provider = TritonProvider()
+        with pytest.raises(ValueError, match="context_length is not configured"):
+            provider.initialize(ProviderConfig())
+
+    def test_initialize_fails_fast_when_urls_missing(self, monkeypatch):
+        """No hardcoded localhost fallback for URLs — ``initialize``
+        raises ``ValueError`` when neither URL env vars nor HOST
+        shorthand are set."""
+        for var in ("TRITON_OPENAI_URL", "TRITON_CONTROL_URL", "TRITON_HOST"):
+            monkeypatch.delenv(var, raising=False)
+        provider = TritonProvider()
+        with pytest.raises(ValueError, match="OpenAI frontend URL is not configured"):
+            provider.initialize(ProviderConfig())
+
+    def test_get_context_limit_raises_before_initialize(self):
+        """``get_context_limit`` raises ``RuntimeError`` when called on
+        an uninitialized provider — no silent fallback to a hardcoded
+        default."""
+        provider = TritonProvider()
+        with pytest.raises(RuntimeError, match="before initialize"):
+            provider.get_context_limit()
 
 
 # ============================================================

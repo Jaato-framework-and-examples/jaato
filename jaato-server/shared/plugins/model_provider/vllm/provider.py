@@ -72,8 +72,8 @@ from ..nim.converters import (
     tool_schemas_to_openai,
 )
 from .env import (
-    DEFAULT_CONTEXT_LENGTH,
-    DEFAULT_HOST,
+    ENV_CONTEXT_LENGTH,
+    ENV_HOST,
     resolve_api_token,
     resolve_context_length,
     resolve_host,
@@ -127,7 +127,10 @@ class VLLMProvider:
         self._client: Optional["OpenAI"] = None
         self._model_name: Optional[str] = None
 
-        self._host: str = DEFAULT_HOST
+        # Host + context_length are required at session init time; the
+        # empty-string / None sentinels here are placeholders until
+        # ``initialize()`` validates them.  No localhost / 8K fallback.
+        self._host: str = ""
         self._api_token: Optional[str] = None
         self._auth_info: str = ""
 
@@ -207,7 +210,15 @@ class VLLMProvider:
         if config is None:
             config = ProviderConfig()
 
-        self._host = (config.extra.get("host") or resolve_host()).rstrip("/")
+        host_value = config.extra.get("host") or resolve_host()
+        if not host_value:
+            raise ValueError(
+                f"vLLM provider: host is not configured.  Set {ENV_HOST} "
+                f"in the environment, or plugin_configs.vllm.host in the "
+                f"profile.  No hardcoded localhost fallback exists per "
+                f"the project's no-fallback rule."
+            )
+        self._host = host_value.rstrip("/")
         self._api_token = config.extra.get("api_token") or resolve_api_token()
 
         context_extra = config.extra.get("context_length")
@@ -215,6 +226,16 @@ class VLLMProvider:
             self._context_length_override = int(context_extra)
         else:
             self._context_length_override = resolve_context_length()
+        if not self._context_length_override:
+            raise ValueError(
+                f"vLLM provider: context_length is not configured.  vLLM's "
+                f"GET /v1/models does not surface max_model_len, so the "
+                f"framework cannot auto-discover it.  Set "
+                f"{ENV_CONTEXT_LENGTH} in the environment, or "
+                f"plugin_configs.vllm.context_length in the profile.  No "
+                f"hardcoded fallback exists per the project's no-fallback "
+                f"rule."
+            )
 
         max_tokens_extra = config.extra.get("max_tokens")
         if max_tokens_extra is not None:
@@ -713,20 +734,24 @@ class VLLMProvider:
     def get_context_limit(self) -> int:
         """Return the context window size for the currently connected model.
 
-        Priority:
-            1. Explicit ``context_length`` override from profile/env
-            2. Conservative default (8192)
+        Returns the value validated at ``initialize()`` time (sourced
+        from ``plugin_configs.vllm.context_length`` or
+        ``VLLM_CONTEXT_LENGTH``).  vLLM's ``GET /v1/models`` does not
+        surface per-engine context length (verified against vLLM
+        stable docs 2026-06-07 via context7 — the catalog entry shape
+        has no length field), so the value must come from the
+        operator — ``initialize()`` raises if missing.
 
-        Note: vLLM's ``GET /v1/models`` does not surface per-engine
-        context length (verified against vLLM stable docs 2026-06-07
-        via context7 — the catalog entry shape has no length field).
-        Long-context engines must set ``VLLM_CONTEXT_LENGTH`` or
-        ``plugin_configs.vllm.context_length`` to match the
-        ``--max-model-len`` flag passed at server launch.
+        Raises:
+            RuntimeError: When called before ``initialize()`` has run.
         """
-        if self._context_length_override:
-            return self._context_length_override
-        return DEFAULT_CONTEXT_LENGTH
+        if self._context_length_override is None:
+            raise RuntimeError(
+                "vLLM provider: get_context_limit() called before "
+                "initialize() set the override.  This is a programmer "
+                "error — the provider must be connected first."
+            )
+        return self._context_length_override
 
     def get_token_usage(self) -> TokenUsage:
         """Token usage from the most recent completion."""

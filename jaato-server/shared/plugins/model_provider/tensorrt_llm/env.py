@@ -4,13 +4,24 @@ The provider talks to a ``trtllm-serve`` instance over its
 OpenAI-compatible HTTP surface (``POST /v1/chat/completions``,
 ``GET /v1/models``, ``GET /health``).
 
-Environment variables:
-    TENSORRT_LLM_HOST: Server URL (default: http://localhost:8000)
-    TENSORRT_LLM_MODEL: Default model name
-    TENSORRT_LLM_CONTEXT_LENGTH: Override context window size
+Environment variables (all REQUIRED at session init time — no
+hardcoded fallbacks per the project's "no fallback" rule; missing
+values fail fast in ``TensorRTLLMProvider.initialize`` with a clear
+``ValueError`` naming the env var and profile knob to set):
+
+    TENSORRT_LLM_HOST: Server URL (e.g. ``http://localhost:8000``).
+        Override per-session via ``plugin_configs.tensorrt_llm.host``.
+    TENSORRT_LLM_MODEL: Default model name.  Override per-session via
+        the profile's top-level ``model:`` knob.
+    TENSORRT_LLM_CONTEXT_LENGTH: Context window size.  trtllm-serve's
+        ``GET /v1/models`` does not surface per-engine context length
+        (``max_seq_len`` is fixed at engine build time and not echoed
+        in the OpenAI catalog response), so this MUST be set
+        explicitly.  Override per-session via
+        ``plugin_configs.tensorrt_llm.context_length``.
     TENSORRT_LLM_API_TOKEN: Optional bearer token (only when the server
         is behind a proxy that enforces auth — trtllm-serve itself does
-        not document a built-in API key mechanism)
+        not document a built-in API key mechanism).
 """
 
 import os
@@ -22,19 +33,15 @@ ENV_MODEL = "TENSORRT_LLM_MODEL"
 ENV_CONTEXT_LENGTH = "TENSORRT_LLM_CONTEXT_LENGTH"
 ENV_API_TOKEN = "TENSORRT_LLM_API_TOKEN"
 
-DEFAULT_HOST = "http://localhost:8000"
 
-# trtllm-serve's GET /v1/models does not surface per-model context length
-# (the engine's max_seq_len is fixed at build time and not echoed in the
-# OpenAI catalog response). Fall back to a conservative value when no
-# override is provided; users running long-context engines should set
-# TENSORRT_LLM_CONTEXT_LENGTH or plugin_configs.tensorrt_llm.context_length.
-DEFAULT_CONTEXT_LENGTH = 8192
+def resolve_host() -> Optional[str]:
+    """Return the trtllm-serve server URL, or ``None`` when unset.
 
-
-def resolve_host() -> str:
-    """Return the trtllm-serve server URL."""
-    return os.environ.get(ENV_HOST, DEFAULT_HOST)
+    Caller is responsible for failing fast when this returns ``None``
+    and no profile-level override is in place — see
+    ``TensorRTLLMProvider.initialize``.
+    """
+    return os.environ.get(ENV_HOST)
 
 
 def resolve_model() -> Optional[str]:

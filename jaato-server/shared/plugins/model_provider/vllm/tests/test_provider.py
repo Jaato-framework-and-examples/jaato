@@ -20,8 +20,6 @@ import pytest
 
 from shared.plugins.model_provider.base import ProviderConfig
 from shared.plugins.model_provider.vllm.env import (
-    DEFAULT_CONTEXT_LENGTH,
-    DEFAULT_HOST,
     resolve_api_token,
     resolve_context_length,
     resolve_host,
@@ -94,6 +92,19 @@ def _route_get(*, health_resp=None, models_resp=None):
     return _route
 
 
+@pytest.fixture(autouse=True)
+def _vllm_env_defaults(monkeypatch):
+    """Autouse: provide canonical env values so ``initialize()`` doesn't
+    fail-fast on missing host/context_length in tests that aren't
+    specifically exercising the no-fallback rule.  Tests that need to
+    assert the fail-fast behavior call
+    ``monkeypatch.delenv(...)`` explicitly in their body to override
+    this fixture.
+    """
+    monkeypatch.setenv("VLLM_HOST", "http://test.local:8000")
+    monkeypatch.setenv("VLLM_CONTEXT_LENGTH", "8192")
+
+
 # ============================================================
 # env.py
 # ============================================================
@@ -101,9 +112,13 @@ def _route_get(*, health_resp=None, models_resp=None):
 
 class TestEnv:
 
-    def test_host_default_when_env_missing(self, monkeypatch):
+    def test_host_returns_none_when_env_missing(self, monkeypatch):
+        """No hardcoded localhost fallback — ``resolve_host`` returns
+        ``None`` when the env var is unset, and the caller
+        (``VLLMProvider.initialize``) fails fast.  See the project's
+        "no fallback" rule."""
         monkeypatch.delenv("VLLM_HOST", raising=False)
-        assert resolve_host() == DEFAULT_HOST
+        assert resolve_host() is None
 
     def test_host_from_env(self, monkeypatch):
         monkeypatch.setenv("VLLM_HOST", "http://gpu-box:8000")
@@ -365,16 +380,41 @@ class TestContextLimit:
         assert provider.get_context_limit() == 131072
 
     @patch("shared.plugins.model_provider.vllm.provider.httpx.get")
-    def test_default_used_when_no_override(self, mock_get):
+    def test_env_value_used_when_no_config_override(self, mock_get):
+        """When ``ProviderConfig`` has no ``context_length`` override,
+        the value flows from ``VLLM_CONTEXT_LENGTH`` (autouse fixture
+        sets it to 8192).  No hardcoded fallback inside the provider."""
         mock_get.side_effect = _route_get()
         provider = VLLMProvider()
         provider.initialize(ProviderConfig())
         provider.connect("Qwen/Qwen2.5-7B-Instruct")
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LENGTH
+        assert provider.get_context_limit() == 8192
 
-    def test_default_used_before_connect(self):
+    def test_initialize_fails_fast_when_context_length_missing(
+        self, monkeypatch,
+    ):
+        """No hardcoded fallback for context_length — ``initialize``
+        raises ``ValueError`` when neither config nor env provides one."""
+        monkeypatch.delenv("VLLM_CONTEXT_LENGTH", raising=False)
         provider = VLLMProvider()
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LENGTH
+        with pytest.raises(ValueError, match="context_length is not configured"):
+            provider.initialize(ProviderConfig())
+
+    def test_initialize_fails_fast_when_host_missing(self, monkeypatch):
+        """No hardcoded fallback for host — ``initialize`` raises
+        ``ValueError`` when neither config nor env provides one."""
+        monkeypatch.delenv("VLLM_HOST", raising=False)
+        provider = VLLMProvider()
+        with pytest.raises(ValueError, match="host is not configured"):
+            provider.initialize(ProviderConfig())
+
+    def test_get_context_limit_raises_before_initialize(self):
+        """``get_context_limit`` raises ``RuntimeError`` when called on
+        an uninitialized provider — no silent fallback to a hardcoded
+        default."""
+        provider = VLLMProvider()
+        with pytest.raises(RuntimeError, match="before initialize"):
+            provider.get_context_limit()
 
 
 # ============================================================
