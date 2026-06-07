@@ -1304,8 +1304,103 @@ def load_config(config_file: str = DEFAULT_CONFIG_FILE) -> Optional[dict]:
         return None
 
 
+def _snapshot_daemon_descendants(pid: int) -> List[int]:
+    """Snapshot every descendant PID of the daemon process tree.
+
+    Walked BEFORE the daemon is killed, so when ``--stop`` later
+    reaps any orphans (e.g. runner subprocesses whose upstream
+    session was killed mid-cascade and pruned from the daemon's
+    in-memory session→runner registry), it can target THIS
+    daemon's descendants specifically — never a sibling daemon's
+    runners on the same host.
+
+    Closes the orphan-bleed gap diagnosed by peer 7:1 on 2026-06-07:
+    after ``jaato-server --stop`` cleanly reaped a daemon + 2
+    current runners, a 3rd runner (PID 1985236, etime 1h17m,
+    orphaned from session ``20260607_215922`` killed mid-cascade)
+    stayed alive POSTing to the upstream vLLM endpoint until
+    manually killed.  See
+    ``project_backlog_jaato_server_stop_orphan_runner_reaper.md``
+    for the full diagnosis + the (a) structural follow-up that
+    eventually obviates this defensive sweep.
+
+    psutil's ``children(recursive=True)`` enumerates BOTH:
+    - Direct children spawned by the daemon (normal case).
+    - Orphans re-parented to the daemon via the daemon's
+      ``prctl(PR_SET_CHILD_SUBREAPER, 1)`` startup invariant
+      documented at ``jaato/CLAUDE.md:493`` — the kernel makes
+      the daemon the new parent of any descendant whose original
+      parent died.
+
+    Returns an empty list when psutil can't see the daemon
+    (already-dead, permission denied) — caller treats absence as
+    "no orphans to sweep" rather than an error.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return []
+    try:
+        proc = psutil.Process(pid)
+        return [child.pid for child in proc.children(recursive=True)]
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+
+
+def _reap_orphan_descendants(pids: List[int]) -> int:
+    """Send SIGTERM + SIGKILL escalation to each PID still alive
+    after the daemon exit.  Captured via
+    :func:`_snapshot_daemon_descendants` BEFORE the daemon was
+    killed.
+
+    Returns the count of processes that were actually killed
+    (skipped if already dead).  Best-effort: per-PID errors are
+    swallowed silently because the daemon is already down and
+    failed reaps just leak processes — they don't corrupt state.
+    """
+    import time as _time
+
+    killed = 0
+    for pid in pids:
+        try:
+            # Skip if already dead.
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
+        # Wait up to 2s for graceful exit (orphan runners may have
+        # in-flight HTTP requests to flush).
+        gone = False
+        for _ in range(20):
+            _time.sleep(0.1)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                gone = True
+                break
+        if not gone:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        killed += 1
+    return killed
+
+
 def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
     """Stop a running server.
+
+    Snapshots the daemon's descendant PIDs BEFORE sending SIGTERM
+    so orphan runners — runner subprocesses whose upstream session
+    was killed mid-cascade and pruned from the in-memory
+    session→runner registry — can be reaped after the daemon
+    exits.  See :func:`_snapshot_daemon_descendants` for the
+    diagnosis behind this defensive sweep.
 
     Returns:
         True if stopped, False if not running.
@@ -1318,7 +1413,10 @@ def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
         import time
 
         if sys.platform == "win32":
-            # Windows: use taskkill or TerminateProcess
+            # Windows: use taskkill or TerminateProcess.  Orphan-reap
+            # sweep is Unix-only for now (psutil works on Windows but
+            # the runner subprocess model is POSIX-fork-specific; if a
+            # Windows port lands, add the snapshot + reap here too).
             import ctypes
             kernel32 = ctypes.windll.kernel32
             PROCESS_TERMINATE = 0x0001
@@ -1336,16 +1434,41 @@ def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
                     return True
             return True
         else:
+            # Snapshot descendant PIDs BEFORE killing the daemon.
+            # After SIGTERM the kernel re-parents to PID 1, which
+            # would defeat any post-kill child enumeration.
+            descendants = _snapshot_daemon_descendants(pid)
             os.kill(pid, signal.SIGTERM)
-            # Wait for process to exit
+            # Wait for daemon to exit
+            daemon_gone = False
             for _ in range(50):  # 5 seconds timeout
                 time.sleep(0.1)
                 try:
                     os.kill(pid, 0)
                 except ProcessLookupError:
-                    return True
-            # Force kill
-            os.kill(pid, signal.SIGKILL)
+                    daemon_gone = True
+                    break
+            if not daemon_gone:
+                # Force kill the daemon if it didn't exit gracefully.
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            # Orphan sweep: reap any captured descendants the daemon
+            # didn't reach itself.  Always runs — even on graceful
+            # daemon exit — because the daemon's reaper walks an
+            # in-memory session→runner registry that gets pruned when
+            # sessions are killed mid-cascade.  Orphans whose session
+            # entry was pruned stay alive past the daemon's own reap.
+            if descendants:
+                reaped = _reap_orphan_descendants(descendants)
+                if reaped:
+                    print(
+                        f"  Reaped {reaped} orphan runner "
+                        f"{'process' if reaped == 1 else 'processes'} "
+                        f"left behind by killed mid-cascade sessions",
+                        file=sys.stderr,
+                    )
             return True
     except Exception:
         return False
