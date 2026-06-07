@@ -142,21 +142,51 @@ class TestCompleteForwardsToolChoice:
         call_kwargs = p._client.chat.completions.create.call_args.kwargs
         assert "tool_choice" not in call_kwargs
 
-    def test_quirk_on_forwards_tool_choice(self) -> None:
-        """When the quirk is ON and the session passes
-        ``tool_choice=``, the provider forwards verbatim."""
+    def test_quirk_on_forwards_tool_choice_with_hash_translation(self) -> None:
+        """When the quirk is ON and the session passes a canonical
+        function name in ``tool_choice``, the provider translates to
+        the hashed wire id via ``name_to_id`` before forwarding to
+        vLLM — symmetric to how the wire ``tools`` array carries
+        hashed names (see ``tool_schemas_to_openai`` line 74).
+        Pre-PR-251 the canonical name was forwarded verbatim and
+        vLLM 400s with ``The tool specified in tool_choice does not
+        match any of the specified tools``.
+        """
+        from shared.tool_id_map import name_to_id
+
         p = _wire_provider(force_tool_choice=True)
-        forced = {
+        canonical = {
             "type": "function",
             "function": {"name": "signal_completion"},
         }
         p.complete(
             messages=[_msg("hi")],
             tools=[_tool()],
-            tool_choice=forced,
+            tool_choice=canonical,
         )
         call_kwargs = p._client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["tool_choice"] == forced
+        # Wire shape uses the hashed id, NOT the canonical name.
+        expected_hash = name_to_id("signal_completion")
+        assert call_kwargs["tool_choice"] == {
+            "type": "function",
+            "function": {"name": expected_hash},
+        }
+        # Hashed id is deterministic + regex-safe.
+        assert expected_hash.startswith("t_")
+        assert len(expected_hash) == 10  # "t_" + 8 hex chars
+
+    def test_quirk_on_non_function_tool_choice_forwarded_verbatim(self) -> None:
+        """Non-function tool_choice shapes (e.g. the string
+        ``"required"`` or ``"none"``) are forwarded verbatim — no
+        name to translate."""
+        p = _wire_provider(force_tool_choice=True)
+        p.complete(
+            messages=[_msg("hi")],
+            tools=[_tool()],
+            tool_choice={"type": "required"},
+        )
+        call_kwargs = p._client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["tool_choice"] == {"type": "required"}
 
     def test_quirk_on_without_session_tool_choice_omits(self) -> None:
         """Quirk-ON doesn't change behavior when the session passes

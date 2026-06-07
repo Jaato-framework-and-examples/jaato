@@ -72,6 +72,7 @@ from ..nim.converters import (
     response_from_openai,
     tool_schemas_to_openai,
 )
+from shared.tool_id_map import name_to_id
 from .env import (
     ENV_CONTEXT_LENGTH,
     ENV_HOST,
@@ -672,19 +673,46 @@ class VLLMProvider:
         # schema → server-side correctly-typed args.  When the
         # quirk is OFF, the kwarg is dropped and vLLM uses its
         # auto-mode default.
+        #
+        # Tool-name translation (PR-251 fix, 2026-06-07): the wire
+        # ``tools`` array carries HASHED ids (``t_<8-hex>`` per
+        # ``shared/tool_id_map.py:name_to_id`` — same hashing
+        # ``tool_schemas_to_openai`` applies at line 74), so
+        # ``tool_choice.function.name`` MUST also be the hashed id
+        # or vLLM 400s with ``The tool specified in tool_choice
+        # does not match any of the specified tools``.  The
+        # session passes the canonical name (it doesn't know about
+        # hashing); the provider applies ``name_to_id`` here at
+        # the wire boundary, symmetric to how
+        # ``get_original_tool_name`` reverses the mapping on the
+        # response path.  Empirically caught by peer's 2026-06-07
+        # cascade after PR-250 landed — stamped name
+        # "signal_completion" didn't resolve to any wire tool
+        # because all entries were ``t_5ab8fa33`` etc.
         if (
             self._force_tool_choice_for_lifecycle
             and tool_choice is not None
             and tools
         ):
-            kwargs["tool_choice"] = tool_choice
-            tc_name = (
-                tool_choice.get("function", {}).get("name")
-                if isinstance(tool_choice, dict) else str(tool_choice)
-            )
+            forwarded_tool_choice = tool_choice
+            canonical_name: Optional[str] = None
+            if (
+                isinstance(tool_choice, dict)
+                and tool_choice.get("type") == "function"
+                and isinstance(tool_choice.get("function"), dict)
+                and isinstance(tool_choice["function"].get("name"), str)
+            ):
+                canonical_name = tool_choice["function"]["name"]
+                hashed_name = name_to_id(canonical_name)
+                forwarded_tool_choice = {
+                    "type": "function",
+                    "function": {"name": hashed_name},
+                }
+            kwargs["tool_choice"] = forwarded_tool_choice
             self._trace(
-                f"QUIRK_FORCE_TOOL_CHOICE tool_choice={tc_name} — "
-                f"vLLM will engage xgrammar for this call"
+                f"QUIRK_FORCE_TOOL_CHOICE canonical={canonical_name} "
+                f"wire={forwarded_tool_choice} — vLLM will engage "
+                f"xgrammar for this call"
             )
 
         try:
