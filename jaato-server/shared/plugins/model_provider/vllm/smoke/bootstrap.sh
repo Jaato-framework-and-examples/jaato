@@ -45,7 +45,10 @@ Usage: $0 [options]
 
 Options:
   --workspace <path>  Workspace path (default: $WORKSPACE)
-  --run <scenario>    After bootstrap, run the smoke. Scenario is "chat" or "tools".
+  --run <scenario>    After bootstrap, run a smoke.  Scenarios:
+                        chat               — pure text round-trip, no tools
+                        signal_completion  — lifecycle, schema-driven completion
+                        tools              — cli + signal_completion (full tools shape)
                       Omit to bootstrap only.
   --python <path>     Python executable used when --run is set
                       (default: \$JAATO_REPO/.venv/bin/python; also honors \$PYTHON env)
@@ -53,7 +56,7 @@ Options:
 
 Behavior (always):
   1. mkdir the workspace + .jaato/{profiles,agents}/
-  2. Copy smoke.py + smoke_tools.py to the workspace root
+  2. Copy smoke_chat.py + smoke_signal_completion.py + smoke_tools.py to the workspace root
   3. Copy profile + agent templates to .jaato/{profiles,agents}/
   4. Copy .env.example to <workspace>/.env if .env does not already exist
 
@@ -61,14 +64,15 @@ Behavior (only with --run):
   5. cd into the workspace and exec the chosen harness
 
 After bootstrap, edit <workspace>/.env to set VLLM_HOST.
-The daemon must be listening on /tmp/jaato.sock before running the smoke.
+The daemon must be listening on /tmp/jaato.sock before running any smoke.
 
 The vLLM server must already be running with the model named in the
 profile (default: Qwen/Qwen2.5-7B-Instruct).  Launch it like:
   vllm serve Qwen/Qwen2.5-7B-Instruct \\
       --host 0.0.0.0 --port 8000 --max-model-len 8192
-For the tools smoke also pass --enable-auto-tool-choice and a parser
-matching the model family (e.g. --tool-call-parser hermes for Qwen).
+For the signal_completion and tools smokes also pass
+--enable-auto-tool-choice and a parser matching the model family
+(e.g. --tool-call-parser hermes for Qwen).
 USAGE
 }
 
@@ -84,10 +88,11 @@ done
 
 HARNESS=""
 case "$RUN" in
-    "")    HARNESS="" ;;
-    chat)  HARNESS="smoke.py" ;;
-    tools) HARNESS="smoke_tools.py" ;;
-    *) echo "ERROR: --run must be 'chat' or 'tools', got: $RUN" >&2; exit 1 ;;
+    "")                 HARNESS="" ;;
+    chat)               HARNESS="smoke_chat.py" ;;
+    signal_completion)  HARNESS="smoke_signal_completion.py" ;;
+    tools)              HARNESS="smoke_tools.py" ;;
+    *) echo "ERROR: --run must be one of: chat, signal_completion, tools — got: $RUN" >&2; exit 1 ;;
 esac
 
 if [[ -n "$HARNESS" ]] && ! [[ -x "$PYTHON" ]]; then
@@ -100,7 +105,8 @@ echo "==> Bootstrapping smoke install at $WORKSPACE"
 mkdir -p "$WORKSPACE/.jaato/profiles" "$WORKSPACE/.jaato/agents"
 
 echo "==> Copying harness scripts"
-cp -f "$SMOKE_DIR/smoke.py" "$SMOKE_DIR/smoke_tools.py" "$WORKSPACE/"
+cp -f "$SMOKE_DIR/smoke_chat.py" "$SMOKE_DIR/smoke_signal_completion.py" \
+    "$SMOKE_DIR/smoke_tools.py" "$WORKSPACE/"
 
 echo "==> Copying profile + agent templates"
 cp -f "$SMOKE_DIR/.jaato.example/profiles/"*.yaml "$WORKSPACE/.jaato/profiles/"
@@ -124,11 +130,13 @@ cat <<NEXT
 Bootstrap complete.  Next:
 
   1. Edit  $WORKSPACE/.env  to set VLLM_HOST.
-  2. Run the smoke:
+  2. Run any of the three smokes:
        cd $WORKSPACE
-       $PYTHON smoke.py         # chat smoke
-       $PYTHON smoke_tools.py   # tools smoke
-     (Or re-invoke this script with --run chat / --run tools.)
+       $PYTHON smoke_chat.py               # 1: pure text, no tools
+       $PYTHON smoke_signal_completion.py  # 2: signal_completion w/ schema
+       $PYTHON smoke_tools.py              # 3: cli tool + signal_completion
+     (Or re-invoke this script with
+      --run chat | --run signal_completion | --run tools.)
 
 (Daemon must already be listening on /tmp/jaato.sock.)
 (vLLM server must already be running with the profile's model.)
