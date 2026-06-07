@@ -1,0 +1,311 @@
+"""TelepathyPlugin — share_context tool implementation.
+
+Extracted from ``shared/jaato_session.py`` (2026-06-07) per the
+maintainer's guidance that tools belong in plugins, not session
+built-ins.  See the package ``__init__.py`` for the full history
+and rationale.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+from jaato_sdk.plugins.model_provider.types import ToolSchema
+
+if TYPE_CHECKING:
+    from shared.jaato_session import JaatoSession
+
+
+class TelepathyPlugin:
+    """Provides the ``share_context`` tool for subagent→parent context sharing.
+
+    Lifecycle:
+
+    1. ``__init__()`` — empty plugin instance.
+    2. ``initialize(config)`` — no-op (no config knobs).
+    3. ``set_session(session)`` — store ref to the host session; needed
+       at execute time to reach ``session._parent_session`` and
+       ``session._agent_id``.
+    4. ``is_tool_visible(name)`` — per-turn visibility predicate
+       consulted by ``JaatoSession._get_tools_for_provider`` (PR #241).
+       Returns ``False`` for ``share_context`` when the host session
+       has no parent (calling it would just error "No parent session
+       available" at the executor); returns ``True`` for any other
+       tool name (other plugins' tools are not this plugin's
+       concern).
+    5. ``get_executors()['share_context']`` runs the actual push to
+       ``parent_session.inject_prompt``.
+
+    The visibility predicate is belt-and-braces: this plugin is
+    non-core (only loaded when listed in ``profile.plugins``), so
+    most root / orchestrator profiles never load it.  Subagent
+    profiles that DO list it get the per-turn gate to handle the
+    edge case where a session lists the plugin but never has its
+    parent wired (e.g. cascade entry-points mis-labeled as
+    subagents).
+    """
+
+    def __init__(self) -> None:
+        self._initialized: bool = False
+        self._session: Optional['JaatoSession'] = None
+
+    @property
+    def name(self) -> str:
+        return "telepathy"
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """No-op initializer.
+
+        Telepathy has no configurable knobs.  The ``config`` arg is
+        accepted to satisfy the ``ToolPlugin`` protocol uniformly.
+        """
+        self._initialized = True
+
+    def shutdown(self) -> None:
+        self._initialized = False
+        self._session = None
+
+    def set_session(self, session: 'JaatoSession') -> None:
+        """Capture a reference to the host session.
+
+        The executor needs ``session._parent_session`` (to push
+        context up) and ``session._agent_id`` (for the ``source_id``
+        attribution on the parent's inject_prompt call).  Called by
+        ``JaatoSession.configure()`` for every plugin that
+        implements this hook — the standard mechanism for
+        session-aware plugins.
+        """
+        self._session = session
+
+    def is_tool_visible(self, tool_name: str) -> bool:
+        """Per-turn visibility predicate (PR #241 hook).
+
+        ``share_context`` is only meaningful when the host session
+        has a parent.  Hide it from the tool surface otherwise so
+        the model never sees a tool whose executor would reject
+        every call.
+
+        Returns ``True`` for tool names other than ``share_context``
+        — this predicate has no opinion on tools owned by other
+        plugins.
+        """
+        if tool_name != "share_context":
+            return True
+        if self._session is None:
+            return False
+        return getattr(self._session, '_parent_session', None) is not None
+
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        return [
+            ToolSchema(
+                name='share_context',
+                description=(
+                    'Share context from your memory with your parent agent. '
+                    'Use this to transfer knowledge without the parent needing to '
+                    're-read files or re-execute tools.\n\n'
+                    'CRITICAL: Share the COMPLETE file content, not summaries or excerpts. '
+                    'The parent needs the full content to work with it. Never omit content '
+                    '"for brevity" - that defeats the purpose of this tool.\n\n'
+                    'IMPORTANT: Do NOT re-read files before sharing. Use your memory of files '
+                    'you have already read. Copy the full content from your context.\n\n'
+                    'Use this to:\n'
+                    '- Share complete file contents you have already read\n'
+                    '- Share your analysis or findings\n'
+                    '- Share relevant facts you have discovered'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "object",
+                            "description": (
+                                "Files to share from your memory. Keys are file paths, "
+                                "values are the COMPLETE file content from your context. "
+                                "Do NOT summarize or omit content - share the full text."
+                            ),
+                            "additionalProperties": {"type": "string"}
+                        },
+                        "findings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Key findings, facts, or conclusions to share. "
+                                "These should be insights from your analysis."
+                            )
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": (
+                                "Free-form context, analysis, guidance, or explanation "
+                                "to help the parent agent understand the shared context."
+                            )
+                        }
+                    },
+                    "required": []
+                },
+                discoverability="core",
+            ),
+        ]
+
+    def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        return {"share_context": self._execute_share_context}
+
+    def get_user_commands(self) -> List[Any]:
+        return []
+
+    def get_auto_approved_tools(self) -> List[str]:
+        # Subagents calling share_context need to push without an
+        # interactive permission prompt — there's no human in the
+        # subagent's loop.  The parent has its own permission
+        # handling on whatever it does with the injected content.
+        return ["share_context"]
+
+    def _execute_share_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Push structured context to the host session's parent.
+
+        Body preserved verbatim from the pre-extraction
+        ``JaatoSession._execute_share_context`` (2026-06-07 move).
+        """
+        # Local import to avoid a hard runtime dependency on the
+        # session module at plugin-discovery time.
+        from shared.message_queue import SourceType
+
+        if self._session is None:
+            return {
+                'success': False,
+                'error': (
+                    'TelepathyPlugin has no session reference.  This '
+                    'is a programmer error — set_session() must be '
+                    'called before the executor runs.'
+                ),
+            }
+
+        files = args.get('files', {})
+        findings = args.get('findings', [])
+        notes = args.get('notes', '')
+
+        # Check if there's anything to share
+        if not files and not findings and not notes:
+            return {
+                'success': False,
+                'error': (
+                    'No context to share. Provide at least one of: '
+                    'files, findings, notes.'
+                )
+            }
+
+        parent_session = getattr(self._session, '_parent_session', None)
+        if not parent_session:
+            # Defensive: the visibility filter should have hidden
+            # the tool when no parent — this error path only fires
+            # if the model called the tool from cached schema /
+            # message history mid-turn after the parent was unset.
+            return {
+                'success': False,
+                'error': (
+                    'No parent session available. This agent may '
+                    'be the main agent.'
+                )
+            }
+
+        formatted_context = self._format_shared_context(files, findings, notes)
+        agent_id = getattr(self._session, '_agent_id', 'unknown')
+
+        try:
+            # Use same pattern as subagent communication: inject if
+            # busy, send if idle.  CHILD source type — will be
+            # processed when parent is idle.
+            if parent_session.is_running:
+                parent_session.inject_prompt(
+                    formatted_context,
+                    source_id=agent_id,
+                    source_type=SourceType.CHILD,
+                )
+                return {
+                    'success': True,
+                    'status': 'queued',
+                    'message': (
+                        'Context queued for parent. Will be '
+                        'processed when parent is idle.'
+                    ),
+                    'shared': {
+                        'files': list(files.keys()) if files else [],
+                        'findings_count': len(findings) if findings else 0,
+                        'has_notes': bool(notes),
+                    },
+                }
+
+            # Parent is idle — shouldn't normally happen
+            # (subagent runs while parent waits) but handle
+            # gracefully by injecting anyway.
+            parent_session.inject_prompt(
+                formatted_context,
+                source_id=agent_id,
+                source_type=SourceType.CHILD,
+            )
+            return {
+                'success': True,
+                'status': 'sent',
+                'message': 'Context sent to parent.',
+                'shared': {
+                    'files': list(files.keys()) if files else [],
+                    'findings_count': len(findings) if findings else 0,
+                    'has_notes': bool(notes),
+                },
+            }
+        except Exception as e:  # noqa: BLE001
+            return {
+                'success': False,
+                'error': f'Failed to share context: {e}',
+            }
+
+    @staticmethod
+    def _format_shared_context(
+        files: Dict[str, str],
+        findings: List[str],
+        notes: str,
+    ) -> str:
+        """Format shared context for injection into parent's conversation.
+
+        Body preserved verbatim from the pre-extraction
+        ``JaatoSession._format_shared_context`` (2026-06-07 move).
+        """
+        parts: List[str] = []
+
+        # Add instruction prefix so the receiving agent knows to use
+        # this content directly instead of re-reading files.
+        if files:
+            parts.append(
+                "CONTEXT FROM SUBAGENT: The following files and findings are "
+                "shared from the subagent's memory. DO NOT re-read these "
+                "files - use the content provided below directly."
+            )
+            parts.append("")
+
+        parts.append('<shared_context from_agent="subagent">')
+
+        if files:
+            parts.append('<files>')
+            for path, content in files.items():
+                parts.append(f'<file path="{path}">')
+                parts.append(content)
+                parts.append('</file>')
+            parts.append('</files>')
+
+        if findings:
+            parts.append('<findings>')
+            for finding in findings:
+                parts.append(f'  - {finding}')
+            parts.append('</findings>')
+
+        if notes:
+            parts.append('<notes>')
+            parts.append(notes)
+            parts.append('</notes>')
+
+        parts.append('</shared_context>')
+        return '\n'.join(parts)
+
+
+def create_plugin() -> TelepathyPlugin:
+    return TelepathyPlugin()
