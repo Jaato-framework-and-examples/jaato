@@ -1668,6 +1668,7 @@ def discover_profiles(
     profiles_dir: str,
     base_path: Optional[str] = None,
     config_root: Optional[str] = None,
+    force_profile_set: Optional[str] = None,
 ) -> ProfileDiscoveryResult:
     """Discover subagent profiles from multiple sources.
 
@@ -1692,6 +1693,15 @@ def discover_profiles(
             scans ``<config_root>/profiles/`` instead of
             ``{base_path}/{profiles_dir}``.  See
             :func:`shared.config_resolver.resolve_config_search_path`.
+        force_profile_set: Optional override for the profile-set name.
+            When set, takes precedence over the ``JAATO_PROFILE_SET``
+            env-var lookup at step 1.a — the named set is scanned even
+            if the env var is empty or names a different set.  Used by
+            callers that resolve a qualified ``set/name`` profile path
+            and need the matching set's subdirectory to be scanned
+            regardless of the per-session env state.  When ``None`` /
+            empty, falls back to the env-var read (pre-existing
+            behavior).
 
     Returns:
         ProfileDiscoveryResult with discovered profiles and any parse errors.
@@ -1743,13 +1753,25 @@ def discover_profiles(
     # the same daemon can run different sets concurrently, and switching
     # sets does NOT require restarting the daemon.
     from shared.session_context import get_session_env
-    profile_set = get_session_env('JAATO_PROFILE_SET')
+    # ``force_profile_set`` (explicit kwarg) wins over the env-var read
+    # so callers resolving a qualified ``set/name`` path can pin the
+    # set without mutating the per-session env contextvar.
+    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')
     if profile_set and effective_config_root:
         set_path = (
             Path(effective_config_root).expanduser().resolve()
             / "profiles" / profile_set
         )
         _scan_profiles_dir(set_path, profiles, errors)
+    elif profile_set and not effective_config_root:
+        # No ``config_root`` override — fall back to scanning
+        # ``<base_path>/<profiles_dir>/<set>/`` so qualified resolution
+        # still works in test harnesses and ad-hoc layouts that don't
+        # set a config_root.
+        fallback_set_path = Path(profiles_dir)
+        if not fallback_set_path.is_absolute():
+            fallback_set_path = Path(base_path) / fallback_set_path
+        _scan_profiles_dir(fallback_set_path / profile_set, profiles, errors)
 
     # 1.b Workspace tier — config_root override takes precedence; fall
     #    back to <base_path>/<profiles_dir> when no override is in effect.
