@@ -2939,6 +2939,74 @@ class RunnerRPC:
                     ),
                     "stage": "send",
                 }
+
+            # Path G (2026-06-07): post-turn ``AgentUIHooks`` forwarding.
+            #
+            # Pre-§7c-seat-flip the daemon-side
+            # ``JaatoClient.send_message`` wrapper (see
+            # ``shared/jaato_client.py:662-696``) fired three hooks after
+            # ``session.send_message`` returned:
+            # ``on_agent_turn_completed`` (→ ``TurnCompletedEvent``),
+            # ``on_agent_context_updated`` (→ ``ContextUpdatedEvent``),
+            # ``on_agent_history_updated`` (→ persistence).
+            #
+            # Post-§7c the daemon's ``_start_model_thread`` calls
+            # ``runner_rpc.session_send_message_threadsafe`` (this
+            # handler) directly instead of going through
+            # ``JaatoClient.send_message``.  PR #82 / commit 631678e1
+            # wired the runner-side ``_AgentUIHooksNotificationShim`` to
+            # FORWARD these three calls — but no caller in the root IPC
+            # path actually invoked the shim.  Result: root sessions
+            # never emitted ``TurnCompletedEvent``; SDK clients waiting
+            # for it (every provider smoke harness, every external IPC
+            # consumer) hung until disconnect timeout.
+            #
+            # This block restores the JaatoClient-wrapper semantics for
+            # the root IPC path: fetch turn accounting + context + history
+            # from the runner-side session and fan out through the shim
+            # (still installed at this point — restore runs in the
+            # ``finally`` below).  Subagent sessions are unaffected:
+            # they run their model loop inside
+            # ``subagent/plugin.py`` and fire the same hooks themselves
+            # at ``_run_subagent_async`` (line ~3408).  Best-effort —
+            # forwarding failure must not corrupt the send_message
+            # response.
+            ui_hooks = getattr(session, "_ui_hooks", None)
+            if ui_hooks is not None:
+                try:
+                    agent_id = getattr(session, "_agent_id", None) or "main"
+                    turn_accounting = session.get_turn_accounting()
+                    last_turn = turn_accounting[-1] if turn_accounting else {}
+                    ui_hooks.on_agent_turn_completed(
+                        agent_id=agent_id,
+                        turn_number=max(0, len(turn_accounting) - 1),
+                        prompt_tokens=last_turn.get("prompt", 0),
+                        output_tokens=last_turn.get("output", 0),
+                        total_tokens=last_turn.get("total", 0),
+                        duration_seconds=last_turn.get("duration_seconds", 0),
+                        function_calls=last_turn.get("function_calls", []),
+                        cache_read_tokens=last_turn.get("cache_read"),
+                        cache_creation_tokens=last_turn.get("cache_creation"),
+                    )
+                    usage = session.get_context_usage()
+                    ui_hooks.on_agent_context_updated(
+                        agent_id=agent_id,
+                        total_tokens=usage.get("total_tokens", 0),
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        output_tokens=usage.get("output_tokens", 0),
+                        turns=usage.get("turns", 0),
+                        percent_used=usage.get("percent_used", 0),
+                    )
+                    history = session.get_history()
+                    ui_hooks.on_agent_history_updated(
+                        agent_id=agent_id,
+                        history=history,
+                    )
+                except Exception:  # noqa: BLE001 — best-effort forwarding
+                    logger.exception(
+                        "post-turn AgentUIHooks forwarding raised — "
+                        "send_message response still returned",
+                    )
         finally:
             # Phase 3 §7c step 6.6.4.2: restore any pre-existing
             # callbacks the session had so other callers (e.g. a
@@ -4552,7 +4620,7 @@ class _AgentUIHooksNotificationShim:
         output_tokens: int,
         total_tokens: int,
         duration_seconds: float,
-        function_calls: int,
+        function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
     ) -> None:
@@ -4561,6 +4629,11 @@ class _AgentUIHooksNotificationShim:
         Daemon-side ``ServerAgentHooks.on_agent_turn_completed``
         appends turn-accounting + fires ``TurnCompletedEvent`` for
         TUI per-turn timing / token-cost display.
+
+        ``function_calls`` is the per-call timing list captured in
+        ``turn_data['function_calls']`` (each entry: ``{name, start_time,
+        end_time, duration_seconds}``).  ``TurnCompletedEvent.function_calls``
+        is typed ``List[Dict[str, Any]]`` — pass the list through verbatim.
         """
         try:
             self._rpc.emit_notification(
@@ -4573,7 +4646,7 @@ class _AgentUIHooksNotificationShim:
                     "output_tokens": int(output_tokens or 0),
                     "total_tokens": int(total_tokens or 0),
                     "duration_seconds": float(duration_seconds or 0.0),
-                    "function_calls": int(function_calls or 0),
+                    "function_calls": list(function_calls or []),
                     "cache_read_tokens": cache_read_tokens,
                     "cache_creation_tokens": cache_creation_tokens,
                 },
