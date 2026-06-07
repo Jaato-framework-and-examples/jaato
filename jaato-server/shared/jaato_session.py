@@ -2196,11 +2196,79 @@ class JaatoSession:
         Checks whether the provider manages its own tools (e.g. Claude CLI
         in delegated mode). If so, returns an empty list.
 
+        **Per-turn visibility filter.**  Plugins MAY implement an
+        opt-in ``is_tool_visible(tool_name) -> bool`` method to gate
+        their own tools on dynamic session state.  This method is
+        consulted on EVERY ``provider.complete()`` call, so visibility
+        decisions always reflect current state.  Plugins without the
+        method are unaffected.  Tools whose owning plugin returns
+        ``False`` are stripped from the array sent to the model.
+
+        The canonical use case (server 0.6.x+) is the ``todo`` plugin
+        hiding its 8 plan-required tools (``startPlan``,
+        ``setStepStatus``, ``getPlanStatus``, ``completePlan``,
+        ``addStep``, ``addDependentStep``, ``completeStepWithOutput``,
+        ``getBlockedSteps``) when no active plan exists.  Without
+        this filter, small models (e.g. Llama 3.1 8B AWQ on vLLM
+        2026-06-07 smoke) misroute to ``completeStepWithOutput`` as
+        a proxy for ``signal_completion`` because the description
+        overlaps and the precondition isn't enforced at the schema
+        layer.  Same shape as
+        :meth:`LifecycleTools._should_hide_signal_completion` — gate
+        at schema-export time rather than waiting for a clean
+        runtime-rejection error from the plugin.
+
+        A plugin's ``is_tool_visible`` predicate is asked about
+        EVERY tool name in the session (not just the plugin's own
+        tools); a sensible default is ``return True`` for unknown
+        names so other plugins' tools flow through unchanged.
+
         Returns:
             Tools to pass, or empty list if provider manages its own.
         """
         uses_external = getattr(self._provider, 'uses_external_tools', lambda: True)()
-        return self._tools if uses_external else []
+        if not uses_external:
+            return []
+        if not self._tools:
+            return self._tools
+
+        registry = getattr(self._runtime, 'registry', None)
+        if registry is None:
+            return self._tools
+
+        # Collect plugins that opt in to visibility gating.  Walk
+        # ``list_exposed`` (rather than ``_plugins.keys()``) so
+        # un-exposed plugins don't get consulted.
+        try:
+            exposed_names = registry.list_exposed()
+        except Exception:
+            return self._tools
+        filters = []
+        for name in exposed_names:
+            plugin = registry.get_plugin(name)
+            if plugin is not None and hasattr(plugin, 'is_tool_visible'):
+                filters.append(plugin)
+        if not filters:
+            return self._tools
+
+        visible: List['ToolSchema'] = []
+        for tool in self._tools:
+            hidden = False
+            for plugin in filters:
+                try:
+                    if not plugin.is_tool_visible(tool.name):
+                        hidden = True
+                        break
+                except Exception:
+                    # A buggy predicate must not break the turn — log
+                    # and treat as visible (fail-open).
+                    self._trace(
+                        f"is_tool_visible raised for tool={tool.name!r} "
+                        f"plugin={plugin.name!r}; treating as visible"
+                    )
+            if not hidden:
+                visible.append(tool)
+        return visible
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
