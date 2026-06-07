@@ -633,25 +633,51 @@ class SessionManager:
                     env_file, exc,
                 )
 
+        # Qualified path support: when the caller asks for
+        # ``<set>/<name>``, route the request to the named profile set
+        # regardless of the per-session ``JAATO_PROFILE_SET`` env var.
+        # The set's subdirectory under ``<config_root>/profiles/`` (or
+        # ``<workspace>/.jaato/profiles/`` when no config_root override
+        # is in effect) is scanned and the bare name is looked up
+        # within the resulting profile map.  Pre-fix the SDK would hand
+        # back ``Profile not found`` for any qualified path whose set
+        # didn't match the current ``JAATO_PROFILE_SET`` value (or
+        # whose env var was unset), even though the underlying file
+        # existed at ``profiles/<set>/<name>.yaml``.  Symmetric to the
+        # SDK Bug-B fix landed on 2026-06-06.
+        force_profile_set: Optional[str] = None
+        lookup_name = profile_name
+        if "/" in profile_name:
+            head, _, tail = profile_name.partition("/")
+            if head and tail and "/" not in tail:
+                force_profile_set = head
+                lookup_name = tail
+
         try:
             result = discover_profiles(
                 ".jaato/profiles",
                 base_path=workspace_path,
                 config_root=config_root,
+                force_profile_set=force_profile_set,
             )
         finally:
             if overlay_applied:
                 _session_env_var.set(previous_env)
-        profile = result.profiles.get(profile_name)
+        profile = result.profiles.get(lookup_name)
         if profile is not None:
             return profile, None
 
         # Profile not in the successfully parsed set — check if there was
         # a parse error for a file matching the requested name.
-        if profile_name in result.errors:
+        if lookup_name in result.errors:
             return None, (
                 f"Profile '{profile_name}' exists but failed to parse: "
-                f"{result.errors[profile_name]}"
+                f"{result.errors[lookup_name]}"
+            )
+        if force_profile_set is not None:
+            return None, (
+                f"Agent profile '{profile_name}' not found in "
+                f".jaato/profiles/{force_profile_set}/"
             )
         return None, f"Agent profile '{profile_name}' not found in .jaato/profiles/"
 

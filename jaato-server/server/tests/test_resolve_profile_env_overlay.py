@@ -214,3 +214,138 @@ class TestEnvFileOverlay:
             "pass:// in env_file must resolve daemon-side before "
             "discover_profiles reads JAATO_PROFILE_SET"
         )
+
+
+class TestQualifiedProfilePath:
+    """Pin: ``_resolve_profile`` accepts ``<set>/<name>`` qualified
+    paths and routes the discovery scan to the named set regardless
+    of the per-session ``JAATO_PROFILE_SET`` env-var.  Closes Bug-A
+    (2026-06-06): `inspect_session` against ``openrouter_haiku/
+    introspector`` returned ``Profile not found`` even though the file
+    existed at ``profiles/openrouter_haiku/introspector.yaml``,
+    because the env var was empty and the qualified-path semantics
+    were never wired through."""
+
+    def test_qualified_path_resolves_without_env_var(
+        self, tmp_path: Path,
+    ) -> None:
+        """A bare ``set/name`` lookup scans ``profiles/<set>/`` even
+        when ``JAATO_PROFILE_SET`` is unset."""
+        config_root = tmp_path / ".jaato"
+        _write_profile(
+            config_root / "profiles" / "openrouter_haiku",
+            "introspector",
+            model="haiku-introspector",
+        )
+
+        mgr = _make_manager()
+        profile, err = mgr._resolve_profile(
+            "openrouter_haiku/introspector",
+            workspace_path=str(tmp_path),
+            config_root=str(config_root),
+            env_file=None,
+        )
+        assert err is None, (
+            f"Qualified path should resolve without JAATO_PROFILE_SET; "
+            f"got error: {err}"
+        )
+        assert profile is not None
+        assert profile.model == "haiku-introspector"
+        assert profile.name == "introspector"
+
+    def test_qualified_path_wins_over_env_var_for_different_set(
+        self, tmp_path: Path,
+    ) -> None:
+        """When the qualified path names set X but the env var names
+        set Y, the qualified path wins — X is scanned, Y is irrelevant
+        for this lookup."""
+        config_root = tmp_path / ".jaato"
+        # Plant the same name in TWO sets so we can detect which one
+        # actually got scanned.
+        _write_profile(
+            config_root / "profiles" / "set_a", "research",
+            model="model-from-set-a",
+        )
+        _write_profile(
+            config_root / "profiles" / "set_b", "research",
+            model="model-from-set-b",
+        )
+        env_file = tmp_path / ".env"
+        env_file.write_text("JAATO_PROFILE_SET=set_b\n")
+
+        mgr = _make_manager()
+        profile, err = mgr._resolve_profile(
+            "set_a/research",  # qualified path → set_a wins
+            workspace_path=str(tmp_path),
+            config_root=str(config_root),
+            env_file=str(env_file),
+        )
+        assert err is None
+        assert profile is not None
+        assert profile.model == "model-from-set-a", (
+            "Qualified path 'set_a/research' must resolve via set_a "
+            "regardless of JAATO_PROFILE_SET=set_b"
+        )
+
+    def test_qualified_path_unresolvable_returns_set_scoped_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Error message for a missing qualified profile mentions the
+        named set so operators see WHERE the file was expected."""
+        config_root = tmp_path / ".jaato"
+        # Set dir exists but contains a different profile.
+        _write_profile(
+            config_root / "profiles" / "openrouter_haiku",
+            "other_agent",
+        )
+
+        mgr = _make_manager()
+        profile, err = mgr._resolve_profile(
+            "openrouter_haiku/missing_agent",
+            workspace_path=str(tmp_path),
+            config_root=str(config_root),
+            env_file=None,
+        )
+        assert profile is None
+        assert err is not None
+        assert "openrouter_haiku" in err, (
+            f"Error must reference the profile-set name; got: {err}"
+        )
+
+    def test_unqualified_path_unchanged(self, tmp_path: Path) -> None:
+        """A bare name (no slash) follows the legacy resolution path."""
+        config_root = tmp_path / ".jaato"
+        _write_profile(config_root / "profiles", "codegen")
+
+        mgr = _make_manager()
+        profile, err = mgr._resolve_profile(
+            "codegen",
+            workspace_path=str(tmp_path),
+            config_root=str(config_root),
+            env_file=None,
+        )
+        assert err is None
+        assert profile is not None
+        assert profile.name == "codegen"
+
+    def test_multi_slash_path_falls_back_to_bare_lookup(
+        self, tmp_path: Path,
+    ) -> None:
+        """Paths with multiple slashes (e.g. ``a/b/c``) don't match the
+        qualified-path shape; the legacy lookup runs against the raw
+        name (which will miss and return the canonical not-found
+        error).  Ensures the slash detection is strict
+        ``<set>/<name>``, not freeform."""
+        config_root = tmp_path / ".jaato"
+        _write_profile(config_root / "profiles", "codegen")
+
+        mgr = _make_manager()
+        profile, err = mgr._resolve_profile(
+            "a/b/c",
+            workspace_path=str(tmp_path),
+            config_root=str(config_root),
+            env_file=None,
+        )
+        assert profile is None
+        assert err is not None
+        assert "not found" in err
