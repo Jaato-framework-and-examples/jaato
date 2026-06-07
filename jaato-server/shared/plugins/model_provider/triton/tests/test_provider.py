@@ -531,15 +531,19 @@ class TestCapabilities:
 
 
 class TestMidStreamErrorDistinction:
-    """Triton's OpenAI frontend wraps the same TRT-LLM engine as
-    trtllm-serve, so it surfaces the same class of mid-stream
-    connection-drop bug when the engine errors after HTTP 200 is
-    committed (prompt exceeds ``max_input_length``, KV-cache OOM,
-    internal exceptions).  ``_handle_api_error`` must distinguish
-    these from pre-flight failures the same way the tensorrt_llm
-    provider does — see the kb-orchestrator cascade incident
-    (2026-06-06) which falsely surfaced as a generic connection
-    error and burned forensics time.
+    """Triton's OpenAI frontend exposes the same envelope-commit-before-
+    validate failure mode as trtllm-serve (HTTP 200 + chunked headers
+    committed before the engine validates → wire-level connection
+    drop with no extractable cause).  ``_handle_api_error`` must
+    distinguish these from pre-flight failures the same way the
+    tensorrt_llm provider does — see the kb-orchestrator cascade
+    incident (2026-06-06) which falsely surfaced as a generic
+    connection error and burned forensics time.
+
+    The mid-stream message itself must be GENERIC per
+    ``feedback_no_hardcoded_likely_cause_in_error_messages.md`` —
+    enforced by the shared ``assert_no_likely_cause_prose`` helper in
+    ``shared/plugins/model_provider/conftest.py``.
     """
 
     def _make_apicon_error(self, message: str):
@@ -566,8 +570,25 @@ class TestMidStreamErrorDistinction:
             provider._handle_api_error(err)
         msg = str(ctx.value)
         assert "192.168.50.154:9000" in msg
-        assert "max_input_length" in msg
-        assert "trtllm-build" in msg
+        # Per feedback_no_hardcoded_likely_cause_in_error_messages.md,
+        # the message points the operator at Triton's log instead of
+        # naming a likely cause.
+        assert "Triton's log" in msg
+
+    def test_mid_stream_message_does_not_guess_at_cause(self):
+        """Falsification guard for the no-hardcoded-likely-cause rule
+        (``feedback_no_hardcoded_likely_cause_in_error_messages.md``).
+        Shared with tensorrt_llm + vllm via the model_provider
+        conftest.
+        """
+        from shared.plugins.model_provider.conftest import (
+            assert_no_likely_cause_prose,
+        )
+        from shared.plugins.model_provider.triton.errors import (
+            TritonMidStreamError,
+        )
+        err = TritonMidStreamError("http://srv:9000", original_error="x")
+        assert_no_likely_cause_prose(str(err))
 
     def test_clean_connection_failure_still_routes_to_connection_error(self):
         from shared.plugins.model_provider.triton.errors import (

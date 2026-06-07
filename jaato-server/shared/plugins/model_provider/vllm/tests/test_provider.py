@@ -485,20 +485,24 @@ class TestMidStreamErrorDistinction:
         assert "vLLM server log" in msg
 
     def test_mid_stream_message_does_not_guess_at_cause(self):
-        """Falsification guard for the no-hardcoded-likely-cause rule:
-        if anyone re-adds a "this is almost always..." block to the
-        mid-stream message, this test breaks.  The mid-stream message
-        is allowed to say "this is a server-side failure" (factual)
-        but not "this is almost always prompt-too-long" (guess).
+        """Falsification guard for the no-hardcoded-likely-cause rule
+        (``feedback_no_hardcoded_likely_cause_in_error_messages.md``).
+
+        Uses the shared ``assert_no_likely_cause_prose`` helper from
+        ``shared/plugins/model_provider/conftest.py`` so the forbidden
+        keyword list is enforced identically across all self-hosted
+        OpenAI-compatible providers (tensorrt_llm, triton, vllm).
+        When a fourth such provider lands, point its mid-stream test
+        at the same helper.
         """
+        from shared.plugins.model_provider.conftest import (
+            assert_no_likely_cause_prose,
+        )
         from shared.plugins.model_provider.vllm.errors import (
             VLLMMidStreamError,
         )
         err = VLLMMidStreamError("http://srv:8000", original_error="x")
-        msg = str(err).lower()
-        # The phrase "almost always" is the tell of a hardcoded
-        # likely-cause guess — should not appear in the vLLM message.
-        assert "almost always" not in msg
+        assert_no_likely_cause_prose(str(err))
 
     def test_clean_connection_failure_still_routes_to_connection_error(self):
         from shared.plugins.model_provider.vllm.errors import (

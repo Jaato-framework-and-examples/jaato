@@ -83,22 +83,11 @@ class VLLMMidStreamError(VLLMError):
             lines.append(f"Underlying error: {original_error}")
         lines.extend([
             "",
-            "This is a server-side failure that fired AFTER the HTTP 200",
-            "had already been committed — by the time the connection",
-            "drops, vLLM has stopped emitting SSE chunks but the framework",
-            "cannot see the actual cause from the wire.",
-            "",
-            "Decisive diagnostic: check the vLLM server log on the host",
+            "The HTTP 200 was already committed when the connection",
+            "dropped, so the framework cannot see the failure reason",
+            "from the wire.  Check the vLLM server log on the host",
             "running the engine for an entry around the time of this",
-            "error.  Common locations:",
-            "  - stdout/stderr of the 'vllm serve ...' process",
-            "  - journalctl -u vllm.service --since '5 minutes ago'",
-            "    (when run as a systemd unit)",
-            "  - docker logs <vllm-container> (when containerized)",
-            "",
-            "The vLLM log will name the failure (prompt-too-long, KV",
-            "cache exhaustion, CUDA OOM, engine-internal exception, ...);",
-            "the fix tree depends on which one fired.",
+            "error — it will name the actual cause.",
         ])
         super().__init__("\n".join(lines))
 

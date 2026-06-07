@@ -434,14 +434,18 @@ class TestCapabilities:
 
 class TestMidStreamErrorDistinction:
     """``_handle_api_error`` must distinguish a mid-stream connection drop
-    (engine-error AFTER HTTP 200 — e.g. prompt exceeds engine
-    ``max_input_length``, KV-cache OOM) from a pre-flight connection
-    failure (host unreachable / firewall / DNS).  The two have completely
+    (engine-error AFTER HTTP 200) from a pre-flight connection failure
+    (host unreachable / firewall / DNS).  The two have completely
     different fix trees — surfacing both as ``TensorRTLLMConnectionError``
     misroutes the user toward network debugging when the real bug is
     engine config.  Empirically demonstrated by the 2026-06-06
-    kb-orchestrator cascade incident (prompt 19,977 tokens against
-    engine ``max_input_length=16384``).
+    kb-orchestrator cascade incident.
+
+    The mid-stream message itself must be GENERIC per
+    ``feedback_no_hardcoded_likely_cause_in_error_messages.md`` —
+    enforced by the shared
+    ``assert_no_likely_cause_prose`` helper in
+    ``shared/plugins/model_provider/conftest.py``.
     """
 
     def _make_apicon_error(self, message: str):
@@ -472,8 +476,24 @@ class TestMidStreamErrorDistinction:
             provider._handle_api_error(err)
         msg = str(ctx.value)
         assert "192.168.50.154:8000" in msg
-        assert "max_input_length" in msg
-        assert "trtllm-build" in msg
+        # Per feedback_no_hardcoded_likely_cause_in_error_messages.md,
+        # the message points the operator at the server log instead of
+        # naming a likely cause.
+        assert "trtllm-serve log" in msg
+
+    def test_mid_stream_message_does_not_guess_at_cause(self):
+        """Falsification guard for the no-hardcoded-likely-cause rule
+        (``feedback_no_hardcoded_likely_cause_in_error_messages.md``).
+        Shared with triton + vllm via the model_provider conftest.
+        """
+        from shared.plugins.model_provider.conftest import (
+            assert_no_likely_cause_prose,
+        )
+        from shared.plugins.model_provider.tensorrt_llm.errors import (
+            TensorRTLLMMidStreamError,
+        )
+        err = TensorRTLLMMidStreamError("http://srv:8000", original_error="x")
+        assert_no_likely_cause_prose(str(err))
 
     def test_clean_connection_failure_still_routes_to_connection_error(self):
         from shared.plugins.model_provider.tensorrt_llm.errors import (
