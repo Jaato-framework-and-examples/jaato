@@ -196,18 +196,38 @@ def test_bootstrap_passes_agent_params() -> None:
     assert runtime.create_session_kwargs["agent_params"] == {"case_id": "c-42"}
 
 
-def test_bootstrap_with_empty_plugins_passes_none() -> None:
-    """Empty plugin list flows as ``tools=None`` so the runtime
-    falls back to its default behavior (expose all).
+def test_bootstrap_with_empty_plugins_passes_empty_list() -> None:
+    """Empty plugin list flows as ``tools=[]`` so the runtime
+    produces the minimal framework set (introspection + lifecycle +
+    framework infra) rather than expanding to all exposed plugins.
 
-    Phase 4 §C: plugin_configs is now a separate top-level envelope
+    Pre-2026-06-07 this assertion was ``tools is None`` because the
+    helper had ``tools=tool_names or None`` — falsy coercion swapped
+    empty-list for None, which the runtime then interpreted as
+    "load ALL exposed plugins" per its docstring.  The vLLM smoke
+    surfaced the resulting ~22-tool wire surface (instead of ~8);
+    PR ``fix/runner-session-tools-falsy-none`` (2026-06-07) drops
+    the falsy coercion so ``plugins: []`` in a profile actually
+    produces an empty tool surface.
+
+    Phase 4 §C: plugin_configs is a separate top-level envelope
     field (no longer derived from plugins[i].config), so the test
     clears it explicitly to assert the "no configs" path.
     """
     env = _good_envelope(plugins=[], plugin_configs={})
     runtime = _StubRuntime()
     bootstrap_session(env, runtime_factory=lambda e: runtime)
-    assert runtime.create_session_kwargs["tools"] is None
+    assert runtime.create_session_kwargs["tools"] == [], (
+        "Empty profile.plugins must produce tools=[] (NOT None).  "
+        "None would cascade to the runtime's 'load all exposed "
+        "plugins' fallback — the bug the vLLM smoke 2026-06-07 "
+        "surfaced."
+    )
+    # plugin_configs and preloaded_plugins still get the empty→None
+    # falsy coercion since their downstream semantics treat
+    # empty-dict and empty-set as equivalent to None (no overrides,
+    # no preloaded plugins).  Distinct from tools where None has
+    # meaningfully different semantics.
     assert runtime.create_session_kwargs["plugin_configs"] is None
     assert runtime.create_session_kwargs["preloaded_plugins"] is None
 

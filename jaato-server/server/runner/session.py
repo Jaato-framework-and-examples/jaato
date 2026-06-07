@@ -1012,7 +1012,23 @@ def _build_session(
 
     return runtime.create_session(
         model=envelope.model_name,
-        tools=tool_names or None,
+        # PR #240 (2026-06-07) attempted to fix the same bug at
+        # ``server/core.py:_build_profile_session_kwargs`` — but that
+        # function turned out to be dead code (only referenced by
+        # tests; no production caller).  The LIVE production path
+        # routes through this runner-side bootstrap, which had the
+        # exact same falsy bug: ``tool_names or None`` swallows the
+        # explicit-empty-list semantic.  When ``profile.plugins: []``
+        # was declared (canonical "minimal framework set"),
+        # ``tool_names`` was ``[]`` → ``[] or None`` → ``None`` →
+        # ``runtime.create_session`` interprets None as "load all
+        # exposed plugins", producing the ~22-tool wire surface that
+        # confused Llama-3.1-8B-AWQ in the vLLM smoke.
+        #
+        # Pass the list verbatim — empty means empty (minimal set:
+        # introspection + lifecycle + framework infra like stream /
+        # event_bus that are registered as core tools regardless).
+        tools=tool_names,
         system_instructions=envelope.system_instructions,
         plugin_configs=plugin_configs or None,
         provider_name=envelope.provider_name or None,
