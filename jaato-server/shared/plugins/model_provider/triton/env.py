@@ -1,18 +1,35 @@
 """Environment variable resolution for the Triton provider.
 
 Triton's OpenAI-compatible frontend and Triton's native HTTP API run as
-separate processes on different ports (defaults: 9000 and 8000).  This
-module resolves both URLs independently so users can target deployments
-that put them on different hosts (e.g. OpenAI frontend behind a load
-balancer, Triton internal on a private network).
+separate processes on different ports (canonical: 9000 and 8000).
+This module resolves both URLs independently so users can target
+deployments that put them on different hosts (e.g. OpenAI frontend
+behind a load balancer, Triton internal on a private network).
 
-Environment variables:
-    TRITON_OPENAI_URL: OpenAI frontend URL (default: http://localhost:9000)
-    TRITON_CONTROL_URL: Triton native HTTP URL (default: http://localhost:8000)
-    TRITON_HOST: Shorthand — sets both URLs to this hostname with default ports
-    TRITON_MODEL: Default model name
-    TRITON_CONTEXT_LENGTH: Override context window size
-    TRITON_API_TOKEN: Optional bearer token
+Environment variables (URL+host knobs REQUIRED at session init time
+— no hardcoded localhost fallbacks per the project's "no fallback"
+rule; missing values fail fast in ``TritonProvider.initialize`` with
+a clear ``ValueError``):
+
+    TRITON_OPENAI_URL: OpenAI frontend URL (e.g.
+        ``http://gpu-box:9000``).
+    TRITON_CONTROL_URL: Triton native HTTP URL (e.g.
+        ``http://gpu-box:8000``).
+    TRITON_HOST: Shorthand — sets both URLs to this hostname with the
+        canonical Triton ports.  Use ONE of {URL pair, HOST shorthand}.
+    TRITON_MODEL: Default model name.
+    TRITON_CONTEXT_LENGTH: Context window size.  Triton's model config
+        does not carry a standard "context length" field — backend-
+        specific (TRT-LLM has ``max_seq_len``, vLLM has
+        ``max_model_len``).  REQUIRED at session init time.
+    TRITON_API_TOKEN: Optional bearer token.
+
+The two port constants (``DEFAULT_OPENAI_PORT = 9000``,
+``DEFAULT_CONTROL_PORT = 8000``) are NOT fallback values — they are
+the canonical Triton-server port assignments, used solely to fill in
+the port number when the user provides a bare hostname via
+``TRITON_HOST``.  When neither URL nor HOST is set, the provider
+fails fast rather than assuming localhost.
 """
 
 import os
@@ -27,16 +44,12 @@ ENV_MODEL = "TRITON_MODEL"
 ENV_CONTEXT_LENGTH = "TRITON_CONTEXT_LENGTH"
 ENV_API_TOKEN = "TRITON_API_TOKEN"
 
+# Canonical Triton port assignments (NOT fallback values — only used
+# to compose a URL from the TRITON_HOST shorthand).  These match the
+# Triton example launchers; override the full URL via TRITON_OPENAI_URL
+# / TRITON_CONTROL_URL when running on non-default ports.
 DEFAULT_OPENAI_PORT = 9000
 DEFAULT_CONTROL_PORT = 8000
-DEFAULT_OPENAI_URL = f"http://localhost:{DEFAULT_OPENAI_PORT}"
-DEFAULT_CONTROL_URL = f"http://localhost:{DEFAULT_CONTROL_PORT}"
-
-# Triton's model config (max_batch_size, parameters) doesn't carry a
-# standard "context length" field — that's a backend-specific concept
-# (TRT-LLM has ``max_seq_len``, vLLM has ``max_model_len``, etc.).  We
-# don't try to auto-discover it; users set this explicitly.
-DEFAULT_CONTEXT_LENGTH = 8192
 
 
 def _origin_for_host(host: str, default_port: int) -> str:
@@ -57,38 +70,35 @@ def _origin_for_host(host: str, default_port: int) -> str:
     return f"{parsed.scheme}://{netloc}"
 
 
-def resolve_urls() -> Tuple[str, str]:
-    """Return ``(openai_url, control_url)``.
+def resolve_urls() -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(openai_url, control_url)`` — either may be ``None``.
 
-    Priority:
-        1. Both ``TRITON_OPENAI_URL`` and ``TRITON_CONTROL_URL`` set →
-           use them as-is (each can be overridden independently).
-        2. ``TRITON_HOST`` set, URL env vars absent → derive both URLs
-           from the host with default ports.
-        3. Neither URL env var nor ``TRITON_HOST`` set → defaults
-           (``http://localhost:9000``, ``http://localhost:8000``).
+    Resolution:
+        1. ``TRITON_OPENAI_URL`` / ``TRITON_CONTROL_URL`` if set →
+           use them as-is.
+        2. Otherwise, if ``TRITON_HOST`` is set → derive the missing
+           URL by composing the host shorthand with the canonical
+           Triton port (9000 for OpenAI, 8000 for control).
+        3. Otherwise → ``None`` for that URL.  Caller is responsible
+           for failing fast — there is no localhost fallback.
 
     A single URL env var (only ``TRITON_OPENAI_URL`` or only
-    ``TRITON_CONTROL_URL``) is also honored — the other gets its
-    default or its ``TRITON_HOST``-derived value.
+    ``TRITON_CONTROL_URL``) is honored — the other gets its
+    ``TRITON_HOST``-derived value if HOST is set, else ``None``.
     """
     openai = os.environ.get(ENV_OPENAI_URL)
     control = os.environ.get(ENV_CONTROL_URL)
     host = os.environ.get(ENV_HOST)
 
-    if openai is None:
-        openai = (
-            _origin_for_host(host, DEFAULT_OPENAI_PORT)
-            if host
-            else DEFAULT_OPENAI_URL
-        )
-    if control is None:
-        control = (
-            _origin_for_host(host, DEFAULT_CONTROL_PORT)
-            if host
-            else DEFAULT_CONTROL_URL
-        )
-    return openai.rstrip("/"), control.rstrip("/")
+    if openai is None and host:
+        openai = _origin_for_host(host, DEFAULT_OPENAI_PORT)
+    if control is None and host:
+        control = _origin_for_host(host, DEFAULT_CONTROL_PORT)
+
+    return (
+        openai.rstrip("/") if openai else None,
+        control.rstrip("/") if control else None,
+    )
 
 
 def resolve_model() -> Optional[str]:

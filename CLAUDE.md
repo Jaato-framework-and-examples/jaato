@@ -134,6 +134,7 @@ Four plugin types:
 - `model_provider/lmstudio/`: LM Studio local models (OpenAI-compat chat + native load-control)
 - `model_provider/nim/`: NVIDIA NIM (OpenAI-compatible API, hosted + self-hosted)
 - `model_provider/tensorrt_llm/`: NVIDIA TensorRT-LLM via `trtllm-serve` (OpenAI-compatible, self-hosted GPU inference)
+- `model_provider/vllm/`: vLLM via `vllm.entrypoints.openai.api_server` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
 
 ### Tool Execution Flow
@@ -621,9 +622,9 @@ Available models include Llama 3.3/3.1, DeepSeek-R1, Nemotron, and other NIM cat
 ### NVIDIA TensorRT-LLM (`trtllm-serve`)
 | Variable | Purpose |
 |----------|---------|
-| `TENSORRT_LLM_HOST` | trtllm-serve URL (default: `http://localhost:8000`) |
+| `TENSORRT_LLM_HOST` | trtllm-serve URL (**required** — e.g. `http://localhost:8000`; no localhost fallback) |
 | `TENSORRT_LLM_MODEL` | Default model name (matches the engine's `id` in `/v1/models`) |
-| `TENSORRT_LLM_CONTEXT_LENGTH` | Override context window size (trtllm-serve does not surface `max_seq_len` in `/v1/models`) |
+| `TENSORRT_LLM_CONTEXT_LENGTH` | Context window size (**required** — trtllm-serve does not surface `max_seq_len` in `/v1/models`) |
 | `TENSORRT_LLM_API_TOKEN` | Optional bearer token (only when fronted by an auth proxy — trtllm-serve has no built-in API key mechanism) |
 
 Talks to a `trtllm-serve` instance the user has already launched. Each `trtllm-serve` process hosts exactly one engine, built out-of-band with `trtllm-build`. Provider is **passive** — no in-band load endpoint analogous to LM Studio's `/api/v1/models/load`.
@@ -647,6 +648,41 @@ Benefits:
 - Maximum throughput on NVIDIA GPUs (FP8/INT4 quant, in-flight batching, KV-cache reuse, speculative decoding)
 - Self-hosted — no API costs, data never leaves your hardware
 - DIY counterpart to NIM: NIM is essentially TensorRT-LLM productized; this provider serves users who build their own engines
+
+### vLLM (`vllm serve`)
+| Variable | Purpose |
+|----------|---------|
+| `VLLM_HOST` | vLLM server URL (**required** — e.g. `http://localhost:8000`; no localhost fallback) |
+| `VLLM_MODEL` | Default model name (matches the model's `id` in `/v1/models`) |
+| `VLLM_CONTEXT_LENGTH` | Context window size (**required** — vLLM's `/v1/models` does not surface `max_model_len`; verified against vLLM stable docs 2026-06-07 via context7) |
+| `VLLM_API_TOKEN` | Optional bearer token (only when the server was launched with `--api-key <token>` — vLLM's native bearer auth — or fronted by an auth proxy) |
+
+Talks to a vLLM OpenAI-compatible server (`vllm.entrypoints.openai.api_server`) the user has already launched. Provider is **passive** — no in-band model load endpoint; model choice (`--model`), context length (`--max-model-len`), and the tool-call parser (`--enable-auto-tool-choice --tool-call-parser <name>`) all live at server-launch boundary.
+
+Profile knobs under `plugin_configs.vllm`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `host` | str | Override `VLLM_HOST` |
+| `context_length` | int | Context window override (required for long-context engines) |
+| `api_token` | str | Bearer token override (when server uses `--api-key`) |
+| `max_tokens` | int | Cap on per-request output budget; forwarded as OpenAI `max_tokens`. Omit to let vLLM apply its own default (bounded by `--max-model-len` minus prompt). |
+
+Quick start:
+```bash
+vllm serve Qwen/Qwen2.5-7B-Instruct \
+    --host 0.0.0.0 --port 8000 \
+    --max-model-len 32768
+export VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct
+export VLLM_CONTEXT_LENGTH=32768  # match the engine's --max-model-len
+```
+
+For tool-calling, also pass `--enable-auto-tool-choice --tool-call-parser <name>` matching the model family (e.g. `hermes` for Qwen2.5, `mistral` for Mistral Instruct, `llama3_json` for Llama 3.1, `pythonic` for Llama 3.2 / 4, `granite` for IBM Granite, ...). See the vLLM Tool-Calling docs for the full parser list.
+
+Benefits:
+- High-throughput batched inference on NVIDIA GPUs (PagedAttention, continuous batching, prefix caching)
+- Self-hosted — no API costs, data never leaves your hardware
+- 200+ supported model architectures; LoRA adapter hot-loading; structured outputs (`json_schema`, guided decoding via `extra_body`)
 
 ### OpenRouter
 | Variable | Purpose |

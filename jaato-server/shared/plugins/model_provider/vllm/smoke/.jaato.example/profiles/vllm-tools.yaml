@@ -1,0 +1,28 @@
+name: vllm-tools
+description: >
+  Tool-calling smoke test for the vllm provider. Exercises the OpenAI
+  tools shape via the cli plugin — one tool call followed by a
+  one-sentence summary. Permission policy is default-allow so the
+  harness needs no interactive permission handling.
+
+  Requires the vLLM server to have been launched with
+  --enable-auto-tool-choice --tool-call-parser <name> matching the
+  model family (e.g. hermes for Qwen2.5, llama3_json for Llama 3.1).
+
+model: Qwen/Qwen2.5-7B-Instruct
+provider: vllm
+
+max_turns: 4
+
+suppress_base_instructions: true
+
+plugins:
+  - cli
+
+plugin_configs:
+  vllm:
+    host: "${VLLM_HOST}"
+    context_length: 8192
+  permission:
+    policy:
+      defaultPolicy: allow

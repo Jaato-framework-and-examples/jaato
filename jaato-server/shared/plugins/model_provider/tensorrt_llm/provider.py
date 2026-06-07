@@ -65,8 +65,8 @@ from ..nim.converters import (
     tool_schemas_to_openai,
 )
 from .env import (
-    DEFAULT_CONTEXT_LENGTH,
-    DEFAULT_HOST,
+    ENV_CONTEXT_LENGTH,
+    ENV_HOST,
     resolve_api_token,
     resolve_context_length,
     resolve_host,
@@ -120,7 +120,10 @@ class TensorRTLLMProvider:
         self._client: Optional["OpenAI"] = None
         self._model_name: Optional[str] = None
 
-        self._host: str = DEFAULT_HOST
+        # Host + context_length are required at session init time; the
+        # empty-string / None sentinels here are placeholders until
+        # ``initialize()`` validates them.  No localhost / 8K fallback.
+        self._host: str = ""
         self._api_token: Optional[str] = None
         self._auth_info: str = ""
 
@@ -207,7 +210,16 @@ class TensorRTLLMProvider:
         if config is None:
             config = ProviderConfig()
 
-        self._host = (config.extra.get("host") or resolve_host()).rstrip("/")
+        host_value = config.extra.get("host") or resolve_host()
+        if not host_value:
+            raise ValueError(
+                f"TensorRT-LLM provider: host is not configured.  Set "
+                f"{ENV_HOST} in the environment, or "
+                f"plugin_configs.tensorrt_llm.host in the profile.  No "
+                f"hardcoded localhost fallback exists per the project's "
+                f"no-fallback rule."
+            )
+        self._host = host_value.rstrip("/")
         self._api_token = config.extra.get("api_token") or resolve_api_token()
 
         context_extra = config.extra.get("context_length")
@@ -215,6 +227,16 @@ class TensorRTLLMProvider:
             self._context_length_override = int(context_extra)
         else:
             self._context_length_override = resolve_context_length()
+        if not self._context_length_override:
+            raise ValueError(
+                f"TensorRT-LLM provider: context_length is not configured.  "
+                f"trtllm-serve's GET /v1/models does not surface the "
+                f"engine's max_seq_len, so the framework cannot auto-"
+                f"discover it.  Set {ENV_CONTEXT_LENGTH} in the "
+                f"environment, or plugin_configs.tensorrt_llm.context_length "
+                f"in the profile.  No hardcoded fallback exists per the "
+                f"project's no-fallback rule."
+            )
 
         max_tokens_extra = config.extra.get("max_tokens")
         if max_tokens_extra is not None:
@@ -698,19 +720,27 @@ class TensorRTLLMProvider:
     def get_context_limit(self) -> int:
         """Return the context window size for the currently connected model.
 
-        Priority:
-            1. Explicit ``context_length`` override from profile/env
-            2. Conservative default (8192)
+        Returns the value validated at ``initialize()`` time (sourced
+        from ``plugin_configs.tensorrt_llm.context_length`` or
+        ``TENSORRT_LLM_CONTEXT_LENGTH``).  trtllm-serve's
+        ``GET /v1/models`` does not surface per-engine context length
+        (``max_seq_len`` is fixed at engine build time and is not
+        echoed in the OpenAI catalog response), so the value must
+        come from the operator — ``initialize()`` raises if missing.
 
-        Note: trtllm-serve's ``GET /v1/models`` does not surface
-        per-engine context length (``max_seq_len`` is fixed at engine
-        build time and is not echoed in the OpenAI catalog response).
-        Long-context engines should set ``TENSORRT_LLM_CONTEXT_LENGTH``
-        or ``plugin_configs.tensorrt_llm.context_length``.
+        Raises:
+            RuntimeError: When called before ``initialize()`` has
+                run (the override would be ``None``).  Sessions that
+                reach ``get_context_limit`` always have a connected
+                provider, so this is a programmer-error guard.
         """
-        if self._context_length_override:
-            return self._context_length_override
-        return DEFAULT_CONTEXT_LENGTH
+        if self._context_length_override is None:
+            raise RuntimeError(
+                "TensorRT-LLM provider: get_context_limit() called before "
+                "initialize() set the override.  This is a programmer "
+                "error — the provider must be connected first."
+            )
+        return self._context_length_override
 
     def get_token_usage(self) -> TokenUsage:
         """Token usage from the most recent completion."""

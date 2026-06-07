@@ -86,31 +86,31 @@ class TritonLoadError(TritonError):
 class TritonMidStreamError(TritonError):
     """Triton dropped the connection mid-stream on the OpenAI frontend.
 
-    Symmetric to ``TensorRTLLMMidStreamError`` — both providers wrap the
-    same trtllm engine and surface the same class of bug via different
-    OpenAI-compatible frontends.  Triton's ``openai_frontend`` (or the
-    builtin ``--openai-port`` server on 25.x+) commits HTTP 200 headers
-    before the engine's scheduler validates the request, so engine-level
-    errors (prompt-too-long, KV-cache OOM, internal exceptions) propagate
-    as ``httpx.RemoteProtocolError: peer closed connection without
-    sending complete message body`` rather than a structured HTTP 4xx/5xx.
+    Fires when ``chat.completions.create`` returns HTTP 200, the server
+    starts streaming, and then the connection closes before the body is
+    complete (``httpx.RemoteProtocolError: peer closed connection
+    without sending complete message body`` / ``incomplete chunked
+    read``).
 
-    Almost always one of:
+    Triton's ``openai_frontend`` (or the builtin ``--openai-port`` server
+    on 25.x+) commits HTTP 200 headers before the engine's scheduler
+    validates the request, so any server-side failure (prompt validation,
+    KV-cache pressure, engine exception, OOM, shutdown) surfaces as the
+    same wire-level connection drop.  The framework cannot extract the
+    failure reason from the wire — by the time httpx sees the drop, the
+    SSE chunk that would carry it has been silently discarded.
 
-    1. **Prompt exceeds engine ``max_input_length``.**  The engine
-       cached at ``<model_repo>/tensorrt_llm/1/`` was built with
-       ``trtllm-build --max_input_len <N>``; prompts over N trigger
-       a server-side ``RequestError: Prompt length (XXXX) exceeds
-       maximum input length (N)``.  The default when ``max_input_len``
-       is unset at build time is ``max_num_tokens`` (typically 16384).
-    2. **KV-cache exhaustion** under sustained generation past
-       ``max_num_tokens`` scheduler-step budget.
-    3. **Engine-internal exception** (rare; usually surfaces as CUDA
-       OOM in Triton's log).
+    Per the rule in
+    ``feedback_no_hardcoded_likely_cause_in_error_messages.md``, this
+    error surfaces "what we observed" (HTTP 200 committed, then
+    connection drop) and points at the server log for the actual
+    reason.  It does NOT enumerate likely causes — every previous
+    attempt to do so anchored operators on the wrong hypothesis when
+    the real cause was a different one.
 
-    Pre-this-class the error surfaced as a generic
-    ``TritonConnectionError`` which directed the user toward Triton-
-    reachability debugging — the wrong tree.
+    Symmetric to ``TensorRTLLMMidStreamError`` / ``VLLMMidStreamError`` —
+    every OpenAI-compatible self-hosted inference server exposes the
+    same envelope-commit-before-validate failure mode.
     """
 
     def __init__(self, openai_url: str, original_error: Optional[str] = None):
@@ -124,37 +124,11 @@ class TritonMidStreamError(TritonError):
             lines.append(f"Underlying error: {original_error}")
         lines.extend([
             "",
-            "This is almost always a server-side engine error AFTER the",
-            "HTTP 200 has been committed.  Common causes:",
-            "",
-            "  1. Prompt exceeds the engine's max_input_length (a",
-            "     trtllm-build parameter, separate from max_seq_len).",
-            "     The engine silently caps at max_num_tokens when",
-            "     max_input_len is unset at build time.  Default 16384.",
-            "",
-            "  2. KV-cache exhaustion under sustained generation past",
-            "     max_num_tokens scheduler-step budget.",
-            "",
-            "  3. Engine-internal exception (rare; usually CUDA OOM).",
-            "",
-            "Decisive diagnostic: check Triton's log on the server host",
-            "for an entry around the time of this error.  Look for",
-            "'Prompt length (XXXX) exceeds maximum input length' or",
-            "'CUDA out of memory'.  Common locations:",
-            "  - docker logs <triton-container> (when run as a container)",
-            "  - /opt/triton/logs/triton.log (when run via systemd unit",
-            "    with file logging)",
-            "  - journalctl -u triton.service --since '5 minutes ago'",
-            "",
-            "Fixes by cause:",
-            "  - max_input_length too low → rebuild engine with",
-            "    'trtllm-build --max_input_len <new>' and re-place in",
-            "    the model_repository.  Restart Triton.",
-            "  - Prompt too large for the engine → shrink via",
-            "    'suppress_base_instructions: true' in the profile and/or",
-            "    reduce preloaded plugin schemas.",
-            "  - KV-cache OOM → reduce max_batch_size or",
-            "    kv_cache_free_gpu_mem_fraction at engine build.",
+            "The HTTP 200 was already committed when the connection",
+            "dropped, so the framework cannot see the failure reason",
+            "from the wire.  Check Triton's log on the server host for",
+            "an entry around the time of this error — it will name the",
+            "actual cause.",
         ])
         super().__init__("\n".join(lines))
 
