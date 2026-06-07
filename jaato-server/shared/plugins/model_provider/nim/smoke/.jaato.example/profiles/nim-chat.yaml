@@ -1,0 +1,21 @@
+name: nim-chat
+description: >
+  Pure chat smoke for the nim provider — sends one user message,
+  expects one text response, no tools.  No completion_payload_schema
+  declared → signal_completion is HIDDEN from the model's tool
+  surface (2026-06-07 schema gate).  The turn ends naturally when
+  the provider's response has no function calls.
+
+model: meta/llama-3.1-8b-instruct
+provider: nim
+
+max_turns: 1
+
+suppress_base_instructions: true
+
+plugins: []
+
+plugin_configs:
+  nim:
+    api_key: "${JAATO_NIM_API_KEY}"
+    context_length: 8192

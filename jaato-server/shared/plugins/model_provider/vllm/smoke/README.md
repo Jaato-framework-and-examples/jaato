@@ -1,18 +1,24 @@
 # vllm provider smoke harness
 
-Two end-to-end smokes for the `vllm` provider:
+Three end-to-end smokes for the `vllm` provider, layered from simplest to most demanding:
 
-| Smoke | What it validates | Profile | Harness |
-|---|---|---|---|
-| **Chat** | Provider wire — daemon can reach the remote endpoint and round-trip `/v1/chat/completions`. No tools involved. | `vllm-smoke` | `smoke.py` |
-| **Tools** | OpenAI tools shape — schema serialization, tool-call argument parsing, tool-result round-trip. Exercises the `cli` plugin. The `permission` plugin is server-wired automatically (no need to list it in `plugins`), but its policy is set via `plugin_configs.permission`. | `vllm-tools` | `smoke_tools.py` |
+| # | Smoke | What it validates | Profile | Harness |
+|---|---|---|---|---|
+| 1 | **Chat** | Provider wire — daemon can reach the remote endpoint and round-trip `/v1/chat/completions`. **No tools, no `signal_completion`**: the profile declares no `completion_payload_schema` so `signal_completion` is hidden (2026-06-07 schema gate). The turn ends naturally when the model emits text without function calls. | `vllm-chat` | `smoke_chat.py` |
+| 2 | **signal_completion** | Lifecycle — schema-driven completion contract. Profile declares a non-trivial 3-field schema (summary + status + word_count, 2 required). Model must acknowledge in text then call `signal_completion` with a schema-valid payload. Tests both the OpenAI tools wire AND `jsonschema.validate` end-to-end. | `vllm-signal_completion` | `smoke_signal_completion.py` |
+| 3 | **Tools** | Full tool-calling — `cli` plugin (one shell tool call) followed by `signal_completion` (same schema as #2). Exercises the OpenAI tools shape with multiple tool surfaces. Requires `--enable-auto-tool-choice --tool-call-parser <name>` at server launch. | `vllm-tools` | `smoke_tools.py` |
 
-Run the **chat** smoke first. If it's red, the wire is broken and tool-shape
-results would be meaningless. Once chat is green, the tools smoke tells you
-whether the OpenAI tools path is intact (and gives the model a fair chance
-to demonstrate tool-calling fidelity — pick a model that's good at it, e.g.
-Qwen2.5-7B-Instruct or Llama-3.1-8B-Instruct, and make sure your vLLM
-server was launched with `--enable-auto-tool-choice --tool-call-parser <name>`).
+Run them in order. If **chat** is red, the wire is broken — fix that first.
+If **signal_completion** is red but chat is green, the issue is either the
+tool-calling parser at the vLLM server (missing `--enable-auto-tool-choice`)
+or a model-fidelity gap on structured output. If **tools** is red but the
+first two are green, the issue is the `cli` tool's schema or chained
+tool-result handling.
+
+Pick a model that's strong at tool-calling for tests 2-3 (Qwen2.5-7B-Instruct,
+Llama-3.1-8B-Instruct, or larger). Small / heavily-quantized models
+(< 7B, INT4 AWQ) may pass test 1 but fail tests 2-3 from model-fidelity
+limits, not framework bugs.
 
 These are **not** unit tests — they require a live daemon and a live
 remote endpoint. Unit tests for the provider live in `../tests/`.
@@ -35,18 +41,21 @@ a different model on your endpoint, edit the profile.
 
 ```
 smoke/
-├── README.md                       # this file
-├── bootstrap.sh                    # one-shot workspace install
-├── smoke.py                        # chat-only harness
-├── smoke_tools.py                  # tool-calling harness
-├── .env.example                    # workspace env template
-└── .jaato.example/                 # workspace .jaato/ template
+├── README.md                            # this file
+├── bootstrap.sh                         # one-shot workspace install
+├── smoke_chat.py                        # #1 — pure text round-trip
+├── smoke_signal_completion.py           # #2 — lifecycle, schema-driven
+├── smoke_tools.py                       # #3 — cli + signal_completion
+├── .env.example                         # workspace env template
+└── .jaato.example/                      # workspace .jaato/ template
     ├── profiles/
-    │   ├── vllm-smoke.yaml         # pure chat, no tools, no GC
-    │   └── vllm-tools.yaml         # cli plugin, default-allow permission
+    │   ├── vllm-chat.yaml               # no schema → signal_completion hidden
+    │   ├── vllm-signal_completion.yaml  # 3-field schema, plugins:[]
+    │   └── vllm-tools.yaml              # 3-field schema, plugins:[cli]
     └── agents/
-        ├── vllm-smoke.md           # one-sentence-responder persona
-        └── vllm-tools.md           # tool-using-then-summarize persona
+        ├── vllm-chat.md                 # text-only responder
+        ├── vllm-signal_completion.md    # acknowledge + payload
+        └── vllm-tools.md                # tool call + acknowledge + payload
 ```
 
 ## Prerequisites

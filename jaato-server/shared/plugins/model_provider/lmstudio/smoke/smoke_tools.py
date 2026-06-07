@@ -1,16 +1,24 @@
 """Tool-calling smoke for the lmstudio provider.
 
-Like ``smoke.py`` but uses the ``lmstudio-tools`` profile, which
-exposes the ``cli`` plugin with default-allow permissions.  The model
-should make exactly one ``cli_based_tool`` call (``ls /tmp``) and then
-respond with a one-sentence summary.
+Test 3 of 3 (smoke_chat / smoke_signal_completion / smoke_tools):
+uses the ``lmstudio-tools`` profile, which exposes the ``cli``
+plugin with default-allow permissions AND declares a 3-field
+``completion_payload_schema`` so ``signal_completion`` is also
+visible.  The model should make exactly one ``cli_based_tool`` call
+(``ls /tmp``), reply with a one-sentence summary, then call
+``signal_completion`` with a schema-valid payload to end the turn.
 
-This is a **tools-shape test**: it validates that the provider serializes
-tool schemas in the OpenAI shape the model expects, parses tool-call
-arguments correctly, and round-trips the tool result back into the
-conversation.  If chat-only ``smoke.py`` is green but this fails,
-the bug is in the tool-call path (schema serialization, argument
-parsing, or the model's own tool-calling fidelity), not the wire.
+This is the **full tools-shape test**: it validates that the
+provider serializes tool schemas in the OpenAI shape the model
+expects, parses tool-call arguments correctly, round-trips the tool
+result back into the conversation, AND that the same wire shape
+carries the lifecycle ``signal_completion`` tool to a schema-driven
+termination.  If chat-only ``smoke_chat.py`` is green but this
+fails, the bug is in the tool-call path (schema serialization,
+argument parsing, or the model's own tool-calling fidelity), not
+the wire.  If ``smoke_signal_completion.py`` is also green but this
+fails, the bug is specifically in the multiple-tool-surface
+composition.
 
 The permission policy in the profile is ``defaultPolicy: "allow"`` so
 no interactive permission handling is needed in the harness.

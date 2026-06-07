@@ -1,0 +1,21 @@
+name: ollama-chat
+description: >
+  Pure chat smoke for the ollama provider — sends one user message,
+  expects one text response, no tools.  No completion_payload_schema
+  declared → signal_completion is HIDDEN from the model's tool
+  surface (2026-06-07 schema gate).  The turn ends naturally when
+  the provider's response has no function calls.
+
+model: qwen3:8b
+provider: ollama
+
+max_turns: 1
+
+suppress_base_instructions: true
+
+plugins: []
+
+plugin_configs:
+  ollama:
+    host: "${OLLAMA_HOST}"
+    context_length: 32768
