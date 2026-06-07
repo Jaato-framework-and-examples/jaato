@@ -255,6 +255,22 @@ class JaatoSession:
         # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
         self._completion_payload_schema: Optional[Any] = None
 
+        # Path 1 quirk state (server 0.6.195+).  When
+        # ``LifecycleTools._execute_signal_completion`` returns a
+        # ``validation_failed`` error, ``_execute_tools_and_continue``
+        # stamps this with the failing tool's name so the NEXT
+        # ``provider.complete()`` in the same turn can request
+        # named-function ``tool_choice``.  Cleared after one consumed
+        # call so a single retry-with-xgrammar is the contract.
+        # ``None`` = no pending retry.  The provider plugin decides
+        # whether to honor it (vllm honors when its
+        # ``force_tool_choice_for_lifecycle`` quirk is True;
+        # providers without the quirk ignore the kwarg).  See
+        # ``feedback_llama31_vllm_auto_mode_stringifies_args`` and
+        # ``project_backlog_vllm_provider_typed_tool_args`` for the
+        # diagnosis + design.
+        self._pending_tool_choice_name: Optional[str] = None
+
         # Profile-declared completion processors (kb-authored Python
         # under ``.jaato/scripts/processors/``).  Each entry is a
         # ``CompletionProcessor`` carrying a script path + optional
@@ -4343,6 +4359,25 @@ NOTES
             fc_group, turn_data, on_output, cancellation_notified
         )
 
+        # 1.4 Path 1 quirk: signal_completion validation_failed →
+        # request named-function tool_choice on the retry.
+        #
+        # When the lifecycle tool returns
+        # ``{"error": "validation_failed", ...}`` (schema mismatch or
+        # fatal processor error), stamp the failing tool's name on the
+        # session so the NEXT ``provider.complete()`` in this turn can
+        # request server-side xgrammar enforcement via named-function
+        # ``tool_choice``.  Scoped to ``signal_completion`` because
+        # that's the only tool today whose return shape carries the
+        # ``"validation_failed"`` sentinel + a schema-validated payload
+        # contract (see ``shared/lifecycle_tools.py:594``).  The
+        # provider plugin decides whether to honor the request — vllm
+        # honors it when ``force_tool_choice_for_lifecycle`` quirk is
+        # True; providers without the quirk no-op.  Cleared after one
+        # consumed call (see ``_do_send_tool_results``) so the contract
+        # is "one xgrammar-enforced retry, then back to auto".
+        self._maybe_stamp_lifecycle_retry_tool_choice(tool_results)
+
         # 1.5 signal_completion terminates the turn.
         #
         # Pre-2026-06-07 the loop continued past a successful
@@ -5024,6 +5059,72 @@ NOTES
             # Child messages are status updates from subagents that were queued
             # while we were busy. Process them before truly becoming idle.
             self._drain_child_messages(on_output)
+
+    def _maybe_stamp_lifecycle_retry_tool_choice(
+        self, tool_results: List[ToolResult],
+    ) -> None:
+        """Path 1 quirk hook (server 0.6.195+).
+
+        Scan ``tool_results`` for ``signal_completion`` returning
+        ``{"error": "validation_failed", ...}`` — the canonical
+        self-correction shape from ``LifecycleTools._execute_signal_completion``
+        when ``completion_payload_schema`` rejected the args.  When
+        found, stamp ``self._pending_tool_choice_name`` with the tool
+        name so the next ``provider.complete()`` call passes
+        ``tool_choice={type: function, function: {name: ...}}`` to the
+        provider.
+
+        Only ``signal_completion`` is scoped today — it's the only
+        tool whose return contract carries the ``"validation_failed"``
+        sentinel + a typed-payload schema worth enforcing via
+        server-side xgrammar.  Generalizing to other tools is
+        mechanical (drop the name check) once another tool surfaces
+        the same pattern.
+
+        Non-validation_failed tool results, results without the
+        sentinel, and results from other tools are no-ops.  The
+        provider plugin decides whether to honor the request via its
+        own quirk gate (vllm: ``force_tool_choice_for_lifecycle``);
+        providers without the quirk silently ignore the kwarg, so this
+        stamping is provider-agnostic + free when the quirk is off.
+        """
+        for tr in tool_results:
+            if tr.name != "signal_completion":
+                continue
+            result = tr.result
+            # Result can be dict, string, or other; we only match the
+            # dict shape with the canonical sentinel.
+            if not isinstance(result, dict):
+                continue
+            if result.get("error") != "validation_failed":
+                continue
+            self._pending_tool_choice_name = tr.name
+            self._trace(
+                f"PENDING_TOOL_CHOICE: {tr.name} stamped after "
+                f"validation_failed return — next provider.complete() "
+                f"will request named-function tool_choice if the "
+                f"provider honors the force_tool_choice_for_lifecycle "
+                f"quirk"
+            )
+            return
+
+    def _consume_pending_tool_choice(self) -> Optional[Dict[str, Any]]:
+        """Return the pending tool_choice dict (OpenAI/vLLM wire shape)
+        and clear the stamp.  Called once per ``provider.complete()``
+        at every call site in the turn loop so the retry request fires
+        for exactly one model call before reverting to auto.
+
+        Returns ``None`` when no retry is pending.  Returns a dict
+        ``{"type": "function", "function": {"name": <tool_name>}}``
+        when ready to consume — the canonical OpenAI Chat Completions
+        wire shape; other providers translate (or ignore) at their
+        plugin layer.
+        """
+        if not self._pending_tool_choice_name:
+            return None
+        name = self._pending_tool_choice_name
+        self._pending_tool_choice_name = None
+        return {"type": "function", "function": {"name": name}}
 
     def _execute_function_call_group(
         self,
@@ -6378,6 +6479,25 @@ NOTES
                         self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
                         on_output("thinking", thinking, "write")
 
+                # Path 1 quirk consumption: if signal_completion just
+                # returned validation_failed, request named-function
+                # tool_choice on this retry (provider decides whether
+                # to honor via its own quirk gate).  Consumed inline
+                # so the stamp clears for ALL subsequent calls in this
+                # turn — single xgrammar-enforced retry is the
+                # contract.  Only PASSED to provider.complete when
+                # set: providers that don't yet accept the
+                # ``tool_choice`` kwarg (most of them; only vllm
+                # honors it today) never see an unknown kwarg in the
+                # default no-quirk path.  The Protocol declares the
+                # kwarg per
+                # ``shared/plugins/model_provider/base.py:complete``;
+                # explicit per-provider acceptance can land in a
+                # follow-up sweep.
+                _retry_tool_choice = self._consume_pending_tool_choice()
+                _extra_complete_kwargs: Dict[str, Any] = {}
+                if _retry_tool_choice is not None:
+                    _extra_complete_kwargs["tool_choice"] = _retry_tool_choice
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
@@ -6388,6 +6508,7 @@ NOTES
                             cancel_token=self._cancel_token,
                             on_usage_update=wrapped_usage_callback,
                             on_thinking=thinking_callback,
+                            **_extra_complete_kwargs,
                         ),
                         context="complete_tool_results_streaming",
                         on_retry=self._on_retry,
@@ -6395,12 +6516,17 @@ NOTES
                         provider=self._provider
                     )
             else:
+                _retry_tool_choice = self._consume_pending_tool_choice()
+                _extra_complete_kwargs = {}
+                if _retry_tool_choice is not None:
+                    _extra_complete_kwargs["tool_choice"] = _retry_tool_choice
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
+                            **_extra_complete_kwargs,
                         ),
                         context="complete_tool_results",
                         on_retry=self._on_retry,

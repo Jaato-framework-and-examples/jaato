@@ -160,6 +160,25 @@ class VLLMProvider:
         # ``feedback_llama31_vllm_auto_mode_stringifies_args``.
         self._coerce_typed_tool_args: bool = False
 
+        # Quirk: force_tool_choice_for_lifecycle (server 0.6.195+).
+        # When set via ``profile.quirks.force_tool_choice_for_lifecycle``,
+        # ``complete()`` honors the per-call ``tool_choice`` kwarg the
+        # session passes after a lifecycle-tool ``validation_failed``
+        # return.  Wire shape forwarded verbatim:
+        # ``{"type": "function", "function": {"name": <tool_name>}}``.
+        # vLLM 0.22 engages xgrammar decoding when ``tool_choice`` is
+        # a named function — constraining generation to the tool's
+        # parameter JSON schema, which produces correctly-typed args
+        # at the source.  Unlike ``coerce_typed_tool_args`` (parser-
+        # tag-gated to ``deepseek_v4`` / ``qwen_3_5`` per peer's
+        # vLLM-side diagnosis), named-function ``tool_choice`` engages
+        # xgrammar universally — so Llama 3.1 8B AWQ benefits too.
+        # When OFF (default), the session's ``tool_choice`` kwarg is
+        # ignored and vLLM uses its auto-mode default.  See
+        # ``project_backlog_vllm_provider_typed_tool_args`` for the
+        # two-path prescription (this is Path 1).
+        self._force_tool_choice_for_lifecycle: bool = False
+
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
         self._agent_id: str = "main"
@@ -270,7 +289,13 @@ class VLLMProvider:
         self._coerce_typed_tool_args = bool(
             quirks.get("coerce_typed_tool_args", False)
         )
-        _KNOWN_QUIRKS = frozenset({"coerce_typed_tool_args"})
+        self._force_tool_choice_for_lifecycle = bool(
+            quirks.get("force_tool_choice_for_lifecycle", False)
+        )
+        _KNOWN_QUIRKS = frozenset({
+            "coerce_typed_tool_args",
+            "force_tool_choice_for_lifecycle",
+        })
         for unknown_quirk in set(quirks) - _KNOWN_QUIRKS:
             logger.warning(
                 "vLLM provider: ignoring unknown quirk %r (known: %s)",
@@ -281,6 +306,12 @@ class VLLMProvider:
                 "[INIT] quirk coerce_typed_tool_args ENABLED — "
                 "string args will be ast.literal_eval'd / json.loads'd "
                 "before validation",
+            )
+        if self._force_tool_choice_for_lifecycle:
+            self._trace(
+                "[INIT] quirk force_tool_choice_for_lifecycle ENABLED — "
+                "session-supplied tool_choice will be forwarded to "
+                "vLLM so xgrammar constrains lifecycle-tool retries",
             )
 
         self._auth_info = (
@@ -595,6 +626,7 @@ class VLLMProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         """Run one stateless chat completion through vLLM's /v1.
 
@@ -604,6 +636,13 @@ class VLLMProvider:
         models whose tokenizer chat template + the server's
         ``--tool-call-parser`` (set at launch) support function
         calling.
+
+        ``tool_choice`` is honored ONLY when the
+        ``force_tool_choice_for_lifecycle`` quirk is enabled (default:
+        off).  Without the quirk the kwarg is ignored and vLLM uses
+        its auto-mode default; the session passes it generically and
+        provider gates it via the quirk per
+        ``project_backlog_vllm_provider_typed_tool_args``.
         """
         if not self._client or not self._model_name:
             raise RuntimeError(
@@ -626,6 +665,27 @@ class VLLMProvider:
             kwargs["response_format"] = {"type": "json_object"}
         if self._max_tokens is not None:
             kwargs["max_tokens"] = self._max_tokens
+        # Path 1 quirk: forward session-supplied ``tool_choice`` to
+        # vLLM only when the quirk is enabled.  vLLM 0.22 engages
+        # xgrammar decoding for named-function ``tool_choice``,
+        # constraining generation to the tool's parameter JSON
+        # schema → server-side correctly-typed args.  When the
+        # quirk is OFF, the kwarg is dropped and vLLM uses its
+        # auto-mode default.
+        if (
+            self._force_tool_choice_for_lifecycle
+            and tool_choice is not None
+            and tools
+        ):
+            kwargs["tool_choice"] = tool_choice
+            tc_name = (
+                tool_choice.get("function", {}).get("name")
+                if isinstance(tool_choice, dict) else str(tool_choice)
+            )
+            self._trace(
+                f"QUIRK_FORCE_TOOL_CHOICE tool_choice={tc_name} — "
+                f"vLLM will engage xgrammar for this call"
+            )
 
         try:
             if on_chunk:

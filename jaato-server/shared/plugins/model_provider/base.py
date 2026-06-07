@@ -257,6 +257,7 @@ class ModelProviderPlugin(Protocol):
         on_usage_update: Optional['UsageUpdateCallback'] = None,
         on_function_call: Optional['FunctionCallDetectedCallback'] = None,
         on_thinking: Optional['ThinkingCallback'] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         """Stateless completion: convert messages to provider format, call API, return response.
 
@@ -284,6 +285,21 @@ class ModelProviderPlugin(Protocol):
             on_usage_update: Real-time token usage callback (streaming).
             on_function_call: Callback when function call detected mid-stream.
             on_thinking: Callback for extended thinking content.
+            tool_choice: Optional per-call ``tool_choice`` override.  When
+                set, requests the model invoke a specific tool on this
+                call (typically used by the session for one-shot retries
+                after a lifecycle-tool ``validation_failed``).  Wire
+                shape mirrors OpenAI / vLLM Chat Completions:
+                ``{"type": "function", "function": {"name": <tool_name>}}``;
+                Anthropic providers translate to
+                ``{"type": "tool", "name": <tool_name>}``.  ``None``
+                means provider default (``"auto"`` when tools are
+                present).  Providers MAY ignore the kwarg when their
+                wire-format quirk gate is off — the session passes it
+                generically and lets each provider decide whether to
+                honor it (vllm honors via
+                ``force_tool_choice_for_lifecycle`` quirk; providers
+                without the quirk no-op).
 
         Returns:
             A ``TurnResult`` classifying the outcome.
