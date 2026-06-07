@@ -70,6 +70,36 @@ def _is_validation_step(description: str) -> bool:
     return bool(_VALIDATION_STEP_PATTERN.search(description))
 
 
+# Tools whose business logic requires an active plan
+# (``_get_current_plan() is not None``).  Each function's first
+# significant check is ``if not plan: return {"error": "No active
+# plan..."}`` — see the function bodies for the runtime-side
+# rejection that fires when the plan is missing.
+#
+# This constant is consulted by :meth:`TodoPlugin.is_tool_visible`
+# to hide these tools at schema-export time when no plan exists,
+# rather than offering them to the model and waiting for a clean
+# runtime rejection.  Same shape as
+# :meth:`LifecycleTools._should_hide_signal_completion`: the
+# precondition belongs at the visibility layer, not the call layer.
+#
+# ``plan`` is included as the user-command alias for
+# ``getPlanStatus`` (see ``get_executors`` mapping).  ``createPlan``
+# is NOT included — it is the entry point that creates the plan
+# in the first place.
+PLAN_REQUIRED_TOOLS: frozenset[str] = frozenset({
+    "startPlan",
+    "setStepStatus",
+    "getPlanStatus",
+    "completePlan",
+    "addStep",
+    "addDependentStep",
+    "completeStepWithOutput",
+    "getBlockedSteps",
+    "plan",  # user-command alias for getPlanStatus
+})
+
+
 class TodoPlugin(RunnerForwardingMixin):
     """Plugin that provides plan registration and progress tracking.
 
@@ -165,6 +195,46 @@ class TodoPlugin(RunnerForwardingMixin):
     @property
     def name(self) -> str:
         return "todo"
+
+    def is_tool_visible(self, tool_name: str) -> bool:
+        """Per-turn visibility predicate consulted by ``JaatoSession``.
+
+        Hides the 8 (+1 alias) plan-required tools — listed in
+        :data:`PLAN_REQUIRED_TOOLS` — when no plan is active, so the
+        model never sees a tool whose precondition doesn't hold.
+        Mirrors :meth:`LifecycleTools._should_hide_signal_completion`
+        (gate at the schema-export layer, not the call layer).
+
+        For any tool name NOT in :data:`PLAN_REQUIRED_TOOLS`
+        (including tools owned by other plugins), returns ``True``
+        unconditionally — the predicate has no opinion on other
+        plugins' tools.
+
+        Called by ``JaatoSession._get_tools_for_provider`` on every
+        ``provider.complete()`` invocation, so the visibility
+        decision always reflects current plan state.  When the model
+        calls ``createPlan`` successfully, the 8 plan-required tools
+        become visible on the NEXT turn; when ``completePlan``
+        finishes the plan, they disappear again.
+
+        Args:
+            tool_name: Name of the tool whose visibility is being
+                queried.
+
+        Returns:
+            ``True`` if the tool should be exposed to the model on
+            the current turn; ``False`` to hide it.
+        """
+        if tool_name not in PLAN_REQUIRED_TOOLS:
+            return True
+        try:
+            return self._get_current_plan() is not None
+        except Exception:
+            # Defensive: a buggy plan-lookup must not break the turn.
+            # Fail-open (treat tool as visible) — the runtime check
+            # inside ``_execute_*`` will still surface a clean error
+            # if the plan really is missing.
+            return True
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
