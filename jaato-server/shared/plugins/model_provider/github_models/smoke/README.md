@@ -1,17 +1,23 @@
 # github_models provider smoke harness
 
-Two end-to-end smokes for the `github_models` provider:
+Three end-to-end smokes for the `github_models` provider, layered from simplest to most demanding:
 
-| Smoke | What it validates | Profile | Harness |
-|---|---|---|---|
-| **Chat** | Provider wire — daemon can reach the managed GitHub Models endpoint and round-trip `/chat/completions`. No tools involved. | `github-models-smoke` | `smoke.py` |
-| **Tools** | OpenAI tools shape — schema serialization, tool-call argument parsing, tool-result round-trip. Exercises the `cli` plugin. The `permission` plugin is server-wired automatically (no need to list it in `plugins`), but its policy is set via `plugin_configs.permission`. | `github-models-tools` | `smoke_tools.py` |
+| # | Smoke | What it validates | Profile | Harness |
+|---|---|---|---|---|
+| 1 | **Chat** | Provider wire — daemon can reach the managed GitHub Models endpoint and round-trip `/chat/completions`. **No tools, no `signal_completion`**: the profile declares no `completion_payload_schema` so `signal_completion` is hidden (2026-06-07 schema gate). The turn ends naturally when the model emits text without function calls. | `github-models-chat` | `smoke_chat.py` |
+| 2 | **signal_completion** | Lifecycle — schema-driven completion contract. Profile declares a non-trivial 3-field schema (summary + status + word_count, 2 required). Model must acknowledge in text then call `signal_completion` with a schema-valid payload. Tests both the OpenAI tools wire AND `jsonschema.validate` end-to-end. | `github-models-signal_completion` | `smoke_signal_completion.py` |
+| 3 | **Tools** | Full tool-calling — `cli` plugin (one shell tool call) followed by `signal_completion` (same schema as #2). Exercises the OpenAI tools shape with multiple tool surfaces. The `permission` plugin is server-wired automatically (no need to list it in `plugins`), but its policy is set via `plugin_configs.permission`. | `github-models-tools` | `smoke_tools.py` |
 
-Run the **chat** smoke first. If it's red, the wire is broken and tool-shape
-results would be meaningless. Once chat is green, the tools smoke tells you
-whether the OpenAI tools path is intact (and gives the model a fair chance
-to demonstrate tool-calling fidelity — `openai/gpt-4o` and
-`anthropic/claude-3.5-sonnet` are both strong here).
+Run them in order. If **chat** is red, the wire is broken — fix that
+first. If **signal_completion** is red but chat is green, the issue is
+either the OpenAI tools serialization path or a model-fidelity gap on
+structured output. If **tools** is red but the first two are green,
+the issue is the `cli` tool's schema or chained tool-result handling.
+
+Pick a model that's strong at tool-calling for tests 2-3 (e.g.
+`openai/gpt-4o`, `anthropic/claude-3.5-sonnet`). Smaller / open-weights
+catalog entries may pass test 1 but fail tests 2-3 from model-fidelity
+limits, not framework bugs.
 
 These are **not** unit tests — they require a live daemon and live
 GitHub credentials. Unit tests for the provider live in `../tests/`.
@@ -37,18 +43,21 @@ The token is the only deployment-time variable.
 
 ```
 smoke/
-├── README.md                              # this file
-├── bootstrap.sh                           # one-shot workspace install
-├── smoke.py                               # chat-only harness
-├── smoke_tools.py                         # tool-calling harness
-├── .env.example                           # workspace env template
-└── .jaato.example/                        # workspace .jaato/ template
+├── README.md                                    # this file
+├── bootstrap.sh                                 # one-shot workspace install
+├── smoke_chat.py                                # #1 — pure text round-trip
+├── smoke_signal_completion.py                   # #2 — lifecycle, schema-driven
+├── smoke_tools.py                               # #3 — cli + signal_completion
+├── .env.example                                 # workspace env template
+└── .jaato.example/                              # workspace .jaato/ template
     ├── profiles/
-    │   ├── github-models-smoke.yaml       # pure chat, no tools, no GC
-    │   └── github-models-tools.yaml       # cli plugin, default-allow permission
+    │   ├── github-models-chat.yaml              # no schema → signal_completion hidden
+    │   ├── github-models-signal_completion.yaml # 3-field schema, plugins:[]
+    │   └── github-models-tools.yaml             # 3-field schema, plugins:[cli]
     └── agents/
-        ├── github-models-smoke.md         # one-sentence-responder persona
-        └── github-models-tools.md         # tool-using-then-summarize persona
+        ├── github-models-chat.md                # text-only responder
+        ├── github-models-signal_completion.md   # acknowledge + payload
+        └── github-models-tools.md               # tool call + acknowledge + payload
 ```
 
 ## Prerequisites
@@ -81,11 +90,12 @@ After it completes, the workspace looks like:
 
 ```
 /tmp/jaato-github-models-smoke/
-├── smoke.py             ← copied from the repo
-├── smoke_tools.py       ← copied from the repo
-├── .env                 ← created from .env.example (only if absent)
+├── smoke_chat.py                ← copied from the repo
+├── smoke_signal_completion.py   ← copied from the repo
+├── smoke_tools.py               ← copied from the repo
+├── .env                         ← created from .env.example (only if absent)
 └── .jaato/
-    ├── profiles/        ← templates (gpt-4o baked in, token → ${GITHUB_TOKEN})
+    ├── profiles/                ← templates (gpt-4o baked in, token → ${GITHUB_TOKEN})
     └── agents/
 ```
 
@@ -105,15 +115,17 @@ Either run from the workspace:
 
 ```bash
 cd /tmp/jaato-github-models-smoke
-<repo>/.venv/bin/python smoke.py         # chat smoke
-<repo>/.venv/bin/python smoke_tools.py   # tools smoke
+<repo>/.venv/bin/python smoke_chat.py               # 1: pure text, no tools
+<repo>/.venv/bin/python smoke_signal_completion.py  # 2: signal_completion w/ schema
+<repo>/.venv/bin/python smoke_tools.py              # 3: cli tool + signal_completion
 ```
 
-…or re-invoke `bootstrap.sh` with `--run chat` / `--run tools` to do the
-bootstrap + run step in one command:
+…or re-invoke `bootstrap.sh` with `--run chat` / `--run signal_completion` /
+`--run tools` to do the bootstrap + run step in one command:
 
 ```bash
 ./bootstrap.sh --run chat
+./bootstrap.sh --run signal_completion
 ./bootstrap.sh --run tools
 ```
 
@@ -141,7 +153,7 @@ mkdir -p "$WS/.jaato/profiles" "$WS/.jaato/agents"
 
 ```bash
 SMOKE=jaato-server/shared/plugins/model_provider/github_models/smoke
-cp -f "$SMOKE/smoke.py" "$SMOKE/smoke_tools.py" "$WS/"
+cp -f "$SMOKE/smoke_chat.py" "$SMOKE/smoke_signal_completion.py" "$SMOKE/smoke_tools.py" "$WS/"
 cp -f "$SMOKE/.jaato.example/profiles/"*.yaml "$WS/.jaato/profiles/"
 cp -f "$SMOKE/.jaato.example/agents/"*.md "$WS/.jaato/agents/"
 cp -f "$SMOKE/.env.example" "$WS/.env"      # only if you don't already have .env
@@ -160,12 +172,23 @@ GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 
 ```bash
 cd "$WS"
-<repo>/.venv/bin/python smoke.py
+<repo>/.venv/bin/python smoke_chat.py
 ```
 
 Expected: one sentence of model output, exit 0.
 
-### 5. Then run the tools smoke
+### 5. Then run the signal_completion smoke
+
+```bash
+cd "$WS"
+<repo>/.venv/bin/python smoke_signal_completion.py
+```
+
+Expected: a one-sentence acknowledgement followed by a
+`signal_completion` tool call with `{summary, status, word_count}`,
+exit 0.
+
+### 6. Then run the tools smoke
 
 ```bash
 cd "$WS"
@@ -173,7 +196,8 @@ cd "$WS"
 ```
 
 Expected: a `cli_based_tool` call running `ls /tmp`, followed by a
-one-sentence summary, exit 0. The full conversation including the tool
+one-sentence summary, followed by a `signal_completion` call with the
+same 3-field payload, exit 0. The full conversation including the tool
 call streams to stdout via the SDK's output events.
 
 If the model loops or refuses to call the tool, that's a **model
@@ -204,4 +228,4 @@ model like `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`.
 | 2 | "connect failed" | Daemon isn't listening on `/tmp/jaato.sock` — re-run `jaato-server --status`. |
 | 3 | Timeout, no output | Cold-start latency or the model is hung. Bump `TURN_TIMEOUT_SECONDS` in the harness (the tools smoke uses 180s by default since tool round-trips take longer). |
 | 0 but no tool call (`smoke_tools.py`) | The model answered without calling `cli_based_tool` — usually a fidelity issue with weaker models. Try `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`. |
-| 1 with `NudgeExhausted: Agent loop exhausted N completion nudges` | The model responded with text but didn't call `signal_completion` to end the turn. **The wire worked** — the smoke validates provider connectivity, and a coherent text reply proves the wire end-to-end. NudgeExhausted on a weak tool-caller (smaller github_models entries, etc.) is a **model-fidelity result, not a smoke failure**. Capable models (Claude Sonnet 4.5, GPT-4o) follow the persona's `signal_completion` instruction cleanly. The persona pattern (instruct one sentence + signal_completion call) is the canonical shape; smaller models may need richer pattern (front-load imperative, forbid alternatives) but example payloads can backfire — weak models echo the example as natural text. |
+| 1 with `NudgeExhausted: Agent loop exhausted N completion nudges` | The model responded with text but didn't call `signal_completion` to end the turn. **The wire worked** — the smoke validates provider connectivity, and a coherent text reply proves the wire end-to-end. NudgeExhausted on a weak tool-caller (smaller github_models entries, etc.) is a **model-fidelity result, not a smoke failure**. Capable models (Claude Sonnet 4.5, GPT-4o) follow the persona's `signal_completion` instruction cleanly. |

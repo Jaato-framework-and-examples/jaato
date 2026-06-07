@@ -1,0 +1,21 @@
+name: github-models-chat
+description: >
+  Pure chat smoke for the github_models provider against the managed
+  GitHub Models endpoint — sends one user message, expects one text
+  response, no tools.  No completion_payload_schema declared →
+  signal_completion is HIDDEN from the model's tool surface
+  (2026-06-07 schema gate).  The turn ends naturally when the
+  provider's response has no function calls.
+
+model: openai/gpt-4o
+provider: github_models
+
+max_turns: 1
+
+suppress_base_instructions: true
+
+plugins: []
+
+plugin_configs:
+  github_models:
+    api_key: "${GITHUB_TOKEN}"

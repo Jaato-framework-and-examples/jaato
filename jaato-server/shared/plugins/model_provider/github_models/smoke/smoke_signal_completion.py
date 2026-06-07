@@ -1,28 +1,24 @@
-"""Minimal SDK harness for the lmstudio provider.
+"""signal_completion smoke for the github_models provider.
 
-Connects to a running jaato daemon over IPC, spawns a session against the
-``lmstudio-smoke`` profile + agent, sends one user message, prints
-model output as it arrives, and exits on ``TURN_COMPLETED``.
+Test 2 of 3 (smoke_chat / smoke_signal_completion / smoke_tools):
+exercises the lifecycle ``signal_completion`` tool with a non-trivial
+``completion_payload_schema``.  The persona instructs the model to
+emit a brief acknowledgement THEN call ``signal_completion`` with a
+structured payload (summary + status + word_count).  Success: the
+model emits valid payload → schema validation passes → session
+terminates → ``TURN_COMPLETED`` fires.
 
-This is a **wire test**: it validates the daemon can reach the local
-LM Studio server and round-trip a chat completion via
-``/v1/chat/completions``.  No tools are exercised — function-calling is
-a separate smoke (copy this harness, swap the profile to one with
-``plugins: ["cli"]``).
+This is the **lifecycle test**: it validates the daemon's
+schema-driven completion contract end-to-end against the GitHub
+Models endpoint.  Weak models may fail to produce a schema-valid
+payload on the first try; the framework returns a self-correction
+error and lets them retry within ``max_turns``.  Capable catalog
+models (``openai/gpt-4o``, ``anthropic/claude-3.5-sonnet``) are
+generally strong on structured tool output.
 
-Prerequisites:
-    1. A jaato daemon is running and listening on ``/tmp/jaato.sock``.
-    2. The profile + agent templates from ``.jaato.example/`` are copied
-       into the workspace's ``.jaato/profiles/`` and ``.jaato/agents/``.
-    3. ``host`` in the workspace ``.env`` (LMSTUDIO_HOST) points at a
-       running LM Studio server and the ``model`` in the profile is
-       loaded in LM Studio (via the UI or ``lms load``).
-
-Run:
-    .venv/bin/jaato-server --ipc-socket /tmp/jaato.sock --daemon
-    .venv/bin/python -m smoke --workspace /tmp/jaato-lmstudio-smoke
-    # or from inside the workspace:
-    cd /tmp/jaato-lmstudio-smoke && .venv/bin/python /path/to/smoke.py
+Sibling smokes:
+    smoke_chat.py             — pure text round-trip, no signal_completion
+    smoke_tools.py            — cli plugin + signal_completion (full tools shape)
 """
 from __future__ import annotations
 
@@ -41,9 +37,12 @@ from jaato_sdk.events import (
 )
 
 SOCKET = "/tmp/jaato.sock"
-PROFILE = "lmstudio-smoke"
-AGENT = "lmstudio-smoke"
-PROMPT = "Reply with exactly one short sentence saying hello."
+PROFILE = "github-models-signal_completion"
+AGENT = "github-models-signal_completion"
+PROMPT = (
+    "Acknowledge briefly, then signal completion with a structured "
+    "payload containing your summary and word count."
+)
 TURN_TIMEOUT_SECONDS = 120.0
 
 

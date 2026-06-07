@@ -1,29 +1,30 @@
-"""Tool-calling smoke for the github_models provider.
+"""Chat smoke for the github_models provider — pure text round-trip.
 
-Test 3 of 3 (smoke_chat / smoke_signal_completion / smoke_tools):
-uses the ``github-models-tools`` profile, which exposes the ``cli``
-plugin with default-allow permissions AND declares a 3-field
-``completion_payload_schema`` so ``signal_completion`` is also
-visible.  The model should make exactly one ``cli_based_tool`` call
-(``ls /tmp``), reply with a one-sentence summary, then call
-``signal_completion`` with a schema-valid payload to end the turn.
+Test 1 of 3 (smoke_chat / smoke_signal_completion / smoke_tools):
+sends one user message, expects one text response, exits on
+``TURN_COMPLETED``.  Profile declares **no**
+``completion_payload_schema`` so ``signal_completion`` is HIDDEN
+from the model's tool surface (per the 2026-06-07 schema gate);
+the persona just emits text and the turn ends naturally when the
+provider response carries no function calls.
 
-This is the **full tools-shape test**: it validates that the
-provider serializes tool schemas in the OpenAI shape the model
-expects, parses tool-call arguments correctly, round-trips the tool
-result back into the conversation, AND that the same wire shape
-carries the lifecycle ``signal_completion`` tool to a schema-driven
-termination.  If chat-only ``smoke_chat.py`` is green but this
-fails, the bug is in the tool-call path (schema serialization,
-argument parsing, or the model's own tool-calling fidelity), not
-the wire.  If ``smoke_signal_completion.py`` is also green but this
-fails, the bug is specifically in the multiple-tool-surface
-composition.
+This is the **wire test**: it validates the daemon can reach the managed
+GitHub Models endpoint and round-trip a chat completion.  Tool-calling
+fidelity is exercised by the sibling ``smoke_signal_completion.py``
+(lifecycle tool only) and ``smoke_tools.py`` (cli + signal_completion).
 
-The permission policy in the profile is ``defaultPolicy: "allow"`` so
-no interactive permission handling is needed in the harness.
+Prerequisites:
+    1. A jaato daemon is running and listening on ``/tmp/jaato.sock``.
+    2. The profile + agent templates from ``.jaato.example/`` are copied
+       into the workspace's ``.jaato/profiles/`` and ``.jaato/agents/``.
+    3. ``GITHUB_TOKEN`` is set in the workspace ``.env`` (or the user has
+       run ``github-auth login`` and the OAuth token is on disk).
 
-Prerequisites and run instructions: see ``README.md``.
+Run:
+    .venv/bin/jaato-server --ipc-socket /tmp/jaato.sock --daemon
+    .venv/bin/python smoke_chat.py --workspace /tmp/jaato-github-models-smoke
+    # or from inside the workspace:
+    cd /tmp/jaato-github-models-smoke && .venv/bin/python /path/to/smoke_chat.py
 """
 from __future__ import annotations
 
@@ -42,10 +43,10 @@ from jaato_sdk.events import (
 )
 
 SOCKET = "/tmp/jaato.sock"
-PROFILE = "github-models-tools"
-AGENT = "github-models-tools"
-PROMPT = "List the contents of /tmp and tell me how many entries you see."
-TURN_TIMEOUT_SECONDS = 180.0
+PROFILE = "github-models-chat"
+AGENT = "github-models-chat"
+PROMPT = "Reply with exactly one short sentence saying hello."
+TURN_TIMEOUT_SECONDS = 120.0
 
 
 async def main(workspace: str) -> int:
@@ -55,7 +56,7 @@ async def main(workspace: str) -> int:
         workspace_path=workspace,
     )
     if not await client.connect(timeout=10.0):
-        print("[smoke-tools] connect failed", file=sys.stderr)
+        print("[smoke] connect failed", file=sys.stderr)
         return 2
 
     done = asyncio.Event()
@@ -84,7 +85,7 @@ async def main(workspace: str) -> int:
         await asyncio.wait_for(done.wait(), timeout=TURN_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         print(
-            f"\n[smoke-tools] timeout after {TURN_TIMEOUT_SECONDS}s waiting "
+            f"\n[smoke] timeout after {TURN_TIMEOUT_SECONDS}s waiting "
             "for TURN_COMPLETED",
             file=sys.stderr,
         )
@@ -94,7 +95,7 @@ async def main(workspace: str) -> int:
     await client.disconnect()
 
     if failure:
-        print(f"[smoke-tools] ERROR: {failure[0]}", file=sys.stderr)
+        print(f"[smoke] ERROR: {failure[0]}", file=sys.stderr)
         return 1
     return 0
 

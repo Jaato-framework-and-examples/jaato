@@ -1,29 +1,23 @@
-"""Tool-calling smoke for the github_models provider.
+"""signal_completion smoke for the anthropic provider.
 
-Test 3 of 3 (smoke_chat / smoke_signal_completion / smoke_tools):
-uses the ``github-models-tools`` profile, which exposes the ``cli``
-plugin with default-allow permissions AND declares a 3-field
-``completion_payload_schema`` so ``signal_completion`` is also
-visible.  The model should make exactly one ``cli_based_tool`` call
-(``ls /tmp``), reply with a one-sentence summary, then call
-``signal_completion`` with a schema-valid payload to end the turn.
+Test 2 of 3 (smoke_chat / smoke_signal_completion / smoke_tools):
+exercises the lifecycle ``signal_completion`` tool with a non-trivial
+``completion_payload_schema``.  The persona instructs the model to
+emit a brief acknowledgement THEN call ``signal_completion`` with a
+structured payload (summary + status + word_count).  Success: the
+model emits valid payload → schema validation passes → session
+terminates → ``TURN_COMPLETED`` fires.
 
-This is the **full tools-shape test**: it validates that the
-provider serializes tool schemas in the OpenAI shape the model
-expects, parses tool-call arguments correctly, round-trips the tool
-result back into the conversation, AND that the same wire shape
-carries the lifecycle ``signal_completion`` tool to a schema-driven
-termination.  If chat-only ``smoke_chat.py`` is green but this
-fails, the bug is in the tool-call path (schema serialization,
-argument parsing, or the model's own tool-calling fidelity), not
-the wire.  If ``smoke_signal_completion.py`` is also green but this
-fails, the bug is specifically in the multiple-tool-surface
-composition.
+This is the **lifecycle test**: it validates the daemon's
+schema-driven completion contract end-to-end against the Anthropic
+Messages API.  Weak models may fail to produce a schema-valid
+payload on the first try; the framework returns a self-correction
+error and lets them retry within ``max_turns``.  Claude Sonnet /
+Opus models are generally strong on structured tool output.
 
-The permission policy in the profile is ``defaultPolicy: "allow"`` so
-no interactive permission handling is needed in the harness.
-
-Prerequisites and run instructions: see ``README.md``.
+Sibling smokes:
+    smoke_chat.py             — pure text round-trip, no signal_completion
+    smoke_tools.py            — cli plugin + signal_completion (full tools shape)
 """
 from __future__ import annotations
 
@@ -42,10 +36,13 @@ from jaato_sdk.events import (
 )
 
 SOCKET = "/tmp/jaato.sock"
-PROFILE = "github-models-tools"
-AGENT = "github-models-tools"
-PROMPT = "List the contents of /tmp and tell me how many entries you see."
-TURN_TIMEOUT_SECONDS = 180.0
+PROFILE = "anthropic-signal_completion"
+AGENT = "anthropic-signal_completion"
+PROMPT = (
+    "Acknowledge briefly, then signal completion with a structured "
+    "payload containing your summary and word count."
+)
+TURN_TIMEOUT_SECONDS = 120.0
 
 
 async def main(workspace: str) -> int:
@@ -55,7 +52,7 @@ async def main(workspace: str) -> int:
         workspace_path=workspace,
     )
     if not await client.connect(timeout=10.0):
-        print("[smoke-tools] connect failed", file=sys.stderr)
+        print("[smoke] connect failed", file=sys.stderr)
         return 2
 
     done = asyncio.Event()
@@ -84,7 +81,7 @@ async def main(workspace: str) -> int:
         await asyncio.wait_for(done.wait(), timeout=TURN_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         print(
-            f"\n[smoke-tools] timeout after {TURN_TIMEOUT_SECONDS}s waiting "
+            f"\n[smoke] timeout after {TURN_TIMEOUT_SECONDS}s waiting "
             "for TURN_COMPLETED",
             file=sys.stderr,
         )
@@ -94,7 +91,7 @@ async def main(workspace: str) -> int:
     await client.disconnect()
 
     if failure:
-        print(f"[smoke-tools] ERROR: {failure[0]}", file=sys.stderr)
+        print(f"[smoke] ERROR: {failure[0]}", file=sys.stderr)
         return 1
     return 0
 

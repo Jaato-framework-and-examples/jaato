@@ -1,0 +1,20 @@
+name: anthropic-chat
+description: >
+  Pure chat smoke for the anthropic provider against api.anthropic.com
+  — sends one user message, expects one text response, no tools.  No
+  completion_payload_schema declared → signal_completion is HIDDEN
+  from the model's tool surface (2026-06-07 schema gate).  The turn
+  ends naturally when the provider's response has no function calls.
+
+model: claude-sonnet-4-6
+provider: anthropic
+
+max_turns: 1
+
+suppress_base_instructions: true
+
+plugins: []
+
+plugin_configs:
+  anthropic:
+    api_key: "${ANTHROPIC_API_KEY}"
