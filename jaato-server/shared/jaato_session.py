@@ -4343,6 +4343,51 @@ NOTES
             fc_group, turn_data, on_output, cancellation_notified
         )
 
+        # 1.5 signal_completion terminates the turn.
+        #
+        # Pre-2026-06-07 the loop continued past a successful
+        # signal_completion call: the result was sent back to the
+        # model with the task-completion spur appended (line 5708,
+        # ``_send_tool_results_and_continue``), the model read
+        # "After each action, continue working..." and either
+        # (a) STRONG models recognized the request was already
+        #     fulfilled, emitted plain text with no tool calls, and
+        #     the outer ``while any(p.function_call ...)`` loop
+        #     exited naturally — the spur worked harmlessly.
+        # (b) WEAK models (Llama 3.1 8B AWQ in the vLLM smoke
+        #     2026-06-07) took "continue working" literally and
+        #     called signal_completion AGAIN with the same payload.
+        #     Framework returned ``{status: completed, ...}`` plus
+        #     the spur AGAIN.  Infinite loop until the harness
+        #     timeout.
+        #
+        # The architectural fix: signal_completion is the terminal
+        # tool by contract.  When it succeeds (= schema validation
+        # passed if ``completion_payload_schema`` is declared, and
+        # all configured completion processors passed — see
+        # ``LifecycleTools._execute_signal_completion``), the
+        # session is OVER.  ``hooks.on_agent_completed`` already
+        # fired inside the executor; downstream consumers have
+        # their event.  There is no model call left to make.
+        # Terminating here is correct for ALL providers — strong
+        # models save one wasted round-trip, weak models stop
+        # looping.
+        #
+        # IMPORTANT: ``_signal_completion_called`` is set ONLY on
+        # the validated-success path.  Schema-validation failures
+        # and fatal-processor failures return the
+        # ``validation_failed`` self-correction error without
+        # setting the flag — so this guard does NOT terminate on
+        # those paths; the normal continuation lets the model
+        # retry signal_completion with a corrected payload.
+        if getattr(self, "_signal_completion_called", False):
+            final_text = ''.join(accumulated_text) if accumulated_text else ""
+            self._trace(
+                "SIGNAL_COMPLETION_TERMINATES_TURN: skipping continuation "
+                "(spur + model round-trip) — session is over"
+            )
+            return None, TurnResult.success(final_text), False
+
         # 2. Simple cancellation check after execution
         if self._is_cancelled():
             reason = self._cancel_token.cancel_reason if self._cancel_token else ""
