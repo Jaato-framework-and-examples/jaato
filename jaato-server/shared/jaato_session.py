@@ -3449,6 +3449,42 @@ NOTES
         if not self._configured:
             raise RuntimeError("Session not configured. Call configure() first.")
 
+        # Post-completion send_message guard (server 0.6.197+, PR-253).
+        #
+        # When ``LifecycleTools._execute_signal_completion`` succeeds it
+        # sets ``_signal_completion_called=True`` and the chat-loop
+        # terminator at line ~4448 closes the current turn.  The
+        # session_quiescent hook at the finally block emits
+        # ``SessionTerminatedEvent`` ONCE (gated by
+        # ``_session_quiescent_emitted``) so subscribers can react.
+        #
+        # Pre-PR-253 the framework happily accepted subsequent
+        # ``send_message`` calls on a completed session: each new turn
+        # ran the model, executed any tool calls, and the terminator
+        # fired AGAIN per turn — wasting a full chat completion + tool
+        # execution before terminating.  Cascade drivers using
+        # ``client.subscribe_once(SESSION_TERMINATED, ...)`` consumed
+        # the first emission but didn't gate their send loop on the
+        # captured event; the framework had no unilateral signal to
+        # stop further sends.  Peer's 2026-06-07 cascade against
+        # llama31-8b-awq + vLLM 0.22 showed 8 wasted turns + 8 wire
+        # POSTs to the upstream after a successful signal_completion
+        # had already terminated the session.
+        #
+        # Hard-refuse here so the framework's "session is done"
+        # contract is unilaterally enforced regardless of the driver's
+        # subscription strategy.  Post-completion introspection /
+        # replay use cases should create a new session (or call a
+        # different verb like ``interrogate_session``).  Also re-emit
+        # SessionTerminatedEvent on the refusal path so any LATER
+        # subscription (e.g., a fresh ``subscribe()`` after the
+        # cascade driver's restart logic) would receive it — belt
+        # and suspenders, since the original one-shot subscribers
+        # already consumed their callbacks on the first emission.
+        if getattr(self, "_signal_completion_called", False):
+            self._refuse_post_completion_send(on_output)
+            return ""
+
         # Lazy-init the provider on first model use (deferred-provider-INIT
         # design 2026-05-13).  The 9s/2-3s INIT cost happens here on first
         # send_message instead of during configure(), shifting it off the
@@ -5059,6 +5095,75 @@ NOTES
             # Child messages are status updates from subagents that were queued
             # while we were busy. Process them before truly becoming idle.
             self._drain_child_messages(on_output)
+
+    def _refuse_post_completion_send(
+        self, on_output: Optional[OutputCallback],
+    ) -> None:
+        """Emit the refusal error + re-fire SessionTerminatedEvent for
+        the post-completion send_message guard (PR-253).
+
+        Called from ``send_message`` when
+        ``_signal_completion_called=True``.  The session is "done" —
+        the chat-loop terminator at line ~4448 already returned
+        cleanly from the prior turn, the session_quiescent hook
+        already emitted SessionTerminatedEvent once.  Subsequent
+        send_messages are refused unilaterally to prevent wasted
+        chat completions + tool executions against a logically-
+        terminated session.
+
+        Two side effects:
+
+        1. ``on_output("error", ...)``: structured error visible to
+           the caller (UI, IPC client, cascade driver).  Message text
+           names the architectural reason + the remediation: create a
+           new session for further interaction.
+        2. Re-fire session-quiescent hook to re-emit
+           ``SessionTerminatedEvent``.  The original emission was
+           gated by ``_session_quiescent_emitted`` so it fires once
+           per session naturally; this path forces a re-fire so any
+           LATER subscription receives it.  ``subscribe_once``
+           subscribers that already consumed their callback won't be
+           notified again — for those callers the error event above
+           is the unilateral signal.
+        """
+        message = (
+            "send_message refused: session has already signaled "
+            "completion (signal_completion was called successfully "
+            "earlier in this session).  Post-completion send_messages "
+            "are not supported by default — create a new session for "
+            "further interaction, or call an introspection verb if "
+            "you need to inspect the completed session's history."
+        )
+        self._trace(f"POST_COMPLETION_SEND_REFUSED: {message}")
+        if on_output:
+            try:
+                on_output("error", message, "write")
+            except Exception:
+                logger.warning(
+                    "POST_COMPLETION_SEND_REFUSED on_output raised; "
+                    "error already in trace.  Ignoring."
+                )
+
+        # Re-fire SessionTerminatedEvent via session_quiescent hook
+        # so any LATER subscription receives a fresh notification.
+        # Clear the one-shot gate first so the hook fires; gate is
+        # restored at hook completion to keep the "fire once per
+        # natural quiescence" semantics intact for the normal path.
+        hooks = getattr(self, "_ui_hooks", None) or getattr(
+            self, "_callbacks", None
+        )
+        if hooks is not None and hasattr(hooks, "on_session_quiescent"):
+            try:
+                hooks.on_session_quiescent(
+                    agent_id=self._agent_id,
+                    reason="natural",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Post-completion send refusal: on_session_quiescent "
+                    "re-fire raised: %s — refusal still in effect.",
+                    exc,
+                )
 
     def _maybe_stamp_lifecycle_retry_tool_choice(
         self, tool_results: List[ToolResult],
