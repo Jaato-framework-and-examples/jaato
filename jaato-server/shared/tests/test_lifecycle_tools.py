@@ -51,15 +51,19 @@ class StubSession:
 
 class TestGetToolSchemas:
 
-    def test_legacy_summary_when_no_schema(self):
+    def test_no_schema_hides_signal_completion(self):
+        """2026-06-07 schema gate: no ``completion_payload_schema``
+        → ``signal_completion`` is HIDDEN entirely (returns no
+        schema), not the legacy ``{summary: string}`` shape.
+        Profiles that want signal_completion must declare a schema.
+        See ``test_signal_completion_schema_gate.py`` for the gate
+        contract; this test just pins the get_tool_schemas() output."""
         lt = LifecycleTools(StubSession(schema=None))
         schemas = lt.get_tool_schemas()
-        assert len(schemas) == 1
-        params = schemas[0].parameters
-        assert "summary" in params["properties"]
-        assert params["properties"]["summary"]["type"] == "string"
-        assert params["required"] == ["summary"]
-        assert "payload" not in params["properties"]
+        assert all(s.name != "signal_completion" for s in schemas), (
+            f"signal_completion must be hidden when no schema is "
+            f"declared; got {[s.name for s in schemas]}"
+        )
 
     def test_typed_payload_when_schema_present(self):
         """Option G (server 0.6.115+): tool's parameters ARE the schema.
@@ -78,10 +82,11 @@ class TestGetToolSchemas:
         # The legacy "payload" key must NOT appear at the parameter level.
         assert "payload" not in params["properties"]
 
-    def test_tool_name_unchanged(self):
-        lt_legacy = LifecycleTools(StubSession(schema=None))
+    def test_tool_name_unchanged_with_schema(self):
+        """When the tool IS exposed (schema declared), its name is
+        always ``signal_completion`` — preserved verbatim regardless
+        of schema shape."""
         lt_typed = LifecycleTools(StubSession(schema=SAMPLE_SCHEMA))
-        assert lt_legacy.get_tool_schemas()[0].name == "signal_completion"
         assert lt_typed.get_tool_schemas()[0].name == "signal_completion"
 
 
@@ -224,7 +229,11 @@ class TestSchemaResolutionFromPath:
         params = lt.get_tool_schemas()[0].parameters
         assert params == SAMPLE_SCHEMA
 
-    def test_unresolvable_path_falls_back_to_legacy_summary(self, tmp_path):
+    def test_unresolvable_path_hides_signal_completion(self, tmp_path):
+        """2026-06-07 schema gate: an unresolvable
+        ``completion_payload_schema: path`` reference yields a
+        resolved schema of ``None`` → tool is HIDDEN (same outcome
+        as a profile that doesn't declare a schema at all)."""
         ws = tmp_path / "workspace"
         ws.mkdir()
         session = StubSession(
@@ -232,10 +241,12 @@ class TestSchemaResolutionFromPath:
         )
         lt = LifecycleTools(session)
 
-        # Unresolvable schema → resolver returns None → legacy shape
-        params = lt.get_tool_schemas()[0].parameters
-        assert "summary" in params["properties"]
-        assert "payload" not in params["properties"]
+        # Unresolvable path → schema is None → schema gate hides tool.
+        schemas = lt.get_tool_schemas()
+        assert all(s.name != "signal_completion" for s in schemas), (
+            f"Unresolvable schema path must hide signal_completion; "
+            f"got {[s.name for s in schemas]}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -317,25 +328,37 @@ class TestInteractiveRootFilter:
         )
 
     def test_api_root_keeps_signal_completion(self):
-        """Headless API client at the top level — tool is EXPOSED.
+        """Headless API client at the top level + declared schema —
+        tool is EXPOSED.  Cascade entry points (handoff_test,
+        kb-enablement-2.0 orchestrators) connect as API clients and
+        rely on signal_completion to drive the typed-payload
+        completion contract.
 
-        Cascade entry points (handoff_test, kb-enablement-2.0
-        orchestrators) connect as API clients and rely on
-        signal_completion to drive the typed-payload completion contract.
+        Schema declaration is REQUIRED (2026-06-07 gate); a profile
+        without ``completion_payload_schema`` would hide the tool
+        even on an API root.
         """
-        lt = LifecycleTools(StubInteractiveSession(client_type=ClientType.API))
+        lt = LifecycleTools(StubInteractiveSession(
+            schema=SAMPLE_SCHEMA, client_type=ClientType.API,
+        ))
         names = [s.name for s in lt.get_tool_schemas()]
         assert "signal_completion" in names
 
     def test_subagent_keeps_signal_completion_even_in_terminal(self):
-        """Subagent of any client_type — tool is EXPOSED.
+        """Subagent of any client_type + declared schema — tool is
+        EXPOSED.  Subagents need to terminate cleanly to bubble
+        their typed payloads up to the parent.  The parent's
+        interactive client_type doesn't transitively hide
+        signal_completion from the children.
 
-        Subagents need to terminate cleanly to bubble their typed
-        payloads up to the parent.  The parent's interactive client_type
-        doesn't transitively hide signal_completion from the children.
+        Schema declaration is REQUIRED (2026-06-07 gate); a subagent
+        whose profile doesn't declare ``completion_payload_schema``
+        no longer sees the tool — schema gate applies uniformly to
+        root + subagent.
         """
         parent = object()  # sentinel non-None parent session
         lt = LifecycleTools(StubInteractiveSession(
+            schema=SAMPLE_SCHEMA,
             parent=parent,
             client_type=ClientType.TERMINAL,
         ))
@@ -343,15 +366,19 @@ class TestInteractiveRootFilter:
         assert "signal_completion" in names
 
     def test_no_presentation_context_keeps_signal_completion(self):
-        """Defensive default: missing presentation_context → expose tool.
+        """Defensive default with declared schema: missing
+        ``presentation_context`` → expose tool.  Unknown client_type
+        is treated as cascade-friendly (the load-bearing case where
+        signal_completion's contract is established).  Better to
+        leave the tool than to silently break cascades when the
+        presentation context wasn't wired through.
 
-        Unknown client_type is treated as cascade-friendly (the
-        load-bearing case where signal_completion's contract is
-        established).  Better to leave the tool than to silently break
-        cascades when the presentation context wasn't wired through.
+        Schema declaration is REQUIRED (2026-06-07 gate); without a
+        schema the tool would still be hidden regardless of
+        presentation_context.
         """
         # Plain StubSession has no _presentation_context attribute.
-        lt = LifecycleTools(StubSession())
+        lt = LifecycleTools(StubSession(schema=SAMPLE_SCHEMA))
         names = [s.name for s in lt.get_tool_schemas()]
         assert "signal_completion" in names
 

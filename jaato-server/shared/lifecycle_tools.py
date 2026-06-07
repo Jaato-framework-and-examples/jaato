@@ -318,25 +318,52 @@ class LifecycleTools:
         return schemas
 
     def _should_hide_signal_completion(self) -> bool:
-        """Whether the interactive-root filter applies to this session.
+        """Whether to hide ``signal_completion`` from this session's tool surface.
 
-        Returns True iff the session is BOTH:
+        Two independent gates, ANY of which hides the tool:
 
-        - **Root** — no ``_parent_session`` set.  Subagents always see
-          ``signal_completion`` because they need to terminate cleanly
-          to bubble their typed payloads up to the parent regardless
-          of the parent's client type.
-        - **Connected via an interactive client** —
-          ``presentation_context.client_type ∈ {TERMINAL, WEB, CHAT}``.
-          Headless API clients (``client_type=API``) keep the tool
-          because cascade entry-points and one-shot orchestrators rely
-          on it.
+        1. **No declared completion_payload_schema** (2026-06-07+).
+           ``signal_completion`` only makes sense when the profile
+           declares a typed payload contract via
+           ``completion_payload_schema``.  Without one, the legacy
+           "unconstrained ``{summary: string}``" path was accepting
+           anything from the model with no validation — a profile
+           that wanted to reference signal_completion in its persona
+           had no rigorous "done" semantic.  Now the tool is
+           opt-in via schema declaration: declare a schema → get
+           signal_completion; don't declare one → the tool is
+           hidden and the session terminates naturally when the
+           model emits text without tool calls.
 
-        Returns False — i.e. ``signal_completion`` IS exposed — when
-        either condition fails OR when ``presentation_context`` is
-        absent (defensive default; an unknown client_type is treated
-        as the cascade-friendly path).
+           This gate applies uniformly to ROOT and SUBAGENT
+           sessions.  Subagents that need to bubble structured
+           payloads up to their parent declare a schema; subagents
+           that just emit text and stop don't need it.
+
+        2. **Interactive root filter** (pre-existing).  Root
+           sessions (no ``_parent_session`` set) connected via an
+           interactive client (``client_type ∈ {TERMINAL, WEB,
+           CHAT}``) hide signal_completion because interactive
+           clients expect the session to stay available for further
+           turns; signal_completion's termination contract is the
+           wrong shape for that workload.
+
+           Headless API clients
+           (``client_type=API``) keep the tool because cascade
+           entry-points and one-shot orchestrators rely on it.
+
+        Returns True iff EITHER gate fires.  Returns False — i.e.
+        ``signal_completion`` IS exposed — only when a schema is
+        declared AND the interactive-root filter doesn't apply.
         """
+        # Gate 1 (2026-06-07+): no schema → hide.  Applies to root
+        # AND subagent.  If you want signal_completion, declare a
+        # completion_payload_schema in your profile.
+        if self._payload_schema is None:
+            return True
+
+        # Gate 2 (pre-existing): subagents always see it (when schema
+        # declared); interactive root sessions don't.
         if getattr(self._session, '_parent_session', None) is not None:
             return False
         pctx = getattr(self._session, '_presentation_context', None)
