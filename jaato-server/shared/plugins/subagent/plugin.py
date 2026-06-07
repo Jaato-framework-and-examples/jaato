@@ -527,6 +527,19 @@ class SubagentPlugin:
                         effective_plugin_configs[plugin_name] = {}
                     effective_plugin_configs[plugin_name]["agent_name"] = profile.name
 
+                # Quirks injection (server 0.6.194+).  See
+                # ``SubagentProfile.quirks`` + the root-session
+                # mirror in ``server/core.py``.  Threaded via the
+                # provider's plugin_configs namespace so it reaches
+                # ``ProviderConfig.extra["quirks"]`` at session
+                # bootstrap without new framework plumbing.
+                if profile.quirks and provider:
+                    provider_cfg = dict(
+                        effective_plugin_configs.get(provider) or {}
+                    )
+                    provider_cfg["quirks"] = dict(profile.quirks)
+                    effective_plugin_configs[provider] = provider_cfg
+
                 # Save parent session before create_session because configure() on
                 # the new session will overwrite self._parent_session
                 parent_session = self._parent_session
@@ -3141,6 +3154,19 @@ class SubagentPlugin:
                 # Inject base_path for template plugin so it uses parent's workspace
                 if plugin_name == "template":
                     effective_plugin_configs[plugin_name]["base_path"] = parent_cwd
+
+            # Quirks injection (server 0.6.194+).  See
+            # ``SubagentProfile.quirks`` + the root-session mirror in
+            # ``server/core.py``.  Threaded via the provider's
+            # plugin_configs namespace so it reaches
+            # ``ProviderConfig.extra["quirks"]`` at session bootstrap
+            # without new framework plumbing.
+            if profile.quirks and provider:
+                provider_cfg = dict(
+                    effective_plugin_configs.get(provider) or {}
+                )
+                provider_cfg["quirks"] = dict(profile.quirks)
+                effective_plugin_configs[provider] = provider_cfg
 
             # Save parent session reference BEFORE create_session, because
             # create_session calls session.configure() which overwrites

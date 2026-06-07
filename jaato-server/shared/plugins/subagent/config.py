@@ -856,6 +856,34 @@ class SubagentProfile:
     #   3. Legacy unconfined default (``False`` until PR-B).
     apparmor: bool = False
 
+    # Provider/model quirks declarations (server 0.6.194+).
+    #
+    # Top-level profile field that opts the active provider into known
+    # wire-format / model-behavior workarounds.  A profile binds to
+    # exactly one ``provider`` + ``model``; the provider plugin reads
+    # the quirks dict at session init and acts on the keys it knows.
+    # Unknown keys log a warning and are ignored.
+    #
+    # Currently shipped quirks (see provider plugin docstrings for the
+    # canonical list):
+    #
+    # - ``coerce_typed_tool_args`` (vllm, others may follow): when the
+    #   model emits a JSON string where the tool schema expects an
+    #   array / object / integer / number / boolean, attempt
+    #   ``ast.literal_eval`` (handles Python repr with single quotes
+    #   that ``json.loads`` cannot parse) then ``json.loads`` as a
+    #   fallback, then re-validate.  Workaround for Llama 3.1 on vLLM
+    #   0.22.1 with the ``llama3_json`` parser, which passes the
+    #   model's stringified args through verbatim because vLLM has not
+    #   registered a structural-tag enforcement for that parser.
+    #   See ``feedback_llama31_vllm_auto_mode_stringifies_args`` for
+    #   the full diagnosis.
+    #
+    # Defaults to an empty dict (no quirks active).  Inheritance follows
+    # the collection-union rule: child + parent keys are merged; on
+    # key collision the child wins.
+    quirks: Dict[str, Any] = field(default_factory=dict)
+
     # Per-profile AppArmor fragment scoping (Piece 1, 2026-05-14).
     #
     # When set, the per-session AppArmor policy composes only the
@@ -1114,6 +1142,12 @@ def build_inline_profile(
         if isinstance(raw_model_tiers, dict) else {}
     )
 
+    raw_quirks = data.get('quirks') or {}
+    quirks = (
+        {str(k): v for k, v in raw_quirks.items()}
+        if isinstance(raw_quirks, dict) else {}
+    )
+
     return SubagentProfile(
         name=name,
         description=description,
@@ -1140,6 +1174,7 @@ def build_inline_profile(
         # semantically distinct from explicit ``[]`` (compose no
         # fragments).  See :func:`_normalize_apparmor_fragments`.
         apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+        quirks=quirks,
     )
 
 
@@ -1464,6 +1499,17 @@ def _merge_profiles(
                 merged_apparmor_fragments = list(parent_fragments)
                 break
 
+    # quirks: dict-union with child-wins-on-key-collision.  Same shape
+    # as plugin_configs / env merging — parent keys flow through, child
+    # keys override.  Rationale: quirks are additive declarations of
+    # which provider workarounds the profile opts into; a child that
+    # disables a parent's quirk does so explicitly with ``key: false``,
+    # not by omitting the key.
+    merged_quirks: Dict[str, Any] = {}
+    for parent in parents:
+        merged_quirks.update(getattr(parent, 'quirks', {}) or {})
+    merged_quirks.update(child.quirks or {})
+
     return SubagentProfile(
         name=child.name,
         description=child.description,
@@ -1484,6 +1530,7 @@ def _merge_profiles(
         runtime_limits=merged_runtime_limits,
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
+        quirks=merged_quirks,
     )
 
 
@@ -1655,6 +1702,12 @@ def _scan_profiles_dir(
                 "per turn from 'model_tiers[<active_tier>]'.", name,
             )
 
+        raw_quirks = data.get('quirks') or {}
+        quirks = (
+            {str(k): v for k, v in raw_quirks.items()}
+            if isinstance(raw_quirks, dict) else {}
+        )
+
         profiles[name] = SubagentProfile(
             name=name,
             description=data.get('description', ''),
@@ -1676,6 +1729,7 @@ def _scan_profiles_dir(
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+            quirks=quirks,
         )
         if data.get('system_instructions'):
             import warnings
@@ -1910,6 +1964,12 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
                 "'model' will be ignored.", name,
             )
 
+        raw_quirks = data.get('quirks') or {}
+        quirks = (
+            {str(k): v for k, v in raw_quirks.items()}
+            if isinstance(raw_quirks, dict) else {}
+        )
+
         profile = SubagentProfile(
             name=name,
             description=data.get('description', ''),
@@ -1931,6 +1991,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+            quirks=quirks,
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)

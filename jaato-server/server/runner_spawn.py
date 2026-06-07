@@ -420,6 +420,29 @@ def build_session_envelope(
             raw_plugin_configs,
             workspace_root_override=getattr(server, "_workspace_path", None),
         )
+        # Quirks injection (server 0.6.194+).  Top-level
+        # ``profile.quirks`` is threaded into the provider's
+        # plugin_configs namespace under the ``"quirks"`` key so the
+        # runner-side provider plugin reads it from
+        # ``ProviderConfig.extra["quirks"]`` at session init.  Lives
+        # here at the envelope-build site (NOT at
+        # ``core.py:_build_profile_session_kwargs`` — that's dead code
+        # per PR #240's diagnosis comment in runner/session.py:~1015)
+        # so the value actually reaches the runner.  Mirror in
+        # ``shared/plugins/subagent/plugin.py`` covers the
+        # daemon-spawned subagent path.  See
+        # ``SubagentProfile.quirks`` docstring +
+        # ``feedback_llama31_vllm_auto_mode_stringifies_args``.
+        profile_quirks = getattr(profile, "quirks", None) or {}
+        effective_provider_for_quirks = (
+            provider_name or getattr(profile, "provider", None)
+        )
+        if profile_quirks and effective_provider_for_quirks:
+            provider_cfg = dict(
+                plugin_configs_dict.get(effective_provider_for_quirks) or {}
+            )
+            provider_cfg["quirks"] = dict(profile_quirks)
+            plugin_configs_dict[effective_provider_for_quirks] = provider_cfg
         for name in names:
             plugin_specs.append({"name": name, "preload": name in preloaded})
         system_instructions = getattr(profile, "system_instructions", None)

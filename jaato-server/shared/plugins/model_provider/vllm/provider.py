@@ -31,6 +31,7 @@ docstring for the per-endpoint findings.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -146,6 +147,19 @@ class VLLMProvider:
         # ``TensorRTLLMProvider`` for the empirical pattern.
         self._max_tokens: Optional[int] = None
 
+        # Quirk: coerce_typed_tool_args (server 0.6.194+).  When set
+        # via ``profile.quirks.coerce_typed_tool_args``, ``flush_tool_calls``
+        # walks each emitted function call's args and, for any string
+        # value whose tool-schema property type is array / object /
+        # integer / number / boolean, attempts ``ast.literal_eval``
+        # (handles Python repr with single quotes) with ``json.loads``
+        # fallback.  Workaround for Llama 3.1 on vLLM 0.22 with the
+        # ``llama3_json`` parser under ``tool_choice: "auto"`` —
+        # stringifies typed args because vLLM has not registered a
+        # structural-tag enforcement for that parser.  See
+        # ``feedback_llama31_vllm_auto_mode_stringifies_args``.
+        self._coerce_typed_tool_args: bool = False
+
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
         self._agent_id: str = "main"
@@ -240,6 +254,34 @@ class VLLMProvider:
         max_tokens_extra = config.extra.get("max_tokens")
         if max_tokens_extra is not None:
             self._max_tokens = int(max_tokens_extra)
+
+        # Read profile-declared quirks (see ``self._coerce_typed_tool_args``
+        # docstring).  ``quirks`` is a dict injected by ``core.py`` /
+        # ``subagent/plugin.py`` at session bootstrap from the top-level
+        # ``profile.quirks`` field.  Unknown keys log a warning and are
+        # ignored — that surfaces profile typos.
+        quirks = config.extra.get("quirks") or {}
+        if not isinstance(quirks, dict):
+            logger.warning(
+                "vLLM provider: ignoring non-dict quirks (got %s)",
+                type(quirks).__name__,
+            )
+            quirks = {}
+        self._coerce_typed_tool_args = bool(
+            quirks.get("coerce_typed_tool_args", False)
+        )
+        _KNOWN_QUIRKS = frozenset({"coerce_typed_tool_args"})
+        for unknown_quirk in set(quirks) - _KNOWN_QUIRKS:
+            logger.warning(
+                "vLLM provider: ignoring unknown quirk %r (known: %s)",
+                unknown_quirk, sorted(_KNOWN_QUIRKS),
+            )
+        if self._coerce_typed_tool_args:
+            self._trace(
+                "[INIT] quirk coerce_typed_tool_args ENABLED — "
+                "string args will be ast.literal_eval'd / json.loads'd "
+                "before validation",
+            )
 
         self._auth_info = (
             f"local ({self._host}, bearer)"
@@ -439,6 +481,108 @@ class VLLMProvider:
 
     # ==================== Stateless Completion ====================
 
+    def _coerce_args_to_schema(
+        self,
+        args: Dict[str, Any],
+        tool_schema: Optional[ToolSchema],
+    ) -> Dict[str, Any]:
+        """Coerce string-valued args to their tool-schema-declared type.
+
+        Applies only when ``self._coerce_typed_tool_args`` is True
+        (set via ``profile.quirks.coerce_typed_tool_args``).  For each
+        arg whose tool-schema property type is array / object / integer
+        / number / boolean, if a string arrived, attempts
+        ``ast.literal_eval`` first (handles Python repr with single
+        quotes — the actual wire shape from Llama 3.1 8B AWQ on vLLM
+        0.22 under ``tool_choice: "auto"``) then ``json.loads`` as a
+        fallback.  Coercion failures leave the string in place; the
+        downstream schema validator will surface the type error as
+        usual.
+
+        ``ast.literal_eval`` is SAFE — it walks the AST for literal
+        containers (str / num / list / dict / tuple / set / bool /
+        None) only and never executes arbitrary code.
+
+        No-op when ``tool_schema`` is None (unknown tool, e.g. one
+        the framework hasn't registered) or when the schema has no
+        ``properties`` map.
+
+        Returns the (possibly modified) args dict.  Safe to call on
+        a dict that wasn't mutated — returns the input as-is.
+        """
+        if not self._coerce_typed_tool_args:
+            return args
+        if not isinstance(args, dict) or not args:
+            return args
+        if tool_schema is None:
+            return args
+        properties = (
+            (tool_schema.parameters or {}).get("properties") or {}
+            if isinstance(tool_schema.parameters, dict) else {}
+        )
+        if not properties:
+            return args
+
+        non_string_types = {"array", "object", "integer", "number", "boolean"}
+        coerced = dict(args)
+        any_changed = False
+        for key, value in args.items():
+            if not isinstance(value, str):
+                continue
+            prop_schema = properties.get(key)
+            if not isinstance(prop_schema, dict):
+                continue
+            expected_type = prop_schema.get("type")
+            # JSON Schema allows ``type`` to be a list (union of types).
+            # Coerce when at least one expected type is non-string AND
+            # ``string`` is NOT among them (otherwise a string is a
+            # legitimate value and we'd be over-eager).
+            if isinstance(expected_type, list):
+                type_set = set(expected_type)
+                if "string" in type_set:
+                    continue
+                if not (type_set & non_string_types):
+                    continue
+            elif expected_type not in non_string_types:
+                continue
+            new_value: Any = value
+            for parser in (ast.literal_eval, json.loads):
+                try:
+                    new_value = parser(value)
+                    break
+                except (ValueError, SyntaxError):
+                    continue
+            if new_value is not value:
+                coerced[key] = new_value
+                any_changed = True
+                self._trace(
+                    f"QUIRK_COERCE tool={tool_schema.name} arg={key} "
+                    f"from=str to={type(new_value).__name__}"
+                )
+        return coerced if any_changed else args
+
+    def _coerce_response_function_calls(
+        self,
+        provider_response: ProviderResponse,
+        tools: Optional[List[ToolSchema]],
+    ) -> None:
+        """Walk a ProviderResponse's parts and coerce stringified args
+        on every function_call, in place.  No-op when the quirk is
+        off or no function calls are present.  Used by the
+        non-streaming path; the streaming path coerces inline in
+        ``flush_tool_calls``."""
+        if not self._coerce_typed_tool_args or not provider_response:
+            return
+        schemas_by_name = {t.name: t for t in (tools or [])}
+        for part in (provider_response.parts or []):
+            fc = getattr(part, "function_call", None)
+            if fc is None:
+                continue
+            tool_schema = schemas_by_name.get(fc.name)
+            new_args = self._coerce_args_to_schema(fc.args or {}, tool_schema)
+            if new_args is not fc.args:
+                fc.args = new_args
+
     def complete(
         self,
         messages: List[Message],
@@ -493,6 +637,7 @@ class VLLMProvider:
                     on_usage_update=on_usage_update,
                     on_thinking=on_thinking,
                     trace_prefix="COMPLETE_STREAM",
+                    tools=tools,
                 )
             else:
                 response = self._client.chat.completions.create(
@@ -505,6 +650,7 @@ class VLLMProvider:
                     cached = _extract_cache_tokens(response.usage)
                     if cached is not None:
                         provider_response.usage.cache_read_tokens = cached
+                self._coerce_response_function_calls(provider_response, tools)
 
             self._last_usage = provider_response.usage
 
@@ -529,15 +675,25 @@ class VLLMProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
         trace_prefix: str = "STREAM",
+        tools: Optional[List[ToolSchema]] = None,
     ) -> ProviderResponse:
         """Accumulate text, tool calls, and usage from a streaming response.
 
         vLLM emits the same OpenAI delta shape as LM Studio / NIM /
         trtllm-serve, including ``stream_options={include_usage: true}``
         support so usage arrives in the trailing chunk.
+
+        ``tools`` is forwarded only to feed
+        :meth:`_coerce_args_to_schema` inside ``flush_tool_calls`` when
+        the ``coerce_typed_tool_args`` quirk is active.  Not used to
+        build the request — that already happened in ``complete()``.
         """
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
+
+        schemas_by_name: Dict[str, ToolSchema] = {
+            t.name: t for t in (tools or [])
+        }
 
         accumulated_text: List[str] = []
         parts: List[Part] = []
@@ -567,6 +723,12 @@ class VLLMProvider:
                         args = {}
                     tool_id = tc.get("id")
                     original_name = get_original_tool_name(func_name)
+                    # Quirk: coerce stringified args BEFORE building the
+                    # FunctionCall so downstream (schema validator,
+                    # ledger, history) sees the typed shape.
+                    args = self._coerce_args_to_schema(
+                        args, schemas_by_name.get(original_name),
+                    )
                     fc = FunctionCall(id=tool_id, name=original_name, args=args)
                     parts.append(Part.from_function_call(fc))
                     function_calls.append(fc)

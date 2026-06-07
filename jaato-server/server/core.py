@@ -2483,6 +2483,15 @@ class JaatoServer:
             if self._profile.provider:
                 kwargs["provider_name"] = self._profile.provider
 
+            # Note: ``profile.quirks`` injection lives in
+            # ``server/runner_spawn.py:build_session_envelope`` (the
+            # LIVE production path) and
+            # ``shared/plugins/subagent/plugin.py`` (subagent spawn).
+            # Not injected here because this entire method is dead
+            # code (referenced only by tests; no production caller —
+            # see ``server/runner/session.py:~1016`` for the
+            # diagnostic comment + PR #240 history).
+
             if self._profile.completion_payload_schema is not None:
                 kwargs["completion_payload_schema"] = (
                     self._profile.completion_payload_schema
