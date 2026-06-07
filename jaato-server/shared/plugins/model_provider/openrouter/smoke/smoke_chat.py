@@ -1,13 +1,18 @@
-"""Minimal SDK harness for the openrouter provider.
+"""Chat smoke for the openrouter provider — pure text round-trip.
 
-Connects to a running jaato daemon over IPC, spawns a session against the
-``openrouter-smoke`` profile + agent, sends one user message, prints
-model output as it arrives, and exits on ``TURN_COMPLETED``.
+Test 1 of 3 (smoke_chat / smoke_signal_completion / smoke_tools):
+sends one user message, expects one text response, exits on
+``TURN_COMPLETED``.  Profile declares **no**
+``completion_payload_schema`` so ``signal_completion`` is HIDDEN
+from the model's tool surface (per the 2026-06-07 schema gate);
+the persona just emits text and the turn ends naturally when the
+provider response carries no function calls.
 
-This is a **wire test**: it validates the daemon can reach the OpenRouter
-cloud gateway and round-trip a chat completion.  No tools are exercised —
-function-calling is a separate smoke (copy this harness, swap the profile
-to one with ``plugins: ["cli"]``).
+This is the **wire test**: it validates the daemon can reach the
+OpenRouter cloud gateway and round-trip a chat completion.
+Tool-calling fidelity is exercised by the sibling
+``smoke_signal_completion.py`` (lifecycle tool only) and
+``smoke_tools.py`` (cli + signal_completion).
 
 Prerequisites:
     1. A jaato daemon is running and listening on ``/tmp/jaato.sock``.
@@ -18,9 +23,9 @@ Prerequisites:
 
 Run:
     .venv/bin/jaato-server --ipc-socket /tmp/jaato.sock --daemon
-    .venv/bin/python -m smoke --workspace /tmp/jaato-openrouter-smoke
+    .venv/bin/python smoke_chat.py --workspace /tmp/jaato-openrouter-smoke
     # or from inside the workspace:
-    cd /tmp/jaato-openrouter-smoke && .venv/bin/python /path/to/smoke.py
+    cd /tmp/jaato-openrouter-smoke && .venv/bin/python /path/to/smoke_chat.py
 """
 from __future__ import annotations
 
@@ -39,8 +44,8 @@ from jaato_sdk.events import (
 )
 
 SOCKET = "/tmp/jaato.sock"
-PROFILE = "openrouter-smoke"
-AGENT = "openrouter-smoke"
+PROFILE = "openrouter-chat"
+AGENT = "openrouter-chat"
 PROMPT = "Reply with exactly one short sentence saying hello."
 TURN_TIMEOUT_SECONDS = 120.0
 

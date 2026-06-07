@@ -1,9 +1,13 @@
 name: tensorrt-llm-tools
 description: >
-  Tool-calling smoke test for the tensorrt_llm provider. Exercises the
-  OpenAI tools shape via the cli plugin — one tool call followed by a
-  one-sentence summary. Permission policy is default-allow so the
-  harness needs no interactive permission handling.
+  Tool-calling smoke for the tensorrt_llm provider — cli plugin
+  (one tool call) + signal_completion (typed payload).  Exercises
+  both the OpenAI tools wire shape and the schema-driven termination
+  contract end-to-end.
+
+  Tool-calling support depends on the trtllm engine build — engines
+  built without tool-calling parsing will fail this smoke even with
+  a strong model.
 
 model: Qwen/Qwen2.5-7B-Instruct
 provider: tensorrt_llm
@@ -22,3 +26,29 @@ plugin_configs:
   permission:
     policy:
       defaultPolicy: allow
+
+# Declares a schema so signal_completion is exposed (2026-06-07
+# gate).  Same 3-field shape as tensorrt-llm-signal_completion.yaml
+# so the persona only has to learn one payload contract.
+completion_payload_schema:
+  type: object
+  additionalProperties: false
+  required:
+    - summary
+    - status
+  properties:
+    summary:
+      type: string
+      description: >
+        One-sentence recap of what the tool call returned and the
+        agent's interpretation.
+    status:
+      type: string
+      enum: [ok, partial, failed]
+      description: >
+        Outcome classification.
+    word_count:
+      type: integer
+      minimum: 0
+      description: >
+        Number of words in the summary.

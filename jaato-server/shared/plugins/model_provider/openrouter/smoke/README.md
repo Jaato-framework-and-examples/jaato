@@ -1,18 +1,24 @@
 # openrouter provider smoke harness
 
-Two end-to-end smokes for the `openrouter` provider:
+Three end-to-end smokes for the `openrouter` provider, layered from simplest to most demanding:
 
-| Smoke | What it validates | Profile | Harness |
-|---|---|---|---|
-| **Chat** | Provider wire — daemon can reach the OpenRouter cloud gateway and round-trip `/v1/chat/completions`. No tools involved. | `openrouter-smoke` | `smoke.py` |
-| **Tools** | OpenAI tools shape — schema serialization, tool-call argument parsing, tool-result round-trip. Exercises the `cli` plugin. The `permission` plugin is server-wired automatically (no need to list it in `plugins`), but its policy is set via `plugin_configs.permission`. | `openrouter-tools` | `smoke_tools.py` |
+| # | Smoke | What it validates | Profile | Harness |
+|---|---|---|---|---|
+| 1 | **Chat** | Provider wire — daemon can reach the OpenRouter cloud gateway and round-trip `/v1/chat/completions`. **No tools, no `signal_completion`**: the profile declares no `completion_payload_schema` so `signal_completion` is hidden (2026-06-07 schema gate). The turn ends naturally when the model emits text without function calls. | `openrouter-chat` | `smoke_chat.py` |
+| 2 | **signal_completion** | Lifecycle — schema-driven completion contract. Profile declares a non-trivial 3-field schema (summary + status + word_count, 2 required). Model must acknowledge in text then call `signal_completion` with a schema-valid payload. Tests both the OpenAI tools wire AND `jsonschema.validate` end-to-end (OpenRouter forwards tool config to the selected upstream). | `openrouter-signal_completion` | `smoke_signal_completion.py` |
+| 3 | **Tools** | Full tool-calling — `cli` plugin (one shell tool call) followed by `signal_completion` (same schema as #2). Exercises the OpenAI tools shape with multiple tool surfaces. | `openrouter-tools` | `smoke_tools.py` |
 
-Run the **chat** smoke first. If it's red, the wire is broken (key,
-network, or gateway) and tool-shape results would be meaningless. Once
-chat is green, the tools smoke tells you whether the OpenAI tools path
-is intact (and gives the model a fair chance to demonstrate tool-calling
-fidelity — pick a model that's good at it, e.g. `anthropic/claude-sonnet-4.5`
-or `openai/gpt-4o`).
+Run them in order. If **chat** is red, the wire is broken (key, network,
+or gateway) — fix that first. If **signal_completion** is red but chat
+is green, the issue is either OpenRouter's upstream forwarding for the
+selected model or a model-fidelity gap on structured output. If
+**tools** is red but the first two are green, the issue is the `cli`
+tool's schema or chained tool-result handling.
+
+Pick a model that's strong at tool-calling for tests 2-3
+(`anthropic/claude-sonnet-4.5`, `openai/gpt-4o`, Gemini 2.5). Weaker
+tool-callers may pass test 1 but fail tests 2-3 from model-fidelity
+limits, not framework bugs.
 
 These are **not** unit tests — they require a live daemon and a live
 OpenRouter API key (with credits). Unit tests for the provider live in
@@ -38,18 +44,21 @@ https://openrouter.ai/models. Edit the profile to switch.
 
 ```
 smoke/
-├── README.md                              # this file
-├── bootstrap.sh                           # one-shot workspace install
-├── smoke.py                               # chat-only harness
-├── smoke_tools.py                         # tool-calling harness
-├── .env.example                           # workspace env template
-└── .jaato.example/                        # workspace .jaato/ template
+├── README.md                                # this file
+├── bootstrap.sh                             # one-shot workspace install
+├── smoke_chat.py                            # #1 — pure text round-trip
+├── smoke_signal_completion.py               # #2 — lifecycle, schema-driven
+├── smoke_tools.py                           # #3 — cli + signal_completion
+├── .env.example                             # workspace env template
+└── .jaato.example/                          # workspace .jaato/ template
     ├── profiles/
-    │   ├── openrouter-smoke.yaml          # pure chat, no tools, no GC
-    │   └── openrouter-tools.yaml          # cli plugin, default-allow permission
+    │   ├── openrouter-chat.yaml             # no schema → signal_completion hidden
+    │   ├── openrouter-signal_completion.yaml # 3-field schema, plugins:[]
+    │   └── openrouter-tools.yaml            # 3-field schema, plugins:[cli]
     └── agents/
-        ├── openrouter-smoke.md            # one-sentence-responder persona
-        └── openrouter-tools.md            # tool-using-then-summarize persona
+        ├── openrouter-chat.md               # text-only responder
+        ├── openrouter-signal_completion.md  # acknowledge + payload
+        └── openrouter-tools.md              # tool call + acknowledge + payload
 ```
 
 ## Prerequisites
@@ -76,11 +85,12 @@ After it completes, the workspace looks like:
 
 ```
 /tmp/jaato-openrouter-smoke/
-├── smoke.py             ← copied from the repo
-├── smoke_tools.py       ← copied from the repo
-├── .env                 ← created from .env.example (only if absent)
+├── smoke_chat.py                ← copied from the repo
+├── smoke_signal_completion.py   ← copied from the repo
+├── smoke_tools.py               ← copied from the repo
+├── .env                         ← created from .env.example (only if absent)
 └── .jaato/
-    ├── profiles/        ← templates (Claude Sonnet 4.5 baked in, api_key → ${JAATO_OPENROUTER_API_KEY})
+    ├── profiles/                ← templates (Claude Sonnet 4.5 baked in, api_key → ${JAATO_OPENROUTER_API_KEY})
     └── agents/
 ```
 
@@ -99,21 +109,23 @@ A `pass://` URI is resolved daemon-side and keeps the literal token out
 of the workspace tree — see the project CLAUDE.md "Workspace .env values
 resolve secret URIs" note.
 
-### Run the smoke
+### Run the smokes
 
 Either run from the workspace:
 
 ```bash
 cd /tmp/jaato-openrouter-smoke
-<repo>/.venv/bin/python smoke.py         # chat smoke
-<repo>/.venv/bin/python smoke_tools.py   # tools smoke
+<repo>/.venv/bin/python smoke_chat.py               # 1: pure text round-trip
+<repo>/.venv/bin/python smoke_signal_completion.py  # 2: signal_completion w/ schema
+<repo>/.venv/bin/python smoke_tools.py              # 3: cli tool + signal_completion
 ```
 
-…or re-invoke `bootstrap.sh` with `--run chat` / `--run tools` to do the
-bootstrap + run step in one command:
+…or re-invoke `bootstrap.sh` with `--run chat` / `--run signal_completion` /
+`--run tools` to do the bootstrap + run step in one command:
 
 ```bash
 ./bootstrap.sh --run chat
+./bootstrap.sh --run signal_completion
 ./bootstrap.sh --run tools
 ```
 
@@ -141,7 +153,8 @@ mkdir -p "$WS/.jaato/profiles" "$WS/.jaato/agents"
 
 ```bash
 SMOKE=jaato-server/shared/plugins/model_provider/openrouter/smoke
-cp -f "$SMOKE/smoke.py" "$SMOKE/smoke_tools.py" "$WS/"
+cp -f "$SMOKE/smoke_chat.py" "$SMOKE/smoke_signal_completion.py" \
+    "$SMOKE/smoke_tools.py" "$WS/"
 cp -f "$SMOKE/.jaato.example/profiles/"*.yaml "$WS/.jaato/profiles/"
 cp -f "$SMOKE/.jaato.example/agents/"*.md "$WS/.jaato/agents/"
 cp -f "$SMOKE/.env.example" "$WS/.env"      # only if you don't already have .env
@@ -159,12 +172,22 @@ JAATO_OPENROUTER_API_KEY=sk-or-v1-...
 
 ```bash
 cd "$WS"
-<repo>/.venv/bin/python smoke.py
+<repo>/.venv/bin/python smoke_chat.py
 ```
 
 Expected: one sentence of model output, exit 0.
 
-### 5. Then run the tools smoke
+### 5. Then the signal_completion smoke
+
+```bash
+cd "$WS"
+<repo>/.venv/bin/python smoke_signal_completion.py
+```
+
+Expected: a brief acknowledgement followed by a `signal_completion` call
+with a schema-valid payload, exit 0.
+
+### 6. Finally the tools smoke
 
 ```bash
 cd "$WS"
@@ -172,8 +195,9 @@ cd "$WS"
 ```
 
 Expected: a `cli_based_tool` call running `ls /tmp`, followed by a
-one-sentence summary, exit 0. The full conversation including the tool
-call streams to stdout via the SDK's output events.
+one-sentence summary, followed by a `signal_completion` call, exit 0.
+The full conversation including the tool call streams to stdout via
+the SDK's output events.
 
 If the model loops or refuses to call the tool, that's a **model
 fidelity** issue, not a provider bug — try a stronger tool-calling
@@ -209,5 +233,5 @@ model (Claude Sonnet 4.5, GPT-4o, and Gemini 2.5 work well).
 | 3 | Timeout, no output | Upstream model is slow or hung. Bump `TURN_TIMEOUT_SECONDS` in the harness (the tools smoke uses 180s by default since tool round-trips take longer). |
 | 0 but no tool call (`smoke_tools.py`) | The model answered without calling `cli_based_tool` — usually a fidelity issue with smaller models. Try Claude Sonnet 4.5, GPT-4o, or Gemini 2.5. |
 | 1 with `APIStatusError 402: Prompt tokens limit exceeded: N > M` | Your OpenRouter account's remaining prompt-token credit (M) is below the framework's irreducible prompt-token floor (~15K for a `ClientType.API` session, even with `suppress_base_instructions: true` and `plugins: []` — the floor is the tool-schemas array: `signal_completion` + the always-on introspection tools `list_tools` / `get_tool_schemas` etc. — see saved-lesson `feedback_introspection_tools_in_array_by_design`). Top up credits at https://openrouter.ai/settings/credits and retry. |
-| 1 with `APIStatusError 402: You requested up to N tokens, but can only afford M` | The provider was asking for too many output tokens. The profile caps `api_params.max_tokens: 256` which avoids this — if you still see it, you're running an older daemon that pre-dates the `api_params.max_tokens` wiring fix (PR #233). |
+| 1 with `APIStatusError 402: You requested up to N tokens, but can only afford M` | The provider was asking for too many output tokens. The profiles cap `api_params.max_tokens: 256` which avoids this — if you still see it, you're running an older daemon that pre-dates the `api_params.max_tokens` wiring fix (PR #233). |
 | 1 with `NudgeExhausted: Agent loop exhausted N completion nudges` | The model responded with text but didn't call `signal_completion` to end the turn. **The wire worked** — a coherent text reply proves provider connectivity. NudgeExhausted on a weak tool-caller (small models on local providers) is a **model-fidelity result, not a smoke failure**. Claude Sonnet 4.5 / GPT-4o / Gemini 2.5 follow the persona's `signal_completion` instruction cleanly. |
