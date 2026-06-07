@@ -134,6 +134,10 @@ class TestOnAgentTurnCompleted:
     def test_emits_with_full_token_breakdown(self):
         rpc = _FakeRPC()
         shim = _AgentUIHooksNotificationShim(rpc, request_id=1)
+        function_calls = [
+            {"name": "list_tools", "duration_seconds": 0.01},
+            {"name": "get_tool_schemas", "duration_seconds": 0.02},
+        ]
         shim.on_agent_turn_completed(
             agent_id="main",
             turn_number=3,
@@ -141,7 +145,7 @@ class TestOnAgentTurnCompleted:
             output_tokens=500,
             total_tokens=2500,
             duration_seconds=4.25,
-            function_calls=2,
+            function_calls=function_calls,
             cache_read_tokens=1800,
             cache_creation_tokens=200,
         )
@@ -152,7 +156,11 @@ class TestOnAgentTurnCompleted:
         assert payload["output_tokens"] == 500
         assert payload["total_tokens"] == 2500
         assert payload["duration_seconds"] == 4.25
-        assert payload["function_calls"] == 2
+        # ``TurnCompletedEvent.function_calls`` is typed
+        # ``List[Dict[str, Any]]`` — the shim must pass the list through
+        # verbatim (pre-2026-06-07 this coerced to ``int`` and crashed
+        # for any turn that actually contained tool calls).
+        assert payload["function_calls"] == function_calls
         assert payload["cache_read_tokens"] == 1800
         assert payload["cache_creation_tokens"] == 200
 
@@ -166,9 +174,10 @@ class TestOnAgentTurnCompleted:
             output_tokens=50,
             total_tokens=150,
             duration_seconds=1.0,
-            function_calls=0,
+            function_calls=[],
         )
         _, _, payload = rpc.emissions[0]
+        assert payload["function_calls"] == []
         assert payload["cache_read_tokens"] is None
         assert payload["cache_creation_tokens"] is None
 

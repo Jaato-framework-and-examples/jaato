@@ -4155,6 +4155,17 @@ class JaatoServer:
                 if event_type == "agent_turn_completed":
                     hooks = server._get_ui_hooks()
                     if hooks is not None:
+                        # ``function_calls`` is the per-call timing list
+                        # (``TurnCompletedEvent.function_calls`` is typed
+                        # ``List[Dict[str, Any]]``).  Pass it through as a
+                        # list — pre-2026-06-07 this coerced to ``int``,
+                        # which crashed the shim for any turn that actually
+                        # contained tool calls and silently dropped the
+                        # event.  See ``project_pr_turn_completed_event_*``
+                        # for the diagnosis.
+                        fc_payload = payload.get("function_calls")
+                        if not isinstance(fc_payload, list):
+                            fc_payload = []
                         hooks.on_agent_turn_completed(
                             agent_id=payload.get("agent_id") or server._main_agent_id,
                             turn_number=int(payload.get("turn_number", 0) or 0),
@@ -4164,7 +4175,7 @@ class JaatoServer:
                             duration_seconds=float(
                                 payload.get("duration_seconds", 0.0) or 0.0
                             ),
-                            function_calls=int(payload.get("function_calls", 0) or 0),
+                            function_calls=fc_payload,
                             cache_read_tokens=payload.get("cache_read_tokens"),
                             cache_creation_tokens=payload.get("cache_creation_tokens"),
                         )
