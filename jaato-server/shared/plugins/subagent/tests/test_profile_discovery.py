@@ -198,7 +198,8 @@ class TestDiscoverProfiles:
             profile_path = profiles_dir / "test.json"
             profile_path.write_text(json.dumps({
                 "name": "test",
-                "description": "Test profile"
+                "description": "Test profile",
+                "plugins": [],
             }))
 
             # Use relative path with base_path
@@ -500,6 +501,7 @@ class TestPluginAutoDiscovery:
             profile_path.write_text(json.dumps({
                 "name": "discovered",
                 "description": "A discovered agent",
+                "plugins": [],
             }))
 
             original_cwd = os.getcwd()
@@ -551,16 +553,16 @@ class TestScanProfilesDirLogProvenance:
         with tempfile.TemporaryDirectory() as d_a, \
              tempfile.TemporaryDirectory() as d_b:
             (Path(d_a) / "alpha.json").write_text(
-                json.dumps({"name": "alpha", "description": "from A"})
+                json.dumps({"name": "alpha", "description": "from A", "plugins": []})
             )
             (Path(d_a) / "beta.json").write_text(
-                json.dumps({"name": "beta", "description": "from A"})
+                json.dumps({"name": "beta", "description": "from A", "plugins": []})
             )
             (Path(d_b) / "gamma.json").write_text(
-                json.dumps({"name": "gamma", "description": "from B"})
+                json.dumps({"name": "gamma", "description": "from B", "plugins": []})
             )
             (Path(d_b) / "delta.json").write_text(
-                json.dumps({"name": "delta", "description": "from B"})
+                json.dumps({"name": "delta", "description": "from B", "plugins": []})
             )
 
             profiles = {}

@@ -1087,7 +1087,19 @@ def build_inline_profile(
         except (ValueError, TypeError) as exc:
             raise ValueError(f"Invalid runtime_limits in inline spec: {exc}")
 
-    raw_plugins = data.get('plugins', [])
+    # ``plugins`` is REQUIRED on every profile / inline spec — absent
+    # vs. explicitly-empty have meaningfully different downstream
+    # semantics (see the workspace-tier scanner for the full
+    # rationale).  Inline specs raise immediately because the caller
+    # has the surface area to fix it.
+    if 'plugins' not in data:
+        raise ValueError(
+            "Inline session spec is missing the required 'plugins' "
+            "key.  Use 'plugins': [] for the minimal framework set "
+            "(permission, reliability, lifecycle only), or list "
+            "plugin names to expose."
+        )
+    raw_plugins = data['plugins']
     clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
     raw_env = data.get('env', {})
@@ -1597,7 +1609,34 @@ def _scan_profiles_dir(
                     errors[name] = err
                 continue
 
-        raw_plugins = data.get('plugins', [])
+        # ``plugins:`` is a REQUIRED profile key as of server 0.6.x
+        # (this PR).  Absent vs. explicitly-empty have meaningfully
+        # different semantics:
+        #   - Absent  → was conflated with "load all exposed plugins"
+        #               by server/core.py:_apply_profile_overrides via
+        #               a falsy check (``if self._profile.plugins``)
+        #               that swallowed both ``None`` and ``[]``.  The
+        #               2026-06-07 vLLM smoke investigation surfaced
+        #               this: ``plugins: []`` in the profile YAML
+        #               produced ~30 tools on the wire instead of 0.
+        #   - Empty   → explicit "no non-framework plugins" — the
+        #               framework still wires permission, reliability,
+        #               and lifecycle (signal_completion) regardless.
+        # Requiring the key forces profile authors to pick one
+        # intentionally and eliminates the ambiguous middle case.
+        if 'plugins' not in data:
+            err = (
+                f"Profile '{name}' is missing the required 'plugins' "
+                f"key.  Use 'plugins: []' for the minimal framework "
+                f"set (permission, reliability, lifecycle only), or "
+                f"list plugin names to expose (e.g. 'plugins: "
+                f"[cli, todo]')."
+            )
+            logger.warning(err)
+            if name not in errors:
+                errors[name] = err
+            continue
+        raw_plugins = data['plugins']
         clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
         # Parse env: must be a flat dict of string→string
@@ -1844,7 +1883,17 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
                 )
                 continue
 
-        raw_plugins = data.get('plugins', [])
+        # ``plugins:`` is REQUIRED on premium profiles too — see the
+        # workspace scanner for the full rationale.
+        if 'plugins' not in data:
+            logger.warning(
+                "Skipping premium profile '%s': missing required "
+                "'plugins' key.  Use 'plugins: []' for the minimal "
+                "framework set, or list plugin names to expose.",
+                name,
+            )
+            continue
+        raw_plugins = data['plugins']
         clean_plugins, preloaded = parse_plugin_list(raw_plugins)
 
         raw_env = data.get('env', {})

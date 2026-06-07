@@ -17,7 +17,7 @@ class TestBuildInlineProfile:
 
     def test_minimal_spec_with_only_model(self):
         """A spec with only ``model`` produces a profile with safe defaults."""
-        p = build_inline_profile({"model": "claude-sonnet-4-5"})
+        p = build_inline_profile({"model": "claude-sonnet-4-5", "plugins": []})
         assert isinstance(p, SubagentProfile)
         assert p.model == "claude-sonnet-4-5"
         assert p.plugins == []
@@ -62,6 +62,7 @@ class TestBuildInlineProfile:
         """Inline specs are atomic — ``inherits`` makes no sense and is dropped."""
         p = build_inline_profile({
             "model": "X",
+            "plugins": [],
             "inherits": ["readonly", "web_capable"],
         })
         assert p.inherits is None
@@ -77,7 +78,7 @@ class TestBuildInlineProfile:
     def test_explicit_name_and_description(self):
         """Caller can override the placeholder name/description for traces."""
         p = build_inline_profile(
-            {"model": "X"},
+            {"model": "X", "plugins": []},
             name="ops-task",
             description="Ad-hoc operations session",
         )
@@ -91,7 +92,7 @@ class TestBuildInlineProfile:
         policy. The empty-model case is validated upstream where the
         client-facing ``ErrorEvent`` lives.
         """
-        p = build_inline_profile({})
+        p = build_inline_profile({"plugins": []})
         assert p.model is None
 
     def test_model_tiers_forwarded(self):
@@ -101,12 +102,12 @@ class TestBuildInlineProfile:
             "fast": "claude-haiku",
             "deep": "claude-opus",
         }
-        p = build_inline_profile({"model": "claude-haiku", "model_tiers": tiers})
+        p = build_inline_profile({"model": "claude-haiku", "plugins": [], "model_tiers": tiers})
         assert p.model_tiers == tiers
 
     def test_apparmor_default_is_false(self):
         """PR-A (2026-05-14): ``apparmor`` absent → False (back-compat)."""
-        p = build_inline_profile({"model": "m"})
+        p = build_inline_profile({"model": "m", "plugins": []})
         assert p.apparmor is False
 
     def test_apparmor_true_parsed(self):
@@ -114,14 +115,14 @@ class TestBuildInlineProfile:
         actual confinement still depends on the caller-level kwarg /
         client_config opt-in (see ``test_ipc_apparmor_provision.py``);
         this test just pins the parse → field path."""
-        p = build_inline_profile({"model": "m", "apparmor": True})
+        p = build_inline_profile({"model": "m", "plugins": [], "apparmor": True})
         assert p.apparmor is True
 
     def test_apparmor_false_explicit_parsed(self):
         """Explicit ``apparmor: false`` is preserved (vs. absent).  Useful
         for inline specs that want to lock the field at the spec layer
         before PR-B flips the profile default to True."""
-        p = build_inline_profile({"model": "m", "apparmor": False})
+        p = build_inline_profile({"model": "m", "plugins": [], "apparmor": False})
         assert p.apparmor is False
 
     def test_apparmor_truthy_value_coerced(self):
@@ -129,27 +130,28 @@ class TestBuildInlineProfile:
         truthy non-bool (1, non-empty list, etc.) coerces to True;
         falsy (0, empty) coerces to False.  Pins the coercion contract
         so YAML / JSON differences across loaders don't regress."""
-        p_truthy = build_inline_profile({"model": "m", "apparmor": 1})
+        p_truthy = build_inline_profile({"model": "m", "plugins": [], "apparmor": 1})
         assert p_truthy.apparmor is True
-        p_falsy = build_inline_profile({"model": "m", "apparmor": 0})
+        p_falsy = build_inline_profile({"model": "m", "plugins": [], "apparmor": 0})
         assert p_falsy.apparmor is False
 
     def test_apparmor_fragments_absent_resolves_none(self):
         """Piece 1 (2026-05-14): field absent → None on the dataclass.
         Distinct from explicit empty list.  Workspace-default
         "compose all fragments" applies at render time."""
-        p = build_inline_profile({"model": "m"})
+        p = build_inline_profile({"model": "m", "plugins": []})
         assert p.apparmor_fragments is None
 
     def test_apparmor_fragments_explicit_empty_list_preserved(self):
         """Explicit ``apparmor_fragments: []`` is distinct from
         absent: the maximally locked-down stage in a cascade."""
-        p = build_inline_profile({"model": "m", "apparmor_fragments": []})
+        p = build_inline_profile({"model": "m", "plugins": [], "apparmor_fragments": []})
         assert p.apparmor_fragments == []
 
     def test_apparmor_fragments_non_empty_list_parsed(self):
         p = build_inline_profile({
             "model": "m",
+            "plugins": [],
             "apparmor_fragments": ["host_validator", "kb-enablement-2"],
         })
         assert p.apparmor_fragments == ["host_validator", "kb-enablement-2"]
@@ -159,6 +161,7 @@ class TestBuildInlineProfile:
         whitespace don't silently break the basename match."""
         p = build_inline_profile({
             "model": "m",
+            "plugins": [],
             "apparmor_fragments": ["  host_validator  ", "kb-fixtures"],
         })
         assert p.apparmor_fragments == ["host_validator", "kb-fixtures"]
@@ -169,13 +172,13 @@ class TestBuildInlineProfile:
         in YAML, which yields a string, not a single-item list)."""
         with pytest.raises(ValueError, match="must be a list of strings"):
             build_inline_profile({
-                "model": "m", "apparmor_fragments": "host_validator",
+                "model": "m", "plugins": [], "apparmor_fragments": "host_validator",
             })
 
     def test_apparmor_fragments_rejects_non_string_entry(self):
         with pytest.raises(ValueError, match=r"\[0\] must be a non-empty string"):
             build_inline_profile({
-                "model": "m", "apparmor_fragments": [42, "foo"],
+                "model": "m", "plugins": [], "apparmor_fragments": [42, "foo"],
             })
 
     def test_apparmor_fragments_rejects_empty_string_entry(self):
@@ -183,5 +186,5 @@ class TestBuildInlineProfile:
         loudly so the operator notices the typo."""
         with pytest.raises(ValueError, match=r"\[1\] must be a non-empty string"):
             build_inline_profile({
-                "model": "m", "apparmor_fragments": ["host_validator", ""],
+                "model": "m", "plugins": [], "apparmor_fragments": ["host_validator", ""],
             })

@@ -2445,10 +2445,30 @@ class JaatoServer:
         if self._profile:
             from shared.plugins.subagent.config import expand_plugin_configs
 
-            if self._profile.plugins:
-                kwargs["tools"] = self._profile.plugins
-                if self._profile.preloaded_plugins:
-                    kwargs["preloaded_plugins"] = self._profile.preloaded_plugins
+            # ALWAYS pass ``profile.plugins`` through — including the
+            # empty-list case.  Pre-fix this branch used a falsy check
+            # (``if self._profile.plugins:``) that conflated explicit
+            # ``plugins: []`` with absent.  When the condition was
+            # false, ``tools`` was never set on kwargs, which caused
+            # ``JaatoRuntime.create_session`` to fall back to its
+            # ``tools=None`` semantic (use ALL exposed plugins from
+            # the registry).  Surfaced 2026-06-07 by the vLLM smoke:
+            # ``plugins: []`` in the profile produced ~30 tools on the
+            # wire (todo, references, memory, notebook, event_bus,
+            # clarification, environment, introspection — every
+            # registered tool plugin).  Empirical evidence captured
+            # via VLLM_WIRE_PROBE in the vLLM provider.
+            #
+            # Paired with the ``plugins:`` required-key check in
+            # ``shared/plugins/subagent/config.py``: profile authors
+            # now must explicitly write ``plugins: []`` for the
+            # minimal framework set OR list the plugin names they
+            # want.  ``profile.plugins`` is therefore guaranteed to
+            # be a list (possibly empty) post-validation; the
+            # unconditional pass-through here honors that.
+            kwargs["tools"] = self._profile.plugins
+            if self._profile.preloaded_plugins:
+                kwargs["preloaded_plugins"] = self._profile.preloaded_plugins
 
             if self._profile.system_instructions:
                 kwargs["system_instructions"] = self._profile.system_instructions
