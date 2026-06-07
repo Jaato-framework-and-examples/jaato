@@ -138,11 +138,11 @@ def test_ephemeral_session_id_is_unique() -> None:
     sm, captured, _ = _make_session_manager()
 
     sm._run_ephemeral_session_impl(
-        profile_json="", inline_config_json="",
+        profile_json=json.dumps({"plugins": []}), inline_config_json="",
         prompt="x", agent_name="a", on_output=None,
     )
     sm._run_ephemeral_session_impl(
-        profile_json="", inline_config_json="",
+        profile_json=json.dumps({"plugins": []}), inline_config_json="",
         prompt="x", agent_name="b", on_output=None,
     )
 
@@ -166,7 +166,7 @@ def test_ephemeral_chdir_restored_after_run(tmp_path) -> None:
     sub.mkdir()
 
     sm._run_ephemeral_session_impl(
-        profile_json="", inline_config_json="",
+        profile_json=json.dumps({"plugins": []}), inline_config_json="",
         prompt="x", agent_name="ws-test", on_output=None,
         workspace_path=str(sub),
     )
@@ -186,7 +186,7 @@ def test_ephemeral_workspace_root_env_restored(tmp_path) -> None:
     original = os.environ.pop("JAATO_WORKSPACE_ROOT", None)
     try:
         sm._run_ephemeral_session_impl(
-            profile_json="", inline_config_json="",
+            profile_json=json.dumps({"plugins": []}), inline_config_json="",
             prompt="x", agent_name="ws-test", on_output=None,
             workspace_path=str(sub),
         )
@@ -215,7 +215,7 @@ def test_ephemeral_init_failure_returns_hint_string() -> None:
     sm._construct_and_initialize_server = _failing_subhelper.__get__(sm, type(sm))  # type: ignore[method-assign]
 
     result = sm._run_ephemeral_session_impl(
-        profile_json="", inline_config_json="",
+        profile_json=json.dumps({"plugins": []}), inline_config_json="",
         prompt="x", agent_name="fail", on_output=None,
     )
     assert "failed" in result.lower()

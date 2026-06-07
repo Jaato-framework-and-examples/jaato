@@ -402,7 +402,7 @@ class TestSubagentProfileEnv:
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
         profile_file = profiles_dir / "db-agent.json"
-        profile_file.write_text('{"name": "db-agent", "description": "DB", "env": {"DB_HOST": "localhost"}}')
+        profile_file.write_text('{"name": "db-agent", "description": "DB", "plugins": [], "env": {"DB_HOST": "localhost"}}')
 
         result = discover_profiles(str(profiles_dir))
         profile = result.profiles.get("db-agent")
@@ -415,7 +415,7 @@ class TestSubagentProfileEnv:
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
         profile_file = profiles_dir / "bad-env.json"
-        profile_file.write_text('{"name": "bad-env", "description": "Bad", "env": "not-a-dict"}')
+        profile_file.write_text('{"name": "bad-env", "description": "Bad", "plugins": [], "env": "not-a-dict"}')
 
         result = discover_profiles(str(profiles_dir))
         profile = result.profiles.get("bad-env")
