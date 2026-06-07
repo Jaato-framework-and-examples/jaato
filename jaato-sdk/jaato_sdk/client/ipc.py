@@ -1328,27 +1328,46 @@ class IPCClient:
                 self._await_session_info(), timeout=timeout
             )
         except asyncio.TimeoutError:
-            logger.warning("create_session: timed out waiting for SessionInfoEvent")
+            logger.warning(
+                "create_session: timed out after %ss waiting for "
+                "SessionInfoEvent or ErrorEvent",
+                timeout,
+            )
             return None
 
     async def _await_session_info(self) -> Optional[str]:
         """Subscribe to the drain loop and wait for SessionInfoEvent.
 
         Filters the subscriber queue for ``SessionInfoEvent`` (success)
-        or non-recoverable ``ErrorEvent`` (failure).  When this method
-        is the only subscriber active, non-target events seen along the
-        way are saved to ``_buffered_events`` so a subsequent
-        ``events()`` call can replay them — preserving the
-        pre-0.13.0 behaviour where ``events()`` after ``create_session``
-        could yield init-progress / system-message events emitted
-        during session creation.  When ``events()`` is concurrently
-        subscribed, those events are already being yielded directly to
-        the consumer's iterator and are NOT re-buffered (avoiding
-        duplicates).
+        or ``ErrorEvent`` (failure — any ``ErrorEvent`` terminates the
+        wait, regardless of its ``recoverable`` flag).  The daemon
+        emits ALL ``session.new`` failures (profile-not-found,
+        agent-not-found, invalid spec, spawn-payload validation) with
+        ``recoverable=True`` so they can be surfaced to the user
+        without forcing a client reconnect, but from the caller's
+        perspective they are still terminal for THIS create_session
+        call.  Pre-fix the SDK silently swallowed them and returned
+        ``None`` only after the asyncio timeout fired, producing the
+        "daemon stalled" symptom (see project_backlog and 2026-06-06
+        Bug-B investigation).
+
+        When an ``ErrorEvent`` arrives, it is logged at WARNING with
+        the daemon-supplied error type + message so the failure cause
+        is visible in the SDK consumer's logs.
+
+        When this method is the only subscriber active, non-target
+        events seen along the way are saved to ``_buffered_events``
+        so a subsequent ``events()`` call can replay them — preserving
+        the pre-0.13.0 behaviour where ``events()`` after
+        ``create_session`` could yield init-progress / system-message
+        events emitted during session creation.  When ``events()`` is
+        concurrently subscribed, those events are already being yielded
+        directly to the consumer's iterator and are NOT re-buffered
+        (avoiding duplicates).
 
         Returns:
             The session ID from the SessionInfoEvent, or None on
-            recoverable error / disconnect / timeout.
+            error / disconnect / timeout.
         """
         q = self._subscribe_events()
         # Events to re-buffer for a future events() call, but only when
@@ -1372,7 +1391,14 @@ class IPCClient:
                         self._buffered_events.extend(incidental)
                     return event.session_id
 
-                if isinstance(event, ErrorEvent) and not event.recoverable:
+                if isinstance(event, ErrorEvent):
+                    logger.warning(
+                        "create_session: daemon reported error "
+                        "(error_type=%s, recoverable=%s): %s",
+                        event.error_type,
+                        event.recoverable,
+                        event.error,
+                    )
                     if solo:
                         incidental.append(event)
                         self._buffered_events.extend(incidental)
