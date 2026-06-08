@@ -5088,6 +5088,37 @@ NOTES
         providers without the quirk silently ignore the kwarg, so this
         stamping is provider-agnostic + free when the quirk is off.
         """
+        # PR-255 PROBE INSTRUMENTATION (TEMPORARY, 2026-06-08).
+        #
+        # Empirical disagreement between code-trace + grep on
+        # /tmp/provider_trace.log (zero PENDING_TOOL_CHOICE all-time
+        # despite a cascade flow that DEFINITELY hit signal_completion
+        # validation_failed per peer 7:1's daemon log at 06:13:32).
+        # Three competing hypotheses can't be resolved by reading
+        # source alone: (1) function never called, (2) tr.result is
+        # not a dict at scan time (peer's original hypothesis: spur
+        # stringification reaches us), or (3) result.get("error") is
+        # something other than "validation_failed".
+        #
+        # This single logger.info captures count / names / types /
+        # error_keys-or-first-64-chars in one line per scan so the
+        # next cascade re-run triangulates which holds.  Writes to
+        # ``workspace/.jaato/logs/session_<sid>_*.log`` via the
+        # module-level ``logger`` (per peer-verified path at
+        # ``/home/apanoia/Sources/Jaato-framework-and-examples/jaato-based-kb-enablement-2.0/tests/runs/cascade_smoke/.jaato/logs/``).
+        # Revert after the actual fix lands as PR-256.
+        logger.info(
+            "MAYBE_STAMP_SCAN count=%d names=%s types=%s error_keys=%s",
+            len(tool_results),
+            [t.name for t in tool_results],
+            [type(t.result).__name__ for t in tool_results],
+            [
+                t.result.get("error") if isinstance(t.result, dict)
+                else (t.result[:64] if isinstance(t.result, str) else None)
+                for t in tool_results
+            ],
+        )
+
         for tr in tool_results:
             if tr.name != "signal_completion":
                 continue
