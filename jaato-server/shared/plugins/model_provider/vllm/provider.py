@@ -650,6 +650,39 @@ class VLLMProvider:
                 "Provider not connected. Call initialize() and connect() first."
             )
 
+        # PR-256 PROBE INSTRUMENTATION (TEMPORARY, 2026-06-08).
+        #
+        # Companion to ``_maybe_stamp_lifecycle_retry_tool_choice`` /
+        # ``_consume_pending_tool_choice`` probes in
+        # ``jaato_session.py``.  PR-255 confirmed:
+        #   - stamp fires on every val_failed (discovery AND context)
+        #   - sentinel matches verbatim
+        # But peer's empirical evidence shows xgrammar engages on
+        # discovery retries (model converges in 3.2s) yet NOT on
+        # context retries (5 loops without convergence, model emits
+        # ``{}`` which xgrammar standalone proves is impossible under
+        # the compiled grammar).  Between "stamp set" and "vLLM
+        # receives named tool_choice on wire" something breaks for
+        # context that doesn't break for discovery.
+        #
+        # This probe records what ``complete()`` actually receives:
+        # tool_choice value (None / dict shape), quirk gate state,
+        # tools count.  Triangulates three sub-hypotheses:
+        #   B.1 — consume returned None (no tool_choice arrived)
+        #   B.2 — tool_choice arrived but quirk False (profile gap)
+        #   B.3 — both true but tools list empty (vllm drops kwarg)
+        # Routed via ``logger.info`` (NOT ``self._trace``) so the
+        # entry lands in the per-session log file alongside the
+        # session-side MAYBE_STAMP_* probes, not the per-agent
+        # provider_trace_subagent_<id>.log files which were the
+        # gotcha behind peer's earlier "zero traces" finding.
+        logger.info(
+            "VLLM_COMPLETE_ENTRY tool_choice=%r force_quirk=%s tools_count=%d",
+            tool_choice,
+            self._force_tool_choice_for_lifecycle,
+            len(tools) if tools else 0,
+        )
+
         clear_tool_name_mapping()
 
         openai_messages: List[Dict[str, Any]] = []
