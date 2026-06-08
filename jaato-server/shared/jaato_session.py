@@ -5151,10 +5151,21 @@ NOTES
         wire shape; other providers translate (or ignore) at their
         plugin layer.
         """
+        # PR-256 PROBE: log consume outcome to distinguish B.1
+        # ("consume returns None for context but not discovery") from
+        # B.2/B.3 (consume returns name but provider-side or wire-side
+        # breaks the chain).  Same destination as the entry probe in
+        # PR-255 — per-session log via module-level ``logger``.
+        # Revert with PR-257 alongside the actual fix.
         if not self._pending_tool_choice_name:
+            logger.info("MAYBE_STAMP_CONSUME pending=None — no retry queued")
             return None
         name = self._pending_tool_choice_name
         self._pending_tool_choice_name = None
+        logger.info(
+            "MAYBE_STAMP_CONSUME pending=%r — returning OpenAI wire shape, "
+            "cleared", name,
+        )
         return {"type": "function", "function": {"name": name}}
 
     def _execute_function_call_group(
