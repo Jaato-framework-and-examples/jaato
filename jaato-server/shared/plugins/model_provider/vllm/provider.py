@@ -828,11 +828,25 @@ class VLLMProvider:
         # PROBE (cancel-leak prod-vs-isolation diagnostic):
         # Trace cancel_token identity at entry — settles H2 (right token
         # instance?  did is_cancelled ever return True for the token the
-        # provider holds?).  See peer ping 2026-06-09 "cancel-leak-probe
-        # -results-pr258-code-correct-mystery-fix-needed".
-        self._trace(
-            f"{trace_prefix}_CT_ID id={id(cancel_token) if cancel_token else None} "
-            f"cancelled={cancel_token.is_cancelled if cancel_token else None}"
+        # provider holds?).
+        #
+        # Routed via ``logger.info`` (NOT ``self._trace``).  Runner-tier
+        # ``self._trace`` calls land in ``/tmp/provider_trace.log`` which
+        # AppArmor SILENTLY DENIES under the per-WS confined-runner
+        # profile (template grants ``rw`` only on
+        # ``/tmp/jaato-<ws>-**``, not the bare ``/tmp/`` filename).
+        # ``trace_write`` catches the PermissionError and ``pass``es,
+        # so the trace lines vanish.  Empirically confirmed
+        # 2026-06-09 by peer'\''s first probe run: only the
+        # ``logger.info`` line at ``complete()`` entry landed in
+        # ``/tmp/jaato.log``; all 4 ``self._trace`` lines absent
+        # from every searchable log sink.  Backlog item filed for
+        # the apparmor rule gap; for diagnostic purposes the trace
+        # bumps to logger.info so traces are visible.
+        logger.info(
+            "VLLM_STREAM_CT_ID id=%s cancelled=%s",
+            id(cancel_token) if cancel_token else None,
+            cancel_token.is_cancelled if cancel_token else None,
         )
 
         schemas_by_name: Dict[str, ToolSchema] = {
@@ -892,10 +906,13 @@ class VLLMProvider:
                 if cancel_token and cancel_token.is_cancelled:
                     # PROBE (cancel-leak prod-vs-isolation diagnostic):
                     # Settles H3 (how many chunks elapsed before the
-                    # provider'\''s for-loop detected cancellation).
-                    self._trace(
-                        f"{trace_prefix}_CT_CANCEL_DETECTED "
-                        f"iter={chunk_count} ct_id={id(cancel_token)}"
+                    # provider's for-loop detected cancellation).
+                    # Routed via logger.info per the apparmor-blocks-
+                    # self._trace finding above.
+                    logger.info(
+                        "VLLM_STREAM_CT_CANCEL_DETECTED iter=%d ct_id=%s",
+                        chunk_count,
+                        id(cancel_token),
                     )
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
@@ -986,18 +1003,24 @@ class VLLMProvider:
             # hangs.  If NEITHER appears, the finally never fires
             # (most likely if running inside a wrapper killed first).
             if response_stream is not None:
-                self._trace(
-                    f"{trace_prefix}_CLOSING_STREAM_NOW "
-                    f"response_id={id(response_stream)} "
-                    f"was_cancelled={was_cancelled}"
+                # PROBE (cancel-leak prod-vs-isolation diagnostic):
+                # Bumped to logger.info per apparmor-blocks-self._trace
+                # finding above.  These two are the central traces for
+                # the cancel-leak diagnostic — they answer whether
+                # close() actually fires on prod cancel.
+                logger.info(
+                    "VLLM_STREAM_CLOSING_STREAM_NOW response_id=%s was_cancelled=%s",
+                    id(response_stream),
+                    was_cancelled,
                 )
                 try:
                     response_stream.close()
-                    self._trace(f"{trace_prefix}_CLOSED_STREAM_OK")
+                    logger.info("VLLM_STREAM_CLOSED_STREAM_OK")
                 except Exception as close_exc:  # pragma: no cover - best effort
-                    self._trace(
-                        f"{trace_prefix}_CLOSE_ERROR "
-                        f"{type(close_exc).__name__}: {close_exc}"
+                    logger.info(
+                        "VLLM_STREAM_CLOSE_ERROR %s: %s",
+                        type(close_exc).__name__,
+                        close_exc,
                     )
 
         flush_text_block()
