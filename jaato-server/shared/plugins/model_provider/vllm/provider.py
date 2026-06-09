@@ -749,6 +749,30 @@ class VLLMProvider:
             openai_tools = tool_schemas_to_openai(tools)
             if openai_tools:
                 kwargs["tools"] = openai_tools
+                # Diagnostic visibility (2026-06-09): emit per-tool wire
+                # byte sizes so operators can correlate "tools_count=N"
+                # with the actual bytes vLLM receives.  Closes one
+                # residual uncertainty from the qwen3-14b empty-args
+                # debug arc — Family (A) "framework strips schema before
+                # sending to vLLM" can be falsified at-a-glance by
+                # grepping VLLM_TOOLS_WIRE_DUMP, instead of code-reading
+                # the converter every time the question recurs.  Routes
+                # via ``logger.info`` so the trace lands in /tmp/jaato.log
+                # regardless of apparmor confinement on self._trace.
+                tools_json = json.dumps(openai_tools, separators=(",", ":"))
+                per_tool_bytes = [
+                    (
+                        t.get("function", {}).get("name", "?"),
+                        len(json.dumps(t, separators=(",", ":"))),
+                    )
+                    for t in openai_tools
+                ]
+                logger.info(
+                    "VLLM_TOOLS_WIRE_DUMP total_bytes=%d count=%d per_tool=%s",
+                    len(tools_json),
+                    len(openai_tools),
+                    per_tool_bytes,
+                )
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
         if self._max_tokens is not None:
