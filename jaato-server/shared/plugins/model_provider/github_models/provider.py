@@ -1505,6 +1505,15 @@ class GitHubModelsProvider:
                 except Exception:  # pragma: no cover - best effort
                     pass
 
+            # SHAPE B (cancel-leak fix, 2026-06-09): close the Azure
+            # SDK client when cancelled.  Symmetric with the openai-SDK
+            # providers — Stream.close() alone may not propagate TCP-FIN.
+            if was_cancelled and self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+
         flush_text_block()
 
         if function_calls and not was_cancelled:

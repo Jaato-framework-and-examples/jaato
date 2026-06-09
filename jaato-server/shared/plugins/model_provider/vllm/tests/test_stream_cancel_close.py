@@ -46,6 +46,7 @@ def _make_stream(chunks):
 def _build_provider():
     provider = VLLMProvider()
     provider._client = MagicMock()
+    provider._client.close = MagicMock()
     provider._model_name = "Qwen/Qwen3-14B"
     provider._max_tokens = 2048
     provider._enable_thinking = False
@@ -87,6 +88,32 @@ class TestStreamCancellationClosesConnection:
 
         assert result.finish_reason == FinishReason.CANCELLED
         stream_ref["stream"].close.assert_called_once()
+        # Shape B (PR-260 falsification): on cancel, the openai client's
+        # httpx pool must also be closed so TCP-FIN actually reaches vLLM.
+        # Stream.close() alone does not propagate disconnect.
+        provider._client.close.assert_called_once()
+
+    def test_client_close_NOT_called_on_normal_completion(self):
+        """Natural completion must NOT close the client — keep-alive
+        is desirable for the next call from the same session."""
+        provider = _build_provider()
+        chunks = [
+            _make_chunk(content="hi"),
+            _make_chunk(finish_reason="stop"),
+        ]
+
+        def capture_create(**kwargs):
+            return _make_stream(chunks)
+
+        provider._client.chat.completions.create = capture_create
+
+        provider._stream_response(
+            messages=[],
+            kwargs={},
+            on_chunk=lambda _t: None,
+        )
+
+        provider._client.close.assert_not_called()
 
     def test_close_called_on_normal_completion(self):
         provider = _build_provider()

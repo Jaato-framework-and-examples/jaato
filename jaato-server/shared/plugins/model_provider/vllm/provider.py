@@ -1023,6 +1023,44 @@ class VLLMProvider:
                         close_exc,
                     )
 
+            # SHAPE B (cancel-leak fix, 2026-06-09): close the
+            # OpenAI client's httpx pool when the turn was cancelled.
+            # Empirical evidence from peer's PR-260 cascade run:
+            # ``response_stream.close()`` returns OK but does NOT
+            # send TCP-FIN to vLLM — openai SDK ``Stream.close()``
+            # releases the wrapper without aggressively closing
+            # the underlying TCP socket, which httpx keeps in
+            # its pool for keep-alive reuse.  vLLM kept generating
+            # for 4+ minutes with GPU at 91 C climbing toward
+            # thermal-throttle until ``kill -9`` on the runner.
+            # ``self._client.close()`` dismantles the entire httpx
+            # pool, forcing FIN on EVERY socket including the
+            # in-flight one — peer's isolation probe variant B
+            # confirmed this stops vLLM in <50ms.
+            #
+            # Safety: providers are per-session
+            # (jaato_session.py:2096+3344 via
+            # ``runtime.create_provider``), so closing this
+            # client only affects the cancelled session.  Caveat:
+            # if cancel reason is ``mid_turn_interrupt`` (TUI
+            # mid-turn prompt injection), the session continues
+            # but the next ``provider.complete()`` would fail
+            # because ``self._client`` is closed.  That regression
+            # is filed as a follow-up
+            # ([[project_backlog_cancel_leak_mid_turn_interrupt_recreate_client]]).
+            # For cascade workloads the cancel always ends the
+            # session, so this fix is safe in the dominant case.
+            if was_cancelled and self._client is not None:
+                try:
+                    self._client.close()
+                    logger.info("VLLM_CLIENT_CLOSED_ON_CANCEL")
+                except Exception as client_close_exc:  # pragma: no cover - best effort
+                    logger.info(
+                        "VLLM_CLIENT_CLOSE_ERROR %s: %s",
+                        type(client_close_exc).__name__,
+                        client_close_exc,
+                    )
+
         flush_text_block()
         flush_tool_calls()
 
