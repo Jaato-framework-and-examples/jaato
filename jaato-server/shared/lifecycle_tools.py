@@ -974,10 +974,44 @@ class LifecycleTools:
         # Validate the value against the leaf's schema (relaxed —
         # required[] stripped so partial objects are allowed; type /
         # enum / format remain enforced).
-        relaxed = self._strip_required_recursive(leaf_schema)
+        #
+        # $ref resolution (PR-fix 2026-06-09): the kb's
+        # generation_context.schema.json uses ``$ref: #/$defs/Field``
+        # patterns where ``$defs`` lives at ROOT.  Validating the
+        # isolated leaf schema without a root-context resolver fails
+        # with ``PointerToNowhere: '/$defs/Field' does not exist``
+        # for ANY field whose value-schema embeds a $ref.  Wide-impact
+        # class — most non-trivial generation_context fields (model,
+        # modules, endpoints) hit it.  Fix: relax the WHOLE root
+        # schema (including $defs entries) + bind a RefResolver to
+        # the relaxed root so references resolve correctly during
+        # value validation.
+        relaxed_root = self._strip_required_recursive(self._payload_schema)
+        relaxed_leaf = self._resolve_path_schema(segments, relaxed_root)
+        if relaxed_leaf is None:
+            # Should not happen — _resolve_path_schema already returned
+            # non-None on the original schema above.  Defensive fallback.
+            relaxed_leaf = self._strip_required_recursive(leaf_schema)
         try:
+            import warnings
             import jsonschema
-            jsonschema.validate(instance=value, schema=relaxed)
+            # RefResolver works through jsonschema 4.x but emits a
+            # DeprecationWarning since 4.18 (the ``referencing``
+            # library is the replacement).  Suppress the warning
+            # locally so it doesn't spam the daemon log on every
+            # prepare_completion call — migration to ``referencing``
+            # is a follow-up if/when jsonschema 5.x ships.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", category=DeprecationWarning,
+                    module="jsonschema",
+                )
+                resolver = jsonschema.RefResolver.from_schema(relaxed_root)
+                validator_cls = jsonschema.validators.validator_for(
+                    relaxed_root, default=jsonschema.Draft7Validator,
+                )
+                validator = validator_cls(relaxed_leaf, resolver=resolver)
+                validator.validate(value)
         except jsonschema.ValidationError as exc:
             return {
                 "accepted": {},
@@ -1203,11 +1237,18 @@ class LifecycleTools:
 
     def _strip_required_recursive(self, schema: Any) -> Any:
         """Return a deep-copied schema with all ``required[]`` arrays
-        removed.  Recurses into ``properties`` and ``items`` so nested
-        objects-in-arrays inherit the relaxation.  Used by
-        ``_validate_field_against_schema`` to allow partial
-        submissions during accumulation while preserving type / enum /
-        format checks.
+        removed.  Recurses into ``properties``, ``items``, ``$defs``,
+        and ``definitions`` so nested + referenced sub-schemas inherit
+        the relaxation.  Used by ``_execute_prepare_completion`` to
+        allow partial submissions during accumulation while preserving
+        type / enum / format checks.
+
+        $defs / definitions recursion (added 2026-06-09): the kb's
+        completion schemas use ``$ref: #/$defs/Foo`` patterns where
+        the referenced sub-schema itself declares ``required[]``.
+        Without recursing into $defs, a $ref-typed value would fail
+        partial validation because the referenced sub-schema still
+        enforces its own required fields.
         """
         if not isinstance(schema, dict):
             return schema
@@ -1219,6 +1260,13 @@ class LifecycleTools:
             }
         if "items" in out:
             out["items"] = self._strip_required_recursive(out["items"])
+        # Recurse into $defs (Draft 2019-09+) and definitions (older).
+        for defs_key in ("$defs", "definitions"):
+            if defs_key in out and isinstance(out[defs_key], dict):
+                out[defs_key] = {
+                    k: self._strip_required_recursive(v)
+                    for k, v in out[defs_key].items()
+                }
         return out
 
     def _compute_pending_required_fields(
@@ -1237,10 +1285,19 @@ class LifecycleTools:
         non-empty array, each item's required fields are checked
         against item-schema.  If accumulated array is empty AND the
         array itself is required, surfaces ``<path>`` as pending.
+
+        Resolves ``$ref: #/$defs/Foo`` references against the root
+        schema during the walk so referenced sub-schemas surface their
+        own required fields.  Without this, a ``model.fields[0]``
+        whose items schema is ``{"$ref": "#/$defs/Field"}`` would be
+        opaque to the walker and ``model.fields[0].type`` would not
+        appear in pending.  Empirically observed kb cascade
+        2026-06-09 — peer's $ref bug report.
         """
         pending: List[Dict[str, Any]] = []
         self._walk_required(
             accumulated, schema, path_prefix="", pending=pending,
+            root_schema=schema,
         )
         return pending
 
@@ -1250,7 +1307,23 @@ class LifecycleTools:
         schema: Dict[str, Any],
         path_prefix: str,
         pending: List[Dict[str, Any]],
+        root_schema: Optional[Dict[str, Any]] = None,
     ) -> None:
+        # Resolve $ref against root before walking.  The kb's schemas
+        # use ``$ref: #/$defs/Foo`` patterns; without this dereference
+        # the walker sees an opaque {"$ref": ...} dict and falls
+        # through both type branches without surfacing the referenced
+        # sub-schema's required fields.
+        if (
+            isinstance(schema, dict)
+            and "$ref" in schema
+            and root_schema is not None
+        ):
+            resolved = self._resolve_json_pointer(
+                schema["$ref"], root_schema,
+            )
+            if resolved is not None:
+                schema = resolved
         if schema.get("type") == "object":
             properties = schema.get("properties", {})
             required = schema.get("required", [])
@@ -1262,6 +1335,7 @@ class LifecycleTools:
                     pending.append(
                         self._describe_pending_field(
                             child_path, properties.get(req_key, {}),
+                            root_schema=root_schema,
                         )
                     )
                 else:
@@ -1273,32 +1347,90 @@ class LifecycleTools:
                         properties.get(req_key, {}),
                         child_path,
                         pending,
+                        root_schema=root_schema,
                     )
         elif schema.get("type") == "array":
             items_schema = schema.get("items", {})
             if isinstance(accumulated, list):
                 for idx, item in enumerate(accumulated):
                     item_path = f"{path_prefix}[{idx}]"
-                    self._walk_required(item, items_schema, item_path, pending)
+                    self._walk_required(
+                        item, items_schema, item_path, pending,
+                        root_schema=root_schema,
+                    )
+
+    def _resolve_json_pointer(
+        self,
+        ref: str,
+        root: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a ``#/path/to/thing`` JSON Pointer against ``root``.
+
+        Handles JSON Pointer escape sequences (``~1`` → ``/``,
+        ``~0`` → ``~``).  Returns ``None`` if the pointer doesn't
+        resolve (typo, missing path).  Used by ``_walk_required`` to
+        dereference ``$ref`` in completion schemas that declare
+        ``$defs`` at root.
+        """
+        if not ref.startswith("#/"):
+            return None
+        parts = ref[2:].split("/")
+        current: Any = root
+        for part in parts:
+            part = part.replace("~1", "/").replace("~0", "~")
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return None
+        return current if isinstance(current, dict) else None
 
     def _describe_pending_field(
         self,
         path: str,
         field_schema: Dict[str, Any],
+        root_schema: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build the pending-field descriptor surfaced in
         prepare/query responses.  Keeps the schema knowledge JIT-
         accessible so small models don't need to retain all 30K of
         persona prose in working context.
+
+        Resolves ``$ref`` in the field_schema against root_schema so
+        items declared via ``{"$ref": "#/$defs/Foo"}`` surface
+        Foo.type / Foo.required in the descriptor rather than just
+        the opaque ``{"$ref": ...}`` placeholder.
         """
+        # Dereference $ref at the top-level of field_schema if root
+        # context is available.
+        if (
+            isinstance(field_schema, dict)
+            and "$ref" in field_schema
+            and root_schema is not None
+        ):
+            resolved = self._resolve_json_pointer(
+                field_schema["$ref"], root_schema,
+            )
+            if resolved is not None:
+                field_schema = resolved
         descriptor: Dict[str, Any] = {"path": path}
         for key in ("description", "type", "enum", "format", "examples"):
             if key in field_schema:
                 descriptor[key] = field_schema[key]
         # For arrays-of-objects, surface the items.type hint so the
         # model knows it needs to fill an array (not a scalar).
+        # Also dereference items $ref if present.
         if field_schema.get("type") == "array" and "items" in field_schema:
             items = field_schema["items"]
+            if (
+                isinstance(items, dict)
+                and "$ref" in items
+                and root_schema is not None
+            ):
+                resolved_items = self._resolve_json_pointer(
+                    items["$ref"], root_schema,
+                )
+                if resolved_items is not None:
+                    items = resolved_items
             descriptor["items_type"] = items.get("type", "any")
             if "required" in items:
                 descriptor["items_required"] = list(items["required"])

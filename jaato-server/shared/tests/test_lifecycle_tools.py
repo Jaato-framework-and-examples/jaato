@@ -620,6 +620,87 @@ class TestPrepareCompletionA2Pending:
         assert "endpoints[0].path" in pending_paths
 
 
+class TestPrepareCompletionRefResolution:
+    """Regression for the kb cascade $ref bug 2026-06-09: the kb's
+    generation_context.schema.json uses ``$ref: #/$defs/Field``
+    patterns where the ``$defs`` lives at root.  Without RefResolver
+    binding to root, leaf validation fails with
+    ``PointerToNowhere: '/$defs/Field' does not exist`` for any
+    field whose value-schema embeds a $ref.  Wide-impact class.
+    """
+
+    SCHEMA_WITH_REFS = {
+        "type": "object",
+        "$defs": {
+            "Field": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "enum": ["string", "integer", "boolean"],
+                    },
+                },
+                "required": ["name", "type"],
+            },
+        },
+        "properties": {
+            "model": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "fields": {
+                        "type": "array",
+                        "items": {"$ref": "#/$defs/Field"},
+                    },
+                },
+                "required": ["name", "fields"],
+            },
+        },
+        "required": ["model"],
+    }
+
+    def test_setting_ref_typed_value_resolves_against_root(self):
+        """Setting model.fields[0] to a well-formed Field instance
+        succeeds (no PointerToNowhere)."""
+        lt = LifecycleTools(StubSession(schema=self.SCHEMA_WITH_REFS))
+        result = _set(lt, "model.fields[0]", {
+            "name": "customer_id", "type": "string",
+        })
+        assert result["accepted"] == {
+            "model.fields[0]": {"name": "customer_id", "type": "string"},
+        }
+        assert result["rejected"] == {}
+
+    def test_partial_ref_typed_value_accepted_per_relaxed_root(self):
+        """A partial Field (missing 'type') succeeds at the
+        per-call validator because $defs's required[] is also
+        stripped recursively.  Final signal_completion would catch
+        it via the strict full-schema gate."""
+        lt = LifecycleTools(StubSession(schema=self.SCHEMA_WITH_REFS))
+        result = _set(lt, "model.fields[0]", {"name": "customer_id"})
+        # Per-call: relaxed.  Allowed.
+        assert result["accepted"] == {"model.fields[0]": {"name": "customer_id"}}
+        # Pending walker still surfaces the missing 'type' for the user.
+        # (Walker uses ORIGINAL schema with required intact.)
+        result = lt._execute_query_completion({})
+        pending_paths = {
+            p["path"]
+            for p in result["pending_required_fields_with_descriptions"]
+        }
+        assert "model.fields[0].type" in pending_paths
+
+    def test_ref_typed_value_with_wrong_enum_rejected(self):
+        """The relaxed root still enforces enum constraints — only
+        required[] is stripped.  ``type: "INVALID"`` violates the
+        Field.type enum → rejected."""
+        lt = LifecycleTools(StubSession(schema=self.SCHEMA_WITH_REFS))
+        result = _set(lt, "model.fields[0]", {
+            "name": "customer_id", "type": "INVALID",
+        })
+        assert "model.fields[0]" in result["rejected"]
+
+
 class TestPrepareCompletionA2IsComplete:
     def test_is_complete_flips_when_all_required_set(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
