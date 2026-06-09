@@ -443,8 +443,17 @@ def build_session_envelope(
             )
             provider_cfg["quirks"] = dict(profile_quirks)
             plugin_configs_dict[effective_provider_for_quirks] = provider_cfg
+        profile_tool_scopes = getattr(profile, "tool_scopes", {}) or {}
         for name in names:
-            plugin_specs.append({"name": name, "preload": name in preloaded})
+            spec = {"name": name, "preload": name in preloaded}
+            # Per-plugin tool allow-list (profile ``tools:[...]`` modifier)
+            # rides alongside name/preload on the envelope entry so the
+            # runner-side ``_build_session`` can scope this session's
+            # wire surface.  Absent → all of the plugin's tools exposed.
+            scope = profile_tool_scopes.get(name)
+            if scope:
+                spec["tools"] = list(scope)
+            plugin_specs.append(spec)
         system_instructions = getattr(profile, "system_instructions", None)
         gc_obj = getattr(profile, "gc", None)
         if gc_obj is not None:

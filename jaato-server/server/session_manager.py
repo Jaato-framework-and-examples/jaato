@@ -1945,12 +1945,19 @@ class SessionManager:
             raw_plugin_configs,
             workspace_root_override=workspace_path,
         )
+        profile_tool_scopes = getattr(profile, "tool_scopes", {}) or {}
         plugin_specs = []
         for name in plugins_list:
             entry = {"name": name, "preload": name in preloaded}
             cfg = plugin_configs.get(name)
             if cfg:
                 entry["config"] = dict(cfg)
+            # Per-plugin tool allow-list (profile ``tools:[...]`` modifier)
+            # — carried on the envelope entry so the isolated subagent's
+            # runner-side bootstrap scopes its wire surface.
+            scope = profile_tool_scopes.get(name)
+            if scope:
+                entry["tools"] = list(scope)
             plugin_specs.append(entry)
 
         system_instructions = getattr(profile, "system_instructions", None)

@@ -977,6 +977,7 @@ def _build_session(
     """
     tool_names: List[str] = []
     preloaded: set = set()
+    tool_scopes: Dict[str, List[str]] = {}
     for entry in envelope.plugins:
         name = entry.get("name")
         if not isinstance(name, str) or not name:
@@ -984,6 +985,11 @@ def _build_session(
         tool_names.append(name)
         if entry.get("preload"):
             preloaded.add(name)
+        # Per-plugin tool allow-list (profile ``tools:[...]`` modifier),
+        # carried alongside ``name`` / ``preload`` on the envelope entry.
+        scope = entry.get("tools")
+        if scope:
+            tool_scopes[name] = list(scope)
     # Phase 4 §C: per-plugin configs come from the top-level
     # envelope.plugin_configs map (schema v2); shallow-copy so the
     # callee can't mutate the envelope's dict.
@@ -1039,6 +1045,10 @@ def _build_session(
             _processors_from_envelope(envelope) or None
         ),
         tier_config=tier_config,
+        # Per-plugin tool allow-lists (profile ``tools:[...]`` modifier),
+        # threaded from the envelope so scoped-out tools are absent from
+        # this runner session's wire body + grammar surface.
+        tool_scopes=tool_scopes or None,
         # Thread the envelope's resolved agent_id into the runner-
         # side JaatoSession so AgentCompletedEvent.agent_id carries
         # the daemon's ``--agent <name>`` resolution (the envelope

@@ -236,54 +236,186 @@ def reset_secret_resolvers() -> None:
     _resolvers = None
 
 
-def parse_plugin_entry(entry: str) -> Tuple[str, bool]:
-    """Parse a plugin entry that may have a ``(preload)`` suffix.
+# Valid values for the ``mode`` modifier knob.  ``discover`` (the
+# default) leaves the plugin's discoverable tools deferred — the model
+# finds them via ``list_tools`` / ``get_tool_schemas`` introspection.
+# ``preload`` forces all of the plugin's tools (including discoverable
+# ones) into the initial wire context.  The vocabulary mirrors
+# ``ToolSchema.discoverability`` (``core`` | ``discoverable``): a
+# deferred tool is precisely one the model *discovers*.
+_PLUGIN_MODES = ("preload", "discover")
 
-    Plugin names in profile ``plugins`` lists can include a ``(preload)``
-    annotation to force all of the plugin's tools (including discoverable
-    ones) to be loaded into the initial context rather than deferred.
 
-    An optional space before the parenthesised annotation is accepted so
-    that both ``"template(preload)"`` and ``"template (preload)"`` work.
+def _split_top_level_commas(s: str) -> List[str]:
+    """Split ``s`` on commas that are NOT inside ``[...]`` brackets.
+
+    Needed so ``"mode:preload, tools:[readFile,writeFile]"`` splits into
+    two tokens (``mode:preload`` and ``tools:[readFile,writeFile]``)
+    rather than four — the commas inside the bracketed list belong to
+    the list, not the modifier separator.
+    """
+    parts: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    for ch in s:
+        if ch == '[':
+            depth += 1
+            cur.append(ch)
+        elif ch == ']':
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch == ',' and depth == 0:
+            parts.append(''.join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append(''.join(cur))
+    return parts
+
+
+def _parse_tool_allowlist(val: str) -> List[str]:
+    """Parse a ``tools`` value into a list of tool names.
+
+    Accepts the bracketed form ``[readFile, writeFile]`` and the bare
+    single-value form ``readFile``.  Whitespace around names is
+    stripped; empty entries are dropped.
+    """
+    val = val.strip()
+    if val.startswith('[') and val.endswith(']'):
+        val = val[1:-1]
+    return [t.strip() for t in val.split(',') if t.strip()]
+
+
+def parse_plugin_entry(entry: str) -> Tuple[str, bool, Optional[List[str]]]:
+    """Parse a plugin entry that may carry a ``(...)`` modifier.
+
+    Plugin names in profile ``plugins`` lists can carry an optional
+    parenthesised modifier expressing two orthogonal knobs:
+
+    - **mode** (``preload`` | ``discover``, default ``discover``) —
+      whether to eagerly load all of the plugin's tools into the
+      initial wire context (``preload``) or leave discoverable tools
+      deferred (``discover``).
+    - **tools** (an allow-list) — restrict the plugin to exactly the
+      named tools; every other tool the plugin ships is dropped from
+      this session's wire body AND its xgrammar grammar surface.  When
+      absent, all of the plugin's tools are exposed (current default).
+
+    Both knobs accept an **implicit** (positional, by token shape) form
+    and an **explicit** (tagged ``key:value``) form, freely mixed:
+
+    - a bare word (``preload`` / ``discover``) → the **mode**
+    - a ``[...]`` token → the **tools** allow-list
+    - a ``key:value`` token → an explicit tag (``mode:`` / ``tools:``)
+
+    Token order is irrelevant.  An optional space before the
+    parenthesis is accepted (``"file_edit (preload)"``).
+
+    The bare legacy flag ``(preload)`` still parses — it is just the
+    implicit-mode form.
 
     Args:
-        entry: Plugin entry string, e.g. ``"template"``, ``"template(preload)"``,
-            or ``"template (preload)"``.
+        entry: Plugin entry string, e.g. ``"cli"``, ``"file_edit(preload)"``,
+            ``"file_edit([readFile])"``,
+            ``"file_edit(mode:preload, tools:[readFile,writeFile])"``.
 
     Returns:
-        Tuple of (plugin_name, is_preloaded).
+        Tuple of ``(plugin_name, is_preloaded, tool_allowlist)`` where
+        ``tool_allowlist`` is ``None`` (all tools) or a list of allowed
+        tool names.
+
+    Raises:
+        ValueError: when a modifier token is unrecognised (not a valid
+            mode, not a ``[...]`` list, not a known ``key:value`` tag).
 
     Examples:
-        >>> parse_plugin_entry("template(preload)")
-        ('template', True)
-        >>> parse_plugin_entry("template (preload)")
-        ('template', True)
         >>> parse_plugin_entry("cli")
-        ('cli', False)
+        ('cli', False, None)
+        >>> parse_plugin_entry("file_edit(preload)")
+        ('file_edit', True, None)
+        >>> parse_plugin_entry("file_edit([readFile])")
+        ('file_edit', False, ['readFile'])
+        >>> parse_plugin_entry("file_edit(mode:preload, tools:[readFile,writeFile])")
+        ('file_edit', True, ['readFile', 'writeFile'])
+        >>> parse_plugin_entry("file_edit([readFile], preload)")
+        ('file_edit', True, ['readFile'])
     """
-    match = re.match(r'^(\w+)\s*\(preload\)$', entry)
-    if match:
-        return match.group(1), True
-    return entry, False
+    match = re.match(r'^(\w+)\s*(?:\((.*)\))?$', entry.strip())
+    if not match:
+        # Not a recognisable ``name`` or ``name(...)`` shape — treat the
+        # whole string as a bare plugin name (lenient; downstream
+        # expose_tool will surface an unknown-plugin error if invalid).
+        return entry.strip(), False, None
+
+    name = match.group(1)
+    inner = match.group(2)
+    if inner is None:
+        return name, False, None
+
+    preload = False
+    tools: Optional[List[str]] = None
+    for raw_token in _split_top_level_commas(inner):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if ':' in token:
+            key, _, val = token.partition(':')
+            key = key.strip()
+            val = val.strip()
+            if key == 'mode':
+                if val not in _PLUGIN_MODES:
+                    raise ValueError(
+                        f"invalid mode {val!r} in plugin entry {entry!r}; "
+                        f"expected one of {_PLUGIN_MODES}"
+                    )
+                preload = (val == 'preload')
+            elif key == 'tools':
+                tools = _parse_tool_allowlist(val)
+            else:
+                raise ValueError(
+                    f"unknown modifier key {key!r} in plugin entry "
+                    f"{entry!r}; expected 'mode' or 'tools'"
+                )
+        elif token.startswith('['):
+            tools = _parse_tool_allowlist(token)
+        elif token in _PLUGIN_MODES:
+            preload = (token == 'preload')
+        else:
+            raise ValueError(
+                f"unrecognised modifier token {token!r} in plugin entry "
+                f"{entry!r}; expected a mode ({_PLUGIN_MODES}), a "
+                f"'[tool,...]' allow-list, or a 'mode:'/'tools:' tag"
+            )
+    return name, preload, tools
 
 
-def parse_plugin_list(entries: List[str]) -> Tuple[List[str], set]:
-    """Parse a list of plugin entries, separating names from preload annotations.
+def parse_plugin_list(
+    entries: List[str],
+) -> Tuple[List[str], set, Dict[str, List[str]]]:
+    """Parse a list of plugin entries into names, preload set, and scopes.
 
     Args:
-        entries: List of plugin entry strings, possibly with ``(preload)`` suffixes.
+        entries: List of plugin entry strings, possibly carrying ``(...)``
+            modifiers (see :func:`parse_plugin_entry`).
 
     Returns:
-        Tuple of (clean_plugin_names, preloaded_plugin_names_set).
+        Tuple of ``(clean_plugin_names, preloaded_plugin_names_set,
+        tool_scopes)`` where ``tool_scopes`` maps a plugin name to its
+        allow-list of tool names.  Plugins without a ``tools`` modifier
+        do not appear in ``tool_scopes`` (meaning: all tools exposed).
     """
     clean_names: List[str] = []
     preloaded: set = set()
+    tool_scopes: Dict[str, List[str]] = {}
     for entry in entries:
-        name, is_preloaded = parse_plugin_entry(entry)
+        name, is_preloaded, tools = parse_plugin_entry(entry)
         clean_names.append(name)
         if is_preloaded:
             preloaded.add(name)
-    return clean_names, preloaded
+        if tools is not None:
+            tool_scopes[name] = tools
+    return clean_names, preloaded, tool_scopes
 
 
 def expand_variables(
@@ -776,6 +908,22 @@ class SubagentProfile:
     description: str
     plugins: List[str] = field(default_factory=list)
     preloaded_plugins: set = field(default_factory=set)
+    # Per-plugin tool allow-lists derived from ``tools:[...]`` modifiers
+    # in the raw ``plugins`` list (see :func:`parse_plugin_entry`).  Maps
+    # plugin name → list of tool names to expose; every other tool the
+    # plugin ships is dropped from this session's wire body AND its
+    # xgrammar grammar surface.  A plugin absent from this dict exposes
+    # all its tools (the default).  The filter is applied **per session**
+    # in ``JaatoSession`` (mirroring the ``_tool_plugins`` plugin-level
+    # filter) — it never mutates the shared registry, so sibling
+    # subagents on the same runtime are unaffected.
+    #
+    # CAVEAT for profile authors: a tool dropped here is invisible to the
+    # model — its schema never reaches the wire.  If an agent persona (or
+    # cross-persona instruction) names a tool that the allow-list omits,
+    # the model will be told to use a tool it cannot see.  Keep the
+    # allow-list and the persona's referenced tools in sync.
+    tool_scopes: Dict[str, List[str]] = field(default_factory=dict)
     plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     system_instructions: Optional[str] = None
     # When True, drop the framework's BASE instructions layer (the
@@ -1128,7 +1276,7 @@ def build_inline_profile(
             "plugin names to expose."
         )
     raw_plugins = data['plugins']
-    clean_plugins, preloaded = parse_plugin_list(raw_plugins)
+    clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
 
     raw_env = data.get('env', {})
     env = (
@@ -1153,6 +1301,7 @@ def build_inline_profile(
         description=description,
         plugins=clean_plugins,
         preloaded_plugins=preloaded,
+        tool_scopes=tool_scopes,
         plugin_configs=data.get('plugin_configs', {}),
         system_instructions=data.get('system_instructions'),
         suppress_base_instructions=data.get('suppress_base_instructions', False),
@@ -1299,6 +1448,18 @@ def _merge_profiles(
     for parent in parents:
         merged_preloaded |= parent.preloaded_plugins
     merged_preloaded |= child.preloaded_plugins
+
+    # tool_scopes: per-plugin override (dict update — child wins on a
+    # plugin key it specifies; a parent's scope for a plugin the child
+    # doesn't re-scope survives).  Note this means a child that re-lists
+    # a plugin WITHOUT a ``tools:`` modifier inherits the parent's
+    # allow-list — consistent with preloaded_plugins' additive
+    # semantics.  To widen back to all tools, a child must list the
+    # plugin with an explicit ``tools:[...]`` enumerating the wider set.
+    merged_tool_scopes: Dict[str, List[str]] = {}
+    for parent in parents:
+        merged_tool_scopes.update(getattr(parent, 'tool_scopes', {}) or {})
+    merged_tool_scopes.update(child.tool_scopes or {})
 
     # env: merge with conflict detection
     merged_env: Dict[str, str] = {}
@@ -1515,6 +1676,7 @@ def _merge_profiles(
         description=child.description,
         plugins=merged_plugins,
         preloaded_plugins=merged_preloaded,
+        tool_scopes=merged_tool_scopes,
         plugin_configs=merged_configs,
         system_instructions=merged_instructions,
         suppress_base_instructions=merged_suppress_base,
@@ -1684,7 +1846,7 @@ def _scan_profiles_dir(
                 errors[name] = err
             continue
         raw_plugins = data['plugins']
-        clean_plugins, preloaded = parse_plugin_list(raw_plugins)
+        clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
 
         # Parse env: must be a flat dict of string→string
         raw_env = data.get('env', {})
@@ -1713,6 +1875,7 @@ def _scan_profiles_dir(
             description=data.get('description', ''),
             plugins=clean_plugins,
             preloaded_plugins=preloaded,
+            tool_scopes=tool_scopes,
             plugin_configs=data.get('plugin_configs', {}),
             system_instructions=data.get('system_instructions'),
             suppress_base_instructions=data.get('suppress_base_instructions', False),
@@ -1948,7 +2111,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             )
             continue
         raw_plugins = data['plugins']
-        clean_plugins, preloaded = parse_plugin_list(raw_plugins)
+        clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
 
         raw_env = data.get('env', {})
         env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
@@ -1975,6 +2138,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             description=data.get('description', ''),
             plugins=clean_plugins,
             preloaded_plugins=preloaded,
+            tool_scopes=tool_scopes,
             plugin_configs=data.get('plugin_configs', {}),
             system_instructions=data.get('system_instructions'),
             suppress_base_instructions=data.get('suppress_base_instructions', False),
@@ -2217,8 +2381,9 @@ class SubagentConfig:
                 runtime_limits = RuntimeLimits.from_dict(profile_data['runtime_limits'])
 
             # Parse plugin entries, separating (preload) annotations
+            # and per-plugin tool allow-lists.
             raw_plugins = profile_data.get('plugins', [])
-            clean_plugins, preloaded = parse_plugin_list(raw_plugins)
+            clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
 
             raw_env = profile_data.get('env', {})
             env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
@@ -2239,6 +2404,7 @@ class SubagentConfig:
                 description=profile_data.get('description', ''),
                 plugins=clean_plugins,
                 preloaded_plugins=preloaded,
+                tool_scopes=tool_scopes,
                 plugin_configs=profile_data.get('plugin_configs', {}),
                 system_instructions=profile_data.get('system_instructions'),
                 suppress_base_instructions=profile_data.get('suppress_base_instructions', False),
