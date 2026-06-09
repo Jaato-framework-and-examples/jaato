@@ -836,7 +836,6 @@ Available Models:
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 | `JAATO_CGROUPS_ROOT` | Parent cgroup v2 directory for the WS server's per-session cgroup tree (default: `/sys/fs/cgroup/jaato`). Override when the host has subtree_control delegated under a different path. Must already exist with `memory`, `pids`, `cpu` in `cgroup.subtree_control`. |
-| `JAATO_FORCE_NARRATION_BETWEEN_TOOLS` | Probe B (server 0.6.196+, 2026-06-09). When `true` / `1` / `yes` / `on`, the session injects a synthetic `USER`-role prompt asking the model to extract observations after every `tool_result` append. Closes the small-model narration-skipping failure class (qwen3-14b @ temp=0 emits empty text content regardless of persona prose AND in-context examples). Opt-in per-daemon; will promote to a per-profile knob if validated. See `feedback_small_model_narration_skipping_is_structural`. |
 
 ### Rate Limiting
 | Variable | Purpose |

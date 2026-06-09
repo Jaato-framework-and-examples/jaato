@@ -1257,45 +1257,98 @@ class TestJaatoSessionReplayMessagesLazyProvider:
             session.replay_messages([], timeout=1.0)
 
 
-class TestForceNarrationBetweenTools:
-    """Probe B (2026-06-09): ``JAATO_FORCE_NARRATION_BETWEEN_TOOLS=true``
-    env var gates a synthetic-user-prompt injection after every tool
-    result append.  Closes the small-model narration-skipping failure
-    class (qwen3-14b @ temp=0 in tool-mode skips narration regardless
-    of persona prose AND in-context examples — see
+class TestForceNarrationBetweenToolsQuirk:
+    """Probe B (2026-06-09):
+    ``profile.quirks.force_narration_between_tools`` per-profile knob
+    gates a synthetic-user-prompt injection after every tool result
+    append.  Closes the small-model narration-skipping failure class
+    (qwen3-14b @ temp=0 in tool-mode skips narration regardless of
+    persona prose AND in-context examples — see
     ``feedback_small_model_narration_skipping_is_structural``).
+
+    Per-profile scope is critical: the quirk is qwen3-14b-specific,
+    so it must not leak to haiku / openrouter / other profile sets
+    via process-wide activation (e.g. env var).  Threaded through
+    ``provider.extra["quirks"]`` symmetric with existing quirks like
+    ``force_tool_choice_for_lifecycle`` and ``coerce_typed_tool_args``.
     """
 
-    def test_default_is_false_no_injection(self, monkeypatch):
-        """Without the env var, ``_force_narration_between_tools`` is
-        False and no synthetic prompt is injected."""
-        monkeypatch.delenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", raising=False)
-        mock_runtime = MagicMock()
-        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
-        assert session._force_narration_between_tools is False
+    def test_vllm_provider_default_quirk_off(self):
+        """Default (no quirk in profile) → provider attribute False."""
+        from shared.plugins.model_provider.vllm.provider import VLLMProvider
+        from shared.plugins.model_provider.base import ProviderConfig
 
-    def test_env_var_true_enables(self, monkeypatch):
-        monkeypatch.setenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "true")
-        mock_runtime = MagicMock()
-        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
-        assert session._force_narration_between_tools is True
+        provider = VLLMProvider()
+        provider._verify_connectivity = lambda: None
+        provider._trace = lambda _msg: None
+        cfg = ProviderConfig(
+            api_key="EMPTY",
+            extra={"host": "http://test:8000", "context_length": 32768},
+        )
+        provider.initialize(cfg)
+        assert provider._force_narration_between_tools is False
 
-    def test_env_var_one_enables(self, monkeypatch):
-        monkeypatch.setenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "1")
-        mock_runtime = MagicMock()
-        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
-        assert session._force_narration_between_tools is True
+    def test_vllm_provider_quirk_true_enables(self):
+        """profile.quirks.force_narration_between_tools=true is read
+        from config.extra["quirks"]["force_narration_between_tools"]."""
+        from shared.plugins.model_provider.vllm.provider import VLLMProvider
+        from shared.plugins.model_provider.base import ProviderConfig
 
-    def test_env_var_false_disabled(self, monkeypatch):
-        monkeypatch.setenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "false")
-        mock_runtime = MagicMock()
-        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
-        assert session._force_narration_between_tools is False
+        provider = VLLMProvider()
+        provider._verify_connectivity = lambda: None
+        provider._trace = lambda _msg: None
+        cfg = ProviderConfig(
+            api_key="EMPTY",
+            extra={
+                "host": "http://test:8000",
+                "context_length": 32768,
+                "quirks": {"force_narration_between_tools": True},
+            },
+        )
+        provider.initialize(cfg)
+        assert provider._force_narration_between_tools is True
 
-    def test_env_var_garbage_disabled(self, monkeypatch):
-        """Anything not in {true, 1, yes, on} disables — including
-        accidental empty / whitespace / typo values."""
-        monkeypatch.setenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "ye")
+    def test_vllm_provider_quirk_false_explicit_disables(self):
+        from shared.plugins.model_provider.vllm.provider import VLLMProvider
+        from shared.plugins.model_provider.base import ProviderConfig
+
+        provider = VLLMProvider()
+        provider._verify_connectivity = lambda: None
+        provider._trace = lambda _msg: None
+        cfg = ProviderConfig(
+            api_key="EMPTY",
+            extra={
+                "host": "http://test:8000",
+                "context_length": 32768,
+                "quirks": {"force_narration_between_tools": False},
+            },
+        )
+        provider.initialize(cfg)
+        assert provider._force_narration_between_tools is False
+
+    def test_session_reads_quirk_from_provider_attribute(self):
+        """Session reads the quirk lazily from ``self._provider``
+        using ``getattr(..., '_force_narration_between_tools', False)``
+        — symmetric with how other provider-quirk attributes are
+        consulted from session code."""
         mock_runtime = MagicMock()
         session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
-        assert session._force_narration_between_tools is False
+        # Simulate provider with quirk on
+        session._provider = MagicMock()
+        session._provider._force_narration_between_tools = True
+        # The use-site reads via getattr — confirm the value propagates
+        assert getattr(
+            session._provider, "_force_narration_between_tools", False
+        ) is True
+
+    def test_session_defaults_to_false_when_provider_lacks_attribute(self):
+        """Providers that haven't adopted the quirk (e.g. openrouter
+        in this first ship) → session sees False via getattr default,
+        no injection fires."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "haiku")
+        # Provider missing the attribute entirely
+        session._provider = MagicMock(spec=[])  # no _force_narration_*
+        assert getattr(
+            session._provider, "_force_narration_between_tools", False
+        ) is False

@@ -299,18 +299,6 @@ class JaatoSession:
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
 
-        # Probe B: ``JAATO_FORCE_NARRATION_BETWEEN_TOOLS=true`` env var
-        # gates the synthetic-user-prompt injection that fires after
-        # every tool_result append (see ``_send_tool_results_to_provider``
-        # below).  Closes the small-model narration-skipping failure
-        # class.  Opt-in per-daemon for now; will promote to a
-        # per-profile knob if validated.  See
-        # ``feedback_small_model_narration_skipping_is_structural``.
-        self._force_narration_between_tools: bool = (
-            os.environ.get("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "").lower()
-            in ("true", "1", "yes", "on")
-        )
-
         # Per-turn model-tier config.  ``_tier_config`` is the resolved
         # view (built from profile.tiers or env vars).  ``_active_tier``
         # tracks which tier the session is currently operating in;
@@ -6533,11 +6521,17 @@ NOTES
         # naturally text-mode (user just asked for text) + may include
         # the next tool call.  Loop semantics unchanged.
         #
-        # Gated by ``JAATO_FORCE_NARRATION_BETWEEN_TOOLS=true`` so this
-        # is opt-in per-daemon — falsifiable against the kb cascade
-        # fixture set + harmless when disabled.  Follow-up will promote
-        # to a per-profile knob if validated.
-        if self._force_narration_between_tools:
+        # Gated by ``profile.quirks.force_narration_between_tools``
+        # threaded through ``provider.extra["quirks"]`` (the canonical
+        # per-profile quirk mechanism, symmetric with
+        # ``force_tool_choice_for_lifecycle`` and
+        # ``coerce_typed_tool_args``).  Profile-scoped so the qwen3-14b
+        # narration-skipping quirk doesn't leak to haiku /
+        # openrouter / other profile sets.
+        force_narration = getattr(
+            self._provider, "_force_narration_between_tools", False
+        )
+        if force_narration:
             narration_prompt = Message(
                 role=Role.USER,
                 parts=[Part(text=(
