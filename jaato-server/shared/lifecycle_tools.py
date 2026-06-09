@@ -239,6 +239,23 @@ class LifecycleTools:
         # missing symbols to the agent at signal time.
         self._processors_loaded: Optional[List[Any]] = None
 
+        # Accumulated payload state (server 0.6.198+, 2026-06-09) for the
+        # ``prepare_completion`` / ``query_completion`` / arg-less
+        # ``signal_completion`` triple.  Closes the composition-burden
+        # failure on small models (qwen3-14b @ temp=0): the model
+        # collapses to ``args={}`` when forced to compose the entire
+        # completion payload in one tool emission, even though it can
+        # produce each piece individually (interrogator-probe proven).
+        # The triple lets the agent transcribe partials across many
+        # turns ("readFile-style" — one observation per call), inspect
+        # accumulated state via ``query_completion``, and finally call
+        # ``signal_completion()`` arg-less to synthesize from
+        # accumulated.  Legacy ``signal_completion(args=full)`` single-
+        # shot path remains for capable models.  See
+        # ``feedback_small_model_narration_skipping_is_structural`` for
+        # the empirical chain that motivated this design.
+        self._accumulated_payload: Dict[str, Any] = {}
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ``signal_completion`` schema for the active profile.
 
@@ -300,12 +317,90 @@ class LifecycleTools:
                         "Signal that you have finished all your work and have "
                         "nothing left to do.  This triggers downstream agents "
                         "(e.g. memory curator) and allows the session to be "
-                        "cleaned up.  Call this as your very last action."
+                        "cleaned up.  Call this as your very last action.\n\n"
+                        "Two paths:\n"
+                        "  - Single-shot (capable models): call with the full "
+                        "payload matching completion_payload_schema as args.\n"
+                        "  - Accumulator: call with NO args after using "
+                        "``prepare_completion`` to populate fields across "
+                        "multiple turns; the framework synthesizes the payload "
+                        "from accumulated state.  See ``query_completion`` to "
+                        "inspect accumulated state."
                     ),
                     parameters=parameters,
                     discoverability="core",
                 )
             )
+
+            # prepare_completion / query_completion tools — register
+            # only when a completion_payload_schema is declared
+            # (otherwise there is no schema to accumulate against).
+            # Designed for small-model composition-burden mitigation:
+            # the agent submits PARTIAL segments of the payload across
+            # multiple turns instead of composing the entire structured
+            # emission in one tool call.  See
+            # ``_execute_prepare_completion`` /
+            # ``_execute_query_completion`` for the executor docstrings.
+            if self._payload_schema is not None:
+                schemas.append(
+                    ToolSchema(
+                        name="prepare_completion",
+                        description=(
+                            "Add fields to the completion payload one segment "
+                            "at a time.  Pass a partial dict matching part of "
+                            "completion_payload_schema's shape (any subset of "
+                            "top-level fields, or nested values for fields you "
+                            "already started).  The framework merges into "
+                            "session-tier accumulated state and returns: "
+                            "``accepted`` (what merged), ``rejected`` "
+                            "(per-field type errors), "
+                            "``pending_required_fields_with_descriptions`` "
+                            "(what remains), and ``is_complete`` (True when "
+                            "every required field is satisfied).  Call this "
+                            "repeatedly as you discover values from your "
+                            "tool calls; when ``is_complete`` is True, call "
+                            "``signal_completion()`` with no args.  Use "
+                            "``query_completion`` to inspect accumulated "
+                            "state without contributing."
+                        ),
+                        parameters={
+                            "type": "object",
+                            "additionalProperties": True,
+                            "description": (
+                                "Partial completion payload — any subset of "
+                                "fields from completion_payload_schema.  No "
+                                "wire-level constraints; framework validates "
+                                "each field server-side against the declared "
+                                "schema and surfaces rejections in the "
+                                "response."
+                            ),
+                        },
+                        discoverability="core",
+                    )
+                )
+                schemas.append(
+                    ToolSchema(
+                        name="query_completion",
+                        description=(
+                            "Inspect the current accumulated completion "
+                            "payload (read-only — does not mutate state).  "
+                            "Returns ``accumulated`` (what you've set so "
+                            "far), ``pending_required_fields_with_descriptions`` "
+                            "(what's still missing), and ``is_complete`` "
+                            "(whether ``signal_completion()`` arg-less is "
+                            "ready to fire).  Use this when you lose track of "
+                            "what you've contributed, want to verify a value "
+                            "you set earlier, or before calling "
+                            "``signal_completion`` to confirm completeness."
+                        ),
+                        parameters={
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                        discoverability="core",
+                    )
+                )
 
         # Per-turn model-tier switching.  Only registered when the
         # session has tier mode active — single-model sessions don't
@@ -431,12 +526,18 @@ class LifecycleTools:
         executors: Dict[str, Any] = {
             "signal_completion": self._execute_signal_completion,
         }
+        if self._payload_schema is not None:
+            executors["prepare_completion"] = self._execute_prepare_completion
+            executors["query_completion"] = self._execute_query_completion
         if getattr(self._session, '_tier_config', None) is not None:
             executors["enter_tier"] = self._execute_enter_tier
         return executors
 
     def get_auto_approved_tools(self) -> List[str]:
         approved = ["signal_completion"]
+        if self._payload_schema is not None:
+            approved.append("prepare_completion")
+            approved.append("query_completion")
         if getattr(self._session, '_tier_config', None) is not None:
             approved.append("enter_tier")
         return approved
@@ -499,6 +600,18 @@ class LifecycleTools:
         and a derived ``summary`` (from the payload's ``summary``
         field if present, otherwise empty) for reactor consumers that
         still read the legacy field.
+
+        **Accumulator path (server 0.6.198+):** when ``args`` is empty
+        AND a ``completion_payload_schema`` is declared, the framework
+        synthesizes the payload from
+        :attr:`_accumulated_payload` (populated by
+        ``prepare_completion`` calls across the session).  If the
+        accumulated state satisfies the schema (``is_complete=True``),
+        proceeds to validation + processors.  Otherwise rejects with
+        the same ``validation_failed`` shape used by malformed
+        partial-args, including the
+        ``pending_required_fields_with_descriptions`` map so the agent
+        knows what's left to set via ``prepare_completion``.
         """
         payload: Optional[Dict[str, Any]]
         summary: str
@@ -507,10 +620,44 @@ class LifecycleTools:
             summary = args.get("summary", "")
             payload = None
         else:
-            # Option G: args dict IS the payload — the tool's parameters
-            # mirror completion_payload_schema's top-level properties
-            # directly.  No more "payload" wrapper.
-            payload = args
+            # Accumulator path: empty args + non-empty accumulated state
+            # → synthesize the payload from accumulated.  See
+            # ``_execute_prepare_completion`` for how state gets there.
+            if not args and self._accumulated_payload:
+                pending = self._compute_pending_required_fields(
+                    self._accumulated_payload, self._payload_schema,
+                )
+                if pending:
+                    logger.info(
+                        "signal_completion: arg-less call but accumulated "
+                        "state has %d required field(s) pending — rejecting",
+                        len(pending),
+                    )
+                    return {
+                        "error": "validation_failed",
+                        "message": (
+                            "signal_completion was called with no args but "
+                            "the accumulated payload is not yet complete. "
+                            "Use prepare_completion to fill the pending "
+                            "fields below, then call signal_completion() "
+                            "with no args again.  Or call signal_completion "
+                            "with a full payload as args to bypass the "
+                            "accumulator."
+                        ),
+                        "pending_required_fields_with_descriptions": pending,
+                    }
+                # is_complete=True — synthesize.
+                payload = dict(self._accumulated_payload)
+                logger.info(
+                    "signal_completion: synthesizing from accumulated "
+                    "state (%d top-level keys)",
+                    len(payload),
+                )
+            else:
+                # Option G: args dict IS the payload — the tool's
+                # parameters mirror completion_payload_schema's
+                # top-level properties directly.  No "payload" wrapper.
+                payload = args
             try:
                 import jsonschema
                 jsonschema.validate(instance=payload, schema=self._payload_schema)
@@ -666,3 +813,295 @@ class LifecycleTools:
         if processor_outcome and processor_outcome.written:
             result["artifacts_written"] = list(processor_outcome.written)
         return result
+
+    # ==================== prepare/query completion (2026-06-09) ====================
+
+    def _execute_prepare_completion(
+        self, args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Merge a partial payload into accumulated state, validate
+        per-field, return progress signal.
+
+        Designed for small-model composition-burden mitigation
+        ([[feedback_small_model_narration_skipping_is_structural]]).
+        Each call is a discrete TRANSCRIPTION operation — the model
+        contributes one or more fields at a time, the framework
+        accumulates, the response signals what's still pending.  The
+        model stays in the same cognitive mode that works for tool
+        result transcription instead of composing the entire payload
+        as one structured emission.
+
+        Args:
+            args: Partial completion payload — any subset of fields
+                from ``completion_payload_schema``.  Top-level field
+                rejection is per-field: a partial like
+                ``{service: "billing", endpoints: <malformed>}``
+                accepts ``service``, rejects ``endpoints``, surfaces
+                both in the response.  Nested objects merge
+                last-write-wins per Q7.
+
+        Returns:
+            Dict with:
+            - ``accepted``: subset of args that passed per-field
+              validation and was merged into accumulated state.
+            - ``rejected``: ``{field_path: rejection_reason}`` for
+              fields that failed validation; accumulated state was NOT
+              mutated for these.
+            - ``pending_required_fields_with_descriptions``: list of
+              ``{path, description, type, ...}`` dicts for required
+              fields still missing from accumulated state.
+            - ``is_complete``: True iff
+              ``jsonschema.validate(accumulated, full_schema)`` passes.
+        """
+        if self._payload_schema is None:
+            return {
+                "error": "no_completion_schema",
+                "message": (
+                    "prepare_completion is only available when the "
+                    "profile declares a completion_payload_schema. This "
+                    "session has no schema, so signal_completion(summary) "
+                    "is the only completion path."
+                ),
+            }
+
+        if not isinstance(args, dict):
+            return {
+                "error": "invalid_argument",
+                "message": (
+                    "prepare_completion requires a dict argument matching "
+                    "part of completion_payload_schema's shape."
+                ),
+            }
+
+        # Per-field validation: try each top-level key against the
+        # schema's properties.  Accept what validates, reject what
+        # doesn't — preserves partial submissions where some fields are
+        # well-formed and others aren't.
+        accepted: Dict[str, Any] = {}
+        rejected: Dict[str, str] = {}
+        for key, value in args.items():
+            err = self._validate_field_against_schema(
+                key, value, self._payload_schema,
+            )
+            if err is None:
+                accepted[key] = value
+            else:
+                rejected[key] = err
+
+        # Merge accepted fields into accumulated state (last-write-wins
+        # per-key — Q7).  Deep merge for dict values, replace for
+        # everything else.
+        for key, value in accepted.items():
+            if (
+                isinstance(value, dict)
+                and isinstance(self._accumulated_payload.get(key), dict)
+            ):
+                self._deep_merge(self._accumulated_payload[key], value)
+            else:
+                self._accumulated_payload[key] = value
+
+        pending = self._compute_pending_required_fields(
+            self._accumulated_payload, self._payload_schema,
+        )
+        is_complete = not pending
+
+        logger.info(
+            "prepare_completion: accepted=%d rejected=%d pending=%d is_complete=%s",
+            len(accepted), len(rejected), len(pending), is_complete,
+        )
+
+        return {
+            "accepted": accepted,
+            "rejected": rejected,
+            "pending_required_fields_with_descriptions": pending,
+            "is_complete": is_complete,
+        }
+
+    def _execute_query_completion(
+        self, args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Inspect accumulated completion state (read-only).
+
+        Returns the full accumulated payload + pending required fields
+        + is_complete flag.  Does NOT mutate state — safe to call
+        repeatedly.  Useful when the model loses track of what it has
+        contributed, wants to verify a value set earlier, or before
+        calling ``signal_completion`` to confirm completeness.
+        """
+        if self._payload_schema is None:
+            return {
+                "error": "no_completion_schema",
+                "message": (
+                    "query_completion is only available when the profile "
+                    "declares a completion_payload_schema."
+                ),
+            }
+
+        pending = self._compute_pending_required_fields(
+            self._accumulated_payload, self._payload_schema,
+        )
+        return {
+            "accumulated": dict(self._accumulated_payload),
+            "pending_required_fields_with_descriptions": pending,
+            "is_complete": not pending,
+        }
+
+    def _validate_field_against_schema(
+        self,
+        key: str,
+        value: Any,
+        schema: Dict[str, Any],
+    ) -> Optional[str]:
+        """Validate one top-level field against the schema's property
+        spec for that key.  Returns rejection-reason string on
+        failure, or None on success.
+
+        Validation uses a RELAXED variant of the property spec where
+        all ``required[]`` arrays are stripped recursively.  This
+        allows partial submissions — the agent can submit
+        ``{stack_config: {language: "java"}}`` even though the schema
+        marks ``framework`` as required inside stack_config.  Type
+        checking + enum constraints + format constraints remain
+        enforced.  Required-field tracking is handled separately by
+        the pending walker which uses the ORIGINAL (unrelaxed) schema.
+        """
+        properties = schema.get("properties", {})
+        if key not in properties:
+            return (
+                f"Field {key!r} is not declared in "
+                f"completion_payload_schema.properties. Valid top-level "
+                f"keys: {sorted(properties.keys())}."
+            )
+
+        # Strip required[] recursively so partial submissions don't
+        # fail validation just for being incomplete.
+        relaxed = self._strip_required_recursive(properties[key])
+
+        try:
+            import jsonschema
+            jsonschema.validate(instance=value, schema=relaxed)
+        except jsonschema.ValidationError as exc:
+            return f"{exc.message} (at {'.'.join(str(p) for p in exc.absolute_path)})"
+        return None
+
+    def _strip_required_recursive(self, schema: Any) -> Any:
+        """Return a deep-copied schema with all ``required[]`` arrays
+        removed.  Recurses into ``properties`` and ``items`` so nested
+        objects-in-arrays inherit the relaxation.  Used by
+        ``_validate_field_against_schema`` to allow partial
+        submissions during accumulation while preserving type / enum /
+        format checks.
+        """
+        if not isinstance(schema, dict):
+            return schema
+        out = {k: v for k, v in schema.items() if k != "required"}
+        if "properties" in out and isinstance(out["properties"], dict):
+            out["properties"] = {
+                k: self._strip_required_recursive(v)
+                for k, v in out["properties"].items()
+            }
+        if "items" in out:
+            out["items"] = self._strip_required_recursive(out["items"])
+        return out
+
+    def _compute_pending_required_fields(
+        self,
+        accumulated: Dict[str, Any],
+        schema: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Return list of required fields still missing from
+        accumulated state.  Each entry includes the JSON-pointer-style
+        path + the schema's description / type / enum (if present) for
+        that field so the model gets just-in-time guidance per
+        pending field without needing to re-read persona prose.
+
+        Walks the schema recursively for nested-object required
+        fields.  Arrays of objects: if the accumulated value is a
+        non-empty array, each item's required fields are checked
+        against item-schema.  If accumulated array is empty AND the
+        array itself is required, surfaces ``<path>`` as pending.
+        """
+        pending: List[Dict[str, Any]] = []
+        self._walk_required(
+            accumulated, schema, path_prefix="", pending=pending,
+        )
+        return pending
+
+    def _walk_required(
+        self,
+        accumulated: Any,
+        schema: Dict[str, Any],
+        path_prefix: str,
+        pending: List[Dict[str, Any]],
+    ) -> None:
+        if schema.get("type") == "object":
+            properties = schema.get("properties", {})
+            required = schema.get("required", [])
+            for req_key in required:
+                child_path = (
+                    f"{path_prefix}.{req_key}" if path_prefix else req_key
+                )
+                if not isinstance(accumulated, dict) or req_key not in accumulated:
+                    pending.append(
+                        self._describe_pending_field(
+                            child_path, properties.get(req_key, {}),
+                        )
+                    )
+                else:
+                    # Recurse into the present value to surface deeply
+                    # nested required fields (e.g. each endpoint's
+                    # required ``operation``).
+                    self._walk_required(
+                        accumulated[req_key],
+                        properties.get(req_key, {}),
+                        child_path,
+                        pending,
+                    )
+        elif schema.get("type") == "array":
+            items_schema = schema.get("items", {})
+            if isinstance(accumulated, list):
+                for idx, item in enumerate(accumulated):
+                    item_path = f"{path_prefix}[{idx}]"
+                    self._walk_required(item, items_schema, item_path, pending)
+
+    def _describe_pending_field(
+        self,
+        path: str,
+        field_schema: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build the pending-field descriptor surfaced in
+        prepare/query responses.  Keeps the schema knowledge JIT-
+        accessible so small models don't need to retain all 30K of
+        persona prose in working context.
+        """
+        descriptor: Dict[str, Any] = {"path": path}
+        for key in ("description", "type", "enum", "format", "examples"):
+            if key in field_schema:
+                descriptor[key] = field_schema[key]
+        # For arrays-of-objects, surface the items.type hint so the
+        # model knows it needs to fill an array (not a scalar).
+        if field_schema.get("type") == "array" and "items" in field_schema:
+            items = field_schema["items"]
+            descriptor["items_type"] = items.get("type", "any")
+            if "required" in items:
+                descriptor["items_required"] = list(items["required"])
+        return descriptor
+
+    def _deep_merge(
+        self,
+        target: Dict[str, Any],
+        source: Dict[str, Any],
+    ) -> None:
+        """Recursive in-place merge.  Last-write-wins per leaf (Q7).
+        Dict values merge; everything else (including arrays)
+        replaces.  Symmetric with the accumulated-state mutation
+        semantics in ``_execute_prepare_completion``.
+        """
+        for key, value in source.items():
+            if (
+                isinstance(value, dict)
+                and isinstance(target.get(key), dict)
+            ):
+                self._deep_merge(target[key], value)
+            else:
+                target[key] = value
