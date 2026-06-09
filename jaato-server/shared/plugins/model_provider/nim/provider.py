@@ -681,6 +681,16 @@ class NIMProvider:
                         f"{type(close_exc).__name__}: {close_exc}"
                     )
 
+            # SHAPE B (cancel-leak fix, 2026-06-09): close the openai
+            # client's httpx pool when cancelled.  See vllm/provider.py
+            # for the empirical evidence — ``response_stream.close()``
+            # alone does NOT propagate TCP-FIN to the upstream.
+            if was_cancelled and self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+
         # Flush remaining text and tool calls
         flush_text_block()
         flush_tool_calls()
