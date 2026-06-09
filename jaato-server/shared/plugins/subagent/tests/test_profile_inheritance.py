@@ -249,6 +249,38 @@ class TestResolveSingleInheritance:
         assert not errors
         assert resolved["child"].preloaded_plugins == {"cli", "memory", "todo"}
 
+    def test_tool_scopes_per_plugin_override(self):
+        # Parent scopes file_edit + cli; child re-scopes file_edit (wins)
+        # and leaves cli untouched (parent's scope survives).
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                tool_scopes={"file_edit": ["readFile"], "cli": ["run"]},
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                tool_scopes={"file_edit": ["readFile", "writeFile"]},
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].tool_scopes == {
+            "file_edit": ["readFile", "writeFile"],  # child wins
+            "cli": ["run"],                            # parent survives
+        }
+
+    def test_tool_scopes_empty_when_unset(self):
+        profiles = {
+            "base": SubagentProfile(name="base", description="Base"),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].tool_scopes == {}
+
 
 class TestResolveMultipleInheritance:
     """Tests for multiple-parent inheritance."""

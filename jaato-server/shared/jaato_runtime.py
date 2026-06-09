@@ -914,6 +914,7 @@ class JaatoRuntime:
         agent_params: Optional[Dict[str, Any]] = None,
         completion_processors: Optional[List[Any]] = None,
         agent_id: str = "main",
+        tool_scopes: Optional[Dict[str, List[str]]] = None,
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -955,6 +956,12 @@ class JaatoRuntime:
                 path for this session.  Used by fork-replay to point a temp
                 session at a worktree snapshot without affecting other sessions
                 sharing the same runtime.
+            tool_scopes: Optional per-plugin tool allow-lists (profile
+                ``tools:[...]`` modifier).  Maps plugin name → list of
+                allowed tool names; the session drops every other tool the
+                plugin ships from its own wire body + grammar surface.
+                Applied per-session — the shared registry is never mutated,
+                so sibling sessions on this runtime keep their own scopes.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -998,6 +1005,7 @@ class JaatoRuntime:
             tier_config=tier_config,
             agent_params=agent_params,
             completion_processors=completion_processors,
+            tool_scopes=tool_scopes,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 

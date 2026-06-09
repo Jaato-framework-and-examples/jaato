@@ -502,6 +502,15 @@ class JaatoSession:
         # the system prompt and the budget.
         self._deferred_plugin_instructions: Set[str] = set()
         self._preloaded_plugins: set = set()
+        # Per-plugin tool allow-lists (profile ``tools:[...]`` modifier).
+        # Maps plugin name → list of allowed tool names.  A plugin absent
+        # from this dict exposes all its tools.  Enforced per-session in
+        # ``_apply_tool_scopes`` (mirroring the ``_tool_plugins``
+        # plugin-level filter) so a tool outside its plugin's allow-list
+        # never reaches the wire body or the provider's grammar surface.
+        # Never mutates the shared registry — sibling subagents on the
+        # same runtime keep their own scopes.
+        self._tool_scopes: Dict[str, List[str]] = {}
 
         # Priority-aware message queue for agent communication
         # Uses double-linked list for efficient mid-queue removal of parent messages
@@ -1656,6 +1665,7 @@ class JaatoSession:
         tier_config: Optional['ModelTierConfig'] = None,
         agent_params: Optional[Dict[str, Any]] = None,
         completion_processors: Optional[List[Any]] = None,
+        tool_scopes: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -1736,6 +1746,8 @@ class JaatoSession:
 
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
+        # Store per-plugin tool allow-lists (profile ``tools:[...]``).
+        self._tool_scopes = dict(tool_scopes) if tool_scopes else {}
         # Store tool plugin names
         self._tool_plugins = tools
 
@@ -1872,6 +1884,24 @@ class JaatoSession:
                 ]
                 if approved:
                     self._runtime.permission_plugin.add_whitelist_tools(approved)
+
+            # Apply per-plugin tool allow-lists (profile ``tools:[...]``)
+            # to the assembled ``self._tools`` so scoped-out tools are
+            # absent from discovery / token-budget accounting too — not
+            # just the wire body (``_get_tools_for_provider`` is the
+            # final guard).  Lifecycle / core-infra tools have no owning
+            # plugin and always survive.  No-op without configured
+            # scopes.
+            if self._tool_scopes and self._tools:
+                before = len(self._tools)
+                self._tools = self._apply_tool_scopes(self._tools)
+                dropped = before - len(self._tools)
+                if dropped:
+                    self._trace(
+                        f"configure: tool_scopes dropped {dropped} "
+                        f"tool(s) from the initial surface "
+                        f"(scopes={self._tool_scopes})"
+                    )
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
@@ -2274,9 +2304,18 @@ class JaatoSession:
         if not self._tools:
             return self._tools
 
+        # Per-session tool-scope allow-list filter (profile
+        # ``tools:[...]`` modifier).  Applied FIRST, on every return
+        # path, so a tool outside its plugin's allow-list never reaches
+        # the provider's wire body or grammar surface regardless of how
+        # ``self._tools`` was assembled.  This is the definitive
+        # wire-absence guarantee — the property profile authors rely on
+        # for context-shaving.  A no-op when no scopes are configured.
+        scoped = self._apply_tool_scopes(self._tools)
+
         registry = getattr(self._runtime, 'registry', None)
         if registry is None:
-            return self._tools
+            return scoped
 
         # Collect plugins that opt in to visibility gating.  Walk
         # ``list_exposed`` (rather than ``_plugins.keys()``) so
@@ -2284,17 +2323,17 @@ class JaatoSession:
         try:
             exposed_names = registry.list_exposed()
         except Exception:
-            return self._tools
+            return scoped
         filters = []
         for name in exposed_names:
             plugin = registry.get_plugin(name)
             if plugin is not None and hasattr(plugin, 'is_tool_visible'):
                 filters.append(plugin)
         if not filters:
-            return self._tools
+            return scoped
 
         visible: List['ToolSchema'] = []
-        for tool in self._tools:
+        for tool in scoped:
             hidden = False
             for plugin in filters:
                 try:
@@ -2311,6 +2350,50 @@ class JaatoSession:
             if not hidden:
                 visible.append(tool)
         return visible
+
+    def _apply_tool_scopes(
+        self, schemas: List['ToolSchema']
+    ) -> List['ToolSchema']:
+        """Filter ``schemas`` to honour per-plugin tool allow-lists.
+
+        For each tool, looks up its owning plugin (via
+        ``registry.get_plugin_for_tool``) and, if that plugin has an
+        entry in ``self._tool_scopes``, drops the tool unless its name
+        is in the allow-list.  Tools with no owning plugin (lifecycle
+        tools like ``signal_completion``, core infra like stream /
+        event-bus controls) have no scope and always survive.
+
+        Mirrors the ``_tool_plugins`` plugin-level filter in
+        :meth:`activate_discovered_tools`, one granularity finer.  Pure
+        function over the input list — never mutates the registry or
+        ``self._tools``.
+
+        Returns the input unchanged when no scopes are configured (the
+        overwhelmingly common case), so the per-turn cost is a single
+        dict-emptiness check for unscoped sessions.
+        """
+        if not self._tool_scopes or not schemas:
+            return schemas
+        registry = getattr(self._runtime, 'registry', None)
+        if registry is None:
+            return schemas
+        kept: List['ToolSchema'] = []
+        for schema in schemas:
+            plugin = registry.get_plugin_for_tool(schema.name)
+            plugin_name = plugin.name if plugin is not None else None
+            allow = (
+                self._tool_scopes.get(plugin_name)
+                if plugin_name is not None
+                else None
+            )
+            if allow is not None and schema.name not in allow:
+                self._trace(
+                    f"tool_scope: dropping {schema.name!r} "
+                    f"(plugin {plugin_name!r} allow-list={allow})"
+                )
+                continue
+            kept.append(schema)
+        return kept
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
@@ -3106,6 +3189,22 @@ class JaatoSession:
                         f"(plugin '{plugin.name}' not in profile)"
                     )
                     continue
+
+            # Enforce per-plugin tool allow-list (profile ``tools:[...]``):
+            # a scoped-out tool must not be activatable even if the model
+            # discovers it via introspection.  One granularity finer than
+            # the plugin filter above.
+            if self._tool_scopes:
+                plugin = self._runtime.registry.get_plugin_for_tool(tool_name)
+                if plugin is not None:
+                    allow = self._tool_scopes.get(plugin.name)
+                    if allow is not None and tool_name not in allow:
+                        self._trace(
+                            f"activate_discovered_tools: skipping "
+                            f"'{tool_name}' (outside plugin "
+                            f"'{plugin.name}' allow-list={allow})"
+                        )
+                        continue
 
             schema = schema_map[tool_name]
             if self._tools is None:

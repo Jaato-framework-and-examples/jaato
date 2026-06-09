@@ -554,6 +554,12 @@ class SubagentPlugin:
                     preloaded_plugins=profile.preloaded_plugins or None,
                     completion_payload_schema=profile.completion_payload_schema,
                     completion_processors=profile.completion_processors or None,
+                    # Per-plugin tool allow-lists (profile ``tools:[...]``).
+                    # In-process subagents share the parent's registry, so
+                    # the scope MUST be per-session (the session applies it
+                    # to its own ``self._tools``; the registry is never
+                    # mutated) — siblings keep their own scopes.
+                    tool_scopes=getattr(profile, "tool_scopes", None) or None,
                 )
 
                 # Restore parent session reference (was overwritten by configure())
@@ -3189,6 +3195,9 @@ class SubagentPlugin:
                 completion_payload_schema=profile.completion_payload_schema,
                 completion_processors=profile.completion_processors or None,
                 suppress_base_instructions=getattr(profile, 'suppress_base_instructions', False),
+                # Per-plugin tool allow-lists (profile ``tools:[...]``) —
+                # per-session, never mutates the shared registry.
+                tool_scopes=getattr(profile, "tool_scopes", None) or None,
             )
             logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")
 
