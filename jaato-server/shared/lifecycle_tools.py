@@ -384,12 +384,14 @@ class LifecycleTools:
                                 "field_path": {
                                     "type": "string",
                                     "description": (
-                                        "Dot-notation path to the schema "
-                                        "field you're setting.  Use ``[idx]`` "
-                                        "for array indices.  Examples: "
-                                        "``service``, ``stack_config.language``, "
-                                        "``endpoints[0].operation``, "
-                                        "``endpoints[2]``."
+                                        "Dot-notation path into the "
+                                        "completion target. Examples: "
+                                        "service (top-level), "
+                                        "stack_config.language (nested), "
+                                        "endpoints[0].operation (array "
+                                        "index then key), endpoints[2] "
+                                        "(whole element), matrix[0][1] "
+                                        "(multi-level)."
                                     ),
                                 },
                                 "value": {
