@@ -688,6 +688,7 @@ class LMStudioProvider:
                     function_calls.append(fc)
             tool_call_accumulators.clear()
 
+        response_stream = None
         try:
             self._trace(f"{trace_prefix}_START")
             chunk_count = 0
@@ -766,6 +767,18 @@ class LMStudioProvider:
                 finish_reason = FinishReason.CANCELLED
             else:
                 raise
+        finally:
+            # Close the underlying HTTP connection so LM Studio stops
+            # generating immediately on cancel. The SDK ``Stream`` object
+            # only sends TCP-close at garbage-collection time.
+            if response_stream is not None:
+                try:
+                    response_stream.close()
+                except Exception as close_exc:  # pragma: no cover - best effort
+                    self._trace(
+                        f"{trace_prefix}_CLOSE_ERROR "
+                        f"{type(close_exc).__name__}: {close_exc}"
+                    )
 
         flush_text_block()
         flush_tool_calls()

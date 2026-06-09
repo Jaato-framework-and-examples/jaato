@@ -1431,6 +1431,7 @@ class GitHubModelsProvider:
                 parts.append(Part.from_text("".join(accumulated_text)))
                 accumulated_text = []
 
+        response_stream = None
         try:
             chunk_count = 0
             response_stream = self._client.complete(
@@ -1493,6 +1494,16 @@ class GitHubModelsProvider:
             else:
                 self._handle_api_error(e)
                 raise
+        finally:
+            # Close the underlying HTTP connection so GitHub Models stops
+            # generating immediately on cancel. The Azure SDK's
+            # ``StreamingChatCompletions`` object only sends TCP-close at
+            # garbage-collection time.
+            if response_stream is not None:
+                try:
+                    response_stream.close()
+                except Exception:  # pragma: no cover - best effort
+                    pass
 
         flush_text_block()
 
