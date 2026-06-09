@@ -1352,3 +1352,86 @@ class TestForceNarrationBetweenToolsQuirk:
         assert getattr(
             session._provider, "_force_narration_between_tools", False
         ) is False
+
+    def test_vllm_known_quirks_allow_list_includes_force_narration(self, caplog):
+        """Regression: PR-265 wired the attribute read but did NOT
+        update the vllm provider's ``_KNOWN_QUIRKS`` allow-list.
+        Profile-set quirk value passed through ``quirks.get(...)``
+        but the post-read allow-list filter logged an "ignoring
+        unknown quirk" WARNING and the value never took effect on
+        the session.  Caught by peer's daemon-log grep BEFORE the
+        empirical cascade re-run, saving GPU + a wrong RED
+        attribution to model-side structural failure.
+
+        This test pins all three currently-recognised quirks in the
+        allow-list so the next quirk wire-up fails fast at unit-test
+        time, not at empirical-cascade time.
+        """
+        from shared.plugins.model_provider.vllm.provider import VLLMProvider
+        from shared.plugins.model_provider.base import ProviderConfig
+        import logging
+
+        provider = VLLMProvider()
+        provider._verify_connectivity = lambda: None
+        provider._trace = lambda _msg: None
+        cfg = ProviderConfig(
+            api_key="EMPTY",
+            extra={
+                "host": "http://test:8000",
+                "context_length": 32768,
+                "quirks": {
+                    "coerce_typed_tool_args": True,
+                    "force_tool_choice_for_lifecycle": True,
+                    "force_narration_between_tools": True,
+                },
+            },
+        )
+        with caplog.at_level(logging.WARNING):
+            provider.initialize(cfg)
+
+        # No "ignoring unknown quirk" warning for any of the three
+        # known quirks.
+        warnings = [
+            r.message for r in caplog.records
+            if r.levelname == "WARNING"
+            and "ignoring unknown quirk" in r.message
+        ]
+        assert warnings == [], (
+            f"Allow-list rejected a known quirk: {warnings}"
+        )
+
+        # All three attributes set as expected.
+        assert provider._coerce_typed_tool_args is True
+        assert provider._force_tool_choice_for_lifecycle is True
+        assert provider._force_narration_between_tools is True
+
+    def test_vllm_known_quirks_unknown_still_warns(self, caplog):
+        """The allow-list filter MUST still fire for genuinely
+        unknown quirks (profile typo, deprecated quirk name).  This
+        guards against the allow-list being loosened too far in
+        future PRs."""
+        from shared.plugins.model_provider.vllm.provider import VLLMProvider
+        from shared.plugins.model_provider.base import ProviderConfig
+        import logging
+
+        provider = VLLMProvider()
+        provider._verify_connectivity = lambda: None
+        provider._trace = lambda _msg: None
+        cfg = ProviderConfig(
+            api_key="EMPTY",
+            extra={
+                "host": "http://test:8000",
+                "context_length": 32768,
+                "quirks": {"made_up_quirk_does_not_exist": True},
+            },
+        )
+        with caplog.at_level(logging.WARNING):
+            provider.initialize(cfg)
+
+        warnings = [
+            r.message for r in caplog.records
+            if r.levelname == "WARNING"
+            and "ignoring unknown quirk" in r.message
+        ]
+        assert len(warnings) == 1
+        assert "made_up_quirk_does_not_exist" in warnings[0]
