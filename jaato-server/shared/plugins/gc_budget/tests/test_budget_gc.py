@@ -952,3 +952,332 @@ class TestEndToEndPairAwareGC:
             assert fc_ids <= result_ids, (
                 f"Unpaired tool_use: {fc_ids - result_ids}"
             )
+
+
+class TestShapeDOrphanPairPreservesNarration:
+    """When the orphan-pair expansion adds a model message to the
+    removal set (because its paired tool_result is being removed),
+    strip the function_call parts but PRESERVE the text parts.
+
+    Persona patterns that ask the agent to "narrate what you
+    extracted after each read so subsequent turns retain the gist
+    if GC trims the raw tool result" depend on the narration
+    surviving GC.  Without this surgical removal the narration was
+    bundled into the same model message as the tool_call, so it
+    got evicted whenever the paired tool_result was trimmed.
+
+    See [[project_cancel_leak_arc_pr_258_2026_06_09]]-adjacent
+    "gc-narration-loss-from-paired-removal" peer ping
+    2026-06-09 for the full diagnostic + Shape D rationale.
+    """
+
+    def _build_plugin(self) -> BudgetGCPlugin:
+        plugin = BudgetGCPlugin()
+        plugin._trace = lambda _msg: None  # silence trace in tests
+        return plugin
+
+    def test_orphan_paired_model_message_keeps_text_parts(self):
+        """Mixed model message (text + function_call) when added to
+        removal_list via orphan-pair expansion → drop function_call,
+        keep text part as standalone model message.
+        """
+        plugin = self._build_plugin()
+
+        # User input
+        user_msg = Message(
+            role=Role.USER,
+            parts=[Part(text="Read fixture A and narrate.")],
+            message_id="msg_user",
+        )
+        # Model emits narration + tool_call in same message
+        model_msg = Message(
+            role=Role.MODEL,
+            parts=[
+                Part(text="I extracted: customer-api has 3 endpoints."),
+                Part(function_call=FunctionCall(
+                    id="call_1", name="readFile", args={"path": "a"},
+                )),
+            ],
+            message_id="msg_model",
+        )
+        # Tool result (the one GC wants to remove for budget)
+        tool_msg = Message(
+            role=Role.TOOL,
+            parts=[Part(function_response=ToolResult(
+                call_id="call_1", name="readFile", result="<20K of content>",
+            ))],
+            message_id="msg_tool",
+        )
+        history = [user_msg, model_msg, tool_msg]
+
+        # Direct removal of tool_msg + orphan-pair expansion adds
+        # model_msg with reason="tool_call_pair".
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="turn_1_external",
+                tokens_freed=5000,
+                reason="ephemeral",
+                message_ids=["msg_tool"],
+            ),
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="turn_1_output",
+                tokens_freed=500,
+                reason="tool_call_pair",  # orphan-pair expansion marker
+                message_ids=["msg_model"],
+            ),
+        ]
+
+        result = plugin._apply_removals_to_history(history, removal_list)
+
+        # msg_tool is gone; msg_model stripped down to just text
+        assert len(result) == 2
+        assert result[0].message_id == "msg_user"
+        assert result[1].message_id == "msg_model"
+        assert result[1].role == Role.MODEL
+        assert len(result[1].parts) == 1
+        assert result[1].parts[0].text == "I extracted: customer-api has 3 endpoints."
+        assert result[1].parts[0].function_call is None
+
+    def test_orphan_paired_model_with_no_text_dropped_entirely(self):
+        """If the orphan-paired model message has no text parts (only
+        function_calls), nothing survives the strip — drop it.
+        """
+        plugin = self._build_plugin()
+
+        model_msg = Message(
+            role=Role.MODEL,
+            parts=[
+                Part(function_call=FunctionCall(
+                    id="call_1", name="readFile", args={"path": "a"},
+                )),
+            ],
+            message_id="msg_model",
+        )
+        tool_msg = Message(
+            role=Role.TOOL,
+            parts=[Part(function_response=ToolResult(
+                call_id="call_1", name="readFile", result="<content>",
+            ))],
+            message_id="msg_tool",
+        )
+        history = [model_msg, tool_msg]
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="turn_1_external",
+                tokens_freed=1000,
+                reason="ephemeral",
+                message_ids=["msg_tool"],
+            ),
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="turn_1_output",
+                tokens_freed=100,
+                reason="tool_call_pair",
+                message_ids=["msg_model"],
+            ),
+        ]
+
+        result = plugin._apply_removals_to_history(history, removal_list)
+
+        # Both gone — no text to preserve.
+        assert result == []
+
+    def test_direct_removal_drops_message_entirely_no_strip(self):
+        """When a model message is directly removed (reason !=
+        "tool_call_pair"), drop it entirely — Shape D only applies
+        to orphan-pair expansion entries.  Direct ephemeral /
+        preservable removals retain the existing whole-message-drop
+        semantics.
+        """
+        plugin = self._build_plugin()
+
+        model_msg = Message(
+            role=Role.MODEL,
+            parts=[
+                Part(text="some narration"),
+                Part(function_call=FunctionCall(
+                    id="call_1", name="readFile", args={},
+                )),
+            ],
+            message_id="msg_model",
+        )
+        history = [model_msg]
+
+        # Direct ephemeral removal (no orphan-pair).
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="turn_1_output",
+                tokens_freed=100,
+                reason="ephemeral",  # NOT tool_call_pair
+                message_ids=["msg_model"],
+            ),
+        ]
+
+        result = plugin._apply_removals_to_history(history, removal_list)
+
+        # Direct removal drops entirely — narration is NOT preserved
+        # when the message itself is ephemeral.
+        assert result == []
+
+    def test_mixed_direct_and_orphan_direct_wins(self):
+        """If a message_id appears in BOTH direct and orphan-pair
+        removal sets, direct removal wins (drop entirely).  This
+        guards against an upstream bug where orphan-pair expansion
+        adds a message already directly removed; we shouldn't
+        partially preserve a message the caller wanted gone.
+        """
+        plugin = self._build_plugin()
+
+        model_msg = Message(
+            role=Role.MODEL,
+            parts=[
+                Part(text="narration"),
+                Part(function_call=FunctionCall(id="c1", name="t", args={})),
+            ],
+            message_id="msg_model",
+        )
+        history = [model_msg]
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="x",
+                tokens_freed=100,
+                reason="ephemeral",
+                message_ids=["msg_model"],
+            ),
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="y",
+                tokens_freed=50,
+                reason="tool_call_pair",
+                message_ids=["msg_model"],
+            ),
+        ]
+
+        result = plugin._apply_removals_to_history(history, removal_list)
+
+        assert result == []  # direct wins
+
+    def test_text_only_model_message_unaffected_by_orphan_pair(self):
+        """A model message with only text parts (no function_calls)
+        flagged as orphan-pair is a degenerate input — strip yields
+        the same parts.  Test that we don't accidentally drop or
+        corrupt it.
+        """
+        plugin = self._build_plugin()
+
+        model_msg = Message(
+            role=Role.MODEL,
+            parts=[Part(text="standalone narration")],
+            message_id="msg_model",
+        )
+        history = [model_msg]
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="turn_1_output",
+                tokens_freed=50,
+                reason="tool_call_pair",
+                message_ids=["msg_model"],
+            ),
+        ]
+
+        result = plugin._apply_removals_to_history(history, removal_list)
+
+        assert len(result) == 1
+        assert result[0].message_id == "msg_model"
+        assert len(result[0].parts) == 1
+        assert result[0].parts[0].text == "standalone narration"
+
+    def test_stripped_history_has_lower_token_count_than_original(self):
+        """Budget edge case (peer flag): after Shape D strip, the
+        history's token count should be LOWER than original (text
+        narration retained but function_call + paired tool_result
+        gone), so the next GC pass sees ground truth.
+
+        This is the load-bearing test peer called out: "ensuring
+        subsequent GC pass sees correct budget for stripped
+        messages".  We verify that ``estimate_history_tokens``
+        called on the post-strip history returns a value strictly
+        smaller than on the pre-strip history.
+        """
+        from shared.plugins.gc.utils import estimate_history_tokens
+
+        plugin = self._build_plugin()
+
+        big_content = "x" * 20000  # ~5000 tokens
+        narration = "Extracted: 3 endpoints"  # ~6 tokens
+
+        user_msg = Message(
+            role=Role.USER,
+            parts=[Part(text="Read.")],
+            message_id="u",
+        )
+        model_msg = Message(
+            role=Role.MODEL,
+            parts=[
+                Part(text=narration),
+                Part(function_call=FunctionCall(
+                    id="c1", name="readFile", args={"path": "a"},
+                )),
+            ],
+            message_id="m",
+        )
+        tool_msg = Message(
+            role=Role.TOOL,
+            parts=[Part(function_response=ToolResult(
+                call_id="c1", name="readFile", result=big_content,
+            ))],
+            message_id="t",
+        )
+        history = [user_msg, model_msg, tool_msg]
+        tokens_before = estimate_history_tokens(history)
+
+        removal_list = [
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="ext",
+                tokens_freed=5000,
+                reason="ephemeral",
+                message_ids=["t"],
+            ),
+            GCRemovalItem(
+                source=InstructionSource.CONVERSATION,
+                child_key="out",
+                tokens_freed=500,
+                reason="tool_call_pair",
+                message_ids=["m"],
+            ),
+        ]
+
+        new_history = plugin._apply_removals_to_history(history, removal_list)
+        tokens_after = estimate_history_tokens(new_history)
+
+        # Strict reduction — function_call + tool_result gone, only
+        # narration text retained.
+        assert tokens_after < tokens_before
+        # Narration survived
+        assert any(
+            p.text == narration
+            for m in new_history
+            for p in m.parts
+        )
+        # function_call gone
+        assert not any(
+            p.function_call is not None
+            for m in new_history
+            for p in m.parts
+        )
+        # tool_result gone
+        assert not any(
+            p.function_response is not None
+            for m in new_history
+            for p in m.parts
+        )
