@@ -682,6 +682,20 @@ class VLLMProvider:
             self._force_tool_choice_for_lifecycle,
             len(tools) if tools else 0,
         )
+        # PROBE (cancel-leak prod-vs-isolation diagnostic):
+        # Log cancel_token identity at complete() entry — companion to
+        # the _CT_ID trace in _stream_response.  Two distinct trace
+        # sinks (logger vs self._trace) so we can correlate with the
+        # MAYBE_STAMP probe entries (logger.info → per-session log)
+        # AND the per-agent provider_trace_* files.  Same id() value
+        # at both sites confirms the cancel_token plumbing is
+        # consistent; divergent ids would surface H2 (instance
+        # mismatch) immediately.
+        logger.info(
+            "VLLM_COMPLETE_ENTRY_CT id=%s cancelled=%s",
+            id(cancel_token) if cancel_token else None,
+            cancel_token.is_cancelled if cancel_token else None,
+        )
 
         clear_tool_name_mapping()
 
@@ -811,6 +825,15 @@ class VLLMProvider:
         """
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
+        # PROBE (cancel-leak prod-vs-isolation diagnostic):
+        # Trace cancel_token identity at entry — settles H2 (right token
+        # instance?  did is_cancelled ever return True for the token the
+        # provider holds?).  See peer ping 2026-06-09 "cancel-leak-probe
+        # -results-pr258-code-correct-mystery-fix-needed".
+        self._trace(
+            f"{trace_prefix}_CT_ID id={id(cancel_token) if cancel_token else None} "
+            f"cancelled={cancel_token.is_cancelled if cancel_token else None}"
+        )
 
         schemas_by_name: Dict[str, ToolSchema] = {
             t.name: t for t in (tools or [])
@@ -867,6 +890,13 @@ class VLLMProvider:
 
             for chunk in response_stream:
                 if cancel_token and cancel_token.is_cancelled:
+                    # PROBE (cancel-leak prod-vs-isolation diagnostic):
+                    # Settles H3 (how many chunks elapsed before the
+                    # provider'\''s for-loop detected cancellation).
+                    self._trace(
+                        f"{trace_prefix}_CT_CANCEL_DETECTED "
+                        f"iter={chunk_count} ct_id={id(cancel_token)}"
+                    )
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
@@ -943,9 +973,27 @@ class VLLMProvider:
             # because the SDK ``Stream`` object only sends TCP-close
             # at garbage-collection time — which on a cancelled turn
             # can mean 60-120s of wasted GPU work per cancelled call.
+            #
+            # PROBE (cancel-leak prod-vs-isolation diagnostic):
+            # The two _CLOSING_STREAM_NOW / _CLOSED_STREAM_OK traces
+            # settle the central question — does close() actually FIRE
+            # on prod cancel?  Peer'\''s 30-line isolation probe showed
+            # close() stops vLLM in <50ms; prod 2026-06-09 shows 7 min
+            # GPU-hold.  If both traces appear on a cancelled prod
+            # turn AND vLLM still keeps generating, there'\''s a state
+            # difference between probe and prod that close()
+            # alone can'\''t fix.  If only _CLOSING appears, close
+            # hangs.  If NEITHER appears, the finally never fires
+            # (most likely if running inside a wrapper killed first).
             if response_stream is not None:
+                self._trace(
+                    f"{trace_prefix}_CLOSING_STREAM_NOW "
+                    f"response_id={id(response_stream)} "
+                    f"was_cancelled={was_cancelled}"
+                )
                 try:
                     response_stream.close()
+                    self._trace(f"{trace_prefix}_CLOSED_STREAM_OK")
                 except Exception as close_exc:  # pragma: no cover - best effort
                     self._trace(
                         f"{trace_prefix}_CLOSE_ERROR "

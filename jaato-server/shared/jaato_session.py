@@ -1501,6 +1501,17 @@ class JaatoSession:
             The current streaming chunk will complete before stopping.
         """
         if self._cancel_token and self._is_running:
+            # PROBE (cancel-leak prod-vs-isolation diagnostic):
+            # Log cancel_token id() at the source of cancel() — pairs
+            # with the VLLM_COMPLETE_ENTRY_CT logger.info trace in the
+            # vLLM provider so we can correlate "session cancelled its
+            # token T_session" with "provider's for-loop saw cancel on
+            # token T_provider".  Same id() = H2 (instance mismatch)
+            # ruled out.  Different id() = found the bug.
+            self._trace(
+                f"REQUEST_STOP_CT_CANCEL id={id(self._cancel_token)} "
+                f"reason={reason!r}"
+            )
             self._cancel_token.cancel(reason=reason or "user_cancelled")
             return True
         return False
