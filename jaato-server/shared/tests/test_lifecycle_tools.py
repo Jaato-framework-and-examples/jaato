@@ -620,6 +620,230 @@ class TestPrepareCompletionA2Pending:
         assert "endpoints[0].path" in pending_paths
 
 
+class TestEnrichedPendingDescriptor:
+    """Pending-field descriptors carry the full schema fragment for
+    each path: scalar constraints, nested object properties, array
+    items shape, polymorphic branches.  Closes the "B1 first-contact
+    opacity" gap surfaced by peer 2026-06-09 — small models get the
+    target structure per pending path without N rejection-retry
+    rounds against an opaque {type: object} or {type: array}."""
+
+    CONSTRAINED_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "user_id": {
+                "type": "string",
+                "description": "Unique customer identifier.",
+                "pattern": "^[a-z][a-z0-9_]{2,15}$",
+                "minLength": 3,
+                "maxLength": 16,
+            },
+            "score": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "exclusiveMinimum": False,
+            },
+            "increment": {
+                "type": "number",
+                "multipleOf": 0.5,
+            },
+            "tags": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "uniqueItems": True,
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["user_id", "score"],
+    }
+
+    def test_scalar_constraints_surfaced(self):
+        lt = LifecycleTools(StubSession(schema=self.CONSTRAINED_SCHEMA))
+        result = lt._execute_query_completion({})
+        pending = {p["path"]: p for p in result["pending_required_fields_with_descriptions"]}
+        user_id = pending["user_id"]
+        assert user_id["pattern"] == "^[a-z][a-z0-9_]{2,15}$"
+        assert user_id["minLength"] == 3
+        assert user_id["maxLength"] == 16
+        score = pending["score"]
+        assert score["minimum"] == 0
+        assert score["maximum"] == 100
+        assert score["exclusiveMinimum"] is False
+
+    def test_nested_object_properties_expanded(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "object",
+                    "description": "Domain model spec.",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "version": {
+                            "type": "string",
+                            "pattern": r"^v[0-9]+\.[0-9]+$",
+                        },
+                    },
+                    "required": ["name", "version"],
+                },
+            },
+            "required": ["model"],
+        }
+        lt = LifecycleTools(StubSession(schema=schema))
+        result = lt._execute_query_completion({})
+        model_desc = next(
+            p for p in result["pending_required_fields_with_descriptions"]
+            if p["path"] == "model"
+        )
+        assert "properties" in model_desc
+        assert "name" in model_desc["properties"]
+        assert "version" in model_desc["properties"]
+        assert model_desc["properties"]["version"]["pattern"] == r"^v[0-9]+\.[0-9]+$"
+        assert model_desc["required"] == ["name", "version"]
+
+    def test_array_items_expanded_as_nested_descriptor(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "endpoints": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "enum": ["create", "read"],
+                            },
+                            "path": {"type": "string"},
+                        },
+                        "required": ["operation", "path"],
+                    },
+                },
+            },
+            "required": ["endpoints"],
+        }
+        lt = LifecycleTools(StubSession(schema=schema))
+        result = lt._execute_query_completion({})
+        endpoints_desc = next(
+            p for p in result["pending_required_fields_with_descriptions"]
+            if p["path"] == "endpoints"
+        )
+        # Back-compat shallow fields AND enriched nested items both present.
+        assert endpoints_desc["items_type"] == "object"
+        assert endpoints_desc["items_required"] == ["operation", "path"]
+        assert "items" in endpoints_desc
+        items_desc = endpoints_desc["items"]
+        assert "operation" in items_desc["properties"]
+        assert items_desc["properties"]["operation"]["enum"] == ["create", "read"]
+        assert items_desc["properties"]["path"]["type"] == "string"
+
+    def test_polymorphic_branches_expanded(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "result": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"success": {"type": "boolean"}},
+                            "required": ["success"],
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"error": {"type": "string"}},
+                            "required": ["error"],
+                        },
+                    ],
+                },
+            },
+            "required": ["result"],
+        }
+        lt = LifecycleTools(StubSession(schema=schema))
+        result = lt._execute_query_completion({})
+        result_desc = next(
+            p for p in result["pending_required_fields_with_descriptions"]
+            if p["path"] == "result"
+        )
+        assert "oneOf" in result_desc
+        assert len(result_desc["oneOf"]) == 2
+        branch_0 = result_desc["oneOf"][0]
+        assert "success" in branch_0["properties"]
+
+    def test_ref_resolved_in_nested_properties(self):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "Field": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["str", "int"],
+                        },
+                    },
+                    "required": ["name", "type"],
+                },
+            },
+            "properties": {
+                "fields": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/Field"},
+                },
+            },
+            "required": ["fields"],
+        }
+        lt = LifecycleTools(StubSession(schema=schema))
+        result = lt._execute_query_completion({})
+        fields_desc = next(
+            p for p in result["pending_required_fields_with_descriptions"]
+            if p["path"] == "fields"
+        )
+        items = fields_desc["items"]
+        assert items["properties"]["name"]["type"] == "string"
+        assert items["properties"]["type"]["enum"] == ["str", "int"]
+
+    def test_recursion_depth_bounded(self):
+        """Cyclic $defs don't blow up — recursion stops at the bound."""
+        schema = {
+            "type": "object",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "child": {"$ref": "#/$defs/Node"},
+                    },
+                },
+            },
+            "properties": {
+                "root": {"$ref": "#/$defs/Node"},
+            },
+            "required": ["root"],
+        }
+        lt = LifecycleTools(StubSession(schema=schema))
+        # If recursion were unbounded, this would never return.
+        result = lt._execute_query_completion({})
+        root_desc = next(
+            p for p in result["pending_required_fields_with_descriptions"]
+            if p["path"] == "root"
+        )
+        assert "value" in root_desc["properties"]
+
+    def test_existing_basic_tests_still_pass(self):
+        """Sanity: existing path+type+description expectations hold;
+        enriched fields are ADDITIONS, not replacements."""
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        result = lt._execute_query_completion({})
+        pending = {p["path"]: p for p in result["pending_required_fields_with_descriptions"]}
+        assert pending["service"]["description"] == (
+            "Service name (e.g. 'billing', 'customer')."
+        )
+        assert pending["service"]["type"] == "string"
+
+
 class TestPrepareCompletionRefResolution:
     """Regression for the kb cascade $ref bug 2026-06-09: the kb's
     generation_context.schema.json uses ``$ref: #/$defs/Field``

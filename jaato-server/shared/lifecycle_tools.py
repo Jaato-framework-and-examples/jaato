@@ -1384,24 +1384,65 @@ class LifecycleTools:
                 return None
         return current if isinstance(current, dict) else None
 
+    # Scalar / constraint keys that go directly into pending-field
+    # descriptors so small models see ALL the constraints (not just
+    # type) at each pending path.  Closes the "agent has to guess
+    # shapes" gap peer flagged 2026-06-09 for B1 viability.
+    _PENDING_DESCRIPTOR_KEYS = (
+        # Core / existing
+        "description", "type", "enum", "format", "examples",
+        # String constraints
+        "pattern", "minLength", "maxLength",
+        # Number constraints
+        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+        "multipleOf",
+        # Array constraints
+        "minItems", "maxItems", "uniqueItems",
+        # Generic
+        "default", "const",
+    )
+
+    # Bound recursion depth to prevent runaway in cyclic $defs.
+    # Empirically: depth 3 covers most realistic schemas (top-level →
+    # nested object → array of objects → items shape).  Beyond that,
+    # the model can discover via prepare_completion of partial values.
+    _PENDING_DESCRIPTOR_MAX_DEPTH = 3
+
     def _describe_pending_field(
         self,
         path: str,
         field_schema: Dict[str, Any],
         root_schema: Optional[Dict[str, Any]] = None,
+        depth: int = 0,
     ) -> Dict[str, Any]:
         """Build the pending-field descriptor surfaced in
         prepare/query responses.  Keeps the schema knowledge JIT-
         accessible so small models don't need to retain all 30K of
         persona prose in working context.
 
-        Resolves ``$ref`` in the field_schema against root_schema so
-        items declared via ``{"$ref": "#/$defs/Foo"}`` surface
-        Foo.type / Foo.required in the descriptor rather than just
-        the opaque ``{"$ref": ...}`` placeholder.
+        Enriched descriptor (2026-06-09, follow-up to PR-268 A2):
+        - All scalar constraint keys (pattern, min/max, lengths,
+          multipleOf, default, const, etc.) per ``_PENDING_DESCRIPTOR_KEYS``
+        - For type=object: include ``properties`` as a dict of nested
+          descriptors + ``required`` + ``additionalProperties``
+        - For type=array: include ``items`` as a single nested
+          descriptor (the per-item shape model fills via
+          ``endpoints[N]`` paths)
+        - For polymorphic: include ``oneOf`` / ``anyOf`` / ``allOf``
+          branches as lists of nested descriptors
+        - Recursion bounded by ``_PENDING_DESCRIPTOR_MAX_DEPTH`` to
+          prevent runaway in cyclic ``$defs``
+
+        Resolves ``$ref`` against root_schema at every level so
+        ``{"$ref": "#/$defs/Foo"}`` references surface the Foo
+        sub-schema's structure rather than the opaque
+        ``{"$ref": ...}`` placeholder.
+
+        Closes the "B1 first-contact opacity" gap: agent gets the
+        full nested shape for a pending path in one tool response,
+        not via N rejection-retry rounds.
         """
-        # Dereference $ref at the top-level of field_schema if root
-        # context is available.
+        # Dereference $ref against root_schema at the top-level.
         if (
             isinstance(field_schema, dict)
             and "$ref" in field_schema
@@ -1413,27 +1454,85 @@ class LifecycleTools:
             if resolved is not None:
                 field_schema = resolved
         descriptor: Dict[str, Any] = {"path": path}
-        for key in ("description", "type", "enum", "format", "examples"):
+
+        # All scalar / constraint keys present in the schema flow into
+        # the descriptor verbatim.  Type / enum / format / pattern /
+        # min/max all visible at-a-glance.
+        for key in self._PENDING_DESCRIPTOR_KEYS:
             if key in field_schema:
                 descriptor[key] = field_schema[key]
-        # For arrays-of-objects, surface the items.type hint so the
-        # model knows it needs to fill an array (not a scalar).
-        # Also dereference items $ref if present.
-        if field_schema.get("type") == "array" and "items" in field_schema:
-            items = field_schema["items"]
-            if (
-                isinstance(items, dict)
-                and "$ref" in items
-                and root_schema is not None
-            ):
-                resolved_items = self._resolve_json_pointer(
-                    items["$ref"], root_schema,
-                )
-                if resolved_items is not None:
-                    items = resolved_items
-            descriptor["items_type"] = items.get("type", "any")
-            if "required" in items:
-                descriptor["items_required"] = list(items["required"])
+
+        # Recurse into nested structure (object properties, array
+        # items, polymorphic branches) up to the depth bound.
+        if depth < self._PENDING_DESCRIPTOR_MAX_DEPTH:
+            schema_type = field_schema.get("type")
+
+            # Object: expand properties as nested descriptors so the
+            # model sees each key's type + constraints up front.
+            if schema_type == "object" and "properties" in field_schema:
+                props: Dict[str, Any] = {}
+                for prop_name, prop_schema in field_schema["properties"].items():
+                    if isinstance(prop_schema, dict):
+                        props[prop_name] = self._describe_pending_field(
+                            f"{path}.{prop_name}",
+                            prop_schema,
+                            root_schema=root_schema,
+                            depth=depth + 1,
+                        )
+                descriptor["properties"] = props
+                if "required" in field_schema:
+                    descriptor["required"] = list(field_schema["required"])
+                if "additionalProperties" in field_schema:
+                    descriptor["additionalProperties"] = (
+                        field_schema["additionalProperties"]
+                    )
+
+            # Array: expand items as a single nested descriptor.
+            # Keep the existing items_type / items_required surface
+            # for back-compat with any consumer that reads those.
+            if schema_type == "array" and "items" in field_schema:
+                items = field_schema["items"]
+                if (
+                    isinstance(items, dict)
+                    and "$ref" in items
+                    and root_schema is not None
+                ):
+                    resolved_items = self._resolve_json_pointer(
+                        items["$ref"], root_schema,
+                    )
+                    if resolved_items is not None:
+                        items = resolved_items
+                # Shallow back-compat fields kept alongside the
+                # enriched ``items`` sub-descriptor.
+                descriptor["items_type"] = items.get("type", "any")
+                if isinstance(items, dict) and "required" in items:
+                    descriptor["items_required"] = list(items["required"])
+                # Enriched: full per-item shape as a nested descriptor.
+                if isinstance(items, dict):
+                    descriptor["items"] = self._describe_pending_field(
+                        f"{path}[*]",
+                        items,
+                        root_schema=root_schema,
+                        depth=depth + 1,
+                    )
+
+            # Polymorphic: expand each branch as a nested descriptor
+            # so the model sees ALL valid shapes for this path.
+            for poly_key in ("oneOf", "anyOf", "allOf"):
+                if poly_key in field_schema and isinstance(
+                    field_schema[poly_key], list,
+                ):
+                    descriptor[poly_key] = [
+                        self._describe_pending_field(
+                            f"{path}<{poly_key}[{i}]>",
+                            branch,
+                            root_schema=root_schema,
+                            depth=depth + 1,
+                        )
+                        for i, branch in enumerate(field_schema[poly_key])
+                        if isinstance(branch, dict)
+                    ]
+
         return descriptor
 
     def _deep_merge(
