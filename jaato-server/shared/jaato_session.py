@@ -299,6 +299,18 @@ class JaatoSession:
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
 
+        # Probe B: ``JAATO_FORCE_NARRATION_BETWEEN_TOOLS=true`` env var
+        # gates the synthetic-user-prompt injection that fires after
+        # every tool_result append (see ``_send_tool_results_to_provider``
+        # below).  Closes the small-model narration-skipping failure
+        # class.  Opt-in per-daemon for now; will promote to a
+        # per-profile knob if validated.  See
+        # ``feedback_small_model_narration_skipping_is_structural``.
+        self._force_narration_between_tools: bool = (
+            os.environ.get("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "").lower()
+            in ("true", "1", "yes", "on")
+        )
+
         # Per-turn model-tier config.  ``_tier_config`` is the resolved
         # view (built from profile.tiers or env vars).  ``_active_tier``
         # tracks which tier the session is currently operating in;
@@ -6506,6 +6518,39 @@ NOTES
         # Append tool results to session history
         tool_result_parts = [Part(function_response=r) for r in tool_results]
         self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+
+        # Probe B (force_narration_between_tools, 2026-06-09).  Empirical
+        # finding from kb cascade context-stage falsification on
+        # qwen3-14b @ temp=0 (see
+        # ``feedback_small_model_narration_skipping_is_structural``):
+        # small models in tool-mode skip narration regardless of persona
+        # prose AND in-context examples.  Structural failure that
+        # framework-side forcing is the right level to fix.
+        #
+        # Approach: after each tool_result append, inject a synthetic
+        # ``USER``-role message asking the model to extract observations
+        # in 1-2 sentences before continuing.  Model's response is
+        # naturally text-mode (user just asked for text) + may include
+        # the next tool call.  Loop semantics unchanged.
+        #
+        # Gated by ``JAATO_FORCE_NARRATION_BETWEEN_TOOLS=true`` so this
+        # is opt-in per-daemon — falsifiable against the kb cascade
+        # fixture set + harmless when disabled.  Follow-up will promote
+        # to a per-profile knob if validated.
+        if self._force_narration_between_tools:
+            narration_prompt = Message(
+                role=Role.USER,
+                parts=[Part(text=(
+                    "Briefly extract what you observed from the previous "
+                    "tool result in 1-2 sentences, then continue with your "
+                    "next action."
+                ))],
+            )
+            self._history.append(narration_prompt)
+            self._trace(
+                f"FORCE_NARRATION: injected synthetic user prompt after "
+                f"{len(tool_results)} tool result(s)"
+            )
 
         with self._telemetry.llm_span(
             model=self._model_name or "unknown",
