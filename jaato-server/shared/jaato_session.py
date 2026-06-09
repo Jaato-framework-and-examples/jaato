@@ -8439,11 +8439,63 @@ NOTES
 
                 if result.success:
                     if result.items_collected == 0:
-                        # GC ran but collected nothing - this is often surprising to users
-                        self._trace(
-                            f"GC_BEFORE_SEND: WARNING - GC triggered but collected 0 items. "
-                            f"Check preserve_recent_turns setting vs actual turn count. "
-                            f"Details: {result.details}"
+                        # GC ran but collected nothing — often surprising to
+                        # operators debugging cascade overflow.  Surface the
+                        # LOCKED-vs-eligible breakdown so the operator can
+                        # tell WHICH class of "nothing trimmable" applies:
+                        #
+                        # - High locked_tokens, low eligible_tokens: most of
+                        #   the budget is body-wired (persona, pinned refs,
+                        #   tool schemas, framework instructions).  Fix:
+                        #   externalize content, shrink persona, or extend
+                        #   context window.  GC cannot help.
+                        # - Low locked + low eligible: budget is mostly
+                        #   empty; threshold was crossed by something else
+                        #   (e.g. provider-reported usage from a streaming
+                        #   chunk).  Investigate budget accuracy.
+                        # - Moderate eligible but 0 collected: strategy
+                        #   restrictions (gc_truncate's preserve_recent_turns,
+                        #   gc_budget's per-source policies) prevented
+                        #   removal.  Tune the strategy config.
+                        #
+                        # Routed via ``logger.info`` (NOT ``self._trace``)
+                        # so the diagnostic lands in /tmp/jaato.log — the
+                        # apparmor-confined runner can't write to the
+                        # default ``self._trace`` path
+                        # ([[project_backlog_apparmor_blocks_provider_trace_silently]]).
+                        locked = (
+                            self._instruction_budget.locked_tokens()
+                            if self._instruction_budget else 0
+                        )
+                        eligible = (
+                            self._instruction_budget.gc_eligible_tokens()
+                            if self._instruction_budget else 0
+                        )
+                        preservable = (
+                            self._instruction_budget.preservable_tokens()
+                            if self._instruction_budget else 0
+                        )
+                        total = (
+                            self._instruction_budget.total_tokens()
+                            if self._instruction_budget else 0
+                        )
+                        context_limit = (
+                            self._instruction_budget.context_limit
+                            if self._instruction_budget else 0
+                        )
+                        logger.info(
+                            "GC_NO_ITEMS_COLLECTED: GC triggered but freed "
+                            "0 items.  budget breakdown: total=%d "
+                            "locked=%d eligible=%d preservable=%d "
+                            "context_limit=%d.  reason=%s.  "
+                            "details=%s.  When locked >> eligible, the "
+                            "budget is body-wired and GC cannot help — "
+                            "reduce locked content (externalize references, "
+                            "shrink persona/schemas) or extend the context "
+                            "window.",
+                            total, locked, eligible, preservable,
+                            context_limit, reason.value if reason else None,
+                            result.details,
                         )
                     else:
                         self._trace(
