@@ -563,6 +563,7 @@ class TensorRTLLMProvider:
                     function_calls.append(fc)
             tool_call_accumulators.clear()
 
+        response_stream = None
         try:
             self._trace(f"{trace_prefix}_START")
             chunk_count = 0
@@ -643,6 +644,20 @@ class TensorRTLLMProvider:
                 finish_reason = FinishReason.CANCELLED
             else:
                 raise
+        finally:
+            # Close the underlying HTTP connection so trtllm-serve stops
+            # generating immediately on cancel. Without this close,
+            # trtllm-serve keeps filling output_tokens up to max_tokens
+            # because the SDK ``Stream`` object only sends TCP-close at
+            # garbage-collection time.
+            if response_stream is not None:
+                try:
+                    response_stream.close()
+                except Exception as close_exc:  # pragma: no cover - best effort
+                    self._trace(
+                        f"{trace_prefix}_CLOSE_ERROR "
+                        f"{type(close_exc).__name__}: {close_exc}"
+                    )
 
         flush_text_block()
         flush_tool_calls()

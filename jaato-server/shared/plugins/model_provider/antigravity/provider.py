@@ -919,6 +919,16 @@ class AntigravityProvider:
 
         except httpx.HTTPError as e:
             raise StreamingError(f"Stream error: {e}")
+        finally:
+            # Close the underlying HTTP connection so Antigravity stops
+            # generating immediately on cancel. ``httpx.Response`` from
+            # ``client.send(req, stream=True)`` only sends TCP-close at
+            # garbage-collection time, which on a cancelled turn can
+            # leave the upstream model generating to completion.
+            try:
+                response.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
 
         # Flush remaining text
         if accumulated_text:
