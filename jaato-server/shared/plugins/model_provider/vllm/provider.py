@@ -335,6 +335,7 @@ class VLLMProvider:
         _KNOWN_QUIRKS = frozenset({
             "coerce_typed_tool_args",
             "force_tool_choice_for_lifecycle",
+            "force_narration_between_tools",
         })
         for unknown_quirk in set(quirks) - _KNOWN_QUIRKS:
             logger.warning(
