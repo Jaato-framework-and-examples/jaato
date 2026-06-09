@@ -1508,9 +1508,16 @@ class JaatoSession:
             # token T_session" with "provider's for-loop saw cancel on
             # token T_provider".  Same id() = H2 (instance mismatch)
             # ruled out.  Different id() = found the bug.
-            self._trace(
-                f"REQUEST_STOP_CT_CANCEL id={id(self._cancel_token)} "
-                f"reason={reason!r}"
+            #
+            # Routed via logger.info (NOT self._trace) because
+            # self._trace writes land in /tmp/provider_trace.log which
+            # apparmor SILENTLY DENIES under the per-WS confined-runner
+            # profile.  Empirically confirmed 2026-06-09 by peer's
+            # first probe run: only logger.info traces landed.
+            logger.info(
+                "REQUEST_STOP_CT_CANCEL id=%s reason=%r",
+                id(self._cancel_token),
+                reason,
             )
             self._cancel_token.cancel(reason=reason or "user_cancelled")
             return True
