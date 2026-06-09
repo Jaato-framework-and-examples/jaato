@@ -192,6 +192,22 @@ class VLLMProvider:
         # two-path prescription (this is Path 1).
         self._force_tool_choice_for_lifecycle: bool = False
 
+        # Quirk: force_narration_between_tools (server 0.6.197+).  When
+        # set via ``profile.quirks.force_narration_between_tools``, the
+        # session injects a synthetic ``USER``-role prompt asking the
+        # model to extract observations in 1-2 sentences after every
+        # ``tool_result`` append (see
+        # ``JaatoSession._send_tool_results_to_provider``).  Closes the
+        # small-model narration-skipping failure class — qwen3-14b @
+        # temp=0 in tool-mode skips narration regardless of persona
+        # prose AND in-context examples (empirically falsified
+        # 2026-06-09).  Provider-instance attribute so the session
+        # reads it via ``getattr(self._provider,
+        # 'force_narration_between_tools', False)`` symmetric with the
+        # existing quirk-attribute pattern.  See
+        # ``feedback_small_model_narration_skipping_is_structural``.
+        self._force_narration_between_tools: bool = False
+
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
         self._agent_id: str = "main"
@@ -312,6 +328,9 @@ class VLLMProvider:
         )
         self._force_tool_choice_for_lifecycle = bool(
             quirks.get("force_tool_choice_for_lifecycle", False)
+        )
+        self._force_narration_between_tools = bool(
+            quirks.get("force_narration_between_tools", False)
         )
         _KNOWN_QUIRKS = frozenset({
             "coerce_typed_tool_args",
