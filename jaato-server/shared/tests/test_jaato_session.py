@@ -1255,3 +1255,47 @@ class TestJaatoSessionReplayMessagesLazyProvider:
 
         with pytest.raises(RuntimeError, match="no provider"):
             session.replay_messages([], timeout=1.0)
+
+
+class TestForceNarrationBetweenTools:
+    """Probe B (2026-06-09): ``JAATO_FORCE_NARRATION_BETWEEN_TOOLS=true``
+    env var gates a synthetic-user-prompt injection after every tool
+    result append.  Closes the small-model narration-skipping failure
+    class (qwen3-14b @ temp=0 in tool-mode skips narration regardless
+    of persona prose AND in-context examples — see
+    ``feedback_small_model_narration_skipping_is_structural``).
+    """
+
+    def test_default_is_false_no_injection(self, monkeypatch):
+        """Without the env var, ``_force_narration_between_tools`` is
+        False and no synthetic prompt is injected."""
+        monkeypatch.delenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", raising=False)
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
+        assert session._force_narration_between_tools is False
+
+    def test_env_var_true_enables(self, monkeypatch):
+        monkeypatch.setenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "true")
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
+        assert session._force_narration_between_tools is True
+
+    def test_env_var_one_enables(self, monkeypatch):
+        monkeypatch.setenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "1")
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
+        assert session._force_narration_between_tools is True
+
+    def test_env_var_false_disabled(self, monkeypatch):
+        monkeypatch.setenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "false")
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
+        assert session._force_narration_between_tools is False
+
+    def test_env_var_garbage_disabled(self, monkeypatch):
+        """Anything not in {true, 1, yes, on} disables — including
+        accidental empty / whitespace / typo values."""
+        monkeypatch.setenv("JAATO_FORCE_NARRATION_BETWEEN_TOOLS", "ye")
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
+        assert session._force_narration_between_tools is False
