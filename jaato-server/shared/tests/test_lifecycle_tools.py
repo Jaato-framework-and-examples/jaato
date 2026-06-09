@@ -469,142 +469,201 @@ NESTED_SCHEMA: Dict[str, Any] = {
 }
 
 
-class TestPrepareCompletionAccept:
-    """prepare_completion merges accepted partials into accumulated
-    state and surfaces what's pending."""
+# A2 helper to keep call sites compact.
+def _set(lt, path, value):
+    return lt._execute_prepare_completion({"field_path": path, "value": value})
 
-    def test_simple_field_accepted_and_merged(self):
+
+class TestPrepareCompletionA2Accept:
+    """A2 shape: prepare_completion takes (field_path, value).  Both
+    required.  Minimum-valid emission is no longer ``{}``."""
+
+    def test_top_level_string_accepted(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        result = lt._execute_prepare_completion({"service": "billing"})
-
+        result = _set(lt, "service", "billing")
         assert result["accepted"] == {"service": "billing"}
         assert result["rejected"] == {}
         assert lt._accumulated_payload == {"service": "billing"}
         assert result["is_complete"] is False
-        # Two top-level required still pending (stack_config, endpoints).
-        pending_paths = {p["path"] for p in result["pending_required_fields_with_descriptions"]}
-        assert "stack_config" in pending_paths or any(
-            p.startswith("stack_config.") for p in pending_paths
-        )
-        assert "endpoints" in pending_paths
 
-    def test_nested_object_merges_per_subkey(self):
-        """Successive prepare_completion calls into the same nested
-        key merge per-subkey (last-write-wins per leaf)."""
+    def test_nested_object_path_accepted(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        lt._execute_prepare_completion({"stack_config": {"language": "java"}})
-        lt._execute_prepare_completion({"stack_config": {"framework": "spring-boot"}})
-
+        _set(lt, "stack_config.language", "java")
+        _set(lt, "stack_config.framework", "spring-boot")
         assert lt._accumulated_payload["stack_config"] == {
             "language": "java",
             "framework": "spring-boot",
         }
 
-    def test_idempotent_last_write_wins(self):
-        """Calling prepare_completion twice with conflicting values
-        for the same field — Q7 contract: last-write-wins."""
+    def test_array_index_path_accepted(self):
+        """endpoints[0].operation sets the nested field at index 0
+        (creating intermediate empty objects as needed)."""
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        lt._execute_prepare_completion({"service": "billing"})
-        result = lt._execute_prepare_completion({"service": "payments"})
+        _set(lt, "endpoints[0].operation", "create")
+        _set(lt, "endpoints[0].path", "/customers")
+        assert lt._accumulated_payload["endpoints"] == [
+            {"operation": "create", "path": "/customers"},
+        ]
 
+    def test_whole_object_at_array_index_accepted(self):
+        """endpoints[2] receives a whole-object value — supports the
+        ``set the whole element at that index`` shape."""
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        _set(lt, "endpoints[0]", {"operation": "create", "path": "/a"})
+        _set(lt, "endpoints[1]", {"operation": "delete", "path": "/b"})
+        assert lt._accumulated_payload["endpoints"] == [
+            {"operation": "create", "path": "/a"},
+            {"operation": "delete", "path": "/b"},
+        ]
+
+    def test_last_write_wins(self):
+        """Q7: re-setting the same path overwrites the prior value."""
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        _set(lt, "service", "billing")
+        result = _set(lt, "service", "payments")
         assert result["accepted"] == {"service": "payments"}
         assert lt._accumulated_payload["service"] == "payments"
 
 
-class TestPrepareCompletionReject:
-    """prepare_completion rejects malformed fields per-field, keeping
-    well-formed siblings in accepted (Q6)."""
+class TestPrepareCompletionA2Reject:
+    """A2 rejects malformed inputs surgically — bad field_path,
+    bad value, unknown path."""
 
-    def test_per_field_rejection_keeps_siblings(self):
+    def test_missing_field_path_argument(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        result = lt._execute_prepare_completion({
-            "service": "billing",
-            # endpoints requires array; this is an object → reject.
-            "endpoints": {"not_an_array": True},
-        })
+        result = lt._execute_prepare_completion({"value": "x"})
+        assert result["error"] == "invalid_argument"
 
-        assert "service" in result["accepted"]
+    def test_missing_value_argument(self):
+        """value is required even when None-ish; missing → reject."""
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        result = lt._execute_prepare_completion({"field_path": "service"})
+        assert result["error"] == "invalid_argument"
+
+    def test_falsy_value_accepted_not_rejected(self):
+        """value=0 / False / "" / [] / {} are valid — distinguish
+        from 'missing'.  The schema's type check decides; for
+        ``service: string``, value="" is type-valid (empty string)."""
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        result = _set(lt, "service", "")
+        assert result["accepted"] == {"service": ""}
+        assert result["rejected"] == {}
+
+    def test_value_type_mismatch_rejected(self):
+        """endpoints expects array; setting endpoints to a string
+        is a type violation → rejected per-path."""
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        result = _set(lt, "endpoints", "not-an-array")
         assert "endpoints" in result["rejected"]
-        # Accepted siblings ARE merged into accumulated.
-        assert lt._accumulated_payload["service"] == "billing"
-        # Rejected field is NOT in accumulated.
+        # Accumulated NOT mutated for rejected paths.
         assert "endpoints" not in lt._accumulated_payload
 
-    def test_unknown_field_rejected_with_valid_keys_hint(self):
-        """Unknown top-level keys get a helpful rejection message
-        listing the valid schema keys."""
-        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        result = lt._execute_prepare_completion({"nonexistent": "value"})
-        assert "nonexistent" in result["rejected"]
-        assert "service" in result["rejected"]["nonexistent"]  # lists valid keys
-
     def test_enum_violation_rejected(self):
-        """Enum-typed field gets rejected with the value-vs-allowed
-        info from jsonschema."""
+        """endpoints[0].operation has enum constraint; "INVALID_OP"
+        is out-of-enum → rejected."""
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        result = lt._execute_prepare_completion({
-            "endpoints": [{"operation": "INVALID_ENUM", "path": "/x"}],
-        })
-        assert "endpoints" in result["rejected"]
+        result = _set(lt, "endpoints[0].operation", "INVALID_OP")
+        assert "endpoints[0].operation" in result["rejected"]
 
-
-class TestPrepareCompletionPending:
-    """Pending fields surface schema descriptions for JIT delivery."""
-
-    def test_pending_includes_descriptions(self):
+    def test_unknown_field_path_rejected(self):
+        """field_path that doesn't match the schema's structure
+        gets a helpful 'does not match' message."""
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        result = lt._execute_prepare_completion({})
+        result = _set(lt, "nonexistent_field", "x")
+        assert "nonexistent_field" in result["rejected"]
+        assert "does not match" in result["rejected"]["nonexistent_field"]
 
+    def test_malformed_path_syntax_rejected(self):
+        """Unmatched brackets / non-integer indices → reject as
+        invalid syntax."""
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        result = _set(lt, "endpoints[abc].operation", "create")
+        assert "endpoints[abc].operation" in result["rejected"]
+
+
+class TestPrepareCompletionA2Pending:
+    """Pending walker behavior unchanged from PR-268-as-shipped.
+    A2 just changes the entry surface; walker still uses the
+    original schema with required[] intact."""
+
+    def test_pending_descriptions_jit_delivered(self):
+        """Pending fields surface schema descriptions for JIT
+        delivery — small models don't need to retain persona prose
+        when each response carries field-level guidance."""
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        # No state set yet — all three top-level required are pending.
+        result = lt._execute_query_completion({})
         pending = {p["path"]: p for p in result["pending_required_fields_with_descriptions"]}
-        # Top-level required field with description JIT-delivered.
         assert pending["service"]["description"] == (
             "Service name (e.g. 'billing', 'customer')."
         )
-        assert pending["service"]["type"] == "string"
 
-    def test_nested_required_paths_surface(self):
-        """When the parent object IS present in accumulated but
-        nested required fields are missing, walker surfaces the
-        nested paths (not just the parent)."""
+    def test_nested_required_surface_when_parent_present(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        lt._execute_prepare_completion({"stack_config": {"language": "java"}})
-        result = lt._execute_prepare_completion({})
-
-        pending_paths = {p["path"] for p in result["pending_required_fields_with_descriptions"]}
-        # stack_config.framework missing — should be surfaced
-        # specifically, not generic "stack_config" since the parent
-        # IS in accumulated.
+        _set(lt, "stack_config.language", "java")
+        result = lt._execute_query_completion({})
+        pending_paths = {
+            p["path"]
+            for p in result["pending_required_fields_with_descriptions"]
+        }
         assert "stack_config.framework" in pending_paths
         assert "stack_config" not in pending_paths
 
-    def test_array_of_objects_per_item_pending(self):
-        """If an endpoint is partially populated, the walker
-        surfaces missing fields per array index."""
+    def test_array_per_item_required_surface(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        lt._execute_prepare_completion({
-            "endpoints": [{"operation": "create"}],  # missing path
-        })
-        result = lt._execute_prepare_completion({})
-
-        pending_paths = {p["path"] for p in result["pending_required_fields_with_descriptions"]}
+        _set(lt, "endpoints[0].operation", "create")
+        result = lt._execute_query_completion({})
+        pending_paths = {
+            p["path"]
+            for p in result["pending_required_fields_with_descriptions"]
+        }
         assert "endpoints[0].path" in pending_paths
 
 
-class TestPrepareCompletionIsComplete:
-    """is_complete flips True iff full-schema jsonschema.validate
-    passes on accumulated state."""
-
-    def test_is_complete_false_until_all_required_set(self):
+class TestPrepareCompletionA2IsComplete:
+    def test_is_complete_flips_when_all_required_set(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        lt._execute_prepare_completion({"service": "billing"})
-        r = lt._execute_prepare_completion({
-            "stack_config": {"language": "java", "framework": "spring-boot"},
-        })
-        assert r["is_complete"] is False  # endpoints still missing
-        r = lt._execute_prepare_completion({
-            "endpoints": [{"operation": "create", "path": "/customers"}],
-        })
+        _set(lt, "service", "billing")
+        _set(lt, "stack_config.language", "java")
+        _set(lt, "stack_config.framework", "spring-boot")
+        r = _set(lt, "endpoints[0]", {"operation": "create", "path": "/x"})
         assert r["is_complete"] is True
+
+
+class TestPathParser:
+    """Unit tests for ``_parse_field_path`` — covers the path syntax
+    surface the persona prose teaches the model."""
+
+    def _parse(self, path):
+        lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
+        return lt._parse_field_path(path)
+
+    def test_simple_key(self):
+        assert self._parse("service") == ["service"]
+
+    def test_dot_nested(self):
+        assert self._parse("stack_config.language") == [
+            "stack_config", "language",
+        ]
+
+    def test_array_index_followed_by_dot(self):
+        assert self._parse("endpoints[0].operation") == [
+            "endpoints", 0, "operation",
+        ]
+
+    def test_bare_array_index_at_end(self):
+        assert self._parse("endpoints[2]") == ["endpoints", 2]
+
+    def test_multiple_array_indices(self):
+        assert self._parse("matrix[0][1]") == ["matrix", 0, 1]
+
+    def test_unmatched_bracket_raises(self):
+        with pytest.raises(ValueError):
+            self._parse("endpoints[0")
+
+    def test_non_integer_index_raises(self):
+        with pytest.raises(ValueError):
+            self._parse("endpoints[abc]")
 
 
 class TestQueryCompletion:
@@ -613,12 +672,10 @@ class TestQueryCompletion:
 
     def test_query_does_not_mutate(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        lt._execute_prepare_completion({"service": "billing"})
-
+        _set(lt, "service", "billing")
         before = dict(lt._accumulated_payload)
         result = lt._execute_query_completion({})
         after = dict(lt._accumulated_payload)
-
         assert before == after
         assert result["accumulated"] == {"service": "billing"}
         assert result["is_complete"] is False
@@ -628,12 +685,10 @@ class TestQueryCompletion:
         result = lt._execute_query_completion({})
         assert "pending_required_fields_with_descriptions" in result
         # Three top-level required fields → three pending entries.
-        # (nested required only surface when parent is present)
+        # (Nested required only surface when parent is present.)
         assert len(result["pending_required_fields_with_descriptions"]) == 3
 
     def test_query_with_no_schema_errors(self):
-        """Sessions without completion_payload_schema can't use
-        query_completion — surfaces an explicit error."""
         lt = LifecycleTools(StubSession(schema=None))
         result = lt._execute_query_completion({})
         assert result["error"] == "no_completion_schema"
@@ -642,80 +697,53 @@ class TestQueryCompletion:
 class TestArglessSignalCompletion:
     """signal_completion() arg-less synthesizes from accumulated
     state when is_complete=True; rejects with pending list when
-    is_complete=False."""
+    is_complete=False.  Same as PR-268 — A2 just changes the
+    accumulator's entry surface, not the synthesis behavior."""
 
     def test_argless_with_incomplete_state_rejects(self):
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
-        lt._execute_prepare_completion({"service": "billing"})
-
+        _set(lt, "service", "billing")
         result = lt._execute_signal_completion({})
         assert result["error"] == "validation_failed"
-        # Same shape as query_completion's pending list so agent gets
-        # the JIT-delivered descriptions without an extra tool call.
         assert "pending_required_fields_with_descriptions" in result
 
     def test_argless_with_empty_accumulated_falls_through_to_legacy(self):
-        """When NO accumulator state AND no args, signal_completion
-        falls through to existing schema validation against ``args``
-        (which is empty) → validation_failed via the existing
-        jsonschema path.  Confirms no behavioral regression on
-        first-time calls."""
         lt = LifecycleTools(StubSession(schema=NESTED_SCHEMA))
         result = lt._execute_signal_completion({})
         assert result["error"] == "validation_failed"
 
     def test_argless_with_complete_accumulated_proceeds(self):
-        """When accumulated state is complete, arg-less signal_completion
-        synthesizes the payload + proceeds to validation/processors/event
-        emission.  Verified by checking that the result includes the
-        synthesized payload (not the error path)."""
-        # Use SAMPLE_SCHEMA (simpler) for this test since processor wiring
-        # is the existing-tests' responsibility.
         session = StubSession(schema=SAMPLE_SCHEMA)
-        # Existing tests need these on session; mirror their setup.
         session._signal_completion_called = False
-
         lt = LifecycleTools(session)
-        # Populate accumulator via prepare_completion.
-        lt._execute_prepare_completion({"category": "billing", "severity": 3})
-        assert lt._accumulated_payload == {"category": "billing", "severity": 3}
-
+        _set(lt, "category", "billing")
+        _set(lt, "severity", 3)
         result = lt._execute_signal_completion({})
-        # Synthesis path: result has the synthesized payload.
         assert result.get("status") == "completed"
         assert result.get("payload") == {"category": "billing", "severity": 3}
 
 
 class TestLegacySinglShotPreserved:
-    """signal_completion(args=full_payload) still works as the legacy
-    single-shot path — accumulator is bypassed entirely."""
+    """signal_completion(args=full_payload) — legacy single-shot
+    path UNCHANGED.  Capable models keep working."""
 
     def test_full_args_bypasses_accumulator(self):
         session = StubSession(schema=SAMPLE_SCHEMA)
         session._signal_completion_called = False
         lt = LifecycleTools(session)
-
-        # Even if accumulator has data, full args wins.
-        lt._execute_prepare_completion({"category": "billing", "severity": 2})
+        _set(lt, "category", "billing")
+        _set(lt, "severity", 2)
         result = lt._execute_signal_completion({
             "category": "tech",
             "severity": 5,
         })
-
         assert result["status"] == "completed"
         assert result["payload"] == {"category": "tech", "severity": 5}
 
     def test_partial_args_rejected_via_existing_jsonschema_path(self):
-        """signal_completion(args=partial) — Q9 contract: doesn't
-        merge with accumulator, instead fails the existing
-        jsonschema.validate gate.  Confirms no surprise mixing."""
         lt = LifecycleTools(StubSession(schema=SAMPLE_SCHEMA))
-        # Populate accumulator to test that args=partial doesn't pull
-        # from it.
-        lt._execute_prepare_completion({"category": "billing", "severity": 3})
-
-        # args=partial (missing severity, required) → existing
-        # validation_failed path.
+        _set(lt, "category", "billing")
+        _set(lt, "severity", 3)
         result = lt._execute_signal_completion({"category": "billing"})
         assert result["error"] == "validation_failed"
 

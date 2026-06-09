@@ -346,14 +346,19 @@ class LifecycleTools:
                     ToolSchema(
                         name="prepare_completion",
                         description=(
-                            "Add fields to the completion payload one segment "
-                            "at a time.  Pass a partial dict matching part of "
-                            "completion_payload_schema's shape (any subset of "
-                            "top-level fields, or nested values for fields you "
-                            "already started).  The framework merges into "
-                            "session-tier accumulated state and returns: "
-                            "``accepted`` (what merged), ``rejected`` "
-                            "(per-field type errors), "
+                            "Set ONE field of the completion payload per call.  "
+                            "Pass ``field_path`` (dot-notation, with ``[idx]`` "
+                            "for array indices, e.g. ``service``, "
+                            "``stack_config.language``, "
+                            "``endpoints[0].operation``) and ``value`` (the "
+                            "value to set at that path; type depends on the "
+                            "schema's expectation for that path — string, "
+                            "integer, object, array, etc.).  The framework "
+                            "validates the value against the schema's type "
+                            "for the path, merges into session-tier "
+                            "accumulated state, and returns: ``accepted`` "
+                            "(the path:value just set), ``rejected`` "
+                            "(reason, if validation failed), "
                             "``pending_required_fields_with_descriptions`` "
                             "(what remains), and ``is_complete`` (True when "
                             "every required field is satisfied).  Call this "
@@ -361,19 +366,46 @@ class LifecycleTools:
                             "tool calls; when ``is_complete`` is True, call "
                             "``signal_completion()`` with no args.  Use "
                             "``query_completion`` to inspect accumulated "
-                            "state without contributing."
+                            "state without contributing.\n\n"
+                            "Examples:\n"
+                            "  prepare_completion(field_path=\"service\", "
+                            "value=\"billing\")\n"
+                            "  prepare_completion(field_path="
+                            "\"stack_config.language\", value=\"java\")\n"
+                            "  prepare_completion(field_path="
+                            "\"endpoints[0].operation\", value=\"create\")\n"
+                            "  prepare_completion(field_path="
+                            "\"endpoints[2]\", value="
+                            "{\"operation\": \"delete\", \"path\": \"/x\"})"
                         ),
                         parameters={
                             "type": "object",
-                            "additionalProperties": True,
-                            "description": (
-                                "Partial completion payload — any subset of "
-                                "fields from completion_payload_schema.  No "
-                                "wire-level constraints; framework validates "
-                                "each field server-side against the declared "
-                                "schema and surfaces rejections in the "
-                                "response."
-                            ),
+                            "properties": {
+                                "field_path": {
+                                    "type": "string",
+                                    "description": (
+                                        "Dot-notation path to the schema "
+                                        "field you're setting.  Use ``[idx]`` "
+                                        "for array indices.  Examples: "
+                                        "``service``, ``stack_config.language``, "
+                                        "``endpoints[0].operation``, "
+                                        "``endpoints[2]``."
+                                    ),
+                                },
+                                "value": {
+                                    "description": (
+                                        "The value to set at field_path.  "
+                                        "Type depends on the schema's "
+                                        "expectation for that path — string, "
+                                        "integer, object, array, etc.  For "
+                                        "setting a whole nested object at an "
+                                        "array index, pass the object as "
+                                        "value."
+                                    ),
+                                },
+                            },
+                            "required": ["field_path", "value"],
+                            "additionalProperties": False,
                         },
                         discoverability="core",
                     )
@@ -819,39 +851,41 @@ class LifecycleTools:
     def _execute_prepare_completion(
         self, args: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Merge a partial payload into accumulated state, validate
-        per-field, return progress signal.
+        """Set ONE field of the completion payload per call.
 
-        Designed for small-model composition-burden mitigation
-        ([[feedback_small_model_narration_skipping_is_structural]]).
-        Each call is a discrete TRANSCRIPTION operation — the model
-        contributes one or more fields at a time, the framework
-        accumulates, the response signals what's still pending.  The
-        model stays in the same cognitive mode that works for tool
-        result transcription instead of composing the entire payload
-        as one structured emission.
+        A2 shape (2026-06-09 iteration): the model passes
+        ``field_path`` + ``value`` as two REQUIRED args.  This forces
+        the model to emit non-empty content per call.  The earlier
+        permissive shape (single ``partial`` object, no required
+        fields) had ``{}`` as a valid minimum-cost emission under
+        xgrammar — empirically observed model collapse to
+        ``prepare_completion(args={})`` at temp=0.  A2 makes
+        ``{field_path: <str>, value: <any>}`` the minimum-valid
+        emission instead.
+
+        Path syntax: dot-notation with ``[idx]`` for array indices.
+        Examples:
+
+          - ``service`` — top-level scalar / object
+          - ``stack_config.language`` — nested object key
+          - ``endpoints[0].operation`` — array index then nested key
+          - ``endpoints[2]`` — set the WHOLE element at that index
+            (value must be the object)
 
         Args:
-            args: Partial completion payload — any subset of fields
-                from ``completion_payload_schema``.  Top-level field
-                rejection is per-field: a partial like
-                ``{service: "billing", endpoints: <malformed>}``
-                accepts ``service``, rejects ``endpoints``, surfaces
-                both in the response.  Nested objects merge
-                last-write-wins per Q7.
+            args: Dict with two required keys per the A2 schema:
+                ``field_path: str`` and ``value: Any``.
 
         Returns:
             Dict with:
-            - ``accepted``: subset of args that passed per-field
-              validation and was merged into accumulated state.
-            - ``rejected``: ``{field_path: rejection_reason}`` for
-              fields that failed validation; accumulated state was NOT
-              mutated for these.
+            - ``accepted``: ``{path: value}`` if the call succeeded,
+              else empty.
+            - ``rejected``: ``{path: reason}`` if validation failed,
+              else empty.
             - ``pending_required_fields_with_descriptions``: list of
-              ``{path, description, type, ...}`` dicts for required
-              fields still missing from accumulated state.
-            - ``is_complete``: True iff
-              ``jsonschema.validate(accumulated, full_schema)`` passes.
+              still-missing required fields after this call.
+            - ``is_complete``: True iff the full schema validates
+              against accumulated state.
         """
         if self._payload_schema is None:
             return {
@@ -868,37 +902,98 @@ class LifecycleTools:
             return {
                 "error": "invalid_argument",
                 "message": (
-                    "prepare_completion requires a dict argument matching "
-                    "part of completion_payload_schema's shape."
+                    "prepare_completion requires a dict with "
+                    "'field_path' and 'value' keys."
                 ),
             }
 
-        # Per-field validation: try each top-level key against the
-        # schema's properties.  Accept what validates, reject what
-        # doesn't — preserves partial submissions where some fields are
-        # well-formed and others aren't.
-        accepted: Dict[str, Any] = {}
-        rejected: Dict[str, str] = {}
-        for key, value in args.items():
-            err = self._validate_field_against_schema(
-                key, value, self._payload_schema,
-            )
-            if err is None:
-                accepted[key] = value
-            else:
-                rejected[key] = err
+        field_path = args.get("field_path")
+        # ``value`` may legitimately be falsy (0, False, "", []), so use
+        # an explicit sentinel to detect omission rather than truthiness.
+        _MISSING = object()
+        value = args.get("value", _MISSING)
 
-        # Merge accepted fields into accumulated state (last-write-wins
-        # per-key — Q7).  Deep merge for dict values, replace for
-        # everything else.
-        for key, value in accepted.items():
-            if (
-                isinstance(value, dict)
-                and isinstance(self._accumulated_payload.get(key), dict)
-            ):
-                self._deep_merge(self._accumulated_payload[key], value)
-            else:
-                self._accumulated_payload[key] = value
+        if not isinstance(field_path, str) or not field_path.strip():
+            return {
+                "error": "invalid_argument",
+                "message": (
+                    "'field_path' must be a non-empty string in "
+                    "dot-notation, e.g. 'service', "
+                    "'stack_config.language', 'endpoints[0].operation'."
+                ),
+            }
+        if value is _MISSING:
+            return {
+                "error": "invalid_argument",
+                "message": (
+                    "'value' is required. Pass the value to set at "
+                    "field_path. Use null/None if you need to set a "
+                    "null value; do not omit the argument."
+                ),
+            }
+
+        # Parse field_path into segments.
+        try:
+            segments = self._parse_field_path(field_path)
+        except ValueError as exc:
+            return {
+                "accepted": {},
+                "rejected": {field_path: f"invalid path syntax: {exc}"},
+                "pending_required_fields_with_descriptions":
+                    self._compute_pending_required_fields(
+                        self._accumulated_payload, self._payload_schema,
+                    ),
+                "is_complete": False,
+            }
+
+        # Walk the schema along the path to find the expected type
+        # for the leaf.  If the path doesn't match the schema's
+        # structure, reject with the canonical "not in schema" error.
+        leaf_schema = self._resolve_path_schema(
+            segments, self._payload_schema,
+        )
+        if leaf_schema is None:
+            return {
+                "accepted": {},
+                "rejected": {
+                    field_path: (
+                        f"field_path {field_path!r} does not match "
+                        f"completion_payload_schema's structure. "
+                        f"Check spelling, casing, and array-index form."
+                    ),
+                },
+                "pending_required_fields_with_descriptions":
+                    self._compute_pending_required_fields(
+                        self._accumulated_payload, self._payload_schema,
+                    ),
+                "is_complete": False,
+            }
+
+        # Validate the value against the leaf's schema (relaxed —
+        # required[] stripped so partial objects are allowed; type /
+        # enum / format remain enforced).
+        relaxed = self._strip_required_recursive(leaf_schema)
+        try:
+            import jsonschema
+            jsonschema.validate(instance=value, schema=relaxed)
+        except jsonschema.ValidationError as exc:
+            return {
+                "accepted": {},
+                "rejected": {
+                    field_path: (
+                        f"{exc.message} (at "
+                        f"{'.'.join(str(p) for p in exc.absolute_path)})"
+                    ),
+                },
+                "pending_required_fields_with_descriptions":
+                    self._compute_pending_required_fields(
+                        self._accumulated_payload, self._payload_schema,
+                    ),
+                "is_complete": False,
+            }
+
+        # Set the value at the path inside accumulated state.
+        self._set_at_path(self._accumulated_payload, segments, value)
 
         pending = self._compute_pending_required_fields(
             self._accumulated_payload, self._payload_schema,
@@ -906,16 +1001,136 @@ class LifecycleTools:
         is_complete = not pending
 
         logger.info(
-            "prepare_completion: accepted=%d rejected=%d pending=%d is_complete=%s",
-            len(accepted), len(rejected), len(pending), is_complete,
+            "prepare_completion: set %s pending=%d is_complete=%s",
+            field_path, len(pending), is_complete,
         )
 
         return {
-            "accepted": accepted,
-            "rejected": rejected,
+            "accepted": {field_path: value},
+            "rejected": {},
             "pending_required_fields_with_descriptions": pending,
             "is_complete": is_complete,
         }
+
+    def _parse_field_path(self, path: str) -> List[Any]:
+        """Parse a dot-notation path with ``[idx]`` array indices into
+        a list of segments.  Each segment is either ``str`` (object
+        key) or ``int`` (array index).
+
+        Examples:
+          - ``"service"`` → ``["service"]``
+          - ``"stack_config.language"`` → ``["stack_config", "language"]``
+          - ``"endpoints[0].operation"`` → ``["endpoints", 0, "operation"]``
+          - ``"endpoints[2]"`` → ``["endpoints", 2]``
+
+        Raises ``ValueError`` on malformed input (e.g. unmatched
+        bracket, non-integer index).
+        """
+        segments: List[Any] = []
+        for part in path.split("."):
+            # Pull off any [idx] suffixes (may be multiple, e.g.
+            # "matrix[0][1]" → ["matrix", 0, 1]).
+            name_end = part.find("[")
+            if name_end == -1:
+                if not part:
+                    raise ValueError(f"empty segment in path {path!r}")
+                segments.append(part)
+                continue
+            name = part[:name_end]
+            if name:
+                segments.append(name)
+            remaining = part[name_end:]
+            while remaining:
+                if not remaining.startswith("["):
+                    raise ValueError(
+                        f"unexpected char {remaining[0]!r} in path "
+                        f"{path!r} after array index"
+                    )
+                close = remaining.find("]")
+                if close == -1:
+                    raise ValueError(f"unmatched '[' in path {path!r}")
+                idx_str = remaining[1:close]
+                try:
+                    segments.append(int(idx_str))
+                except ValueError:
+                    raise ValueError(
+                        f"non-integer array index {idx_str!r} in path "
+                        f"{path!r}"
+                    )
+                remaining = remaining[close + 1:]
+        return segments
+
+    def _resolve_path_schema(
+        self,
+        segments: List[Any],
+        schema: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Walk the schema along ``segments`` and return the schema
+        for the leaf (or None if the path doesn't match the schema's
+        structure).  Used to validate the value the model is setting
+        at field_path against the schema's expected type for that
+        position.
+        """
+        current = schema
+        for seg in segments:
+            if not isinstance(current, dict):
+                return None
+            if isinstance(seg, int):
+                # Array index — current must be type=array; descend
+                # into items schema.
+                if current.get("type") != "array":
+                    return None
+                current = current.get("items", {})
+            else:
+                # Object key — current must be type=object; descend
+                # into properties[seg].
+                if current.get("type") != "object":
+                    return None
+                properties = current.get("properties", {})
+                if seg not in properties:
+                    return None
+                current = properties[seg]
+        return current if isinstance(current, dict) else None
+
+    def _set_at_path(
+        self,
+        target: Dict[str, Any],
+        segments: List[Any],
+        value: Any,
+    ) -> None:
+        """Set ``value`` at ``target[segments]``, creating intermediate
+        dicts / lists as needed.  Last-write-wins per Q7.
+        """
+        if not segments:
+            return
+        # Walk to the parent of the leaf, creating intermediates.
+        current: Any = target
+        for i, seg in enumerate(segments[:-1]):
+            next_seg = segments[i + 1]
+            default = [] if isinstance(next_seg, int) else {}
+            if isinstance(seg, int):
+                # current must be a list — extend if needed.
+                while len(current) <= seg:
+                    current.append(default if len(current) == seg else None)
+                if current[seg] is None or not isinstance(
+                    current[seg], (dict, list),
+                ):
+                    current[seg] = default
+                current = current[seg]
+            else:
+                if seg not in current or not isinstance(
+                    current[seg], (dict, list),
+                ):
+                    current[seg] = default
+                current = current[seg]
+        # Set the leaf.
+        last = segments[-1]
+        if isinstance(last, int):
+            while len(current) <= last:
+                current.append(None)
+            current[last] = value
+        else:
+            current[last] = value
 
     def _execute_query_completion(
         self, args: Dict[str, Any],
