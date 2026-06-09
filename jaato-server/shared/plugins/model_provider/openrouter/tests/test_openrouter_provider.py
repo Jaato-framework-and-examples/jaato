@@ -1845,3 +1845,41 @@ class TestExtractGenerationId:
         )
 
         assert provider.get_last_generation_id() == "gen-stream-42"
+
+
+class TestParallelToolCallsKnob:
+    """``api_params.parallel_tool_calls`` profile knob — when set,
+    propagates as a kwarg to ``chat.completions.create``.  OpenRouter
+    forwards verbatim to upstream OpenAI / Anthropic / vLLM hosts.
+    """
+
+    def _make_provider_with_api_params(self, api_params: dict):
+        """Construct an initialized provider with the given api_params
+        block under config.extra."""
+        from shared.plugins.model_provider.base import ProviderConfig
+        provider = OpenRouterProvider()
+        provider._verify_connectivity = lambda: None  # type: ignore[assignment]
+        provider._trace = lambda _msg: None  # type: ignore[assignment]
+        provider._list_models_for_catalog = lambda: []  # type: ignore[assignment]
+        cfg = ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": api_params, "context_length": 32768},
+        )
+        provider.initialize(cfg)
+        return provider
+
+    def test_default_is_none(self):
+        provider = self._make_provider_with_api_params({})
+        assert provider._parallel_tool_calls is None
+
+    def test_knob_false_stored(self):
+        provider = self._make_provider_with_api_params(
+            {"parallel_tool_calls": False}
+        )
+        assert provider._parallel_tool_calls is False
+
+    def test_knob_true_stored(self):
+        provider = self._make_provider_with_api_params(
+            {"parallel_tool_calls": True}
+        )
+        assert provider._parallel_tool_calls is True
