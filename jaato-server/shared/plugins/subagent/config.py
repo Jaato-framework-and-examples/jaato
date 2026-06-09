@@ -842,11 +842,31 @@ class CompletionProcessor:
         description: Optional human-readable note on what this
             processor does and why it's wired in.  Ignored at runtime;
             consumed by docs / introspection tooling.
+        phase: WHEN this processor runs (server 0.6.199+).
+            ``"finalization"`` (default) — runs at ``signal_completion``
+            only, exactly as every processor did before this field
+            existed: ``render`` writes output, ``validate`` blocks
+            completion on errors.  ``"completeness"`` — runs DURING
+            ``prepare_completion`` (gated: only once the schema-required
+            floor is met, so it fires ~once near the end, not per
+            field) and its ``validate`` return participates in the
+            COMPOSITE ``is_complete`` verdict via the ``incomplete[]``
+            channel of :class:`jaato_sdk.cascade_authoring.ProcessorResult`.
+            A completeness processor's job is SEMANTIC done-ness:
+            "does the accumulated payload have every field the
+            downstream cascade stages actually consume for THIS run?"
+            — distinct from the schema's STRUCTURAL floor (required[]).
+            It must be cheap (pure payload/context inspection, no
+            subprocess / Maven / LSP) because it runs mid-accumulation.
+            Its ``incomplete[]`` entries gate ``is_complete`` to False
+            and surface to the model as neutral "still needed" guidance
+            (no retry penalty); its ``errors[]`` still reject as usual.
     """
     script: str
     output: Optional[str] = None
     on_error: str = "fail_completion"
     description: Optional[str] = None
+    phase: str = "finalization"
 
 
 @dataclass
@@ -1206,11 +1226,21 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
                 script, type(description).__name__,
             )
             description = None
+        phase = entry.get("phase", "finalization")
+        if phase not in ("finalization", "completeness"):
+            logger.warning(
+                "completion_processors: invalid phase=%r for script=%r "
+                "(expected 'finalization' or 'completeness'); defaulting "
+                "to 'finalization'",
+                phase, script,
+            )
+            phase = "finalization"
         out.append(CompletionProcessor(
             script=script.strip(),
             output=normalized_output,
             on_error=on_error,
             description=description.strip() if description else None,
+            phase=phase,
         ))
     return out
 

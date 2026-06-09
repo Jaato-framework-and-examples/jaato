@@ -568,6 +568,7 @@ def build_session_envelope(
                     "output": getattr(entry, "output", None),
                     "on_error": getattr(entry, "on_error", "fail_completion"),
                     "description": getattr(entry, "description", None),
+                    "phase": getattr(entry, "phase", "finalization"),
                 })
             elif isinstance(entry, dict):
                 profile_completion_processors.append(dict(entry))

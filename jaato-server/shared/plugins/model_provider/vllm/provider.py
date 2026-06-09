@@ -208,6 +208,27 @@ class VLLMProvider:
         # ``feedback_small_model_narration_skipping_is_structural``.
         self._force_narration_between_tools: bool = False
 
+        # Quirk: auto_finalize_on_complete (server 0.6.199+).  When set
+        # via ``profile.quirks.auto_finalize_on_complete``, the framework
+        # auto-synthesizes ``signal_completion()`` server-side the
+        # instant the COMPOSITE is_complete flips True (schema floor met
+        # AND no ``phase: "completeness"`` processor reported
+        # ``incomplete[]``).  Closes the context-overflow-at-finalize
+        # death: the accumulator model fills the rich payload and then
+        # over-runs the context window trying to take another turn —
+        # synthesizing in-process (no model round-trip, see
+        # ``LifecycleTools._execute_prepare_completion``) ends the turn
+        # via the PR-255 termination BEFORE the oversized next request is
+        # built.  Provider-instance attribute so ``LifecycleTools`` reads
+        # it via ``getattr(self._provider, '_auto_finalize_on_complete',
+        # False)`` — symmetric with ``force_narration_between_tools`` /
+        # ``force_tool_choice_for_lifecycle``.  Decoupled from the
+        # completeness gate itself: a profile can declare a
+        # ``phase: "completeness"`` processor for is_complete GUIDANCE
+        # alone (surfacing ``still_needed``) and leave this quirk off to
+        # let the model self-finalize.
+        self._auto_finalize_on_complete: bool = False
+
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
         self._agent_id: str = "main"
@@ -332,10 +353,14 @@ class VLLMProvider:
         self._force_narration_between_tools = bool(
             quirks.get("force_narration_between_tools", False)
         )
+        self._auto_finalize_on_complete = bool(
+            quirks.get("auto_finalize_on_complete", False)
+        )
         _KNOWN_QUIRKS = frozenset({
             "coerce_typed_tool_args",
             "force_tool_choice_for_lifecycle",
             "force_narration_between_tools",
+            "auto_finalize_on_complete",
         })
         for unknown_quirk in set(quirks) - _KNOWN_QUIRKS:
             logger.warning(
@@ -353,6 +378,13 @@ class VLLMProvider:
                 "[INIT] quirk force_tool_choice_for_lifecycle ENABLED — "
                 "session-supplied tool_choice will be forwarded to "
                 "vLLM so xgrammar constrains lifecycle-tool retries",
+            )
+        if self._auto_finalize_on_complete:
+            self._trace(
+                "[INIT] quirk auto_finalize_on_complete ENABLED — "
+                "framework synthesizes signal_completion() server-side "
+                "the instant the composite is_complete flips True "
+                "(no model round-trip; avoids context-overflow-at-finalize)",
             )
 
         self._auth_info = (

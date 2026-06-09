@@ -818,3 +818,87 @@ class TestSignalCompletionWithProcessors:
         # Validator complained but on_error=warn → completion succeeds
         assert result["status"] == "completed"
         assert len(session._ui_hooks.calls) == 1
+
+
+class TestIncompleteChannelAndPhaseFilter:
+    """Tests for the completeness channel (server 0.6.199+):
+    ProcessorResult.incomplete[] bucketing + the phase_filter param."""
+
+    def test_incomplete_bucketed_separately(self, tmp_path):
+        proc = CompletionProcessor(script="c.py", phase="completeness")
+        lp = LoadedProcessor(
+            processor=proc,
+            validate_fn=lambda payload, ctx: {
+                "errors": [], "warnings": [], "incomplete": ["api absent"],
+            },
+        )
+        result = invoke_processors([lp], payload={}, context=_ctx(tmp_path))
+        # incomplete is neither fatal nor advisory
+        assert result.failed == []
+        assert result.warned == []
+        assert len(result.incomplete) == 1
+        assert "api absent" in result.incomplete[0][1]
+        assert result.has_incomplete is True
+
+    def test_incomplete_empty_means_complete(self, tmp_path):
+        proc = CompletionProcessor(script="c.py", phase="completeness")
+        lp = LoadedProcessor(
+            processor=proc,
+            validate_fn=lambda payload, ctx: {
+                "errors": [], "warnings": [], "incomplete": [],
+            },
+        )
+        result = invoke_processors([lp], payload={}, context=_ctx(tmp_path))
+        assert result.has_incomplete is False
+
+    def test_phase_filter_runs_only_matching_phase(self, tmp_path):
+        comp = CompletionProcessor(script="comp.py", phase="completeness")
+        fin = CompletionProcessor(script="fin.py", phase="finalization")
+        comp_lp = LoadedProcessor(
+            processor=comp,
+            validate_fn=lambda p, c: {"errors": [], "warnings": [],
+                                      "incomplete": ["still need api"]},
+        )
+        fin_lp = LoadedProcessor(
+            processor=fin,
+            validate_fn=lambda p, c: ["finalization error"],
+        )
+        # Completeness phase: only the completeness processor runs.
+        comp_only = invoke_processors(
+            [comp_lp, fin_lp], payload={}, context=_ctx(tmp_path),
+            phase_filter="completeness",
+        )
+        assert comp_only.has_incomplete is True
+        assert comp_only.failed == []  # finalization proc skipped
+
+        # Finalization phase: only the finalization processor runs.
+        fin_only = invoke_processors(
+            [comp_lp, fin_lp], payload={}, context=_ctx(tmp_path),
+            phase_filter="finalization",
+        )
+        assert fin_only.has_incomplete is False  # completeness proc skipped
+        assert len(fin_only.failed) == 1
+
+    def test_no_phase_filter_runs_all(self, tmp_path):
+        comp = CompletionProcessor(script="comp.py", phase="completeness")
+        fin = CompletionProcessor(script="fin.py", phase="finalization")
+        comp_lp = LoadedProcessor(
+            processor=comp,
+            validate_fn=lambda p, c: {"errors": [], "warnings": [],
+                                      "incomplete": ["x"]},
+        )
+        fin_lp = LoadedProcessor(
+            processor=fin,
+            validate_fn=lambda p, c: ["y"],
+        )
+        both = invoke_processors(
+            [comp_lp, fin_lp], payload={}, context=_ctx(tmp_path),
+        )
+        assert both.has_incomplete is True
+        assert len(both.failed) == 1
+
+    def test_default_phase_is_finalization(self):
+        # A processor with no explicit phase defaults to finalization,
+        # so it's skipped under a completeness filter.
+        proc = CompletionProcessor(script="p.py")
+        assert proc.phase == "finalization"

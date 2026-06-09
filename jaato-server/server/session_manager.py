@@ -2010,6 +2010,7 @@ class SessionManager:
                     "output": getattr(p, "output", None),
                     "on_error": getattr(p, "on_error", "fail_completion"),
                     "description": getattr(p, "description", None),
+                    "phase": getattr(p, "phase", "finalization"),
                 }
                 for p in (getattr(profile, "completion_processors", []) or [])
                 if hasattr(p, "script")

@@ -647,6 +647,24 @@ class LifecycleTools:
         ``pending_required_fields_with_descriptions`` map so the agent
         knows what's left to set via ``prepare_completion``.
         """
+        # Idempotency guard (server 0.6.199+): once this session has
+        # already signalled completion (the flag is set on the
+        # validated-success path below), a second invocation must NOT
+        # re-emit ``AgentCompletedEvent`` — that would fire the next
+        # cascade stage twice.  This protects the server-side
+        # auto-finalize path (``_execute_prepare_completion`` synthesizes
+        # signal_completion when the completeness gate flips) from
+        # colliding with a model that ALSO emits signal_completion in
+        # the same tool batch.  Returns the terminal status without
+        # side-effects.
+        if getattr(self._session, "_signal_completion_called", False):
+            return {
+                "status": "completed",
+                "agent_id": getattr(self._session, "_agent_id", "main"),
+                "summary": "",
+                "note": "already completed (idempotent no-op)",
+            }
+
         payload: Optional[Dict[str, Any]]
         summary: str
 
@@ -763,6 +781,12 @@ class LifecycleTools:
                 self._processors_loaded,
                 payload=payload,
                 context=ctx,
+                # Finalization phase only: ``phase: "completeness"``
+                # processors already ran (and gated is_complete) during
+                # prepare_completion; re-running them here would be a
+                # meaningless second completeness check after the agent
+                # has chosen to finalize.
+                phase_filter="finalization",
             )
             if processor_outcome.has_fatal:
                 failure_messages = collect_failure_messages(processor_outcome)
@@ -849,6 +873,108 @@ class LifecycleTools:
         return result
 
     # ==================== prepare/query completion (2026-06-09) ====================
+
+    def _run_completeness_gate(
+        self, payload: Dict[str, Any],
+    ) -> List[str]:
+        """Run ``phase: "completeness"`` processors over ``payload`` and
+        return their ``incomplete[]`` messages (empty == semantically
+        complete).
+
+        This is the SEMANTIC done-ness check layered on top of the
+        schema's STRUCTURAL floor (required[]).  A completeness
+        processor inspects the accumulated payload against run-specific
+        signals (e.g. discovery's detected_capabilities) and reports
+        which downstream-consumed sections are applicable-but-absent.
+        Those messages gate the composite ``is_complete`` verdict in
+        :meth:`_execute_prepare_completion` and surface to the model as
+        neutral "still needed" guidance — they are NOT errors (no retry
+        penalty) and NOT warnings (which never block).
+
+        Returns an empty list when no completeness processor is
+        configured, when none of them returned ``incomplete[]``, or when
+        the loader/invoker found nothing to run — i.e. the gate is a
+        no-op unless a profile opts in via ``phase: "completeness"``.
+
+        Mirrors the processor-loading + ledger + render-context block in
+        :meth:`_execute_signal_completion`, but filters to the
+        completeness phase and reads ``result.incomplete`` instead of
+        ``result.failed``.
+        """
+        configured_processors = getattr(
+            self._session, "_completion_processors", [],
+        ) or []
+        if not configured_processors:
+            return []
+        from .completion_processors import (
+            build_tool_call_ledger,
+            invoke_processors,
+            load_processors,
+        )
+        from .dynamic_instructions import build_render_context
+        if self._processors_loaded is None:
+            workspace_path_str = getattr(self._session, "workspace_path", None)
+            config_root_str = getattr(
+                getattr(self._session, "runtime", None), "_config_root", None,
+            )
+            self._processors_loaded = load_processors(
+                configured_processors,
+                workspace_path=workspace_path_str,
+                config_root=config_root_str,
+            )
+        try:
+            history = self._session.get_history()
+        except Exception:
+            history = []
+        ledger = build_tool_call_ledger(history)
+        ctx = build_render_context(
+            self._session,
+            agent_params=getattr(self._session, "_agent_params", {}),
+            tool_calls=ledger,
+        )
+        outcome = invoke_processors(
+            self._processors_loaded,
+            payload=payload,
+            context=ctx,
+            phase_filter="completeness",
+        )
+        # The completeness phase is the SOFT gate — its only gating
+        # channel is ``incomplete[]`` (clearable as fields fill).  A
+        # completeness processor that emits ``errors[]`` is mis-wired:
+        # errors are a HARD, NON-clearable condition, and folding them
+        # into the soft gate here would pin ``is_complete`` False
+        # forever → the exact infinite-compose-until-context-exhaustion
+        # death this whole mechanism exists to prevent.  HARD invariants
+        # (e.g. "discovery_result.json absent") belong in a
+        # ``phase: "finalization"`` processor, where ``errors[]`` blocks
+        # EVERY signal_completion (manual AND auto-synthesized) via the
+        # existing terminal gate and cannot be bypassed.  So: honor only
+        # ``incomplete[]`` here; warn (don't gate) on stray errors so the
+        # author moves them to the finalization phase.
+        if outcome.has_fatal or outcome.warned:
+            for _proc, m in (outcome.failed + outcome.warned):
+                logger.warning(
+                    "completeness-phase processor emitted an error/warning "
+                    "(%s) — the completeness phase gates ONLY via "
+                    "incomplete[]; move HARD invariants to a "
+                    "phase:'finalization' processor's errors[]. Not gating "
+                    "on it here.", m,
+                )
+        return [m for _proc, m in outcome.incomplete]
+
+    def _auto_finalize_enabled(self) -> bool:
+        """Whether the ``auto_finalize_on_complete`` quirk is active.
+
+        Read off the provider (the canonical per-profile quirk surface,
+        symmetric with ``force_narration_between_tools`` /
+        ``force_tool_choice_for_lifecycle`` — see
+        ``feedback_framework_behavior_knobs_belong_in_profile_quirks_not_env_var``).
+        Defaults False so completeness-gating can be used for guidance
+        alone (surface ``still_needed`` to the model) WITHOUT forcing an
+        auto-finalize — the two concerns are decoupled.
+        """
+        provider = getattr(self._session, "_provider", None)
+        return bool(getattr(provider, "_auto_finalize_on_complete", False))
 
     def _execute_prepare_completion(
         self, args: Dict[str, Any],
@@ -1034,19 +1160,72 @@ class LifecycleTools:
         pending = self._compute_pending_required_fields(
             self._accumulated_payload, self._payload_schema,
         )
-        is_complete = not pending
+        schema_floor_met = not pending
+
+        # Composite is_complete (server 0.6.199+): the schema's
+        # required[] is the STRUCTURAL floor; ``phase: "completeness"``
+        # processors add the SEMANTIC layer — "does this run have every
+        # field the downstream cascade actually consumes?".  The gate
+        # runs ONLY when the floor is already met (cheap pre-check
+        # first) so it fires ~once near the end, not per field.  Its
+        # ``incomplete[]`` messages keep is_complete False AND surface
+        # to the model as neutral "still needed" guidance (no retry
+        # penalty, no completion block).
+        still_needed: List[str] = []
+        if schema_floor_met:
+            still_needed = self._run_completeness_gate(
+                self._accumulated_payload,
+            )
+        is_complete = schema_floor_met and not still_needed
 
         logger.info(
-            "prepare_completion: set %s pending=%d is_complete=%s",
-            field_path, len(pending), is_complete,
+            "prepare_completion: set %s pending=%d floor_met=%s "
+            "still_needed=%d is_complete=%s",
+            field_path, len(pending), schema_floor_met,
+            len(still_needed), is_complete,
         )
 
-        return {
+        result: Dict[str, Any] = {
             "accepted": {field_path: value},
             "rejected": {},
             "pending_required_fields_with_descriptions": pending,
             "is_complete": is_complete,
         }
+        if still_needed:
+            # Neutral "keep going" guidance — distinct from rejection.
+            result["still_needed"] = still_needed
+
+        # Server-side auto-finalize (server 0.6.199+): when the COMPOSITE
+        # is_complete flips True and the profile opts in via the
+        # ``auto_finalize_on_complete`` quirk, synthesize signal_completion
+        # IN-PROCESS from the accumulated payload — NO model round-trip.
+        # This is the load-bearing fix for the context-overflow-at-
+        # finalize death: forcing the model's NEXT turn (tool_choice) would
+        # still ship the oversized request and 400; synthesizing here sets
+        # ``_signal_completion_called`` so the existing PR-255 termination
+        # (jaato_session.py:4535) ends the turn BEFORE the next request is
+        # built.  Idempotency-guarded in _execute_signal_completion.
+        if (
+            is_complete
+            and self._auto_finalize_enabled()
+            and not getattr(self._session, "_signal_completion_called", False)
+        ):
+            logger.info(
+                "prepare_completion: composite is_complete=True + "
+                "auto_finalize_on_complete quirk → synthesizing "
+                "signal_completion() server-side (no model round-trip)"
+            )
+            finalize_result = self._execute_signal_completion({})
+            result["auto_finalized"] = True
+            # On the success path the session is over (PR-255 termination
+            # fires next).  If finalization processors rejected, surface
+            # the reason so the model can correct on its retained turn.
+            if isinstance(finalize_result, dict) and finalize_result.get("error"):
+                result["auto_finalize_rejected"] = finalize_result
+            else:
+                result["completion"] = finalize_result
+
+        return result
 
     def _parse_field_path(self, path: str) -> List[Any]:
         """Parse a dot-notation path with ``[idx]`` array indices into
