@@ -359,6 +359,114 @@ class TestJaatoSessionGCPlugin:
         with pytest.raises(RuntimeError, match="No GC plugin"):
             session.manual_gc()
 
+    def test_gc_no_items_collected_emits_breakdown_diagnostic(self, caplog):
+        """When GC fires but collects 0 items (e.g. all content is
+        LOCKED — persona, pinned refs, tool schemas, framework
+        instructions), emit a structured diagnostic via ``logger.info``
+        showing the LOCKED-vs-eligible breakdown.  This is the
+        visibility fix for the small-model cascade overflow class
+        where the operator otherwise sees only "cascade aborted with
+        BadRequestError" and no signal that GC tried but had nothing
+        to free.
+
+        Routed via ``logger.info`` (NOT ``self._trace``) so the
+        diagnostic lands in /tmp/jaato.log even under apparmor
+        runner confinement — per
+        [[project_backlog_apparmor_blocks_provider_trace_silently]].
+        """
+        import logging
+        from shared.plugins.gc import GCResult, GCTriggerReason
+        from shared.instruction_budget import InstructionBudget
+
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "Qwen/Qwen3-14B")
+
+        # Realistic budget: ~30K LOCKED (persona+refs+schemas) +
+        # small conversation tier — mirrors kb cascade context-stage
+        # geometry post-overflow.
+        budget = InstructionBudget(context_limit=40944)
+        session._instruction_budget = budget
+        # Mock the breakdown methods to return the kb-geometry values.
+        # We don't populate actual entries since the test only verifies
+        # the diagnostic log line shape + that the values plumb through.
+        budget_mock_locked = 30000
+        budget_mock_eligible = 1500
+        budget_mock_preservable = 2000
+        budget_mock_total = 33500
+        budget.locked_tokens = lambda: budget_mock_locked
+        budget.gc_eligible_tokens = lambda: budget_mock_eligible
+        budget.preservable_tokens = lambda: budget_mock_preservable
+        budget.total_tokens = lambda: budget_mock_total
+
+        # Mock GC plugin that fires but collects 0 items.
+        mock_gc = MagicMock()
+        mock_gc.name = "gc_budget"
+        empty_result = GCResult(
+            success=True,
+            items_collected=0,
+            tokens_before=33500,
+            tokens_after=33500,
+            plugin_name="gc_budget",
+            trigger_reason=GCTriggerReason.THRESHOLD,
+            removal_list=[],
+            details={"locked": 30000, "eligible": 1500},
+        )
+        mock_gc.collect.return_value = ([], empty_result)
+        mock_gc.should_collect.return_value = (True, GCTriggerReason.THRESHOLD)
+
+        mock_config = MagicMock()
+        mock_config.threshold_percent = 60.0
+        mock_config.target_percent = 50.0
+        mock_config.continuous_mode = False
+
+        session._gc_plugin = mock_gc
+        session._gc_config = mock_config
+        session._gc_history = []
+        # Mock context_usage to drive the should_collect path.
+        session.get_context_usage = lambda: {
+            'percent_used': 82.0,
+            'total_tokens': 33500,
+            'context_limit': 40944,
+        }
+        session.get_history = lambda: []
+        # Wire telemetry through the runtime mock; ``_telemetry`` is a
+        # property reading ``self._runtime.telemetry``.
+        mock_runtime.telemetry = MagicMock()
+        mock_runtime.telemetry.gc_span.return_value.__enter__ = (
+            lambda self: MagicMock()
+        )
+        mock_runtime.telemetry.gc_span.return_value.__exit__ = (
+            lambda self, *a: None
+        )
+        # Mock the cache-aware sync helper so it's a no-op.
+        session._apply_gc_removal_list = lambda result, gc_span: None
+        session._emit_instruction_budget_update = lambda: None
+        session._populate_gc_span_result = lambda gc_span, result: None
+        session._build_gc_span_attributes = lambda usage, pre_collect: {}
+
+        with caplog.at_level(logging.INFO):
+            session._maybe_collect_before_send()
+
+        # The diagnostic must land via logger.info with the breakdown.
+        matches = [
+            r.message for r in caplog.records
+            if r.levelname == "INFO"
+            and "GC_NO_ITEMS_COLLECTED" in r.message
+        ]
+        assert len(matches) == 1, (
+            f"Expected exactly 1 GC_NO_ITEMS_COLLECTED log; got {len(matches)}: "
+            f"{matches}"
+        )
+        msg = matches[0]
+        # Verify the breakdown values plumb through.
+        assert "total=33500" in msg
+        assert "locked=30000" in msg
+        assert "eligible=1500" in msg
+        assert "preservable=2000" in msg
+        assert "context_limit=40944" in msg
+        # Verify the operator-actionable hint is included.
+        assert "locked >> eligible" in msg or "body-wired" in msg
+
 
 class TestJaatoSessionPluginIntegration:
     """Tests for JaatoSession session plugin integration."""
