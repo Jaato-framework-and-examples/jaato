@@ -303,14 +303,31 @@ class ProcessorInvocationResult:
             hard failure.  Caller MUST treat the agent's
             ``signal_completion`` as failed and return a
             self-correction prompt to the model.
+        incomplete: List of ``(processor, message)`` tuples emitted by
+            ``phase: "completeness"`` processors via the
+            ``ProcessorResult.incomplete[]`` channel (server 0.6.199+).
+            These are NEITHER fatal NOR advisory — they are SEMANTIC
+            "not done yet" signals that gate the composite
+            ``is_complete`` verdict during ``prepare_completion``.
+            Non-empty → ``is_complete`` stays False and the messages
+            surface to the model as neutral "still needed" guidance
+            (no retry penalty, no completion block).  Consumed by
+            ``LifecycleTools._execute_prepare_completion``; ignored by
+            the ``signal_completion`` finalization path (a completeness
+            verdict is meaningless once the agent chooses to finalize).
     """
     written: List[str] = field(default_factory=list)
     warned: List[Tuple[Any, str]] = field(default_factory=list)
     failed: List[Tuple[Any, str]] = field(default_factory=list)
+    incomplete: List[Tuple[Any, str]] = field(default_factory=list)
 
     @property
     def has_fatal(self) -> bool:
         return bool(self.failed)
+
+    @property
+    def has_incomplete(self) -> bool:
+        return bool(self.incomplete)
 
 
 def _resolve_output_path(
@@ -359,6 +376,7 @@ def invoke_processors(
     loaded: List[LoadedProcessor],
     payload: Dict[str, Any],
     context: "RenderContext",
+    phase_filter: Optional[str] = None,
 ) -> ProcessorInvocationResult:
     """Run every loaded processor; aggregate outcomes.
 
@@ -404,6 +422,18 @@ def invoke_processors(
         proc = lp.processor
         script_ref = getattr(proc, "script", "?")
 
+        # Phase gate (server 0.6.199+): when a ``phase_filter`` is
+        # supplied, only run processors whose declared phase matches.
+        # ``prepare_completion`` passes ``"completeness"`` to run the
+        # semantic-done-ness gate; ``signal_completion`` passes
+        # ``"finalization"`` so completeness processors don't re-run at
+        # finalize.  ``None`` (the default) runs everything — preserves
+        # the pre-phase call shape for any caller that doesn't filter.
+        if phase_filter is not None:
+            proc_phase = getattr(proc, "phase", "finalization")
+            if proc_phase != phase_filter:
+                continue
+
         if lp.load_error is not None:
             _bucket(result, proc, lp.load_error)
             continue
@@ -433,19 +463,22 @@ def invoke_processors(
                 # full contract.
                 errors_iter: List[str] = []
                 warnings_iter: List[str] = []
+                incomplete_iter: List[str] = []
                 shape_ok = True
                 if isinstance(raw, list):
                     errors_iter = raw  # type: ignore[assignment]
                 elif isinstance(raw, dict):
                     errors_iter = raw.get("errors", []) or []
                     warnings_iter = raw.get("warnings", []) or []
+                    incomplete_iter = raw.get("incomplete", []) or []
                 else:
                     shape_ok = False
                     _bucket(result, proc, (
                         f"completion_processor {script_ref!r} validate "
                         f"returned {type(raw).__name__}; expected "
                         f"list[str] or ProcessorResult TypedDict "
-                        f"({{'errors': [...], 'warnings': [...]}})"
+                        f"({{'errors': [...], 'warnings': [...], "
+                        f"'incomplete': [...]}})"
                     ))
 
                 if shape_ok:
@@ -469,6 +502,22 @@ def invoke_processors(
                             )))
                         else:
                             result.warned.append(
+                                (proc, f"[{script_ref}] {item}")
+                            )
+                    # Incomplete path: neither fatal nor advisory — gates
+                    # is_complete during prepare_completion.  Bypasses
+                    # _bucket entirely (never escalates, never blocks);
+                    # the prepare_completion consumer reads
+                    # result.incomplete to decide is_complete.
+                    for item in incomplete_iter:
+                        if not isinstance(item, str):
+                            result.incomplete.append((proc, (
+                                f"completion_processor {script_ref!r} "
+                                f"validate returned a non-string incomplete "
+                                f"entry: {item!r}"
+                            )))
+                        else:
+                            result.incomplete.append(
                                 (proc, f"[{script_ref}] {item}")
                             )
 

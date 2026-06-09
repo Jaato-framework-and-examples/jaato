@@ -50,7 +50,7 @@ def test_processorresult_field_set():
     ``invoke_processors`` dual-shape handler (server
     ``shared/completion_processors.py``)."""
     hints = get_type_hints(ProcessorResult)
-    assert set(hints.keys()) == {"errors", "warnings"}
+    assert set(hints.keys()) == {"errors", "warnings", "incomplete"}
 
 
 def test_processorresult_accepts_populated_shape():

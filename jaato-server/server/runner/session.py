@@ -953,6 +953,7 @@ def _processors_from_envelope(
             output=entry.get("output"),
             on_error=entry.get("on_error", "fail_completion"),
             description=entry.get("description"),
+            phase=entry.get("phase", "finalization"),
         ))
     return out
 

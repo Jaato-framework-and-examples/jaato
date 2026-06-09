@@ -1090,3 +1090,179 @@ class TestToolRegistration:
         assert "prepare_completion" in approved
         assert "query_completion" in approved
         assert "signal_completion" in approved
+
+
+# ---------------------------------------------------------------------------
+# Processor-gated composite is_complete + server-side auto-finalize
+# (server 0.6.199+)
+# ---------------------------------------------------------------------------
+
+_GATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "service": {"type": "string"},
+        "extra": {"type": "string"},
+    },
+    "required": ["service"],
+}
+
+
+class _AutoFinalizeStubSession:
+    """Session double exercising the prepare→composite-is_complete→
+    auto-finalize path without the processor-loading / render-context
+    machinery (that's covered in test_completion_processors)."""
+
+    def __init__(self, schema, auto_finalize=False):
+        self._completion_payload_schema = schema
+        self._agent_id = "main"
+        self.workspace_path = None
+        self._ui_hooks = StubHooks()
+        self._completion_processors = []  # finalization block skipped
+        self._agent_params = {}
+        self._signal_completion_called = False
+        self.runtime = None
+
+        class _Prov:
+            _auto_finalize_on_complete = auto_finalize
+        self._provider = _Prov()
+
+    def get_context_usage(self):
+        return {}
+
+    def get_history(self):
+        return []
+
+
+class TestCompositeIsCompleteAndAutoFinalize:
+
+    def test_incomplete_gate_keeps_is_complete_false(self):
+        lt = LifecycleTools(_AutoFinalizeStubSession(_GATE_SCHEMA))
+        lt._run_completeness_gate = lambda payload: ["api absent for REST run"]
+        result = lt._execute_prepare_completion(
+            {"field_path": "service", "value": "billing"}
+        )
+        # Schema floor met, but the completeness gate says not done.
+        assert result["is_complete"] is False
+        assert result["still_needed"] == ["api absent for REST run"]
+
+    def test_gate_clear_makes_is_complete_true(self):
+        lt = LifecycleTools(_AutoFinalizeStubSession(_GATE_SCHEMA))
+        lt._run_completeness_gate = lambda payload: []
+        result = lt._execute_prepare_completion(
+            {"field_path": "service", "value": "billing"}
+        )
+        assert result["is_complete"] is True
+        assert "still_needed" not in result
+
+    def test_gate_not_run_until_floor_met(self):
+        # required=[service, extra]: with only `service` set, the floor
+        # is NOT met, so the completeness gate must not even be consulted.
+        schema = {
+            "type": "object",
+            "properties": {"service": {"type": "string"},
+                           "extra": {"type": "string"}},
+            "required": ["service", "extra"],
+        }
+        lt = LifecycleTools(_AutoFinalizeStubSession(schema))
+
+        def _boom(payload):
+            raise AssertionError("gate must not run before floor is met")
+        lt._run_completeness_gate = _boom
+        result = lt._execute_prepare_completion(
+            {"field_path": "service", "value": "billing"}
+        )
+        assert result["is_complete"] is False
+        assert "still_needed" not in result
+
+    def test_auto_finalize_synthesizes_when_quirk_on(self):
+        session = _AutoFinalizeStubSession(_GATE_SCHEMA, auto_finalize=True)
+        lt = LifecycleTools(session)
+        lt._run_completeness_gate = lambda payload: []
+        result = lt._execute_prepare_completion(
+            {"field_path": "service", "value": "billing"}
+        )
+        assert result["is_complete"] is True
+        assert result.get("auto_finalized") is True
+        # Server-side signal_completion fired: event emitted + flag set.
+        assert session._signal_completion_called is True
+        assert len(session._ui_hooks.calls) == 1
+        assert session._ui_hooks.calls[0]["success"] is True
+
+    def test_no_auto_finalize_when_quirk_off(self):
+        session = _AutoFinalizeStubSession(_GATE_SCHEMA, auto_finalize=False)
+        lt = LifecycleTools(session)
+        lt._run_completeness_gate = lambda payload: []
+        result = lt._execute_prepare_completion(
+            {"field_path": "service", "value": "billing"}
+        )
+        assert result["is_complete"] is True
+        assert "auto_finalized" not in result
+        assert session._signal_completion_called is False
+        assert session._ui_hooks.calls == []
+
+    def test_auto_finalize_idempotent_no_double_event(self):
+        session = _AutoFinalizeStubSession(_GATE_SCHEMA, auto_finalize=True)
+        lt = LifecycleTools(session)
+        lt._run_completeness_gate = lambda payload: []
+        lt._execute_prepare_completion(
+            {"field_path": "service", "value": "billing"}
+        )
+        # A second prepare after completion must NOT re-emit the event
+        # (idempotency guard in _execute_signal_completion).
+        lt._execute_prepare_completion(
+            {"field_path": "extra", "value": "x"}
+        )
+        assert len(session._ui_hooks.calls) == 1
+
+
+class TestFinalizationInvariantBlocksAutoFinalize:
+    """A phase:'finalization' processor's errors[] (on_error=fail_completion)
+    blocks EVERY signal_completion — including the server-side auto-
+    synthesized one — so a hard invariant (e.g. discovery_result absent)
+    cannot be bypassed by auto-finalize.  Mirrors 7:1's
+    context_discovery_present.py."""
+
+    def test_finalization_error_blocks_auto_finalize(self):
+        from shared.completion_processors import LoadedProcessor
+        from shared.plugins.subagent.config import CompletionProcessor
+
+        session = _AutoFinalizeStubSession(_GATE_SCHEMA, auto_finalize=True)
+        # Non-empty so the finalization processor block runs in
+        # _execute_signal_completion.
+        session._completion_processors = [
+            CompletionProcessor(
+                script="discovery_present.py",
+                phase="finalization",
+                on_error="fail_completion",
+            )
+        ]
+        lt = LifecycleTools(session)
+        # Completeness gate clears → composite is_complete True →
+        # auto-finalize fires → signal_completion runs finalization procs.
+        lt._run_completeness_gate = lambda payload: []
+        # Pre-load the finalization processor (skip script-file loading)
+        # — it reports a hard invariant violation.
+        lt._processors_loaded = [
+            LoadedProcessor(
+                processor=session._completion_processors[0],
+                validate_fn=lambda payload, ctx: {
+                    "errors": ["discovery_result.json absent"],
+                    "warnings": [], "incomplete": [],
+                },
+            )
+        ]
+
+        result = lt._execute_prepare_completion(
+            {"field_path": "service", "value": "billing"}
+        )
+
+        # is_complete still True (the completeness gate cleared), but the
+        # auto-finalize was REJECTED by the finalization invariant.
+        assert result["is_complete"] is True
+        assert result.get("auto_finalized") is True
+        assert "auto_finalize_rejected" in result
+        assert result["auto_finalize_rejected"]["error"] == "validation_failed"
+        # Crucially: NOT finalized — no event, flag stays False, so the
+        # turn loop does NOT terminate (model retains its turn).
+        assert session._signal_completion_called is False
+        assert session._ui_hooks.calls == []

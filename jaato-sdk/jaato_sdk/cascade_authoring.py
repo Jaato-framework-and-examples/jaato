@@ -102,10 +102,48 @@ class ProcessorResult(TypedDict, total=False):
             errors: list[str] = []
             # ... populate errors only ...
             return errors  # treated as ProcessorResult(errors=..., warnings=[])
+
+    Completeness channel (server 0.6.199+):
+        incomplete: SEMANTIC "not done yet — keep going" signals,
+            used ONLY by processors declared ``phase: "completeness"``
+            in the profile.  Such a processor runs DURING
+            ``prepare_completion`` (gated on the schema-required floor
+            being met) and its ``incomplete[]`` return gates the
+            COMPOSITE ``is_complete`` verdict:
+
+            - ``incomplete`` non-empty  → ``is_complete`` stays False;
+              the entries surface to the model as neutral "still
+              needed" guidance (like pending-field descriptors) — NOT
+              errors, NO retry penalty, NO completion block.
+            - ``incomplete`` empty/absent → no completeness objection;
+              ``is_complete`` follows the schema floor (and, when True,
+              the framework may auto-finalize — see the
+              ``auto_finalize_on_complete`` quirk).
+
+            ``incomplete`` is distinct from ``errors`` (reject + retry)
+            and ``warnings`` (advisory, never blocks).  It expresses a
+            THIRD state — "valid so far, but the downstream cascade
+            needs more before this run is genuinely complete."  On a
+            ``phase: "finalization"`` processor ``incomplete`` is
+            ignored (a completeness verdict is meaningless once the
+            agent has already chosen to finalize).
+
+    Example completeness processor::
+
+        def validate(payload, context) -> ProcessorResult:
+            incomplete: list[str] = []
+            caps = context.agent_params.get("detected_capabilities", {})
+            if caps.get("rest_surface") and not payload.get("api"):
+                incomplete.append(
+                    "api is absent but discovery detected a REST "
+                    "surface — keep setting api.endpoints[*]."
+                )
+            return {"errors": [], "warnings": [], "incomplete": incomplete}
     """
 
     errors: List[str]
     warnings: List[str]
+    incomplete: List[str]
 
 
 __all__ = ["ProcessorResult", "ToolCallEntry"]
