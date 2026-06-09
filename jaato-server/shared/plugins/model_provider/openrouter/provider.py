@@ -340,6 +340,14 @@ class OpenRouterProvider:
         # 402 "you requested up to N tokens but can only afford M" error
         # is driven by this knob, not by actual consumption).
         self._max_tokens: Optional[int] = None
+        # ``api_params.parallel_tool_calls`` — OpenAI Chat Completions
+        # request-body field forwarded verbatim to upstream.  When
+        # ``false``, OpenAI / vLLM / compatible servers return at most
+        # one tool call per response.  Closes the small-model
+        # parallel-batching failure mode (e.g. qwen3-14b via OpenRouter
+        # emitting N readFiles + signal_completion in one assistant
+        # message).  Default ``None`` ⇒ omit the field, upstream default.
+        self._parallel_tool_calls: Optional[bool] = None
 
         # Strict tool-use mode (server 0.6.118+, 2026-05-16).  When True,
         # ``tool_schema_to_openai`` emits ``"strict": True`` as a sibling
@@ -688,6 +696,10 @@ class OpenRouterProvider:
         max_tokens_extra = _knob("max_tokens", layer=api_params)
         if max_tokens_extra is not None:
             self._max_tokens = int(max_tokens_extra)
+
+        parallel_extra = _knob("parallel_tool_calls", layer=api_params)
+        if parallel_extra is not None:
+            self._parallel_tool_calls = bool(parallel_extra)
 
         # Thinking knobs — framework abstractions that translate to
         # OpenRouter's ``reasoning`` extension on the wire.  Live under
@@ -1089,6 +1101,8 @@ class OpenRouterProvider:
             kwargs["extra_body"] = {"top_k": self._top_k}
         if self._max_tokens is not None:
             kwargs["max_tokens"] = self._max_tokens
+        if self._parallel_tool_calls is not None:
+            kwargs["parallel_tool_calls"] = self._parallel_tool_calls
 
         # OpenRouter request-body extras (e.g. ``provider`` routing).  The
         # OpenAI SDK has no typed parameter for these, so we pass them

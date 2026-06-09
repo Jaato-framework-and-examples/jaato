@@ -148,6 +148,18 @@ class VLLMProvider:
         # ``TensorRTLLMProvider`` for the empirical pattern.
         self._max_tokens: Optional[int] = None
 
+        # OpenAI Chat Completions ``parallel_tool_calls`` request-body field.
+        # Per vLLM stable docs (verified 2026-06-09 via context7): when
+        # ``false``, the server returns "only zero or one tool call"
+        # regardless of whether the underlying tool-call parser
+        # (hermes / llama3_json / etc.) would otherwise emit multiple.
+        # Default ``None`` ⇒ omit the field, letting vLLM apply its own
+        # default (``true``).  Closes the small-model parallel-batching
+        # failure mode where qwen3-14b + hermes parser emits N readFiles
+        # + signal_completion in one assistant message, bypassing any
+        # persona-prose narration-between-tool-calls pattern.
+        self._parallel_tool_calls: Optional[bool] = None
+
         # Quirk: coerce_typed_tool_args (server 0.6.194+).  When set
         # via ``profile.quirks.coerce_typed_tool_args``, ``flush_tool_calls``
         # walks each emitted function call's args and, for any string
@@ -274,6 +286,14 @@ class VLLMProvider:
         max_tokens_extra = config.extra.get("max_tokens")
         if max_tokens_extra is not None:
             self._max_tokens = int(max_tokens_extra)
+
+        # ``parallel_tool_calls`` request-body field — flat key, symmetric
+        # with ``max_tokens``.  Migrates to ``api_params.parallel_tool_calls``
+        # when the namespacing backlog is addressed (per
+        # ``project_backlog_provider_config_namespacing``).
+        parallel_extra = config.extra.get("parallel_tool_calls")
+        if parallel_extra is not None:
+            self._parallel_tool_calls = bool(parallel_extra)
 
         # Read profile-declared quirks (see ``self._coerce_typed_tool_args``
         # docstring).  ``quirks`` is a dict injected by ``core.py`` /
@@ -713,6 +733,8 @@ class VLLMProvider:
             kwargs["response_format"] = {"type": "json_object"}
         if self._max_tokens is not None:
             kwargs["max_tokens"] = self._max_tokens
+        if self._parallel_tool_calls is not None:
+            kwargs["parallel_tool_calls"] = self._parallel_tool_calls
         # Path 1 quirk: forward session-supplied ``tool_choice`` to
         # vLLM only when the quirk is enabled.  vLLM 0.22 engages
         # xgrammar decoding for named-function ``tool_choice``,
