@@ -8735,6 +8735,16 @@ NOTES
             )
             return None
 
+        # Phase 0: collapse byte-identical duplicate tool-results BEFORE the
+        # before-send GC check.  This is the GC path that fires on the
+        # InstructionBudget utilisation (vs the streaming-flag-gated
+        # after-turn path), so it's the one that catches a request about to
+        # overflow the context window — dedup must run here too, or the
+        # duplicate-catalog bloat is never reclaimed before the send.
+        # Re-reads context_usage below so the GC_CHECK percent reflects the
+        # smaller wire.
+        self._dedup_history_for_gc()
+
         context_usage = self.get_context_usage()
         # Diagnostic: full denominator breakdown (sys/plugin[wire_tools]/conv)
         # so the GC_CHECK percent can be attributed to its sources and the
