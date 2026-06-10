@@ -1056,6 +1056,7 @@ class AnthropicProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         """Stateless completion: convert messages to provider format, call API, return response.
 
@@ -1083,6 +1084,17 @@ class AnthropicProvider:
             on_usage_update: Real-time token usage callback (streaming).
             on_function_call: Callback when function call detected mid-stream.
             on_thinking: Callback for extended thinking content.
+            tool_choice: Per-call lifecycle tool-choice hint (the session
+                passes it generically — see ``ModelProvider.complete``
+                contract in ``base.py``).  AnthropicProvider has no
+                ``force_tool_choice_for_lifecycle``-style wire quirk, so
+                it ACCEPTS and IGNORES this kwarg (the contract's "no-op"
+                half).  Present purely for signature parity so the
+                session can pass ``tool_choice`` to every provider
+                without per-provider branching — without it, the
+                keyword-only signature raised ``TypeError`` and broke any
+                forced-completion stage (host_validator, build_descriptor)
+                on z.ai / GLM-5, which routes through this adapter.
 
         Returns:
             A ``TurnResult`` classifying the outcome.
