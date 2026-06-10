@@ -28,6 +28,11 @@ from .tool_result_truncation import (
     cap_tool_results as _cap_tool_results_impl,
     truncate_results_to_fit as _truncate_results_to_fit_impl,
 )
+from .tool_result_builder import (
+    extract_multimodal_attachments as _extract_multimodal_attachments_impl,
+    normalize_result_dict as _normalize_result_dict_impl,
+    split_executor_result as _split_executor_result_impl,
+)
 from .instruction_budget_builder import (
     TokenCountRequest as _TokenCountRequest,
     count_tokens as _builder_count_tokens,
@@ -6502,17 +6507,13 @@ NOTES
            that provider converters send it as-is (avoiding JSON escaping of
            file content, which breaks subsequent ``updateFile`` calls).
         """
-        # Executor returns (ok, result_dict) tuple
-        if isinstance(executor_result, tuple) and len(executor_result) == 2:
-            ok, result_data = executor_result
-        else:
-            ok = True
-            result_data = executor_result
+        # Executor returns (ok, result_dict) tuple, or a bare value.
+        ok, result_data = _split_executor_result_impl(executor_result)
 
         # Check for multimodal result
         attachments: Optional[List[Attachment]] = None
         if isinstance(result_data, dict) and result_data.get('_multimodal'):
-            attachments = self._extract_multimodal_attachments(result_data)
+            attachments = _extract_multimodal_attachments_impl(result_data)
             result_data = {k: v for k, v in result_data.items()
                           if not k.startswith('_multimodal') and k not in ('image_data',)}
 
@@ -6544,42 +6545,10 @@ NOTES
                 enrichment_metadata=enrichment_metadata,
             )
 
-        # Build result dict
-        if isinstance(result_data, dict):
-            result_dict = result_data
-        else:
-            result_dict = {"result": result_data}
-
-        # Inject advisory comment from permission evaluator (ALLOW_WITH_COMMENT)
-        # before stripping internal metadata.  The comment becomes a visible
-        # field so the model sees the feedback alongside the tool result.
-        perm_meta = result_dict.get('_permission')
-        if isinstance(perm_meta, dict) and perm_meta.get('comment'):
-            result_dict['_permission_note'] = perm_meta['comment']
-
-        # Strip internal metadata keys (prefixed with '_') before sending
-        # to the model.  These carry scaffolding like _permission, _multimodal
-        # flags, etc. that are not meaningful to the model.  The
-        # _permission_note is intentionally kept (renamed below).
-        permission_note = result_dict.pop('_permission_note', None)
-        result_dict = {
-            k: v for k, v in result_dict.items()
-            if not k.startswith('_')
-        }
-        if permission_note:
-            result_dict['permission_note'] = permission_note
-
-        # For error results, extract a clean error string so provider
-        # converters don't double-wrap a dict inside {"error": str(dict)}.
-        # This ensures the model receives a readable message (e.g.,
-        # "Tool not executed. User comment: ...") rather than a repr of
-        # internal scaffolding.
-        if not ok and 'error' in result_dict:
-            error_msg = result_dict['error']
-            # If 'error' is the only remaining key, pass the string directly
-            # so converters don't JSON-encode a single-key dict.
-            if len(result_dict) == 1:
-                result_dict = error_msg
+        # Normalize the payload into the model-facing form: wrap non-dicts,
+        # surface the permission advisory note, strip internal '_' keys, and
+        # collapse single-key error dicts to a bare string.
+        result_dict = _normalize_result_dict_impl(result_data, ok=ok)
 
         # Run tool result enrichment (e.g., template extraction).
         #
@@ -6944,29 +6913,6 @@ NOTES
             '',
             self._system_instruction,
         )
-
-    def _extract_multimodal_attachments(
-        self,
-        result: Dict[str, Any]
-    ) -> Optional[List[Attachment]]:
-        """Extract multimodal attachments from a result dict."""
-        multimodal_type = result.get('_multimodal_type', 'image')
-
-        if multimodal_type == 'image':
-            image_data = result.get('image_data')
-            if not image_data:
-                return None
-
-            mime_type = result.get('mime_type', 'image/png')
-            display_name = result.get('display_name', 'image')
-
-            return [Attachment(
-                mime_type=mime_type,
-                data=image_data,
-                display_name=display_name
-            )]
-
-        return None
 
     def _accumulate_turn_tokens(
         self,
