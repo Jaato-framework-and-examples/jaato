@@ -34,7 +34,11 @@ from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, i
 from .token_accounting import TokenLedger
 from jaato_sdk.plugins.base import HelpLines, UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCRemovalItem, GCResult, GCTriggerReason
-from .plugins.gc.utils import ensure_tool_call_integrity, estimate_history_tokens
+from .plugins.gc.utils import (
+    dedup_identical_tool_results,
+    ensure_tool_call_integrity,
+    estimate_history_tokens,
+)
 from .instruction_budget import (
     InstructionBudget,
     InstructionSource,
@@ -3848,6 +3852,56 @@ NOTES
 
         return wrapped_callback
 
+    def _dedup_history_for_gc(self) -> int:
+        """Collapse byte-identical duplicate tool-results in history (GC Phase 0).
+
+        A model that re-invokes the same tool and gets the identical
+        payload back (the qwen3 ``listAvailableTemplates`` re-call
+        pathology) bloats the wire with redundant copies that GC EVICTION
+        cannot reclaim when they sit in the ``preserve_recent_turns``
+        window.  This SHRINKS each earlier duplicate's result body to a
+        marker (recency, message structure, and tool_call/tool_result
+        pairing all preserved; only exact duplicates touched — zero data
+        loss), then:
+
+        1. invalidates the per-message token cache for the shrunk
+           messages (their ``message_id`` is unchanged, so the cache would
+           otherwise return the stale pre-dedup count); and
+        2. re-syncs the CONVERSATION budget so the denominator reflects
+           the smaller wire.
+
+        Runs before the eviction phases so eviction only handles whatever
+        is still over budget.  Returns the estimated tokens reclaimed
+        (0 if nothing deduped).  No-op when ``dedup_identical_tool_results``
+        is disabled on the GC config (default enabled).
+        """
+        if not self._instruction_budget:
+            return 0
+        if not getattr(
+            self._gc_config, "dedup_identical_tool_results", True
+        ):
+            return 0
+
+        history = self.get_history()
+        new_history, chars_reclaimed, elided_ids = dedup_identical_tool_results(
+            history
+        )
+        if not elided_ids:
+            return 0
+
+        for mid in elided_ids:
+            self._msg_token_cache.pop(mid, None)
+        self._history.replace(new_history)
+        self._update_conversation_budget()
+        self._emit_instruction_budget_update()
+
+        freed_tokens = chars_reclaimed // 4
+        self._trace(
+            f"GC_DEDUP: collapsed {len(elided_ids)} duplicate tool-result "
+            f"message(s), ~{freed_tokens} tokens reclaimed"
+        )
+        return freed_tokens
+
     def _maybe_collect_after_turn(self) -> Optional[GCResult]:
         """Perform GC after turn if threshold was crossed during streaming."""
         if not self._gc_plugin or not self._gc_config:
@@ -3860,6 +3914,14 @@ NOTES
             self._budget_counting_thread.join(timeout=5.0)
             if self._budget_counting_thread.is_alive():
                 self._trace("PROACTIVE_GC: Background counting still running after 5s, proceeding with estimates")
+
+        # Phase 0: collapse byte-identical duplicate tool-results BEFORE
+        # eviction.  This reclaims redundancy that sits inside the
+        # preserve_recent_turns window (where eviction can't reach) by
+        # shrinking — not removing — the duplicates.  Run first so the
+        # context_usage / history below reflect the smaller wire and
+        # eviction only handles whatever's still over budget.
+        self._dedup_history_for_gc()
 
         context_usage = self.get_context_usage()
         history = self.get_history()
@@ -6251,6 +6313,11 @@ NOTES
             return False
 
         self._trace("CONTEXT_LIMIT_RECOVERY: Attempting GC before truncation")
+
+        # Phase 0: collapse byte-identical duplicate tool-results first
+        # (shrink, not evict) — reclaims redundancy eviction can't reach in
+        # the preserve_recent_turns window.  See _dedup_history_for_gc.
+        self._dedup_history_for_gc()
 
         context_usage = self.get_context_usage()
         history = self.get_history()
