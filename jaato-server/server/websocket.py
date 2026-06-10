@@ -71,6 +71,16 @@ from .event_sink import EventSink
 
 logger = logging.getLogger(__name__)
 
+
+def _env_flag(name: str) -> bool:
+    """Return True when env var ``name`` is set to a truthy value.
+
+    Matches the framework's standard truthy spelling (``1``/``true``/``yes``,
+    case-insensitive). Absent or any other value reads as False.
+    """
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
 # Default path for servers.json (contains TLS config)
 _SERVERS_JSON = Path.home() / ".jaato" / "servers.json"
 
@@ -367,8 +377,13 @@ class JaatoWSServer:
                 from subdirectories; each workspace has its own .env file that
                 determines the provider.
             apparmor: Enable AppArmor confinement for provisioned workspaces.
-                ``None`` (default) auto-detects availability.  ``True`` requires
-                AppArmor.  ``False`` disables confinement.
+                ``None`` (default) auto-detects: confine when available, else
+                log a WARNING and degrade to directory sandboxing.  ``True``
+                *requires* AppArmor — :meth:`start` raises rather than start
+                unconfined.  ``False`` disables confinement.  Setting
+                ``JAATO_REQUIRE_APPARMOR=1`` promotes ``None`` to ``True``;
+                combining it with ``apparmor=False`` is a contradiction that
+                :meth:`start` rejects.
             cgroups: Enable per-session cgroup v2 runtime limits.
                 ``None`` (default) auto-detects availability.  ``True`` requires
                 cgroup v2 with the configured root delegated.  ``False`` disables
@@ -434,6 +449,16 @@ class JaatoWSServer:
         # AppArmor manager for per-session confinement
         self._apparmor: Optional[AppArmorManager] = None
         self._apparmor_mode = apparmor  # None=auto, True=required, False=disabled
+
+        # Require-confinement opt-in: JAATO_REQUIRE_APPARMOR promotes the
+        # auto (None) mode to required (True), so the startup gate fails
+        # closed rather than silently degrading to directory sandboxing.
+        # An explicit --no-apparmor (False) is a direct contradiction and
+        # surfaces as a config error at start() rather than being
+        # silently overridden.
+        self._apparmor_required_env = _env_flag("JAATO_REQUIRE_APPARMOR")
+        if self._apparmor_required_env and self._apparmor_mode is None:
+            self._apparmor_mode = True
 
         # Cgroups manager for per-session runtime limits.  Sibling to
         # AppArmor — same lifecycle, same graceful degradation.
@@ -988,12 +1013,31 @@ class JaatoWSServer:
                 loop=asyncio.get_running_loop(),
             )
             if self._apparmor_mode is False:
+                if self._apparmor_required_env:
+                    # Contradiction: env requires confinement, flag disables
+                    # it. Refuse rather than guess which the operator meant.
+                    raise RuntimeError(
+                        "Contradictory AppArmor configuration: "
+                        "JAATO_REQUIRE_APPARMOR=1 requires confinement but "
+                        "--no-apparmor disables it. Resolve by unsetting one."
+                    )
                 logger.info("AppArmor confinement disabled by configuration")
                 self._apparmor = None
             elif self._apparmor_mode is True and not self._apparmor.is_available():
-                logger.warning(
-                    "AppArmor confinement required but not available — "
-                    "workspace isolation will rely on directory sandboxing only"
+                # Required-but-unavailable: fail closed. The operator
+                # explicitly opted into confinement (--apparmor or
+                # JAATO_REQUIRE_APPARMOR); starting unconfined would leave
+                # only the bypassable directory-sandbox heuristic, which is
+                # not what "required" means. Refuse to start.
+                reason = self._apparmor.unavailable_reason or "reason unknown"
+                raise RuntimeError(
+                    "AppArmor confinement required but not available "
+                    f"({reason}). Refusing to start unconfined — workspace "
+                    "isolation would rely on directory sandboxing only. "
+                    "Install/enable AppArmor (and the apparmor_parser "
+                    "sudoers rule), or drop the requirement with "
+                    "--no-apparmor / unset JAATO_REQUIRE_APPARMOR to accept "
+                    "directory-sandbox-only isolation."
                 )
             elif self._apparmor and self._apparmor.is_available():
                 logger.info("AppArmor confinement enabled")
@@ -2579,7 +2623,10 @@ async def main():
         default=None,
         action="store_true",
         dest="apparmor",
-        help="Enable AppArmor confinement (default: auto-detect)",
+        help="Require AppArmor confinement: the server refuses to start if "
+             "confinement is unavailable, rather than silently degrading to "
+             "directory-sandbox-only isolation (default: auto-detect, which "
+             "warns and degrades). Equivalent to JAATO_REQUIRE_APPARMOR=1.",
     )
     parser.add_argument(
         "--no-apparmor",

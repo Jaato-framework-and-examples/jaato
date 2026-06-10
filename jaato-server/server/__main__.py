@@ -294,7 +294,7 @@ class JaatoDaemon:
         pid_file: str = DEFAULT_PID_FILE,
         config_file: str = DEFAULT_CONFIG_FILE,
         log_file: str = DEFAULT_LOG_FILE,
-        socket_mode: int = 0o666,
+        socket_mode: int = 0o660,
         dashboard_port: Optional[int] = None,
         server_name: Optional[str] = None,
         ws_token: Optional[str] = None,
@@ -309,7 +309,8 @@ class JaatoDaemon:
             pid_file: Path to PID file for daemon mode.
             config_file: Path to config file for restart support.
             log_file: Path to log file for daemon mode.
-            socket_mode: Unix file permissions for the IPC socket (default: 0o666).
+            socket_mode: Unix file permissions for the IPC socket (default: 0o660,
+                owner and group only — the IPC transport is unauthenticated).
             dashboard_port: TCP port for the dashboard and health HTTP endpoint
                 (None to disable).
             server_name: Explicit server name for self-identification.
@@ -1685,9 +1686,12 @@ Examples:
     parser.add_argument(
         "--socket-mode",
         metavar="MODE",
-        default="666",
-        help="Unix file permissions for the IPC socket in octal (default: 666). "
-             "Use 660 to restrict to owner and group only.",
+        default="660",
+        help="Unix file permissions for the IPC socket in octal (default: 660, "
+             "owner and group only). The IPC transport is unauthenticated, so "
+             "any principal that can open the socket can fully drive the agent. "
+             "Pass 666 to opt into world-accessible (e.g. cross-user containers "
+             "on a trusted host).",
     )
     parser.add_argument(
         "--dashboard-port",
@@ -1795,7 +1799,7 @@ Examples:
         args.ipc_socket = config.get("ipc_socket")
         args.web_socket = config.get("web_socket")
         args.log_file = config.get("log_file", DEFAULT_LOG_FILE)
-        args.socket_mode = oct(config["socket_mode"])[2:] if "socket_mode" in config else "666"
+        args.socket_mode = oct(config["socket_mode"])[2:] if "socket_mode" in config else "660"
         args.dashboard_port = config.get("dashboard_port")
         args.server_name = config.get("server_name")
         # Only --ws-token-file is persisted (path, not secret). Inline

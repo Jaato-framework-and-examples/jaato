@@ -19,6 +19,32 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYP
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 from .session_history import SessionHistory
+from .gc_support import (
+    apply_gc_removal_list as _gc_apply_removal_list,
+    build_gc_span_attributes as _gc_build_span_attributes,
+    populate_gc_span_result as _gc_populate_span_result,
+)
+from .tool_result_truncation import (
+    cap_tool_results as _cap_tool_results_impl,
+    truncate_results_to_fit as _truncate_results_to_fit_impl,
+)
+from .tool_result_builder import (
+    extract_multimodal_attachments as _extract_multimodal_attachments_impl,
+    normalize_result_dict as _normalize_result_dict_impl,
+    split_executor_result as _split_executor_result_impl,
+)
+from .instruction_budget_builder import (
+    TokenCountRequest as _TokenCountRequest,
+    count_tokens as _builder_count_tokens,
+    collect_instruction_texts as _builder_collect_instruction_texts,
+    apply_instruction_counts as _builder_apply_instruction_counts,
+)
+from .session_persistence import SessionPersistence
+from .session_telemetry import (
+    classify_cache_outcome,
+    history_to_openinference,
+    response_to_openinference,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,23 +158,6 @@ class _PinnedReference:
     ref_name: str
     content: str
     pinned_at: float
-
-
-@dataclass
-class _TokenCountRequest:
-    """A pending token-count request for a single instruction text.
-
-    Used during two-phase instruction budget population: Phase 1 resolves
-    counts from cache or estimates, Phase 2 refines cache misses via
-    background ``provider.count_tokens()`` calls.
-    """
-    text: str
-    source: InstructionSource
-    child_key: str
-    gc_policy: GCPolicy
-    label: str
-    token_count: int = 0
-    is_estimate: bool = False
 
 
 @dataclass
@@ -438,9 +447,10 @@ class JaatoSession:
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
 
-        # Session persistence
-        self._session_plugin: Optional[SessionPlugin] = None
-        self._session_config: Optional[SessionConfig] = None
+        # Session persistence (plugin + config ownership and the
+        # save/restore flow live on this collaborator; the
+        # _session_plugin/_session_config properties below delegate to it)
+        self._persistence = SessionPersistence(self)
 
         # Agent type context (for permission checks)
         self._agent_type: str = "main"
@@ -2424,51 +2434,18 @@ class JaatoSession:
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
 
-        Lookup order:
-        1. ``InstructionTokenCache`` — instant, shared across sessions.
-        2. ``provider.count_tokens()`` — accurate HTTP call; result is
-           stored in the cache for future hits.
-        3. ``estimate_tokens()`` — chars/4 approximation fallback.
-
-        Args:
-            text: The text to count tokens for.
-
-        Returns:
-            Token count (actual or estimated).
+        Thin wrapper over
+        :func:`instruction_budget_builder.count_tokens` that supplies this
+        session's runtime cache, provider, and provider-name resolution.
         """
-        if not text:
-            return 0
-
-        # 1. Check instruction token cache
-        cache = self._runtime.instruction_token_cache
         provider_name = self._provider_name_override or self._runtime.provider_name
-        cached = cache.get(provider_name, text)
-        if isinstance(cached, int):
-            return cached
-
-        # 2. Try provider API
-        if self._provider and hasattr(self._provider, 'count_tokens'):
-            try:
-                result = self._provider.count_tokens(text)
-                # Ensure we got an int (handles mocked providers returning MagicMock)
-                if isinstance(result, int):
-                    cache.put(provider_name, text, result)
-                    return result
-                else:
-                    self._trace(
-                        f"count_tokens returned non-int ({type(result).__name__}), "
-                        f"falling back to estimate"
-                    )
-            except Exception as e:
-                self._trace(
-                    f"count_tokens FAILED ({type(e).__name__}: {e}), "
-                    f"falling back to estimate (text length: {len(text)} chars)"
-                )
-
-        # 3. Estimate fallback
-        est = estimate_tokens(text)
-        self._trace(f"count_tokens: using estimate={est} (from {len(text)} chars)")
-        return est
+        return _builder_count_tokens(
+            text,
+            cache=self._runtime.instruction_token_cache,
+            provider=self._provider,
+            provider_name=provider_name,
+            on_trace=self._trace,
+        )
 
     # ------------------------------------------------------------------
     # Two-phase instruction budget population
@@ -2577,159 +2554,28 @@ class JaatoSession:
     ) -> List['_TokenCountRequest']:
         """Collect all instruction texts that need token counting.
 
-        When ``system_instruction_override`` is set the wire-level system
-        message is exactly that string (or empty), regardless of what
-        the assembly pipeline produced.  In that case the budget must
-        reflect what *actually* reaches the model — we emit a single
-        ``OVERRIDE`` entry (or nothing for an empty override) instead of
-        walking BASE/CLIENT/FRAMEWORK/plugin texts that never make it to
-        the wire.  This avoids the silent lie where the budget showed
-        thousands of tokens of premium instructions while the model was
-        receiving an empty system message.
-
-        When ``system_instruction_override`` is ``None`` the assembly
-        pipeline is the authoritative source and we walk SYSTEM children
-        (base, client, framework, pinned references) plus PLUGIN
-        children (per-plugin, per-formatter) into a flat list of
-        ``_TokenCountRequest`` objects.
-
-        Args:
-            session_instructions: The user-provided system_instructions from configure().
-            system_instruction_override: When not ``None``, supplants the
-                whole assembly — see above.
-
-        Returns:
-            List of ``_TokenCountRequest`` — one per instruction text.
+        Thin wrapper over
+        :func:`instruction_budget_builder.collect_instruction_texts` that
+        supplies this session's runtime, pinned references, and preloaded
+        plugins, and records the returned deferred-plugin names onto
+        ``self._deferred_plugin_instructions`` (the side effect this
+        method has always carried). Returns just the request list, as
+        before.
         """
-        from .jaato_runtime import (
-            _TASK_COMPLETION_INSTRUCTION,
-            _PARALLEL_TOOL_GUIDANCE,
-            _TURN_SUMMARY_INSTRUCTION,
-            _is_parallel_tools_enabled,
+        requests, deferred_plugins = _builder_collect_instruction_texts(
+            self._runtime,
+            session_instructions,
+            system_instruction_override=system_instruction_override,
+            suppress_base=suppress_base,
+            pinned_references=getattr(self, '_pinned_references', {}),
+            preloaded_plugins=getattr(self, '_preloaded_plugins', set()),
         )
-
-        # Override-aware short-circuit: the wire system message is the
-        # override, period.  No need to walk the assembly pipeline (and
-        # — paired with the lazy base loader — no disk I/O fires for
-        # ``runtime.get_base_system_instructions()`` on this session).
-        if system_instruction_override is not None:
-            if system_instruction_override == "":
-                return []
-            return [_TokenCountRequest(
-                text=system_instruction_override,
-                source=InstructionSource.SYSTEM,
-                child_key=SystemChildType.OVERRIDE.value,
-                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.OVERRIDE],
-                label="Override (system_instruction_override)",
-            )]
-
-        requests: List[_TokenCountRequest] = []
-
-        # --- SYSTEM children ---
-
-        # 1. Base instructions from .jaato/instructions/ (or legacy single
-        #    file) — lazy-loaded the first time any session asks.  Skipped
-        #    entirely when suppress_base is set; other SYSTEM children
-        #    (CLIENT / FRAMEWORK / pinned refs) and PLUGIN children below
-        #    still contribute, so the agent keeps its agent-.md content
-        #    and tool instructions.
-        if not suppress_base and self._runtime:
-            base_instructions = self._runtime.get_base_system_instructions()
-        else:
-            base_instructions = None
-        if base_instructions:
-            requests.append(_TokenCountRequest(
-                text=base_instructions,
-                source=InstructionSource.SYSTEM,
-                child_key=SystemChildType.BASE.value,
-                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.BASE],
-                label="Base Instructions",
-            ))
-
-        # 2. Client-provided session instructions (programmatic)
-        if session_instructions:
-            requests.append(_TokenCountRequest(
-                text=session_instructions,
-                source=InstructionSource.SYSTEM,
-                child_key=SystemChildType.CLIENT.value,
-                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.CLIENT],
-                label="Client Instructions",
-            ))
-
-        # 3. Framework constants (concatenated into one request)
-        framework_parts = [_TASK_COMPLETION_INSTRUCTION]
-        if _is_parallel_tools_enabled():
-            framework_parts.append(_PARALLEL_TOOL_GUIDANCE)
-        framework_parts.append(_TURN_SUMMARY_INSTRUCTION)
-        framework_text = "\n\n".join(framework_parts)
-        requests.append(_TokenCountRequest(
-            text=framework_text,
-            source=InstructionSource.SYSTEM,
-            child_key=SystemChildType.FRAMEWORK.value,
-            gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
-            label="Framework",
-        ))
-
-        # 4. Pinned preselected references (content read by the model and
-        #    promoted to system instruction for GC protection)
-        for ref_id, pinned in getattr(self, '_pinned_references', {}).items():
-            child_key = f"{SystemChildType.SELECTED_REFERENCES.value}:{ref_id}"
-            requests.append(_TokenCountRequest(
-                text=pinned.content,
-                source=InstructionSource.SYSTEM,
-                child_key=child_key,
-                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.SELECTED_REFERENCES],
-                label=f"ref: {pinned.ref_name}",
-            ))
-
-        # --- PLUGIN children ---
-        # When deferred tool loading is enabled, only include system
-        # instructions from plugins that have at least one core tool.
-        # Instructions for discoverable-only plugins are deferred until
-        # the model activates one of their tools via get_tool_schemas.
-
-        from .jaato_runtime import _is_deferred_tools_enabled
-        deferred_enabled = _is_deferred_tools_enabled()
-
-        if self._runtime.registry:
-            for plugin_name in self._runtime.registry._exposed:
-                if deferred_enabled and plugin_name not in self._preloaded_plugins and not self._runtime.registry.plugin_has_core_tools(plugin_name):
-                    # Remember this plugin's instructions are deferred so we
-                    # can inject them when the model discovers its tools.
-                    # Exception: preloaded plugins always include instructions.
-                    plugin = self._runtime.registry.get_plugin(plugin_name)
-                    if plugin and hasattr(plugin, 'get_system_instructions'):
-                        instr = plugin.get_system_instructions()
-                        if instr:
-                            self._deferred_plugin_instructions.add(plugin_name)
-                    continue
-                plugin = self._runtime.registry.get_plugin(plugin_name)
-                if plugin and hasattr(plugin, 'get_system_instructions'):
-                    instr = plugin.get_system_instructions()
-                    if instr:
-                        requests.append(_TokenCountRequest(
-                            text=instr,
-                            source=InstructionSource.PLUGIN,
-                            child_key=plugin_name,
-                            gc_policy=DEFAULT_TOOL_POLICIES[PluginToolType.CORE],
-                            label=plugin_name,
-                        ))
-
-        # Formatter pipeline instructions (output rendering capabilities)
-        formatter_pipeline = getattr(self._runtime, '_formatter_pipeline', None)
-        if formatter_pipeline and hasattr(formatter_pipeline, '_formatters'):
-            for formatter in formatter_pipeline._formatters:
-                if hasattr(formatter, 'get_system_instructions'):
-                    instr = formatter.get_system_instructions()
-                    if instr:
-                        requests.append(_TokenCountRequest(
-                            text=instr,
-                            source=InstructionSource.PLUGIN,
-                            child_key=formatter.name,
-                            gc_policy=GCPolicy.PRESERVABLE,
-                            label=formatter.name,
-                        ))
-
+        # Record deferred-plugin names only when there are any — matches
+        # the original, which touched this attr solely inside the
+        # deferral branch (so minimal sessions that never defer a plugin
+        # don't require the attribute to exist).
+        if deferred_plugins:
+            self._deferred_plugin_instructions.update(deferred_plugins)
         return requests
 
     def _apply_instruction_counts(
@@ -2739,59 +2585,19 @@ class JaatoSession:
     ) -> None:
         """Build budget children and parent totals from resolved token counts.
 
-        Called once in Phase 1 (with estimates/cached values) and again after
-        Phase 2 completes (with accurate counts for previously-estimated entries).
-
-        Args:
-            requests: List of resolved ``_TokenCountRequest`` objects.
-            context_limit: Context window size for percentage logging.
+        Thin wrapper over
+        :func:`instruction_budget_builder.apply_instruction_counts` (which
+        mutates this session's budget in place) followed by the
+        budget-update emission this method has always performed. Called
+        once in Phase 1 (estimates/cached) and again after Phase 2
+        completes (accurate counts for previously-estimated entries).
         """
-        # Group by source to compute parent totals
-        source_totals: Dict[InstructionSource, int] = {}
-
-        for req in requests:
-            source_totals.setdefault(req.source, 0)
-            source_totals[req.source] += req.token_count
-
-            # Check if child already exists (Phase 2 update path)
-            parent_entry = self._instruction_budget.get_entry(req.source)
-            existing = parent_entry.children.get(req.child_key) if parent_entry else None
-            if existing is not None:
-                existing.tokens = req.token_count
-            else:
-                if req.token_count > 0:
-                    self._instruction_budget.add_child(
-                        req.source,
-                        req.child_key,
-                        req.token_count,
-                        req.gc_policy,
-                        label=req.label,
-                    )
-
-        # Update parent totals
-        for source, total in source_totals.items():
-            self._instruction_budget.update_tokens(source, total)
-
-        # ENRICHMENT and CONVERSATION start at 0
-        self._instruction_budget.update_tokens(InstructionSource.ENRICHMENT, 0)
-        self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, 0)
-
-        # Log summary
-        total_initial = sum(source_totals.values())
-        estimate_count = sum(1 for r in requests if r.is_estimate)
-        try:
-            pct = (total_initial / context_limit * 100) if context_limit else 0
-            self._trace(
-                f"BUDGET_CALC: Budget {'updated' if any(not r.is_estimate for r in requests) else 'initial'} — "
-                f"total={total_initial} tokens ({pct:.1f}% of {context_limit}), "
-                f"estimates={estimate_count}/{len(requests)}"
-            )
-        except (TypeError, ValueError):
-            self._trace(
-                f"BUDGET_CALC: Budget applied — total={total_initial} tokens, "
-                f"estimates={estimate_count}/{len(requests)}"
-            )
-
+        _builder_apply_instruction_counts(
+            self._instruction_budget,
+            requests,
+            context_limit,
+            on_trace=self._trace,
+        )
         # Emit budget update event
         self._emit_instruction_budget_update()
 
@@ -3776,7 +3582,7 @@ NOTES
                 self._maybe_collect_after_turn()
 
             # Notify session plugin
-            self._notify_session_turn_complete()
+            self._persistence.notify_turn_complete()
 
             # Notify reliability plugin of turn end
             if self._runtime.reliability_plugin:
@@ -3987,218 +3793,45 @@ NOTES
                 self._trace(f"LLM_TELEMETRY: cache attr fetch failed: {e}")
         return attrs
 
-    def _classify_cache_outcome(
-        self,
-        prompt_tokens: int,
-        cache_read_tokens: Optional[int],
-        cache_creation_tokens: Optional[int],
-    ) -> str:
-        """Classify a request's cache hit/miss outcome.
-
-        ``prompt_tokens`` is the *new* (uncached) input only — matches
-        Anthropic's ``input_tokens`` semantics, which jaato normalizes
-        other providers to (see ``model_provider/anthropic/converters.py``).
-        Total input therefore = ``cache_read_tokens + prompt_tokens``,
-        and the hit ratio is ``cache_read_tokens / total_input`` — which
-        naturally caps at 1.0.  Dividing by ``prompt_tokens`` alone
-        produces ratios above 1.0 on cache-warm turns (e.g. 36.97 from
-        26580 / 719) and misclassifies them as anomalies.
-
-        Returns:
-            "hit"   — most input tokens served from cache (>= 80%)
-            "partial" — some input tokens served from cache (10-80%)
-            "warm"  — cache was being written but not read (creation only)
-            "miss"  — no cache reads, no creation
-            "unknown" — usage data missing
-        """
-        read = cache_read_tokens or 0
-        creation = cache_creation_tokens or 0
-        new_input = prompt_tokens or 0
-        total_input = read + new_input
-        if total_input <= 0:
-            return "unknown"
-        ratio = read / total_input
-        if ratio >= 0.8:
-            return "hit"
-        if ratio >= 0.1:
-            return "partial"
-        if creation > 0:
-            return "warm"
-        return "miss"
-
-    def _populate_llm_span_outcome(
-        self,
-        llm_span: Any,
-        response: Optional['ProviderResponse'],
-    ) -> None:
-        """Populate an LLM span with cache outcome derived from the response.
-
-        Called after ``provider.complete()`` returns.  Extracts the
-        cache hit/miss classification from response.usage and sets it
-        as a span attribute.
-        """
-        if not llm_span or not response or not getattr(response, "usage", None):
-            return
-        try:
-            usage = response.usage
-            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
-            read = getattr(usage, "cache_read_tokens", None)
-            creation = getattr(usage, "cache_creation_tokens", None)
-            llm_span.set_attribute("cache.read_tokens", int(read or 0))
-            llm_span.set_attribute("cache.creation_tokens", int(creation or 0))
-            llm_span.set_attribute(
-                "cache.outcome",
-                self._classify_cache_outcome(prompt, read, creation),
-            )
-        except Exception as e:
-            self._trace(f"LLM_TELEMETRY: failed to populate cache outcome: {e}")
-
     def _build_gc_span_attributes(
         self, context_usage: Dict[str, Any], pre_collect: bool = True,
     ) -> Dict[str, Any]:
         """Build the initial attribute dict for a GC telemetry span.
 
-        Captures budget state, cache anchor (if a cache plugin is active),
-        and context usage at the moment GC is about to run.  These are
-        the "before" values; ``_populate_gc_span_result`` adds the "after"
-        values once GC completes.
-
-        Args:
-            context_usage: Output of ``get_context_usage()``.
-            pre_collect: Reserved for future divergence between pre/post
-                attribute sets.  Currently always True.
-
-        Returns:
-            Dict of OTel-friendly attributes.
+        Thin wrapper over :func:`gc_support.build_gc_span_attributes`
+        supplying this session's budget and cache plugin. ``pre_collect``
+        is reserved for future pre/post divergence (currently unused).
         """
-        attrs: Dict[str, Any] = {
-            "gc.percent_used": float(context_usage.get("percent_used", 0)),
-            "gc.tokens_total": int(context_usage.get("total_tokens", 0)),
-            "gc.context_limit": int(context_usage.get("context_limit", 0)),
-        }
-        if self._instruction_budget:
-            try:
-                attrs["gc.tokens_before"] = int(self._instruction_budget.total_tokens())
-            except Exception:
-                pass
-        # Cache anchor (if any cache plugin exposes it)
-        cache = getattr(self, "_cache_plugin", None)
-        if cache and hasattr(cache, "get_cache_anchor_message_id"):
-            try:
-                anchor = cache.get_cache_anchor_message_id()
-                if anchor:
-                    attrs["gc.cache_anchor_message_id"] = anchor
-            except Exception:
-                pass
-        return attrs
+        return _gc_build_span_attributes(
+            context_usage,
+            budget=self._instruction_budget,
+            cache_plugin=getattr(self, "_cache_plugin", None),
+        )
 
     def _populate_gc_span_result(self, gc_span: Any, result: 'GCResult') -> None:
         """Populate a GC span with attributes derived from the GC result.
 
-        Called after ``gc_plugin.collect()`` returns.  The span receives
-        per-phase counts and aggregate metrics so external observers can
-        correlate GC operations with subsequent cache hit/miss outcomes.
-
-        Args:
-            gc_span: The active OTel span (or no-op span when telemetry
-                is disabled).
-            result: The ``GCResult`` from ``gc_plugin.collect()``.
+        Thin wrapper over :func:`gc_support.populate_gc_span_result`.
         """
-        if not gc_span:
-            return
-        try:
-            gc_span.set_attribute("gc.success", bool(result.success))
-            gc_span.set_attribute("gc.items_collected", int(result.items_collected))
-            gc_span.set_attribute("gc.tokens_freed", int(result.tokens_freed))
-            gc_span.set_attribute("gc.tokens_after", int(result.tokens_after))
-            # Per-phase counts come from result.details
-            details = result.details or {}
-            for key in (
-                "ephemeral_removed",
-                "partial_removed",
-                "preservable_removed",
-                "enrichment_cleared",
-                "tokens_to_free",
-                "target_tokens",
-            ):
-                if key in details:
-                    val = details[key]
-                    # bool first to avoid being treated as int
-                    if isinstance(val, bool):
-                        gc_span.set_attribute(f"gc.{key}", val)
-                    elif isinstance(val, (int, float)):
-                        gc_span.set_attribute(f"gc.{key}", val)
-        except Exception as e:
-            self._trace(f"GC_TELEMETRY: failed to populate span attrs: {e}")
+        _gc_populate_span_result(gc_span, result, on_trace=self._trace)
 
     def _apply_gc_removal_list(
         self, result: GCResult, gc_span: Any = None,
     ) -> None:
         """Apply GC removal list to instruction budget.
 
-        This synchronizes the budget with the actual history changes made by GC.
-        Must be called after a successful GC operation.
-
-        Args:
-            result: The GCResult containing the removal_list.
-            gc_span: Optional active GC telemetry span; passed to the
-                cache plugin's ``on_gc_result`` so it can emit cache
-                invalidation events on the same span.
+        Thin wrapper over :func:`gc_support.apply_gc_removal_list`
+        supplying this session's budget, cache plugin, and trace. Must be
+        called after a successful GC operation to keep the budget in sync
+        with the history changes.
         """
-        if not self._instruction_budget or not result.removal_list:
-            return
-
-        for item in result.removal_list:
-            if item.child_key:
-                # Remove specific child entry
-                self._instruction_budget.remove_child(item.source, item.child_key)
-            else:
-                # Bulk clear entire source (e.g., ENRICHMENT)
-                entry = self._instruction_budget.get_entry(item.source)
-                if entry:
-                    entry.tokens = 0
-                    entry.children.clear()
-
-        # If summary was created (summarize/hybrid plugins), add summary entry
-        summary_tokens = result.details.get("summary_tokens")
-        if summary_tokens and summary_tokens > 0:
-            # Find or create a unique summary key
-            conv_entry = self._instruction_budget.get_entry(InstructionSource.CONVERSATION)
-            if conv_entry:
-                # Count existing summaries to generate unique key
-                summary_count = sum(
-                    1 for key in conv_entry.children.keys()
-                    if key.startswith("gc_summary_")
-                )
-                summary_key = f"gc_summary_{summary_count + 1}"
-                self._instruction_budget.add_child(
-                    source=InstructionSource.CONVERSATION,
-                    child_key=summary_key,
-                    tokens=summary_tokens,
-                    gc_policy=GCPolicy.PRESERVABLE,
-                    label=f"Context Summary #{summary_count + 1}",
-                    metadata={"created_by": result.plugin_name},
-                )
-
-        self._trace(
-            f"GC_BUDGET_SYNC: Applied {len(result.removal_list)} removals to budget"
+        _gc_apply_removal_list(
+            result,
+            budget=self._instruction_budget,
+            cache_plugin=getattr(self, '_cache_plugin', None),
+            on_trace=self._trace,
+            gc_span=gc_span,
         )
-
-        # Notify cache plugin about GC so it can track prefix invalidation.
-        # The cache plugin may emit a 'cache.prefix_invalidated' event on
-        # the active gc_span (when provided) so the GC↔cache coordination
-        # is visible in the trace.
-        _cache = getattr(self, '_cache_plugin', None)
-        if _cache and hasattr(_cache, 'on_gc_result'):
-            try:
-                # Try the span-aware signature first; fall back to legacy
-                # call if the cache plugin only accepts the result.
-                try:
-                    _cache.on_gc_result(result, gc_span=gc_span)
-                except TypeError:
-                    _cache.on_gc_result(result)
-            except Exception as e:
-                self._trace(f"CACHE_PLUGIN: on_gc_result failed: {e}")
 
     def _enrich_and_clean_prompt(self, prompt: str, turn_span=None) -> str:
         """Run prompt through enrichment pipeline and strip @references.
@@ -6468,258 +6101,34 @@ NOTES
                 # Hit a non-tool message, stop
                 break
 
-    _TRUNCATION_PRESERVE_LINES = 20  # Lines to keep from the start of truncated results
-    _TRUNCATION_PRESERVE_CHARS = 2000  # Minimum characters to keep when using char-based truncation
-    _TRUNCATION_NOTICE = (
-        "\n\n[NOTICE: This tool result was automatically truncated because it caused "
-        "the prompt to exceed the model's context window. Only the first {kept} "
-        "of {total} are shown above ({removed_tokens} estimated tokens removed). "
-        "If you need more content, re-invoke the tool with offset/limit parameters "
-        "to read in smaller chunks.]"
-    )
-
-    # Target 80% of context limit to leave headroom after truncation
-    _TRUNCATION_TARGET_PERCENT = 0.80
-
     def _truncate_results_to_fit(
         self, tool_results: List[ToolResult], current_tokens: int, limit_tokens: int
     ) -> List[ToolResult]:
-        """Truncate tool results to reduce token count, preserving first lines.
+        """Truncate tool results to reduce token count (reactive recovery).
 
-        Strategy:
-        - Targets 80% of the model's context limit to leave headroom.
-        - Targets the largest results first (they are the most likely culprits).
-        - Preserves the first N lines of content so the model retains useful context.
-        - Appends a notice informing the model about the truncation.
-        - Never removes the tool result itself (models expect one response per call).
-        - Continues truncating multiple tool results until target is reached.
-
-        Args:
-            tool_results: The original tool results.
-            current_tokens: Current total tokens as reported by the model error.
-            limit_tokens: Maximum allowed tokens as reported by the model error.
-
-        Returns:
-            A new list of tool results with large ones truncated.
+        Thin wrapper over
+        :func:`tool_result_truncation.truncate_results_to_fit`.
         """
-        # Estimate size of each result
-        result_sizes = []
-        for i, tr in enumerate(tool_results):
-            result_str = str(tr.result) if tr.result is not None else ""
-            estimated_tokens = len(result_str) / 4  # ~4 chars per token
-            result_sizes.append((i, estimated_tokens, result_str))
-
-        total_result_tokens = sum(size for _, size, _ in result_sizes)
-
-        # Calculate target: reduce to 80% of limit to leave headroom
-        # target_removal = how many tokens we need to remove from current
-        target_context = int(limit_tokens * self._TRUNCATION_TARGET_PERCENT)
-        target_removal = current_tokens - target_context
-
-        self._trace(
-            f"CONTEXT_LIMIT_RECOVERY: truncate called with current={current_tokens}, "
-            f"limit={limit_tokens}, target_context={target_context} (80%), "
-            f"target_removal={target_removal}, total_result_tokens={total_result_tokens}, "
-            f"num_results={len(tool_results)}"
+        return _truncate_results_to_fit_impl(
+            tool_results, current_tokens, limit_tokens, on_trace=self._trace,
         )
-
-        # If we couldn't extract valid token counts, be aggressive: cut 50% of results
-        if target_removal <= 0:
-            target_removal = int(total_result_tokens * 0.5)
-            self._trace(f"CONTEXT_LIMIT_RECOVERY: using aggressive default target_removal={target_removal}")
-
-        # Sort indices by size descending to truncate largest first
-        sized_indices = sorted(
-            range(len(result_sizes)),
-            key=lambda j: result_sizes[j][1],
-            reverse=True,
-        )
-
-        truncated = list(tool_results)  # shallow copy
-        tokens_removed = 0.0
-        preserve_lines = self._TRUNCATION_PRESERVE_LINES
-
-        for j in sized_indices:
-            if tokens_removed >= target_removal:
-                break
-
-            idx, size, result_str = result_sizes[j]
-            tr = tool_results[idx]
-
-            # Skip small results (< 200 tokens estimated) — not worth truncating
-            if size < 200:
-                self._trace(f"CONTEXT_LIMIT_RECOVERY: skipping result {idx} (size={size} < 200)")
-                continue
-
-            # Split into lines and try line-based truncation first
-            lines = result_str.split('\n')
-
-            # Calculate how much content to keep (in characters)
-            # Keep enough to preserve context but remove overflow + safety margin
-            chars_to_remove = int(target_removal * 4)  # tokens -> chars
-            chars_to_keep = max(2000, len(result_str) - chars_to_remove)  # Keep at least 2000 chars
-
-            if len(lines) > preserve_lines:
-                # Line-based truncation: keep first N lines
-                kept_lines = lines[:preserve_lines]
-                kept_text = '\n'.join(kept_lines)
-                truncation_unit = "lines"
-                truncation_kept = preserve_lines
-                truncation_total = len(lines)
-            elif len(result_str) > chars_to_keep:
-                # Character-based truncation: content has few lines but is large
-                # Keep first chars_to_keep characters
-                kept_text = result_str[:chars_to_keep]
-                # Try to break at a word boundary
-                last_space = kept_text.rfind(' ', max(0, chars_to_keep - 200))
-                if last_space > chars_to_keep // 2:
-                    kept_text = kept_text[:last_space]
-                truncation_unit = "characters"
-                truncation_kept = len(kept_text)
-                truncation_total = len(result_str)
-                self._trace(
-                    f"CONTEXT_LIMIT_RECOVERY: using char-based truncation for result {idx} "
-                    f"(lines={len(lines)}, chars={len(result_str)} -> {len(kept_text)})"
-                )
-            else:
-                self._trace(
-                    f"CONTEXT_LIMIT_RECOVERY: skipping result {idx} "
-                    f"(lines={len(lines)}, chars={len(result_str)} — already small enough)"
-                )
-                continue
-
-            kept_tokens = len(kept_text) / 4
-            removed_tokens = size - kept_tokens
-
-            if removed_tokens <= 0:
-                continue
-
-            # Build the truncated content with notice
-            notice = self._TRUNCATION_NOTICE.format(
-                kept=f"{truncation_kept} {truncation_unit}",
-                total=f"{truncation_total} {truncation_unit}",
-                removed_tokens=f"{int(removed_tokens):,}",
-            )
-            truncated_content = kept_text + notice
-
-            truncated[idx] = ToolResult(
-                call_id=tr.call_id,
-                name=tr.name,
-                result=truncated_content,
-                is_error=tr.is_error,
-                attachments=None,  # Drop attachments to reduce size
-            )
-            tokens_removed += removed_tokens
-
-        return truncated
 
     def _cap_tool_results(self, tool_results: List[ToolResult]) -> List[ToolResult]:
         """Proactively cap tool results before they enter history.
 
-        Estimates the aggregate token size of all results and, if they
-        would push the context beyond 80% of the model's limit, truncates
-        the largest results with a hard character cap.
-
-        Uses a direct cap approach (not the removal-based math in
-        ``_truncate_results_to_fit()``) because a single oversized result
-        can be many times larger than the entire context window — the
-        removal formula underflows in that case.
-
-        Args:
-            tool_results: The tool results about to be appended to history.
-
-        Returns:
-            The original list (unchanged) if results fit, or a new list
-            with large results truncated.
+        Thin wrapper over :func:`tool_result_truncation.cap_tool_results`
+        supplying the budget-derived context limit and current total. No-op
+        when no budget (or an unknown context limit) is configured.
         """
         budget = self._instruction_budget
         if not budget or budget.context_limit == 0:
             return tool_results
-
-        # Estimate per-result sizes
-        result_sizes = []
-        total_result_tokens = 0
-        for tr in tool_results:
-            result_str = str(tr.result) if tr.result is not None else ""
-            tokens = len(result_str) / 4  # ~4 chars per token
-            result_sizes.append((tr, result_str, tokens))
-            total_result_tokens += tokens
-
-        # Cap: available space to reach 80% of context limit
-        target = int(budget.context_limit * self._TRUNCATION_TARGET_PERCENT)
-        cap_tokens = max(0, target - budget.total_tokens())
-
-        if total_result_tokens <= cap_tokens:
-            self._trace(
-                f"PROACTIVE_CAP: result_tokens={int(total_result_tokens)}, "
-                f"cap_tokens={int(cap_tokens)}, action=passed"
-            )
-            return tool_results
-
-        self._trace(
-            f"PROACTIVE_CAP: result_tokens={int(total_result_tokens)}, "
-            f"cap_tokens={int(cap_tokens)}, action=truncating"
+        return _cap_tool_results_impl(
+            tool_results,
+            context_limit=budget.context_limit,
+            current_total_tokens=budget.total_tokens(),
+            on_trace=self._trace,
         )
-
-        # Hard cap: each result gets at most cap_tokens (divided equally
-        # if multiple, but in practice one result dominates).
-        n_results = len(tool_results)
-        per_result_cap_tokens = max(
-            self._TRUNCATION_PRESERVE_CHARS // 4,
-            cap_tokens // max(1, n_results),
-        )
-        per_result_cap_chars = int(per_result_cap_tokens * 4)
-
-        truncated = []
-        for tr, result_str, tokens in result_sizes:
-            if tokens <= per_result_cap_tokens:
-                truncated.append(tr)
-                continue
-
-            # Truncate to hard character cap
-            kept_text = result_str[:per_result_cap_chars]
-
-            # Try to break at a word or line boundary
-            last_newline = kept_text.rfind('\n', max(0, per_result_cap_chars - 500))
-            if last_newline > per_result_cap_chars // 2:
-                kept_text = kept_text[:last_newline]
-            else:
-                last_space = kept_text.rfind(' ', max(0, per_result_cap_chars - 200))
-                if last_space > per_result_cap_chars // 2:
-                    kept_text = kept_text[:last_space]
-
-            # Determine units for the notice
-            original_lines = result_str.count('\n') + 1
-            kept_lines = kept_text.count('\n') + 1
-            if original_lines > 1:
-                unit_kept = f"{kept_lines} lines"
-                unit_total = f"{original_lines} lines"
-            else:
-                unit_kept = f"{len(kept_text):,} characters"
-                unit_total = f"{len(result_str):,} characters"
-
-            removed_tokens = int(tokens - len(kept_text) / 4)
-            notice = self._TRUNCATION_NOTICE.format(
-                kept=unit_kept,
-                total=unit_total,
-                removed_tokens=f"{removed_tokens:,}",
-            )
-
-            self._trace(
-                f"PROACTIVE_CAP: truncated result '{tr.name}' from "
-                f"{int(tokens)} to {int(len(kept_text)/4)} tokens "
-                f"(cap={per_result_cap_tokens})"
-            )
-
-            truncated.append(ToolResult(
-                call_id=tr.call_id,
-                name=tr.name,
-                result=kept_text + notice,
-                is_error=tr.is_error,
-                attachments=None,  # Drop attachments to reduce size
-            ))
-
-        return truncated
 
     def _sync_budget_after_truncation(
         self,
@@ -7098,17 +6507,13 @@ NOTES
            that provider converters send it as-is (avoiding JSON escaping of
            file content, which breaks subsequent ``updateFile`` calls).
         """
-        # Executor returns (ok, result_dict) tuple
-        if isinstance(executor_result, tuple) and len(executor_result) == 2:
-            ok, result_data = executor_result
-        else:
-            ok = True
-            result_data = executor_result
+        # Executor returns (ok, result_dict) tuple, or a bare value.
+        ok, result_data = _split_executor_result_impl(executor_result)
 
         # Check for multimodal result
         attachments: Optional[List[Attachment]] = None
         if isinstance(result_data, dict) and result_data.get('_multimodal'):
-            attachments = self._extract_multimodal_attachments(result_data)
+            attachments = _extract_multimodal_attachments_impl(result_data)
             result_data = {k: v for k, v in result_data.items()
                           if not k.startswith('_multimodal') and k not in ('image_data',)}
 
@@ -7140,42 +6545,10 @@ NOTES
                 enrichment_metadata=enrichment_metadata,
             )
 
-        # Build result dict
-        if isinstance(result_data, dict):
-            result_dict = result_data
-        else:
-            result_dict = {"result": result_data}
-
-        # Inject advisory comment from permission evaluator (ALLOW_WITH_COMMENT)
-        # before stripping internal metadata.  The comment becomes a visible
-        # field so the model sees the feedback alongside the tool result.
-        perm_meta = result_dict.get('_permission')
-        if isinstance(perm_meta, dict) and perm_meta.get('comment'):
-            result_dict['_permission_note'] = perm_meta['comment']
-
-        # Strip internal metadata keys (prefixed with '_') before sending
-        # to the model.  These carry scaffolding like _permission, _multimodal
-        # flags, etc. that are not meaningful to the model.  The
-        # _permission_note is intentionally kept (renamed below).
-        permission_note = result_dict.pop('_permission_note', None)
-        result_dict = {
-            k: v for k, v in result_dict.items()
-            if not k.startswith('_')
-        }
-        if permission_note:
-            result_dict['permission_note'] = permission_note
-
-        # For error results, extract a clean error string so provider
-        # converters don't double-wrap a dict inside {"error": str(dict)}.
-        # This ensures the model receives a readable message (e.g.,
-        # "Tool not executed. User comment: ...") rather than a repr of
-        # internal scaffolding.
-        if not ok and 'error' in result_dict:
-            error_msg = result_dict['error']
-            # If 'error' is the only remaining key, pass the string directly
-            # so converters don't JSON-encode a single-key dict.
-            if len(result_dict) == 1:
-                result_dict = error_msg
+        # Normalize the payload into the model-facing form: wrap non-dicts,
+        # surface the permission advisory note, strip internal '_' keys, and
+        # collapse single-key error dicts to a bare string.
+        result_dict = _normalize_result_dict_impl(result_data, ok=ok)
 
         # Run tool result enrichment (e.g., template extraction).
         #
@@ -7541,29 +6914,6 @@ NOTES
             self._system_instruction,
         )
 
-    def _extract_multimodal_attachments(
-        self,
-        result: Dict[str, Any]
-    ) -> Optional[List[Attachment]]:
-        """Extract multimodal attachments from a result dict."""
-        multimodal_type = result.get('_multimodal_type', 'image')
-
-        if multimodal_type == 'image':
-            image_data = result.get('image_data')
-            if not image_data:
-                return None
-
-            mime_type = result.get('mime_type', 'image/png')
-            display_name = result.get('display_name', 'image')
-
-            return [Attachment(
-                mime_type=mime_type,
-                data=image_data,
-                display_name=display_name
-            )]
-
-        return None
-
     def _accumulate_turn_tokens(
         self,
         response: ProviderResponse,
@@ -7660,7 +7010,7 @@ NOTES
             )
 
         # Record output messages (OpenInference indexed attributes)
-        output_msgs = self._response_to_openinference(response)
+        output_msgs = response_to_openinference(response)
         if output_msgs:
             span.set_output_messages(output_msgs)
 
@@ -7683,7 +7033,7 @@ NOTES
         # so external observers can correlate cache behavior with the
         # GC ↔ cache coordination dance.
         try:
-            outcome = self._classify_cache_outcome(
+            outcome = classify_cache_outcome(
                 int(usage.prompt_tokens or 0),
                 usage.cache_read_tokens,
                 usage.cache_creation_tokens,
@@ -7712,79 +7062,9 @@ NOTES
         Args:
             span: The LLM span context to set attributes on.
         """
-        input_msgs = self._history_to_openinference()
+        input_msgs = history_to_openinference(self._history.messages)
         if input_msgs:
             span.set_input_messages(input_msgs)
-
-    @staticmethod
-    def _response_to_openinference(response: ProviderResponse) -> List[Dict[str, Any]]:
-        """Convert a ProviderResponse to OpenInference output message dicts.
-
-        Returns a list with a single assistant message containing text content
-        and any tool calls from the response parts.
-
-        Args:
-            response: The provider response to convert.
-
-        Returns:
-            List of message dicts with 'role', 'content', and optional
-            'tool_calls' suitable for ``span.set_output_messages()``.
-        """
-        text = response.get_text()
-        function_calls = response.get_function_calls()
-
-        if not text and not function_calls:
-            return []
-
-        msg: Dict[str, Any] = {"role": "assistant", "content": text or ""}
-        if function_calls:
-            msg["tool_calls"] = [
-                {
-                    "name": fc.name,
-                    "arguments": json.dumps(fc.args) if fc.args else "{}",
-                }
-                for fc in function_calls
-            ]
-        return [msg]
-
-    def _history_to_openinference(self) -> List[Dict[str, Any]]:
-        """Convert the current session history to OpenInference input message dicts.
-
-        Maps jaato ``Message`` objects to the dict format expected by
-        ``span.set_input_messages()``: each dict has 'role' and 'content'.
-
-        Returns:
-            List of message dicts suitable for ``span.set_input_messages()``.
-        """
-        result = []
-        for msg in self._history.messages:
-            # Map jaato roles to OpenInference roles
-            role = msg.role.value  # "user", "model", "tool"
-            if role == "model":
-                role = "assistant"
-
-            # Extract text content from parts
-            texts = [p.text for p in msg.parts if p.text]
-            content = "".join(texts) if texts else ""
-
-            entry: Dict[str, Any] = {"role": role, "content": content}
-
-            # Include tool calls from model messages
-            if msg.role == Role.MODEL:
-                tool_calls = [
-                    {
-                        "name": p.function_call.name,
-                        "arguments": json.dumps(p.function_call.args)
-                            if p.function_call.args else "{}",
-                    }
-                    for p in msg.parts
-                    if p.function_call
-                ]
-                if tool_calls:
-                    entry["tool_calls"] = tool_calls
-
-            result.append(entry)
-        return result
 
     def get_history(self) -> List[Message]:
         """Get current conversation history.
@@ -8967,6 +8247,22 @@ NOTES
         return False
 
     # ==================== Session Persistence ====================
+    # The plugin/config and the save/restore flow live on the
+    # ``SessionPersistence`` collaborator (``self._persistence``).  These
+    # methods are thin delegations; the properties below keep
+    # ``_session_plugin`` / ``_session_config`` readable for the handful
+    # of external/internal readers that reach for them directly
+    # (jaato_client, refresh_tools, revert).
+
+    @property
+    def _session_plugin(self) -> Optional[SessionPlugin]:
+        """The attached session plugin, or None (owned by _persistence)."""
+        return self._persistence.plugin
+
+    @property
+    def _session_config(self) -> Optional[SessionConfig]:
+        """The session config paired with the plugin (owned by _persistence)."""
+        return self._persistence.config
 
     def set_session_plugin(
         self,
@@ -8974,38 +8270,11 @@ NOTES
         config: Optional[SessionConfig] = None
     ) -> None:
         """Set the session plugin for persistence."""
-        self._session_plugin = plugin
-        self._session_config = config or SessionConfig()
-
-        if hasattr(plugin, 'set_session'):
-            plugin.set_session(self)
-
-        if hasattr(plugin, 'get_user_commands'):
-            for cmd in plugin.get_user_commands():
-                self._user_commands[cmd.name] = cmd
-
-        if hasattr(plugin, 'get_executors') and self._executor:
-            for name, fn in plugin.get_executors().items():
-                self._executor.register(name, fn)
-
-        if hasattr(plugin, 'get_tool_schemas'):
-            session_schemas = plugin.get_tool_schemas()
-            if session_schemas:
-                current_tools = list(self._tools) if self._tools else []
-                current_tools.extend(session_schemas)
-                self._tools = current_tools
-
-        if self._session_config.auto_resume_last:
-            state = self._session_plugin.on_session_start(self._session_config)
-            if state:
-                self._restore_session_state(state)
+        self._persistence.set_plugin(plugin, config)
 
     def remove_session_plugin(self) -> None:
         """Remove the session plugin."""
-        if self._session_plugin:
-            self._session_plugin.shutdown()
-        self._session_plugin = None
-        self._session_config = None
+        self._persistence.remove_plugin()
 
     def save_session(
         self,
@@ -9013,112 +8282,31 @@ NOTES
         user_inputs: Optional[List[str]] = None
     ) -> str:
         """Save the current session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-
-        state = self._get_session_state(session_id, user_inputs)
-        self._session_plugin.save(state)
-
-        if hasattr(self._session_plugin, 'set_current_session_id'):
-            self._session_plugin.set_current_session_id(state.session_id)
-
-        return state.session_id
+        return self._persistence.save(session_id, user_inputs)
 
     def resume_session(self, session_id: str) -> SessionState:
         """Resume a previously saved session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-
-        state = self._session_plugin.load(session_id)
-        self._restore_session_state(state)
-        return state
+        return self._persistence.resume(session_id)
 
     def list_sessions(self) -> List[SessionInfo]:
         """List all available sessions."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-        return self._session_plugin.list_sessions()
+        return self._persistence.list()
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a saved session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-        return self._session_plugin.delete(session_id)
+        return self._persistence.delete(session_id)
 
     def _get_session_state(
         self,
         session_id: Optional[str] = None,
         user_inputs: Optional[List[str]] = None
     ) -> SessionState:
-        """Build a SessionState from current state."""
-        if not session_id:
-            if (self._session_plugin and
-                    hasattr(self._session_plugin, 'get_current_session_id')):
-                session_id = self._session_plugin.get_current_session_id()
-            if not session_id:
-                session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        now = datetime.now()
-        turn_accounting = self.get_turn_accounting()
-
-        description = None
-        if self._session_plugin and hasattr(self._session_plugin, '_session_description'):
-            description = self._session_plugin._session_description
-
-        # Snapshot session-attached state at save time.  Invokes every
-        # registered provider so the snapshot reflects live values
-        # (extension-owned incrementally-mutated structures stay
-        # correct without push-on-every-mutation).  Empty dict
-        # collapses to None so old persistence files round-trip
-        # unchanged when nothing has been attached.
-        attached_state = self.get_all_session_state()
-        # ``profile_name`` not threaded through this construction path
-        # — this branch fires on the runner-side standalone-client
-        # save flow where the profile binding lives on the daemon-side
-        # JaatoServer, not the runner-side JaatoSession.  SessionManager's
-        # save path (which has access to ``server._profile.name``)
-        # populates it correctly.  This path stays None; backward-
-        # compat path for non-SessionManager-managed sessions.
-        return SessionState(
-            session_id=session_id,
-            history=self.get_history(),
-            created_at=now,
-            updated_at=now,
-            turn_count=len(turn_accounting),
-            turn_accounting=turn_accounting,
-            user_inputs=user_inputs or [],
-            description=description,
-            session_state=attached_state if attached_state else None,
-        )
+        """Build a SessionState snapshot (delegates to _persistence)."""
+        return self._persistence.build_state(session_id, user_inputs)
 
     def _restore_session_state(self, state: SessionState) -> None:
-        """Restore session state from a SessionState."""
-        self.reset_session(state.history)
-        self._turn_accounting = list(state.turn_accounting)
-        # Re-attach session-state values from the persisted snapshot.
-        # Routes through set_session_state so the JSON-serialisability
-        # check fires (defensive: persisted state should already be
-        # serialisable, but a corrupted file shouldn't silently
-        # inject a non-JSON value into the live container).
-        # Consumer hooks fire via the normal session-creation path
-        # (when the persisted session is loaded by SessionManager) and
-        # can re-register providers / instantiate runtime structures
-        # from the restored values.
-        if state.session_state:
-            for key, value in state.session_state.items():
-                self.set_session_state(key, value)
-
-    def _notify_session_turn_complete(self) -> None:
-        """Notify session plugin that a turn completed."""
-        if not self._session_plugin or not self._session_config:
-            return
-
-        state = self._get_session_state()
-
-        if hasattr(self._session_plugin, 'increment_turn_count'):
-            self._session_plugin.increment_turn_count()
-
-        self._session_plugin.on_turn_complete(state, self._session_config)
+        """Restore session state from a SessionState (delegates to _persistence)."""
+        self._persistence.restore_state(state)
 
     # ------------------------------------------------------------------
     # Conversation fork
@@ -9442,9 +8630,7 @@ NOTES
 
     def close_session(self) -> None:
         """Close the current session."""
-        if self._session_plugin and self._session_config:
-            state = self._get_session_state()
-            self._session_plugin.on_session_end(state, self._session_config)
+        self._persistence.close()
 
 
 __all__ = ['JaatoSession']

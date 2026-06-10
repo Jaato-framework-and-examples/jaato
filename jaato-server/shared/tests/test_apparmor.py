@@ -69,6 +69,32 @@ class TestAvailability:
         manager._available = False
         assert manager.is_available() is False
 
+    def test_unavailable_reason_records_failing_precondition(self, manager):
+        """unavailable_reason names the specific precondition that failed."""
+        with patch("server.apparmor.platform.system", return_value="Darwin"):
+            manager._available = None
+            assert manager.is_available() is False
+            assert manager.unavailable_reason is not None
+            assert "Linux" in manager.unavailable_reason
+
+    def test_unavailable_reason_for_missing_parser(self, manager):
+        with patch("server.apparmor.platform.system", return_value="Linux"), \
+             patch("server.apparmor.shutil.which", return_value=None):
+            manager._available = None
+            assert manager.is_available() is False
+            assert "apparmor_parser" in (manager.unavailable_reason or "")
+
+    def test_is_available_logs_warning_when_unavailable(self, manager, caplog):
+        """Degradation is logged at WARNING (visible), not INFO/silent."""
+        with patch("server.apparmor.platform.system", return_value="Darwin"):
+            manager._available = None
+            with caplog.at_level("WARNING", logger="server.apparmor"):
+                assert manager.is_available() is False
+            assert any(
+                "NOT available" in r.message and r.levelname == "WARNING"
+                for r in caplog.records
+            )
+
 
 class TestProfileName:
     def test_profile_name_format(self, manager):
