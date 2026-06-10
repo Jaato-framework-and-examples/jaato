@@ -42,6 +42,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -64,7 +65,6 @@ from ..nim.converters import (
     tool_schemas_to_openai,
 )
 from .env import (
-    DEFAULT_CONTEXT_LENGTH,
     DEFAULT_HOST,
     resolve_api_token,
     resolve_context_length,
@@ -368,14 +368,26 @@ class LMStudioProvider:
         if self._load_config is not None:
             self._load_model(model, self._load_config)
 
-        # Discover the actual live context window from a loaded instance.
+        # Tier-1 auto-detect: discover the live context window.
         # max_context_length on the model entry is the model's hard upper
         # bound; the live instance config carries what the user (or our
         # /load call) actually configured — these can differ by 100s of K
         # for long-context models.  Falls back to max_context_length when
-        # no instance is loaded (passive-mode pre-warm) and ultimately to
-        # DEFAULT_CONTEXT_LENGTH.
+        # no instance is loaded (passive-mode pre-warm).
         self._refresh_discovered_context(model)
+
+        # Fail-fast (no hardcoded fallback): the window must resolve from
+        # the discovered /api/v0/models max_context_length (tier-1) or an
+        # explicit context_length override (tier-2/3).
+        if not self._discovered_context_length and not self._context_length_override:
+            raise ValueError(
+                "LM Studio provider: context_length could not be resolved.  "
+                "GET /api/v0/models did not report max_context_length (and no "
+                "instance is loaded), and no manual override is set.  Set "
+                "plugin_configs.lmstudio.context_length in the profile, or "
+                "LMSTUDIO_CONTEXT_LENGTH in the environment.  No hardcoded "
+                "fallback exists per the project's no-fallback rule."
+            )
 
         logger.info(
             "Connected to LM Studio model: %s (context=%d, load_applied=%s)",
@@ -523,8 +535,9 @@ class LMStudioProvider:
            target model — the *actual* configured context.
         2. The model entry's ``max_context_length`` — the model's hard
            upper bound, used when no instance is loaded yet.
-        3. Leave ``_discovered_context_length`` unset; ``get_context_limit``
-           falls back to ``DEFAULT_CONTEXT_LENGTH``.
+        3. Leave ``_discovered_context_length`` unset; ``connect`` then
+           falls back to the manual ``context_length`` override, or
+           fails fast if none is set (no hardcoded default).
         """
         for entry in self._fetch_v1_models():
             if entry.get("key") != model:
@@ -839,16 +852,18 @@ class LMStudioProvider:
     def get_context_limit(self) -> int:
         """Return the context window size for the currently connected model.
 
-        Priority:
-            1. Explicit ``context_length`` override from profile/env
-            2. ``max_context_length`` discovered from ``/api/v0/models``
-            3. Conservative default (8192)
+        Precedence (auto-detect PRIMARY — see ``resolve_context_window``):
+            1. ``max_context_length`` discovered from ``/api/v0/models``
+               at connect() (the server's source of truth)
+            2. explicit ``context_length`` override from profile / env
+            3. 0 ("unknown") — connect() raises if nothing resolves, so a
+               connected provider always reports a real window (no
+               hardcoded default).
         """
-        if self._context_length_override:
-            return self._context_length_override
-        if self._discovered_context_length:
-            return self._discovered_context_length
-        return DEFAULT_CONTEXT_LENGTH
+        return resolve_context_window(
+            detect_capacity=lambda: self._discovered_context_length,
+            profile_value=self._context_length_override,
+        ) or 0
 
     def get_token_usage(self) -> TokenUsage:
         """Token usage from the most recent completion."""

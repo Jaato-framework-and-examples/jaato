@@ -31,9 +31,6 @@ HEADER_APP_CATEGORIES = "X-OpenRouter-Categories"
 # Default OpenRouter endpoint.  The same key works for all upstream models.
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Default context window when the model catalog doesn't report one.
-DEFAULT_CONTEXT_LENGTH = 32768
-
 # Default attribution headers — OpenRouter uses these for app rankings
 # when an integrator opts in.  Users can override via env vars.
 DEFAULT_HTTP_REFERER = "https://github.com/Jaato-framework-and-examples/jaato"
@@ -74,15 +71,21 @@ def resolve_model() -> Optional[str]:
     return os.environ.get(ENV_OPENROUTER_MODEL)
 
 
-def resolve_context_length() -> int:
-    """Resolve the context window override from env, falling back to default."""
+def resolve_context_length() -> Optional[int]:
+    """Resolve the manual context-window override from env, or ``None``.
+
+    Returns ``None`` when unset — the provider auto-detects the per-model
+    context length from the OpenRouter catalog (tier-1); this env var is
+    only a fallback (no hardcoded default per the project's no-fallback
+    rule).
+    """
     value = os.environ.get(ENV_OPENROUTER_CONTEXT_LENGTH)
     if value:
         try:
             return int(value)
         except ValueError:
             pass
-    return DEFAULT_CONTEXT_LENGTH
+    return None
 
 
 def resolve_http_referer() -> str:

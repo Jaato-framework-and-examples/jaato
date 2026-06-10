@@ -67,6 +67,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -99,7 +100,6 @@ from .converters import (
 )
 from .env import (
     DEFAULT_BASE_URL,
-    DEFAULT_CONTEXT_LENGTH,
     HEADER_APP_CATEGORIES,
     HEADER_APP_TITLE,
     HEADER_HTTP_REFERER,
@@ -299,7 +299,9 @@ class OpenRouterProvider:
         # Per-call accounting (NOT conversation state)
         self._last_usage: TokenUsage = TokenUsage()
         self._context_length: int = 0
-        self._context_length_override: bool = False
+        # Optional manual context-window override (framework escape hatch
+        # or env var) — the FALLBACK tier; the catalog auto-detect wins.
+        self._context_length_knob: Optional[int] = None
 
         # OpenRouter request-time routing controls.  ``provider`` is the
         # killer feature of OpenRouter — it constrains which upstream
@@ -608,24 +610,18 @@ class OpenRouterProvider:
                 normalised[k] = v
             self._extra_headers = normalised
 
-        # framework_overrides: rare escape hatches.  Normally
-        # context_length is discovered from the OpenRouter catalog at
-        # connect() time; only set the override when the catalog is
-        # wrong / unavailable / for self-hosted gateways.
+        # Context window is auto-detected from the OpenRouter catalog
+        # (per-model ``context_length``) at connect() — the PRIMARY tier.
+        # Stash the optional manual override (framework escape hatch or
+        # env var) as the fallback, used only when the catalog has no
+        # entry for the model (self-hosted gateways, catalog gaps).
         context_length_extra = _knob(
             "context_length", layer=framework_overrides,
         )
-        if context_length_extra:
-            self._context_length = int(context_length_extra)
-            self._context_length_override = True
-        else:
-            self._context_length = resolve_context_length()
-            # Treat the env-var fallback as authoritative only if the
-            # user actually set it; otherwise we'll let connect() learn
-            # the per-model context length from the catalog.
-            self._context_length_override = (
-                self._context_length != DEFAULT_CONTEXT_LENGTH
-            )
+        self._context_length_knob = (
+            int(context_length_extra) if context_length_extra
+            else resolve_context_length()
+        )
 
         # routing: OpenRouter's ``provider`` extension field (sort,
         # ignore, order, allow_fallbacks, ...).  Stored as a dict and
@@ -878,12 +874,13 @@ class OpenRouterProvider:
     # ==================== Connection ====================
 
     def connect(self, model: str, *, skip_model_test: bool = False) -> None:
-        """Set the model to use and learn its context length from the catalog.
+        """Set the model and resolve its context window from the catalog.
 
-        Catalog lookup is best-effort: a network failure or missing
-        entry just falls back to ``DEFAULT_CONTEXT_LENGTH`` (or the
-        explicit override the user set via env / config).  Real model
-        validation happens on the first chat-completion call.
+        Context resolution is auto-detect PRIMARY: the per-model
+        ``context_length`` from ``GET /api/v1/models`` wins, falling back
+        to an explicit manual override (env / config) and failing fast if
+        neither resolves (no hardcoded default).  Real model validation
+        happens on the first chat-completion call.
 
         Args:
             model: Model ID (e.g. ``anthropic/claude-3.5-sonnet``,
@@ -894,26 +891,31 @@ class OpenRouterProvider:
         """
         self._model_name = model
 
-        # Honour an explicit context_length override (env var or
-        # framework_overrides.context_length) — user knows their value.
-        if self._context_length_override:
-            return
-
-        # Catalog lookup is a public, cacheable HTTP GET (``GET /api/v1/models``)
-        # totally orthogonal to ``skip_model_test`` — that flag is for
-        # *real-completion* model validation, not metadata fetch.  Always
-        # do this lookup so the per-model context window is set
-        # correctly even on fast-bootstrap paths where skip_model_test=True.
-        # Pre-server-0.6.66 the lookup was gated by ``skip_model_test``,
-        # which meant every fast-bootstrap session used the
-        # 32 K ``DEFAULT_CONTEXT_LENGTH`` — budget calculations against
-        # 200 K-window models reported >100% on tiny prompts.
-        catalog_length = self._lookup_context_length(model)
-        if catalog_length:
-            self._context_length = catalog_length
-            self._trace(
-                f"[CONNECT] model={model} context_length={catalog_length} (catalog)"
+        # Resolve the context window: catalog auto-detect PRIMARY ->
+        # manual override -> fail-fast (no hardcoded default).  The
+        # catalog lookup is a public, cacheable HTTP GET
+        # (``GET /api/v1/models``) orthogonal to ``skip_model_test`` —
+        # that flag is for *real-completion* model validation, not the
+        # metadata fetch — so it always runs, even on fast-bootstrap
+        # paths.  A stale per-profile context_length can no longer
+        # silently under-declare a 200 K-window model.
+        self._context_length = resolve_context_window(
+            detect_capacity=lambda: self._lookup_context_length(model),
+            profile_value=self._context_length_knob,
+        ) or 0
+        if not self._context_length:
+            raise ValueError(
+                "OpenRouter provider: context_length could not be resolved.  "
+                "The model is absent from GET /api/v1/models (so no per-model "
+                "context_length was found), and no manual override is set.  "
+                "Set plugin_configs.openrouter.framework_overrides."
+                "context_length in the profile, or "
+                "JAATO_OPENROUTER_CONTEXT_LENGTH in the environment.  No "
+                "hardcoded fallback exists per the project's no-fallback rule."
             )
+        self._trace(
+            f"[CONNECT] model={model} context_length={self._context_length}"
+        )
 
     @property
     def is_connected(self) -> bool:

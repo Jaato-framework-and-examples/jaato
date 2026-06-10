@@ -44,6 +44,13 @@ from ..provider import OpenRouterProvider
 from shared.plugins.model_provider.base import ProviderConfig
 
 
+@pytest.fixture(autouse=True)
+def _default_context_knob(monkeypatch):
+    """Manual context_length fallback so connect()'s tier-1 auto-detect
+    resolves (no catalog seeded in these cache tests)."""
+    monkeypatch.setenv("JAATO_OPENROUTER_CONTEXT_LENGTH", "200000")
+
+
 # ==================== cache.py ====================
 
 
