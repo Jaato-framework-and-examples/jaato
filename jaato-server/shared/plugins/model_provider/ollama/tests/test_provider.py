@@ -7,10 +7,27 @@ from ..provider import (
     OllamaProvider,
     OllamaConnectionError,
     OllamaModelNotFoundError,
-    DEFAULT_CONTEXT_LIMIT,
 )
 from ..env import DEFAULT_OLLAMA_HOST
 from shared.plugins.model_provider.base import ProviderConfig
+
+
+@pytest.fixture(autouse=True)
+def _mock_api_show(monkeypatch):
+    """Default mock for POST /api/show (tier-1 context auto-detection at
+    connect()) so connect tests resolve a context window deterministically
+    instead of hitting a real local Ollama."""
+    def _post(url, *args, **kwargs):
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        if "/api/show" in url:
+            resp.json.return_value = {
+                "model_info": {"general.context_length": 8192}
+            }
+        else:
+            resp.json.return_value = {}
+        return resp
+    monkeypatch.setattr("httpx.post", _post)
 
 
 class TestInitialization:
@@ -231,15 +248,20 @@ class TestContextLimit:
 
     @patch('httpx.get')
     @patch('anthropic.Anthropic')
-    def test_default_context_limit(self, mock_anthropic, mock_get):
-        """Should return default context limit."""
+    def test_context_limit_unknown_before_connect_no_hardcoded_default(
+        self, mock_anthropic, mock_get, monkeypatch,
+    ):
+        """With no manual override and before connect() (no model yet, so
+        no /api/show auto-detect), get_context_limit() reports 0 ("unknown")
+        — NOT a hardcoded default (no-fallback rule)."""
+        monkeypatch.delenv("OLLAMA_CONTEXT_LENGTH", raising=False)
         mock_get.return_value = MagicMock(status_code=200)
         mock_get.return_value.json.return_value = {"models": []}
 
         provider = OllamaProvider()
         provider.initialize()
 
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
+        assert provider.get_context_limit() == 0
 
     @patch('httpx.get')
     @patch('anthropic.Anthropic')
@@ -307,3 +329,59 @@ class TestLogin:
         OllamaProvider.login(on_message=messages.append)
 
         assert any("doesn't require authentication" in m for m in messages)
+
+
+class TestContextCapacityAutodetect:
+    """Tier-1 context-window auto-detection via POST /api/show."""
+
+    def _provider(self):
+        p = OllamaProvider()
+        p._host = "http://localhost:11434"
+        p._model_name = "qwen3:32b"
+        return p
+
+    def test_detect_reads_arch_prefixed_context_length(self):
+        p = self._provider()
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"model_info": {"qwen3.context_length": 40960}}
+        with patch("httpx.post", return_value=resp):
+            assert p._detect_context_capacity() == 40960
+
+    def test_detect_none_when_field_absent(self):
+        p = self._provider()
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"model_info": {"general.parameter_count": 32_000_000_000}}
+        with patch("httpx.post", return_value=resp):
+            assert p._detect_context_capacity() is None
+
+    def test_detect_none_when_no_model(self):
+        p = OllamaProvider()
+        p._model_name = None
+        assert p._detect_context_capacity() is None
+
+    def test_detect_none_on_http_error(self):
+        import httpx
+        p = self._provider()
+        with patch("httpx.post", side_effect=httpx.ConnectError("refused")):
+            assert p._detect_context_capacity() is None
+
+    @patch('httpx.get')
+    @patch('anthropic.Anthropic')
+    def test_connect_uses_detected_context_over_no_knob(
+        self, mock_anthropic, mock_get, monkeypatch,
+    ):
+        """connect() resolves the detected /api/show window when no manual
+        override is set (detect PRIMARY)."""
+        monkeypatch.delenv("OLLAMA_CONTEXT_LENGTH", raising=False)
+        mock_get.return_value = MagicMock(status_code=200)
+        mock_get.return_value.json.return_value = {"models": [{"name": "qwen3:32b"}]}
+        show = MagicMock(status_code=200)
+        show.raise_for_status = MagicMock()
+        show.json.return_value = {"model_info": {"qwen3.context_length": 40960}}
+        provider = OllamaProvider()
+        provider.initialize()
+        with patch("httpx.post", return_value=show):
+            provider.connect("qwen3:32b", skip_model_test=True)
+        assert provider.get_context_limit() == 40960

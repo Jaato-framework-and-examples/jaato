@@ -19,7 +19,6 @@ import pytest
 
 from shared.plugins.model_provider.base import ProviderConfig
 from shared.plugins.model_provider.lmstudio.env import (
-    DEFAULT_CONTEXT_LENGTH,
     DEFAULT_HOST,
     resolve_api_token,
     resolve_context_length,
@@ -279,7 +278,10 @@ class TestConnectPassive:
     def test_connect_without_load_does_not_post(self, mock_get, mock_post):
         mock_get.return_value = _catalog_response()
         provider = LMStudioProvider()
-        provider.initialize(ProviderConfig())
+        # Explicit override so connect() resolves without depending on
+        # /api/v1/models discovery (this test is about passive load, not
+        # context); also satisfies the no-fallback fail-fast.
+        provider.initialize(ProviderConfig(extra={"context_length": 32768}))
         provider.connect("gpt-oss-20b")
 
         # The load endpoint must NOT be hit in passive mode
@@ -610,9 +612,19 @@ class TestContextLimit:
         provider.connect("gpt-oss-20b")
         assert provider.get_context_limit() == 32768
 
-    def test_default_used_before_connect(self):
+    def test_context_limit_unknown_before_connect_no_hardcoded_default(self):
+        # Before connect() there is no discovered window and (here) no
+        # override → 0 ("unknown"), NOT a hardcoded default.
         provider = LMStudioProvider()
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LENGTH
+        assert provider.get_context_limit() == 0
+
+    def test_discovered_wins_over_override_detect_primary(self):
+        # Auto-detect PRIMARY (2026-06-10): the /api/v0/models-discovered
+        # window wins over an explicit context_length override.
+        provider = LMStudioProvider()
+        provider._context_length_override = 8192      # explicit knob/env
+        provider._discovered_context_length = 71680   # server truth
+        assert provider.get_context_limit() == 71680
 
 
 # ============================================================

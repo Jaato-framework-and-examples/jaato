@@ -22,7 +22,6 @@ from ..converters import (
 from ..env import (
     DEFAULT_APP_CATEGORIES,
     DEFAULT_BASE_URL,
-    DEFAULT_CONTEXT_LENGTH,
     HEADER_APP_CATEGORIES,
     HEADER_APP_TITLE,
     HEADER_HTTP_REFERER,
@@ -96,6 +95,18 @@ def create_mock_tool_call(name="test_tool", args='{"key": "value"}', call_id="ca
     return tc
 
 
+@pytest.fixture(autouse=True)
+def _default_context_knob(monkeypatch):
+    """Provide a manual ``context_length`` fallback so ``connect()``'s
+    tier-1 auto-detect resolves (via the knob) in tests that don't seed a
+    catalog — connect now fails fast without a resolvable window.  Tests
+    asserting catalog/detect behavior seed ``_catalog_cache`` (which wins,
+    detect-primary); the env-resolver tests override this via
+    ``patch.dict``.
+    """
+    monkeypatch.setenv("JAATO_OPENROUTER_CONTEXT_LENGTH", "200000")
+
+
 # ==================== Environment Tests ====================
 
 
@@ -124,9 +135,11 @@ class TestEnvironment:
         ):
             assert resolve_base_url() == "https://custom/api/v1"
 
-    def test_resolve_context_length_default(self):
+    def test_resolve_context_length_unset_is_none(self):
+        # No hardcoded default — unset env resolves to None; the provider
+        # auto-detects the per-model window from the catalog instead.
         with patch.dict("os.environ", {}, clear=True):
-            assert resolve_context_length() == DEFAULT_CONTEXT_LENGTH
+            assert resolve_context_length() is None
 
     def test_resolve_context_length_from_env(self):
         with patch.dict("os.environ", {"JAATO_OPENROUTER_CONTEXT_LENGTH": "131072"}):
@@ -136,7 +149,7 @@ class TestEnvironment:
         with patch.dict(
             "os.environ", {"JAATO_OPENROUTER_CONTEXT_LENGTH": "not-a-number"}
         ):
-            assert resolve_context_length() == DEFAULT_CONTEXT_LENGTH
+            assert resolve_context_length() is None
 
     def test_resolve_http_referer_default(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -525,15 +538,16 @@ class TestAuthentication:
         assert provider._base_url == "https://custom/api/v1"
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
-    def test_initialize_custom_context_length_marks_override(self, mock_client_class):
+    def test_initialize_custom_context_length_stashed_as_knob(self, mock_client_class):
         mock_client_class.return_value = MagicMock()
         provider = OpenRouterProvider()
         provider.initialize(ProviderConfig(
             api_key="sk-or-test",
             extra={"context_length": 200000},
         ))
-        assert provider._context_length == 200000
-        assert provider._context_length_override is True
+        # The manual value is stashed as the fallback knob; the actual
+        # window is resolved at connect() (catalog auto-detect PRIMARY).
+        assert provider._context_length_knob == 200000
 
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_initialize_passes_attribution_headers(self, mock_client_class):
@@ -1221,8 +1235,7 @@ class TestConfigNamespacing:
         assert provider._temperature == 0.55
         assert provider._top_p == 1.0
         assert provider._provider_routing == {"sort": "throughput", "ignore": ["AtlasCloud"]}
-        assert provider._context_length == 32768
-        assert provider._context_length_override is True
+        assert provider._context_length_knob == 32768
         legacy_warnings = [r for r in caplog.records if "legacy" in r.getMessage().lower()]
         assert legacy_warnings == [], (
             f"new shape should not emit deprecation warnings, got: "
@@ -1303,7 +1316,7 @@ class TestConfigNamespacing:
         assert provider._temperature == 0.55
         assert provider._top_p == 1.0
         assert provider._provider_routing == {"sort": "throughput"}
-        assert provider._context_length == 32768
+        assert provider._context_length_knob == 32768
         legacy_warnings = [r for r in caplog.records if "legacy" in r.getMessage().lower()]
         assert len(legacy_warnings) >= 4, (
             f"expected ≥4 deprecation warnings (temperature/top_p/provider/context_length), "
@@ -1442,7 +1455,11 @@ class TestConnection:
     def test_connect_sets_model(self):
         provider = OpenRouterProvider()
         provider._client = MagicMock()
-        # Skip the catalog network call.
+        # Seed the catalog so tier-1 auto-detect resolves the window
+        # (connect now fails fast without a resolvable context).
+        provider._catalog_cache = [
+            {"id": "anthropic/claude-3.5-sonnet", "context_length": 200000},
+        ]
         provider.connect("anthropic/claude-3.5-sonnet", skip_model_test=True)
         assert provider.model_name == "anthropic/claude-3.5-sonnet"
 
@@ -1466,16 +1483,34 @@ class TestConnection:
         provider.connect("anthropic/claude-3.5-sonnet")
         assert provider.get_context_limit() == 200000
 
-    def test_connect_keeps_explicit_override(self):
+    def test_catalog_detect_wins_over_manual_knob(self):
+        # Auto-detect PRIMARY (2026-06-10): the catalog-reported window
+        # wins over an explicit context_length knob.
         provider = OpenRouterProvider()
         provider._client = MagicMock()
-        provider._context_length = 50000
-        provider._context_length_override = True
+        provider._context_length_knob = 50000   # explicit fallback
         provider._catalog_cache = [
-            {"id": "x/y", "context_length": 200000},
+            {"id": "x/y", "context_length": 200000},  # server truth
         ]
         provider.connect("x/y")
+        assert provider.get_context_limit() == 200000
+
+    def test_connect_falls_back_to_knob_when_model_absent_from_catalog(self):
+        # Model not in the catalog → no detect → manual knob fallback.
+        provider = OpenRouterProvider()
+        provider._client = MagicMock()
+        provider._context_length_knob = 50000
+        provider._catalog_cache = [{"id": "other/model", "context_length": 200000}]
+        provider.connect("x/y", skip_model_test=True)
         assert provider.get_context_limit() == 50000
+
+    def test_connect_raises_when_nothing_resolves(self):
+        # No catalog entry, no knob → fail-fast (no hardcoded default).
+        provider = OpenRouterProvider()
+        provider._client = MagicMock()
+        provider._catalog_cache = [{"id": "other/model", "context_length": 200000}]
+        with pytest.raises(ValueError, match="context_length could not be resolved"):
+            provider.connect("x/y", skip_model_test=True)
 
 
 class TestListModels:
