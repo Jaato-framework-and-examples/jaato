@@ -102,6 +102,17 @@ class TestApparmorProfileParsing:
         self._patch_attr(monkeypatch, tmp_path, "jaato-ws-x//child (enforce)\n")
         assert _apparmor_enforced_profile() == "jaato-ws-x//child"
 
+    def test_nul_terminated_enforce_profile(self, monkeypatch, tmp_path):
+        # The kernel NUL-terminates the value; a whitespace-only strip would
+        # leave the NUL and false-negative the enforced profile, breaking
+        # the confined path. Regression for that parse bug.
+        self._patch_attr(monkeypatch, tmp_path, "jaato-ws-x//child (enforce)\n\x00")
+        assert _apparmor_enforced_profile() == "jaato-ws-x//child"
+
+    def test_nul_then_newline_order(self, monkeypatch, tmp_path):
+        self._patch_attr(monkeypatch, tmp_path, "jaato-ws-x//child (enforce)\x00")
+        assert _apparmor_enforced_profile() == "jaato-ws-x//child"
+
     def test_complain_mode_is_none(self, monkeypatch, tmp_path):
         # complain mode logs but does not block — not a boundary.
         self._patch_attr(monkeypatch, tmp_path, "jaato-ws-x (complain)\n")

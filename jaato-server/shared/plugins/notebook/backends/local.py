@@ -48,7 +48,11 @@ def _apparmor_enforced_profile() -> Optional[str]:
     """
     try:
         with open("/proc/self/attr/current", "r") as fh:
-            raw = fh.read().strip()
+            # The kernel terminates this value with a NUL byte (and a
+            # newline); str.strip() alone leaves the NUL, which would
+            # false-negative an enforced profile and break the confined
+            # path. Match the convention in server/runner_spawner.py:251.
+            raw = fh.read().strip("\x00 \t\r\n")
     except OSError:
         return None
     if not raw or raw.startswith("unconfined"):
@@ -137,6 +141,15 @@ class LocalJupyterBackend(NotebookBackend):
         2. The operator explicitly opted in via ``allow_inprocess_exec`` /
            ``JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC`` (e.g. trusted single-user
            dev, or a deployment that accepts the risk).
+
+        **Scope (important):** this gate only fail-closes the *unconfined*
+        path. It does NOT reduce the confined-path risk: AppArmor bounds
+        syscalls, not in-process Python memory, so under an enforced
+        profile a cell can still reach this process's objects and state
+        (including ``session_env`` secrets held by the runner). Closing
+        that requires the deferred subprocess-kernel + tool-RPC redesign
+        (or not exposing an in-process backend for untrusted use), not this
+        gate. The gate is a stopgap that removes the silent unconfined hole.
 
         Returns:
             ``(allowed, reason)`` — ``reason`` is a human-readable
