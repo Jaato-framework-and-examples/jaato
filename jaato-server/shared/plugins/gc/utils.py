@@ -457,7 +457,7 @@ def _elided_result(tr: ToolResult) -> ToolResult:
 def dedup_identical_tool_results(
     history: List[Message],
     min_payload_chars: int = 200,
-) -> Tuple[List[Message], int]:
+) -> Tuple[List[Message], int, List[str]]:
     """Collapse byte-identical tool-result payloads in ``history``.
 
     A model that re-invokes the same tool and gets the identical output
@@ -475,9 +475,14 @@ def dedup_identical_tool_results(
     eviction) and elide all earlier ones.  Groups whose payload is below
     ``min_payload_chars`` are skipped (not worth eliding).
 
-    Returns ``(new_history, chars_reclaimed)``.  ``history`` is returned
-    unchanged (same object) when nothing is deduped.  Only the messages
-    that actually change are copied; the rest are shared by reference.
+    Returns ``(new_history, chars_reclaimed, elided_message_ids)``.
+    ``history`` is returned unchanged (same object) and the id list empty
+    when nothing is deduped.  Only the messages that actually change are
+    copied; the rest are shared by reference.  ``elided_message_ids`` lets
+    the caller invalidate any per-message token cache so the budget
+    re-sync recomputes the shrunken sizes (message_id is preserved across
+    the shrink, so a cache keyed on it would otherwise return the stale
+    pre-dedup count).
     """
     # 1) Group occurrences by signature: sig -> [(msg_idx, part_idx, payload_len)]
     groups: Dict[str, List[Tuple[int, int, int]]] = {}
@@ -505,10 +510,11 @@ def dedup_identical_tool_results(
             chars_reclaimed += payload_len
 
     if not to_elide:
-        return history, 0
+        return history, 0, []
 
     # 3) Rebuild history, copying only the touched messages.
     new_history: List[Message] = []
+    elided_message_ids: List[str] = []
     for mi, msg in enumerate(history):
         elide_parts = to_elide.get(mi)
         if not elide_parts:
@@ -522,8 +528,7 @@ def dedup_identical_tool_results(
                 )
             else:
                 new_parts.append(part)
-        new_history.append(
-            _dc_replace(msg, parts=new_parts)
-        )
+        new_history.append(_dc_replace(msg, parts=new_parts))
+        elided_message_ids.append(msg.message_id)
 
-    return new_history, chars_reclaimed
+    return new_history, chars_reclaimed, elided_message_ids

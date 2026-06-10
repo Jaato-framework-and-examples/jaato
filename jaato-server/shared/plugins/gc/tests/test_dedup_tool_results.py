@@ -43,7 +43,7 @@ class TestDedupIdenticalToolResults:
             _result_msg("c2", "listAvailableTemplates", _BIG),
             _result_msg("c3", "listAvailableTemplates", _BIG),
         ]
-        new_history, freed = dedup_identical_tool_results(history)
+        new_history, freed, _ = dedup_identical_tool_results(history)
 
         # Same count of messages (shrink, not remove).
         assert len(new_history) == 3
@@ -58,7 +58,7 @@ class TestDedupIdenticalToolResults:
             _result_msg("c1", "listAvailableTemplates", _BIG),
             _result_msg("c2", "listAvailableTemplates", _BIG2),
         ]
-        new_history, freed = dedup_identical_tool_results(history)
+        new_history, freed, _ = dedup_identical_tool_results(history)
         assert new_history is history  # nothing changed → same object
         assert freed == 0
 
@@ -68,7 +68,7 @@ class TestDedupIdenticalToolResults:
             _result_msg("c1", "toolA", _BIG),
             _result_msg("c2", "toolB", _BIG),
         ]
-        new_history, freed = dedup_identical_tool_results(history)
+        new_history, freed, _ = dedup_identical_tool_results(history)
         assert freed == 0
 
     def test_small_payloads_below_threshold_skipped(self):
@@ -77,7 +77,7 @@ class TestDedupIdenticalToolResults:
             _result_msg("c1", "ping", small),
             _result_msg("c2", "ping", small),
         ]
-        new_history, freed = dedup_identical_tool_results(history, min_payload_chars=200)
+        new_history, freed, _ = dedup_identical_tool_results(history, min_payload_chars=200)
         assert freed == 0
         assert new_history is history
 
@@ -86,7 +86,7 @@ class TestDedupIdenticalToolResults:
             _result_msg("c1", "listAvailableTemplates", _BIG),
             _result_msg("c2", "listAvailableTemplates", _BIG),
         ]
-        new_history, _ = dedup_identical_tool_results(history)
+        new_history, _, _ = dedup_identical_tool_results(history)
         # message_id preserved; call_id/name preserved; one part each.
         for old, new in zip(history, new_history):
             assert new.message_id == old.message_id
@@ -101,7 +101,7 @@ class TestDedupIdenticalToolResults:
             _result_msg("c1", "listAvailableTemplates", _BIG),
             _result_msg("c2", "listAvailableTemplates", _BIG),
         ]
-        new_history, _ = dedup_identical_tool_results(history)
+        new_history, _, _ = dedup_identical_tool_results(history)
         # The untouched text message is the SAME object (only changed msgs copied).
         assert new_history[0] is keep
         # The elided one is a copy (not the original).
@@ -115,11 +115,11 @@ class TestDedupIdenticalToolResults:
             _result_msg("c1", "t", a),
             _result_msg("c2", "t", b),
         ]
-        _, freed = dedup_identical_tool_results(history)
+        _, freed, _ = dedup_identical_tool_results(history)
         assert freed > 0
 
     def test_no_function_response_parts_noop(self):
         history = [_text(Role.USER, "hi"), _text(Role.MODEL, "yo")]
-        new_history, freed = dedup_identical_tool_results(history)
+        new_history, freed, _ = dedup_identical_tool_results(history)
         assert new_history is history
         assert freed == 0
