@@ -700,6 +700,13 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
             pass
 
         self._available: Optional[bool] = None  # Lazy-checked
+        # Human-readable reason confinement is unavailable, set by
+        # ``_check_availability`` on the first failing precondition.
+        # ``None`` until the check runs or when confinement is available.
+        # Surfaced via :attr:`unavailable_reason` so operators (and the
+        # require-confinement startup gate) can report *why* the kernel
+        # boundary is absent rather than just *that* it is.
+        self._unavailable_reason: Optional[str] = None
 
         # Per-session locks for fragment-write + parser-reload races.
         # Lazily allocated by _session_lock(); cleaned up on teardown.
@@ -797,37 +804,63 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if self._available:
             logger.info("AppArmor confinement available")
         else:
-            logger.info("AppArmor confinement not available — falling back to directory sandboxing")
+            # WARNING, not INFO: when the kernel boundary is absent the
+            # only remaining workspace isolation is the bypassable
+            # directory-sandbox heuristic. Operators need this in the log
+            # at a visible level, with the specific failing precondition,
+            # so the degradation is a deliberate, observable choice rather
+            # than a silent one. Use the require-confinement startup gate
+            # (--apparmor / JAATO_REQUIRE_APPARMOR) to fail closed instead.
+            logger.warning(
+                "AppArmor confinement NOT available (%s) — workspace "
+                "isolation falls back to directory sandboxing only, which "
+                "is a heuristic and not a kernel-enforced boundary. To "
+                "require confinement and refuse to start unconfined, pass "
+                "--apparmor (WS) or set JAATO_REQUIRE_APPARMOR=1.",
+                self._unavailable_reason or "reason unknown",
+            )
         return self._available
 
     def _check_availability(self) -> bool:
-        """Perform the actual availability check (called once)."""
-        if platform.system() != "Linux":
-            logger.debug("AppArmor: not Linux")
+        """Perform the actual availability check (called once).
+
+        On the first failing precondition, records a human-readable
+        reason in ``self._unavailable_reason`` (surfaced via
+        :attr:`unavailable_reason`) and returns ``False``. On success,
+        clears the reason and returns ``True``.
+        """
+        def _unavailable(reason: str) -> bool:
+            self._unavailable_reason = reason
+            logger.debug("AppArmor unavailable: %s", reason)
             return False
+
+        if platform.system() != "Linux":
+            return _unavailable("not running on Linux")
 
         if not shutil.which("apparmor_parser"):
-            logger.debug("AppArmor: apparmor_parser not found")
-            return False
+            return _unavailable("apparmor_parser not found on PATH")
 
         if not shutil.which("aa-exec"):
-            logger.debug("AppArmor: aa-exec not found")
-            return False
+            return _unavailable("aa-exec not found on PATH")
 
         if not Path("/sys/kernel/security/apparmor").exists():
-            logger.debug("AppArmor: kernel module not loaded")
-            return False
+            return _unavailable(
+                "kernel module not loaded "
+                "(/sys/kernel/security/apparmor missing)"
+            )
 
         # Check profile directory
         try:
             self._profile_dir.mkdir(parents=True, exist_ok=True)
         except PermissionError:
-            logger.debug("AppArmor: cannot create profile dir %s", self._profile_dir)
-            return False
+            return _unavailable(
+                f"cannot create profile dir {self._profile_dir}"
+            )
 
         if not os.access(self._profile_dir, os.W_OK):
-            logger.debug("AppArmor: profile dir not writable: %s", self._profile_dir)
-            return False
+            return _unavailable(
+                f"profile dir not writable: {self._profile_dir}"
+            )
 
         # Verify sudo access to apparmor_parser (required for loading profiles)
         try:
@@ -836,20 +869,33 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
                 capture_output=True, timeout=5,
             )
             if result.returncode != 0:
-                logger.debug("AppArmor: sudo apparmor_parser not available (no sudoers rule?)")
-                return False
+                return _unavailable(
+                    "passwordless sudo for apparmor_parser unavailable "
+                    "(no sudoers rule?)"
+                )
         except (subprocess.TimeoutExpired, OSError):
-            logger.debug("AppArmor: sudo apparmor_parser check failed")
-            return False
+            return _unavailable("sudo apparmor_parser check failed")
 
         # Create user-local cache directory for apparmor_parser
         try:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
         except PermissionError:
-            logger.debug("AppArmor: cannot create cache dir %s", self._cache_dir)
-            return False
+            return _unavailable(
+                f"cannot create cache dir {self._cache_dir}"
+            )
 
+        self._unavailable_reason = None
         return True
+
+    @property
+    def unavailable_reason(self) -> Optional[str]:
+        """Why confinement is unavailable, or ``None`` if available/unchecked.
+
+        Populated by :meth:`_check_availability` (run on first
+        :meth:`is_available` call). ``None`` before the check runs or when
+        confinement is available.
+        """
+        return self._unavailable_reason
 
     # ------------------------------------------------------------------
     # Profile management
