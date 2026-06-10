@@ -13,14 +13,14 @@ values fail fast in ``VLLMProvider.initialize`` with a clear
         per-session via ``plugin_configs.vllm.host``.
     VLLM_MODEL: Default model name.  Override per-session via the
         profile's top-level ``model:`` knob.
-    VLLM_CONTEXT_LENGTH: Context window size.  vLLM's
-        ``GET /v1/models`` response does NOT surface ``max_model_len``
-        (the value passed at server-launch via ``--max-model-len``),
-        so this MUST be set explicitly.  Verified against vLLM stable
-        docs 2026-06-07 via context7: the catalog entry shape is
-        ``{id, object, created, owned_by, root, parent, permission}``
-        with no length field.  Override per-session via
-        ``plugin_configs.vllm.context_length``.
+    VLLM_CONTEXT_LENGTH: Manual context-window override (tier-3 / env
+        fallback).  Normally unnecessary — current vLLM versions DO
+        surface ``max_model_len`` in each ``GET /v1/models`` entry, which
+        the provider auto-detects (tier-1; verified live 2026-06-10
+        against a running server: ``data[0].max_model_len`` present).
+        Set this (or ``plugin_configs.vllm.context_length``) only for
+        older vLLM builds that omit the field, or to pin a value.  See
+        ``resolve_context_window``.
     VLLM_API_TOKEN: Optional bearer token.  Only required when the
         vLLM server was launched with ``--api-key <token>`` (vLLM's
         native bearer auth), or when fronted by a reverse proxy that
