@@ -6550,26 +6550,7 @@ NOTES
         # collapse single-key error dicts to a bare string.
         result_dict = _normalize_result_dict_impl(result_data, ok=ok)
 
-        # Run tool result enrichment (e.g., template extraction).
-        #
-        # PR-218 TEMPORARY DIAGNOSTIC PROBE — revert after the
-        # enrich_tool_result-dispatch gap (2026-06-04 smoke, Family IV
-        # closed Layer 1 but Layer 2 still broken) is empirically
-        # narrowed.  Three log lines distinguish which gate fails:
-        #   - ENRICH_CALLSITE always fires → tells us ok + registry state
-        #     at the call site (line 6745).  If absent, the upstream
-        #     tool-dispatch loop isn't even reaching here.
-        #   - ENRICH_PROBE fires inside the method (line 6788) → tells
-        #     us the dispatch made it past the callsite gate.
-        #   - ENRICH_PROBE_TRAIT fires inside the TRAIT_FILE_WRITER
-        #     branch → tells us the trait lookup resolved correctly.
-        # logger is the stdlib jaato-server logger; writes to
-        # /tmp/claude-1000/jaato.log via daemon FD-inheritance —
-        # survives apparmor.
-        logger.info(
-            "ENRICH_CALLSITE tool=%s ok=%s registry=%s",
-            fc.name, ok, self._runtime.registry is not None,
-        )
+        # Run tool result enrichment (e.g., template extraction)
         enrichment_metadata: Optional[Dict[str, Any]] = None
         if ok and self._runtime.registry:
             result_dict, enrichment_metadata = self._enrich_tool_result_dict(
@@ -6665,36 +6646,12 @@ NOTES
         # last-write-wins on intentional duplicates only.
         combined_metadata: Dict[str, Any] = {}
 
-        # PR-218 TEMPORARY DIAGNOSTIC PROBE — see callsite at
-        # _handle_tool_response for rationale.  Revert after probe.
-        logger.info(
-            "ENRICH_PROBE tool=%s registry=%s",
-            tool_name, self._runtime.registry is not None,
-        )
-
         # Tools declaring the file_writer trait get full-JSON enrichment
         # (LSP diagnostics, artifact tracking, etc.)
         from jaato_sdk.plugins.model_provider.types import TRAIT_FILE_WRITER
         tool_traits = self._runtime.registry.get_tool_traits(tool_name)
 
-        # PR-218 TEMPORARY: surface the resolved trait set so we can
-        # tell apart trait-lookup-empty (broken registry trait lookup)
-        # vs trait-set-doesn't-include-FILE_WRITER (the schema lost
-        # the trait somewhere upstream).  Revert with the other ENRICH_*
-        # lines.
-        logger.info(
-            "ENRICH_PROBE_TRAITS tool=%s traits=%s file_writer_match=%s",
-            tool_name, sorted(tool_traits),
-            TRAIT_FILE_WRITER in tool_traits,
-        )
-
         if TRAIT_FILE_WRITER in tool_traits:
-            # PR-218 TEMPORARY: confirm we reach the trait-positive
-            # branch.  Revert after probe.
-            logger.info(
-                "ENRICH_PROBE_TRAIT_BRANCH tool=%s",
-                tool_name,
-            )
             # Pass full result as JSON so LSP can extract file paths
             import json
             result_json = json.dumps(result_dict)

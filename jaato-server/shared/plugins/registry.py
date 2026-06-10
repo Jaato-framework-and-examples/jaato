@@ -2608,56 +2608,18 @@ class PluginRegistry:
             List of plugins that subscribe to tool result enrichment,
             sorted by priority.
         """
-        # TEMP PR-219: instrumentation to narrow (B-i/ii/iii/iv) — which
-        # filter excludes lsp from the subscriber list despite being
-        # profile-declared.  Revert with PR-218 + the fix.
-        logger.info(
-            "ENRICH_SUBSCRIBERS_STATE _exposed=%s _enrichment_only=%s "
-            "all_plugins=%s lsp_in_plugins=%s lsp_in_exposed=%s "
-            "lsp_in_enrichment_only=%s",
-            sorted(self._exposed),
-            sorted(self._enrichment_only),
-            sorted(self._plugins.keys()),
-            'lsp' in self._plugins,
-            'lsp' in self._exposed,
-            'lsp' in self._enrichment_only,
-        )
-
         subscribers = []
         all_enrichment_names = self._exposed | self._enrichment_only
         for name in all_enrichment_names:
             try:
                 plugin = self._plugins[name]
-                has_method = hasattr(plugin, 'subscribes_to_tool_result_enrichment')
-                subscribes = False
-                if has_method:
-                    subscribes = plugin.subscribes_to_tool_result_enrichment()
-                # TEMP PR-219: per-plugin filter trace
-                logger.info(
-                    "ENRICH_SUBSCRIBERS_ITER name=%s has_method=%s "
-                    "subscribes=%s plugin_class=%s",
-                    name,
-                    has_method,
-                    subscribes,
-                    type(plugin).__name__,
-                )
-                if has_method and subscribes:
+                if (hasattr(plugin, 'subscribes_to_tool_result_enrichment') and
+                        plugin.subscribes_to_tool_result_enrichment()):
                     subscribers.append(plugin)
             except Exception as exc:
                 _trace(f" Error checking tool result enrichment for '{name}': {exc}")
-                # TEMP PR-219: surface exceptions that might silently drop lsp
-                logger.info(
-                    "ENRICH_SUBSCRIBERS_ITER_EXC name=%s exc=%s",
-                    name,
-                    exc,
-                )
 
         subscribers.sort(key=self._get_tool_result_enrichment_priority)
-        # TEMP PR-219: final list after sort
-        logger.info(
-            "ENRICH_SUBSCRIBERS_FINAL names=%s",
-            [getattr(p, 'name', type(p).__name__) for p in subscribers],
-        )
         return subscribers
 
     def enrich_tool_result(

@@ -2,15 +2,12 @@
 
 import asyncio
 import json
-import logging
 import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
-
-logger = logging.getLogger(__name__)
 
 
 def _make_pdeathsig_preexec():
@@ -596,14 +593,6 @@ class LSPClient:
                 uri = params.get('uri', '')
                 diagnostics = [Diagnostic.from_dict(d) for d in params.get('diagnostics', [])]
                 self._diagnostics[uri] = diagnostics
-                # TEMP PR-221: NOTIFICATION_RX — server pushed a
-                # publishDiagnostics batch.  Surfaces URI + count so we
-                # can correlate with the URI the await side queries.
-                logger.info(
-                    "ENRICH_LSP_NOTIFICATION_RX uri=%s diag_count=%s",
-                    uri,
-                    len(diagnostics),
-                )
                 # Signal any caller awaiting first batch via
                 # `await_diagnostics(path, ...)`.  We lazily create the
                 # Event so URIs the server pushes for spontaneously
