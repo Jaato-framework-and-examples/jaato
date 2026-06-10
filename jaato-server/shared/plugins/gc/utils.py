@@ -3,10 +3,17 @@
 Provides helpers for turn splitting, token estimation, and history manipulation.
 """
 
-from dataclasses import dataclass
-from typing import List, Optional
+import hashlib
+import json
+from dataclasses import dataclass, replace as _dc_replace
+from typing import Dict, List, Optional, Tuple
 
-from jaato_sdk.plugins.model_provider.types import Message, Part, Role
+from jaato_sdk.plugins.model_provider.types import (
+    Message,
+    Part,
+    Role,
+    ToolResult,
+)
 
 
 @dataclass
@@ -399,3 +406,124 @@ def get_preserved_indices(
                 preserved.add(idx)
 
     return preserved
+
+
+# ============================================================
+# Identical tool-result dedup
+# ============================================================
+
+
+def _tool_result_payload(tr: ToolResult) -> str:
+    """Canonical string form of a tool result's payload for hashing/sizing.
+
+    Uses sorted-key JSON so equal dicts hash equal regardless of key
+    order; falls back to ``repr`` for non-JSON-serializable payloads.
+    """
+    try:
+        return json.dumps(tr.result, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(tr.result)
+
+
+def _tool_result_signature(tr: ToolResult) -> str:
+    """Stable hash of ``(name, result)`` — the dedup grouping key.
+
+    Two function-response parts are duplicates iff the SAME tool returned
+    the SAME payload (e.g. a model re-calling ``listAvailableTemplates``
+    and getting the identical catalog back).
+    """
+    payload = _tool_result_payload(tr)
+    raw = f"{tr.name or ''}\x00{payload}".encode("utf-8", "replace")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _elided_result(tr: ToolResult) -> ToolResult:
+    """Return a copy of ``tr`` with its payload replaced by a tiny marker.
+
+    Keeps the result a dict (stable downstream shape) and preserves
+    ``call_id``/``name`` so tool_call↔tool_result pairing is intact —
+    only the redundant body is dropped.
+    """
+    marker = {
+        "_gc_deduped": True,
+        "note": (
+            f"Identical to a later '{tr.name}' result — body elided by GC "
+            f"to reclaim context (the duplicate carried the same payload)."
+        ),
+    }
+    return _dc_replace(tr, result=marker)
+
+
+def dedup_identical_tool_results(
+    history: List[Message],
+    min_payload_chars: int = 200,
+) -> Tuple[List[Message], int]:
+    """Collapse byte-identical tool-result payloads in ``history``.
+
+    A model that re-invokes the same tool and gets the identical output
+    back (the qwen3 ``listAvailableTemplates`` re-call pathology) bloats
+    the wire with redundant copies that GC eviction can't reclaim when
+    they sit in the recency-preserved window.  This **shrinks** each
+    earlier duplicate's result body to a compact marker WITHOUT removing
+    the message — so recency, message structure, and tool_call/tool_result
+    pairing are all preserved, and only EXACT duplicates are touched
+    (zero data loss: the surviving copy holds the full payload).
+
+    Strategy: group function-response parts by ``(name, result)``
+    signature; for each group with >1 member, keep the MOST RECENT
+    occurrence intact (it's recency-protected, so it survives any later
+    eviction) and elide all earlier ones.  Groups whose payload is below
+    ``min_payload_chars`` are skipped (not worth eliding).
+
+    Returns ``(new_history, chars_reclaimed)``.  ``history`` is returned
+    unchanged (same object) when nothing is deduped.  Only the messages
+    that actually change are copied; the rest are shared by reference.
+    """
+    # 1) Group occurrences by signature: sig -> [(msg_idx, part_idx, payload_len)]
+    groups: Dict[str, List[Tuple[int, int, int]]] = {}
+    for mi, msg in enumerate(history):
+        for pi, part in enumerate(msg.parts or []):
+            tr = part.function_response
+            if tr is None or tr.result is None:
+                continue
+            payload_len = len(_tool_result_payload(tr))
+            if payload_len < min_payload_chars:
+                continue
+            groups.setdefault(_tool_result_signature(tr), []).append(
+                (mi, pi, payload_len)
+            )
+
+    # 2) For each duplicated group, mark all-but-last for elision.
+    #    to_elide: msg_idx -> set(part_idx)
+    to_elide: Dict[int, set] = {}
+    chars_reclaimed = 0
+    for occ in groups.values():
+        if len(occ) < 2:
+            continue
+        for (mi, pi, payload_len) in occ[:-1]:  # keep occ[-1] (most recent)
+            to_elide.setdefault(mi, set()).add(pi)
+            chars_reclaimed += payload_len
+
+    if not to_elide:
+        return history, 0
+
+    # 3) Rebuild history, copying only the touched messages.
+    new_history: List[Message] = []
+    for mi, msg in enumerate(history):
+        elide_parts = to_elide.get(mi)
+        if not elide_parts:
+            new_history.append(msg)
+            continue
+        new_parts = []
+        for pi, part in enumerate(msg.parts):
+            if pi in elide_parts and part.function_response is not None:
+                new_parts.append(
+                    _dc_replace(part, function_response=_elided_result(part.function_response))
+                )
+            else:
+                new_parts.append(part)
+        new_history.append(
+            _dc_replace(msg, parts=new_parts)
+        )
+
+    return new_history, chars_reclaimed
