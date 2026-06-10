@@ -13,6 +13,44 @@ from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _make_pdeathsig_preexec():
+    """Build a ``preexec_fn`` that sets ``PR_SET_PDEATHSIG = SIGKILL``.
+
+    Returns the callable on Linux (so a spawned language server is
+    SIGKILL'd by the kernel the instant its owning runner process dies —
+    graceful exit, SIGKILL, OOM, or crash), or ``None`` elsewhere
+    (``preexec_fn=None`` is a harmless no-op, keeping the spawn portable
+    to platforms without ``prctl``).
+
+    The forked child runs a single ``libc`` syscall between fork and
+    exec — the documented-safe use of ``preexec_fn`` (no Python
+    allocation in the child).  See #284 / #280 (jdtls OOM leak).
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        import ctypes
+        _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    except OSError:
+        return None
+
+    import signal as _signal
+    _PR_SET_PDEATHSIG = 1
+
+    def _preexec() -> None:
+        # If the parent already died before this runs, prctl still
+        # succeeds but the signal won't fire — the window between this
+        # spawn and here is negligible.
+        _libc.prctl(_PR_SET_PDEATHSIG, _signal.SIGKILL)
+
+    return _preexec
+
+
+# Resolved once at import: the preexec_fn passed to every language-server
+# spawn (None on non-Linux).
+_set_pdeathsig_sigkill = _make_pdeathsig_preexec()
+
+
 @dataclass
 class Position:
     """A position in a text document (0-indexed line and character)."""
@@ -377,7 +415,20 @@ class LSPClient:
         self._workspace_folders: Set[str] = set()  # workspace folder URIs added
 
     async def start(self) -> None:
-        """Start the language server process."""
+        """Start the language server process.
+
+        The child is spawned with a kernel-enforced parent-death signal
+        (``PR_SET_PDEATHSIG = SIGKILL``, Linux) so the language server —
+        a heavyweight process (jdtls routinely sits at 0.5-1GB) — is
+        reaped the instant its owning runner dies, no matter HOW it dies:
+        graceful shutdown, SIGKILL, OOM, or crash.  Without this, a
+        runner that's killed (e.g. OOM, pool recycle, mid-cascade abort)
+        leaks its language server, which then re-parents to the daemon
+        (subreaper) and accumulates — one per cascade stage — until the
+        daemon itself OOMs.  This is the kernel backstop; the graceful
+        ``stop()`` path (thread-cleanup → ``disconnect_server``) handles
+        the normal session-end case.  See #284 / #280.
+        """
         env = {**os.environ, **(self.config.env or {})}
 
         self._process = await asyncio.create_subprocess_exec(
@@ -386,7 +437,8 @@ class LSPClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=self._errlog if hasattr(self._errlog, 'fileno') else asyncio.subprocess.DEVNULL,
-            env=env
+            env=env,
+            preexec_fn=_set_pdeathsig_sigkill,
         )
 
         # Start reader task
