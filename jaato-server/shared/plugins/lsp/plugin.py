@@ -1,10 +1,12 @@
 """LSP tool plugin for code intelligence via Language Server Protocol."""
 
 import asyncio
+import atexit
 import json
 import os
 import queue
 import shutil
+import signal
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -421,6 +423,9 @@ class LSPToolPlugin(RunnerForwardingMixin):
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}
+        # atexit backstop: reap jdtls when THIS (slot/runner) process exits.
+        # Registered lazily in _ensure_thread.  See _atexit_reap_jdtls / #284.
+        self._atexit_registered: bool = False
         self._log: deque = deque(maxlen=MAX_LOG_ENTRIES)
         self._log_lock = threading.Lock()
         # Agent context for trace logging
@@ -1290,12 +1295,20 @@ class LSPToolPlugin(RunnerForwardingMixin):
         return path
 
     def shutdown(self) -> None:
-        """Shutdown the LSP plugin and clean up resources."""
+        """Shutdown the LSP plugin and clean up resources.
+
+        Sending the ``(None, None)`` sentinel makes the server thread
+        reap every connected LSP server (``await client.stop()`` —
+        terminate → wait → kill) BEFORE it exits its event loop, so the
+        jdtls subprocesses don't leak.  The join timeout (15s) bounds the
+        reap: ``client.stop()`` waits up to 5s per server for graceful
+        termination before SIGKILL, so a single jdtls finishes well within
+        the window.  See #284 (per-slot jdtls leak)."""
         self._trace("shutdown: cleaning up resources")
         if self._request_queue:
             self._request_queue.put((None, None))
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=15)
         # Close stderr capture
         if self._errlog:
             self._errlog.close()
@@ -2666,10 +2679,53 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         if self._thread and self._thread.is_alive():
             return
 
+        # Register the atexit reaper the first time a server thread starts
+        # (i.e. the first time jdtls et al become spawnable).  Idempotent.
+        self._register_atexit_reaper()
+
         self._request_queue = queue.Queue()
         self._response_queue = queue.Queue()
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._thread.start()
+
+    def _register_atexit_reaper(self) -> None:
+        """Register the process-exit jdtls reaper exactly once."""
+        if self._atexit_registered:
+            return
+        try:
+            atexit.register(self._atexit_reap_jdtls)
+            self._atexit_registered = True
+        except Exception:  # pragma: no cover — atexit.register never raises
+            pass
+
+    def _atexit_reap_jdtls(self) -> None:
+        """Process-exit backstop: SIGKILL every still-running LSP server
+        subprocess when THIS process (a runner / pre-warm pool slot) exits.
+
+        Root cause (#284 residual, per-slot jdtls leak): the pool-slot
+        teardown path — daemon closes the slot socket → the runner's RPC
+        ``serve()`` returns on EOF → the slot ``sys.exit(0)`` — does NOT
+        call ``plugin.shutdown()``.  So a connected jdtls (0.5-1.5 GB each)
+        was abandoned, re-parented to the daemon subreaper, and accumulated
+        one-per-slot across cascade stages until the daemon OOMed.
+
+        ``atexit`` fires on the clean ``sys.exit()`` the slot uses, so the
+        subprocess dies WITH its slot.  We SIGKILL by pid (not the async
+        ``client.stop()``) because the LSP event loop is already gone at
+        interpreter exit.  Warm cascade-reuse is unaffected: this only
+        fires when the slot PROCESS itself dies — exactly when a
+        slot-scoped jdtls should die too.  PDEATHSIG (PR-277) remains the
+        backstop for the ungraceful SIGKILL/OOM case atexit can't catch.
+        """
+        for client in list(self._clients.values()):
+            proc = getattr(client, "_process", None)
+            pid = getattr(proc, "pid", None)
+            if not pid:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
 
     async def _reap_failed_client(self, name: str, client) -> None:
         """Terminate a partially-started LSP client after a failed or
@@ -2842,6 +2898,23 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 try:
                     req = self._request_queue.get(timeout=0.1)
                     if req is None or req == (None, None):
+                        # Graceful reap: stop every connected LSP server
+                        # before the event loop exits so the subprocesses
+                        # (jdtls) don't outlive this plugin.  shutdown()
+                        # previously dropped self._clients WITHOUT stopping
+                        # them (#284 residual).  Iterate captured client
+                        # objects (not dict lookups) so a concurrent
+                        # shutdown() clearing self._clients can't KeyError.
+                        for _name, _client in list(self._clients.items()):
+                            try:
+                                await _client.stop()
+                                self._trace(f"shutdown: reaped LSP server '{_name}'")
+                            except Exception as _e:
+                                self._trace(
+                                    f"shutdown: reap of LSP server "
+                                    f"'{_name}' raised (ignored): {_e}"
+                                )
+                        self._clients.clear()
                         break
 
                     msg_type, data = req

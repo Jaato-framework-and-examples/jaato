@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import pytest
+import signal
 import tempfile
 import threading
 import queue
@@ -1277,6 +1278,77 @@ class TestReapFailedClient:
         # Must not raise.
         await plugin._reap_failed_client("java", client)
         client.stop.assert_awaited_once()
+
+
+class TestAtexitReapJdtls:
+    """Pin the process-exit jdtls reaper (#284 per-slot leak OOM-stopper).
+
+    The pre-warm pool-slot teardown path (daemon closes the slot socket →
+    runner RPC ``serve()`` returns on EOF → slot ``sys.exit(0)``) does NOT
+    call ``plugin.shutdown()``.  Without an atexit backstop the connected
+    jdtls (0.5-1.5 GB) was abandoned, re-parented to the daemon subreaper,
+    and accumulated one-per-slot across cascade stages until the daemon
+    OOMed.  The reaper SIGKILLs each tracked subprocess by pid at
+    interpreter exit so jdtls dies WITH its slot.
+    """
+
+    def _client_with_pid(self, pid):
+        client = Mock()
+        client._process = Mock()
+        client._process.pid = pid
+        return client
+
+    def test_sigkills_each_tracked_pid(self):
+        plugin = LSPToolPlugin()
+        plugin._clients = {
+            "java": self._client_with_pid(4242),
+            "pyright": self._client_with_pid(4343),
+        }
+        with patch("shared.plugins.lsp.plugin.os.kill") as mock_kill:
+            plugin._atexit_reap_jdtls()
+        sent = {c.args for c in mock_kill.call_args_list}
+        assert (4242, signal.SIGKILL) in sent
+        assert (4343, signal.SIGKILL) in sent
+
+    def test_noop_with_no_clients(self):
+        plugin = LSPToolPlugin()
+        plugin._clients = {}
+        with patch("shared.plugins.lsp.plugin.os.kill") as mock_kill:
+            plugin._atexit_reap_jdtls()
+        mock_kill.assert_not_called()
+
+    def test_skips_client_without_live_process(self):
+        """A client whose subprocess was never spawned (``_process`` None) or
+        has no pid is skipped — no kill, no raise."""
+        plugin = LSPToolPlugin()
+        no_proc = Mock()
+        no_proc._process = None
+        plugin._clients = {"java": no_proc}
+        with patch("shared.plugins.lsp.plugin.os.kill") as mock_kill:
+            plugin._atexit_reap_jdtls()
+        mock_kill.assert_not_called()
+
+    def test_swallows_kill_errors(self):
+        """A dead/already-reaped pid (ProcessLookupError) must not propagate
+        out of the atexit handler."""
+        plugin = LSPToolPlugin()
+        plugin._clients = {"java": self._client_with_pid(999999)}
+        with patch(
+            "shared.plugins.lsp.plugin.os.kill",
+            side_effect=ProcessLookupError(),
+        ):
+            plugin._atexit_reap_jdtls()  # must not raise
+
+    def test_register_is_idempotent(self):
+        """_register_atexit_reaper registers exactly once even if called
+        repeatedly (each _ensure_thread call invokes it)."""
+        plugin = LSPToolPlugin()
+        with patch("shared.plugins.lsp.plugin.atexit.register") as mock_reg:
+            plugin._register_atexit_reaper()
+            plugin._register_atexit_reaper()
+            plugin._register_atexit_reaper()
+        mock_reg.assert_called_once_with(plugin._atexit_reap_jdtls)
+        assert plugin._atexit_registered is True
 
 
 class TestDiagnosticsWaitKnobs:
