@@ -1159,18 +1159,25 @@ class TestConnectTimeoutKnob:
     hard-coded 15.0 at lsp/plugin.py:1699 — enough for pyright /
     typescript-language-server (5s cold-start typical) but starves
     Eclipse JDT LS (jdtls) on Maven workspaces where the full
-    initialize + workspace import easily exceeds 30s.  The knob lets
-    profiles tune per workspace.
+    initialize + workspace import routinely runs 60-120s+.  The default
+    was later raised 30->180 (#284) and the knob lets profiles tune
+    per workspace.
     """
 
-    def test_default_is_thirty_seconds(self):
-        """Pin: unconfigured plugin uses the documented default."""
+    def test_default_is_180_seconds(self):
+        """Pin: unconfigured plugin uses the documented default.
+
+        Raised 30->180 (#284): a cold jdtls Maven import routinely runs
+        60-120s+, so a 30s default timed out WHILE jdtls was legitimately
+        starting — orphaning the spawned subprocess and triggering a
+        retry-autoconnect duplicate.  180s covers a cold import while still
+        bounding a genuinely hung server (< MAX 300s)."""
         from ..plugin import DEFAULT_CONNECT_TIMEOUT_SECONDS
         plugin = LSPToolPlugin()
         # We must not touch _ensure_thread; just verify initial state +
         # configure() does the right thing without starting LSP servers.
         assert plugin._connect_timeout_seconds == DEFAULT_CONNECT_TIMEOUT_SECONDS
-        assert DEFAULT_CONNECT_TIMEOUT_SECONDS == 30.0
+        assert DEFAULT_CONNECT_TIMEOUT_SECONDS == 180.0
 
     def test_initialize_applies_config_value(self):
         """Pin: an explicit value flows from config to the instance attr."""
@@ -1224,7 +1231,52 @@ class TestConnectTimeoutKnob:
         assert "connect_timeout_seconds" in names
         entry = next(s for s in schema if s.name == "connect_timeout_seconds")
         assert entry.type == "float"
-        assert entry.default == 30.0
+        assert entry.default == 180.0
+
+
+class TestReapFailedClient:
+    """Pin behavior of LSPToolPlugin._reap_failed_client (#284).
+
+    When ``connect_server`` times out or raises, the spawned language-server
+    subprocess (created in ``LSPClient.start()`` BEFORE the slow
+    ``_initialize()`` handshake) is left running but UNTRACKED —
+    ``self._clients[name]`` is only set on the success path.  The reaper
+    calls ``client.stop()`` (the same teardown ``disconnect_server`` uses) so
+    the orphan doesn't leak and the retry-autoconnect doesn't spawn a
+    duplicate.  Before this fix every premature 30s timeout cost one jdtls
+    cold-start of leaked RAM until the daemon OOMed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reaps_spawned_client(self):
+        """A spawned-but-failed client is stopped (subprocess killed)."""
+        plugin = LSPToolPlugin()
+        plugin._trace = Mock()
+        client = AsyncMock()
+        await plugin._reap_failed_client("java", client)
+        client.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_client_spawned(self):
+        """Failure before LSPClient(...) leaves client=None — must not raise
+        and must not attempt any teardown."""
+        plugin = LSPToolPlugin()
+        plugin._trace = Mock()
+        # Must not raise.
+        await plugin._reap_failed_client("java", None)
+
+    @pytest.mark.asyncio
+    async def test_swallows_stop_exception(self):
+        """A reap is best-effort: an exception from client.stop() must not
+        propagate out of the except handler (it would mask the original
+        connect failure and abort the auto-connect loop)."""
+        plugin = LSPToolPlugin()
+        plugin._trace = Mock()
+        client = AsyncMock()
+        client.stop.side_effect = RuntimeError("process already dead")
+        # Must not raise.
+        await plugin._reap_failed_client("java", client)
+        client.stop.assert_awaited_once()
 
 
 class TestDiagnosticsWaitKnobs:
