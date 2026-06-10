@@ -13,6 +13,7 @@ Covers:
   classifier shape)
 """
 
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -54,30 +55,33 @@ def _health_response(status: int = 200):
     return resp
 
 
-def _models_response(model_id: str = "Qwen/Qwen2.5-7B-Instruct"):
+def _models_response(
+    model_id: str = "Qwen/Qwen2.5-7B-Instruct",
+    max_model_len: Optional[int] = None,
+):
     """Build a fake GET /v1/models response matching vLLM's shape.
 
-    vLLM's catalog entries (per vLLM stable docs, verified 2026-06-07
-    via context7) are ``{id, object, created, owned_by, root, parent,
-    permission}`` — ``max_model_len`` is NOT included.
+    Current vLLM versions DO surface ``max_model_len`` in each model
+    object (verified live 2026-06-10 against a running server). This
+    helper omits it by default so existing tests exercise the manual
+    ``context_length`` fallback (tier-2/3); pass ``max_model_len`` to
+    exercise tier-1 auto-detection.
     """
+    entry = {
+        "id": model_id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "vllm",
+        "root": model_id,
+        "parent": None,
+        "permission": [],
+    }
+    if max_model_len is not None:
+        entry["max_model_len"] = max_model_len
     resp = MagicMock()
     resp.status_code = 200
     resp.raise_for_status = MagicMock()
-    resp.json.return_value = {
-        "object": "list",
-        "data": [
-            {
-                "id": model_id,
-                "object": "model",
-                "created": 0,
-                "owned_by": "vllm",
-                "root": model_id,
-                "parent": None,
-                "permission": [],
-            }
-        ],
-    }
+    resp.json.return_value = {"object": "list", "data": [entry]}
     return resp
 
 
@@ -165,7 +169,7 @@ class TestInitialize:
     @patch("shared.plugins.model_provider.vllm.provider.httpx.get")
     def test_initialize_reads_host_from_extra(self, mock_get, monkeypatch):
         monkeypatch.delenv("VLLM_HOST", raising=False)
-        mock_get.return_value = _health_response()
+        mock_get.side_effect = _route_get()
 
         provider = VLLMProvider()
         provider.initialize(ProviderConfig(extra={"host": "http://gpu-box:8000"}))
@@ -175,7 +179,7 @@ class TestInitialize:
 
     @patch("shared.plugins.model_provider.vllm.provider.httpx.get")
     def test_initialize_strips_trailing_slash(self, mock_get):
-        mock_get.return_value = _health_response()
+        mock_get.side_effect = _route_get()
         provider = VLLMProvider()
         provider.initialize(ProviderConfig(extra={"host": "http://gpu-box:8000/"}))
         assert provider._host == "http://gpu-box:8000"
@@ -189,7 +193,7 @@ class TestInitialize:
         per-request output budget under ``--max-model-len`` would
         otherwise drop the engine mid-stream.
         """
-        mock_get.return_value = _health_response()
+        mock_get.side_effect = _route_get()
         provider = VLLMProvider()
         provider.initialize(ProviderConfig(extra={"max_tokens": 4096}))
         assert provider._max_tokens == 4096
@@ -201,7 +205,7 @@ class TestInitialize:
         ``max_tokens`` field — letting vLLM apply its own default
         (typically bounded by ``--max-model-len`` minus prompt).
         """
-        mock_get.return_value = _health_response()
+        mock_get.side_effect = _route_get()
         provider = VLLMProvider()
         provider.initialize(ProviderConfig())
         assert provider._max_tokens is None
@@ -235,17 +239,18 @@ class TestInitialize:
 
     @patch("shared.plugins.model_provider.vllm.provider.httpx.get")
     def test_initialize_probes_health_endpoint(self, mock_get):
-        mock_get.return_value = _health_response()
+        mock_get.side_effect = _route_get()
         provider = VLLMProvider()
         provider.initialize(ProviderConfig(extra={"host": "http://srv:8000"}))
-        # The single httpx.get call must hit /health, not /v1/models —
-        # /health is the cheap liveness probe.
-        called_url = mock_get.call_args[0][0]
-        assert called_url == "http://srv:8000/health"
+        # initialize() now hits two endpoints: GET /v1/models (tier-1
+        # context-window auto-detection) and GET /health (liveness probe).
+        urls = [c[0][0] for c in mock_get.call_args_list]
+        assert "http://srv:8000/health" in urls
+        assert "http://srv:8000/v1/models" in urls
 
     @patch("shared.plugins.model_provider.vllm.provider.httpx.get")
     def test_initialize_forwards_bearer_to_health_probe(self, mock_get):
-        mock_get.return_value = _health_response()
+        mock_get.side_effect = _route_get()
         provider = VLLMProvider()
         provider.initialize(ProviderConfig(extra={"api_token": "tok-abc"}))
         headers = mock_get.call_args[1]["headers"]
@@ -336,16 +341,22 @@ class TestConnect:
         assert "different-model" in str(excinfo.value)
 
     @patch("shared.plugins.model_provider.vllm.provider.httpx.get")
-    def test_connect_skip_model_test_bypasses_catalog(self, mock_get):
-        """skip_model_test=True must not hit /v1/models."""
-        mock_get.return_value = _health_response()  # only /health probed
+    def test_connect_skip_model_test_skips_catalog_validation(self, mock_get):
+        """skip_model_test=True must accept a model WITHOUT validating it
+        against /v1/models.
+
+        (initialize() does fetch /v1/models for tier-1 context-window
+        auto-detection; the catalog here advertises a *different* model
+        id, so a NON-skip connect would raise.  skip_model_test bypasses
+        that validation step — that's the contract under test.)
+        """
+        mock_get.side_effect = _route_get(
+            models_resp=_models_response(model_id="some-other-model"),
+        )
         provider = VLLMProvider()
         provider.initialize(ProviderConfig())
         provider.connect("any-model", skip_model_test=True)
         assert provider.model_name == "any-model"
-        # Only the initialize() health probe was called — no /v1/models GET.
-        for call in mock_get.call_args_list:
-            assert "/v1/models" not in call[0][0]
 
     @patch("shared.plugins.model_provider.vllm.provider.httpx.get")
     def test_connect_with_empty_catalog_skips_validation(self, mock_get):
@@ -390,14 +401,20 @@ class TestContextLimit:
         provider.connect("Qwen/Qwen2.5-7B-Instruct")
         assert provider.get_context_limit() == 8192
 
+    @patch("shared.plugins.model_provider.vllm.provider.httpx.get")
     def test_initialize_fails_fast_when_context_length_missing(
-        self, monkeypatch,
+        self, mock_get, monkeypatch,
     ):
         """No hardcoded fallback for context_length — ``initialize``
-        raises ``ValueError`` when neither config nor env provides one."""
+        raises ``ValueError`` when the server doesn't report max_model_len
+        AND neither config nor env provides a manual override."""
         monkeypatch.delenv("VLLM_CONTEXT_LENGTH", raising=False)
+        # Server catalog without max_model_len → tier-1 yields nothing.
+        mock_get.side_effect = _route_get(
+            models_resp=_models_response(model_id="m"),
+        )
         provider = VLLMProvider()
-        with pytest.raises(ValueError, match="context_length is not configured"):
+        with pytest.raises(ValueError, match="context_length could not be resolved"):
             provider.initialize(ProviderConfig())
 
     def test_initialize_fails_fast_when_host_missing(self, monkeypatch):

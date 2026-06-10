@@ -103,6 +103,52 @@ class ProviderConfig:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
+def resolve_context_window(
+    *,
+    detect_capacity: Optional[Callable[[], Optional[int]]] = None,
+    profile_value: Optional[Any] = None,
+    env_value: Optional[int] = None,
+) -> Optional[int]:
+    """Resolve a model's context-window size by a generic precedence.
+
+    Shared by every provider so the resolution order is uniform; the
+    *primary* tier is an optional per-provider hook.
+
+    Precedence (2026-06-10 design):
+
+    1. **PRIMARY — provider auto-detect.**  If ``detect_capacity`` is
+       supplied — a provider whose backend exposes its own capacity
+       endpoint, e.g. vLLM's ``GET /v1/models`` ``max_model_len`` — its
+       non-falsy return wins.  The server is the source of truth and
+       self-updates with engine config (rope/YARN scaling, re-launch
+       with a different ``--max-model-len``).  Providers without such an
+       endpoint simply omit the hook, so tier-1 is a no-op for them and
+       resolution falls straight through to the manual tiers —
+       preserving their existing behaviour.
+    2. **fallback — per-profile knob.**  ``plugin_configs.<provider>.
+       context_length`` (a per-model-safe manual override for backends
+       whose capacity isn't auto-detectable, or to pin a value).
+    3. **fallback — environment variable.**  e.g. ``VLLM_CONTEXT_LENGTH``.
+
+    Returns the first non-falsy tier, or ``None`` so the caller raises a
+    provider-specific "not configured" error.  No hardcoded fallback is
+    ever substituted (project no-fallback rule).
+
+    ``detect_capacity`` should itself be failure-tolerant (return
+    ``None`` on an unreachable/blank endpoint) so a transient blip
+    degrades to the manual tiers rather than raising here.
+    """
+    if detect_capacity is not None:
+        detected = detect_capacity()
+        if detected:
+            return int(detected)
+    if profile_value:
+        return int(profile_value)
+    if env_value:
+        return int(env_value)
+    return None
+
+
 @runtime_checkable
 class ModelProviderPlugin(Protocol):
     """Protocol for Model Provider plugins.

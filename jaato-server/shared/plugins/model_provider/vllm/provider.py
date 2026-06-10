@@ -51,6 +51,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -273,9 +274,12 @@ class VLLMProvider:
             config: ``ProviderConfig`` whose ``extra`` dict may contain:
 
                 - ``host`` (str): Override ``VLLM_HOST``.
-                - ``context_length`` (int): Override context window size.
-                  Required for long-context engines — vLLM's
-                  ``/v1/models`` does not surface ``max_model_len``.
+                - ``context_length`` (int): Manual context-window
+                  override (tier-2).  Normally unnecessary — the window
+                  is auto-detected from the server's ``/v1/models``
+                  ``max_model_len`` (tier-1).  Set this only for older
+                  vLLM builds that don't surface ``max_model_len``, or to
+                  pin a value.  See ``resolve_context_window``.
                 - ``api_token`` (str): Bearer token when vLLM was
                   launched with ``--api-key <token>`` or when an auth
                   proxy fronts the server.
@@ -304,20 +308,27 @@ class VLLMProvider:
         self._host = host_value.rstrip("/")
         self._api_token = config.extra.get("api_token") or resolve_api_token()
 
-        context_extra = config.extra.get("context_length")
-        if context_extra:
-            self._context_length_override = int(context_extra)
-        else:
-            self._context_length_override = resolve_context_length()
+        # Context window resolution precedence (see ``resolve_context_window``):
+        #   1. PRIMARY  — auto-detect ``max_model_len`` from the live server's
+        #      GET /v1/models (current vLLM versions surface it; verified live).
+        #   2. fallback — plugin_configs.vllm.context_length.
+        #   3. fallback — VLLM_CONTEXT_LENGTH env var.
+        # The server is the source of truth and self-updates with the engine's
+        # launched ``--max-model-len`` (incl. rope/YARN scaling), so a stale
+        # per-stage profile value can't silently under-declare the window.
+        self._context_length_override = resolve_context_window(
+            detect_capacity=self._detect_context_capacity,
+            profile_value=config.extra.get("context_length"),
+            env_value=resolve_context_length(),
+        )
         if not self._context_length_override:
             raise ValueError(
-                f"vLLM provider: context_length is not configured.  vLLM's "
-                f"GET /v1/models does not surface max_model_len, so the "
-                f"framework cannot auto-discover it.  Set "
-                f"{ENV_CONTEXT_LENGTH} in the environment, or "
-                f"plugin_configs.vllm.context_length in the profile.  No "
-                f"hardcoded fallback exists per the project's no-fallback "
-                f"rule."
+                f"vLLM provider: context_length could not be resolved.  The "
+                f"server's GET /v1/models did not report max_model_len (older "
+                f"vLLM, or unreachable), and no manual override is set.  Set "
+                f"plugin_configs.vllm.context_length in the profile, or "
+                f"{ENV_CONTEXT_LENGTH} in the environment.  No hardcoded "
+                f"fallback exists per the project's no-fallback rule."
             )
 
         max_tokens_extra = config.extra.get("max_tokens")
@@ -558,6 +569,34 @@ class VLLMProvider:
         except httpx.HTTPError as exc:
             logger.warning("Failed to list vLLM models: %s", exc)
             return []
+
+    def _detect_context_capacity(self) -> Optional[int]:
+        """Tier-1 context-window auto-detection hook for vLLM.
+
+        Reads ``max_model_len`` from the live server's ``GET /v1/models``.
+        Current vLLM versions surface it in each model object (verified
+        live against a running server); older versions that omit it make
+        this return ``None`` so resolution falls back to the manual
+        ``context_length`` knob / env var (see ``resolve_context_window``).
+
+        vLLM hosts exactly one model per process, so the catalog normally
+        has a single entry; we still prefer an ``id``-match against the
+        selected model when one is known.  Failure-tolerant by
+        construction: ``_fetch_catalog`` returns ``[]`` on an unreachable
+        server, and a missing/zero ``max_model_len`` yields ``None``.
+        """
+        catalog = self._fetch_catalog()
+        if not catalog:
+            return None
+        entry = None
+        if self._model_name:
+            entry = next(
+                (m for m in catalog if m.get("id") == self._model_name), None
+            )
+        if entry is None:
+            entry = catalog[0]
+        max_len = entry.get("max_model_len")
+        return int(max_len) if max_len else None
 
     @property
     def is_connected(self) -> bool:
