@@ -2163,6 +2163,19 @@ class JaatoSession:
                     agent_name=self._agent_name,
                     agent_id=self._agent_id,
                 )
+            # Resolve the real context window now that the provider exists.
+            # The budget was created at configure() time with context_limit=0
+            # because the provider is lazy-created and didn't exist yet.  This
+            # is the single point where the model's actual limit (e.g. vLLM's
+            # configured context_length) becomes the budget-GC denominator —
+            # it runs on first model use, before any conversation grows or any
+            # after-turn GC check, so the GC threshold is computed against the
+            # true window from the very first turn.  See
+            # _populate_instruction_budget for the failure mode this closes.
+            if self._instruction_budget is not None:
+                self._instruction_budget.context_limit = (
+                    self._provider.get_context_limit()
+                )
             # Wire cache plugin now that the provider exists.  Pre-defer
             # this fired at the end of configure() unconditionally.
             self._wire_cache_plugin()
@@ -2477,15 +2490,22 @@ class JaatoSession:
         Args:
             session_instructions: The user-provided system_instructions from configure().
         """
-        # Get context limit from provider.  By this point the provider has
-        # already connect()'ed and resolved the limit (e.g. from model metadata
-        # or a static lookup), so this is a cheap in-memory read.
-        context_limit = 128_000  # Default
-        if self._provider and hasattr(self._provider, 'get_context_limit'):
-            try:
-                context_limit = self._provider.get_context_limit()
-            except Exception:
-                pass  # keep default
+        # Get context limit from the provider.  The provider is lazy-created
+        # (``_ensure_provider``, first model use) to keep bootstrap off the
+        # critical path, so at configure() time ``self._provider`` is usually
+        # ``None`` — there is no limit to read yet.  In that case the budget
+        # is created with ``context_limit = 0`` (an honest "unknown"; the
+        # utilization/available helpers are already guarded against 0) and the
+        # real limit is filled in by ``_ensure_provider`` the moment the
+        # provider materializes, BEFORE any conversation grows or any GC check
+        # runs.  We deliberately do NOT keep a hardcoded default (e.g. the old
+        # 128_000): that masked a misconfigured/late provider and froze the
+        # budget-GC denominator at a model-agnostic number, so the after-turn
+        # GC threshold was computed against the wrong window and never tripped
+        # — the session walked into a context-window 400 with GC idle.
+        context_limit = 0
+        if self._provider is not None:
+            context_limit = self._provider.get_context_limit()
 
         # Get session_id - use runtime's session ID or generate placeholder
         # The server will assign proper session_id when session is registered
