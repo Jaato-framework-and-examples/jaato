@@ -19,6 +19,11 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYP
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 from .session_history import SessionHistory
+from .gc_support import (
+    apply_gc_removal_list as _gc_apply_removal_list,
+    build_gc_span_attributes as _gc_build_span_attributes,
+    populate_gc_span_result as _gc_populate_span_result,
+)
 from .instruction_budget_builder import (
     TokenCountRequest as _TokenCountRequest,
     count_tokens as _builder_count_tokens,
@@ -3784,147 +3789,40 @@ NOTES
     ) -> Dict[str, Any]:
         """Build the initial attribute dict for a GC telemetry span.
 
-        Captures budget state, cache anchor (if a cache plugin is active),
-        and context usage at the moment GC is about to run.  These are
-        the "before" values; ``_populate_gc_span_result`` adds the "after"
-        values once GC completes.
-
-        Args:
-            context_usage: Output of ``get_context_usage()``.
-            pre_collect: Reserved for future divergence between pre/post
-                attribute sets.  Currently always True.
-
-        Returns:
-            Dict of OTel-friendly attributes.
+        Thin wrapper over :func:`gc_support.build_gc_span_attributes`
+        supplying this session's budget and cache plugin. ``pre_collect``
+        is reserved for future pre/post divergence (currently unused).
         """
-        attrs: Dict[str, Any] = {
-            "gc.percent_used": float(context_usage.get("percent_used", 0)),
-            "gc.tokens_total": int(context_usage.get("total_tokens", 0)),
-            "gc.context_limit": int(context_usage.get("context_limit", 0)),
-        }
-        if self._instruction_budget:
-            try:
-                attrs["gc.tokens_before"] = int(self._instruction_budget.total_tokens())
-            except Exception:
-                pass
-        # Cache anchor (if any cache plugin exposes it)
-        cache = getattr(self, "_cache_plugin", None)
-        if cache and hasattr(cache, "get_cache_anchor_message_id"):
-            try:
-                anchor = cache.get_cache_anchor_message_id()
-                if anchor:
-                    attrs["gc.cache_anchor_message_id"] = anchor
-            except Exception:
-                pass
-        return attrs
+        return _gc_build_span_attributes(
+            context_usage,
+            budget=self._instruction_budget,
+            cache_plugin=getattr(self, "_cache_plugin", None),
+        )
 
     def _populate_gc_span_result(self, gc_span: Any, result: 'GCResult') -> None:
         """Populate a GC span with attributes derived from the GC result.
 
-        Called after ``gc_plugin.collect()`` returns.  The span receives
-        per-phase counts and aggregate metrics so external observers can
-        correlate GC operations with subsequent cache hit/miss outcomes.
-
-        Args:
-            gc_span: The active OTel span (or no-op span when telemetry
-                is disabled).
-            result: The ``GCResult`` from ``gc_plugin.collect()``.
+        Thin wrapper over :func:`gc_support.populate_gc_span_result`.
         """
-        if not gc_span:
-            return
-        try:
-            gc_span.set_attribute("gc.success", bool(result.success))
-            gc_span.set_attribute("gc.items_collected", int(result.items_collected))
-            gc_span.set_attribute("gc.tokens_freed", int(result.tokens_freed))
-            gc_span.set_attribute("gc.tokens_after", int(result.tokens_after))
-            # Per-phase counts come from result.details
-            details = result.details or {}
-            for key in (
-                "ephemeral_removed",
-                "partial_removed",
-                "preservable_removed",
-                "enrichment_cleared",
-                "tokens_to_free",
-                "target_tokens",
-            ):
-                if key in details:
-                    val = details[key]
-                    # bool first to avoid being treated as int
-                    if isinstance(val, bool):
-                        gc_span.set_attribute(f"gc.{key}", val)
-                    elif isinstance(val, (int, float)):
-                        gc_span.set_attribute(f"gc.{key}", val)
-        except Exception as e:
-            self._trace(f"GC_TELEMETRY: failed to populate span attrs: {e}")
+        _gc_populate_span_result(gc_span, result, on_trace=self._trace)
 
     def _apply_gc_removal_list(
         self, result: GCResult, gc_span: Any = None,
     ) -> None:
         """Apply GC removal list to instruction budget.
 
-        This synchronizes the budget with the actual history changes made by GC.
-        Must be called after a successful GC operation.
-
-        Args:
-            result: The GCResult containing the removal_list.
-            gc_span: Optional active GC telemetry span; passed to the
-                cache plugin's ``on_gc_result`` so it can emit cache
-                invalidation events on the same span.
+        Thin wrapper over :func:`gc_support.apply_gc_removal_list`
+        supplying this session's budget, cache plugin, and trace. Must be
+        called after a successful GC operation to keep the budget in sync
+        with the history changes.
         """
-        if not self._instruction_budget or not result.removal_list:
-            return
-
-        for item in result.removal_list:
-            if item.child_key:
-                # Remove specific child entry
-                self._instruction_budget.remove_child(item.source, item.child_key)
-            else:
-                # Bulk clear entire source (e.g., ENRICHMENT)
-                entry = self._instruction_budget.get_entry(item.source)
-                if entry:
-                    entry.tokens = 0
-                    entry.children.clear()
-
-        # If summary was created (summarize/hybrid plugins), add summary entry
-        summary_tokens = result.details.get("summary_tokens")
-        if summary_tokens and summary_tokens > 0:
-            # Find or create a unique summary key
-            conv_entry = self._instruction_budget.get_entry(InstructionSource.CONVERSATION)
-            if conv_entry:
-                # Count existing summaries to generate unique key
-                summary_count = sum(
-                    1 for key in conv_entry.children.keys()
-                    if key.startswith("gc_summary_")
-                )
-                summary_key = f"gc_summary_{summary_count + 1}"
-                self._instruction_budget.add_child(
-                    source=InstructionSource.CONVERSATION,
-                    child_key=summary_key,
-                    tokens=summary_tokens,
-                    gc_policy=GCPolicy.PRESERVABLE,
-                    label=f"Context Summary #{summary_count + 1}",
-                    metadata={"created_by": result.plugin_name},
-                )
-
-        self._trace(
-            f"GC_BUDGET_SYNC: Applied {len(result.removal_list)} removals to budget"
+        _gc_apply_removal_list(
+            result,
+            budget=self._instruction_budget,
+            cache_plugin=getattr(self, '_cache_plugin', None),
+            on_trace=self._trace,
+            gc_span=gc_span,
         )
-
-        # Notify cache plugin about GC so it can track prefix invalidation.
-        # The cache plugin may emit a 'cache.prefix_invalidated' event on
-        # the active gc_span (when provided) so the GC↔cache coordination
-        # is visible in the trace.
-        _cache = getattr(self, '_cache_plugin', None)
-        if _cache and hasattr(_cache, 'on_gc_result'):
-            try:
-                # Try the span-aware signature first; fall back to legacy
-                # call if the cache plugin only accepts the result.
-                try:
-                    _cache.on_gc_result(result, gc_span=gc_span)
-                except TypeError:
-                    _cache.on_gc_result(result)
-            except Exception as e:
-                self._trace(f"CACHE_PLUGIN: on_gc_result failed: {e}")
 
     def _enrich_and_clean_prompt(self, prompt: str, turn_span=None) -> str:
         """Run prompt through enrichment pipeline and strip @references.
