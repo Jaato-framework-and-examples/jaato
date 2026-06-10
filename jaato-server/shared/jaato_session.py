@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYP
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 from .session_history import SessionHistory
+from .session_persistence import SessionPersistence
 from .session_telemetry import (
     classify_cache_outcome,
     history_to_openinference,
@@ -439,9 +440,10 @@ class JaatoSession:
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
 
-        # Session persistence
-        self._session_plugin: Optional[SessionPlugin] = None
-        self._session_config: Optional[SessionConfig] = None
+        # Session persistence (plugin + config ownership and the
+        # save/restore flow live on this collaborator; the
+        # _session_plugin/_session_config properties below delegate to it)
+        self._persistence = SessionPersistence(self)
 
         # Agent type context (for permission checks)
         self._agent_type: str = "main"
@@ -3777,7 +3779,7 @@ NOTES
                 self._maybe_collect_after_turn()
 
             # Notify session plugin
-            self._notify_session_turn_complete()
+            self._persistence.notify_turn_complete()
 
             # Notify reliability plugin of turn end
             if self._runtime.reliability_plugin:
@@ -8759,6 +8761,22 @@ NOTES
         return False
 
     # ==================== Session Persistence ====================
+    # The plugin/config and the save/restore flow live on the
+    # ``SessionPersistence`` collaborator (``self._persistence``).  These
+    # methods are thin delegations; the properties below keep
+    # ``_session_plugin`` / ``_session_config`` readable for the handful
+    # of external/internal readers that reach for them directly
+    # (jaato_client, refresh_tools, revert).
+
+    @property
+    def _session_plugin(self) -> Optional[SessionPlugin]:
+        """The attached session plugin, or None (owned by _persistence)."""
+        return self._persistence.plugin
+
+    @property
+    def _session_config(self) -> Optional[SessionConfig]:
+        """The session config paired with the plugin (owned by _persistence)."""
+        return self._persistence.config
 
     def set_session_plugin(
         self,
@@ -8766,38 +8784,11 @@ NOTES
         config: Optional[SessionConfig] = None
     ) -> None:
         """Set the session plugin for persistence."""
-        self._session_plugin = plugin
-        self._session_config = config or SessionConfig()
-
-        if hasattr(plugin, 'set_session'):
-            plugin.set_session(self)
-
-        if hasattr(plugin, 'get_user_commands'):
-            for cmd in plugin.get_user_commands():
-                self._user_commands[cmd.name] = cmd
-
-        if hasattr(plugin, 'get_executors') and self._executor:
-            for name, fn in plugin.get_executors().items():
-                self._executor.register(name, fn)
-
-        if hasattr(plugin, 'get_tool_schemas'):
-            session_schemas = plugin.get_tool_schemas()
-            if session_schemas:
-                current_tools = list(self._tools) if self._tools else []
-                current_tools.extend(session_schemas)
-                self._tools = current_tools
-
-        if self._session_config.auto_resume_last:
-            state = self._session_plugin.on_session_start(self._session_config)
-            if state:
-                self._restore_session_state(state)
+        self._persistence.set_plugin(plugin, config)
 
     def remove_session_plugin(self) -> None:
         """Remove the session plugin."""
-        if self._session_plugin:
-            self._session_plugin.shutdown()
-        self._session_plugin = None
-        self._session_config = None
+        self._persistence.remove_plugin()
 
     def save_session(
         self,
@@ -8805,112 +8796,31 @@ NOTES
         user_inputs: Optional[List[str]] = None
     ) -> str:
         """Save the current session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-
-        state = self._get_session_state(session_id, user_inputs)
-        self._session_plugin.save(state)
-
-        if hasattr(self._session_plugin, 'set_current_session_id'):
-            self._session_plugin.set_current_session_id(state.session_id)
-
-        return state.session_id
+        return self._persistence.save(session_id, user_inputs)
 
     def resume_session(self, session_id: str) -> SessionState:
         """Resume a previously saved session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-
-        state = self._session_plugin.load(session_id)
-        self._restore_session_state(state)
-        return state
+        return self._persistence.resume(session_id)
 
     def list_sessions(self) -> List[SessionInfo]:
         """List all available sessions."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-        return self._session_plugin.list_sessions()
+        return self._persistence.list()
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a saved session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-        return self._session_plugin.delete(session_id)
+        return self._persistence.delete(session_id)
 
     def _get_session_state(
         self,
         session_id: Optional[str] = None,
         user_inputs: Optional[List[str]] = None
     ) -> SessionState:
-        """Build a SessionState from current state."""
-        if not session_id:
-            if (self._session_plugin and
-                    hasattr(self._session_plugin, 'get_current_session_id')):
-                session_id = self._session_plugin.get_current_session_id()
-            if not session_id:
-                session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        now = datetime.now()
-        turn_accounting = self.get_turn_accounting()
-
-        description = None
-        if self._session_plugin and hasattr(self._session_plugin, '_session_description'):
-            description = self._session_plugin._session_description
-
-        # Snapshot session-attached state at save time.  Invokes every
-        # registered provider so the snapshot reflects live values
-        # (extension-owned incrementally-mutated structures stay
-        # correct without push-on-every-mutation).  Empty dict
-        # collapses to None so old persistence files round-trip
-        # unchanged when nothing has been attached.
-        attached_state = self.get_all_session_state()
-        # ``profile_name`` not threaded through this construction path
-        # — this branch fires on the runner-side standalone-client
-        # save flow where the profile binding lives on the daemon-side
-        # JaatoServer, not the runner-side JaatoSession.  SessionManager's
-        # save path (which has access to ``server._profile.name``)
-        # populates it correctly.  This path stays None; backward-
-        # compat path for non-SessionManager-managed sessions.
-        return SessionState(
-            session_id=session_id,
-            history=self.get_history(),
-            created_at=now,
-            updated_at=now,
-            turn_count=len(turn_accounting),
-            turn_accounting=turn_accounting,
-            user_inputs=user_inputs or [],
-            description=description,
-            session_state=attached_state if attached_state else None,
-        )
+        """Build a SessionState snapshot (delegates to _persistence)."""
+        return self._persistence.build_state(session_id, user_inputs)
 
     def _restore_session_state(self, state: SessionState) -> None:
-        """Restore session state from a SessionState."""
-        self.reset_session(state.history)
-        self._turn_accounting = list(state.turn_accounting)
-        # Re-attach session-state values from the persisted snapshot.
-        # Routes through set_session_state so the JSON-serialisability
-        # check fires (defensive: persisted state should already be
-        # serialisable, but a corrupted file shouldn't silently
-        # inject a non-JSON value into the live container).
-        # Consumer hooks fire via the normal session-creation path
-        # (when the persisted session is loaded by SessionManager) and
-        # can re-register providers / instantiate runtime structures
-        # from the restored values.
-        if state.session_state:
-            for key, value in state.session_state.items():
-                self.set_session_state(key, value)
-
-    def _notify_session_turn_complete(self) -> None:
-        """Notify session plugin that a turn completed."""
-        if not self._session_plugin or not self._session_config:
-            return
-
-        state = self._get_session_state()
-
-        if hasattr(self._session_plugin, 'increment_turn_count'):
-            self._session_plugin.increment_turn_count()
-
-        self._session_plugin.on_turn_complete(state, self._session_config)
+        """Restore session state from a SessionState (delegates to _persistence)."""
+        self._persistence.restore_state(state)
 
     # ------------------------------------------------------------------
     # Conversation fork
@@ -9234,9 +9144,7 @@ NOTES
 
     def close_session(self) -> None:
         """Close the current session."""
-        if self._session_plugin and self._session_config:
-            state = self._get_session_state()
-            self._session_plugin.on_session_end(state, self._session_config)
+        self._persistence.close()
 
 
 __all__ = ['JaatoSession']
