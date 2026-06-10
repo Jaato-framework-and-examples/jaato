@@ -716,14 +716,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute_streaming: {cmd_preview}")
 
-            # Validate paths are within workspace (if sandboxing enabled)
-            blocked_path = self._validate_command_paths(command, arg_list)
-            if blocked_path:
-                result = self._make_not_found_result(blocked_path, command)
-                # Call callbacks with the fake error
-                on_stderr(result['stderr'].encode('utf-8'))
-                on_returncode(result['returncode'])
-                return result
+            # Validate paths are within workspace (if sandboxing enabled).
+            # Returns a ready result dict on refusal (blocked path or
+            # unparseable command), or None when the command is allowed.
+            refusal = self._validate_command_paths(command, arg_list)
+            if refusal is not None:
+                # Call callbacks with the refusal error
+                on_stderr(refusal['stderr'].encode('utf-8'))
+                on_returncode(refusal['returncode'])
+                return refusal
 
             # Prepare environment
             env = os.environ.copy()
@@ -1112,34 +1113,54 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         self,
         command: str,
         arg_list: Optional[List[str]] = None
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """Validate that all paths in a command are within workspace_root.
 
         Each path is checked with its inferred access mode: paths in write
         positions (redirections, write commands) require "readwrite"
         authorization; all other paths only require "read" access.
 
-        If any path is outside the workspace, returns the blocked path for
-        a fake "not found" error. The model sees this as if the path doesn't
-        exist.
+        **Fail-closed contract.** The path heuristics below tokenise the
+        command with :func:`shlex.split`, which models POSIX shell word
+        splitting. If ``shlex`` *cannot* parse the command (unbalanced
+        quotes, dangling escapes), the tokens it would produce no longer
+        match how ``/bin/sh`` will interpret the string — so the path
+        extraction can't reason about it safely. Historically the helpers
+        degraded to a naive ``str.split()`` here, which parses differently
+        than the shell and could let an out-of-workspace path slip past the
+        check. Instead we now refuse the command outright. This is a
+        security boundary: when we can't analyse, we deny.
 
         Args:
             command: The command string.
             arg_list: Optional separate argument list.
 
         Returns:
-            None if all paths are valid, or the first blocked path string.
+            ``None`` if all paths are valid; otherwise a ready-to-return
+            result dict (``stdout``/``stderr``/``returncode``) describing
+            why the command was refused — either a blocked path (mimicking
+            "not found") or an unparseable command (shell syntax error).
         """
         if not self._workspace_root:
             # No sandboxing configured
             return None
+
+        # Fail closed before any heuristic runs: a command the validator
+        # cannot tokenise the way the shell will is refused, not degraded.
+        try:
+            shlex.split(command)
+        except ValueError as exc:
+            self._trace(
+                f"path_sandbox: refusing unparseable command for validation ({exc})"
+            )
+            return self._make_unparseable_result(command, exc)
 
         classified = self._classify_path_modes(command, arg_list)
 
         for path, mode in classified:
             if not self._is_path_within_workspace(path, mode=mode):
                 self._trace(f"path_sandbox: blocked access to '{path}' (outside workspace, mode={mode})")
-                return path
+                return self._make_not_found_result(path, command)
 
         return None
 
@@ -1168,6 +1189,39 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             'stdout': '',
             'stderr': stderr,
             'returncode': 1
+        }
+
+    def _make_unparseable_result(
+        self, command: str, exc: Exception
+    ) -> Dict[str, Any]:
+        """Create a result dict for a command that failed sandbox parsing.
+
+        Returned by :meth:`_validate_command_paths` when ``shlex.split``
+        cannot tokenise the command (e.g. unbalanced quotes), so the path
+        sandbox can't verify it stays within the workspace. The command is
+        refused with a shell-style syntax error (returncode 2, the POSIX
+        convention for a shell parse failure) rather than executed.
+
+        The message is explicit so the model can self-correct — typically
+        by balancing quotes or simplifying the quoting — instead of seeing
+        a misleading "file not found".
+
+        Args:
+            command: The original command string (unused beyond context;
+                kept for symmetry with :meth:`_make_not_found_result`).
+            exc: The ``shlex`` parse error, surfaced to aid correction.
+
+        Returns:
+            Dict with stdout, stderr, returncode for a refused command.
+        """
+        stderr = (
+            "sh: syntax error: command could not be parsed for sandbox "
+            f"validation ({exc}); rewrite it with balanced quotes/escapes."
+        )
+        return {
+            'stdout': '',
+            'stderr': stderr,
+            'returncode': 2,
         }
 
     # --- End path sandboxing implementation ---
@@ -1209,10 +1263,12 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute: {cmd_preview}")
 
-            # Validate paths are within workspace (if sandboxing enabled)
-            blocked_path = self._validate_command_paths(command, arg_list)
-            if blocked_path:
-                return self._make_not_found_result(blocked_path, command)
+            # Validate paths are within workspace (if sandboxing enabled).
+            # Returns a ready result dict on refusal (blocked path or
+            # unparseable command), or None when the command is allowed.
+            refusal = self._validate_command_paths(command, arg_list)
+            if refusal is not None:
+                return refusal
 
             # Merge separate arg_list into the command string so the
             # shared runner receives a single command expression.
