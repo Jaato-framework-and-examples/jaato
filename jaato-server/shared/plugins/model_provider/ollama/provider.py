@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..anthropic.provider import AnthropicProvider
-from ..base import ProviderConfig
+from ..base import ProviderConfig, resolve_context_window
 from .env import (
     DEFAULT_OLLAMA_HOST,
     resolve_context_length,
@@ -35,10 +35,6 @@ from .env import (
 
 logger = logging.getLogger(__name__)
 
-
-# Default context limit for Ollama models
-# Most models support at least 8K, many support 32K+
-DEFAULT_CONTEXT_LIMIT = 32768
 
 
 class OllamaConnectionError(Exception):
@@ -96,6 +92,7 @@ class OllamaProvider(AnthropicProvider):
         super().__init__()
         self._host: str = DEFAULT_OLLAMA_HOST
         self._context_length_override: Optional[int] = None
+        self._context_length_knob: Optional[int] = None
 
         # Ollama doesn't support thinking.
         self._enable_thinking = False
@@ -131,9 +128,15 @@ class OllamaProvider(AnthropicProvider):
         # Ensure host doesn't have trailing slash
         self._host = self._host.rstrip("/")
 
-        # Optional context length override
-        self._context_length_override = (
-            config.extra.get("context_length") or resolve_context_length()
+        # Context window: resolved with tier-1 auto-detect PRIMARY at
+        # connect() (the model is known then — Ollama's context length is
+        # per-model).  Stash the manual knob and seed a provisional from
+        # knob -> env so get_context_limit() is usable before connect();
+        # connect() re-resolves with detect (POST /api/show) winning.
+        self._context_length_knob = config.extra.get("context_length")
+        self._context_length_override = resolve_context_window(
+            profile_value=self._context_length_knob,
+            env_value=resolve_context_length(),
         )
 
         # Ollama doesn't support thinking.
@@ -247,9 +250,54 @@ class OllamaProvider(AnthropicProvider):
 
         self._model_name = model_name
 
+        # Tier-1 context-window auto-detect now that the model is known
+        # (detect PRIMARY -> manual knob -> env).  POST /api/show reports
+        # the model's real context length; a stale per-profile value can no
+        # longer silently under-declare it.
+        self._context_length_override = resolve_context_window(
+            detect_capacity=self._detect_context_capacity,
+            profile_value=self._context_length_knob,
+            env_value=resolve_context_length(),
+        )
+        if not self._context_length_override:
+            raise ValueError(
+                "Ollama provider: context_length could not be resolved.  "
+                "POST /api/show did not report the model's context length "
+                "(older Ollama, or unreachable), and no manual override is "
+                "set.  Set plugin_configs.ollama.context_length in the "
+                "profile, or OLLAMA_CONTEXT_LENGTH in the environment.  No "
+                "hardcoded fallback exists per the project's no-fallback rule."
+            )
+
         if not skip_model_test:
             # Verify model can actually respond (catches memory issues, etc.)
             self._verify_model_responds()
+
+    def _detect_context_capacity(self) -> Optional[int]:
+        """Tier-1 context-window auto-detection hook for Ollama.
+
+        Reads the model's context length from ``POST /api/show``, whose
+        ``model_info`` dict carries an architecture-prefixed
+        ``<arch>.context_length`` entry (e.g. ``qwen3.context_length``).
+        Returns ``None`` when the server is unreachable or the field is
+        absent, so resolution degrades to the manual knob / env var.
+        """
+        if not self._model_name:
+            return None
+        try:
+            response = httpx.post(
+                f"{self._host}/api/show",
+                json={"model": self._model_name},
+                timeout=10,
+            )
+            response.raise_for_status()
+            info = response.json().get("model_info") or {}
+        except httpx.HTTPError:
+            return None
+        for key, val in info.items():
+            if key.endswith(".context_length") and val:
+                return int(val)
+        return None
 
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models available in Ollama.
@@ -281,12 +329,13 @@ class OllamaProvider(AnthropicProvider):
     def get_context_limit(self) -> int:
         """Get context window size.
 
-        Returns context_length_override if set, otherwise a default.
-        Ollama models vary widely in context size.
+        Resolved at connect() via detect (POST /api/show) -> manual knob
+        -> env (see resolve_context_window).  Returns 0 ("unknown") only
+        before connect(); connect() raises if nothing resolves, so a
+        connected provider always reports a real window (no hardcoded
+        default).
         """
-        if self._context_length_override:
-            return self._context_length_override
-        return DEFAULT_CONTEXT_LIMIT
+        return self._context_length_override or 0
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors with Ollama-specific interpretation.
