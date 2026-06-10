@@ -200,7 +200,7 @@ class JaatoIPCServer:
     def __init__(
         self,
         socket_path: Optional[str] = None,
-        socket_mode: int = 0o666,
+        socket_mode: int = 0o660,
         on_session_request: Optional[Callable[[str, str, Event], None]] = None,
         on_command_list_request: Optional[Callable[[], list]] = None,
         on_client_disconnect: Optional[Callable[[str], None]] = None,
@@ -210,8 +210,13 @@ class JaatoIPCServer:
         Args:
             socket_path: Path to the Unix domain socket or Windows pipe name.
                 Defaults to platform-appropriate path.
-            socket_mode: Unix file permissions for the socket (default: 0o666,
-                world read/write). Use 0o660 to restrict to owner and group.
+            socket_mode: Unix file permissions for the socket (default: 0o660,
+                owner and group only). The IPC transport has no per-message
+                authentication, so any principal that can open the socket can
+                fully drive the agent (send prompts, run whitelisted tools,
+                read/write the workspace). 0o660 keeps that reachable only by
+                the daemon's owner and group; pass 0o666 to opt into
+                world-accessible (e.g. cross-user containers on a trusted host).
             on_session_request: Callback for session requests.
                 Called with (client_id, session_id, event).
             on_command_list_request: Callback to get list of available commands.
