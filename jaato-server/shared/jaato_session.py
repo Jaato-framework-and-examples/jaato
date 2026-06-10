@@ -19,6 +19,11 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYP
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 from .session_history import SessionHistory
+from .session_telemetry import (
+    classify_cache_outcome,
+    history_to_openinference,
+    response_to_openinference,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3925,72 +3930,6 @@ NOTES
                 self._trace(f"LLM_TELEMETRY: cache attr fetch failed: {e}")
         return attrs
 
-    def _classify_cache_outcome(
-        self,
-        prompt_tokens: int,
-        cache_read_tokens: Optional[int],
-        cache_creation_tokens: Optional[int],
-    ) -> str:
-        """Classify a request's cache hit/miss outcome.
-
-        ``prompt_tokens`` is the *new* (uncached) input only — matches
-        Anthropic's ``input_tokens`` semantics, which jaato normalizes
-        other providers to (see ``model_provider/anthropic/converters.py``).
-        Total input therefore = ``cache_read_tokens + prompt_tokens``,
-        and the hit ratio is ``cache_read_tokens / total_input`` — which
-        naturally caps at 1.0.  Dividing by ``prompt_tokens`` alone
-        produces ratios above 1.0 on cache-warm turns (e.g. 36.97 from
-        26580 / 719) and misclassifies them as anomalies.
-
-        Returns:
-            "hit"   — most input tokens served from cache (>= 80%)
-            "partial" — some input tokens served from cache (10-80%)
-            "warm"  — cache was being written but not read (creation only)
-            "miss"  — no cache reads, no creation
-            "unknown" — usage data missing
-        """
-        read = cache_read_tokens or 0
-        creation = cache_creation_tokens or 0
-        new_input = prompt_tokens or 0
-        total_input = read + new_input
-        if total_input <= 0:
-            return "unknown"
-        ratio = read / total_input
-        if ratio >= 0.8:
-            return "hit"
-        if ratio >= 0.1:
-            return "partial"
-        if creation > 0:
-            return "warm"
-        return "miss"
-
-    def _populate_llm_span_outcome(
-        self,
-        llm_span: Any,
-        response: Optional['ProviderResponse'],
-    ) -> None:
-        """Populate an LLM span with cache outcome derived from the response.
-
-        Called after ``provider.complete()`` returns.  Extracts the
-        cache hit/miss classification from response.usage and sets it
-        as a span attribute.
-        """
-        if not llm_span or not response or not getattr(response, "usage", None):
-            return
-        try:
-            usage = response.usage
-            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
-            read = getattr(usage, "cache_read_tokens", None)
-            creation = getattr(usage, "cache_creation_tokens", None)
-            llm_span.set_attribute("cache.read_tokens", int(read or 0))
-            llm_span.set_attribute("cache.creation_tokens", int(creation or 0))
-            llm_span.set_attribute(
-                "cache.outcome",
-                self._classify_cache_outcome(prompt, read, creation),
-            )
-        except Exception as e:
-            self._trace(f"LLM_TELEMETRY: failed to populate cache outcome: {e}")
-
     def _build_gc_span_attributes(
         self, context_usage: Dict[str, Any], pre_collect: bool = True,
     ) -> Dict[str, Any]:
@@ -7593,7 +7532,7 @@ NOTES
             )
 
         # Record output messages (OpenInference indexed attributes)
-        output_msgs = self._response_to_openinference(response)
+        output_msgs = response_to_openinference(response)
         if output_msgs:
             span.set_output_messages(output_msgs)
 
@@ -7616,7 +7555,7 @@ NOTES
         # so external observers can correlate cache behavior with the
         # GC ↔ cache coordination dance.
         try:
-            outcome = self._classify_cache_outcome(
+            outcome = classify_cache_outcome(
                 int(usage.prompt_tokens or 0),
                 usage.cache_read_tokens,
                 usage.cache_creation_tokens,
@@ -7645,79 +7584,9 @@ NOTES
         Args:
             span: The LLM span context to set attributes on.
         """
-        input_msgs = self._history_to_openinference()
+        input_msgs = history_to_openinference(self._history.messages)
         if input_msgs:
             span.set_input_messages(input_msgs)
-
-    @staticmethod
-    def _response_to_openinference(response: ProviderResponse) -> List[Dict[str, Any]]:
-        """Convert a ProviderResponse to OpenInference output message dicts.
-
-        Returns a list with a single assistant message containing text content
-        and any tool calls from the response parts.
-
-        Args:
-            response: The provider response to convert.
-
-        Returns:
-            List of message dicts with 'role', 'content', and optional
-            'tool_calls' suitable for ``span.set_output_messages()``.
-        """
-        text = response.get_text()
-        function_calls = response.get_function_calls()
-
-        if not text and not function_calls:
-            return []
-
-        msg: Dict[str, Any] = {"role": "assistant", "content": text or ""}
-        if function_calls:
-            msg["tool_calls"] = [
-                {
-                    "name": fc.name,
-                    "arguments": json.dumps(fc.args) if fc.args else "{}",
-                }
-                for fc in function_calls
-            ]
-        return [msg]
-
-    def _history_to_openinference(self) -> List[Dict[str, Any]]:
-        """Convert the current session history to OpenInference input message dicts.
-
-        Maps jaato ``Message`` objects to the dict format expected by
-        ``span.set_input_messages()``: each dict has 'role' and 'content'.
-
-        Returns:
-            List of message dicts suitable for ``span.set_input_messages()``.
-        """
-        result = []
-        for msg in self._history.messages:
-            # Map jaato roles to OpenInference roles
-            role = msg.role.value  # "user", "model", "tool"
-            if role == "model":
-                role = "assistant"
-
-            # Extract text content from parts
-            texts = [p.text for p in msg.parts if p.text]
-            content = "".join(texts) if texts else ""
-
-            entry: Dict[str, Any] = {"role": role, "content": content}
-
-            # Include tool calls from model messages
-            if msg.role == Role.MODEL:
-                tool_calls = [
-                    {
-                        "name": p.function_call.name,
-                        "arguments": json.dumps(p.function_call.args)
-                            if p.function_call.args else "{}",
-                    }
-                    for p in msg.parts
-                    if p.function_call
-                ]
-                if tool_calls:
-                    entry["tool_calls"] = tool_calls
-
-            result.append(entry)
-        return result
 
     def get_history(self) -> List[Message]:
         """Get current conversation history.
