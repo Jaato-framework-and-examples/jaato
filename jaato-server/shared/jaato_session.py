@@ -3798,6 +3798,15 @@ NOTES
                     percent_used = (usage.total_tokens / context_limit) * 100
                     threshold = self._gc_config.threshold_percent if self._gc_config else 80.0
 
+                    # Diagnostic: log the provider-reported wire size
+                    # (the proactive denominator) alongside the
+                    # InstructionBudget breakdown so the two can be
+                    # compared and the wire_tool_schemas registration
+                    # verified.  Only on a fresh per-turn crossing-check
+                    # (gated by ``not _gc_threshold_crossed``), so it
+                    # fires ~once per turn, not per stream chunk.
+                    self._log_gc_denominator("proactive", usage.total_tokens)
+
                     if percent_used >= threshold:
                         self._gc_threshold_crossed = True
                         self._trace(f"PROACTIVE_GC: Threshold crossed ({percent_used:.1f}% >= {threshold}%)")
@@ -3827,6 +3836,10 @@ NOTES
 
         context_usage = self.get_context_usage()
         history = self.get_history()
+
+        # Diagnostic: the InstructionBudget denominator this GC decision
+        # is actually evaluating (with wire_tool_schemas broken out).
+        self._log_gc_denominator("after_turn")
 
         # Build pre-GC telemetry attributes for span context
         gc_attrs = self._build_gc_span_attributes(
@@ -8050,6 +8063,59 @@ NOTES
             'tokens_remaining': tokens_remaining,
         }
 
+    def _log_gc_denominator(self, label: str, provider_total: int = 0) -> None:
+        """Emit (``logger.info``) the GC-trigger denominator breakdown so
+        the budget-GC decision is inspectable from the daemon log.
+
+        Two denominators are in play and must be told apart:
+
+        - **provider path** (proactive GC during streaming): the wire
+          size vLLM itself reports (``usage.total_tokens``) — ground
+          truth for what's actually on the wire.
+        - **InstructionBudget path** (pre-send / after-turn GC):
+          ``InstructionBudget.total_tokens()`` — what PR-274's
+          ``wire_tool_schemas`` LOCKED PLUGIN child feeds into, and what
+          ``gc_budget``'s threshold check reads via
+          ``get_context_usage``.
+
+        Logging both side-by-side (with the ``wire_tool_schemas`` child
+        broken out) makes three things verifiable from one line: (a) did
+        PR-274's tool-schema registration actually land in the
+        InstructionBudget; (b) does the InstructionBudget total track the
+        provider's true wire or diverge from it; (c) at a GC decision,
+        which number the threshold is being compared against.
+
+        Uses ``logger.info`` deliberately — NOT ``self._trace``, which
+        apparmor can silently swallow on confined runner sessions (see
+        ``feedback_apparmor_blocks_provider_trace_silently``).
+        """
+        ib = self._instruction_budget
+        if ib is None:
+            logger.info(
+                "GC_DENOM[%s] no_instruction_budget provider_total=%d",
+                label, provider_total,
+            )
+            return
+
+        def _src_total(source) -> int:
+            entry = ib.get_entry(source)
+            return entry.total_tokens() if entry is not None else 0
+
+        sys_t = _src_total(InstructionSource.SYSTEM)
+        plugin_entry = ib.get_entry(InstructionSource.PLUGIN)
+        plugin_t = plugin_entry.total_tokens() if plugin_entry is not None else 0
+        wire_t = 0
+        if plugin_entry is not None and "wire_tool_schemas" in plugin_entry.children:
+            wire_t = plugin_entry.children["wire_tool_schemas"].tokens
+        conv_t = _src_total(InstructionSource.CONVERSATION)
+        logger.info(
+            "GC_DENOM[%s] ib_total=%d (sys=%d plugin=%d[wire_tools=%d] "
+            "conv=%d) limit=%d pct=%.1f%% gc_eligible=%d | provider_total=%d",
+            label, ib.total_tokens(), sys_t, plugin_t, wire_t, conv_t,
+            ib.context_limit, ib.utilization_percent(),
+            ib.gc_eligible_tokens(), provider_total,
+        )
+
     def reset_session(self, history: Optional[List[Message]] = None) -> None:
         """Reset the chat session, clearing turn accounting and optionally restoring history.
 
@@ -8583,6 +8649,10 @@ NOTES
             return None
 
         context_usage = self.get_context_usage()
+        # Diagnostic: full denominator breakdown (sys/plugin[wire_tools]/conv)
+        # so the GC_CHECK percent can be attributed to its sources and the
+        # wire_tool_schemas registration verified.
+        self._log_gc_denominator("before_send")
         logger.info(
             "GC_CHECK: plugin=%s usage=%.1f%% threshold=%.1f%% target=%.1f%% continuous=%s",
             type(self._gc_plugin).__name__,

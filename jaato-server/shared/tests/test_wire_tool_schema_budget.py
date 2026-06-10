@@ -124,3 +124,37 @@ class TestInitialWireToolSchemaBudget:
         # The static tools alone move utilisation materially upward —
         # the GC trigger can now see the true wall.
         assert after - below > 5.0
+
+
+class TestGcDenominatorDiagnostic:
+    """The GC_DENOM diagnostic must expose the InstructionBudget
+    breakdown — including the wire_tool_schemas child — so the budget-GC
+    denominator is inspectable from the daemon log (closes the PR-274
+    verification gap)."""
+
+    def test_logs_wire_tools_in_breakdown(self, caplog):
+        import logging
+        s = _make_session()
+        _prep(s)
+        s._tools = [_schema("signal_completion", "x " * 200)]
+        s._register_initial_wire_tool_schema_budget()
+
+        with caplog.at_level(logging.INFO, logger="shared.jaato_session"):
+            s._log_gc_denominator("test", provider_total=12345)
+
+        line = "\n".join(r.getMessage() for r in caplog.records)
+        assert "GC_DENOM[test]" in line
+        assert "wire_tools=" in line
+        # The wire_tools figure must be non-zero (registration landed).
+        assert "wire_tools=0" not in line
+        assert "provider_total=12345" in line
+
+    def test_handles_missing_budget(self, caplog):
+        import logging
+        s = _make_session()
+        s._instruction_budget = None
+        with caplog.at_level(logging.INFO, logger="shared.jaato_session"):
+            s._log_gc_denominator("test", provider_total=7)
+        assert "no_instruction_budget" in "\n".join(
+            r.getMessage() for r in caplog.records
+        )
