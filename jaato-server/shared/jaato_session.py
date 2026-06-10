@@ -2096,6 +2096,15 @@ class JaatoSession:
         # creation if/when needed (see ``_start_background_token_counting``).
         self._populate_instruction_budget(session_instructions=system_instructions)
 
+        # Count the INITIAL wire tool-schema array (preloaded / core /
+        # lifecycle tools that bypass the discovery-only schema counting
+        # in ``_track_activated_tools_in_budget``).  Without this the
+        # budget-GC denominator under-reports the true wire by the size
+        # of the static tool array, so the GC threshold is structurally
+        # unreachable and the session walks into a context-window 400
+        # with GC idle.  See the method docstring for the full evidence.
+        self._register_initial_wire_tool_schema_budget()
+
         # Note: cache plugin wiring moved from here into ``_ensure_provider``
         # since 2026-05-13 — wiring needs a constructed provider, which is
         # now lazy.  The cache plugin attaches when the provider first
@@ -3325,6 +3334,80 @@ class JaatoSession:
                     logger.warning(
                         f"Failed to track plugin {plugin_name} in budget: {e}"
                     )
+
+    def _register_initial_wire_tool_schema_budget(self) -> None:
+        """Count the INITIAL wire tool-schema array into the budget.
+
+        The tool-definitions array (``tools[]``) ships on EVERY request
+        and is part of real context utilization — but its tokens were
+        only ever counted by :meth:`_track_activated_tools_in_budget`,
+        which fires ONLY when a tool is DISCOVERED at runtime (deferred
+        loading).  Tools that are PRELOADED or CORE — exposed at
+        ``configure()`` and never "discovered": the lifecycle tools
+        (``prepare_completion`` / ``signal_completion`` / ...), and any
+        plugin carrying a ``(preload)`` modifier — therefore never had
+        their schema tokens counted.  ``_collect_instruction_texts``
+        counts plugin *instruction* text, not tool *schema* JSON, so it
+        doesn't cover them either (and on the
+        ``system_instruction_override`` short-circuit it returns before
+        the plugin block entirely).
+
+        Net effect of the gap: ``InstructionBudget.total_tokens()`` — the
+        denominator the budget-GC trigger reads
+        (``get_context_usage`` → ``utilization_percent``) — under-reported
+        the true wire by the size of the initial tool array (a cascade
+        stage's 16 tools is ~18-25K; ``signal_completion``'s schema alone
+        is several KB).  GC measured conversation-only utilisation, sat
+        below its threshold, and never reclaimed history while the real
+        request walked into a context-window 400.  Empirically:
+        session 20260610_082013 read 58% (37928 tok) while the wire that
+        overflowed carried 63489 (97%).
+
+        This counts the schema JSON for the tools present in
+        ``self._tools`` at configure time (the initial / preloaded /
+        core wire set) into a single ``PLUGIN`` child with the CORE tool
+        policy (LOCKED).  LOCKED is deliberate: ``total_tokens()`` (the
+        GC trigger + the UI budget bar + telemetry) now reflects the
+        static wire, while ``gc_eligible_tokens()`` still EXCLUDES it —
+        so GC measures true utilisation but only ever trims conversation.
+
+        Disjoint from :meth:`_track_activated_tools_in_budget`: discovered
+        tools are appended to ``self._tools`` AFTER this runs (via
+        ``activate_discovered_tools``), so the two never double-count the
+        same tool.
+        """
+        if not self._instruction_budget or not self._tools:
+            return
+        total = 0
+        for schema in self._tools:
+            try:
+                schema_json = json.dumps({
+                    "name": schema.name,
+                    "description": schema.description,
+                    "parameters": schema.parameters,
+                }, indent=2)
+                total += self._count_tokens(schema_json)
+            except Exception:
+                continue
+        if total <= 0:
+            return
+        try:
+            self._instruction_budget.add_child(
+                InstructionSource.PLUGIN,
+                "wire_tool_schemas",
+                total,
+                DEFAULT_TOOL_POLICIES[PluginToolType.CORE],
+                label="Wire tool schemas (initial)",
+            )
+            self._trace(
+                f"BUDGET_WIRE_TOOLS: registered {total} tokens for "
+                f"{len(self._tools)} initial wire tool schemas (LOCKED)"
+            )
+            self._emit_instruction_budget_update()
+        except Exception as e:
+            logger.warning(
+                f"Failed to register initial wire tool schema budget: {e}"
+            )
 
     def _register_model_command(self) -> None:
         """Register the built-in model command for listing and switching models."""
