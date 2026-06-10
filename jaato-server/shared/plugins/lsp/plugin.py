@@ -99,15 +99,20 @@ LOG_WARN = 'WARN'
 
 MAX_LOG_ENTRIES = 500
 
-# Default per-server LSP connect timeout (seconds).  The previous
-# hard-coded value of 15.0 was sufficient for lightweight servers like
-# pyright / typescript-language-server (which initialize in under 5s),
-# but starves Eclipse JDT LS (jdtls) on Maven / Gradle workspaces where
-# cold-start `initialize` + workspace import routinely takes 30-60s.
-# Operators with very large Java workspaces or other heavy-init servers
-# can raise this further via `plugin_configs.lsp.connect_timeout_seconds`
-# in their profile (capped at MAX_CONNECT_TIMEOUT_SECONDS).
-DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
+# Default per-server LSP connect timeout (seconds).  Lightweight servers
+# (pyright / typescript-language-server) initialize in under 5s, but
+# Eclipse JDT LS (jdtls) on a cold Maven / Gradle workspace routinely
+# takes 60-120s+ for `initialize` + dependency download + workspace
+# import.  A too-short default makes `connect_server` time out WHILE
+# jdtls is still legitimately starting; that timeout cancels the connect
+# coroutine but leaves the spawned subprocess alive (now reaped via
+# `_reap_failed_client`, #284) and the retry-autoconnect then spawns a
+# fresh one — so every premature timeout cost one jdtls cold-start of
+# wasted CPU/RAM.  180s comfortably covers a cold jdtls import while
+# still bounding a genuinely hung server.  Operators can raise further
+# via `plugin_configs.lsp.connect_timeout_seconds` (capped at
+# MAX_CONNECT_TIMEOUT_SECONDS).
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 180.0
 MIN_CONNECT_TIMEOUT_SECONDS = 1.0
 MAX_CONNECT_TIMEOUT_SECONDS = 300.0
 
@@ -2201,8 +2206,8 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 default=DEFAULT_CONNECT_TIMEOUT_SECONDS,
                 description=(
                     "Per-server LSP `initialize` handshake timeout. "
-                    "Raise for heavy-init servers (jdtls on Maven / Gradle "
-                    "workspaces typically needs 30-60s). Clamped to "
+                    "Raise for heavy-init servers (jdtls on a cold Maven / "
+                    "Gradle workspace routinely needs 60-120s+). Clamped to "
                     f"[{MIN_CONNECT_TIMEOUT_SECONDS}, "
                     f"{MAX_CONNECT_TIMEOUT_SECONDS}]."
                 ),
@@ -2666,6 +2671,31 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._thread.start()
 
+    async def _reap_failed_client(self, name: str, client) -> None:
+        """Terminate a partially-started LSP client after a failed or
+        timed-out ``connect_server`` so its subprocess does not leak.
+
+        ``LSPClient.start()`` spawns the language-server subprocess
+        (``create_subprocess_exec``) BEFORE the slow ``_initialize()``
+        handshake.  When ``connect_server`` times out (or raises) the
+        coroutine is cancelled but the spawned process is left running and
+        UNTRACKED — ``self._clients[name]`` is only assigned on the success
+        path.  ``client.stop()`` is the same teardown the success path uses
+        in ``disconnect_server`` (cancel reader task → terminate → wait →
+        kill), so it reaps regardless of whether ``_initialize()`` had
+        completed.  No-op when no client was spawned yet (``client is None``,
+        e.g. failure before ``LSPClient(...)``).  See #284.
+        """
+        if client is None:
+            return
+        try:
+            await client.stop()
+            self._trace(f"reaped failed/timed-out LSP client '{name}'")
+        except Exception as e:
+            self._trace(
+                f"reap of failed LSP client '{name}' raised (ignored): {e}"
+            )
+
     def _thread_main(self) -> None:
         """Background thread running the LSP event loop."""
 
@@ -2686,6 +2716,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             async def connect_server(name: str, spec: dict) -> bool:
                 """Connect to a language server."""
                 self._log_event(LOG_INFO, "Connecting to server", server=name)
+                client = None
                 try:
                     # Expand variables in args (e.g., ${workspaceRoot}).
                     # PR-157 (server 0.6.140): pass
@@ -2755,10 +2786,20 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 except asyncio.TimeoutError:
                     self._failed_servers[name] = "Connection timed out"
                     self._log_event(LOG_ERROR, "Connection timed out", server=name)
+                    # Reap the partially-started server.  ``LSPClient.start()``
+                    # spawns the subprocess BEFORE the (slow) initialize
+                    # handshake, so a timeout cancels the coroutine but leaves a
+                    # live, UNTRACKED process (``self._clients[name]`` was never
+                    # set).  Without this the orphaned jdtls leaks AND the
+                    # retry-autoconnect spawns a duplicate (it sees the server as
+                    # not-connected), accumulating one jdtls per timeout until
+                    # the daemon OOMs.  See #284.
+                    await self._reap_failed_client(name, client)
                     return False
                 except Exception as e:
                     self._failed_servers[name] = str(e)
                     self._log_event(LOG_ERROR, "Connection failed", server=name, details=str(e))
+                    await self._reap_failed_client(name, client)
                     return False
 
             async def disconnect_server(name: str) -> None:
