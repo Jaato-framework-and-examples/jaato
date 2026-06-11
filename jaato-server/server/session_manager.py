@@ -3510,15 +3510,23 @@ class SessionManager:
         self, session: 'Session', event: Event,
     ) -> None:
         """Default lifecycle policy: on ``SessionTerminatedEvent`` for
-        a session that is headless OR has a registered cascade-owner,
-        force an unload.
+        a session that is headless OR has a registered cascade-owner OR
+        is cascade-stamped (``cascade_driver_id`` set), force an unload.
+
+        The cascade-stamped disjunct (server 0.6.166+) covers the
+        driver-attached DISCOVERY session, whose IPC client registers
+        only as an *observer*: without it that session was neither
+        headless nor owner-registered, hit the early-return, and its
+        slot stayed pinned for minutes until the driver detached on its
+        own — see the inline comment on the gate below.
 
         ``SessionTerminatedEvent`` is by definition a terminal-state
         signal (see :class:`jaato_sdk.events.SessionTerminatedEvent`
         — "Session has fully wound down — safe to disconnect").  All
         four current reasons (``natural``, ``error``, ``stopped``,
         ``client_request``) are terminal; any of them on a headless /
-        cascade-owned session means it's safe to unload now, which
+        cascade-owned / cascade-stamped session means it's safe to
+        unload now, which
         triggers ``JaatoServer.shutdown()`` → ``session_end`` RPC →
         ``pool_manager.return_slot_after_session(...)``.  Without this
         unload, the runner subprocess stays alive and the pool slot
@@ -3558,7 +3566,23 @@ class SessionManager:
                 entries = self._cascade_clients.get(cid, [])
                 has_cascade_owner = any(e.role == "owner" for e in entries)
 
-        if not (is_headless or has_cascade_owner):
+        # Server 0.6.166+ (γ'-guard fix): a cascade-stamped session
+        # (``cid is not None``) ALWAYS passes this gate, even when it is
+        # neither headless nor owner-registered.  Without this third
+        # disjunct the driver-attached DISCOVERY session — created via
+        # ``client.create_session("discovery", cascade_driver_id=...)``
+        # over an IPC client that registers only as an *observer* (no
+        # ``owner`` entry) — was ``is_headless=False`` AND
+        # ``has_cascade_owner=False``, hit this early-return, and so the
+        # γ' driver-detach block below NEVER ran.  Its slot stayed pinned
+        # until the driver's IPC client detached on its own (measured
+        # 2m50s–6m25s later, 2026-06-11), stalling the cascade's first
+        # handoff while every headless handoff returned its slot in
+        # ~250ms.  ``cid is not None`` makes the γ' detach reachable for
+        # discovery so its slot returns at SessionTerminated like every
+        # other stage.  TUI interactive sessions never set
+        # ``cascade_driver_id`` so they are unaffected.
+        if not (is_headless or has_cascade_owner or cid is not None):
             return
 
         # Pop the synthetic _HEADLESS_CLIENT_ID so the existing
