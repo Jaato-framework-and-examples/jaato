@@ -595,6 +595,64 @@ class TestDefaultPolicy:
         # at a different session).
         assert sm._client_to_session["ipc_1"] == "other-session"
 
+    def test_observer_only_discovery_unloads_without_owner(self):
+        """γ'-guard fix (server 0.6.166+): a cascade-stamped DISCOVERY
+        session whose IPC client registered ONLY as an *observer* (NO
+        owner entry) must still detach + unload on SessionTerminated.
+
+        This is the REAL production path (2026-06-11 daemon-log
+        evidence): the cascade driver calls
+        ``client.create_session("discovery", cascade_driver_id=...)``
+        and the SDK harness registers as ``role="observer"``, never
+        ``"owner"``.  Before the fix ``is_headless=False`` AND
+        ``has_cascade_owner=False``, so the policy early-returned and
+        the γ' detach never ran — discovery's pool slot stayed pinned
+        2m50s–6m25s until the driver detached on its own, stalling the
+        cascade's first handoff while every headless handoff returned
+        its slot in ~250ms.
+
+        Distinct from
+        ``test_cascade_session_auto_detaches_real_ipc_clients`` above,
+        which registers an OWNER and so passes the guard via a
+        different disjunct — that test's owner assumption did NOT hold
+        in production (no owner is ever registered for these cascades),
+        which is exactly why the leak survived it.  This test pins the
+        observer-only reality.
+        """
+        from jaato_sdk.events import SessionTerminatedEvent
+        sm = _make_sm()
+        unload_calls = self._setup_sm_with_unload_stub(sm)
+        # Observer-only registration — the actual driver / SDK-harness
+        # role (NOT owner).
+        sm.register_in_process_client(
+            client_id="driver-observer",
+            callback=MagicMock(),
+            cascade_driver_id="abc",
+            role="observer",
+        )
+        # Driver-attached discovery session: real IPC client, NOT
+        # headless, NO owner entry.
+        session = _make_session(
+            "s1", cid="abc",
+            attached_clients={"ipc_7"},
+        )
+        sm._sessions["s1"] = session
+        sm._client_to_session["ipc_7"] = "s1"
+        event = SessionTerminatedEvent(
+            session_id="s1", agent_id="discovery", reason="natural",
+        )
+        sm._apply_default_cascade_policy(session, event)
+        assert "ipc_7" not in session.attached_clients, (
+            "γ'-guard fix must detach the driver IPC client from an "
+            "observer-only cascade session so the slot returns promptly"
+        )
+        assert "ipc_7" not in sm._client_to_session
+        assert unload_calls == ["s1"], (
+            "observer-only cascade-stamped session must reach "
+            "_maybe_unload_session — without the cid disjunct it "
+            "early-returned and the slot leaked for minutes"
+        )
+
 
 # ======================================================================
 # GC sweep
