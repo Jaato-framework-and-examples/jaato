@@ -3,10 +3,12 @@
 import asyncio
 import atexit
 import json
+import logging
 import os
 import queue
 import shutil
 import signal
+import sys
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -26,6 +28,46 @@ from .lsp_client import (
 
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
+
+# Module logger — lands in the process's standard log (e.g. the daemon's
+# /tmp/jaato.log), unlike self._log_event/_trace which route to the LSP
+# debug log under the workspace (daemon-side writes there don't surface).
+# Used for the #284 daemon-process gate logging (thread suppression + the
+# connect_server defense guard).
+logger = logging.getLogger(__name__)
+
+
+def _running_in_daemon_process() -> bool:
+    """True when this process is the daemon (``python -m server``), False in a
+    runner/slot (``python -m server.runner``).
+
+    The daemon must NEVER host a language server.  In the seat-flip
+    architecture the per-session runner hosts LSP in a reapable slot; a jdtls
+    spawned in the long-lived daemon has no owning slot, is never reaped, and
+    accumulates resident until the daemon OOMs (#284).  The daemon-side LSP
+    instance exists only as a :class:`RunnerForwardingMixin` executor stub
+    (forwards tool calls via RPC) — it never needs the LSP background thread.
+
+    **Why process identity (not the registry):** the #285 diagnostic proved the
+    daemon-side LSP instance has ``_plugin_registry is None`` at connect time
+    (it is never wired), so the earlier ``registry.runner_rpc`` gate was
+    structurally unreachable and never fired.  Process identity is the only
+    signal available at LSP init/connect time.  Detected via the ``__main__``
+    module package (``server`` = daemon, ``server.runner`` = runner), with an
+    ``argv[0]`` script-path fallback.  Unknown contexts (tests, odd launchers)
+    return ``False`` — i.e. "not the daemon, host LSP" — so suppression only
+    ever triggers when we are positively sure this is the daemon.
+    """
+    main_mod = sys.modules.get("__main__")
+    pkg = getattr(main_mod, "__package__", "") or ""
+    if pkg == "server.runner" or pkg.startswith("server.runner"):
+        return False
+    if pkg == "server":
+        return True
+    argv0 = (sys.argv[0] if sys.argv else "").replace("\\", "/")
+    if argv0.endswith("server/runner/__main__.py"):
+        return False
+    return argv0.endswith("server/__main__.py")
 
 
 # Symbol kinds that represent exportable/referenceable entities
@@ -1712,27 +1754,22 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
     # ==================== Tool Result Enrichment ====================
 
-    def _is_daemon_forwarding_stub(self) -> bool:
-        """True when this instance is the daemon-side forwarding stub.
+    def _daemon_must_not_host_lsp(self) -> bool:
+        """True when this LSP instance runs in the daemon process and must
+        therefore NOT host a language server (suppress the lifecycle).
 
-        The LSP plugin is ``PLUGIN_TIER = "runner"`` but the daemon loads
-        every plugin (``discover()`` with no tier filter) so it can expose
-        tool schemas and forward execution to the runner via
-        :class:`RunnerForwardingMixin`.  On the daemon side the registry
-        carries a ``runner_rpc`` handle (set by ``JaatoServer.set_runner_rpc``
-        before ``server.initialize()``); on the runner-side real instance it
-        is ``None``.
+        Delegates to :func:`_running_in_daemon_process`.  See that function for
+        the full rationale; in short: the daemon-side LSP is a forwarding stub
+        for executor RPC, and any jdtls it spawns leaks resident in the
+        long-lived daemon → OOM (#284).  The per-session runner hosts LSP
+        instead (in a reapable slot).
 
-        Used to suppress the LSP **lifecycle** (server connect + diagnostics
-        enrichment, both of which spawn jdtls) on the daemon stub.  If the
-        stub runs that lifecycle it spawns a RESIDENT jdtls in the daemon
-        process — outside any slot's process group, never reaped, accumulating
-        until OOM (#284).  The runner-side instance hosts jdtls instead, in a
-        setsid'd slot (per-session, killpg-reapable on teardown).  Executor
-        forwarding does NOT use the background thread, so suppressing it leaves
-        the stub's forwarding intact.
+        **History (#285):** this used to read ``registry.runner_rpc`` via
+        :meth:`_runner_rpc_handle`, but the diagnostic proved the daemon-side
+        instance has no registry reference at connect time, so that gate never
+        fired.  Process identity is the only reliable signal.
         """
-        return self._runner_rpc_handle() is not None
+        return _running_in_daemon_process()
 
     def subscribes_to_tool_result_enrichment(self) -> bool:
         """Subscribe to tool result enrichment to auto-run diagnostics after file writes.
@@ -1741,13 +1778,13 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         that are modified by file-writing tools (updateFile, writeNewFile, etc.)
         and append diagnostic information to the tool result.
 
-        Returns ``False`` on the daemon-side forwarding stub (#284): diagnostics
-        enrichment must run on the runner-side instance that owns the workspace
-        and hosts jdtls in a reapable slot — never daemon-side, where jdtls
-        would accumulate resident and OOM the daemon.  See
-        :meth:`_is_daemon_forwarding_stub`.
+        Returns ``False`` in the daemon process (#284): diagnostics enrichment
+        must run on the runner-side instance that owns the workspace and hosts
+        jdtls in a reapable slot — never daemon-side, where jdtls would
+        accumulate resident and OOM the daemon.  See
+        :meth:`_daemon_must_not_host_lsp`.
         """
-        if self._is_daemon_forwarding_stub():
+        if self._daemon_must_not_host_lsp():
             return False
         return True
 
@@ -2709,6 +2746,22 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         if self._thread and self._thread.is_alive():
             return
 
+        # #284/#285: the daemon process must NOT run the LSP background thread.
+        # The thread's auto-connect spawns a jdtls that leaks resident in the
+        # long-lived daemon (no owning slot, never reaped) → OOM.  Executor
+        # forwarding (RunnerForwardingMixin) does not use this thread, so the
+        # daemon-side stub keeps forwarding tool calls to the runner; only the
+        # LSP server lifecycle (connect + diagnostics) is suppressed.  The
+        # per-session runner hosts jdtls in a reapable slot instead.  This is
+        # the earliest, single chokepoint — no thread means no auto-connect and
+        # no connect_server.
+        if self._daemon_must_not_host_lsp():
+            logger.info(
+                "LSP background thread suppressed in daemon process pid=%d "
+                "(runner-side hosts jdtls; #284)", os.getpid(),
+            )
+            return
+
         # Register the atexit reaper the first time a server thread starts
         # (i.e. the first time jdtls et al become spawnable).  Idempotent.
         self._register_atexit_reaper()
@@ -2801,19 +2854,17 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
             async def connect_server(name: str, spec: dict) -> bool:
                 """Connect to a language server."""
-                # #284: the daemon-side forwarding stub must NEVER spawn a
-                # language server.  A jdtls spawned here lives in the daemon's
-                # own process group (outside any slot), is never reaped, and
-                # accumulates resident until the daemon OOMs.  The runner-side
-                # real instance (runner_rpc is None) hosts jdtls instead.  This
-                # is the single chokepoint for ALL connect triggers (initial
-                # auto-connect, MSG_RETRY_AUTOCONNECT, explicit MSG_CONNECT_SERVER).
-                if self._is_daemon_forwarding_stub():
-                    self._log_event(
-                        LOG_INFO,
-                        "Skipping server connect on daemon-side forwarding "
-                        "stub (runner-side hosts jdtls)",
-                        server=name,
+                # #284 defense-in-depth: the daemon process must never spawn a
+                # language server (it leaks resident → OOM).  The primary gate
+                # is in _ensure_thread (the daemon never starts this background
+                # thread), so reaching here in the daemon means the thread gate
+                # regressed — refuse + log loudly.  Runner/slot processes
+                # proceed normally.
+                if self._daemon_must_not_host_lsp():
+                    logger.error(
+                        "LSP connect_server reached in daemon process pid=%d "
+                        "despite the _ensure_thread gate — refusing (server=%s, "
+                        "#284). FIX the thread gate.", os.getpid(), name,
                     )
                     return False
                 self._log_event(LOG_INFO, "Connecting to server", server=name)
