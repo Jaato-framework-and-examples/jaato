@@ -5,6 +5,7 @@ import json
 import os
 import pytest
 import signal
+import sys
 import tempfile
 import threading
 import queue
@@ -3035,35 +3036,59 @@ class TestApparmorExtraRulesKnob:
         )
 
 
-class TestDaemonStubSuppressesLSP:
-    """#284: the daemon-side forwarding stub must NOT run the LSP lifecycle.
+class TestDaemonProcessSuppressesLSP:
+    """#284/#285: the daemon PROCESS must NOT host a language server.
 
-    The LSP plugin is runner-tier, but the daemon loads every plugin and wraps
-    the daemon-side instance as a RunnerForwardingMixin stub (executors forward
-    to the runner).  If that stub also runs connect/enrich it spawns a jdtls in
-    the daemon's own process group — resident, never reaped, accumulating until
-    the daemon OOMs.  The stub is detected via ``registry.runner_rpc`` (set
-    daemon-side only).
+    The leaking jdtls came from the LSP background thread auto-connecting in the
+    long-lived daemon process (no owning slot → never reaped → OOM).  Detection
+    is by PROCESS IDENTITY (``_running_in_daemon_process``): the #285 diagnostic
+    proved the daemon-side LSP instance has ``_plugin_registry is None`` at
+    connect time, so the prior ``registry.runner_rpc`` gate was structurally
+    unreachable and never fired.  The per-session runner hosts LSP instead.
     """
 
-    def test_runner_side_is_not_stub_and_subscribes(self):
-        """Runner-side real instance: runner_rpc is None → hosts LSP."""
-        p = LSPToolPlugin()
-        p._plugin_registry = Mock(runner_rpc=None)
-        assert p._is_daemon_forwarding_stub() is False
-        assert p.subscribes_to_tool_result_enrichment() is True
+    def test_detects_daemon_via_main_package(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(sys.modules["__main__"], "__package__", "server", raising=False)
+        assert lspmod._running_in_daemon_process() is True
 
-    def test_daemon_stub_is_stub_and_does_not_subscribe(self):
-        """Daemon-side stub: runner_rpc set → suppress enrichment (no jdtls)."""
+    def test_detects_runner_via_main_package(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(sys.modules["__main__"], "__package__", "server.runner", raising=False)
+        assert lspmod._running_in_daemon_process() is False
+
+    def test_unknown_context_defaults_to_not_daemon(self, monkeypatch):
+        """Tests / odd launchers → False (don't suppress unless sure)."""
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(sys.modules["__main__"], "__package__", "pytest", raising=False)
+        monkeypatch.setattr(sys, "argv", ["/usr/bin/pytest"])
+        assert lspmod._running_in_daemon_process() is False
+
+    def test_argv_fallback_detects_daemon(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(sys.modules["__main__"], "__package__", "", raising=False)
+        monkeypatch.setattr(sys, "argv", ["/x/jaato-server/server/__main__.py", "--daemon"])
+        assert lspmod._running_in_daemon_process() is True
+
+    def test_daemon_does_not_subscribe_to_enrichment(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(lspmod, "_running_in_daemon_process", lambda: True)
         p = LSPToolPlugin()
-        p._plugin_registry = Mock(runner_rpc=Mock())
-        assert p._is_daemon_forwarding_stub() is True
+        assert p._daemon_must_not_host_lsp() is True
         assert p.subscribes_to_tool_result_enrichment() is False
 
-    def test_no_registry_defaults_to_not_stub(self):
-        """No registry wired yet → treat as real; the connect_server
-        chokepoint re-checks later once runner_rpc is present."""
+    def test_runner_subscribes_to_enrichment(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(lspmod, "_running_in_daemon_process", lambda: False)
         p = LSPToolPlugin()
-        p._plugin_registry = None
-        assert p._is_daemon_forwarding_stub() is False
+        assert p._daemon_must_not_host_lsp() is False
         assert p.subscribes_to_tool_result_enrichment() is True
+
+    def test_daemon_does_not_start_lsp_thread(self, monkeypatch):
+        """The fix: ``_ensure_thread`` is a no-op in the daemon process — no
+        thread means no auto-connect means no daemon-side jdtls (#284)."""
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(lspmod, "_running_in_daemon_process", lambda: True)
+        p = LSPToolPlugin()
+        p._ensure_thread()
+        assert p._thread is None
