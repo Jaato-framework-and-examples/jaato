@@ -55,6 +55,10 @@ class EventType(Enum):
     # Session lifecycle events (bridged from server events)
     SESSION_TERMINATED = "session.terminated"  # Server 0.6.162+ / SDK 0.14.3+
 
+    # Pre-warm pool: slot returned to pool + reusable (cascade sessions).
+    # Lets reactors gate next-stage spawn for guaranteed warm-slot reuse.
+    SLOT_REUSABLE = "slot.reusable"
+
     # Tool execution events (bridged from server events)
     TOOL_CALL_STARTED = "tool.call_started"
     TOOL_CALL_COMPLETED = "tool.call_completed"

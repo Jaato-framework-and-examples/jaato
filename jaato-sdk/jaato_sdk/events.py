@@ -78,6 +78,13 @@ class EventType(str, Enum):
     # Replaces the [SESSION_TERMINATED] string-based marker.
     SESSION_TERMINATED = "session.terminated"
 
+    # Pre-warm pool: emitted the moment a pool slot returns to the pool after
+    # a session ends and is physically reusable.  Lets cascade reactors gate
+    # the next stage's spawn until the warm slot is free — guaranteeing reuse
+    # instead of cold-spawning (the pre-warm pool's whole point).  Cascade
+    # sessions only.
+    SLOT_REUSABLE = "slot.reusable"
+
     # Session lifecycle: emitted on first client-attach to a session
     # that was loaded from disk (Phase 3 §3.12 disk-restore +
     # peer-review M5/N1).  Carries the count of pending tool calls
@@ -443,6 +450,31 @@ class SessionTerminatedEvent(Event):
     reason: str = "natural"  # "natural" | "client_request" | "stopped" | "error" | "cascade_cancelled"
     error_summary: Optional[str] = None  # populated when reason="error"
     error_type: Optional[str] = None     # Python exception class name (e.g. "AnthropicAPIError")
+
+
+class SlotReusableEvent(Event):
+    """A pre-warm pool slot has returned to the pool and is physically
+    reusable for the next session.
+
+    Emitted by the daemon at ``PoolManager.return_slot_after_session`` time —
+    *after* the session's ``session_end`` RPC drained and the slot re-entered
+    the idle pool — for **cascade** sessions only (``cascade_driver_id`` set).
+
+    Purpose: a cascade reactor can await this before spawning the next stage,
+    instead of firing immediately on ``AgentCompletedEvent`` (which races the
+    slot's return and usually cold-spawns).  Awaiting it guarantees the warm
+    slot is free, so the next stage reuses it — the whole point of the
+    pre-warm pool (≈30s→7s bootstrap).
+
+    Correlate by ``cascade_driver_id``: a reactor gating cascade C waits for a
+    ``SlotReusableEvent`` whose ``cascade_driver_id == C``.  Distinct from
+    :class:`SessionTerminatedEvent`, which fires earlier (session wound down)
+    and carries no slot/pool readiness or cascade-affinity signal.
+    """
+    type: EventType = Field(default=EventType.SLOT_REUSABLE)
+    session_id: str = ""                      # the session that just ended
+    cascade_driver_id: Optional[str] = None   # cascade affinity (always set here)
+    pool_slot_pid: int = 0                     # the reusable slot's PID
 
 
 class SessionRestoredEvent(Event):
@@ -2260,6 +2292,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_STATUS_CHANGED.value: AgentStatusChangedEvent,
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
     EventType.SESSION_TERMINATED.value: SessionTerminatedEvent,
+    EventType.SLOT_REUSABLE.value: SlotReusableEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
     EventType.TOOL_OUTPUT.value: ToolOutputEvent,
