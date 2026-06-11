@@ -184,6 +184,16 @@ class RunnerSpawner:
         if pid == 0:
             # ----- child -----
             try:
+                # #284/#280: lead our own session BEFORE exec so the
+                # runner — and every subprocess it spawns thereafter
+                # (jdtls, mcp, cli, interactive_shell PTY) — shares a
+                # process group distinct from the daemon's.  The daemon
+                # SIGKILLs that whole group at slot teardown
+                # (RunnerRPCClient._sweep_slot_group), closing the
+                # orphan-on-teardown leak that OOM'd the daemon.  The
+                # new session (like cgroup membership below) survives
+                # exec().
+                os.setsid()
                 # Phase 3 §7d: migrate the forked child's pid into
                 # the per-session cgroup BEFORE exec.  cgroup
                 # membership survives exec(), so the runner — and
