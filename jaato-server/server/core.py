@@ -147,6 +147,9 @@ _SERVER_TO_BUS: Dict[EventType, BusEventType] = {
     # (Bug A) made `reason` JMESPath-visible, but the event wasn't
     # reaching the matcher at all.  See PR for diagnosis trace.
     EventType.SESSION_TERMINATED: BusEventType.SESSION_TERMINATED,
+    # Pool slot reusable — bridged so cascade reactors can gate next-stage
+    # spawn on warm-slot readiness (SlotReusableEvent, cascade sessions).
+    EventType.SLOT_REUSABLE: BusEventType.SLOT_REUSABLE,
 }
 
 
@@ -5408,6 +5411,25 @@ class JaatoServer:
                             pool_slot.cascade_id or "(standalone)",
                             self._session_id,
                         )
+                        # SlotReusableEvent: the slot is now back in the pool
+                        # and physically reusable.  Emit for CASCADE sessions
+                        # only so reactors can gate the next stage's spawn on
+                        # warm-slot readiness (standalone sessions don't need
+                        # handoff-gating).  Emitted after return_slot so the
+                        # slot is genuinely acquirable when the event fires.
+                        if pool_slot.cascade_id:
+                            try:
+                                from jaato_sdk.events import SlotReusableEvent
+                                self.emit(SlotReusableEvent(
+                                    session_id=self._session_id or "",
+                                    cascade_driver_id=pool_slot.cascade_id,
+                                    pool_slot_pid=pool_slot.pid,
+                                ))
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "JaatoServer.shutdown: SlotReusableEvent "
+                                    "emit raised %s (slot still returned)", exc,
+                                )
                     else:
                         logger.warning(
                             "JaatoServer.shutdown: pool slot pid=%d "
