@@ -1712,13 +1712,43 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
     # ==================== Tool Result Enrichment ====================
 
+    def _is_daemon_forwarding_stub(self) -> bool:
+        """True when this instance is the daemon-side forwarding stub.
+
+        The LSP plugin is ``PLUGIN_TIER = "runner"`` but the daemon loads
+        every plugin (``discover()`` with no tier filter) so it can expose
+        tool schemas and forward execution to the runner via
+        :class:`RunnerForwardingMixin`.  On the daemon side the registry
+        carries a ``runner_rpc`` handle (set by ``JaatoServer.set_runner_rpc``
+        before ``server.initialize()``); on the runner-side real instance it
+        is ``None``.
+
+        Used to suppress the LSP **lifecycle** (server connect + diagnostics
+        enrichment, both of which spawn jdtls) on the daemon stub.  If the
+        stub runs that lifecycle it spawns a RESIDENT jdtls in the daemon
+        process — outside any slot's process group, never reaped, accumulating
+        until OOM (#284).  The runner-side instance hosts jdtls instead, in a
+        setsid'd slot (per-session, killpg-reapable on teardown).  Executor
+        forwarding does NOT use the background thread, so suppressing it leaves
+        the stub's forwarding intact.
+        """
+        return self._runner_rpc_handle() is not None
+
     def subscribes_to_tool_result_enrichment(self) -> bool:
         """Subscribe to tool result enrichment to auto-run diagnostics after file writes.
 
         When enabled, the LSP plugin will automatically run diagnostics on files
         that are modified by file-writing tools (updateFile, writeNewFile, etc.)
         and append diagnostic information to the tool result.
+
+        Returns ``False`` on the daemon-side forwarding stub (#284): diagnostics
+        enrichment must run on the runner-side instance that owns the workspace
+        and hosts jdtls in a reapable slot — never daemon-side, where jdtls
+        would accumulate resident and OOM the daemon.  See
+        :meth:`_is_daemon_forwarding_stub`.
         """
+        if self._is_daemon_forwarding_stub():
+            return False
         return True
 
     def get_tool_result_enrichment_priority(self) -> int:
@@ -2771,6 +2801,21 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
             async def connect_server(name: str, spec: dict) -> bool:
                 """Connect to a language server."""
+                # #284: the daemon-side forwarding stub must NEVER spawn a
+                # language server.  A jdtls spawned here lives in the daemon's
+                # own process group (outside any slot), is never reaped, and
+                # accumulates resident until the daemon OOMs.  The runner-side
+                # real instance (runner_rpc is None) hosts jdtls instead.  This
+                # is the single chokepoint for ALL connect triggers (initial
+                # auto-connect, MSG_RETRY_AUTOCONNECT, explicit MSG_CONNECT_SERVER).
+                if self._is_daemon_forwarding_stub():
+                    self._log_event(
+                        LOG_INFO,
+                        "Skipping server connect on daemon-side forwarding "
+                        "stub (runner-side hosts jdtls)",
+                        server=name,
+                    )
+                    return False
                 self._log_event(LOG_INFO, "Connecting to server", server=name)
                 client = None
                 try:
