@@ -5013,9 +5013,28 @@ NOTES
         sentinel, and results from other tools are no-ops.  The
         provider plugin decides whether to honor the request via its
         own quirk gate (vllm: ``force_tool_choice_for_lifecycle``);
-        providers without the quirk silently ignore the kwarg, so this
-        stamping is provider-agnostic + free when the quirk is off.
+        Stamping is GATED on the active provider HONORING the quirk —
+        ``getattr(self._provider, "_force_tool_choice_for_lifecycle",
+        False)`` (server 0.6.166+, mirrors the
+        ``force_narration_between_tools`` provider-attr gate at the
+        tool-result append site).  A provider whose ``complete()`` does
+        not accept ``tool_choice`` never sets this attr, so the quirk is
+        a silent NO-OP for it — no stamp, no ``tool_choice`` ever passed
+        to its ``complete()``.  This replaces the prior
+        "provider-agnostic stamp + providers ignore the kwarg" design,
+        which ``TypeError``'d on every provider whose signature lacks the
+        kwarg (openrouter codegen, 2026-06-11; only vllm/anthropic/
+        tensorrt_llm accept it, and only vllm sets the attr).
+        Profile-scoped via ``profile.quirks.force_tool_choice_for_lifecycle``.
         """
+        # Quirk gate: only form the forced-tool_choice intent when the
+        # active provider declares it honors the quirk.  Providers that
+        # don't support the ``tool_choice`` kwarg never set this attr ->
+        # no-op (no TypeError on their complete()).
+        if not getattr(
+            self._provider, "_force_tool_choice_for_lifecycle", False,
+        ):
+            return
         # PR-255 PROBE INSTRUMENTATION (TEMPORARY, 2026-06-08).
         #
         # Empirical disagreement between code-trace + grep on

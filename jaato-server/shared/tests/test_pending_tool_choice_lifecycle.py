@@ -16,6 +16,7 @@ load-bearing contract.  Vllm-side honoring is tested separately in
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -32,9 +33,18 @@ class _FakeSession:
     and ``self._trace``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, honors_quirk: bool = True) -> None:
         self._pending_tool_choice_name: Optional[str] = None
         self._traces: List[str] = []
+        # The stamp is gated on the active provider honoring the
+        # ``force_tool_choice_for_lifecycle`` quirk (a provider whose
+        # ``complete()`` lacks the ``tool_choice`` kwarg never sets this
+        # attr → the quirk is a no-op for it).  Default honors=True so
+        # the stamp-logic tests exercise the honoring path; pass
+        # honors=False to assert the gate's no-op.
+        self._provider = SimpleNamespace(
+            _force_tool_choice_for_lifecycle=honors_quirk,
+        )
 
     def _trace(self, msg: str) -> None:
         self._traces.append(msg)
@@ -70,6 +80,22 @@ class TestMaybeStampLifecycleRetryToolChoice:
         s._maybe_stamp_lifecycle_retry_tool_choice(results)
         assert s._pending_tool_choice_name == "signal_completion"
         assert any("PENDING_TOOL_CHOICE" in t for t in s._traces)
+
+    def test_provider_not_honoring_quirk_does_not_stamp(self) -> None:
+        """Gate (server 0.6.166+): when the active provider does NOT honor
+        ``force_tool_choice_for_lifecycle`` (e.g. openrouter, whose
+        ``complete()`` lacks the ``tool_choice`` kwarg), a
+        ``validation_failed`` signal_completion is a NO-OP — no stamp, so
+        ``tool_choice`` is never passed and the provider can't ``TypeError``.
+        Reproduces the openrouter codegen crash, 2026-06-11."""
+        s = _FakeSession(honors_quirk=False)
+        results = [_result(
+            "signal_completion",
+            {"error": "validation_failed", "message": "Schema mismatch"},
+        )]
+        s._maybe_stamp_lifecycle_retry_tool_choice(results)
+        assert s._pending_tool_choice_name is None
+        assert s._consume_pending_tool_choice() is None
 
     def test_signal_completion_success_does_not_stamp(self) -> None:
         s = _FakeSession()
