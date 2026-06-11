@@ -46,7 +46,7 @@ import logging
 import os
 import signal
 import socket
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover — types only
     from shared.session_envelope import SessionInitEnvelope
@@ -260,6 +260,15 @@ class RunnerRPCClient:
             return
         self._closed = True
 
+        # #284/#280: capture the slot's process group BEFORE teardown
+        # begins.  The slot leads its own session (os.setsid at fork),
+        # so its whole subtree — jdtls language servers, mcp servers,
+        # PTY shells — shares this pgid.  We SIGKILL the group after the
+        # slot leader is reaped (step 3) so nothing orphans to the
+        # daemon subreaper and leaks memory (the OOM root cause).
+        # Captured now because getpgid() fails once the slot is reaped.
+        slot_pgid = self._capture_slot_pgid()
+
         # 1. Close socket → runner sees EOF.
         if self._writer is not None:
             try:
@@ -298,6 +307,111 @@ class RunnerRPCClient:
 
         # 2. Wait for runner to exit.
         await self._wait_runner_exit(timeout)
+
+        # 3. #284/#280: sweep the slot's process group — SIGKILL any
+        # surviving subprocesses (jdtls et al.) the slot spawned.  This
+        # is the daemon-side guarantee the slot-side backstops (atexit /
+        # PDEATHSIG) could not provide: it runs on EVERY teardown path
+        # (clean EOF, SIGTERM, SIGKILL).  No-op when the slot already
+        # reaped its children cleanly.
+        self._sweep_slot_group(slot_pgid)
+
+    def _capture_slot_pgid(self) -> Optional[int]:
+        """Return the slot's process-group id for teardown sweeping.
+
+        Returns ``None`` — skipping the sweep — when the slot is already
+        gone, OR (defensively) when the slot shares the **daemon's**
+        process group.  A shared group means ``os.setsid`` regressed at
+        slot-fork; ``os.killpg`` on it would SIGKILL the daemon itself,
+        so we refuse and log loudly rather than self-destruct.  See
+        #284/#280.
+        """
+        try:
+            pgid = os.getpgid(self._runner_pid)
+        except (ProcessLookupError, OSError):
+            return None
+        if pgid == os.getpgrp():
+            logger.error(
+                "RunnerRPCClient: slot pid=%d shares the daemon process "
+                "group (pgid=%d) — slot setsid regressed; SKIPPING subtree "
+                "sweep to avoid killing the daemon. jdtls may leak (#284). "
+                "Fix slot-fork os.setsid().",
+                self._runner_pid, pgid,
+            )
+            return None
+        return pgid
+
+    def _sweep_slot_group(self, pgid: Optional[int]) -> None:
+        """SIGKILL every surviving process in the slot's group (#284).
+
+        Closes the orphan-on-teardown leak: subprocesses the slot
+        spawned (jdtls, mcp, PTY shells) inherit its pgid and would
+        otherwise re-parent to the daemon subreaper and accumulate until
+        OOM.  Logs the swept members so the daemon log proves the leak
+        is closed.  No-op when the group is already empty (the common
+        case once the slot exits cleanly).
+        """
+        if pgid is None:
+            return
+        survivors = self._list_group_members(pgid)
+        if not survivors:
+            return  # slot reaped its children cleanly — nothing to do
+        logger.info(
+            "RunnerRPCClient: slot pid=%d teardown — sweeping process group "
+            "pgid=%d: SIGKILL %d survivor(s): %s",
+            self._runner_pid, pgid, len(survivors),
+            ", ".join(f"{p}({c})" for p, c in survivors),
+        )
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            return
+        # Reap survivors that re-parent to us (the subreaper) as zombies.
+        for pid, _comm in survivors:
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
+
+    @staticmethod
+    def _list_group_members(pgid: int) -> List[Tuple[int, str]]:
+        """Enumerate live ``(pid, comm)`` in process group *pgid* via /proc.
+
+        Best-effort instrumentation for the teardown sweep (#284): the
+        returned list is logged (proving which subprocesses leaked) and
+        used to reap zombies.  Races with process exit are benign — the
+        subsequent ``killpg`` is the authority.  ``/proc/<pid>/stat``
+        field 5 is the process group; field 2 (``comm``) may contain
+        spaces/parens, so we slice between the first ``(`` and last
+        ``)``.
+        """
+        members: List[Tuple[int, str]] = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return members
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as fh:
+                    data = fh.read()
+            except (FileNotFoundError, ProcessLookupError, OSError):
+                continue
+            rparen = data.rfind(b")")
+            lparen = data.find(b"(")
+            if rparen < 0 or lparen < 0 or rparen < lparen:
+                continue
+            comm = data[lparen + 1:rparen].decode("utf-8", "replace")
+            # After "...) ": fields[0]=state, [1]=ppid, [2]=pgrp
+            fields = data[rparen + 2:].split()
+            if len(fields) >= 3:
+                try:
+                    if int(fields[2]) == pgid:
+                        members.append((int(entry), comm))
+                except ValueError:
+                    continue
+        return members
 
     async def _wait_runner_exit(self, timeout: float) -> None:
         """Reap the runner with a SIGTERM/SIGKILL ladder."""
