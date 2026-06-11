@@ -5422,6 +5422,7 @@ class JaatoServer:
                                 from jaato_sdk.events import SlotReusableEvent
                                 self.emit(SlotReusableEvent(
                                     session_id=self._session_id or "",
+                                    agent_id=self._main_agent_id,
                                     cascade_driver_id=pool_slot.cascade_id,
                                     pool_slot_pid=pool_slot.pid,
                                 ))

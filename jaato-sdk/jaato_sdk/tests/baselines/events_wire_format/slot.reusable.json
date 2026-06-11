@@ -2,6 +2,7 @@
   "type": "slot.reusable",
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
+  "agent_id": null,
   "cascade_driver_id": null,
   "pool_slot_pid": 0
 }

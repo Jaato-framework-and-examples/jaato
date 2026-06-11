@@ -473,6 +473,10 @@ class SlotReusableEvent(Event):
     """
     type: EventType = Field(default=EventType.SLOT_REUSABLE)
     session_id: str = ""                      # the session that just ended
+    agent_id: Optional[str] = None            # stage's primary agent name
+                                              # (e.g. "discovery", "codegen") —
+                                              # lets reactors route per-stage
+                                              # via where: agent_id == <stage>
     cascade_driver_id: Optional[str] = None   # cascade affinity (always set here)
     pool_slot_pid: int = 0                     # the reusable slot's PID
 

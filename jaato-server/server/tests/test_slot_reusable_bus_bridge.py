@@ -28,6 +28,7 @@ def test_slot_reusable_maps_to_bus_event():
 
     sdk_event = SlotReusableEvent(
         session_id="20260611_120000",
+        agent_id="codegen",
         cascade_driver_id="cascade-abc",
         pool_slot_pid=4242,
     )
@@ -37,8 +38,10 @@ def test_slot_reusable_maps_to_bus_event():
         "bus bridge missing."
     )
     assert bus_event.event_type == BusEventType.SLOT_REUSABLE
-    # Payload carries the correlation keys a reactor's where-clause needs.
+    # Payload carries the correlation + per-stage-routing keys a reactor's
+    # where-clause needs.
     assert bus_event.payload["session_id"] == "20260611_120000"
+    assert bus_event.payload["agent_id"] == "codegen"
     assert bus_event.payload["cascade_driver_id"] == "cascade-abc"
     assert bus_event.payload["pool_slot_pid"] == 4242
 
