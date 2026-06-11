@@ -147,9 +147,9 @@ _SERVER_TO_BUS: Dict[EventType, BusEventType] = {
     # (Bug A) made `reason` JMESPath-visible, but the event wasn't
     # reaching the matcher at all.  See PR for diagnosis trace.
     EventType.SESSION_TERMINATED: BusEventType.SESSION_TERMINATED,
-    # Pool slot reusable — bridged so cascade reactors can gate next-stage
-    # spawn on warm-slot readiness (SlotReusableEvent, cascade sessions).
-    EventType.SLOT_REUSABLE: BusEventType.SLOT_REUSABLE,
+    # Cascade stage settled — bridged so cascade reactors can gate next-stage
+    # spawn on this universal per-stage event (SlotSettledEvent, cascade only).
+    EventType.SLOT_SETTLED: BusEventType.SLOT_SETTLED,
 }
 
 
@@ -5411,26 +5411,6 @@ class JaatoServer:
                             pool_slot.cascade_id or "(standalone)",
                             self._session_id,
                         )
-                        # SlotReusableEvent: the slot is now back in the pool
-                        # and physically reusable.  Emit for CASCADE sessions
-                        # only so reactors can gate the next stage's spawn on
-                        # warm-slot readiness (standalone sessions don't need
-                        # handoff-gating).  Emitted after return_slot so the
-                        # slot is genuinely acquirable when the event fires.
-                        if pool_slot.cascade_id:
-                            try:
-                                from jaato_sdk.events import SlotReusableEvent
-                                self.emit(SlotReusableEvent(
-                                    session_id=self._session_id or "",
-                                    agent_id=self._main_agent_id,
-                                    cascade_driver_id=pool_slot.cascade_id,
-                                    pool_slot_pid=pool_slot.pid,
-                                ))
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "JaatoServer.shutdown: SlotReusableEvent "
-                                    "emit raised %s (slot still returned)", exc,
-                                )
                     else:
                         logger.warning(
                             "JaatoServer.shutdown: pool slot pid=%d "
@@ -5444,6 +5424,35 @@ class JaatoServer:
                         "(%s); falling through to runner close",
                         exc,
                     )
+
+        # SlotSettledEvent (cascade warm-reuse handoff): emit ONCE per cascade
+        # stage HERE — after the pool-return decision (``cascade_returned``
+        # known) but BEFORE the warm-path early-return + the cold-close — so it
+        # fires on EVERY teardown path (warm-return / pool-torn-down / cold-
+        # spawn).  Gated on the session's cascade affinity.  ``was_warm`` tells
+        # the reactor whether the next stage's spawn reuses the warm slot.
+        # Universal + stall-proof: a cascade reactor gates the next stage on
+        # this single event with no timeout.
+        cascade_driver_id = getattr(self, "_cascade_driver_id", None)
+        if cascade_driver_id:
+            try:
+                from jaato_sdk.events import SlotSettledEvent
+                self.emit(SlotSettledEvent(
+                    session_id=self._session_id or "",
+                    agent_id=self._main_agent_id,
+                    cascade_driver_id=cascade_driver_id,
+                    was_warm=cascade_returned,
+                    pool_slot_pid=(
+                        pool_slot.pid
+                        if (pool_slot is not None and cascade_returned)
+                        else 0
+                    ),
+                ))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "JaatoServer.shutdown: SlotSettledEvent emit raised %s",
+                    exc,
+                )
 
         if cascade_returned:
             # Slot is back in the pool serving the next session.  Do

@@ -78,12 +78,12 @@ class EventType(str, Enum):
     # Replaces the [SESSION_TERMINATED] string-based marker.
     SESSION_TERMINATED = "session.terminated"
 
-    # Pre-warm pool: emitted the moment a pool slot returns to the pool after
-    # a session ends and is physically reusable.  Lets cascade reactors gate
-    # the next stage's spawn until the warm slot is free — guaranteeing reuse
-    # instead of cold-spawning (the pre-warm pool's whole point).  Cascade
-    # sessions only.
-    SLOT_REUSABLE = "slot.reusable"
+    # Cascade stage settled: emitted once per cascade stage at the END of
+    # session teardown — on ALL paths (warm slot returned, slot torn down on
+    # error, or cold-spawned) — so a reactor can gate the next stage's spawn on
+    # one universal, stall-proof event (no timeout).  ``was_warm`` reports
+    # whether the next spawn reuses a warm slot.  Cascade sessions only.
+    SLOT_SETTLED = "slot.settled"
 
     # Session lifecycle: emitted on first client-attach to a session
     # that was loaded from disk (Phase 3 §3.12 disk-restore +
@@ -452,33 +452,41 @@ class SessionTerminatedEvent(Event):
     error_type: Optional[str] = None     # Python exception class name (e.g. "AnthropicAPIError")
 
 
-class SlotReusableEvent(Event):
-    """A pre-warm pool slot has returned to the pool and is physically
-    reusable for the next session.
+class SlotSettledEvent(Event):
+    """A cascade stage's session has fully settled — its runner/slot has
+    returned to the pool (warm) or been torn down (cold) — and the next stage
+    is safe to spawn.
 
-    Emitted by the daemon at ``PoolManager.return_slot_after_session`` time —
-    *after* the session's ``session_end`` RPC drained and the slot re-entered
-    the idle pool — for **cascade** sessions only (``cascade_driver_id`` set).
+    Emitted by the daemon at the END of ``JaatoServer.shutdown`` for **every**
+    cascade session (``cascade_driver_id`` set), on ALL teardown paths:
+    pool-slot-returned, pool-slot-torn-down-on-error, and cold-spawned.  This
+    universality is the point — a cascade reactor can gate the next stage's
+    spawn on this single event with NO timeout and NO stall risk, because it
+    fires exactly once per stage regardless of how the stage's runner ended.
 
-    Purpose: a cascade reactor can await this before spawning the next stage,
-    instead of firing immediately on ``AgentCompletedEvent`` (which races the
-    slot's return and usually cold-spawns).  Awaiting it guarantees the warm
-    slot is free, so the next stage reuses it — the whole point of the
-    pre-warm pool (≈30s→7s bootstrap).
+    ``was_warm`` reports whether a warm pre-warm-pool slot was returned (so the
+    next stage's spawn will reuse it, ≈30s→7s bootstrap) vs. a cold/torn-down
+    teardown (next stage cold-spawns).  It is observability for the reactor —
+    the spawn happens either way; ``was_warm`` just says whether it'll be fast.
 
-    Correlate by ``cascade_driver_id``: a reactor gating cascade C waits for a
-    ``SlotReusableEvent`` whose ``cascade_driver_id == C``.  Distinct from
-    :class:`SessionTerminatedEvent`, which fires earlier (session wound down)
-    and carries no slot/pool readiness or cascade-affinity signal.
+    Replaces the earlier warm-only ``SlotReusableEvent`` (which did not fire for
+    cold-spawned stages — common for the early cascade stages — and so could
+    stall a pure-reactor handoff).  Correlate by ``cascade_driver_id``; route
+    per-stage by ``agent_id``.  Distinct from :class:`SessionTerminatedEvent`,
+    which fires EARLIER (before the slot returns) so spawning on it races the
+    slot and cold-spawns.
     """
-    type: EventType = Field(default=EventType.SLOT_REUSABLE)
+    type: EventType = Field(default=EventType.SLOT_SETTLED)
     session_id: str = ""                      # the session that just ended
     agent_id: Optional[str] = None            # stage's primary agent name
                                               # (e.g. "discovery", "codegen") —
-                                              # lets reactors route per-stage
-                                              # via where: agent_id == <stage>
+                                              # route per-stage via
+                                              # where: agent_id == <stage>
     cascade_driver_id: Optional[str] = None   # cascade affinity (always set here)
-    pool_slot_pid: int = 0                     # the reusable slot's PID
+    was_warm: bool = False                    # True = warm slot returned (next
+                                              # spawn reuses it); False = cold/
+                                              # torn-down (next spawn is cold)
+    pool_slot_pid: int = 0                     # the warm slot's PID (0 if cold)
 
 
 class SessionRestoredEvent(Event):
@@ -2296,7 +2304,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_STATUS_CHANGED.value: AgentStatusChangedEvent,
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
     EventType.SESSION_TERMINATED.value: SessionTerminatedEvent,
-    EventType.SLOT_REUSABLE.value: SlotReusableEvent,
+    EventType.SLOT_SETTLED.value: SlotSettledEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
     EventType.TOOL_OUTPUT.value: ToolOutputEvent,
