@@ -323,20 +323,20 @@ class TestMessageConversion:
 
     def test_user_message(self):
         msg = Message.from_text(Role.USER, "Hello")
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)   # single-element list
         assert result["role"] == "user"
         assert result["content"] == "Hello"
 
     def test_assistant_message_text(self):
         msg = Message(role=Role.MODEL, parts=[Part(text="Hi there")])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
         assert result["role"] == "assistant"
         assert result["content"] == "Hi there"
 
     def test_assistant_message_with_tool_calls(self):
         fc = FunctionCall(id="call_1", name="read_file", args={"path": "/tmp"})
         msg = Message(role=Role.MODEL, parts=[Part(function_call=fc)])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
 
         assert result["role"] == "assistant"
         assert result["content"] is None
@@ -350,10 +350,30 @@ class TestMessageConversion:
     def test_tool_result_message(self):
         tr = ToolResult(call_id="call_1", name="read_file", result={"x": 1})
         msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
         assert result["role"] == "tool"
         assert result["tool_call_id"] == "call_1"
         assert json.loads(result["content"]) == {"x": 1}
+
+    def test_parallel_tool_results_all_reach_wire(self):
+        """A TOOL message with N parallel function_response parts must
+        produce N wire ``role:"tool"`` messages — one per call_id — NOT just
+        the first (the parallel-tool-result truncation bug, 2026-06-12
+        build_descriptor: 7 parallel call_service results, only #1 reached
+        the model)."""
+        trs = [
+            ToolResult(call_id=f"call_{i}", name="call_service",
+                       result={"docs": [{"a": f"artifact-{i}"}]})
+            for i in range(7)
+        ]
+        msg = Message(role=Role.TOOL,
+                      parts=[Part(function_response=tr) for tr in trs])
+        result = message_to_openai(msg)
+        assert len(result) == 7, "all 7 parallel results must reach the wire"
+        assert [m["tool_call_id"] for m in result] == [f"call_{i}" for i in range(7)]
+        assert all(m["role"] == "tool" for m in result)
+        assert [json.loads(m["content"])["docs"][0]["a"] for m in result] == \
+            [f"artifact-{i}" for i in range(7)]
 
 
 class TestResponseConversion:

@@ -194,14 +194,14 @@ class TestMessageConversion:
 
     def test_user_message(self):
         msg = Message.from_text(Role.USER, "Hello")
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)   # single-element list
 
         assert result["role"] == "user"
         assert result["content"] == "Hello"
 
     def test_assistant_message_text(self):
         msg = Message(role=Role.MODEL, parts=[Part(text="Hi there")])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
 
         assert result["role"] == "assistant"
         assert result["content"] == "Hi there"
@@ -209,7 +209,7 @@ class TestMessageConversion:
     def test_assistant_message_with_tool_calls(self):
         fc = FunctionCall(id="call_1", name="read_file", args={"path": "/tmp"})
         msg = Message(role=Role.MODEL, parts=[Part(function_call=fc)])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
 
         assert result["role"] == "assistant"
         assert result["content"] is None
@@ -220,15 +220,32 @@ class TestMessageConversion:
     def test_tool_result_message(self):
         tr = ToolResult(call_id="call_1", name="read_file", result={"content": "file data"})
         msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
 
         assert result["role"] == "tool"
         assert result["tool_call_id"] == "call_1"
         assert json.loads(result["content"]) == {"content": "file data"}
 
+    def test_parallel_tool_results_all_reach_wire(self):
+        """N parallel function_response parts → N wire tool messages (not
+        just the first).  Shared converter used by nim/vllm/lmstudio/
+        tensorrt_llm — the parallel-tool-result truncation bug, 2026-06-12."""
+        trs = [
+            ToolResult(call_id=f"call_{i}", name="call_service",
+                       result={"docs": [{"a": f"artifact-{i}"}]})
+            for i in range(5)
+        ]
+        msg = Message(role=Role.TOOL,
+                      parts=[Part(function_response=tr) for tr in trs])
+        result = message_to_openai(msg)
+        assert len(result) == 5
+        assert [m["tool_call_id"] for m in result] == [f"call_{i}" for i in range(5)]
+        assert [json.loads(m["content"])["docs"][0]["a"] for m in result] == \
+            [f"artifact-{i}" for i in range(5)]
+
     def test_roundtrip_user_message(self):
         original = Message.from_text(Role.USER, "Hello world")
-        openai_msg = message_to_openai(original)
+        openai_msg, = message_to_openai(original)
         restored = message_from_openai(openai_msg)
 
         assert restored.role == Role.USER
@@ -236,7 +253,7 @@ class TestMessageConversion:
 
     def test_roundtrip_assistant_message(self):
         original = Message(role=Role.MODEL, parts=[Part(text="Response")])
-        openai_msg = message_to_openai(original)
+        openai_msg, = message_to_openai(original)
         restored = message_from_openai(openai_msg)
 
         assert restored.role == Role.MODEL
