@@ -94,14 +94,22 @@ def tool_schemas_to_openai(schemas: Optional[List[ToolSchema]]) -> Optional[List
 
 # ==================== Message Conversion ====================
 
-def message_to_openai(message: Message) -> Dict[str, Any]:
-    """Convert internal Message to OpenAI message dict.
+def message_to_openai(message: Message) -> List[Dict[str, Any]]:
+    """Convert internal Message to OpenAI message dict(s).
+
+    Returns a LIST: one internal ``TOOL`` message can carry N parallel
+    ``function_response`` parts (a parallel tool-call batch is appended as a
+    single ``Message(role=TOOL, parts=[...N...])``), and the OpenAI chat
+    format requires ONE ``role:"tool"`` message per ``tool_call_id``.
+    Emitting only ``function_responses[0]`` silently dropped results #2..N
+    off the wire.  Non-tool messages map to a single-element list.  Shared by
+    the nim / vllm / lmstudio / tensorrt_llm providers (identical SDK + wire).
 
     Args:
         message: Internal message.
 
     Returns:
-        Dict in OpenAI chat message format.
+        List of dicts in OpenAI chat message format (1 per tool result).
     """
     role = message.role
 
@@ -116,14 +124,17 @@ def message_to_openai(message: Message) -> Dict[str, Any]:
     function_responses = [p.function_response for p in message.parts if p.function_response]
 
     if function_responses:
-        # Tool result message
-        fr = function_responses[0]
-        result_str = json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
-        return {
-            "role": "tool",
-            "tool_call_id": fr.call_id,
-            "content": result_str,
-        }
+        # One wire ``role:"tool"`` message PER function_response so all N
+        # parallel results reach the model (each keyed by its own call_id).
+        tool_msgs: List[Dict[str, Any]] = []
+        for fr in function_responses:
+            result_str = json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
+            tool_msgs.append({
+                "role": "tool",
+                "tool_call_id": fr.call_id,
+                "content": result_str,
+            })
+        return tool_msgs
 
     if role == Role.MODEL:
         msg: Dict[str, Any] = {
@@ -145,13 +156,13 @@ def message_to_openai(message: Message) -> Dict[str, Any]:
             ]
             if not content:
                 msg["content"] = None
-        return msg
+        return [msg]
 
     # Default to user message
-    return {
+    return [{
         "role": "user",
         "content": content,
-    }
+    }]
 
 
 def message_from_openai(msg: Dict[str, Any]) -> Message:
@@ -220,7 +231,11 @@ def history_to_openai(history: List[Message]) -> List[Dict[str, Any]]:
     Returns:
         List of OpenAI message dicts.
     """
-    return [message_to_openai(m) for m in (history or [])]
+    # Flatten: message_to_openai returns a LIST (a TOOL message with N
+    # parallel function_responses → N wire tool messages).
+    return [
+        wire for m in (history or []) for wire in message_to_openai(m)
+    ]
 
 
 # ==================== Response Conversion ====================
