@@ -121,19 +121,40 @@ def test_lsp_diagnostics_preserved(plugin):
 # ------------------------------------------------------------ text-field path
 
 
-def test_text_result_gets_banner(plugin):
+def test_text_result_filtered_into_json_envelope(plugin):
+    """Even a plain-text (non-JSON) result is wrapped in a valid JSON envelope."""
     plugin._exec_start({"pattern": "MATCH"})
     text = "line one\nMATCH here\nline three"
     out = plugin.enrich_tool_result("cli", text)
-    assert out.result.startswith("[grep-mode active")
-    assert "MATCH here" in out.result
-    assert "line one" not in out.result.split("\n", 1)[1]  # non-matching elided
+    parsed = json.loads(out.result)  # ALWAYS valid JSON (regression #289)
+    assert parsed["_grep_filtered"]["pattern"] == "MATCH"
+    assert "MATCH here" in parsed["content"]
+    assert "line one" not in parsed["content"]  # non-matching elided
 
 
 def test_no_match_is_explicit_not_empty(plugin):
     plugin._exec_start({"pattern": "WILLNOTMATCH"})
     out = plugin.enrich_tool_result("cli", "alpha\nbeta\ngamma")
-    assert "no lines matched" in out.result
+    parsed = json.loads(out.result)
+    assert "no lines matched" in parsed["content"]
+
+
+def test_nonjson_input_still_returns_valid_json_regression_289(plugin):
+    """#289: an upstream enricher (LSP) can mangle a result's JSON into non-JSON
+    BEFORE result_grep (which runs last). Output must STILL be valid JSON, else
+    the session's full-dict json.loads fails and the result passes unfiltered.
+    """
+    plugin._exec_start({"pattern": "(?i)slf4j"})
+    # Simulate LSP@30 having appended markdown diagnostics to a call_service
+    # JSON result -> the string result_grep receives is no longer valid JSON.
+    mangled = (
+        '{"status": 200, "body": {"docs": [{"a": "slf4j-api"}]}}\n'
+        "\n## LSP Diagnostics\n- org.slf4j.MDC: cannot resolve symbol\n"
+    )
+    out = plugin.enrich_tool_result("call_service", mangled)
+    parsed = json.loads(out.result)  # MUST NOT raise (the whole point of #289)
+    assert "_grep_filtered" in parsed
+    assert "slf4j" in parsed["content"].lower()  # the matching line survived
 
 
 # ------------------------------------------------------------------- scoping
@@ -170,17 +191,17 @@ def test_inline_ignorecase_flag_works(plugin):
     """Documented contract: '(?i)' inline flag gives case-insensitive matching."""
     plugin._exec_start({"pattern": "(?i)spring-data"})
     out = plugin.enrich_tool_result("cli", "X SPRING-DATA y\nother")
-    assert "SPRING-DATA" in out.result
+    assert "SPRING-DATA" in json.loads(out.result)["content"]
 
 
 def test_line_anchors_are_per_line(plugin):
     """Documented contract: ^/$ anchor to line start/end (re.search per line)."""
     plugin._exec_start({"pattern": "^needle$"})
     out = plugin.enrich_tool_result("cli", "a needle b\nneedle\nc")
+    content = json.loads(out.result)["content"]
     # only the exact-line 'needle' matches, not the embedded one
-    body = out.result.split("\n", 1)[1]
-    assert "needle" in body
-    assert "a needle b" not in body
+    assert "needle" in content
+    assert "a needle b" not in content
 
 
 def test_invalid_regex_rejected(plugin):
