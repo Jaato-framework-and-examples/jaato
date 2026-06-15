@@ -17,7 +17,11 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import CommandCompletion, CommandParameter, HelpLines, UserCommand
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    EditableContent,
+    ToolSchema,
+    TRAIT_GREPPABLE_CONTENT,
+)
 
 from .auth import AuthError, AuthManager
 from .bruno_import import BrunoParseError, parse_bruno_collection
@@ -366,7 +370,11 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                 description=(
                     "Execute an HTTP request. Can use a discovered service (with auth and "
                     "base URL) or a raw URL. Request body is validated against schema if "
-                    "available. Response is validated and truncated if too large."
+                    "available. Response is validated and truncated if too large. "
+                    "The response is bulk content: when you are scanning it for something "
+                    "specific, call grep_mode_start(pattern) first to have these responses "
+                    "filtered to matching lines (with context) instead of returned in full — "
+                    "this cuts context cost. grep_mode_stop restores full responses."
                 ),
                 parameters={
                     "type": "object",
@@ -457,6 +465,12 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     format="json",
                     template="# Edit the request below. Save and exit to continue.\n",
                 ),
+                # call_service responses are bulk HTTP/registry payloads whose
+                # heavy data sits under structured keys (body/headers) — invisible
+                # to the text-field enrichment path.  This trait routes the full
+                # result through enrichment so result_grep can filter it while
+                # grep-mode is active.
+                traits=frozenset({TRAIT_GREPPABLE_CONTENT}),
             ),
             ToolSchema(
                 name="preview_request",

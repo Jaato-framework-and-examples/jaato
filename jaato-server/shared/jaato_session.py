@@ -6666,12 +6666,23 @@ NOTES
         combined_metadata: Dict[str, Any] = {}
 
         # Tools declaring the file_writer trait get full-JSON enrichment
-        # (LSP diagnostics, artifact tracking, etc.)
-        from jaato_sdk.plugins.model_provider.types import TRAIT_FILE_WRITER
+        # (LSP diagnostics, artifact tracking, etc.).  Tools declaring the
+        # greppable_content trait take the SAME full-dict path so that
+        # result-rewriter enrichment plugins (e.g. result_grep) can inspect
+        # and shrink structured payloads (call_service.body/headers) that the
+        # text-field path below never sees.  Both route the whole result dict
+        # through enrich_tool_result; the field-level path only fires for the
+        # six well-known text keys, missing structured dicts entirely.
+        from jaato_sdk.plugins.model_provider.types import (
+            TRAIT_FILE_WRITER,
+            TRAIT_GREPPABLE_CONTENT,
+        )
         tool_traits = self._runtime.registry.get_tool_traits(tool_name)
 
-        if TRAIT_FILE_WRITER in tool_traits:
-            # Pass full result as JSON so LSP can extract file paths
+        if TRAIT_FILE_WRITER in tool_traits or TRAIT_GREPPABLE_CONTENT in tool_traits:
+            # Pass full result as JSON so enrichers see the entire payload
+            # (LSP file-path extraction for file_writer; full-body grep for
+            # greppable_content).
             import json
             result_json = json.dumps(result_dict)
             # Pass session's callback to route notifications to correct agent panel

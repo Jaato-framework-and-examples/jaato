@@ -341,6 +341,7 @@ permission defaults, etc.) without hardcoding tool names in session or plugin co
 | Constant | Value | Contract |
 |----------|-------|----------|
 | `TRAIT_FILE_WRITER` | `"file_writer"` | Tool writes/modifies files. Result must include `path` (str), `files_modified` (list), or `changes[].file`. Triggers full-JSON enrichment (LSP diagnostics, artifact tracking). |
+| `TRAIT_GREPPABLE_CONTENT` | `"greppable_content"` | Tool returns bulk content eligible for result-rewriting. Routes the full JSON result through the same full-dict enrichment path as `TRAIT_FILE_WRITER` so result-rewriter plugins (`result_grep`) can shrink structured payloads the text-field path never sees (e.g. `call_service.body`). Marks eligibility only; filtering is done by the subscribed rewriter. |
 
 ### How to Declare Traits
 
