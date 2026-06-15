@@ -275,7 +275,7 @@ def _configure_runtime_plugins(
     # Step 4: expose_all — initializes each plugin.  No on_progress
     # callback runner-side.  Initializes ALL discovered runner-tier
     # plugins; tool exposure to the model is gated separately at the
-    # ``runtime.create_session(tools=...)`` layer.
+    # ``runtime.create_session(plugins=...)`` layer.
     #
     # **PR-112 / option C disabled at the call site (2026-05-15).**
     # PR-112 introduced ``requested_plugins=`` gating on this call
@@ -971,7 +971,7 @@ def _build_session(
 
     Plugin spec extraction: each entry in ``envelope.plugins`` is a
     dict ``{"name": "...", "preload": bool, "config": dict?}``.
-    The plugin-list (just names) feeds ``tools=...`` so the runtime
+    The plugin-list (just names) feeds ``plugins=...`` so the runtime
     exposes them; the per-plugin configs feed
     ``plugin_configs=...``; the preload set feeds
     ``preloaded_plugins=...``.
@@ -1035,7 +1035,7 @@ def _build_session(
         # Pass the list verbatim — empty means empty (minimal set:
         # introspection + lifecycle + framework infra like stream /
         # event_bus that are registered as core tools regardless).
-        tools=tool_names,
+        plugins=tool_names,
         system_instructions=envelope.system_instructions,
         plugin_configs=plugin_configs or None,
         provider_name=envelope.provider_name or None,

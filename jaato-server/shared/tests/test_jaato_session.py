@@ -141,23 +141,46 @@ class TestJaatoSessionConfigure:
         assert result is None
         mock_runtime.create_provider.assert_not_called()
 
-    def test_configure_with_tools_subset(self):
-        """Test that configure can use a tool subset."""
+    def _mock_runtime_for_configure(self):
         mock_runtime = MagicMock()
-        mock_provider = MagicMock()
-        mock_runtime.create_provider.return_value = mock_provider
+        mock_runtime.create_provider.return_value = MagicMock()
         mock_runtime.get_executors.return_value = {}
         mock_runtime.get_system_instructions.return_value = None
         mock_runtime.registry = None
         mock_runtime.permission_plugin = None
-
         mock_schema = MagicMock()
         mock_schema.name = "cli_tool"
         mock_runtime.get_tool_schemas.return_value = [mock_schema]
+        return mock_runtime
 
+    def test_configure_with_plugins_subset(self):
+        """Test that configure can use a plugin subset via plugins=."""
+        mock_runtime = self._mock_runtime_for_configure()
         session = JaatoSession(mock_runtime, "gemini-2.5-flash")
-        session.configure(tools=["cli"])
+        session.configure(plugins=["cli"])
 
+        mock_runtime.get_tool_schemas.assert_called_with(["cli"], preloaded_plugins=set())
+
+    def test_configure_tools_kwarg_is_deprecated_alias(self):
+        """Deprecated tools= alias still works and warns (renamed to plugins=)."""
+        import warnings
+        mock_runtime = self._mock_runtime_for_configure()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            session.configure(tools=["cli"])
+        # alias resolved to plugins
+        mock_runtime.get_tool_schemas.assert_called_with(["cli"], preloaded_plugins=set())
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+    def test_configure_plugins_wins_over_tools_alias(self):
+        """When both are given, plugins= takes precedence over tools=."""
+        import warnings
+        mock_runtime = self._mock_runtime_for_configure()
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            session.configure(plugins=["cli"], tools=["web_search"])
         mock_runtime.get_tool_schemas.assert_called_with(["cli"], preloaded_plugins=set())
 
     def test_configure_with_system_instructions(self):

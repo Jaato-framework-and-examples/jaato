@@ -201,7 +201,7 @@ class JaatoSession:
         # Created via runtime.create_session()
         session = runtime.create_session(
             model="gemini-2.5-flash",
-            tools=["cli", "web_search"],
+            plugins=["cli", "web_search"],
             system_instructions="You are a research assistant."
         )
 
@@ -1666,7 +1666,7 @@ class JaatoSession:
 
     def configure(
         self,
-        tools: Optional[List[str]] = None,
+        plugins: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         skip_provider: bool = False,
@@ -1680,12 +1680,15 @@ class JaatoSession:
         agent_params: Optional[Dict[str, Any]] = None,
         completion_processors: Optional[List[Any]] = None,
         tool_scopes: Optional[Dict[str, List[str]]] = None,
+        tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> None:
-        """Configure the session with tools and instructions.
+        """Configure the session with plugins and instructions.
 
         Args:
-            tools: Optional list of plugin names to expose. If None, uses all
-                   exposed plugins from the runtime's registry.
+            plugins: Optional list of plugin names to expose (e.g. ``"cli"``,
+                   ``"web_search"``). If None, uses all exposed plugins from the
+                   runtime's registry. (This is plugin names, NOT tool names —
+                   per-tool allow-lists live in ``tool_scopes``.)
             system_instructions: Optional additional system instructions.
             plugin_configs: Optional per-plugin configuration overrides.
                            Plugins will be re-initialized with these configs.
@@ -1715,7 +1718,26 @@ class JaatoSession:
                 path for this session.  Used by fork-replay to point a
                 temp session at a worktree snapshot without affecting other
                 sessions sharing the same runtime.
+            tools: DEPRECATED alias for ``plugins`` (it always took plugin
+                names, never tool names). Pass ``plugins=`` instead; ``tools=``
+                still works with a one-time deprecation warning. ``plugins``
+                wins if both are given.
         """
+        # Back-compat: ``tools`` was a misleading name for the plugin-name list
+        # (it never took tool names).  Honour it as a deprecated alias for
+        # ``plugins`` and warn once.  The body below uses ``plugins``.
+        if tools is not None:
+            import warnings
+            warnings.warn(
+                "JaatoSession.configure(tools=...) is a deprecated alias for "
+                "plugins=; it takes PLUGIN names (e.g. 'cli', 'web_search'), "
+                "not tool names. Use plugins= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if plugins is None:
+                plugins = tools
+
         import time as _time
         _t_configure_start = _time.perf_counter()
 
@@ -1763,12 +1785,12 @@ class JaatoSession:
         # Store per-plugin tool allow-lists (profile ``tools:[...]``).
         self._tool_scopes = dict(tool_scopes) if tool_scopes else {}
         # Store tool plugin names
-        self._tool_plugins = tools
+        self._tool_plugins = plugins
 
         # Re-initialize plugins with session-specific configs if provided
         if plugin_configs and self._runtime.registry:
             for plugin_name, config in plugin_configs.items():
-                if tools is None or plugin_name in tools:
+                if plugins is None or plugin_name in plugins:
                     try:
                         # Inject agent_name into plugin config for trace logging
                         if self._agent_name and "agent_name" not in config:
@@ -1801,8 +1823,8 @@ class JaatoSession:
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
 
         # Get tool schemas and executors from runtime
-        self._tools = self._runtime.get_tool_schemas(tools, preloaded_plugins=self._preloaded_plugins)
-        executors = self._runtime.get_executors(tools)
+        self._tools = self._runtime.get_tool_schemas(plugins, preloaded_plugins=self._preloaded_plugins)
+        executors = self._runtime.get_executors(plugins)
 
         # Register executors
         for name, fn in executors.items():
@@ -1855,13 +1877,13 @@ class JaatoSession:
             # filter and drops preloaded plugins' discoverable tools.
             existing_names = {s.name for s in self._tools}
             refreshed_schemas = self._runtime.get_tool_schemas(
-                tools, preloaded_plugins=self._preloaded_plugins
+                plugins, preloaded_plugins=self._preloaded_plugins
             )
             for schema in refreshed_schemas:
                 if schema.name not in existing_names:
                     self._tools.append(schema)
                     existing_names.add(schema.name)
-            for name, fn in self._runtime.get_executors(tools).items():
+            for name, fn in self._runtime.get_executors(plugins).items():
                 self._executor.register(name, fn)
 
             # Register lifecycle tools (signal_completion) directly on this
