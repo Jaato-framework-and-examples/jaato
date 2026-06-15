@@ -278,6 +278,7 @@ Tools can declare semantic **traits** on their `ToolSchema` via the `traits` fie
 | Constant | Value | Contract |
 |----------|-------|----------|
 | `TRAIT_FILE_WRITER` | `"file_writer"` | Tool writes/modifies files. Result must include `path` (str), `files_modified` (list), or `changes[].file`. Triggers full-JSON enrichment (LSP diagnostics, artifact tracking). |
+| `TRAIT_GREPPABLE_CONTENT` | `"greppable_content"` | Tool returns bulk content eligible for result-rewriting. Routes the tool's **full JSON result** through the same full-dict enrichment path as `TRAIT_FILE_WRITER`, so result-rewriter plugins (`result_grep`) can inspect/shrink structured payloads the text-field path never sees (e.g. `call_service.body`/`headers`). Marks eligibility only — filtering is performed by whichever rewriter is subscribed/active. |
 
 **How it works:**
 1. Tool schemas declare traits: `traits=frozenset({TRAIT_FILE_WRITER})`

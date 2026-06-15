@@ -43,6 +43,40 @@ Usage::
 """
 
 
+TRAIT_GREPPABLE_CONTENT = "greppable_content"
+"""Trait for tools whose result is bulk content eligible for result-rewriting.
+
+Tools declaring this trait have their **full JSON result** passed through the
+tool-result enrichment pipeline (the same full-dict path ``TRAIT_FILE_WRITER``
+uses), so result-rewriter enrichment plugins — e.g. ``result_grep`` — can
+inspect and *shrink* the payload before it enters history.
+
+Without this trait, the session only routes a result through enrichment when
+the tool writes files (``TRAIT_FILE_WRITER``) or when the result carries a
+large string under a well-known text key (``result``/``content``/``stdout``/
+``output``/``text``/``data``).  Tools that return **structured dicts** under
+other keys (HTTP/registry lookups like ``call_service``, whose heavy payload
+sits under ``body``/``headers``) are otherwise invisible to enrichment; this
+trait is the opt-in that makes them rewriter-eligible.
+
+The trait only marks a result as *eligible* for rewriting — it does not itself
+filter anything.  The actual filtering is performed by whichever enrichment
+plugin subscribes to tool-result enrichment (``result_grep`` does so only while
+its grep-mode is active; when no rewriter is subscribed/active the result is
+passed through unchanged).
+
+Usage::
+
+    from shared.plugins.model_provider.types import ToolSchema, TRAIT_GREPPABLE_CONTENT
+
+    ToolSchema(
+        name="call_service",
+        ...,
+        traits=frozenset({TRAIT_GREPPABLE_CONTENT}),
+    )
+"""
+
+
 TRAIT_FRAMEWORK_LEVEL = "framework_level"
 """Trait for tools that perform framework-level operations and must run unconfined.
 
