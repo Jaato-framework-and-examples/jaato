@@ -405,13 +405,30 @@ class ResultGrepPlugin:
     # ------------------------------------------------------------------ filter
 
     def _apply(self, result: str, f: GrepFilter) -> ToolResultEnrichmentResult:
-        """Apply ``f`` to ``result``, preserving the JSON/text output contract.
+        """Apply ``f`` to ``result`` and ALWAYS return a valid JSON envelope.
 
-        - JSON object input  -> JSON object output (so the full-dict enrichment
-          path can ``json.loads`` it back), packaged as
-          ``{"_grep_filtered": {...}, "content": <slice>}``, carrying any
-          ``_lsp_diagnostics`` through untouched.
-        - anything else      -> raw ``banner + slice`` string (text-field path).
+        Output shape (every path): a JSON object
+        ``{"_grep_filtered": {pattern, lines_shown, lines_total, note},
+        "content": <filtered slice>}`` (carrying any ``_lsp_diagnostics`` through
+        if the input was a dict that had it).
+
+        **Why always JSON** (regression #289): the session's full-dict
+        enrichment path (``TRAIT_FILE_WRITER`` / ``TRAIT_GREPPABLE_CONTENT``)
+        does ``json.loads()`` on our returned string and, on ``JSONDecodeError``,
+        DISCARDS our output (stuffs it under ``_lsp_diagnostics`` and keeps the
+        original UNFILTERED result — ``jaato_session.py`` ~6690).  Because
+        ``result_grep`` runs last in the priority-ordered enrichment chain, an
+        upstream enricher (e.g. LSP appending Java diagnostics to a
+        ``call_service`` result whose body mentions a Java FQCN) can have already
+        rewritten the result's JSON into non-JSON before we see it.  The old code
+        keyed its OUTPUT format on the INPUT's parseability and returned a raw
+        ``banner + text`` string in that case → the full-dict path discarded it →
+        that one result of a parallel batch silently passed through unfiltered
+        (the "arbitrary subset" symptom).  Emitting valid JSON unconditionally
+        makes ``json.loads`` always succeed, so every result is filtered
+        consistently regardless of upstream mutation.  A JSON-object string is
+        also accepted verbatim by the text-field / bare-string paths (they take
+        our output as the field/result value as-is), so this is safe everywhere.
         """
         obj, is_json = _try_json(result)
 
@@ -423,6 +440,9 @@ class ResultGrepPlugin:
         if is_json:
             text = json.dumps(obj, indent=2, ensure_ascii=False, sort_keys=False)
         else:
+            # Non-JSON input — most often a result whose JSON an upstream
+            # enricher already mangled (see #289), or a genuine plain-text
+            # field.  Line-grep it as-is; we still wrap the slice in valid JSON.
             text = result
 
         slice_text, kept, total = _line_grep(
@@ -430,27 +450,20 @@ class ResultGrepPlugin:
         )
         meta = {"pattern": f.pattern, "lines_shown": kept, "lines_total": total}
 
-        if is_json and isinstance(obj, dict):
-            payload: Dict[str, Any] = {
-                "_grep_filtered": {
-                    "pattern": f.pattern,
-                    "lines_shown": kept,
-                    "lines_total": total,
-                    "note": "grep-mode active; call grep_mode_stop for the full result",
-                },
-                "content": slice_text,
-            }
-            if lsp is not None:
-                payload[_LSP_KEY] = lsp
-            return ToolResultEnrichmentResult(
-                result=json.dumps(payload, ensure_ascii=False), metadata=meta
-            )
-
-        banner = (
-            f"[grep-mode active · pattern={f.pattern!r} · "
-            f"{kept}/{total} lines shown · grep_mode_stop for full result]"
+        payload: Dict[str, Any] = {
+            "_grep_filtered": {
+                "pattern": f.pattern,
+                "lines_shown": kept,
+                "lines_total": total,
+                "note": "grep-mode active; call grep_mode_stop for the full result",
+            },
+            "content": slice_text,
+        }
+        if lsp is not None:
+            payload[_LSP_KEY] = lsp
+        return ToolResultEnrichmentResult(
+            result=json.dumps(payload, ensure_ascii=False), metadata=meta
         )
-        return ToolResultEnrichmentResult(result=banner + "\n" + slice_text, metadata=meta)
 
 
 # --------------------------------------------------------------------- helpers
