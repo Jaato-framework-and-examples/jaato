@@ -220,7 +220,7 @@ class JaatoRuntime:
         main_session = runtime.create_session(model="gemini-2.5-flash")
         sub_session = runtime.create_session(
             model="gemini-2.5-flash",
-            tools=["cli", "web_search"],
+            plugins=["cli", "web_search"],
             system_instructions="You are a research assistant."
         )
     """
@@ -900,7 +900,7 @@ class JaatoRuntime:
     def create_session(
         self,
         model: str,
-        tools: Optional[List[str]] = None,
+        plugins: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         provider_name: Optional[str] = None,
@@ -915,6 +915,7 @@ class JaatoRuntime:
         completion_processors: Optional[List[Any]] = None,
         agent_id: str = "main",
         tool_scopes: Optional[Dict[str, List[str]]] = None,
+        tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -924,8 +925,10 @@ class JaatoRuntime:
 
         Args:
             model: Model name to use for this session.
-            tools: Optional list of plugin names to expose. If None, uses all
-                   exposed plugins from the registry.
+            plugins: Optional list of plugin names to expose (e.g. ``"cli"``,
+                   ``"web_search"``). If None, uses all exposed plugins from the
+                   registry. (Plugin names, NOT tool names — per-tool allow-lists
+                   live in ``tool_scopes``. Mirrors ``SubagentProfile.plugins``.)
             system_instructions: Optional additional system instructions to
                                 prepend to the base instructions.
             plugin_configs: Optional per-plugin configuration overrides.
@@ -962,6 +965,10 @@ class JaatoRuntime:
                 plugin ships from its own wire body + grammar surface.
                 Applied per-session — the shared registry is never mutated,
                 so sibling sessions on this runtime keep their own scopes.
+            tools: DEPRECATED alias for ``plugins`` (it always took plugin
+                names, never tool names). Pass ``plugins=`` instead; ``tools=``
+                still works with a one-time deprecation warning. ``plugins``
+                wins if both are given.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -969,6 +976,20 @@ class JaatoRuntime:
         Raises:
             RuntimeError: If runtime is not connected or configured.
         """
+        # Back-compat: ``tools`` was a misleading name for the plugin-name list.
+        # Honour it as a deprecated alias for ``plugins`` and warn once.
+        if tools is not None:
+            import warnings
+            warnings.warn(
+                "JaatoRuntime.create_session(tools=...) is a deprecated alias "
+                "for plugins=; it takes PLUGIN names (e.g. 'cli', 'web_search'), "
+                "not tool names. Use plugins= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if plugins is None:
+                plugins = tools
+
         if not self._connected:
             raise RuntimeError("Runtime not connected. Call connect() first.")
         if not self._registry:
@@ -993,7 +1014,7 @@ class JaatoRuntime:
         # Configure session tools
         t1 = time.perf_counter()
         session.configure(
-            tools=tools,
+            plugins=plugins,
             system_instructions=system_instructions,
             plugin_configs=plugin_configs,
             preloaded_plugins=preloaded_plugins,
@@ -1021,9 +1042,10 @@ class JaatoRuntime:
     def create_session_without_provider(
         self,
         model: str,
-        tools: Optional[List[str]] = None,
+        plugins: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
-        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> 'JaatoSession':
         """Create a session without provider (for auth-pending mode).
 
@@ -1033,13 +1055,27 @@ class JaatoRuntime:
 
         Args:
             model: Model name (stored for later use after auth completes).
-            tools: Optional list of plugin names to expose.
+            plugins: Optional list of plugin names to expose (NOT tool names).
             system_instructions: Optional additional system instructions.
             plugin_configs: Optional per-plugin configuration overrides.
+            tools: DEPRECATED alias for ``plugins``. ``plugins`` wins if both
+                are given; ``tools=`` emits a one-time deprecation warning.
 
         Returns:
             JaatoSession configured without a provider.
         """
+        if tools is not None:
+            import warnings
+            warnings.warn(
+                "JaatoRuntime.create_session_without_provider(tools=...) is a "
+                "deprecated alias for plugins=; it takes PLUGIN names, not tool "
+                "names. Use plugins= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if plugins is None:
+                plugins = tools
+
         if not self._connected:
             raise RuntimeError("Runtime not connected. Call connect() first.")
         if not self._registry:
@@ -1049,7 +1085,7 @@ class JaatoRuntime:
 
         session = JaatoSession(self, model)
         session.configure(
-            tools=tools,
+            plugins=plugins,
             system_instructions=system_instructions,
             plugin_configs=plugin_configs,
             skip_provider=True  # Don't create provider

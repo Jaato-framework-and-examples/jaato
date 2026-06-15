@@ -547,7 +547,7 @@ class SubagentPlugin:
                 # Create session using runtime
                 session = runtime.create_session(
                     model=model,
-                    tools=profile.plugins,
+                    plugins=profile.plugins,
                     system_instructions=profile.system_instructions,
                     plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                     provider_name=provider,
@@ -3186,7 +3186,7 @@ class SubagentPlugin:
             # forwarded ``case_data`` from the spawn call.
             session = self._runtime.create_session(
                 model=model,
-                tools=profile.plugins,
+                plugins=profile.plugins,
                 system_instructions=profile.system_instructions,
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                 provider_name=provider,
