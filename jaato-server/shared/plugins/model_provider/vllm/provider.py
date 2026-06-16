@@ -1279,13 +1279,20 @@ class VLLMProvider:
     def get_context_limit(self) -> int:
         """Return the context window size for the currently connected model.
 
-        Returns the value validated at ``initialize()`` time (sourced
-        from ``plugin_configs.vllm.context_length`` or
-        ``VLLM_CONTEXT_LENGTH``).  vLLM's ``GET /v1/models`` does not
-        surface per-engine context length (verified against vLLM
-        stable docs 2026-06-07 via context7 — the catalog entry shape
-        has no length field), so the value must come from the
-        operator — ``initialize()`` raises if missing.
+        Returns the value resolved at ``initialize()`` time via
+        ``resolve_context_window`` (see that helper + the precedence
+        comment in ``initialize()``):
+
+        1. PRIMARY — auto-detected from the live server's ``GET
+           /v1/models`` ``max_model_len`` (current vLLM versions
+           surface it).
+        2. fallback — ``plugin_configs.vllm.context_length``.
+        3. fallback — ``VLLM_CONTEXT_LENGTH`` env var.
+
+        The manual overrides exist only for older vLLM builds that
+        don't surface ``max_model_len``, or to pin a value.
+        ``initialize()`` raises only when auto-detect fails AND no
+        override is set.
 
         Raises:
             RuntimeError: When called before ``initialize()`` has run.
