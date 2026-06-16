@@ -127,6 +127,17 @@ class FileEditPlugin(RunnerForwardingMixin):
         # Explicit ``backup_dir`` from operator config (takes precedence
         # over derived paths).  Cached so broadcasts respect it.
         self._explicit_backup_dir: Optional[str] = None
+        # Per-profile cap on the character span of a single targeted edit's
+        # ``old``/``new`` arguments (``updateFile`` targeted mode).  ``None``
+        # = unlimited (default).  Set via
+        # ``plugin_configs.file_edit.max_edit_span_chars`` and read in
+        # ``initialize``.  Enforced symmetrically (``old`` AND ``new``) by
+        # ``_check_edit_span`` at the ``updateFile`` executor sites, and
+        # advertised to the model through the dynamic tool description built
+        # in ``get_tool_schemas`` (``_edit_span_hint``).  Full-file rewrites
+        # are unaffected — they go through ``new_content`` (full-replacement
+        # mode), which the cap intentionally does not touch.
+        self._max_edit_span_chars: Optional[int] = None
         # Plugin registry for checking external path authorization
         self._plugin_registry = None
 
@@ -214,6 +225,97 @@ class FileEditPlugin(RunnerForwardingMixin):
         """Write trace message to log file for debugging."""
         _trace_write("FILE_EDIT", msg)
 
+    @staticmethod
+    def _parse_edit_span_cap(raw: Any) -> Optional[int]:
+        """Validate the ``max_edit_span_chars`` config value.
+
+        Returns the cap as a positive ``int`` when *raw* is a valid positive
+        integer (accepting ``bool``-free numeric strings too, since profile
+        loaders may pass strings).  Returns ``None`` (unlimited) when *raw* is
+        absent.  For any malformed value (non-numeric, ``<= 0``, ``bool``) it
+        logs a WARNING and returns ``None`` — the knob disables itself rather
+        than clamping to a hardcoded default, keeping behaviour deterministic
+        and predictable for the operator who set it.
+        """
+        if raw is None:
+            return None
+        # Reject bool explicitly — bool is an int subclass and ``True``/``False``
+        # as a span cap is always an operator mistake.
+        if isinstance(raw, bool):
+            logger.warning(
+                "file_edit: ignoring max_edit_span_chars=%r (bool is not a valid "
+                "span cap); treating as unlimited.", raw
+            )
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "file_edit: ignoring max_edit_span_chars=%r (not an integer); "
+                "treating as unlimited.", raw
+            )
+            return None
+        if value <= 0:
+            logger.warning(
+                "file_edit: ignoring max_edit_span_chars=%d (must be a positive "
+                "integer); treating as unlimited.", value
+            )
+            return None
+        return value
+
+    def _check_edit_span(self, old: Optional[str], new: Optional[str]) -> Optional[str]:
+        """Enforce the targeted-edit span cap on ``old`` and ``new``.
+
+        Applied to each argument independently (capping only one leaves the
+        other as an escape hatch).  Returns a model-facing guiding error string
+        when either exceeds ``self._max_edit_span_chars``, else ``None``.  When
+        the cap is unset (``None``) this is always a no-op.
+
+        The error names the offending side(s) and points at the two legitimate
+        remedies — localise the edit, or use ``new_content`` (full-replacement
+        mode) for a whole-file rewrite — so the model can self-correct without
+        relying on persona prose.
+        """
+        cap = self._max_edit_span_chars
+        if cap is None:
+            return None
+        old_len = len(old or "")
+        new_len = len(new or "")
+        over: List[str] = []
+        if old_len > cap:
+            over.append(f"'old' is {old_len} chars")
+        if new_len > cap:
+            over.append(f"'new' is {new_len} chars")
+        if not over:
+            return None
+        return (
+            f"Targeted edit rejected: {' and '.join(over)}; 'old' and 'new' must "
+            f"each be ≤ {cap} characters. Anchor 'old' on a single distinctive "
+            f"line (e.g. a function signature or a unique statement), not the whole "
+            f"file, and keep 'new' to the localised replacement. To rewrite the "
+            f"entire file, use 'new_content' (full-replacement mode) instead of a "
+            f"large 'old'/'new' pair."
+        )
+
+    def _edit_span_hint(self) -> str:
+        """Return the dynamic schema suffix advertising the span cap.
+
+        Empty string when the cap is unset, so the static tool description is
+        unchanged.  When set, the returned sentence is appended to the
+        ``updateFile`` description (and a shorter variant to the ``old``/``new``
+        property descriptions) in :meth:`get_tool_schemas`, so the constraint
+        reaches the model through the tool contract — never the persona.
+        Computed at schema-build time from the current cap value.
+        """
+        cap = self._max_edit_span_chars
+        if cap is None:
+            return ""
+        return (
+            f" IMPORTANT: in targeted-edit mode, 'old' and 'new' must each be "
+            f"≤ {cap} characters — anchor on a single distinctive line, not "
+            f"the whole file. To replace the entire file, use 'new_content' instead."
+        )
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the file edit plugin.
 
@@ -229,6 +331,17 @@ class FileEditPlugin(RunnerForwardingMixin):
                 - workspace_root: Path to workspace root for sandboxing.
                                   Auto-detected from JAATO_WORKSPACE_ROOT or
                                   workspaceRoot env vars if not specified.
+                - max_edit_span_chars: Per-profile cap on the character length
+                                  of a single targeted edit's ``old`` and
+                                  ``new`` arguments (``updateFile`` targeted
+                                  mode), applied to each independently.  Must
+                                  be a positive int; ``None``/absent = unlimited
+                                  (default).  Drives both the runtime rejection
+                                  (``_check_edit_span``) and the dynamic tool
+                                  description (``_edit_span_hint``).  Does NOT
+                                  cap ``new_content`` (full-replacement mode) —
+                                  whole-file rewrites stay legal through that
+                                  argument.
         """
         config = config or {}
 
@@ -263,6 +376,14 @@ class FileEditPlugin(RunnerForwardingMixin):
         # backup-manager path without losing operator-supplied state.
         self._explicit_backup_dir = config.get("backup_dir")
         self._session_id = config.get("session_id")
+
+        # Per-profile targeted-edit span cap.  Validated to a positive int;
+        # any other value (incl. negative/zero/non-numeric) is rejected with a
+        # WARNING and treated as unset (unlimited) — deterministic, no silent
+        # clamping to an arbitrary default.
+        self._max_edit_span_chars = self._parse_edit_span_cap(
+            config.get("max_edit_span_chars")
+        )
 
         self._reinit_backup_manager()
 
@@ -536,7 +657,21 @@ class FileEditPlugin(RunnerForwardingMixin):
             logger.debug(f"Failed to update .gitignore: {exc}")
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return tool schemas for file editing tools."""
+        """Return tool schemas for file editing tools.
+
+        The ``updateFile`` description and its ``old``/``new`` property
+        descriptions are computed at build time: when a per-profile
+        ``max_edit_span_chars`` cap is set, the span constraint is appended so
+        the model learns the limit through the tool contract (see
+        :meth:`_edit_span_hint`).  When unset, the descriptions are unchanged.
+        """
+        # Dynamic span-cap advertisement (empty string when no cap is set).
+        span_hint = self._edit_span_hint()
+        span_prop_hint = (
+            f" Must be ≤ {self._max_edit_span_chars} characters."
+            if self._max_edit_span_chars is not None
+            else ""
+        )
         return [
             ToolSchema(
                 name="readFile",
@@ -573,7 +708,8 @@ class FileEditPlugin(RunnerForwardingMixin):
                            "provide 'old' and 'new' to replace a specific fragment. If 'old' "
                            "matches multiple locations, add 'prologue'/'epilogue' — short, "
                            "distinctive text copied verbatim from the file as context anchors. "
-                           "(2) Full replacement: provide 'new_content' to replace the entire file.",
+                           "(2) Full replacement: provide 'new_content' to replace the entire file."
+                           + span_hint,
                 parameters={
                     "type": "object",
                     "properties": {
@@ -587,6 +723,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                                 "Text to find in the file (for targeted edit). "
                                 "Must appear exactly once, or use prologue/epilogue "
                                 "to disambiguate."
+                                + span_prop_hint
                             )
                         },
                         "new": {
@@ -594,6 +731,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                             "description": (
                                 "Replacement text (for targeted edit). "
                                 "Replaces only the matched 'old' text."
+                                + span_prop_hint
                             )
                         },
                         "prologue": {
@@ -1059,6 +1197,19 @@ Backups are automatically created for file modifications."""
             new_text = arguments.get("new", "")
             prologue = arguments.get("prologue")
             epilogue = arguments.get("epilogue")
+            # Enforce the per-profile span cap BEFORE attempting the anchor
+            # match, so an oversized whole-file 'old'/'new' surfaces as a
+            # guiding pre-validation error rather than a confusing
+            # EditNotFoundError.  Same channel as the edit-error path below.
+            span_error = self._check_edit_span(old_text, new_text)
+            if span_error is not None:
+                display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+                return PermissionDisplayInfo(
+                    summary=f"Update file: {display_path} (edit span exceeded)",
+                    details=span_error,
+                    format_hint="text",
+                    pre_validation_error=span_error,
+                )
             try:
                 new_content = apply_edit(old_content, old_text, new_text, prologue, epilogue)
             except (EditNotFoundError, AmbiguousEditError) as e:
@@ -1354,6 +1505,18 @@ Backups are automatically created for file modifications."""
                 return {"error": "'new' is required when 'old' is provided"}
             prologue = args.get("prologue")
             epilogue = args.get("epilogue")
+
+            # Enforce the per-profile span cap before any disk read / match so
+            # an oversized whole-file 'old'/'new' is rejected with a guiding
+            # error the model can act on (localise, or switch to new_content).
+            span_error = self._check_edit_span(old_text, new_text)
+            if span_error is not None:
+                self._trace(
+                    f"updateFile(targeted) REJECTED span: path={path}, "
+                    f"old_len={len(old_text)}, new_len={len(new_text)}, "
+                    f"cap={self._max_edit_span_chars}"
+                )
+                return {"error": span_error}
 
             try:
                 current_content = file_path.read_text(encoding="utf-8")
