@@ -88,7 +88,7 @@ The framework uses a server-first architecture where the server runs as a daemon
 
 - **jaato_runtime.py**: `JaatoRuntime` - Shared environment
   - Manages provider config, plugin registry, permissions, ledger
-  - `create_session(model, tools, system_instructions)` - spawn lightweight sessions
+  - `create_session(model, plugins=..., system_instructions=..., ...)` - spawn lightweight sessions (`tools=` is a deprecated alias for `plugins=`; #292)
 
 - **jaato_session.py**: `JaatoSession` - Per-agent conversation state
   - `send_message()`, `get_history()`, `reset_session()` - conversation methods
@@ -159,20 +159,26 @@ When model returns multiple function calls, jaato executes them in parallel usin
 
 ### Agent Profiles
 
-Sessions can be created with a predefined agent profile that configures model, provider, plugins, system instructions, and GC strategy. Profiles are JSON files in `.jaato/profiles/`.
+Sessions can be created with a predefined agent profile that configures model, provider, plugins, and GC strategy. Profiles are YAML files in `.jaato/profiles/` (preferred; JSON is also accepted).
 
 **Profile schema** (same as `SubagentProfile` in `shared/plugins/subagent/config.py`):
-```json
-{
-  "name": "researcher",
-  "description": "Deep research profile",
-  "model": "claude-sonnet-4-20250514",
-  "provider": "anthropic",
-  "plugins": ["cli", "web_search", "memory", "todo(preload)"],
-  "plugin_configs": {},
-  "system_instructions": "You are a research analyst...",
-  "gc": { "type": "budget", "threshold_percent": 80.0 }
-}
+```yaml
+name: researcher
+description: Deep research profile
+model: claude-sonnet-4-20250514
+provider: anthropic
+plugins:
+  - cli
+  - web_search
+  - memory
+  - todo(preload)
+plugin_configs: {}
+# Agent identity and instructions belong in .jaato/agents/<name>.md (persona)
+# layered on top of .jaato/instructions/ base instructions.
+# system_instructions: DEPRECATED — use agents instead.
+gc:
+  type: budget
+  threshold_percent: 80.0
 ```
 
 **SDK API:**
@@ -188,7 +194,7 @@ await client.create_session(profile="researcher")
 - `session.new [name] --profile <name>` — create session from profile
 - `session.profiles` — list available profiles (→ `SessionProfilesEvent`)
 
-**Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, system_instructions, plugin_configs, GC) during `initialize()`.
+**Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
 ### Subagent Architecture
 
@@ -655,7 +661,7 @@ Benefits:
 |----------|---------|
 | `VLLM_HOST` | vLLM server URL (**required** — e.g. `http://localhost:8000`; no localhost fallback) |
 | `VLLM_MODEL` | Default model name (matches the model's `id` in `/v1/models`) |
-| `VLLM_CONTEXT_LENGTH` | Context window size (**required** — vLLM's `/v1/models` does not surface `max_model_len`; verified against vLLM stable docs 2026-06-07 via context7) |
+| `VLLM_CONTEXT_LENGTH` | Context window size (**optional override** — current vLLM surfaces `max_model_len` in `/v1/models`, which the provider auto-detects at connect via `resolve_context_window` (post-#281). Set this only to override the detected value, or as a fallback for older vLLM builds that don't report it.) |
 | `VLLM_API_TOKEN` | Optional bearer token (only when the server was launched with `--api-key <token>` — vLLM's native bearer auth — or fronted by an auth proxy) |
 
 Talks to a vLLM OpenAI-compatible server (`vllm.entrypoints.openai.api_server`) the user has already launched. Provider is **passive** — no in-band model load endpoint; model choice (`--model`), context length (`--max-model-len`), and the tool-call parser (`--enable-auto-tool-choice --tool-call-parser <name>`) all live at server-launch boundary.
@@ -675,7 +681,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct \
     --host 0.0.0.0 --port 8000 \
     --max-model-len 32768
 export VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct
-export VLLM_CONTEXT_LENGTH=32768  # match the engine's --max-model-len
+export VLLM_CONTEXT_LENGTH=32768  # optional — overrides the auto-detected max_model_len
 ```
 
 For tool-calling, also pass `--enable-auto-tool-choice --tool-call-parser <name>` matching the model family (e.g. `hermes` for Qwen2.5, `mistral` for Mistral Instruct, `llama3_json` for Llama 3.1, `pythonic` for Llama 3.2 / 4, `granite` for IBM Granite, ...). See the vLLM Tool-Calling docs for the full parser list.

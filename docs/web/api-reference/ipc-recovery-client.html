@@ -81,6 +81,10 @@
           <li><a href="providers/ollama.html">Ollama</a></li>
           <li><a href="providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="providers/vllm.html">vLLM</a></li>
+          <li><a href="providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="providers/openrouter.html">OpenRouter</a></li>
         </ul>
       </div>
 
@@ -117,7 +121,8 @@
 
           <div class="method-signature">
             <span class="token-keyword">from</span> jaato_sdk.client <span class="token-keyword">import</span> IPCRecoveryClient, ConnectionState<br>
-            <span class="token-keyword">from</span> jaato_sdk.client.config <span class="token-keyword">import</span> RecoveryConfig, get_recovery_config
+            <span class="token-keyword">from</span> jaato_sdk.client.config <span class="token-keyword">import</span> RecoveryConfig, get_recovery_config<br>
+            <span class="token-keyword">from</span> jaato_sdk.events <span class="token-keyword">import</span> ClientType
           </div>
 
           <div class="callout callout-info">
@@ -142,6 +147,7 @@ def on_status(status: ConnectionStatus):
 async def main():
     client = IPCRecoveryClient(
         socket_path="/tmp/jaato.sock",
+        client_type=ClientType.TERMINAL,
         on_status_change=on_status,
     )
     await client.connect()
@@ -172,11 +178,14 @@ asyncio.run(main())</code></pre>
           <div class="method-signature">
             <span class="method-name">IPCRecoveryClient</span>(<br>
             &nbsp;&nbsp;<span class="param">socket_path</span>: <span class="type">str</span> = <span class="type">DEFAULT_SOCKET_PATH</span>,<br>
+            &nbsp;&nbsp;<span class="param">*</span>,<br>
+            &nbsp;&nbsp;<span class="param">client_type</span>: <span class="type">ClientType</span>,<br>
             &nbsp;&nbsp;<span class="param">config</span>: <span class="type">Optional[RecoveryConfig]</span> = <span class="type">None</span>,<br>
             &nbsp;&nbsp;<span class="param">auto_start</span>: <span class="type">bool</span> = <span class="type">True</span>,<br>
             &nbsp;&nbsp;<span class="param">env_file</span>: <span class="type">str</span> = <span class="type">".env"</span>,<br>
             &nbsp;&nbsp;<span class="param">workspace_path</span>: <span class="type">Optional[Path]</span> = <span class="type">None</span>,<br>
-            &nbsp;&nbsp;<span class="param">on_status_change</span>: <span class="type">Optional[StatusCallback]</span> = <span class="type">None</span><br>
+            &nbsp;&nbsp;<span class="param">on_status_change</span>: <span class="type">Optional[StatusCallback]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">min_protocol_version</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
             )
           </div>
 
@@ -190,6 +199,20 @@ asyncio.run(main())</code></pre>
               <div class="param-desc">
                 Path to Unix domain socket or Windows named pipe.
                 Defaults to <code>DEFAULT_SOCKET_PATH</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">client_type</span>
+              <span class="param-type">ClientType</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">
+                <strong>Required keyword argument.</strong> Identifies the kind of client for
+                server-side presentation and lifecycle filters. Pass
+                <code>ClientType.TERMINAL</code> for interactive TUI clients or
+                <code>ClientType.API</code> for headless orchestrators, batch jobs, or
+                cascade harnesses. Forwarded verbatim to the inner
+                <code>IPCClient</code>. Import from
+                <code>jaato_sdk.events</code>.
               </div>
             </li>
             <li>
@@ -239,6 +262,19 @@ asyncio.run(main())</code></pre>
                 Signature: <code>(status: ConnectionStatus) -> None</code>.
               </div>
             </li>
+            <li>
+              <span class="param-name">min_protocol_version</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Override the inner <code>IPCClient.MIN_PROTOCOL_VERSION</code> for
+                this connection. When set, the client refuses to connect to servers
+                whose wire-protocol version is older than this value and raises
+                <a href="#incompatibleservererror"><code>IncompatibleServerError</code></a>.
+                Use only when targeting an unreleased daemon; production deployments
+                should rely on the class-level default.
+              </div>
+            </li>
           </ul>
 
           <div class="returns">
@@ -250,11 +286,13 @@ asyncio.run(main())</code></pre>
           <div class="code-label">Create with defaults (auto-loads config)</div>
           <div class="code-block">
             <pre><code class="language-python">from jaato_sdk.client import IPCRecoveryClient
+from jaato_sdk.events import ClientType
 
 # Config loaded from ~/.jaato/client.json,
 # .jaato/client.json, and JAATO_IPC_* env vars
 client = IPCRecoveryClient(
     socket_path="/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,   # required
 )</code></pre>
           </div>
 
@@ -262,6 +300,7 @@ client = IPCRecoveryClient(
           <div class="code-block">
             <pre><code class="language-python">from jaato_sdk.client import IPCRecoveryClient
 from jaato_sdk.client.config import RecoveryConfig
+from jaato_sdk.events import ClientType
 
 config = RecoveryConfig(
     max_attempts=5,
@@ -271,6 +310,7 @@ config = RecoveryConfig(
 
 client = IPCRecoveryClient(
     socket_path="/tmp/jaato.sock",
+    client_type=ClientType.API,        # required
     config=config,
     auto_start=False,
     on_status_change=on_status,
@@ -356,11 +396,26 @@ client = IPCRecoveryClient(
 
           <h3 id="client-id">client_id <span class="badge badge-property">property</span></h3>
           <p>Returns the client ID assigned by the server, or <code>None</code> if not connected.</p>
+
+          <h3 id="server-version">server_version <span class="badge badge-property">property</span></h3>
+          <p>
+            Returns the server's package version string (from
+            <code>ConnectedEvent.server_info["server_version"]</code>), or
+            <code>None</code> if not connected or the server did not report one.
+            Delegates to the inner <code>IPCClient.server_version</code>.
+            This is a diagnostics-only field — protocol compatibility is
+            checked against the wire-protocol version, not the package version.
+          </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Connection lifecycle</div>
           <div class="code-block">
-            <pre><code class="language-python">client = IPCRecoveryClient("/tmp/jaato.sock")
+            <pre><code class="language-python">from jaato_sdk.events import ClientType
+
+client = IPCRecoveryClient(
+    "/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,
+)
 
 # Connect (auto-starts server if needed)
 await client.connect(timeout=10.0)
@@ -395,7 +450,10 @@ print(client.is_closed)       # True</code></pre>
           <div class="method-signature">
             <span class="token-keyword">async</span> <span class="method-name">create_session</span>(<br>
             &nbsp;&nbsp;<span class="param">name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
-            &nbsp;&nbsp;<span class="param">profile</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            &nbsp;&nbsp;<span class="param">profile</span>: <span class="type">Optional[Union[str, Dict]]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">agent</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">agent_params</span>: <span class="type">Optional[Dict[str, str]]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">cascade_driver_id</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
             ) -> <span class="type">Optional[str]</span>
           </div>
 
@@ -415,13 +473,45 @@ print(client.is_closed)       # True</code></pre>
             </li>
             <li>
               <span class="param-name">profile</span>
+              <span class="param-type">str | Dict</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Either a profile <strong>name</strong> (<code>str</code>) referencing a
+                file under <code>.jaato/profiles/</code>, <strong>or</strong> an inline
+                <strong>spec dict</strong> with keys such as <code>model</code>,
+                <code>plugins</code>, <code>system_instructions</code>, etc. The two
+                forms are mutually exclusive — pass one or the other. Passing any other
+                type raises <code>TypeError</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">agent</span>
               <span class="param-type">str</span>
               <span class="param-optional">optional</span>
               <div class="param-desc">
-                Name of an agent profile from <code>.jaato/profiles/</code> to apply.
-                The profile configures the session's model, provider, tools, system
-                instructions, and GC settings. Profile files are JSON files in the
-                workspace's <code>.jaato/profiles/</code> directory.
+                Agent name. The agent's rendered markdown becomes the session's system
+                instructions. Orthogonal to <code>profile</code> — they compose freely.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">agent_params</span>
+              <span class="param-type">Dict[str, str]</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Parameter values for the agent's <code>{{param}}</code> placeholders.
+                Only used when <code>agent</code> is specified.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">cascade_driver_id</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Phase-2 cascade-sharing tenant ID. Sessions sharing the same opaque ID
+                reuse a warm pool slot (warm imports + plugin state + LSP connections)
+                across cascade stages. Pass the same UUID across every session of one
+                cascade; subagent sessions inherit automatically via the shared runner.
+                <code>None</code> (default) = standalone session, no slot reuse.
               </div>
             </li>
           </ul>
@@ -435,7 +525,8 @@ print(client.is_closed)       # True</code></pre>
             <div class="returns-label">Raises</div>
             <div class="returns-type">
               <code>ReconnectingError</code> if currently reconnecting.<br>
-              <code>ConnectionClosedError</code> if connection is closed.
+              <code>ConnectionClosedError</code> if connection is closed.<br>
+              <code>TypeError</code> if <code>profile</code> is not None, str, or dict.
             </div>
           </div>
 
@@ -506,7 +597,12 @@ print(client.is_closed)       # True</code></pre>
         <div class="panel-code">
           <div class="code-label">Creating a session with a profile</div>
           <div class="code-block">
-            <pre><code class="language-python">client = IPCRecoveryClient("/tmp/jaato.sock")
+            <pre><code class="language-python">from jaato_sdk.events import ClientType
+
+client = IPCRecoveryClient(
+    "/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,
+)
 await client.connect()
 
 # List available profiles first
@@ -527,7 +623,10 @@ client.set_session_id(session_id)</code></pre>
 
           <div class="code-label" style="margin-top: 24px;">Creating and tracking sessions</div>
           <div class="code-block">
-            <pre><code class="language-python">client = IPCRecoveryClient("/tmp/jaato.sock")
+            <pre><code class="language-python">client = IPCRecoveryClient(
+    "/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,
+)
 await client.connect()
 
 # Create a new session (auto-tracked)
@@ -562,7 +661,8 @@ async for event in client.events():
           <div class="method-signature">
             <span class="token-keyword">async</span> <span class="method-name">send_message</span>(<br>
             &nbsp;&nbsp;<span class="param">text</span>: <span class="type">str</span>,<br>
-            &nbsp;&nbsp;<span class="param">attachments</span>: <span class="type">Optional[list]</span> = <span class="type">None</span><br>
+            &nbsp;&nbsp;<span class="param">attachments</span>: <span class="type">Optional[list]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">parallel_tools</span>: <span class="type">Optional[bool]</span> = <span class="type">None</span><br>
             ) -> <span class="type">None</span>
           </div>
 
@@ -580,6 +680,17 @@ async for event in client.events():
               <span class="param-type">list</span>
               <span class="param-optional">optional</span>
               <div class="param-desc">File attachments to include with the message.</div>
+            </li>
+            <li>
+              <span class="param-name">parallel_tools</span>
+              <span class="param-type">bool</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Per-call override of parallel tool execution.
+                <code>None</code> (default) keeps the environment-configured behavior
+                (<code>JAATO_PARALLEL_TOOLS</code>). <code>True</code> forces parallel
+                tool execution; <code>False</code> forces sequential — for this turn only.
+              </div>
             </li>
           </ul>
 
@@ -875,6 +986,7 @@ if status.state == ConnectionState.RECONNECTING:
           <div class="code-label">RecoveryConfig</div>
           <div class="code-block">
             <pre><code class="language-python">from jaato_sdk.client.config import RecoveryConfig
+from jaato_sdk.events import ClientType
 
 # Custom config
 config = RecoveryConfig(
@@ -889,6 +1001,7 @@ config = RecoveryConfig(
 
 client = IPCRecoveryClient(
     socket_path="/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,   # required
     config=config,
 )</code></pre>
           </div>
@@ -1064,6 +1177,32 @@ export JAATO_IPC_CONNECTION_TIMEOUT=10.0</code></pre>
             permanently closed via <code>close()</code> or after max reconnection
             attempts are exhausted.
           </p>
+
+          <h3 id="incompatibleservererror">IncompatibleServerError</h3>
+          <div class="method-signature">
+            <span class="token-keyword">class</span> <span class="method-name">IncompatibleServerError</span>(Exception)
+          </div>
+          <p>
+            Raised during <code>connect()</code> when the server's wire-protocol
+            version is incompatible with the client's minimum requirement
+            (<code>IPCClient.MIN_PROTOCOL_VERSION</code> or the
+            <code>min_protocol_version</code> constructor argument). Because an
+            incompatible server will not become compatible on retry,
+            <code>IPCRecoveryClient</code> classifies this error as
+            <strong>permanent</strong>: it transitions immediately to
+            <code>CLOSED</code> and makes no further reconnection attempts.
+          </p>
+          <p>Attributes:</p>
+          <ul>
+            <li><code>server_protocol</code> (<code>str</code>) — wire-protocol version the daemon reported.</li>
+            <li><code>min_protocol</code> (<code>str</code>) — the client's required minimum wire-protocol version.</li>
+            <li><code>server_version</code> (<code>str</code>) — daemon package version from <code>ConnectedEvent.server_info</code>; <code>"unknown"</code> when absent. Diagnostics only.</li>
+            <li><code>min_version</code> (<code>str</code>) — alias property for <code>min_protocol</code> (pre-1.0 compatibility).</li>
+          </ul>
+          <p>
+            Imported from <code>jaato_sdk.client.ipc</code> and also re-exported
+            from <code>jaato_sdk.client.recovery</code> for convenience.
+          </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Import paths</div>
@@ -1074,12 +1213,16 @@ from jaato_sdk.client import (
     ConnectionState,
 )
 
+# Required for client_type argument
+from jaato_sdk.events import ClientType
+
 # Recovery-specific types
 from jaato_sdk.client.recovery import (
     ConnectionStatus,
     StatusCallback,
     ReconnectingError,
     ConnectionClosedError,
+    IncompatibleServerError,
 )
 
 # Configuration
@@ -1096,10 +1239,18 @@ from jaato_sdk.client.config import (
             <pre><code class="language-python">from jaato_sdk.client.recovery import (
     ReconnectingError,
     ConnectionClosedError,
+    IncompatibleServerError,
 )
 
 try:
+    await client.connect()
     await client.send_message("Hello!")
+except IncompatibleServerError as e:
+    # Server too old; no retry will help.
+    # Client is now in CLOSED state.
+    print(f"Server protocol {e.server_protocol} "
+          f"below minimum {e.min_protocol} "
+          f"(daemon {e.server_version})")
 except ReconnectingError:
     # Queue the message, retry after reconnect
     message_queue.append("Hello!")

@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenRouter Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+          <li><a href="zhipuai.html">Zhipu AI</a></li>
+          <li><a href="nim.html">NVIDIA NIM</a></li>
+          <li><a href="lmstudio.html">LM Studio</a></li>
+          <li><a href="vllm.html">vLLM</a></li>
+          <li><a href="tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="openrouter.html" class="active">OpenRouter</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>OpenRouter Provider</h1>
+          <p class="lead">
+            Unified gateway to 300+ models from OpenAI, Anthropic, Google, Meta, Mistral,
+            DeepSeek, and more &mdash; all through a single OpenAI-compatible API. One key,
+            every model. Use <code>openrouter/auto</code> to let OpenRouter pick the best
+            model per request.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>openrouter</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.openrouter</code></td></tr>
+              <tr><td><strong>SDK</strong></td><td><code>openai</code> (OpenAI-compatible API)</td></tr>
+              <tr><td><strong>Auth</strong></td><td>API key (<code>sk-or-...</code> from <a href="https://openrouter.ai/settings/keys" target="_blank">openrouter.ai/settings/keys</a>)</td></tr>
+              <tr><td><strong>Default endpoint</strong></td><td><code>https://openrouter.ai/api/v1</code></td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="highlights">Highlights</h2>
+          <ul>
+            <li><strong>300+ models</strong> &mdash; One API key for every major model provider</li>
+            <li><strong>Auto model</strong> &mdash; <code>openrouter/auto</code> picks the best available model per request</li>
+            <li><strong>Cross-model fallback</strong> &mdash; <code>api_params.models</code> list walks candidates on failure</li>
+            <li><strong>Provider routing</strong> &mdash; Fine-grained control over which upstream hosts a request</li>
+            <li><strong>Prompt caching</strong> &mdash; Explicit <code>cache_control</code> breakpoints for Anthropic/Gemini upstreams</li>
+            <li><strong>Extended thinking</strong> &mdash; Reasoning extraction from DeepSeek-R1, Claude, o-series</li>
+            <li><strong>Context auto-detect</strong> &mdash; Catalog queried at <code>connect()</code> for per-model <code>context_length</code></li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Set your API key
+export JAATO_OPENROUTER_API_KEY=sk-or-your-key-here
+export JAATO_PROVIDER=openrouter
+export JAATO_OPENROUTER_MODEL=anthropic/claude-sonnet-4-5</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Python quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import JaatoClient
+
+client = JaatoClient(provider_name="openrouter")
+client.connect(
+    project=None,
+    location=None,
+    model="anthropic/claude-sonnet-4-5"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from OpenRouter!",
+    on_output=on_output
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Auto model selection</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Let OpenRouter pick the best model
+client.connect(None, None, "openrouter/auto")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication</h2>
+
+          <h3>Get Your API Key</h3>
+          <ol>
+            <li>Visit <a href="https://openrouter.ai/settings/keys" target="_blank">openrouter.ai/settings/keys</a></li>
+            <li>Create a new key (<code>sk-or-...</code>)</li>
+            <li>Set it as <code>JAATO_OPENROUTER_API_KEY</code> or use <code>openrouter-auth key</code></li>
+          </ol>
+
+          <h3>Credential Priority</h3>
+          <table>
+            <thead>
+              <tr><th>Priority</th><th>Source</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1 (highest)</td>
+                <td><code>JAATO_OPENROUTER_API_KEY</code> environment variable</td>
+              </tr>
+              <tr>
+                <td>2</td>
+                <td>Stored credentials (<code>openrouter-auth key &lt;api_key&gt;</code> &mdash; validates against <code>GET /api/v1/key</code> and stores securely)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Environment variable</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_OPENROUTER_API_KEY=sk-or-your-key-here
+JAATO_PROVIDER=openrouter
+JAATO_OPENROUTER_MODEL=anthropic/claude-sonnet-4-5</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Store credentials interactively</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Validates key against /api/v1/key and stores securely
+openrouter-auth key sk-or-your-key-here
+
+# Check status
+openrouter-auth status
+
+# Clear stored credentials
+openrouter-auth logout</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Environment Variables</h2>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_OPENROUTER_API_KEY</code></td>
+                <td>&mdash;</td>
+                <td>API key (<code>sk-or-...</code>)</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_OPENROUTER_BASE_URL</code></td>
+                <td><code>https://openrouter.ai/api/v1</code></td>
+                <td>API endpoint override</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_OPENROUTER_MODEL</code></td>
+                <td>&mdash;</td>
+                <td>Default model name (e.g. <code>anthropic/claude-sonnet-4-5</code>)</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_OPENROUTER_CONTEXT_LENGTH</code></td>
+                <td>Auto-detected from catalog</td>
+                <td>Override context window size</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_OPENROUTER_HTTP_REFERER</code></td>
+                <td><code>https://github.com/Jaato-framework-and-examples/jaato</code></td>
+                <td><code>HTTP-Referer</code> header for OpenRouter app rankings</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_OPENROUTER_APP_TITLE</code></td>
+                <td><code>jaato</code></td>
+                <td><code>X-OpenRouter-Title</code> header (display name)</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_OPENROUTER_APP_CATEGORIES</code></td>
+                <td><code>cli-agent</code></td>
+                <td><code>X-OpenRouter-Categories</code> header (comma-separated marketplace categories)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Full .env example</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env
+JAATO_PROVIDER=openrouter
+JAATO_OPENROUTER_API_KEY=sk-or-your-key-here
+JAATO_OPENROUTER_MODEL=anthropic/claude-sonnet-4-5
+JAATO_OPENROUTER_HTTP_REFERER=https://myapp.example.com
+JAATO_OPENROUTER_APP_TITLE=MyApp</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Popular model names</div>
+          <div class="code-block">
+            <pre><code class="language-text">anthropic/claude-sonnet-4-5
+anthropic/claude-opus-4
+openai/gpt-4o
+openai/gpt-5-mini
+google/gemini-2.5-flash
+google/gemini-2.5-pro
+meta-llama/llama-3.3-70b-instruct
+deepseek/deepseek-r1
+mistralai/mistral-large
+openrouter/auto          # OpenRouter picks per-request</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Plugin Configs Layers -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="profile-config">Profile Configuration Layers</h2>
+          <p>
+            OpenRouter's profile config is organized into four named layers under
+            <code>plugin_configs.openrouter</code>. Each layer controls a distinct
+            aspect of the request.
+          </p>
+
+          <h3>Layer 1: Auth / Identity (top-level)</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>api_key</code></td><td>str</td><td>Override env / stored credentials</td></tr>
+              <tr><td><code>http_referer</code></td><td>str</td><td><code>HTTP-Referer</code> header for app rankings</td></tr>
+              <tr><td><code>app_title</code></td><td>str</td><td><code>X-OpenRouter-Title</code> header</td></tr>
+              <tr><td><code>app_categories</code></td><td>list[str]</td><td><code>X-OpenRouter-Categories</code> header. Default: <code>["cli-agent"]</code>. Pass <code>[]</code> to opt out of category attribution.</td></tr>
+              <tr><td><code>extra_headers</code></td><td>dict[str,str]</td><td>Arbitrary additional headers. Primary use: OpenRouter's provider-specific beta header passthrough (e.g. <code>x-anthropic-beta</code>)</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Layer 2: <code>api_params</code> &mdash; Request Body Fields</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>temperature</code></td><td>float</td><td>Sampling temperature (0.0&ndash;1.0)</td></tr>
+              <tr><td><code>top_p</code></td><td>float</td><td>Nucleus sampling</td></tr>
+              <tr><td><code>top_k</code></td><td>int</td><td>Top-K sampling</td></tr>
+              <tr><td><code>max_tokens</code></td><td>int</td><td>Cap on response size</td></tr>
+              <tr><td><code>models</code></td><td>list[str]</td><td>Cross-model fallback list; OpenRouter walks candidates on failure of the primary</td></tr>
+              <tr><td><code>enable_thinking</code></td><td>bool</td><td>Extended reasoning (DeepSeek-R1, Claude, o-series)</td></tr>
+              <tr><td><code>thinking_budget</code></td><td>int</td><td>Max reasoning tokens (&rarr; <code>reasoning.max_tokens</code>)</td></tr>
+              <tr><td><code>thinking_level</code></td><td>str</td><td><code>low</code>/<code>medium</code>/<code>high</code> (&rarr; <code>reasoning.effort</code>); wins over <code>thinking_budget</code> when both set</td></tr>
+              <tr><td><code>cache_prompt</code></td><td>str/bool</td><td><code>"auto"</code> (default) stamps <code>cache_control</code> breakpoints on system block and last tool definition for Anthropic/Gemini upstreams</td></tr>
+              <tr><td><code>cache_ttl</code></td><td>str</td><td><code>"5m"</code> (default) or <code>"1h"</code> (2x write premium, no mid-session cache miss)</td></tr>
+              <tr><td><code>strict_tools</code></td><td>bool</td><td>Emit <code>"strict": true</code> alongside each tool definition for grammar-constrained tool-arg sampling on supported upstreams</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Layer 3: <code>routing</code> &mdash; Provider Routing</h3>
+          <p>
+            Opaque pass-through to OpenRouter's
+            <a href="https://openrouter.ai/docs/features/provider-routing" target="_blank">provider routing extension</a>.
+            Any field from the docs works. Common keys:
+          </p>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Values / Notes</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>sort</code></td><td><code>"price"</code>, <code>"throughput"</code>, <code>"latency"</code>, or <code>{"by":"...", "partition":"model"|"none"}</code></td></tr>
+              <tr><td><code>data_collection</code></td><td><code>"allow"</code> (default) | <code>"deny"</code></td></tr>
+              <tr><td><code>ignore</code></td><td>Provider slugs to skip (list)</td></tr>
+              <tr><td><code>only</code></td><td>Provider allowlist (list); mutually exclusive with <code>ignore</code></td></tr>
+              <tr><td><code>order</code></td><td>Try these providers first, then fall back</td></tr>
+              <tr><td><code>allow_fallbacks</code></td><td><code>false</code> = fail rather than try alternatives</td></tr>
+              <tr><td><code>quantizations</code></td><td><code>["fp8"]</code>, <code>["int4"]</code>, etc.</td></tr>
+              <tr><td><code>zdr</code></td><td><code>true</code> = Zero Data Retention endpoints only</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Layer 4: <code>framework_overrides</code> &mdash; Escape Hatches</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>context_length</code></td><td>int</td><td>Override catalog-reported context window</td></tr>
+              <tr><td><code>base_url</code></td><td>str</td><td>Endpoint override</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Full profile config example (YAML)</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: openrouter-cascade
+model: anthropic/claude-sonnet-4-5
+provider: openrouter
+
+plugins:
+  - cli
+  - file_edit
+
+plugin_configs:
+  openrouter:
+    # Auth / identity
+    api_key: "sk-or-..."
+    app_categories: ["cli-agent"]
+
+    # API params
+    api_params:
+      temperature: 0.55
+      max_tokens: 8192
+      cache_prompt: "auto"
+
+      # Cross-model fallback list
+      models:
+        - anthropic/claude-sonnet-4-5
+        - openai/gpt-5-mini
+        - google/gemini-3-flash-preview
+
+    # Provider routing
+    routing:
+      sort: "throughput"
+      data_collection: "deny"
+      allow_fallbacks: true
+
+    # Framework overrides (rare)
+    framework_overrides:
+      context_length: 200000</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Extended thinking example</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">plugin_configs:
+  openrouter:
+    api_params:
+      enable_thinking: true
+      thinking_level: "high"   # wins over thinking_budget when both set
+      thinking_budget: 16384</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Provider-specific beta headers</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">plugin_configs:
+  openrouter:
+    extra_headers:
+      x-anthropic-beta: >-
+        fine-grained-tool-streaming-2025-05-14,
+        interleaved-thinking-2025-05-14</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Model Catalog -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="models">Model Catalog</h2>
+          <p>
+            <code>list_models()</code> queries <code>GET /api/v1/models</code> (no auth required)
+            and returns the full catalog. <code>connect()</code> looks up the selected model's
+            <code>context_length</code> from the catalog response and caches it.
+          </p>
+
+          <p>
+            Models use the <code>vendor/model-name</code> format. Use
+            <code>openrouter/auto</code> to let OpenRouter select the best model per request.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Browse the catalog</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.openrouter.provider import (
+    OpenRouterProvider
+)
+from shared.plugins.model_provider.base import ProviderConfig
+
+provider = OpenRouterProvider()
+provider.initialize(ProviderConfig())
+
+# List all models (no auth required)
+models = provider.list_models()
+print(len(models))  # 300+
+
+# Filter by vendor
+claude_models = provider.list_models(prefix="anthropic/")
+
+# Connect and check context limit (auto-detected)
+provider.connect("anthropic/claude-sonnet-4-5")
+print(provider.get_context_limit())  # e.g. 200000</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+
+          <table>
+            <thead>
+              <tr><th>Exception</th><th>Cause</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>APIKeyNotFoundError</code></td>
+                <td>No API key in env or stored credentials</td>
+              </tr>
+              <tr>
+                <td><code>AuthenticationError</code></td>
+                <td>API key rejected (401/403)</td>
+              </tr>
+              <tr>
+                <td><code>RateLimitError</code></td>
+                <td>Rate limit or credits exhausted (429)</td>
+              </tr>
+              <tr>
+                <td><code>ModelNotFoundError</code></td>
+                <td>Model not in OpenRouter catalog</td>
+              </tr>
+              <tr>
+                <td><code>ContextLimitError</code></td>
+                <td>Prompt exceeds the model's context window</td>
+              </tr>
+              <tr>
+                <td><code>InfrastructureError</code></td>
+                <td>Upstream server error (5xx) or connection failure</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handle errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.openrouter.errors import (
+    APIKeyNotFoundError,
+    AuthenticationError,
+    RateLimitError,
+    ContextLimitError,
+)
+
+try:
+    provider.initialize(config)
+    provider.connect("anthropic/claude-sonnet-4-5")
+    result = provider.complete(messages, tools=tools)
+except APIKeyNotFoundError:
+    print("Set JAATO_OPENROUTER_API_KEY or run: openrouter-auth key <key>")
+except AuthenticationError:
+    print("Invalid API key")
+except RateLimitError as e:
+    if e.retry_after:
+        print(f"Rate limited; retry in {e.retry_after}s")
+except ContextLimitError:
+    print("Prompt too long for this model")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
