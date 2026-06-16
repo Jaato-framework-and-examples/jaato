@@ -194,6 +194,10 @@
           <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
           <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../api-reference/providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../api-reference/providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../api-reference/providers/vllm.html">vLLM</a></li>
+          <li><a href="../api-reference/providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../api-reference/providers/openrouter.html">OpenRouter</a></li>
         </ul>
       </div>
     </aside>
@@ -247,12 +251,38 @@
           Instructions shape the model's understanding, behavior, and decision-making. They define <em>what the model knows</em>.
         </p>
         <ul>
-          <li><strong>Base system instructions</strong> &mdash; Behavioral rules from <code>.jaato/system_instructions.md</code></li>
+          <li>
+            <strong>Base instructions</strong> (LOCKED &mdash; never GC'd) &mdash; Project-wide behavioral rules
+            loaded from the <strong><code>.jaato/instructions/</code> folder hierarchy</strong> (primary source).
+            The folder is searched across three tiers in precedence order:
+            premium baseline &rarr; workspace (<code>&lt;config_root&gt;/instructions/</code> or
+            <code>&lt;workspace&gt;/.jaato/instructions/</code>) &rarr; user (<code>~/.jaato/instructions/</code>).
+            All <code>*.md</code> files in the resolved folder are sorted by filename and concatenated;
+            <code>README.md</code> (matched exactly, case-insensitive) is skipped.
+            The legacy single file <code>.jaato/system_instructions.md</code> is a
+            <strong>fallback only</strong>, consulted when no folder exists in any tier.
+            See <a href="instruction-sources.html#base-instructions-hierarchy">Instruction Sources</a>
+            for the full resolution rules.
+          </li>
           <li><strong>Session-specific instructions</strong> &mdash; Programmatic customization per task</li>
           <li><strong>Plugin instructions</strong> &mdash; Tool usage guides contributed by each plugin</li>
           <li><strong>Framework constants</strong> &mdash; Task completion guidance, parallel tool hints</li>
           <li><strong>Prompt enrichment</strong> &mdash; Dynamic injection of references, templates, and memory</li>
         </ul>
+        <p>
+          A profile can suppress the base layer entirely with
+          <code>suppress_base_instructions: true</code> (useful for narrow, token-constrained agents).
+          Inheritance uses OR semantics &mdash; once any ancestor sets this flag it stays set;
+          a child profile cannot silently re-enable a parent's suppression.
+          See <a href="instruction-sources.html#suppress-base-instructions">Suppressing or Overriding Base Instructions</a>.
+        </p>
+        <p>
+          <strong>Note:</strong> the profile field <code>system_instructions</code> is
+          <strong>deprecated</strong> and emits a warning at runtime.
+          Agent role and identity instructions belong in a persona file under
+          <code>.jaato/agents/&lt;name&gt;.md</code>, not in the profile.
+          See <a href="instruction-sources.html#personas-and-system-instructions">Agent Identity: Personas</a>.
+        </p>
 
         <h3>Layer 2: Tools (The Hands)</h3>
         <p>
@@ -363,7 +393,7 @@
         </p>
         <ul>
           <li><code>JAATO_DEFERRED_TOOLS=true</code> (default) &mdash; saves ~7,000 tokens by loading tool schemas on demand</li>
-          <li>Minimal base instructions &mdash; saves ~300 tokens</li>
+          <li><code>suppress_base_instructions: true</code> in the profile &mdash; drops the base instruction layer (~3&ndash;5&nbsp;k tokens/turn saved); useful for narrow, goal-focused agents that don't benefit from general-purpose guidance</li>
           <li>Fewer plugins &mdash; saves ~200-800 per plugin</li>
           <li>GC (garbage collection) &mdash; reclaims conversation tokens when context is full</li>
         </ul>

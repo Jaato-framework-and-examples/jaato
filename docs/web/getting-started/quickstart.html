@@ -77,6 +77,10 @@
           <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
           <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../api-reference/providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../api-reference/providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../api-reference/providers/vllm.html">vLLM</a></li>
+          <li><a href="../api-reference/providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../api-reference/providers/openrouter.html">OpenRouter</a></li>
         </ul>
       </div>
     </aside>
@@ -202,7 +206,8 @@ MODEL_NAME=gemini-2.5-flash</code></pre>
           <div class="code-label" style="margin-top: 24px;">.env (Ollama - local)</div>
           <div class="code-block">
             <pre><code class="language-bash">JAATO_PROVIDER=ollama
-OLLAMA_MODEL=qwen3:32b</code></pre>
+MODEL_NAME=qwen3:32b
+# Requires: ollama serve &amp;&amp; ollama pull qwen3:32b</code></pre>
           </div>
         </div>
       </section>
@@ -261,7 +266,7 @@ print(response)  # "4"</code></pre>
           <ol>
             <li>Create a <code>PluginRegistry</code> with the model name</li>
             <li>Call <code>discover()</code> to find available plugins</li>
-            <li>Use <code>expose_tool()</code> to enable specific plugins</li>
+            <li>Use <code>expose_tool()</code> to enable specific plugins — it takes a <strong>plugin name</strong> (e.g. <code>"cli"</code>, <code>"web_search"</code>), not an individual tool name</li>
             <li>Call <code>configure_tools()</code> on the client</li>
             <li>Use <code>send_message()</code> with an output callback</li>
           </ol>

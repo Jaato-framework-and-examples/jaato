@@ -70,6 +70,10 @@
           <li><a href="../providers/ollama.html">Ollama</a></li>
           <li><a href="../providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../providers/vllm.html">vLLM</a></li>
+          <li><a href="../providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../providers/openrouter.html">OpenRouter</a></li>
         </ul>
       </div>
 
@@ -115,7 +119,7 @@
               </tr>
               <tr>
                 <td><strong>Tools Provided</strong></td>
-                <td><code>askPermission</code></td>
+                <td>None — <code>get_tool_schemas()</code> returns <code>[]</code></td>
               </tr>
               <tr>
                 <td><strong>User Commands</strong></td>
@@ -127,6 +131,17 @@
               </tr>
             </tbody>
           </table>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">askPermission is intentionally NOT exposed to the model</div>
+            <code>get_tool_schemas()</code> returns an empty list. The <code>askPermission</code>
+            executor exists only for internal daemon-runner forwarding. The model calls target tools
+            directly; the permission middleware (set via
+            <code>executor.set_permission_plugin()</code>) intercepts each call and prompts for
+            approval when needed. Exposing <code>askPermission</code> to the model causes the model
+            to call <code>askPermission</code> instead of the actual tool, creating a redundant
+            permission flow (source: docstring at <code>plugin.py</code> ~line 594).
+          </div>
 
           <h2 id="roles">Two Distinct Roles</h2>
           <p>
@@ -140,8 +155,8 @@
               Enabled via <code>configure_tools(permission_plugin=...)</code>
             </li>
             <li>
-              <strong>Proactive Check Tool</strong><br>
-              Exposes <code>askPermission</code> for the model to query permissions.
+              <strong>Session Management Commands</strong><br>
+              Exposes <code>permissions</code> user command for on-the-fly policy changes.
               Enabled via <code>expose_tool("permission")</code>
             </li>
           </ol>
@@ -452,16 +467,31 @@ Summary: Update file: src/main.py (+5/-2 lines)
         </div>
       </section>
 
-      <!-- askPermission Tool -->
+      <!-- askPermission executor (internal) -->
       <section class="two-panel">
         <div class="panel-explanation">
-          <h2 id="ask-permission">askPermission Tool</h2>
+          <h2 id="ask-permission">askPermission executor (internal)</h2>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Not a model-visible tool</div>
+            <code>askPermission</code> is an internal executor registered in
+            <code>get_executors()</code> for daemon-runner forwarding only.
+            It is <strong>not</strong> returned by <code>get_tool_schemas()</code> and
+            is <strong>never</strong> exposed to the model.
+            The correct flow is: model calls target tool → permission middleware
+            intercepts → prompts user if needed.
+          </div>
+
+          <h3>How Permission Enforcement Works</h3>
           <p>
-            Allows the model to proactively check if a tool is allowed before
-            attempting execution.
+            When the model calls any tool, the <code>ToolExecutor</code> invokes
+            <code>check_permission(tool_name, args)</code> before executing the tool body.
+            The permission plugin evaluates the call against the active policy
+            (whitelist, blacklist, default, evaluators) and either allows, denies,
+            or prompts the user via the configured channel.
           </p>
 
-          <h3>Parameters</h3>
+          <h3>askPermission executor parameters (internal reference)</h3>
           <table>
             <thead>
               <tr><th>Name</th><th>Type</th><th>Required</th></tr>
@@ -472,44 +502,22 @@ Summary: Update file: src/main.py (+5/-2 lines)
               <tr><td><code>arguments</code></td><td><code>object</code></td><td>No</td></tr>
             </tbody>
           </table>
-
-          <h3>Response</h3>
-          <table>
-            <thead>
-              <tr><th>Field</th><th>Type</th><th>Description</th></tr>
-            </thead>
-            <tbody>
-              <tr><td><code>allowed</code></td><td><code>bool</code></td><td>Whether tool is permitted</td></tr>
-              <tr><td><code>reason</code></td><td><code>string</code></td><td>Explanation of decision</td></tr>
-              <tr><td><code>rule_matched</code></td><td><code>string</code></td><td>Which rule applied</td></tr>
-            </tbody>
-          </table>
         </div>
         <div class="panel-code">
-          <div class="code-label">Model using askPermission</div>
+          <div class="code-label">Correct enforcement flow (no explicit askPermission call)</div>
           <div class="code-block">
-            <pre><code class="language-python"># Model checks before executing
-askPermission(
-    tool_name="cli_based_tool",
-    intent="Delete temporary files to free disk space",
-    arguments={"command": "rm -rf /tmp/cache/*"}
-)
+            <pre><code class="language-python"># The model calls tools directly — permission intercepts automatically
+# Model: "I'll run: cli_based_tool(command='ls -la /etc')"
 
-# Response
-{
-  "allowed": false,
-  "reason": "Tool matches blacklist pattern",
-  "rule_matched": "rm*"
-}</code></pre>
-          </div>
+# Framework intercepts before execution:
+# 1. check_permission("cli_based_tool", {"command": "ls -la /etc"})
+# 2. Policy: default=ask, no rule match → prompts user
+# 3. User responds [y]es → tool executes
+# 4. User responds [n]o → tool denied, error returned
 
-          <div class="code-label" style="margin-top: 24px;">Allowed response</div>
-          <div class="code-block">
-            <pre><code class="language-json">{
-  "allowed": true,
-  "reason": "Tool is whitelisted",
-  "rule_matched": "readFile"
-}</code></pre>
+# Do NOT expose the plugin for askPermission:
+registry.expose_tool('permission')  # OK: adds 'permissions' user command only
+                                    # askPermission is still not in model schemas</code></pre>
           </div>
         </div>
       </section>
