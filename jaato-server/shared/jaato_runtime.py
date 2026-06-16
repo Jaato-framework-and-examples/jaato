@@ -340,21 +340,29 @@ class JaatoRuntime:
         return self._base_system_instructions
 
     def _load_base_system_instructions(self) -> None:
-        """Load base system instructions from .jaato/instructions/ folder.
+        """Load base system instructions from .jaato/instructions/ folders.
 
-        Searches for instruction files in two locations (first match wins):
-        1. Workspace tier — ``<config_root>/instructions/`` when
+        Three tiers, loaded in order and concatenated:
+        1. Premium tier — the ``jaato.premium`` ``instructions`` content
+           path, when a premium package is installed.  Loaded FIRST and
+           always additive (the baseline behavioral layer).
+        2. Workspace tier — ``<config_root>/instructions/`` when
            ``config_root`` is set, else
            ``<workspace_path>/.jaato/instructions/``.
-        2. User tier — ``~/.jaato/instructions/``.
+        3. User tier — ``~/.jaato/instructions/``.
 
-        All ``*.md`` files found in the instructions folder are sorted by
+        The workspace and user tiers are searched first-match-wins (the
+        workspace tier is preferred); the premium tier is independent of
+        that choice and is always prepended on top.
+
+        Within each loaded folder, all ``*.md`` files are sorted by
         filename (so numeric prefixes like ``00-``, ``10-``, ``15-`` control
-        ordering) and concatenated with double-newline separators.
+        ordering) and concatenated with double-newline separators
+        (``README.md`` is skipped — see ``_load_instruction_files``).
 
         Falls back to the legacy single-file path
-        ``.jaato/system_instructions.md`` if no instructions folder exists
-        in either location.
+        ``.jaato/system_instructions.md`` only when no tier
+        (premium/workspace/user) yielded any content.
 
         The combined contents are prepended to all agent system instructions,
         ensuring consistent behavior across main agent and all subagents.
