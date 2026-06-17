@@ -494,6 +494,13 @@ class JaatoServer:
         # Background model thread
         self._model_thread: Optional[threading.Thread] = None
         self._model_running: bool = False
+        # How the most recent turn terminated: "error" when a terminal error
+        # (provider exhaustion / NudgeExhausted) ended the turn, else None
+        # (natural).  Reset per-turn at model-thread start; read at the
+        # SlotSettledEvent emit so a cascade stage-advance reactor can SKIP
+        # advancement on an error-terminated session (the recovery path
+        # re-spawns it).  See docs/design/agent-error-recovery-event.md.
+        self._terminal_reason: Optional[str] = None
         # Continuation text stashed by continuation_callback when called from
         # _drain_child_messages() while _model_running is still True.  Processed
         # in the model_thread finally block after _model_running is cleared.
@@ -4480,6 +4487,10 @@ class JaatoServer:
             # retried by COMPLETION_NUDGE.  See PR fixing "Fix #2e:
             # COMPLETION_NUDGE fires on provider exceptions".
             terminal_error: Optional[Exception] = None
+            # Per-turn clean slate — only an error-terminated turn flips this to
+            # "error" (read at the SlotSettledEvent emit).  Reset here so warm
+            # slot reuse can't leak a prior session's terminal reason.
+            server._terminal_reason = None
             try:
                 # Run in workspace context so file operations use client's CWD
                 # Also apply session env so provider/tools can access session-specific config
@@ -4577,6 +4588,10 @@ class JaatoServer:
                 # waiting for AGENT_COMPLETED that will never arrive.
                 if terminal_error is not None:
                     from jaato_sdk.events import SessionTerminatedEvent
+                    # Mark the session error-terminated so the later
+                    # SlotSettledEvent carries terminal_reason="error" — lets a
+                    # stage-advance reactor skip advancement (recovery re-spawns).
+                    server._terminal_reason = "error"
                     # Recovery contract: emit AgentErrorEvent FIRST (this point is
                     # post-with_retry-exhaustion by construction — terminal_error
                     # escaped with_retry above), giving a reactor first refusal to
@@ -4778,6 +4793,10 @@ class JaatoServer:
                         error=nudge_exhaust_summary,
                         error_type="NudgeExhausted",
                     ))
+                    # Mark error-terminated so SlotSettledEvent carries
+                    # terminal_reason="error" (stage-advance reactor skips;
+                    # recovery re-spawns).
+                    server._terminal_reason = "error"
                     # Recovery contract: AgentErrorEvent first (nudge exhaustion
                     # is the framework's automatic-management giving up), so a
                     # reactor can recover the stage before teardown.  See
@@ -5613,6 +5632,10 @@ class JaatoServer:
                         if (pool_slot is not None and cascade_returned)
                         else 0
                     ),
+                    # Discriminator for the slot.settled-vs-recovery collision:
+                    # an error-terminated session's stage is re-spawned by the
+                    # recovery reactor, so the stage-advance reactor must SKIP it.
+                    terminal_reason=getattr(self, "_terminal_reason", None),
                 ))
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

@@ -75,6 +75,58 @@ def test_slot_settled_cold_path_still_carries_correlation():
     assert p["was_warm"] is False
 
 
+def test_slot_settled_carries_terminal_reason():
+    """terminal_reason rides the event + bus payload, defaulting to None
+    (natural completion).  It's the discriminator the stage-advance reactor
+    uses to SKIP advancement on an error-terminated session (recovery re-spawns
+    it) — race-free, straight from the event (not an is_handled guard, which
+    can't tell success-handled from error-handled)."""
+    from jaato_sdk.events import SlotSettledEvent
+    from server.core import _server_event_to_bus_event
+
+    # natural completion → None
+    natural = _server_event_to_bus_event(SlotSettledEvent(
+        session_id="s-ok", agent_id="codegen", cascade_driver_id="c",
+        was_warm=True, pool_slot_pid=1,
+    ))
+    assert natural.payload["terminal_reason"] is None
+
+    # error-terminated → "error"
+    errored = _server_event_to_bus_event(SlotSettledEvent(
+        session_id="s-err", agent_id="build_descriptor", cascade_driver_id="c",
+        was_warm=False, pool_slot_pid=0, terminal_reason="error",
+    ))
+    assert errored.payload["terminal_reason"] == "error"
+
+
+def test_terminal_reason_drives_stage_advance_skip_predicate():
+    """The kb's stage-advance reactor gates on terminal_reason: a where-clause
+    like ``terminal_reason != 'error'`` advances normal stages but SKIPS the
+    error-terminated one (which the recovery reactor re-spawns) — fixing the
+    two-tails collision deterministically."""
+    from jaato_sdk.events import SlotSettledEvent
+    from server.core import _server_event_to_bus_event
+
+    try:
+        from jaato_premium.reactors.matcher import build_merged_view, matches_where
+    except ImportError:
+        import pytest
+        pytest.skip("jaato_premium not installed; skipping end-to-end")
+
+    ok = build_merged_view(_server_event_to_bus_event(SlotSettledEvent(
+        session_id="s1", agent_id="codegen", cascade_driver_id="c", was_warm=True,
+    )))
+    err = build_merged_view(_server_event_to_bus_event(SlotSettledEvent(
+        session_id="s2", agent_id="codegen", cascade_driver_id="c",
+        was_warm=False, terminal_reason="error",
+    )))
+    # Normal advance fires on the natural session, skips the error one.
+    assert matches_where("terminal_reason != 'error'", ok) is True
+    assert matches_where("terminal_reason != 'error'", err) is False
+    # And the recovery side can target just the error one.
+    assert matches_where("terminal_reason == 'error'", err) is True
+
+
 def test_slot_settled_bus_event_satisfies_cascade_correlation():
     """End-to-end: the BusEvent satisfies a reactor where-clause correlating
     on cascade_driver_id (the gating predicate a cascade reactor uses)."""

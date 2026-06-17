@@ -550,6 +550,15 @@ class SlotSettledEvent(Event):
                                               # spawn reuses it); False = cold/
                                               # torn-down (next spawn is cold)
     pool_slot_pid: int = 0                     # the warm slot's PID (0 if cold)
+    terminal_reason: Optional[str] = None     # how the settled session ended:
+                                              # mirrors SessionTerminatedEvent.reason
+                                              # ("error"/"stopped"/"cascade_cancelled"),
+                                              # or None for natural completion.  Lets
+                                              # a stage-advance reactor SKIP advancement
+                                              # on an error-terminated session (the
+                                              # recovery path re-spawns it instead) —
+                                              # race-free, straight from the event.
+                                              # See docs/design/agent-error-recovery-event.md.
 
 
 class SessionRestoredEvent(Event):

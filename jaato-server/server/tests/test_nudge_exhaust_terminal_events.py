@@ -172,7 +172,7 @@ def test_core_py_provider_error_path_carries_error_context():
         f"provider-error path refactored?  Update this test."
     )
     marker_idx = src.index(marker)
-    window = src[marker_idx:marker_idx + 1500]
+    window = src[marker_idx:marker_idx + 2000]
     # The emit must reference the Exception variable for both fields.
     assert "error_summary=str(terminal_error)" in window, (
         "core.py provider-error path must populate "
