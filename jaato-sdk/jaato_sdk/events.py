@@ -71,6 +71,13 @@ class EventType(str, Enum):
     AGENT_OUTPUT = "agent.output"
     AGENT_STATUS_CHANGED = "agent.status_changed"
     AGENT_COMPLETED = "agent.completed"
+    # Recoverable terminal error: emitted when an agent hits a terminal error
+    # AFTER the framework's automatic management (with_retry / nudge) is
+    # exhausted or never applied.  Gives a reactor first refusal to recover the
+    # stage (re-spawn / reroute / escalate) before the session's teardown
+    # SessionTerminatedEvent(reason="error") lands.  See
+    # docs/design/agent-error-recovery-event.md.
+    AGENT_ERROR = "agent.error"
 
     # Session lifecycle (Server -> Client)
     # Fires when the session has fully wound down — emitted spontaneously
@@ -401,6 +408,62 @@ class AgentCompletedEvent(Event):
     turns_used: Optional[int] = None
     error: str = ""  # Cancellation reason or error message
     payload: Optional[Dict[str, Any]] = None  # Validated typed payload from signal_completion
+
+
+class AgentErrorEvent(Event):
+    """An agent hit a terminal error that the framework could not self-resolve.
+
+    This is the **recovery contract**: it fires when the framework's automatic
+    management (``with_retry`` for retryable provider errors, the completion
+    nudge loop) is **exhausted** or never applied — i.e. the framework is out of
+    moves. It gives a reactor *first refusal* to recover the failed stage
+    (re-spawn, reroute to another model/provider, escalate) via the existing
+    ``create_session`` path, BEFORE the session's terminal
+    ``SessionTerminatedEvent(reason="error")`` lands.
+
+    Emit order on the wire is **always** ``AgentErrorEvent`` first, then
+    ``SessionTerminatedEvent(reason="error")``. A reactor that recovers should
+    mark the ``session_id`` handled so the (back-compat) terminated handler
+    no-ops; a cascade with no ``AGENT_ERROR`` handler ignores this event and the
+    terminated event drives the legacy abort — fully back-compatible.
+
+    Recovery is **decoupled from transience**: a non-transient error is still
+    stage-recoverable (reroute/escalate). The framework offers the recovery
+    *point*; the reactor's policy decides what to do.
+
+    Fields:
+        agent_id: The failed agent / cascade stage.
+        session_id: The failed session (dedupe / handled-marking key).
+        error_type: Exception class name (``"APIError"``, ``"RunnerCallError"``,
+            ``"NudgeExhausted"``, ...). Same value carried on the subsequent
+            ``SessionTerminatedEvent.error_type``.
+        error_summary: Human-readable cause.
+        request_id: Provider request id (e.g. OpenAI ``req_…``) when the
+            underlying exception carries one; ``None`` otherwise. For
+            observability / support correlation.
+        attempt: The **reactor-level** re-spawn count for this logical stage,
+            echoed verbatim from the spawn's ``agent_params["attempt"]`` (a
+            string on the wire). This is NOT ``with_retry``'s internal
+            per-request attempt count (which is never surfaced). ``"0"`` /
+            absent on the first spawn. The reactor owns the cap.
+        classification: Optional COARSE shape hint — ``"transient_provider"`` /
+            ``"fatal_contract"`` / ``"unknown"``. **Advisory only**: it never
+            gates whether this event fires. ``None`` when unclassified.
+        framework_retries_exhausted: Optional informational count of automatic
+            retries the framework already burned before giving up. ``None`` when
+            not applicable.
+        occurred_at: Emit timestamp (epoch seconds).
+    """
+    type: EventType = Field(default=EventType.AGENT_ERROR)
+    agent_id: str = ""
+    session_id: str = ""
+    error_type: str = ""
+    error_summary: str = ""
+    request_id: Optional[str] = None
+    attempt: str = "0"  # reactor-level re-spawn count, echoed from agent_params (wire is str)
+    classification: Optional[str] = None  # coarse hint, non-gating
+    framework_retries_exhausted: Optional[int] = None
+    occurred_at: Optional[float] = None
 
 
 class SessionTerminatedEvent(Event):
@@ -2303,6 +2366,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_OUTPUT.value: AgentOutputEvent,
     EventType.AGENT_STATUS_CHANGED.value: AgentStatusChangedEvent,
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
+    EventType.AGENT_ERROR.value: AgentErrorEvent,
     EventType.SESSION_TERMINATED.value: SessionTerminatedEvent,
     EventType.SLOT_SETTLED.value: SlotSettledEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,

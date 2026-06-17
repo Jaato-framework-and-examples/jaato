@@ -74,6 +74,7 @@ from jaato_sdk.events import (
     AgentOutputEvent,
     AgentStatusChangedEvent,
     AgentCompletedEvent,
+    AgentErrorEvent,
     ToolCallStartEvent,
     ToolCallEndEvent,
     ToolOutputEvent,
@@ -129,6 +130,7 @@ _SERVER_TO_BUS: Dict[EventType, BusEventType] = {
     EventType.AGENT_OUTPUT: BusEventType.AGENT_OUTPUT,
     EventType.AGENT_STATUS_CHANGED: BusEventType.AGENT_STATUS_CHANGED,
     EventType.AGENT_COMPLETED: BusEventType.AGENT_COMPLETED,
+    EventType.AGENT_ERROR: BusEventType.AGENT_ERROR,
     EventType.TOOL_CALL_START: BusEventType.TOOL_CALL_STARTED,
     EventType.TOOL_CALL_END: BusEventType.TOOL_CALL_COMPLETED,
     EventType.TOOL_OUTPUT: BusEventType.TOOL_OUTPUT,
@@ -174,6 +176,36 @@ def _server_event_to_bus_event(server_event: Event) -> Optional[BusEvent]:
         source_agent=payload.get("agent_id", "server"),
         payload=payload,
     )
+
+
+def _extract_provider_request_id(exc: Optional[BaseException]) -> Optional[str]:
+    """Best-effort provider request-id extraction for ``AgentErrorEvent``.
+
+    Provider SDK exceptions expose the upstream request id under various
+    attributes (OpenAI/OpenRouter: ``request_id``; some wrappers stash it on
+    ``response.headers["x-request-id"]``).  Returns the first non-empty value
+    found, else ``None``.  Walks the ``__cause__`` chain once because the
+    framework often re-raises a jaato-typed error wrapping the provider's.
+    Purely informational — never raises.
+    """
+    seen = 0
+    cur: Optional[BaseException] = exc
+    while cur is not None and seen < 4:
+        rid = getattr(cur, "request_id", None)
+        if isinstance(rid, str) and rid:
+            return rid
+        resp = getattr(cur, "response", None)
+        headers = getattr(resp, "headers", None)
+        if headers is not None:
+            try:
+                hid = headers.get("x-request-id") or headers.get("X-Request-Id")
+            except Exception:
+                hid = None
+            if isinstance(hid, str) and hid:
+                return hid
+        cur = getattr(cur, "__cause__", None)
+        seen += 1
+    return None
 
 
 class AgentState:
@@ -2927,6 +2959,32 @@ class JaatoServer:
                     payload=payload,
                 ))
 
+            def on_agent_error(self, agent_id, error_type, error_summary, *,
+                               session_id, request_id=None, attempt="0",
+                               classification=None,
+                               framework_retries_exhausted=None,
+                               occurred_at=None):
+                """Emit AgentErrorEvent — the recovery contract.
+
+                Fires from the terminal-error sites AFTER the framework's
+                automatic management is exhausted, BEFORE the teardown
+                SessionTerminatedEvent.  See
+                docs/design/agent-error-recovery-event.md.
+                """
+                if agent_id in server._agents:
+                    server._agents[agent_id].status = "error"
+                server.emit(AgentErrorEvent(
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    error_type=error_type,
+                    error_summary=error_summary,
+                    request_id=request_id,
+                    attempt=attempt,
+                    classification=classification,
+                    framework_retries_exhausted=framework_retries_exhausted,
+                    occurred_at=occurred_at,
+                ))
+
             def on_session_quiescent(self, agent_id, reason="natural"):
                 """Emit SessionTerminatedEvent after natural completion.
 
@@ -3300,6 +3358,100 @@ class JaatoServer:
         require runner activity pre-initialize) drops cleanly.
         """
         return getattr(self, "_agent_hooks", None)
+
+    def _read_spawn_attempt(self) -> str:
+        """Read the reactor-level ``attempt`` from the session's spawn params.
+
+        The kb passes ``agent_params={"attempt": "<n>"}`` at ``create_session``
+        (echoed verbatim onto ``AgentErrorEvent.attempt``).  The envelope types
+        agent_params as ``Dict[str, str]``; we return the string as-is, falling
+        back to ``"0"`` when absent / unreadable.  Never raises.
+
+        This is the REACTOR-level re-spawn count — NOT ``with_retry``'s internal
+        per-request attempts (which are framework-only and never surfaced).
+        See docs/design/agent-error-recovery-event.md.
+        """
+        try:
+            jaato = getattr(self, "_jaato", None)
+            session = jaato.get_session() if jaato is not None else None
+            params = getattr(session, "_agent_params", None) or {}
+            val = params.get("attempt")
+            if isinstance(val, str) and val:
+                return val
+            if val is not None:
+                return str(val)
+        except Exception:
+            pass
+        return "0"
+
+    def _emit_agent_error(
+        self,
+        *,
+        error_type: str,
+        error_summary: str,
+        request_id: Optional[str] = None,
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """Emit ``AgentErrorEvent`` for a terminal error, BEFORE teardown.
+
+        The recovery contract (docs/design/agent-error-recovery-event.md):
+        called at the terminal-error sites — model-thread terminal, nudge
+        exhaustion, bootstrap failure — each of which is, by construction, a
+        point where the framework's automatic management (``with_retry`` /
+        nudge) is exhausted or never applied.  Routes through the daemon-side
+        ``ServerAgentHooks.on_agent_error`` so the event reaches the bus +
+        clients.  No-ops (logs) if hooks aren't wired yet.  Never raises into
+        the caller's teardown path.
+
+        ``session_id`` / ``agent_id`` default to the server's own state but may
+        be overridden (bootstrap-failure path, where the server's session state
+        isn't fully wired yet — the caller knows the ids).
+        """
+        try:
+            hooks = self._get_ui_hooks()
+            if hooks is None:
+                return
+            import time as _time
+            sid = session_id if session_id is not None else (getattr(self, "session_id", None) or "")
+            aid = agent_id if agent_id is not None else (getattr(self, "_main_agent_id", None) or "main")
+            hooks.on_agent_error(
+                agent_id=aid,
+                error_type=error_type,
+                error_summary=error_summary,
+                session_id=sid,
+                request_id=request_id,
+                attempt=self._read_spawn_attempt(),
+                classification=classification,
+                framework_retries_exhausted=framework_retries_exhausted,
+                occurred_at=_time.time(),
+            )
+        except Exception:
+            logger.warning("Failed to emit AgentErrorEvent", exc_info=True)
+
+    def _emit_agent_error_from_exc(
+        self,
+        exc: BaseException,
+        *,
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """Convenience wrapper: emit ``AgentErrorEvent`` from a caught
+        exception, deriving ``error_type`` / ``error_summary`` / ``request_id``.
+        """
+        self._emit_agent_error(
+            error_type=type(exc).__name__,
+            error_summary=str(exc),
+            request_id=_extract_provider_request_id(exc),
+            classification=classification,
+            framework_retries_exhausted=framework_retries_exhausted,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
 
     def _setup_permission_hooks(self) -> None:
         """Set up permission lifecycle hooks."""
@@ -4425,6 +4577,12 @@ class JaatoServer:
                 # waiting for AGENT_COMPLETED that will never arrive.
                 if terminal_error is not None:
                     from jaato_sdk.events import SessionTerminatedEvent
+                    # Recovery contract: emit AgentErrorEvent FIRST (this point is
+                    # post-with_retry-exhaustion by construction — terminal_error
+                    # escaped with_retry above), giving a reactor first refusal to
+                    # recover the stage before the terminal teardown signal.  See
+                    # docs/design/agent-error-recovery-event.md.
+                    server._emit_agent_error_from_exc(terminal_error)
                     # Server 0.6.159+: carry the terminal error onto the
                     # SessionTerminatedEvent so cascade observers can
                     # surface the failure cause without grepping the
@@ -4620,6 +4778,14 @@ class JaatoServer:
                         error=nudge_exhaust_summary,
                         error_type="NudgeExhausted",
                     ))
+                    # Recovery contract: AgentErrorEvent first (nudge exhaustion
+                    # is the framework's automatic-management giving up), so a
+                    # reactor can recover the stage before teardown.  See
+                    # docs/design/agent-error-recovery-event.md.
+                    server._emit_agent_error(
+                        error_type="NudgeExhausted",
+                        error_summary=nudge_exhaust_summary,
+                    )
                     # Server 0.6.159+: same error context flows to the
                     # cascade observer via SessionTerminatedEvent so
                     # nudge-exhaust is distinguishable from a provider

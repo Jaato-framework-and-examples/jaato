@@ -50,6 +50,7 @@ class EventType(Enum):
     AGENT_CREATED = "agent.created"
     AGENT_STATUS_CHANGED = "agent.status_changed"
     AGENT_COMPLETED = "agent.completed"
+    AGENT_ERROR = "agent.error"            # Recoverable terminal error (post Layer-1 exhaustion)
     AGENT_OUTPUT = "agent.output"          # Model text, system text, plugin text
 
     # Session lifecycle events (bridged from server events)
