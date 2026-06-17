@@ -756,35 +756,25 @@ def _emit_bootstrap_terminated(
     flow through ``_emit_to_session`` → ``_dispatch_to_cascade_clients``
     and reach cascade observers + reactor rules.
 
-    Reuses PR-186 ``error_summary`` / ``error_type`` fields on
-    SessionTerminatedEvent.  ``agent_id`` is read defensively from
-    ``server._main_agent_id`` (set during ``server.initialize``); falls
-    back to ``"main"`` so the field is always populated for
-    downstream consumers.
+    Routes through the single error-termination chokepoint
+    ``JaatoServer._emit_error_termination_from_exc`` — which emits
+    ``AgentErrorEvent`` (recovery first refusal; bootstrap has no auto-retry to
+    wait on, the framework is out of moves immediately) THEN
+    ``SessionTerminatedEvent(reason="error")`` (carrying ``error_summary`` /
+    ``error_type``) — so the "AgentErrorEvent precedes every reason=error"
+    invariant is structural here too.  ``agent_id`` falls back to ``"main"`` when
+    ``server._main_agent_id`` isn't set (early bootstrap fail).
 
-    The emit itself is wrapped in a defensive try/except: a failure
-    of the visibility path must not mask the underlying bootstrap
-    failure or disrupt the session-creation caller's error handling.
-    Logs the failure to keep the audit trail intact.
+    The call is wrapped in a defensive try/except: a failure of the visibility
+    path must not mask the underlying bootstrap failure or disrupt the
+    session-creation caller's error handling.  Logs the failure to keep the
+    audit trail intact.
     """
     try:
-        from jaato_sdk.events import SessionTerminatedEvent
         agent_id = getattr(server, "_main_agent_id", None) or "main"
-        # Recovery contract: AgentErrorEvent first (bootstrap failure has no
-        # auto-retry to wait on — the framework is out of moves), so a reactor
-        # gets first refusal before the teardown signal.  Best-effort: bootstrap
-        # failures are usually non-retryable, but the kb policy decides.  See
-        # docs/design/agent-error-recovery-event.md.
-        emit_agent_error = getattr(server, "_emit_agent_error_from_exc", None)
-        if callable(emit_agent_error):
-            emit_agent_error(exc, session_id=session_id, agent_id=agent_id)
-        server.emit(SessionTerminatedEvent(
-            session_id=session_id,
-            agent_id=agent_id,
-            reason="error",
-            error_summary=str(exc),
-            error_type=type(exc).__name__,
-        ))
+        server._emit_error_termination_from_exc(
+            exc, session_id=session_id, agent_id=agent_id,
+        )
     except Exception as emit_exc:  # noqa: BLE001 — defensive
         logger.warning(
             "_emit_bootstrap_terminated: SessionTerminatedEvent emit "

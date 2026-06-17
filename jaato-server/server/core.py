@@ -3460,6 +3460,82 @@ class JaatoServer:
             agent_id=agent_id,
         )
 
+    def _emit_error_termination(
+        self,
+        *,
+        error_type: str,
+        error_summary: str,
+        request_id: Optional[str] = None,
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """THE single chokepoint for an error-terminated session.
+
+        Emits, in order: (1) ``AgentErrorEvent`` — the recovery first-refusal,
+        and (2) ``SessionTerminatedEvent(reason="error")`` — the teardown
+        signal; and stamps ``_terminal_reason="error"`` so the later
+        ``SlotSettledEvent`` carries it.
+
+        This makes the invariant **structural, not conventional**: "an
+        ``AgentErrorEvent`` precedes EVERY ``SessionTerminatedEvent(reason=
+        "error")``" holds because no error-termination path constructs the
+        terminal event directly — they all route here, so the recovery offer
+        can never be skipped.  Downstream that lets a cascade safely retire the
+        redundant ``on session.terminated reason=error`` abort reactor (which
+        otherwise races the recovery reactor's ``mark_handled``).  A guard test
+        (``test_error_termination_single_chokepoint``) fails the build if any
+        ``reason="error"`` terminal emit appears outside this method.  See
+        docs/design/agent-error-recovery-event.md.
+        """
+        from jaato_sdk.events import SessionTerminatedEvent
+        sid = session_id if session_id is not None else (getattr(self, "session_id", None) or "")
+        aid = agent_id if agent_id is not None else (getattr(self, "_main_agent_id", None) or "main")
+        # Stamp before teardown so SlotSettledEvent (emitted in shutdown) carries
+        # terminal_reason="error" → stage-advance reactor skips, recovery re-spawns.
+        self._terminal_reason = "error"
+        # 1. Recovery first refusal (fires only after Layer-1 exhaustion).
+        self._emit_agent_error(
+            error_type=error_type,
+            error_summary=error_summary,
+            request_id=request_id,
+            classification=classification,
+            framework_retries_exhausted=framework_retries_exhausted,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+        # 2. Terminal teardown signal (back-compat; carries the cause).
+        self.emit(SessionTerminatedEvent(
+            session_id=sid,
+            agent_id=aid,
+            reason="error",
+            error_summary=error_summary,
+            error_type=error_type,
+        ))
+
+    def _emit_error_termination_from_exc(
+        self,
+        exc: BaseException,
+        *,
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """Convenience wrapper: :meth:`_emit_error_termination` from a caught
+        exception, deriving ``error_type`` / ``error_summary`` / ``request_id``.
+        """
+        self._emit_error_termination(
+            error_type=type(exc).__name__,
+            error_summary=str(exc),
+            request_id=_extract_provider_request_id(exc),
+            classification=classification,
+            framework_retries_exhausted=framework_retries_exhausted,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+
     def _setup_permission_hooks(self) -> None:
         """Set up permission lifecycle hooks."""
         if not self.permission_plugin:
@@ -4587,29 +4663,15 @@ class JaatoServer:
                 # orchestrator / TUI a terminal signal so they don't sit
                 # waiting for AGENT_COMPLETED that will never arrive.
                 if terminal_error is not None:
-                    from jaato_sdk.events import SessionTerminatedEvent
-                    # Mark the session error-terminated so the later
-                    # SlotSettledEvent carries terminal_reason="error" — lets a
-                    # stage-advance reactor skip advancement (recovery re-spawns).
-                    server._terminal_reason = "error"
-                    # Recovery contract: emit AgentErrorEvent FIRST (this point is
-                    # post-with_retry-exhaustion by construction — terminal_error
-                    # escaped with_retry above), giving a reactor first refusal to
-                    # recover the stage before the terminal teardown signal.  See
-                    # docs/design/agent-error-recovery-event.md.
-                    server._emit_agent_error_from_exc(terminal_error)
-                    # Server 0.6.159+: carry the terminal error onto the
-                    # SessionTerminatedEvent so cascade observers can
-                    # surface the failure cause without grepping the
-                    # daemon log.  terminal_error is the Exception that
-                    # escaped with_retry above.
-                    server.emit(SessionTerminatedEvent(
-                        session_id=server.session_id or "",
-                        agent_id=server._main_agent_id,
-                        reason="error",
-                        error_summary=str(terminal_error),
-                        error_type=type(terminal_error).__name__,
-                    ))
+                    # Single chokepoint: emits AgentErrorEvent (recovery first
+                    # refusal — this point is post-with_retry-exhaustion by
+                    # construction) THEN SessionTerminatedEvent(reason=error)
+                    # (teardown, carrying the cause for log-grep-free
+                    # surfacing), and stamps _terminal_reason.  The invariant
+                    # "AgentErrorEvent precedes every reason=error" is structural
+                    # because the terminal event is never constructed here
+                    # directly.  See docs/design/agent-error-recovery-event.md.
+                    server._emit_error_termination_from_exc(terminal_error)
                     clear_logging_context()
                     return
 
@@ -4774,10 +4836,7 @@ class JaatoServer:
                     nudges_fired >= MAX_COMPLETION_NUDGES
                     and signal_completion_in_surface
                 ):
-                    from jaato_sdk.events import (
-                        ErrorEvent as _ErrorEvent,
-                        SessionTerminatedEvent as _SessionTerminatedEvent,
-                    )
+                    from jaato_sdk.events import ErrorEvent as _ErrorEvent
                     server._trace(
                         f"NUDGE_EXHAUSTED: agent looped "
                         f"{nudges_fired}/{MAX_COMPLETION_NUDGES} "
@@ -4793,29 +4852,17 @@ class JaatoServer:
                         error=nudge_exhaust_summary,
                         error_type="NudgeExhausted",
                     ))
-                    # Mark error-terminated so SlotSettledEvent carries
-                    # terminal_reason="error" (stage-advance reactor skips;
-                    # recovery re-spawns).
-                    server._terminal_reason = "error"
-                    # Recovery contract: AgentErrorEvent first (nudge exhaustion
-                    # is the framework's automatic-management giving up), so a
-                    # reactor can recover the stage before teardown.  See
+                    # Single chokepoint: AgentErrorEvent (recovery first refusal
+                    # — nudge exhaustion is the framework's automatic-management
+                    # giving up) THEN SessionTerminatedEvent(reason=error) so
+                    # nudge-exhaust is distinguishable from a provider error
+                    # without log-grep, plus _terminal_reason.  Structural
+                    # invariant — see _emit_error_termination /
                     # docs/design/agent-error-recovery-event.md.
-                    server._emit_agent_error(
+                    server._emit_error_termination(
                         error_type="NudgeExhausted",
                         error_summary=nudge_exhaust_summary,
                     )
-                    # Server 0.6.159+: same error context flows to the
-                    # cascade observer via SessionTerminatedEvent so
-                    # nudge-exhaust is distinguishable from a provider
-                    # error without log-grep.
-                    server.emit(_SessionTerminatedEvent(
-                        session_id=server.session_id or "",
-                        agent_id=server._main_agent_id,
-                        reason="error",
-                        error_summary=nudge_exhaust_summary,
-                        error_type="NudgeExhausted",
-                    ))
 
                 server.emit(AgentStatusChangedEvent(
                     agent_id=server._main_agent_id,

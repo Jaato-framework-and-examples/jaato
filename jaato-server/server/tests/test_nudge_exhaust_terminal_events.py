@@ -58,49 +58,47 @@ def test_core_py_emits_error_event_on_nudge_exhaust():
     )
 
 
+def _assert_chokepoint_emits_terminal(src: str) -> None:
+    """The single ``_emit_error_termination`` chokepoint constructs
+    ``SessionTerminatedEvent(reason="error")`` carrying ``error_summary`` +
+    ``error_type`` (so observers surface the cause without log-grep).  Both
+    error paths route through it, so this is where the terminal-event contract
+    now lives."""
+    marker = "def _emit_error_termination("
+    assert marker in src, "core.py missing the _emit_error_termination chokepoint"
+    # Window spans the (long) docstring + body so it reaches the actual emit.
+    body = src[src.index(marker):src.index(marker) + 3000]
+    assert "SessionTerminatedEvent(" in body and 'reason="error"' in body, (
+        "_emit_error_termination must emit SessionTerminatedEvent(reason=error)."
+    )
+    assert "error_summary=error_summary" in body and "error_type=error_type" in body, (
+        "_emit_error_termination must carry error_summary + error_type so "
+        "observers distinguish failure classes without log-grep."
+    )
+
+
 def test_core_py_emits_session_terminated_on_nudge_exhaust():
-    """The nudge-exhaust path must emit ``SessionTerminatedEvent``
-    with ``reason="error"`` so Phase 1's
-    ``_apply_default_cascade_policy`` triggers session unload for
-    headless / cascade-owned sessions (closes Finding B-equivalent
-    stall on nudge-exhaust)."""
+    """The nudge-exhaust path routes through the error-termination chokepoint,
+    which emits ``SessionTerminatedEvent(reason="error")`` so Phase 1's default
+    cascade policy fires — and emits ``AgentErrorEvent`` first (recovery offer),
+    making the invariant structural."""
     src = _core_py_source()
-    # Find the nudge-exhaust block by its trace string + check that
-    # a SessionTerminatedEvent emission appears in proximity.
     trace_marker = "NUDGE_EXHAUSTED"
     assert trace_marker in src, (
         f"core.py missing nudge-exhaust trace marker {trace_marker!r}"
     )
-    marker_idx = src.index(trace_marker)
-    # Examine the ~2KB window after the marker — the emit block
-    # should be within this range (current code has it ~30 lines
-    # below; ample buffer).
-    window = src[marker_idx:marker_idx + 2000]
-    assert "SessionTerminatedEvent" in window, (
-        "core.py nudge-exhaust path doesn't emit SessionTerminatedEvent. "
-        "Without this Phase 1's default cascade policy can't fire — "
-        "cascade-owned sessions stall on nudge-exhaust.  See PR #179."
-    )
-    assert 'reason="error"' in window, (
-        "core.py nudge-exhaust SessionTerminatedEvent emission must "
-        "use reason=\"error\" so the Phase 1 default policy gate "
-        "(reason==error → unload) fires.  See PR #179."
-    )
-    # Server 0.6.159+ (Q2): the nudge-exhaust SessionTerminatedEvent
-    # must also carry error_summary + error_type so cascade observers
-    # can distinguish nudge-exhaust from a provider error without
-    # grepping the daemon log.
-    assert "error_summary=" in window and "error_type=" in window, (
-        "core.py nudge-exhaust SessionTerminatedEvent emission must "
-        "carry error_summary + error_type (server 0.6.159+).  Without "
-        "these, cascade observers can't distinguish NudgeExhausted "
-        "from a provider error class without log-grep.  See PR for Q2."
+    window = src[src.index(trace_marker):src.index(trace_marker) + 2000]
+    # The nudge path delegates to the single chokepoint with the NudgeExhausted type.
+    assert "_emit_error_termination(" in window, (
+        "core.py nudge-exhaust path must route through _emit_error_termination "
+        "(the single error-terminal chokepoint that emits AgentErrorEvent first)."
     )
     assert '"NudgeExhausted"' in window, (
-        "core.py nudge-exhaust SessionTerminatedEvent emission must "
-        "carry error_type=\"NudgeExhausted\" so observers can match "
-        "on the class string.  See PR for Q2."
+        "core.py nudge-exhaust path must pass error_type=\"NudgeExhausted\" to "
+        "the chokepoint so observers can match on the class string."
     )
+    # The chokepoint carries the terminal-event contract.
+    _assert_chokepoint_emits_terminal(src)
 
 
 def test_core_py_nudge_exhaust_distinguishing_condition():
@@ -139,15 +137,15 @@ def test_core_py_emits_agent_status_done_for_backward_compat():
         "core.py must still emit AgentStatusChangedEvent on the "
         "nudge-exhaust fall-through for back-compat.  See PR #179."
     )
-    # Order check: SessionTerminatedEvent must appear BEFORE
-    # AgentStatusChangedEvent in the window (terminal events first,
-    # then the back-compat status change).
-    st_idx = window.find("SessionTerminatedEvent")
+    # Order check: the terminal-event chokepoint call must appear BEFORE
+    # AgentStatusChangedEvent in the window (terminal events first, then the
+    # back-compat status change).
+    st_idx = window.find("_emit_error_termination(")
     asc_idx = window.find("AgentStatusChangedEvent")
-    assert st_idx >= 0 and asc_idx >= 0, "both events must be present"
+    assert st_idx >= 0 and asc_idx >= 0, "both the chokepoint call and the status event must be present"
     assert st_idx < asc_idx, (
-        "SessionTerminatedEvent must be emitted BEFORE "
-        "AgentStatusChangedEvent on the nudge-exhaust path so "
+        "the _emit_error_termination chokepoint (terminal signal) must be "
+        "invoked BEFORE AgentStatusChangedEvent on the nudge-exhaust path so "
         "observers receive the terminal signal first."
     )
 
@@ -163,25 +161,26 @@ def test_core_py_provider_error_path_carries_error_context():
     BOTH error-path SessionTerminatedEvent emit sites.
     """
     src = _core_py_source()
-    # Locate the terminal_error guard block — emits
-    # SessionTerminatedEvent in the finally clause after the model
-    # thread's terminal Exception escaped with_retry.
+    # The provider-error path routes the live Exception through the chokepoint.
     marker = "if terminal_error is not None:"
     assert marker in src, (
         f"core.py missing terminal_error guard {marker!r}.  Was the "
         f"provider-error path refactored?  Update this test."
     )
-    marker_idx = src.index(marker)
-    window = src[marker_idx:marker_idx + 2000]
-    # The emit must reference the Exception variable for both fields.
-    assert "error_summary=str(terminal_error)" in window, (
-        "core.py provider-error path must populate "
-        "error_summary=str(terminal_error) on SessionTerminatedEvent "
-        "(server 0.6.159+).  Cascade observers depend on this for "
-        "log-grep-free error surfacing."
+    window = src[src.index(marker):src.index(marker) + 1500]
+    assert "_emit_error_termination_from_exc(terminal_error)" in window, (
+        "core.py provider-error path must route the live Exception through "
+        "_emit_error_termination_from_exc (the chokepoint), not emit directly."
     )
-    assert "error_type=type(terminal_error).__name__" in window, (
-        "core.py provider-error path must populate "
-        "error_type=type(terminal_error).__name__ on "
-        "SessionTerminatedEvent (server 0.6.159+)."
+    # The from_exc wrapper derives error_summary/error_type from the Exception.
+    fe = "def _emit_error_termination_from_exc("
+    assert fe in src, "core.py missing _emit_error_termination_from_exc"
+    fe_body = src[src.index(fe):src.index(fe) + 1500]
+    assert "error_type=type(exc).__name__" in fe_body, (
+        "_emit_error_termination_from_exc must derive error_type=type(exc).__name__."
     )
+    assert "error_summary=str(exc)" in fe_body, (
+        "_emit_error_termination_from_exc must derive error_summary=str(exc)."
+    )
+    # And the chokepoint emits them on SessionTerminatedEvent(reason=error).
+    _assert_chokepoint_emits_terminal(src)

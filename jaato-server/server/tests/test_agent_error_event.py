@@ -192,42 +192,112 @@ class TestEmitAgentErrorHelpers:
         JaatoServer._emit_agent_error(fake, error_type="X", error_summary="y")
 
 
-class TestBootstrapSiteEmitsAgentErrorFirst:
-    """At the bootstrap-failure site, AgentErrorEvent is emitted BEFORE the
-    terminal SessionTerminatedEvent (recovery contract emit ordering)."""
+class TestBootstrapSiteRoutesThroughChokepoint:
+    """The bootstrap-failure site delegates to the single error-termination
+    chokepoint (which guarantees AgentErrorEvent precedes
+    SessionTerminatedEvent — see TestErrorTerminationChokepoint)."""
 
-    def test_agent_error_precedes_session_terminated(self):
-        from jaato_sdk.events import SessionTerminatedEvent
+    def test_delegates_to_chokepoint_with_ids(self):
         from server.runner_spawn import _emit_bootstrap_terminated
 
-        order: list = []
         server = MagicMock()
         server._main_agent_id = "build_judge"
-        server.emit = lambda ev: order.append(("emit", type(ev).__name__))
-        server._emit_agent_error_from_exc = (
-            lambda exc, **kw: order.append(("agent_error", kw.get("session_id")))
-        )
+        exc = ValueError("bootstrap boom")
+        _emit_bootstrap_terminated(server=server, session_id="sid_1", exc=exc)
 
-        _emit_bootstrap_terminated(
-            server=server, session_id="sid_1", exc=ValueError("bootstrap boom"),
-        )
+        server._emit_error_termination_from_exc.assert_called_once()
+        call = server._emit_error_termination_from_exc.call_args
+        assert call.args[0] is exc
+        assert call.kwargs["session_id"] == "sid_1"
+        assert call.kwargs["agent_id"] == "build_judge"
 
-        # AgentErrorEvent recovery hook fires first, then the teardown event.
-        assert order[0] == ("agent_error", "sid_1")
-        assert order[1] == ("emit", "SessionTerminatedEvent")
-
-    def test_back_compat_when_helper_absent(self):
-        """A server without _emit_agent_error_from_exc (older/partial) still
-        emits SessionTerminatedEvent — back-compat, no crash."""
-        from jaato_sdk.events import SessionTerminatedEvent
+    def test_chokepoint_failure_does_not_raise(self):
+        """If the chokepoint raises, the bootstrap helper logs but doesn't raise
+        — the underlying bootstrap failure isn't masked."""
         from server.runner_spawn import _emit_bootstrap_terminated
 
-        emitted: list = []
-        server = MagicMock(spec=["emit", "_main_agent_id"])
+        server = MagicMock()
         server._main_agent_id = "main"
-        server.emit = lambda ev: emitted.append(ev)
-
-        _emit_bootstrap_terminated(
-            server=server, session_id="sid", exc=ValueError("x"),
+        server._emit_error_termination_from_exc = MagicMock(
+            side_effect=RuntimeError("emit boom"),
         )
-        assert any(isinstance(e, SessionTerminatedEvent) for e in emitted)
+        # Must not raise.
+        _emit_bootstrap_terminated(server=server, session_id="sid", exc=ValueError("x"))
+
+
+class TestErrorTerminationChokepoint:
+    """``_emit_error_termination`` is THE single error-terminal emit point:
+    AgentErrorEvent (recovery first refusal) THEN
+    SessionTerminatedEvent(reason="error"), plus ``_terminal_reason="error"``.
+    This is the structural invariant that lets a cascade retire the redundant
+    ``on session.terminated reason=error`` abort reactor (which raced the
+    recovery reactor's mark_handled)."""
+
+    def _fake(self, order):
+        from server.core import JaatoServer
+
+        class Hooks:
+            def on_agent_error(self, **kw):
+                order.append(("agent_error", kw.get("error_type"), kw.get("error_summary")))
+
+        fake = SimpleNamespace(
+            _agent_hooks=Hooks(), session_id="s1", _main_agent_id="stage1",
+            _jaato=SimpleNamespace(get_session=lambda: SimpleNamespace(_agent_params={})),
+        )
+        fake._get_ui_hooks = lambda: JaatoServer._get_ui_hooks(fake)
+        fake._read_spawn_attempt = lambda: JaatoServer._read_spawn_attempt(fake)
+        fake._emit_agent_error = lambda **kw: JaatoServer._emit_agent_error(fake, **kw)
+        fake._emit_error_termination = lambda **kw: JaatoServer._emit_error_termination(fake, **kw)
+        fake.emit = lambda ev: order.append(
+            ("emit", type(ev).__name__, getattr(ev, "reason", None), getattr(ev, "error_type", None))
+        )
+        return fake
+
+    def test_orders_agent_error_before_terminated_and_stamps_reason(self):
+        from server.core import JaatoServer
+        order = []
+        fake = self._fake(order)
+        JaatoServer._emit_error_termination(fake, error_type="APIError", error_summary="boom")
+        assert order[0][:2] == ("agent_error", "APIError")
+        assert order[1][:3] == ("emit", "SessionTerminatedEvent", "error")
+        assert fake._terminal_reason == "error"
+
+    def test_from_exc_derives_and_routes_in_order(self):
+        from server.core import JaatoServer
+        order = []
+        fake = self._fake(order)
+
+        class APIError(Exception):
+            pass
+        JaatoServer._emit_error_termination_from_exc(fake, APIError("upstream 500"))
+        assert order[0] == ("agent_error", "APIError", "upstream 500")
+        assert order[1] == ("emit", "SessionTerminatedEvent", "error", "APIError")
+
+    def test_guard_no_reason_error_emit_outside_chokepoint(self):
+        """STRUCTURAL guard: every SessionTerminatedEvent(reason="error") in
+        core.py is constructed INSIDE _emit_error_termination, so a future error
+        path can't emit a terminal error without first offering recovery."""
+        import ast
+        import inspect
+        from server import core
+
+        tree = ast.parse(inspect.getsource(core))
+        choke = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "_emit_error_termination"
+        )
+        span = range(choke.lineno, (choke.end_lineno or choke.lineno) + 1)
+        offenders = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "SessionTerminatedEvent"):
+                reason = next((kw.value for kw in node.keywords if kw.arg == "reason"), None)
+                if isinstance(reason, ast.Constant) and reason.value == "error" \
+                        and node.lineno not in span:
+                    offenders.append(node.lineno)
+        assert not offenders, (
+            f"SessionTerminatedEvent(reason='error') constructed outside "
+            f"_emit_error_termination at core.py lines {offenders} — that bypasses "
+            f"the AgentErrorEvent recovery offer.  Route it through the chokepoint."
+        )
