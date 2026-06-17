@@ -312,10 +312,10 @@ class FileEditPlugin(RunnerForwardingMixin):
         """
         return (
             "Full-file replacement ('new_content') is disabled for this profile. "
-            "Make a targeted edit instead: provide 'old' and 'new' with the "
-            "changed text only, and pin the location with 'prologue'/'epilogue' "
-            "context copied VERBATIM from the file (one line or several, as many "
-            "as needed for a unique match)."
+            "Make a targeted edit instead: 'old' (the exact current text, minimal) "
+            "→ 'new'. Try a unique 'old' alone first; add 'prologue'/'epilogue' "
+            "(literal adjacent lines, copied verbatim) only if the tool reports "
+            "the match ambiguous."
         )
 
     def _check_edit_span(self, old: Optional[str], new: Optional[str]) -> Optional[str]:
@@ -348,11 +348,13 @@ class FileEditPlugin(RunnerForwardingMixin):
             return None
         msg = (
             f"Targeted edit rejected: {' and '.join(over)}; 'old' and 'new' must "
-            f"each be ≤ {cap} characters. Keep 'old'/'new' minimal (the changed "
-            f"text only); pin the location with 'prologue'/'epilogue' context "
-            f"copied VERBATIM from the file — one line or several, as many as "
-            f"needed for a unique match. Never widen 'old'/'new' to disambiguate "
-            f"— that is what 'prologue'/'epilogue' are for."
+            f"each be ≤ {cap} characters. Shrink them to the changed text only — "
+            f"'old' is the minimal current text you are replacing, usually a "
+            f"single already-unique line (a signature/import/package line). Try "
+            f"'old' ALONE; add 'prologue'/'epilogue' only if the tool then reports "
+            f"the match ambiguous, copying the literal adjacent lines verbatim. "
+            f"Never widen 'old' itself to disambiguate — locator size and edit "
+            f"size are independent axes."
         )
         if self._allow_full_replace:
             msg += (
@@ -376,9 +378,9 @@ class FileEditPlugin(RunnerForwardingMixin):
             return ""
         hint = (
             f" IMPORTANT: in targeted-edit mode, 'old' and 'new' must each be "
-            f"≤ {cap} characters — keep them minimal and pin the location with "
-            f"'prologue'/'epilogue' context copied verbatim from the file (one "
-            f"line or several), rather than widening 'old'/'new'."
+            f"≤ {cap} characters — the changed text only. Use a unique 'old' "
+            f"alone; add 'prologue'/'epilogue' (literal adjacent lines, verbatim) "
+            f"only when the match is reported ambiguous, never to widen 'old'."
         )
         if self._allow_full_replace:
             hint += (
@@ -768,22 +770,38 @@ class FileEditPlugin(RunnerForwardingMixin):
         # mode is advertised only when ``allow_full_replace`` is true, so a gated
         # profile's model never sees 'new_content' (the property is also dropped
         # from ``parameters`` below).
+        # Canonical targeted-edit guidance — the tool contract is the home for
+        # these anchoring rules (every updateFile caller, not just personas).
+        # Evidence (transform-stage diff, 36 calls): a unique 'old' alone
+        # matched 15/15; supplying prologue/epilogue failed ~9/10 because models
+        # build them from semantic landmarks that are NOT verbatim-contiguous
+        # with 'old', so prologue+old+epilogue isn't a real substring.  The two
+        # sizing axes are independent and must not be conflated: the EDIT shrinks
+        # to the changed text; the LOCATOR grows only as needed for uniqueness.
+        targeted_clause = (
+            "Targeted edit: 'old' (the exact current text) → 'new' (its "
+            "replacement). Two INDEPENDENT rules, do not conflate them: the EDIT "
+            "('old'/'new') is the changed text only, minimal; the LOCATOR "
+            "('prologue'+'old'+'epilogue') is sized for UNIQUENESS. Try 'old' "
+            "ALONE first — a method signature, import, or package line is almost "
+            "always already unique. Add 'prologue'/'epilogue' ONLY if the tool "
+            "reports the match is ambiguous: copy the LITERAL adjacent lines "
+            "verbatim (blank lines included), extending outward until the match "
+            "is unique. Never add them pre-emptively or from memory — "
+            "'prologue'+'old'+'epilogue' must be an exact substring of the file."
+        )
         if self._allow_full_replace:
             update_desc = (
-                "Update an existing file. Supports two modes: (1) Targeted edit: "
-                "provide 'old' and 'new' to replace a specific fragment. If 'old' "
-                "matches multiple locations, add 'prologue'/'epilogue' — short, "
-                "distinctive text copied verbatim from the file as context anchors. "
-                "(2) Full replacement: provide 'new_content' to replace the entire file."
+                "Update an existing file. Two modes. (1) " + targeted_clause
+                + " (2) Full replacement: provide 'new_content' to replace the "
+                "entire file."
                 + span_hint
             )
         else:
             update_desc = (
-                "Update an existing file with a targeted edit: provide 'old' and "
-                "'new' to replace a specific fragment. If 'old' matches multiple "
-                "locations, add 'prologue'/'epilogue' — short, distinctive text "
-                "copied verbatim from the file as context anchors. (Whole-file "
-                "replacement via 'new_content' is disabled for this profile.)"
+                "Update an existing file (targeted edit only). " + targeted_clause
+                + " (Whole-file replacement via 'new_content' is disabled for "
+                "this profile.)"
                 + span_hint
             )
         return [
@@ -829,35 +847,41 @@ class FileEditPlugin(RunnerForwardingMixin):
                         "old": {
                             "type": "string",
                             "description": (
-                                "Text to find in the file (for targeted edit). "
-                                "Must appear exactly once, or use prologue/epilogue "
-                                "to disambiguate."
+                                "The exact current text to replace — the changed "
+                                "text only, minimal. Copied verbatim from the file. "
+                                "Try it ALONE first (a signature/import/package line "
+                                "is usually already unique); only if the tool reports "
+                                "the match ambiguous, add prologue/epilogue."
                                 + span_prop_hint
                             )
                         },
                         "new": {
                             "type": "string",
                             "description": (
-                                "Replacement text (for targeted edit). "
-                                "Replaces only the matched 'old' text."
+                                "Replacement for 'old' — the changed text only. "
+                                "Replaces just the matched 'old' text."
                                 + span_prop_hint
                             )
                         },
                         "prologue": {
                             "type": "string",
                             "description": (
-                                "Context anchor: text immediately before 'old', "
-                                "copied verbatim from the file. Use a short, "
-                                "distinctive fragment (e.g., a function signature). "
-                                "Not modified in the output."
+                                "Optional disambiguator — add ONLY when 'old' alone "
+                                "matched ambiguously. The LITERAL line(s) immediately "
+                                "before 'old', copied verbatim from the file (blank "
+                                "lines included), extended outward until "
+                                "prologue+old+epilogue is unique. Never invent from "
+                                "memory. Not modified in the output."
                             )
                         },
                         "epilogue": {
                             "type": "string",
                             "description": (
-                                "Context anchor: text immediately after 'old', "
-                                "copied verbatim from the file. Use a short, "
-                                "distinctive fragment. Not modified in the output."
+                                "Optional disambiguator — add ONLY when 'old' alone "
+                                "matched ambiguously. The LITERAL line(s) immediately "
+                                "after 'old', copied verbatim from the file (blank "
+                                "lines included), extended outward until unique. "
+                                "Never invent from memory. Not modified in the output."
                             )
                         },
                         # Full-replacement arg — present only when the profile
