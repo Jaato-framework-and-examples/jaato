@@ -37,6 +37,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -98,8 +99,6 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "gemini-pro": 32_760,
 }
 
-DEFAULT_CONTEXT_LIMIT = 1_048_576
-
 
 class GoogleGenAIProvider:
     """Google GenAI / Vertex AI model provider (stateless design).
@@ -153,6 +152,11 @@ class GoogleGenAIProvider:
         """
         self._client: Optional[genai.Client] = None
         self._model_name: Optional[str] = None
+        # Per-profile context-window override (plugin_configs.google_genai.
+        # context_length).  Wins over MODEL_CONTEXT_LIMITS in get_context_limit()
+        # — escape hatch for an unlisted model.  None = use the table; unknown
+        # model + no override → raise (no hardcoded fallback, per project rule).
+        self._context_length_knob: Optional[int] = None
         self._project: Optional[str] = None
         self._location: Optional[str] = None
 
@@ -239,6 +243,17 @@ class GoogleGenAIProvider:
         self._auth_method = resolved_config.auth_method
         self._project = resolved_config.project
         self._location = resolved_config.location
+
+        # Context-window override (plugin_configs.google_genai.context_length)
+        # via the shared precedence helper.  Google models' windows are
+        # documented constants (MODEL_CONTEXT_LIMITS), so there is no live
+        # auto-detect tier and no env var — the knob is the only override,
+        # layered over the table in get_context_limit().
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=(resolved_config.extra or {}).get("context_length"),
+            env_value=None,
+        )
 
         # Validate configuration before attempting connection
         self._validate_config(resolved_config)
@@ -733,22 +748,39 @@ class GoogleGenAIProvider:
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``context_length`` override knob (``_context_length_knob``) — the
+           escape hatch for a model not yet in the table.
+        2. ``MODEL_CONTEXT_LIMITS`` exact then prefix match — the documented
+           per-model window.
+        3. else raise — an unknown model with no override is a configuration
+           error, surfaced loudly rather than papered over with a guess.
+
         Returns:
             Maximum tokens the model can handle.
+
+        Raises:
+            ValueError: when neither the knob nor the table yields a value.
         """
-        if not self._model_name:
-            return DEFAULT_CONTEXT_LIMIT
+        if self._context_length_knob:
+            return self._context_length_knob
 
-        # Try exact match first
-        if self._model_name in MODEL_CONTEXT_LIMITS:
-            return MODEL_CONTEXT_LIMITS[self._model_name]
+        if self._model_name:
+            # Try exact match first
+            if self._model_name in MODEL_CONTEXT_LIMITS:
+                return MODEL_CONTEXT_LIMITS[self._model_name]
+            # Try prefix match
+            for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
+                if self._model_name.startswith(model_prefix):
+                    return limit
 
-        # Try prefix match
-        for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
-            if self._model_name.startswith(model_prefix):
-                return limit
-
-        return DEFAULT_CONTEXT_LIMIT
+        raise ValueError(
+            f"Google GenAI provider: no known context window for model "
+            f"{self._model_name!r}, and no override is set.  Add the model to "
+            f"MODEL_CONTEXT_LIMITS, or set plugin_configs.google_genai."
+            f"context_length in the profile.  No hardcoded fallback exists per "
+            f"the project's no-fallback rule."
+        )
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.

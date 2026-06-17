@@ -29,6 +29,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -98,8 +99,6 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "claude-3-haiku": 200_000,
 }
 
-DEFAULT_CONTEXT_LIMIT = 200_000
-
 # Models that support extended thinking
 THINKING_CAPABLE_MODELS = [
     "claude-opus-4-5",
@@ -168,6 +167,13 @@ class AnthropicProvider:
         """Initialize the provider (not yet connected)."""
         self._client: Optional[Any] = None  # anthropic.Anthropic
         self._model_name: Optional[str] = None
+
+        # Per-profile context-window override (framework_overrides.context_length).
+        # When set, wins over the per-model MODEL_CONTEXT_LIMITS table in
+        # get_context_limit() — the escape hatch for a model not yet in the
+        # table.  None = use the table; unknown model + no override → raise
+        # (no hardcoded fallback, per project rule).
+        self._context_length_knob: Optional[int] = None
 
         # Configuration
         self._api_key: Optional[str] = None
@@ -333,6 +339,17 @@ class AnthropicProvider:
         )
         self._thinking_budget = _knob(
             "thinking_budget", layer=api_params, default=resolve_thinking_budget(),
+        )
+
+        # Context-window override (framework_overrides.context_length) via the
+        # shared precedence helper.  Anthropic has no live capacity endpoint and
+        # no env var for this, so detect_capacity/env are absent — the knob is
+        # the only override tier, layered over the per-model MODEL_CONTEXT_LIMITS
+        # table consulted in get_context_limit().
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=_knob("context_length", layer=framework_overrides),
+            env_value=None,
         )
 
         # Sampling parameters.  ``None`` means "omit from the request and
@@ -918,18 +935,35 @@ class AnthropicProvider:
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``framework_overrides.context_length`` knob (``_context_length_knob``)
+           — the escape hatch for a model not yet in the table.
+        2. ``MODEL_CONTEXT_LIMITS`` prefix match — the documented per-model
+           window (the authoritative source for closed Claude models).
+        3. else raise — an unknown model with no override is a configuration
+           error, surfaced loudly rather than papered over with a guess.
+
         Returns:
             Maximum tokens the model can handle.
+
+        Raises:
+            ValueError: when neither the knob nor the table yields a value.
         """
-        if not self._model_name:
-            return DEFAULT_CONTEXT_LIMIT
+        if self._context_length_knob:
+            return self._context_length_knob
 
-        # Try prefix match
-        for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
-            if self._model_name.startswith(model_prefix):
-                return limit
+        if self._model_name:
+            for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
+                if self._model_name.startswith(model_prefix):
+                    return limit
 
-        return DEFAULT_CONTEXT_LIMIT
+        raise ValueError(
+            f"Anthropic provider: no known context window for model "
+            f"{self._model_name!r}, and no override is set.  Add the model to "
+            f"MODEL_CONTEXT_LIMITS, or set framework_overrides.context_length in "
+            f"the profile.  No hardcoded fallback exists per the project's "
+            f"no-fallback rule."
+        )
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.

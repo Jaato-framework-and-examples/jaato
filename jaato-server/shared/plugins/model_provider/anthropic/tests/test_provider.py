@@ -497,12 +497,30 @@ class TestTokenManagement:
 
         assert provider.get_context_limit() == 200_000
 
-    def test_get_context_limit_unknown_model(self):
-        """get_context_limit() should return default for unknown models."""
+    def test_get_context_limit_unknown_model_raises(self):
+        """No hardcoded fallback: an unknown model with no override raises
+        rather than returning a guessed default."""
         provider = AnthropicProvider()
         provider._model_name = 'unknown-model'
 
-        assert provider.get_context_limit() == 200_000  # Default
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
+
+    def test_get_context_limit_override_knob_wins(self):
+        """framework_overrides.context_length overrides the per-model table —
+        the escape hatch for unlisted models / budget-down."""
+        provider = AnthropicProvider()
+        provider._model_name = 'claude-sonnet-4-20250514'  # would be 200_000
+        provider._context_length_knob = 100_000
+
+        assert provider.get_context_limit() == 100_000
+
+    def test_get_context_limit_override_knob_covers_unknown_model(self):
+        provider = AnthropicProvider()
+        provider._model_name = 'some-future-model'
+        provider._context_length_knob = 500_000
+
+        assert provider.get_context_limit() == 500_000
 
 
 class TestCapabilities:
