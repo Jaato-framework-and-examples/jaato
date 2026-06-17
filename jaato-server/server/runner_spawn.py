@@ -769,9 +769,18 @@ def _emit_bootstrap_terminated(
     """
     try:
         from jaato_sdk.events import SessionTerminatedEvent
+        agent_id = getattr(server, "_main_agent_id", None) or "main"
+        # Recovery contract: AgentErrorEvent first (bootstrap failure has no
+        # auto-retry to wait on — the framework is out of moves), so a reactor
+        # gets first refusal before the teardown signal.  Best-effort: bootstrap
+        # failures are usually non-retryable, but the kb policy decides.  See
+        # docs/design/agent-error-recovery-event.md.
+        emit_agent_error = getattr(server, "_emit_agent_error_from_exc", None)
+        if callable(emit_agent_error):
+            emit_agent_error(exc, session_id=session_id, agent_id=agent_id)
         server.emit(SessionTerminatedEvent(
             session_id=session_id,
-            agent_id=getattr(server, "_main_agent_id", None) or "main",
+            agent_id=agent_id,
             reason="error",
             error_summary=str(exc),
             error_type=type(exc).__name__,
