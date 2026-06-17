@@ -43,6 +43,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -222,11 +223,15 @@ class TensorRTLLMProvider:
         self._host = host_value.rstrip("/")
         self._api_token = config.extra.get("api_token") or resolve_api_token()
 
-        context_extra = config.extra.get("context_length")
-        if context_extra:
-            self._context_length_override = int(context_extra)
-        else:
-            self._context_length_override = resolve_context_length()
+        # Context-window resolution via the shared precedence helper
+        # (detect_capacity → profile knob → env → None; no hardcoded fallback).
+        # trtllm-serve's /v1/models does not surface the engine's max_seq_len,
+        # so there is no auto-detect tier — profile knob then env, else raise.
+        self._context_length_override = resolve_context_window(
+            detect_capacity=None,
+            profile_value=config.extra.get("context_length"),
+            env_value=resolve_context_length(),
+        )
         if not self._context_length_override:
             raise ValueError(
                 f"TensorRT-LLM provider: context_length is not configured.  "

@@ -45,7 +45,6 @@ from ..env import (
     resolve_context_length,
     is_self_hosted,
     DEFAULT_BASE_URL,
-    DEFAULT_CONTEXT_LENGTH,
 )
 
 
@@ -111,17 +110,19 @@ class TestEnvironment:
         with patch.dict("os.environ", {"JAATO_NIM_BASE_URL": "http://localhost:8000/v1"}):
             assert resolve_base_url() == "http://localhost:8000/v1"
 
-    def test_resolve_context_length_default(self):
+    def test_resolve_context_length_unset_is_none(self):
+        # No hardcoded fallback (no-fallback rule): unset env → None, so the
+        # provider raises a "not configured" error rather than guessing a default.
         with patch.dict("os.environ", {}, clear=True):
-            assert resolve_context_length() == DEFAULT_CONTEXT_LENGTH
+            assert resolve_context_length() is None
 
     def test_resolve_context_length_from_env(self):
         with patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "131072"}):
             assert resolve_context_length() == 131072
 
-    def test_resolve_context_length_invalid(self):
+    def test_resolve_context_length_invalid_is_none(self):
         with patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "not-a-number"}):
-            assert resolve_context_length() == DEFAULT_CONTEXT_LENGTH
+            assert resolve_context_length() is None
 
     def test_is_self_hosted_localhost(self):
         assert is_self_hosted("http://localhost:8000/v1") is True
@@ -382,7 +383,11 @@ class TestAuthentication:
         mock_client_class.return_value = MagicMock()
 
         provider = NIMProvider()
-        provider.initialize(ProviderConfig(api_key="nvapi-test"))
+        # context_length is now required (no hardcoded default); set it so this
+        # auth-focused test reaches client creation.
+        provider.initialize(ProviderConfig(
+            api_key="nvapi-test", extra={"context_length": 131072},
+        ))
 
         assert provider._api_key == "nvapi-test"
         assert provider._client is not None
@@ -394,7 +399,7 @@ class TestAuthentication:
         mock_client_class.return_value = MagicMock()
 
         provider = NIMProvider()
-        provider.initialize(ProviderConfig())
+        provider.initialize(ProviderConfig(extra={"context_length": 131072}))
 
         assert provider._api_key == "nvapi-env"
 
@@ -405,10 +410,40 @@ class TestAuthentication:
         mock_client_class.return_value = MagicMock()
 
         provider = NIMProvider()
-        provider.initialize(ProviderConfig())
+        provider.initialize(ProviderConfig(extra={"context_length": 131072}))
 
         assert provider._api_key is None
         assert provider._client is not None
+
+    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_initialize_raises_when_context_unresolved(self, mock_client_class):
+        """No hardcoded fallback: with neither profile knob nor env set, the
+        provider raises rather than guessing a default context window."""
+        mock_client_class.return_value = MagicMock()
+        provider = NIMProvider()
+        with pytest.raises(ValueError, match="context_length could not be resolved"):
+            provider.initialize(ProviderConfig(api_key="nvapi-test"))
+
+    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "200000"}, clear=True)
+    def test_initialize_resolves_context_from_env(self, mock_client_class):
+        """Env tier resolves when no profile knob is set."""
+        mock_client_class.return_value = MagicMock()
+        provider = NIMProvider()
+        provider.initialize(ProviderConfig(api_key="nvapi-test"))
+        assert provider._context_length == 200000
+
+    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    def test_initialize_profile_knob_beats_env(self, mock_client_class):
+        """Profile knob (config.extra.context_length) wins over the env tier."""
+        mock_client_class.return_value = MagicMock()
+        with patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "200000"}):
+            provider = NIMProvider()
+            provider.initialize(ProviderConfig(
+                api_key="nvapi-test", extra={"context_length": 131072},
+            ))
+            assert provider._context_length == 131072
 
     @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
     def test_initialize_custom_base_url(self, mock_client_class):
@@ -418,7 +453,7 @@ class TestAuthentication:
         provider = NIMProvider()
         provider.initialize(ProviderConfig(
             api_key="nvapi-test",
-            extra={"base_url": "http://nim.internal:8080/v1"},
+            extra={"base_url": "http://nim.internal:8080/v1", "context_length": 131072},
         ))
 
         assert provider._base_url == "http://nim.internal:8080/v1"

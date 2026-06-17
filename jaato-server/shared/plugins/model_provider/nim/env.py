@@ -27,9 +27,6 @@ ENV_NIM_CONTEXT_LENGTH = "JAATO_NIM_CONTEXT_LENGTH"
 # Default endpoint for NVIDIA hosted NIM API
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
-# Default context window when no override is provided
-DEFAULT_CONTEXT_LENGTH = 32768
-
 
 def resolve_api_key(
     workspace_path: Optional[str] = None,
@@ -84,11 +81,15 @@ def resolve_model() -> Optional[str]:
     return os.environ.get(ENV_NIM_MODEL)
 
 
-def resolve_context_length() -> int:
-    """Resolve context window size from environment.
+def resolve_context_length() -> Optional[int]:
+    """Resolve context window size from the environment.
 
-    Returns:
-        Context window size in tokens.
+    Returns the ``JAATO_NIM_CONTEXT_LENGTH`` override as an int, or ``None``
+    when unset/invalid.  No hardcoded fallback is substituted (project
+    no-fallback rule); the caller routes this through ``resolve_context_window``
+    and raises a "not configured" error when no tier resolves.  NIM's
+    OpenAI-compatible ``/v1/models`` does not surface a per-model context
+    window, so there is no auto-detect tier for this provider.
     """
     value = os.environ.get(ENV_NIM_CONTEXT_LENGTH)
     if value:
@@ -96,7 +97,7 @@ def resolve_context_length() -> int:
             return int(value)
         except ValueError:
             pass
-    return DEFAULT_CONTEXT_LENGTH
+    return None
 
 
 def is_self_hosted(base_url: str) -> bool:
