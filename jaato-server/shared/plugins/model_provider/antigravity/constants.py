@@ -140,6 +140,7 @@ GEMINI_CLI_MODELS = {
     },
 }
 
-# Default context and output limits
-DEFAULT_CONTEXT_LIMIT = 200_000
+# Default output limit (the context window has no blanket default — per-model
+# tables + the context_length override knob resolve it, else the provider
+# raises; see get_context_limit and the project no-fallback rule).
 DEFAULT_OUTPUT_LIMIT = 8192

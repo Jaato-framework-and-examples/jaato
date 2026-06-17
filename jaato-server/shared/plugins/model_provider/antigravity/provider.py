@@ -28,6 +28,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -49,7 +50,6 @@ from .constants import (
     ANTIGRAVITY_MODELS,
     ANTIGRAVITY_PRIMARY_ENDPOINT,
     ANTIGRAVITY_USER_AGENT,
-    DEFAULT_CONTEXT_LIMIT,
     DEFAULT_OUTPUT_LIMIT,
     GEMINI_CLI_API_CLIENT,
     GEMINI_CLI_CLIENT_METADATA,
@@ -140,6 +140,11 @@ class AntigravityProvider:
         self._current_account: Optional[Account] = None
         self._model_name: Optional[str] = None
         self._api_model: Optional[str] = None
+        # Per-profile context-window override (plugin_configs.antigravity.
+        # context_length).  Wins over the model tables' context_limit in
+        # get_context_limit() — escape hatch for an unlisted model.  None = use
+        # the tables; unknown model + no override → raise (no hardcoded fallback).
+        self._context_length_knob: Optional[int] = None
 
         # Configuration
         self._endpoint: str = ANTIGRAVITY_PRIMARY_ENDPOINT
@@ -214,6 +219,16 @@ class AntigravityProvider:
         self._session_recovery = config.extra.get("session_recovery", resolve_session_recovery())
         self._thinking_level = config.extra.get("thinking_level") or resolve_thinking_level()
         self._thinking_budget = config.extra.get("thinking_budget", resolve_thinking_budget())
+
+        # Context-window override (plugin_configs.antigravity.context_length) via
+        # the shared precedence helper.  Antigravity's model windows are
+        # documented in the model tables, so there is no live auto-detect tier
+        # and no env var — the knob is the only override.
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=config.extra.get("context_length"),
+            env_value=None,
+        )
 
     def verify_auth(
         self,
@@ -348,15 +363,32 @@ class AntigravityProvider:
     def get_context_limit(self) -> int:
         """Get the context window limit for the current model.
 
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``context_length`` override knob (``_context_length_knob``).
+        2. the model's ``context_limit`` from the ANTIGRAVITY_MODELS /
+           GEMINI_CLI_MODELS tables.
+        3. else raise — unknown model with no override is a configuration error.
+
         Returns:
             Maximum context tokens.
+
+        Raises:
+            ValueError: when neither the knob nor a table entry yields a value.
         """
+        if self._context_length_knob:
+            return self._context_length_knob
         if self._model_name:
-            if self._model_name in ANTIGRAVITY_MODELS:
-                return ANTIGRAVITY_MODELS[self._model_name].get("context_limit", DEFAULT_CONTEXT_LIMIT)
-            if self._model_name in GEMINI_CLI_MODELS:
-                return GEMINI_CLI_MODELS[self._model_name].get("context_limit", DEFAULT_CONTEXT_LIMIT)
-        return DEFAULT_CONTEXT_LIMIT
+            for table in (ANTIGRAVITY_MODELS, GEMINI_CLI_MODELS):
+                if self._model_name in table:
+                    limit = table[self._model_name].get("context_limit")
+                    if limit:
+                        return limit
+        raise ValueError(
+            f"Antigravity provider: no known context window for model "
+            f"{self._model_name!r}, and no override is set.  Set "
+            f"plugin_configs.antigravity.context_length in the profile.  No "
+            f"hardcoded fallback exists per the project's no-fallback rule."
+        )
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.
