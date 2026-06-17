@@ -1086,6 +1086,7 @@ export type AgentId6 = string | null;
 export type CascadeDriverId = string | null;
 export type WasWarm = boolean;
 export type PoolSlotPid = number;
+export type TerminalReason = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13285,6 +13286,7 @@ export interface SlotSettledEvent {
   cascade_driver_id?: CascadeDriverId;
   was_warm?: WasWarm;
   pool_slot_pid?: PoolSlotPid;
+  terminal_reason?: TerminalReason;
 }
 /**
  * Tool execution has started.
