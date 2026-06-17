@@ -15,6 +15,7 @@ symmetrically to ``old`` and ``new`` but never to ``new_content``
 import pytest
 
 from ..plugin import FileEditPlugin
+from ..edit_core import apply_edit, AmbiguousEditError
 
 
 def _make_plugin(tmp_path, cap=None, allow_full_replace=None):
@@ -333,3 +334,56 @@ class TestConditionalCapWording:
         # suppressed; the only new_content mention left is the "disabled" notice.
         assert "To replace the entire file" not in schema.description
         assert "provide 'new_content'" not in schema.description
+
+
+class TestAnchorGuidance:
+    """The canonical anchoring model (#4) lives in the tool contract and is
+    mirrored consistently in the cap-rejection error and the ambiguous-match
+    error. Evidence: unique 'old' alone matched 15/15; supplied prologue/
+    epilogue failed ~9/10 because models build them non-verbatim. So: try 'old'
+    ALONE; add prologue/epilogue ONLY on reported ambiguity; the EDIT and the
+    LOCATOR are independent sizing axes.
+    """
+
+    def _update_schema(self, plugin):
+        return [s for s in plugin.get_tool_schemas() if s.name == "updateFile"][0]
+
+    def test_tool_description_encodes_two_axes_and_old_alone(self, tmp_path):
+        desc = self._update_schema(_make_plugin(tmp_path)).description
+        assert "INDEPENDENT" in desc          # two sizing rules, not conflated
+        assert "ALONE" in desc                # default: try old alone
+        assert "ambiguous" in desc            # add anchors only on ambiguity
+        assert "verbatim" in desc
+        assert "exact substring" in desc
+
+    def test_tool_description_present_even_when_gated(self, tmp_path):
+        # The anchoring model is generic — present whether or not full-replace
+        # is gated (the gated variant just drops the new_content mode).
+        desc = self._update_schema(
+            _make_plugin(tmp_path, allow_full_replace=False)
+        ).description
+        assert "ALONE" in desc and "ambiguous" in desc
+
+    def test_old_property_steers_to_alone_first(self, tmp_path):
+        props = self._update_schema(_make_plugin(tmp_path)).parameters["properties"]
+        assert "ALONE" in props["old"]["description"]
+        assert "ONLY" in props["prologue"]["description"]
+        assert "from memory" in props["prologue"]["description"]
+
+    def test_cap_error_steers_to_alone_not_anchors_first(self, tmp_path):
+        err = _make_plugin(tmp_path, cap=50)._check_edit_span("o" * 60, "n" * 60)
+        assert "ALONE" in err
+        assert "ambiguous" in err
+        assert "independent axes" in err
+        # Must NOT present prologue/epilogue as the primary move.
+        assert "pin the location with" not in err
+
+    def test_ambiguous_error_says_copy_verbatim_until_unique(self):
+        # The "tool reports ambiguous" moment the new guidance points to.
+        content = "X\nX\nX\n"
+        with pytest.raises(AmbiguousEditError) as ei:
+            apply_edit(content, "X", "Y")
+        msg = str(ei.value)
+        assert "prologue" in msg and "epilogue" in msg
+        assert "verbatim" in msg
+        assert "unique" in msg

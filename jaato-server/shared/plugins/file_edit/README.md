@@ -295,9 +295,41 @@ updateFile, removeFile, and moveFile operations.
 
 ## Configuration Reference
 
+Profile-level config under `plugin_configs.file_edit`:
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `backup_dir` | str | `.jaato/backups` | Directory for storing backups |
+| `max_edit_span_chars` | int | `null` (unlimited) | Cap on the character length of a single **targeted** edit's `old` and `new` (applied to each independently). Rejects oversized whole-file `old`/`new` anchors with a guiding error. Does **not** cap `new_content`. A non-positive or non-integer value disables the cap (logged). |
+| `allow_full_replace` | bool | `true` | When `false`, removes `updateFile`'s whole-file replacement mode (`new_content`) for the session — dropped from the tool schema **and** rejected at runtime — leaving targeted `old`/`new` edits as the only path. |
+
+### Targeted-edit constraints (constraining weak models)
+
+`max_edit_span_chars` and `allow_full_replace` are orthogonal knobs a
+constrained profile typically sets **together** so a weak model has no
+whole-file path that bypasses the cap (the *clobber* path — each cascade step
+regenerating the file and dropping prior edits):
+
+```yaml
+plugin_configs:
+  file_edit:
+    max_edit_span_chars: 800
+    allow_full_replace: false
+```
+
+The `updateFile` tool description and its rejection errors teach a single
+consistent **anchoring model** (the tool contract is the canonical home for
+these rules — not a persona):
+
+- **Two independent sizing axes, never conflated:** the EDIT (`old`/`new`) is
+  the changed text only, minimal; the LOCATOR (`prologue`+`old`+`epilogue`) is
+  sized for **uniqueness**.
+- **Default: try `old` ALONE** — a signature/import/package line is almost
+  always already unique.
+- **Add `prologue`/`epilogue` ONLY when the tool reports the match ambiguous** —
+  copy the literal adjacent lines verbatim (blank lines included), extending
+  outward until unique. Never pre-emptively, never from memory:
+  `prologue`+`old`+`epilogue` must be an exact substring of the file.
 
 ## Environment Variables
 
