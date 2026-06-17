@@ -39,6 +39,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -64,6 +65,7 @@ from .converters import (
 )
 from .env import (
     DEFAULT_BASE_URL,
+    ENV_NIM_CONTEXT_LENGTH,
     resolve_api_key,
     resolve_base_url,
     resolve_context_length,
@@ -208,16 +210,31 @@ class NIMProvider:
         )
         self._base_url = config.extra.get("base_url") or resolve_base_url()
 
-        context_length_extra = config.extra.get("context_length")
-        if context_length_extra:
-            self._context_length = int(context_length_extra)
-        else:
-            self._context_length = resolve_context_length()
-
         # Validate API key (required for hosted, optional for self-hosted)
         if not self._api_key and not is_self_hosted(self._base_url):
             raise APIKeyNotFoundError(
                 checked_locations=get_checked_credential_locations(),
+            )
+
+        # Context-window resolution via the shared precedence helper
+        # (detect_capacity → profile knob → env → None; no hardcoded fallback).
+        # NIM's OpenAI-compatible /v1/models does not surface a per-model
+        # context window, so there is no auto-detect tier — resolution is
+        # profile-knob then env, else a "not configured" error.  Runs after the
+        # auth check so an auth failure surfaces first.
+        self._context_length = resolve_context_window(
+            detect_capacity=None,
+            profile_value=config.extra.get("context_length"),
+            env_value=resolve_context_length(),
+        )
+        if not self._context_length:
+            raise ValueError(
+                "NIM provider: context_length could not be resolved.  NIM's "
+                "/v1/models does not report a per-model context window, and no "
+                "manual override is set.  Set plugin_configs.nim.context_length "
+                f"in the profile, or {ENV_NIM_CONTEXT_LENGTH} in the "
+                "environment.  No hardcoded fallback exists per the project's "
+                "no-fallback rule."
             )
 
         # Create client

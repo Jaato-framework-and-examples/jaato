@@ -61,7 +61,6 @@ from .env import (
     resolve_model,
 )
 from .provider import (
-    DEFAULT_CONTEXT_LIMIT,
     KNOWN_MODELS,
     MODEL_CONTEXT_LIMITS,
     ZHIPUAI_MODELS_URL,
@@ -82,7 +81,6 @@ __all__ = [
     "ZhipuAIConnectionError",
     "ZhipuAIRateLimitError",
     # Constants
-    "DEFAULT_CONTEXT_LIMIT",
     "KNOWN_MODELS",
     "MODEL_CONTEXT_LIMITS",
     # Environment

@@ -4,7 +4,7 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch, call
 
-from ..provider import GoogleGenAIProvider, MODEL_CONTEXT_LIMITS, DEFAULT_CONTEXT_LIMIT
+from ..provider import GoogleGenAIProvider, MODEL_CONTEXT_LIMITS
 from shared.plugins.model_provider.base import ProviderConfig
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -643,16 +643,25 @@ class TestTokenManagement:
         provider._model_name = "gemini-2.5-pro-preview-05-06"
         assert provider.get_context_limit() == MODEL_CONTEXT_LIMITS["gemini-2.5-pro-preview-05-06"]
 
-    def test_get_context_limit_unknown_model(self):
-        """get_context_limit() should return default for unknown models."""
+    def test_get_context_limit_unknown_model_raises(self):
+        """No hardcoded fallback: unknown model + no override raises."""
         provider = GoogleGenAIProvider()
         provider._model_name = "some-unknown-model"
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
 
-    def test_get_context_limit_no_model(self):
-        """get_context_limit() should return default when no model set."""
+    def test_get_context_limit_no_model_raises(self):
+        """No model + no override → raise (no guessed default)."""
         provider = GoogleGenAIProvider()
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
+
+    def test_get_context_limit_override_knob_wins(self):
+        """context_length override beats the table — escape hatch / budget-down."""
+        provider = GoogleGenAIProvider()
+        provider._model_name = "some-unknown-model"
+        provider._context_length_knob = 250_000
+        assert provider.get_context_limit() == 250_000
 
     def test_get_token_usage_initial(self):
         """get_token_usage() should return empty usage initially."""

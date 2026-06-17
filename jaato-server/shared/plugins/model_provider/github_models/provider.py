@@ -49,6 +49,7 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -122,17 +123,20 @@ class ModelInfo:
 
     @property
     def effective_context_limit(self) -> int:
-        """Get the effective context limit for GC calculations.
+        """Get the effective context limit from this catalog entry.
 
-        Uses context_window if available, otherwise sums input + output limits.
-        Falls back to DEFAULT_CONTEXT_LIMIT if no data available.
+        Uses context_window if available, otherwise max_input_tokens.  Returns
+        ``0`` ("unknown") when the catalog entry carries no usable sizing — the
+        caller (``get_context_limit``) then falls through to its static fallback
+        table or raises.  No hardcoded default is substituted here (project
+        no-fallback rule).
         """
         if self.context_window > 0:
             return self.context_window
         if self.max_input_tokens > 0:
             # Context window is typically max_input_tokens (output is separate budget)
             return self.max_input_tokens
-        return DEFAULT_CONTEXT_LIMIT
+        return 0
 
 
 # Fallback context window limits for known models (total tokens)
@@ -166,8 +170,6 @@ FALLBACK_CONTEXT_LIMITS: Dict[str, int] = {
 
 # Keep MODEL_CONTEXT_LIMITS as alias for backwards compatibility
 MODEL_CONTEXT_LIMITS = FALLBACK_CONTEXT_LIMITS
-
-DEFAULT_CONTEXT_LIMIT = 128_000
 
 
 @dataclass
@@ -230,6 +232,10 @@ class GitHubModelsProvider:
         """Initialize the provider (not yet connected)."""
         self._client: Optional[ChatCompletionsClient] = None
         self._model_name: Optional[str] = None
+        # Per-profile context-window override (plugin_configs.github_models.
+        # context_length).  Wins over catalog + fallback table in
+        # get_context_limit() — escape hatch for a model with no catalog sizing.
+        self._context_length_knob: Optional[int] = None
 
         # Configuration
         self._token: Optional[str] = None
@@ -329,6 +335,16 @@ class GitHubModelsProvider:
         if workspace_path and not get_workspace_root():
             os.environ['JAATO_WORKSPACE_ROOT'] = workspace_path
             self._trace(f"[INIT] Set JAATO_WORKSPACE_ROOT from config.extra: {workspace_path}")
+
+        # Context-window override (plugin_configs.github_models.context_length)
+        # via the shared precedence helper.  The catalog supplies live sizing
+        # for most models (get_context_limit tier 2), so this knob is the
+        # override / escape hatch for models the catalog can't size.
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=config.extra.get("context_length"),
+            env_value=None,
+        )
 
         # Resolve configuration
         raw_token = config.api_key or resolve_token()
@@ -1030,33 +1046,47 @@ class GitHubModelsProvider:
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 
-        Attempts to use API-fetched token limits first, then falls back
-        to hardcoded limits if API data is unavailable.
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``context_length`` override knob (``_context_length_knob``).
+        2. catalog (``get_model_info().effective_context_limit``) — the live
+           GitHub Models catalog is the authoritative source when it carries
+           sizing.
+        3. ``FALLBACK_CONTEXT_LIMITS`` exact then prefix match — offline metadata.
+        4. else raise — an unknown model with no catalog data and no override is
+           a configuration error, surfaced loudly rather than guessed.
 
         Returns:
             Maximum tokens the model can handle.
-        """
-        if not self._model_name:
-            return DEFAULT_CONTEXT_LIMIT
 
-        # Try to get from API-fetched model info first
+        Raises:
+            ValueError: when none of the tiers yields a value.
+        """
+        if self._context_length_knob:
+            return self._context_length_knob
+
+        # Live catalog (authoritative when it carries sizing)
         model_info = self.get_model_info()
         if model_info:
             limit = model_info.effective_context_limit
             if limit > 0:
                 return limit
 
-        # Fallback to hardcoded limits
-        # Try exact match
-        if self._model_name in FALLBACK_CONTEXT_LIMITS:
-            return FALLBACK_CONTEXT_LIMITS[self._model_name]
+        if self._model_name:
+            # Offline fallback table — exact then prefix match
+            if self._model_name in FALLBACK_CONTEXT_LIMITS:
+                return FALLBACK_CONTEXT_LIMITS[self._model_name]
+            for model_prefix, limit in FALLBACK_CONTEXT_LIMITS.items():
+                if self._model_name.startswith(model_prefix):
+                    return limit
 
-        # Try prefix match
-        for model_prefix, limit in FALLBACK_CONTEXT_LIMITS.items():
-            if self._model_name.startswith(model_prefix):
-                return limit
-
-        return DEFAULT_CONTEXT_LIMIT
+        raise ValueError(
+            f"GitHub Models provider: no known context window for model "
+            f"{self._model_name!r} — the catalog returned no sizing and the "
+            f"model is not in the fallback table.  Add it to "
+            f"FALLBACK_CONTEXT_LIMITS, or set plugin_configs.github_models."
+            f"context_length in the profile.  No hardcoded fallback exists per "
+            f"the project's no-fallback rule."
+        )
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.
