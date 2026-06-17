@@ -34,7 +34,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..anthropic.provider import AnthropicProvider
-from ..base import ProviderConfig
+from ..base import ProviderConfig, resolve_context_window
 from .env import (
     DEFAULT_ZHIPUAI_BASE_URL,
     DEFAULT_ZHIPUAI_MODEL,
@@ -77,10 +77,19 @@ MODEL_CONTEXT_LIMITS = {
     "glm-4.5-airx": 131072,
     "glm-4.5-flash": 131072,
     "glm-4.5-x": 131072,
+    # GLM-4 generation — 128K context (legacy / largely deprecated; not in the
+    # live /models catalog, retained for backward compat).  The whole GLM-4
+    # generation, including the 4V vision variant, is 128K.
+    # Source: Z.AI docs; models.dev; Zhipu GLM-4.6V 128K announcement.
+    "glm-4": 131072,
+    "glm-4v": 131072,
 }
 
-# Fallback for unknown models (matches GLM-5/4.7 generation default)
-DEFAULT_CONTEXT_LIMIT = 204800
+# No blanket default for unknown models — context is resolved from the override
+# (framework_overrides.context_length / ZHIPUAI_CONTEXT_LENGTH) then the table
+# (exact then longest-prefix), else get_context_limit raises (project
+# no-fallback rule).  The Z.AI /models endpoint is id-only (no context field,
+# verified live), so there is no auto-detect tier.
 
 KNOWN_MODELS = sorted(MODEL_CONTEXT_LIMITS.keys())
 
@@ -337,10 +346,15 @@ class ZhipuAIProvider(AnthropicProvider):
         self._base_url = self._base_url.rstrip("/")
         self._trace(f"[INIT] base_url={self._base_url}")
 
-        # Optional context length override (framework_overrides layer).
-        self._context_length_override = (
-            _knob("context_length", layer=framework_overrides)
-            or resolve_context_length()
+        # Context-window override (framework_overrides.context_length / env) via
+        # the shared precedence helper.  GLM model windows are documented in
+        # MODEL_CONTEXT_LIMITS (consulted in get_context_limit); the Z.AI
+        # /models endpoint carries no context field (verified), so there is no
+        # auto-detect tier.  The override, when set, wins over the table.
+        self._context_length_override = resolve_context_window(
+            detect_capacity=None,
+            profile_value=_knob("context_length", layer=framework_overrides),
+            env_value=resolve_context_length(),
         )
         if self._context_length_override:
             self._trace(f"[INIT] context_length_override={self._context_length_override}")
@@ -532,12 +546,35 @@ class ZhipuAIProvider(AnthropicProvider):
     def get_context_limit(self) -> int:
         """Get context window size.
 
-        Returns context_length_override if set, otherwise looks up the
-        per-model limit from MODEL_CONTEXT_LIMITS.
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``context_length_override`` (framework_overrides knob / env) — wins.
+        2. ``MODEL_CONTEXT_LIMITS`` exact match.
+        3. ``MODEL_CONTEXT_LIMITS`` LONGEST-prefix match — so a dated variant
+           (e.g. ``glm-4.7-20250601``) resolves to its family (``glm-4.7``)
+           rather than a shorter, wrong prefix (``glm-4``).
+        4. else raise — unknown model with no override is a configuration error.
+
+        Raises:
+            ValueError: when neither the override nor the table yields a value.
         """
         if self._context_length_override:
             return self._context_length_override
-        return MODEL_CONTEXT_LIMITS.get(self._model_name, DEFAULT_CONTEXT_LIMIT)
+        model = self._model_name
+        if model:
+            if model in MODEL_CONTEXT_LIMITS:
+                return MODEL_CONTEXT_LIMITS[model]
+            # Longest-prefix match (GLM model names nest: glm-4 is a prefix of
+            # glm-4.5/4.7 — exact match above handles those; here we take the
+            # most specific prefix so dated variants land on the right family).
+            prefixes = [p for p in MODEL_CONTEXT_LIMITS if model.startswith(p)]
+            if prefixes:
+                return MODEL_CONTEXT_LIMITS[max(prefixes, key=len)]
+        raise ValueError(
+            f"ZhipuAI provider: no known context window for model {model!r}, and "
+            f"no override is set.  Add the model to MODEL_CONTEXT_LIMITS, or set "
+            f"framework_overrides.context_length / ZHIPUAI_CONTEXT_LENGTH.  No "
+            f"hardcoded fallback exists per the project's no-fallback rule."
+        )
 
     def _is_thinking_capable(self) -> bool:
         """Check if the current model supports extended thinking.
