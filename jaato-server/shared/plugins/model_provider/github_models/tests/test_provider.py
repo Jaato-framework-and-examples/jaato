@@ -503,12 +503,22 @@ class TestTokenManagement:
 
         assert provider.get_context_limit() == 200_000
 
-    def test_get_context_limit_unknown_model(self):
-        """get_context_limit() should return default for unknown."""
+    def test_get_context_limit_unknown_model_raises(self):
+        """No hardcoded fallback: a model with no catalog sizing and not in the
+        fallback table raises rather than returning a guessed default."""
         provider = GitHubModelsProvider()
         provider._model_name = 'unknown/model'
 
-        assert provider.get_context_limit() == 128_000  # Default
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
+
+    def test_get_context_limit_override_knob_wins(self):
+        """context_length override beats catalog + fallback table."""
+        provider = GitHubModelsProvider()
+        provider._model_name = 'unknown/model'
+        provider._context_length_knob = 64_000
+
+        assert provider.get_context_limit() == 64_000
 
 
 class TestStructuredOutput:
