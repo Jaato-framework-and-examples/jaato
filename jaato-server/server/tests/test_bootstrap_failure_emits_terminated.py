@@ -39,25 +39,23 @@ class TestBootstrapFailureEmitsTerminated:
     """
 
     def _make_server(self):
-        """Fake JaatoServer with the surface
-        ``dispatch_bootstrap_envelope`` reads: ``runner_rpc``,
-        ``emit``, ``_main_agent_id``.  Captures emitted events on
-        a list so tests can assert against them."""
+        """Fake JaatoServer.  Bootstrap failure now ROUTES THROUGH the single
+        error-termination chokepoint ``_emit_error_termination_from_exc`` (which
+        emits AgentErrorEvent then SessionTerminatedEvent(reason=error) +
+        stamps _terminal_reason), so tests assert on the delegation rather than
+        the raw emit.  Field-correctness is covered by the chokepoint's own
+        test."""
         server = MagicMock()
         server._main_agent_id = "build_judge"
-        emitted: list = []
-        server.emit = lambda ev: emitted.append(ev)
-        return server, emitted
+        return server
 
     def test_emit_on_runner_rpc_none_early_return(self, capsys):
-        """Path A: ``server.runner_rpc`` is None (spawn helper
-        raised before populating rpc).  Pre-0.6.169 this path
-        logged DEBUG + returned silently.  Now emits
-        SessionTerminatedEvent so cascade observers see it."""
-        from jaato_sdk.events import SessionTerminatedEvent
+        """Path A: ``server.runner_rpc`` is None (spawn helper raised before
+        populating rpc) → delegates the inner RuntimeError to the chokepoint
+        with the session_id + agent_id."""
         from server.runner_spawn import dispatch_bootstrap_envelope
 
-        server, emitted = self._make_server()
+        server = self._make_server()
         server.runner_rpc = None
 
         dispatch_bootstrap_envelope(
@@ -67,33 +65,22 @@ class TestBootstrapFailureEmitsTerminated:
             profile_name="codegen",
         )
 
-        terminated = [
-            e for e in emitted
-            if isinstance(e, SessionTerminatedEvent)
-        ]
-        assert len(terminated) == 1, (
-            f"Expected exactly one SessionTerminatedEvent on "
-            f"runner_rpc=None path; got {len(terminated)}"
-        )
-        ev = terminated[0]
-        assert ev.session_id == "20260531_222243"
-        assert ev.agent_id == "build_judge"
-        assert ev.reason == "error"
-        # Inner exception details captured.
-        assert ev.error_type == "RuntimeError"
-        assert "spawn_session_runner" in (ev.error_summary or "")
+        server._emit_error_termination_from_exc.assert_called_once()
+        call = server._emit_error_termination_from_exc.call_args
+        exc = call.args[0]
+        assert isinstance(exc, RuntimeError)
+        assert "spawn_session_runner" in str(exc)
+        assert call.kwargs["session_id"] == "20260531_222243"
+        assert call.kwargs["agent_id"] == "build_judge"
 
     def test_emit_on_bootstrap_rpc_exception(self):
-        """Path B: bootstrap_session_threadsafe raises.  Covers
-        SecretResolutionError, apparmor compose failure, runner
-        RPC timeout, plugin discovery errors — any exception that
-        escapes the bootstrap RPC.  Empirical case (peer 7:1,
-        2026-05-31): gpg-agent passphrase expiry."""
-        from jaato_sdk.events import SessionTerminatedEvent
+        """Path B: bootstrap_session_threadsafe raises (SecretResolutionError,
+        apparmor compose failure, RPC timeout, …) → the exact exception is
+        delegated to the chokepoint.  Empirical case (peer 7:1, 2026-05-31):
+        gpg-agent passphrase expiry."""
         from server.runner_spawn import dispatch_bootstrap_envelope
 
-        server, emitted = self._make_server()
-        # Simulate SecretResolutionError on bootstrap RPC.
+        server = self._make_server()
         class SecretResolutionError(RuntimeError):
             pass
         secret_exc = SecretResolutionError(
@@ -112,30 +99,23 @@ class TestBootstrapFailureEmitsTerminated:
             profile_name="codegen",
         )
 
-        terminated = [
-            e for e in emitted
-            if isinstance(e, SessionTerminatedEvent)
-        ]
-        assert len(terminated) == 1
-        ev = terminated[0]
-        assert ev.session_id == "20260531_222243"
-        assert ev.reason == "error"
-        assert ev.error_type == "SecretResolutionError"
-        assert "pass://jaato/zhipuai/api-key" in (ev.error_summary or "")
-        assert "gpg" in (ev.error_summary or "")
+        server._emit_error_termination_from_exc.assert_called_once()
+        passed_exc = server._emit_error_termination_from_exc.call_args.args[0]
+        assert passed_exc is secret_exc
+        assert "pass://jaato/zhipuai/api-key" in str(passed_exc)
 
     def test_emit_failure_does_not_mask_bootstrap_failure(self, caplog):
-        """Defensive: if server.emit itself raises (transport
-        error, no subscribers, etc.), the helper logs the
-        emit-failure but does NOT raise — caller's bootstrap-
-        failure handling continues unchanged.  Keeps the
-        visibility-on-stoppage path from masking the underlying
-        bootstrap failure."""
+        """Defensive: if the chokepoint itself raises (transport error, no
+        subscribers, etc.), the helper logs but does NOT raise — the caller's
+        bootstrap-failure handling continues, the underlying failure isn't
+        masked."""
         from server.runner_spawn import _emit_bootstrap_terminated
 
         server = MagicMock()
         server._main_agent_id = "main"
-        server.emit = MagicMock(side_effect=RuntimeError("emit boom"))
+        server._emit_error_termination_from_exc = MagicMock(
+            side_effect=RuntimeError("emit boom"),
+        )
 
         # Should not raise.
         _emit_bootstrap_terminated(
@@ -143,29 +123,23 @@ class TestBootstrapFailureEmitsTerminated:
             session_id="20260531_222243",
             exc=ValueError("original bootstrap error"),
         )
-        # Both the emit-failure and root-cause survive in the log
-        # trail.  We check for the helper's own diagnostic line.
         assert any(
             "_emit_bootstrap_terminated" in rec.message
             for rec in caplog.records
         ), (
-            "Helper must log a diagnostic line when emit fails so "
+            "Helper must log a diagnostic line when the chokepoint fails so "
             "the visibility-path failure is itself observable."
         )
 
     def test_emit_uses_main_fallback_when_agent_id_absent(self):
-        """Defensive: ``server._main_agent_id`` may not be set
-        when bootstrap fails early.  ``agent_id`` falls back to
-        ``"main"`` so the field is always populated."""
-        from jaato_sdk.events import SessionTerminatedEvent
+        """Defensive: ``server._main_agent_id`` may not be set when bootstrap
+        fails early.  ``agent_id`` falls back to ``"main"`` in the chokepoint
+        delegation so the field is always populated."""
         from server.runner_spawn import dispatch_bootstrap_envelope
 
         server = MagicMock()
-        # Explicitly remove _main_agent_id to simulate early-fail.
-        del server._main_agent_id
+        del server._main_agent_id  # simulate early-fail
         server.runner_rpc = None
-        emitted: list = []
-        server.emit = lambda ev: emitted.append(ev)
 
         dispatch_bootstrap_envelope(
             server=server,
@@ -174,9 +148,5 @@ class TestBootstrapFailureEmitsTerminated:
             profile_name="any",
         )
 
-        terminated = [
-            e for e in emitted
-            if isinstance(e, SessionTerminatedEvent)
-        ]
-        assert len(terminated) == 1
-        assert terminated[0].agent_id == "main"
+        server._emit_error_termination_from_exc.assert_called_once()
+        assert server._emit_error_termination_from_exc.call_args.kwargs["agent_id"] == "main"
