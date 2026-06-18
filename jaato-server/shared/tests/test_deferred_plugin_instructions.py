@@ -140,6 +140,7 @@ def _make_session(
     session._system_instruction = None
     session._tools = []
     session._tool_plugins = None  # No profile restriction by default
+    session._tool_scopes = {}  # No per-plugin tool allow-list by default
     session._deferred_plugin_instructions = set()
     session._preloaded_plugins = set()
     # Normally set in configure(); bypassed by __new__.
