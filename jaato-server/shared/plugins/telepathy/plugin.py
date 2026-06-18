@@ -65,6 +65,21 @@ class TelepathyPlugin:
         self._initialized = False
         self._session = None
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Added to satisfy the ``ToolPlugin`` protocol's runtime
+        ``isinstance`` check (its absence silently dropped the plugin
+        at discovery — see the registry protocol-skip warning).  Per
+        Daniel's litmus test (``docs/design/runner-cascade-sharing.md``
+        §4.3), telepathy holds no per-session state the next cascade
+        session would benefit from having cleared: its only
+        per-session reference (``_session``) is re-wired by
+        :meth:`set_session` during the next session's
+        ``JaatoSession.configure()``, so there is nothing to clear here.
+        """
+        # Intentionally empty — _session is re-set per session.
+
     def set_session(self, session: 'JaatoSession') -> None:
         """Capture a reference to the host session.
 
@@ -159,6 +174,29 @@ class TelepathyPlugin:
         # subagent's loop.  The parent has its own permission
         # handling on whatever it does with the injected content.
         return ["share_context"]
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Describe ``share_context`` to the model — only when usable.
+
+        Required by the ``ToolPlugin`` protocol (its absence silently
+        dropped the plugin at discovery).  Mirrors :meth:`is_tool_visible`'s
+        parent-gating: the instructions are emitted ONLY when the host
+        session has a parent, so the model is never told about a tool the
+        per-turn visibility filter is hiding.  Returns ``None`` for root /
+        parentless sessions.
+        """
+        if self._session is None:
+            return None
+        if getattr(self._session, '_parent_session', None) is None:
+            return None
+        return (
+            "You have access to `share_context`, which pushes context up "
+            "to your parent agent without it re-reading files or "
+            "re-executing tools. Share COMPLETE file contents (never "
+            "summaries or excerpts) from your memory — do not re-read "
+            "files first. Use it to hand the parent full file contents you "
+            "have already read, plus your findings and explanatory notes."
+        )
 
     def _execute_share_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Push structured context to the host session's parent.
