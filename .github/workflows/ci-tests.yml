@@ -1,0 +1,64 @@
+name: CI Tests
+
+# Runs on every PR (each push to a PR branch) and on direct pushes to
+# main. Pairing a job here with a branch-protection "required status
+# check" is what actually blocks a merge — see the per-job notes below.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------
+  # REQUIRED check (promote in branch protection once confirmed green
+  # in real CI). Already green locally: 114 passed. Blocks the silent
+  # plugin-protocol-drift regression class — a plugin/fixture missing a
+  # protocol method (the telepathy + enrichment-fixture bugs) is dropped
+  # at discovery with only a WARNING, so without this gate it ships
+  # invisibly. The AST-based guards here import no optional deps, so
+  # they're robust under the minimal `.[dev]` install.
+  # ---------------------------------------------------------------
+  contract-guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install (editable, dev extras)
+        run: |
+          pip install -e jaato-sdk/
+          pip install -e "jaato-server/.[dev]"
+      - name: Plugin contract guards
+        run: |
+          pytest -q \
+            jaato-server/shared/tests/test_all_plugins_satisfy_protocol.py \
+            jaato-server/shared/tests/test_plugin_tier_partition.py \
+            jaato-server/shared/tests/test_reset_for_next_session.py \
+            jaato-server/shared/tests/test_enrichment_plugin.py
+
+  # ---------------------------------------------------------------
+  # NON-BLOCKING (do NOT add to required checks yet). Reports the
+  # authoritative CI failure set for the full shared/tests suite so the
+  # pre-existing-failure backlog can be burned down (quarantine env-gated
+  # tests with skipif, xfail genuine drift), then promoted to a required
+  # check once green. `--continue-on-collection-errors` so a single bad
+  # import (e.g. a stale symbol) doesn't mask the rest of the suite.
+  # ---------------------------------------------------------------
+  full-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install (editable, dev extras)
+        run: |
+          pip install -e jaato-sdk/
+          pip install -e "jaato-server/.[dev]"
+      - name: Full shared/tests suite
+        run: |
+          pytest -q --continue-on-collection-errors \
+            jaato-server/shared/tests/
