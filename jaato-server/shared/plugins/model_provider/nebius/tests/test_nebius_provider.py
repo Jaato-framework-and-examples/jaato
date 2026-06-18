@@ -507,6 +507,49 @@ class TestVerifyAuth:
         with patch.dict("os.environ", {"JAATO_NEBIUS_API_KEY": "nbk-test-test"}):
             assert provider.verify_auth() is True
 
+    def test_verify_auth_honors_profile_extra_api_key(self):
+        """The pre-init gate must accept a profile-supplied key in
+        config.extra['api_key'] — the shape the runtime builds for
+        verify_auth (ProviderConfig(extra=plugin_configs[nebius])) when a
+        profile sets plugin_configs.nebius.api_key: pass://... .  With no env
+        var and no stored creds, this used to wrongly fail (parity bug vs
+        openrouter/zhipuai)."""
+        provider = NebiusProvider()
+        cfg = ProviderConfig(extra={"api_key": "nbk-test-from-profile"})
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nebius.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),  # no stored creds
+            ):
+                assert provider.verify_auth(config=cfg) is True
+
+    def test_verify_auth_honors_profile_top_level_api_key(self):
+        """config.api_key (top-level) is also honored."""
+        provider = NebiusProvider()
+        cfg = ProviderConfig(api_key="nbk-test-top-level")
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nebius.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),
+            ):
+                assert provider.verify_auth(config=cfg) is True
+
+    def test_verify_auth_profile_key_beats_missing_env_and_creds(self):
+        """End-to-end of the kb scenario: no env, no stored creds, key only in
+        the profile config -> verify_auth returns True (does NOT raise)."""
+        provider = NebiusProvider()
+        cfg = ProviderConfig(extra={"api_key": "nbk-test-x", "workspace_path": "/tmp"})
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nebius.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),
+            ):
+                # allow_interactive=False is the bootstrap path; must not raise.
+                assert provider.verify_auth(allow_interactive=False, config=cfg) is True
+
     def test_verify_auth_self_hosted(self):
         provider = NebiusProvider()
         with patch.dict("os.environ", {"JAATO_NEBIUS_BASE_URL": "http://localhost:8000/v1"}, clear=True):
