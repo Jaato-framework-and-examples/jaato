@@ -192,6 +192,7 @@ def test_all_providers_expose_the_capability_contract():
         ("openrouter", "OpenRouterProvider"),
         ("ollama", "OllamaProvider"),
         ("zhipuai", "ZhipuAIProvider"),
+        ("nebius", "NebiusProvider"),
     ]
     for pkg, cls_name in provider_modules:
         mod = importlib.import_module(
