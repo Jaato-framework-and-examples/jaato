@@ -283,12 +283,19 @@ class NebiusProvider(ModalityCapabilityMixin):
     ) -> bool:
         """Verify that authentication is configured.
 
-        ``config`` is accepted for protocol compatibility but unused — Nebius
-        reads its API key from the environment / stored credentials.
+        Must work before ``initialize()`` — checks for the API key without
+        ever touching ``self._client`` (not yet initialized).
 
-        Must work before ``initialize()`` — checks for the API key
-        in environment variables and stored credentials. Does not
-        access ``self._client`` (not yet initialized).
+        ``config`` is honored: a profile-supplied ``api_key`` (e.g.
+        ``plugin_configs.nebius.api_key: pass://...``, which the daemon
+        expands) takes effect during this pre-init gate.  The runtime hands
+        verify_auth a ``ProviderConfig`` whose ``extra`` carries the
+        provider's profile overrides (``ProviderConfig(extra=
+        plugin_configs[provider])``), so the expanded key lands in
+        ``config.extra['api_key']`` (and may also be on ``config.api_key``).
+        Without reading it here, a valid profile credential is rejected
+        before ``initialize()`` — which DOES honor it — ever runs.  Mirrors
+        openrouter / zhipuai.
 
         When the stored credential file exists but cannot be loaded
         (corrupt JSON, permission error, missing ``api_key`` field),
@@ -300,6 +307,8 @@ class NebiusProvider(ModalityCapabilityMixin):
         Args:
             allow_interactive: Ignored (Nebius uses API keys only).
             on_message: Optional callback for status messages.
+            config: Optional profile ``ProviderConfig``; its ``api_key`` /
+                ``extra['api_key']`` is consulted first.
 
         Returns:
             True if authentication is configured or endpoint is self-hosted.
@@ -312,6 +321,20 @@ class NebiusProvider(ModalityCapabilityMixin):
         from .env import ENV_NEBIUS_API_KEY
 
         base_url = resolve_base_url()
+
+        # Profile-supplied key wins — the daemon expands pass:// secrets into
+        # the verify-time ProviderConfig (extra carries plugin_configs[nebius]),
+        # so without this the pre-init gate rejects a perfectly good
+        # profile-level credential that initialize() would accept.
+        profile_key: Optional[str] = None
+        if config is not None:
+            profile_key = config.api_key or (
+                config.extra.get("api_key") if config.extra else None
+            )
+        if profile_key:
+            if on_message:
+                on_message("Found Nebius API key (profile config)")
+            return True
 
         # Check env var first (highest priority)
         env_key = os.environ.get(ENV_NEBIUS_API_KEY)
