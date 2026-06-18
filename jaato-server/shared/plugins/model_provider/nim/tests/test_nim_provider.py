@@ -480,6 +480,47 @@ class TestVerifyAuth:
         with patch.dict("os.environ", {"JAATO_NIM_API_KEY": "nvapi-test"}):
             assert provider.verify_auth() is True
 
+    def test_verify_auth_honors_profile_extra_api_key(self):
+        """The pre-init gate must accept a profile-supplied key in
+        config.extra['api_key'] — the shape the runtime builds for
+        verify_auth (ProviderConfig(extra=plugin_configs[nim])).  With no
+        env var and no stored creds, this used to wrongly fail (parity bug
+        vs openrouter/zhipuai)."""
+        provider = NIMProvider()
+        cfg = ProviderConfig(extra={"api_key": "nvapi-from-profile"})
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nim.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),
+            ):
+                assert provider.verify_auth(config=cfg) is True
+
+    def test_verify_auth_honors_profile_top_level_api_key(self):
+        """config.api_key (top-level) is also honored."""
+        provider = NIMProvider()
+        cfg = ProviderConfig(api_key="nvapi-top-level")
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nim.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),
+            ):
+                assert provider.verify_auth(config=cfg) is True
+
+    def test_verify_auth_profile_key_beats_missing_env_and_creds(self):
+        """No env, no stored creds, key only in the profile config ->
+        verify_auth returns True (does NOT raise) on the bootstrap path."""
+        provider = NIMProvider()
+        cfg = ProviderConfig(extra={"api_key": "nvapi-x", "workspace_path": "/tmp"})
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nim.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),
+            ):
+                assert provider.verify_auth(allow_interactive=False, config=cfg) is True
+
     def test_verify_auth_self_hosted(self):
         provider = NIMProvider()
         with patch.dict("os.environ", {"JAATO_NIM_BASE_URL": "http://localhost:8000/v1"}, clear=True):
