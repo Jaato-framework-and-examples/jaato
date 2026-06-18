@@ -85,7 +85,7 @@ class TestModalityCapabilityMixin:
 
     def test_override_changes_supports_modality(self):
         class Vision(ModalityCapabilityMixin):
-            def modalities(self):
+            def modalities(self, model=None):
                 return {MODALITY_TEXT, MODALITY_IMAGE}
 
         v = Vision()
@@ -143,6 +143,18 @@ class TestImageCapableProviderTables:
             assert p.modalities() == {"text", "image"}, m
         p._model_name = "not-a-served-model"
         assert p.modalities() == {"text"}
+
+    def test_modalities_accepts_explicit_model_for_other_than_active(self):
+        # The active model is text-only, but a caller (vision-tier
+        # validation) asks about a DIFFERENT model without switching.
+        from ..anthropic.provider import AnthropicProvider
+
+        p = self._bare(AnthropicProvider)
+        p._model_name = "claude-2.1"  # active = text-only
+        assert p.modalities() == {"text"}
+        assert p.modalities(model="claude-opus-4-5") == {"text", "image"}
+        assert p.supports_modality("image", model="claude-3-5-sonnet") is True
+        assert p.supports_modality("image", model="claude-2.1") is False
 
     def test_knob_overrides_table_absence(self):
         # The framework_overrides.modalities knob asserts a model the table

@@ -248,13 +248,20 @@ class ModalityCapabilityMixin:
     provider's own constructor.
     """
 
-    def modalities(self) -> Set[str]:
-        """INPUT modalities the active model accepts.  Text-only floor."""
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
+        """INPUT modalities ``model`` (or the active model) accepts.
+
+        Text-only floor — this adapter marshals text only, so the answer
+        is model-independent and ``model`` is ignored here.  The ``model``
+        parameter lets callers ask about a model OTHER than the connected
+        one (e.g. validating a vision-tier model before switching into it);
+        image-capable overrides honor it.
+        """
         return {MODALITY_TEXT}
 
-    def supports_modality(self, kind: str) -> bool:
-        """Whether the active model accepts ``kind`` as input."""
-        return kind.strip().lower() in self.modalities()
+    def supports_modality(self, kind: str, model: Optional[str] = None) -> bool:
+        """Whether ``model`` (or the active model) accepts ``kind`` as input."""
+        return kind.strip().lower() in self.modalities(model)
 
 
 @runtime_checkable
@@ -553,35 +560,38 @@ class ModelProviderPlugin(Protocol):
         """
         ...
 
-    def modalities(self) -> Set[str]:
-        """INPUT modalities the CURRENTLY-CONNECTED model accepts.
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
+        """INPUT modalities ``model`` (default: the connected model) accepts.
 
         Returns a set of canonical lowercase tokens (``"text"`` at
-        minimum, plus ``"image"`` / ``"audio"`` / … when the active model
-        and this provider's adapter support them).  Resolved per-model
-        via :func:`resolve_modalities` (catalog detect → profile knob →
-        static table); a gateway provider serves both vision and
-        text-only models, so the answer is for the active model, not the
-        provider as a whole.
+        minimum, plus ``"image"`` / ``"audio"`` / … when the model and
+        this provider's adapter support them).  Resolved per-model via
+        :func:`resolve_modalities` (catalog detect → profile knob → static
+        table); a gateway provider serves both vision and text-only
+        models, so the answer is per-model.
+
+        ``model`` lets callers ask about a model OTHER than the connected
+        one — e.g. validating a ``vision`` tier's model before switching
+        into it (V1 tiers are same-provider, so the tier's model lives on
+        this provider).  When ``None``, answers for the active model.
 
         The default text-only floor is supplied by
         :class:`ModalityCapabilityMixin`; image-capable adapters override
         this.  Used by tier validation (a ``vision`` tier must map to an
-        image-capable provider) and the session content-boundary gate (an
-        image ``Part`` must not be sent to a provider whose active model
-        can't view it).
+        image-capable model) and the session content-boundary gate (an
+        image ``Part`` must not be sent to a model that can't view it).
 
         Returns:
-            The active model's input-modality set (never empty — at least
+            The model's input-modality set (never empty — at least
             ``{"text"}``).
         """
         ...
 
-    def supports_modality(self, kind: str) -> bool:
-        """Whether the active model accepts ``kind`` as input.
+    def supports_modality(self, kind: str, model: Optional[str] = None) -> bool:
+        """Whether ``model`` (default: the connected model) accepts ``kind``.
 
         Convenience over :meth:`modalities`:
-        ``kind in self.modalities()``.  Supplied by
+        ``kind in self.modalities(model)``.  Supplied by
         :class:`ModalityCapabilityMixin`.
         """
         ...
