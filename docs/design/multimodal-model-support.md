@@ -1,7 +1,11 @@
 # Multimodal Model Support — vision (and audio/…) via model-tier roles
 
-**Status:** Proposed (design). Scope: **v1 = input vision via the tier system**;
-output/generation and audio/PDF breadth are explicit later scopes (§9).
+**Status:** v1 **implemented** (PRs #297 capability primitive, #298 honest
+provider vision tables, #299 `vision` tier + content gate). Scope: **v1 =
+input vision via the tier system**; output/generation and audio/PDF breadth
+are explicit later scopes (§9). Open follow-up: config-time vision-tier
+validation (the content gate already fails loud at first image, so this is an
+earlier-warning enhancement, not a correctness gap).
 
 ## Goal
 

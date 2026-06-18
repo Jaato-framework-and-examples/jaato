@@ -518,13 +518,17 @@ class LifecycleTools:
         reference once the system-prompt augmentation reminds it of
         which tier it currently occupies.
         """
-        from .model_tiers import TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR
+        from .model_tiers import (
+            TIER_PLANNER,
+            TIER_DISPATCHER,
+            TIER_EXECUTOR,
+            TIER_VISION,
+        )
         return ToolSchema(
             name="enter_tier",
             description=(
-                "Switch the session's active model tier.  Three tiers "
-                "are available; pick the one that matches what you're "
-                "about to do:\n\n"
+                "Switch the session's active model tier.  Pick the one "
+                "that matches what you're about to do:\n\n"
                 "* `planner` — deep thought, multi-step reasoning, "
                 "complex problem decomposition.  Most expensive; use "
                 "when you genuinely need the strongest model.\n"
@@ -532,7 +536,14 @@ class LifecycleTools:
                 "deciding which tools to call.  Default starting tier.\n"
                 "* `executor` — mechanical tool calls and result "
                 "interpretation when the plan is clear.  Cheapest; use "
-                "when the work doesn't need reasoning.\n\n"
+                "when the work doesn't need reasoning.\n"
+                "* `vision` — view image content (diagrams, screenshots).  "
+                "Switch here BEFORE reading an image with a tool (e.g. "
+                "viewing a file that is an image), then switch back when "
+                "done.  Only useful when the session declares a vision "
+                "tier; if you try to read an image while in a non-vision "
+                "tier, the image is withheld and the tool result tells "
+                "you to switch here first.\n\n"
                 "Switching is cheap (no network round-trip; just "
                 "re-points the active provider).  After your work at "
                 "the new tier is done, switch back via another "
@@ -544,10 +555,16 @@ class LifecycleTools:
                 "properties": {
                     "name": {
                         "type": "string",
-                        "enum": [TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR],
+                        "enum": [
+                            TIER_PLANNER,
+                            TIER_DISPATCHER,
+                            TIER_EXECUTOR,
+                            TIER_VISION,
+                        ],
                         "description": (
                             "Target tier name.  Must be one of "
-                            f"{TIER_PLANNER}/{TIER_DISPATCHER}/{TIER_EXECUTOR}."
+                            f"{TIER_PLANNER}/{TIER_DISPATCHER}/"
+                            f"{TIER_EXECUTOR}/{TIER_VISION}."
                         ),
                     },
                 },
