@@ -2520,7 +2520,7 @@ def resolve_plugin_apparmor_rules(
     workspace_path: str,
     config_root: Optional[str],
 ) -> Optional[List[str]]:
-    """Walk ``profile.plugins`` and union each plugin's contributed AppArmor rules.
+    """Union the AppArmor rules contributed by every plugin the runner loads.
 
     Phase 0/1 of the plugin-apparmor-contribution refactor
     (template v20+, 2026-05-16).  See
@@ -2531,15 +2531,20 @@ def resolve_plugin_apparmor_rules(
     the WS path (``websocket.py:_apparmor_pre_init_hook``) can call it
     without duplicating the resolution logic.
 
-    For each plugin listed in ``profile.plugins`` (modifier suffixes
-    like ``(preload)`` stripped), look up the plugin instance from
-    ``server.registry`` and call its optional
-    ``get_apparmor_rules`` classmethod with session context.
+    Iterates **every discovered plugin** (``registry.all_plugins()``),
+    not just ``profile.plugins``, and calls each plugin's optional
+    ``get_apparmor_rules`` classmethod with session context.  The full-set
+    walk is deliberate: the confined runner initializes ALL discovered
+    runner-tier plugins regardless of ``profile.plugins`` (the load-gate was
+    disabled in #114), so the grant set must match the *loaded* set, not the
+    *declared* set — otherwise auto-loaded plugins init without their
+    host-path rules and fail with ``[Errno 13]``.  The walk self-filters:
+    only runner-tier filesystem plugins define ``get_apparmor_rules`` (see
+    the body comment).  ``plugin_configs`` is still applied per plugin.
 
-    Returns ``None`` when the profile has no plugins, the server has
-    no registry, or no plugin contributes anything — the renderer
-    treats ``None`` and ``[]`` identically (renders "(none for this
-    session)" marker).
+    Returns ``None`` when the server has no registry or no plugin
+    contributes anything — the renderer treats ``None`` and ``[]``
+    identically (renders "(none for this session)" marker).
 
     Failures inside an individual plugin's ``get_apparmor_rules`` are
     logged but do not abort — the framework baseline still renders.
@@ -2550,17 +2555,34 @@ def resolve_plugin_apparmor_rules(
         return None
     rules: List[str] = []
 
-    plugin_specs = getattr(profile, "plugins", None) or []
     registry = getattr(server, "registry", None)
     plugin_configs = getattr(profile, "plugin_configs", None) or {}
-    if plugin_specs and registry is not None:
-        for spec in plugin_specs:
-            plugin_name = spec.split("(", 1)[0].strip()
-            if not plugin_name:
-                continue
-            plugin = registry.get_plugin(plugin_name)
-            if plugin is None:
-                continue
+    if registry is not None:
+        # Grant for the plugins the RUNNER actually loads — NOT the declared
+        # ``profile.plugins``.  ``expose_all`` (runner/session.py) initializes
+        # ALL discovered runner-tier plugins regardless of ``profile.plugins``:
+        # the PR-112 load-gate that would have scoped init to the declared set
+        # was disabled in #114 (it broke cascades).  So an auto-loaded plugin
+        # (memory / references / subagent — none of which must be declared)
+        # initializes and touches ``~/.jaato/{memories,references,profiles,
+        # agents}``; if the apparmor profile only grants ``profile.plugins``,
+        # those inits hit ``[Errno 13] Permission denied`` and the plugin is
+        # disabled for the whole session.  This regressed 2026-05-16 when the
+        # grants migrated out of the baseline template keyed on
+        # ``profile.plugins`` membership, while the loader had — since #114
+        # (2026-05-15) — already been loading them unconditionally.  The two
+        # subsystems disagreed on the plugin set; this realigns the grant set
+        # to the load set.
+        #
+        # Iterating the full discovered set SELF-FILTERS to the runner-tier
+        # filesystem plugins: only they define ``get_apparmor_rules``.
+        # Daemon-tier plugins run daemon-side, never in the confined runner,
+        # and contribute nothing (verified: all 7 ``get_apparmor_rules``
+        # plugins are ``PLUGIN_TIER="runner"``; ``test_plugin_tier_partition``
+        # enforces the daemon/runner split).  ``plugin_configs`` is still
+        # honoured per-plugin so a declared plugin's profile config reaches
+        # its rule contributor.
+        for plugin_name, plugin in registry.all_plugins().items():
             get_rules = getattr(plugin, "get_apparmor_rules", None)
             if get_rules is None or not callable(get_rules):
                 continue

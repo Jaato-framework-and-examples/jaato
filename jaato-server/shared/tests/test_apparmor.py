@@ -1885,14 +1885,20 @@ class TestResolvePluginApparmorRules:
         )
         assert out is None
 
-    def test_returns_none_when_no_plugins(self):
+    def test_returns_none_when_registry_empty(self):
+        # Server 0.6.x+: the composer grants for the DISCOVERED plugin set
+        # (registry.all_plugins()), not profile.plugins — an empty registry
+        # contributes nothing.
         from server.apparmor import resolve_plugin_apparmor_rules
         profile = MagicMock()
-        profile.plugins = []
         profile.plugin_configs = {}
         profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
+        registry = MagicMock()
+        registry.all_plugins.return_value = {}
+        server = MagicMock()
+        server.registry = registry
         out = resolve_plugin_apparmor_rules(
-            server=MagicMock(), profile=profile,
+            server=server, profile=profile,
             session_id="s1", workspace_path="/ws", config_root=None,
         )
         assert out is None
@@ -1900,14 +1906,12 @@ class TestResolvePluginApparmorRules:
     def test_returns_none_when_no_plugin_overrides(self):
         from server.apparmor import resolve_plugin_apparmor_rules
         profile = MagicMock()
-        profile.plugins = ["cli", "memory"]
         profile.plugin_configs = {}
         profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
-        # Plugin instances without get_apparmor_rules — registry returns
-        # plain objects with no attribute.
+        # Discovered plugins without get_apparmor_rules contribute nothing.
         class _Plain: pass
         registry = MagicMock()
-        registry.get_plugin.return_value = _Plain()
+        registry.all_plugins.return_value = {"cli": _Plain(), "todo": _Plain()}
         server = MagicMock()
         server.registry = registry
         out = resolve_plugin_apparmor_rules(
@@ -1930,11 +1934,10 @@ class TestResolvePluginApparmorRules:
                 return ["@{HOME}/.cache/x/ rw,", "@{HOME}/.cache/x/** rwk,"]
 
         profile = MagicMock()
-        profile.plugins = ["a", "b"]
         profile.plugin_configs = {}
         profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
         registry = MagicMock()
-        registry.get_plugin.side_effect = lambda n: {"a": _PluginA(), "b": _PluginB()}.get(n)
+        registry.all_plugins.return_value = {"a": _PluginA(), "b": _PluginB()}
         server = MagicMock()
         server.registry = registry
 
@@ -1948,21 +1951,28 @@ class TestResolvePluginApparmorRules:
             "@{HOME}/.cache/x/** rwk,",
         ]
 
-    def test_modifier_suffix_stripped(self):
-        """`references(preload)` should resolve to `references`."""
+    def test_grants_loaded_plugins_even_with_empty_profile_plugins(self):
+        """Regression (2026-06-18): a profile with ``plugins: []`` STILL gets
+        the grants for auto-loaded plugins.  The runner inits ALL discovered
+        runner-tier plugins regardless of profile.plugins (#114 disabled the
+        load-gate), so the composer must grant for the loaded set — else
+        memory/references/subagent init with [Errno 13].  Pre-fix this returned
+        None for an empty profile.plugins, disabling those plugins every stage.
+        """
         from server.apparmor import resolve_plugin_apparmor_rules
 
-        class _Plugin:
+        class _Memory:
             @classmethod
             def get_apparmor_rules(cls, **kw):
-                return ["/test rwk,"]
+                return ["@{HOME}/.jaato/memories/** rw,"]
 
         profile = MagicMock()
-        profile.plugins = ["references(preload)"]
+        profile.plugins = []  # IGNORED by the composer now
         profile.plugin_configs = {}
-        profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
+        profile.gc = None
         registry = MagicMock()
-        registry.get_plugin.side_effect = lambda n: _Plugin() if n == "references" else None
+        # memory auto-loads even though it's not in profile.plugins
+        registry.all_plugins.return_value = {"memory": _Memory()}
         server = MagicMock()
         server.registry = registry
 
@@ -1970,7 +1980,7 @@ class TestResolvePluginApparmorRules:
             server=server, profile=profile,
             session_id="s1", workspace_path="/ws", config_root=None,
         )
-        assert out == ["/test rwk,"]
+        assert out == ["@{HOME}/.jaato/memories/** rw,"]
 
     def test_plugin_failure_does_not_abort(self, caplog):
         """One plugin's exception is logged but doesn't break the union."""
@@ -1987,11 +1997,11 @@ class TestResolvePluginApparmorRules:
                 return ["/ok rwk,"]
 
         profile = MagicMock()
-        profile.plugins = ["broken", "ok"]
         profile.plugin_configs = {}
         profile.gc = None  # Phase 3b: gc field also unions rules; opt out here.
         registry = MagicMock()
-        registry.get_plugin.side_effect = lambda n: {"broken": _Broken(), "ok": _Ok()}[n]
+        # dict preserves insertion order: broken raises (logged), ok contributes
+        registry.all_plugins.return_value = {"broken": _Broken(), "ok": _Ok()}
         server = MagicMock()
         server.registry = registry
 
@@ -2231,25 +2241,25 @@ class TestPromptLibraryAgentsContribution:
         assert len(rules) == 10
 
     def test_resolver_unions_subagent_and_prompt_library_agents(self):
-        """When both plugins are in profile.plugins, the resolver appends
-        each plugin's contribution to the union (duplicate rules are
-        idempotent at the AppArmor parser level)."""
+        """When both plugins are discovered, the resolver appends each
+        plugin's contribution to the union (duplicate rules are idempotent
+        at the AppArmor parser level)."""
         from server.apparmor import resolve_plugin_apparmor_rules
         from shared.plugins.subagent.plugin import SubagentPlugin
         from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
 
         class _StubRegistry:
-            def get_plugin(self, name):
+            def all_plugins(self):
                 return {
                     "subagent": SubagentPlugin(),
                     "prompt_library": PromptLibraryPlugin(),
-                }.get(name)
+                }
 
         class _StubServer:
             registry = _StubRegistry()
 
         class _StubProfile:
-            plugins = ["subagent", "prompt_library"]
+            plugins = []  # composer ignores this now; discovery drives grants
             plugin_configs = {}
             gc = None
 
