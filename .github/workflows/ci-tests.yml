@@ -16,7 +16,8 @@ jobs:
   # protocol method (the telepathy + enrichment-fixture bugs) is dropped
   # at discovery with only a WARNING, so without this gate it ships
   # invisibly. The AST-based guards here import no optional deps, so
-  # they're robust under the minimal `.[dev]` install.
+  # they don't depend on optional backends, but the job installs `.[all]`
+  # (the documented dev env) so plugin-importing guards resolve too.
   # ---------------------------------------------------------------
   contract-guards:
     runs-on: ubuntu-latest
@@ -29,7 +30,7 @@ jobs:
       - name: Install (editable, dev extras)
         run: |
           pip install -e jaato-sdk/
-          pip install -e "jaato-server/.[dev]"
+          pip install -e "jaato-server/.[all]"
       - name: Plugin contract guards
         run: |
           pytest -q \
@@ -57,7 +58,7 @@ jobs:
       - name: Install (editable, dev extras)
         run: |
           pip install -e jaato-sdk/
-          pip install -e "jaato-server/.[dev]"
+          pip install -e "jaato-server/.[all]"
       - name: Full shared/tests suite
         run: |
           pytest -q --continue-on-collection-errors \
