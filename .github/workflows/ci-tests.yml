@@ -11,13 +11,16 @@ on:
 jobs:
   # ---------------------------------------------------------------
   # REQUIRED check (promote in branch protection once confirmed green
-  # in real CI). Already green locally: 114 passed. Blocks the silent
-  # plugin-protocol-drift regression class — a plugin/fixture missing a
-  # protocol method (the telepathy + enrichment-fixture bugs) is dropped
-  # at discovery with only a WARNING, so without this gate it ships
-  # invisibly. The AST-based guards here import no optional deps, so
-  # they don't depend on optional backends, but the job installs `.[all]`
-  # (the documented dev env) so plugin-importing guards resolve too.
+  # in real CI). Blocks the silent plugin-protocol-drift regression
+  # class — a plugin/fixture missing a protocol method (the telepathy +
+  # enrichment-fixture bugs) is dropped at discovery with only a WARNING,
+  # so without this gate it ships invisibly.
+  #
+  # Kept deliberately light + reliable: the only optional backend any of
+  # these guards imports is the interactive_shell plugin's `pexpect`
+  # (.[interactive]). No system-dependency extras (notably `kerberos`,
+  # whose `gssapi` needs libkrb5-dev to build) — so the required check
+  # never goes red for an unrelated install reason.
   # ---------------------------------------------------------------
   contract-guards:
     runs-on: ubuntu-latest
@@ -27,10 +30,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install (editable, dev extras)
+      - name: Install (editable + interactive backend)
         run: |
           pip install -e jaato-sdk/
-          pip install -e "jaato-server/.[all]"
+          pip install -e "jaato-server/.[dev,interactive]"
       - name: Plugin contract guards
         run: |
           pytest -q \
@@ -46,6 +49,12 @@ jobs:
   # tests with skipif, xfail genuine drift), then promoted to a required
   # check once green. `--continue-on-collection-errors` so a single bad
   # import (e.g. a stale symbol) doesn't mask the rest of the suite.
+  #
+  # Installs the full `.[all]` dev env so the failure list reflects real
+  # test failures, not missing-optional-backend import noise. `.[all]`
+  # pulls the `kerberos` extra (gssapi), which needs the libkrb5 build
+  # headers — install them first; graphviz covers the diagrams plugin's
+  # render path.
   # ---------------------------------------------------------------
   full-suite:
     runs-on: ubuntu-latest
@@ -55,7 +64,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install (editable, dev extras)
+      - name: System build deps (gssapi / diagrams)
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev graphviz
+      - name: Install (editable, all extras)
         run: |
           pip install -e jaato-sdk/
           pip install -e "jaato-server/.[all]"
