@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch
 
-from jaato_sdk.events import ConnectedEvent
+from jaato_sdk.events import ConnectedEvent, ClientType
 
 
 class TestServerVersionInConnectedEvent:
@@ -81,7 +81,7 @@ class TestIPCClientServerVersion:
 
     def test_server_version_none_before_connect(self):
         from jaato_sdk.client.ipc import IPCClient
-        client = IPCClient(socket_path="/tmp/test.sock", auto_start=False)
+        client = IPCClient(socket_path="/tmp/test.sock", auto_start=False, client_type=ClientType.TERMINAL)
         assert client.server_version is None
 
 
@@ -95,6 +95,7 @@ class TestRecoveryClientClassifiesIncompatibleAsPermanent:
         client = IPCRecoveryClient(
             socket_path="/tmp/test.sock",
             auto_start=False,
+            client_type=ClientType.TERMINAL,
         )
         # Major-version mismatch: incompatible wire shape.
         err = IncompatibleServerError("2.0", "1.0", server_version="0.5.0")
@@ -107,6 +108,7 @@ class TestRecoveryClientClassifiesIncompatibleAsPermanent:
         client = IPCRecoveryClient(
             socket_path="/tmp/test.sock",
             auto_start=False,
+            client_type=ClientType.TERMINAL,
         )
         err = ConnectionRefusedError("Connection refused")
         assert client._classify_error(err) == "transient"
@@ -120,6 +122,7 @@ class TestRecoveryClientServerVersionProperty:
         client = IPCRecoveryClient(
             socket_path="/tmp/test.sock",
             auto_start=False,
+            client_type=ClientType.TERMINAL,
         )
         assert client.server_version is None
 
@@ -130,9 +133,10 @@ class TestRecoveryClientServerVersionProperty:
         client = IPCRecoveryClient(
             socket_path="/tmp/test.sock",
             auto_start=False,
+            client_type=ClientType.TERMINAL,
         )
         # Simulate a connected inner client
-        inner = IPCClient(socket_path="/tmp/test.sock", auto_start=False)
+        inner = IPCClient(socket_path="/tmp/test.sock", auto_start=False, client_type=ClientType.TERMINAL)
         inner._server_version = "0.2.28"
         client._client = inner
         assert client.server_version == "0.2.28"
