@@ -4700,6 +4700,7 @@ class SessionManager:
         agent_params: Optional[Dict[str, str]] = None,
         apparmor: Optional[bool] = None,
         cascade_driver_id: Optional[str] = None,
+        inline_profile_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -4758,6 +4759,15 @@ class SessionManager:
                 this through from the originating reactor handler
                 (`cascade_after_*.py`).  See
                 ``docs/design/runner-cascade-sharing.md``.
+            inline_profile_data: Optional dict carrying an inline
+                ``SubagentProfile`` shape (model/provider/plugins/…), the
+                canonical ``build_inline_profile`` input.  Forwarded to
+                :meth:`create_session` so callers with a profile built
+                on-the-fly (rather than name-resolved from
+                ``.jaato/profiles/``) can spawn a headless session — used by
+                the ephemeral remote-spawn path, which receives a serialized
+                profile from the origin peer.  Mutually exclusive with
+                ``profile_name`` in practice.
 
         Returns:
             The session ID (empty string on failure).
@@ -4773,6 +4783,7 @@ class SessionManager:
             config_root=config_root,
             apparmor=apparmor,
             cascade_driver_id=cascade_driver_id,
+            inline_profile_data=inline_profile_data,
         )
         if not session_id:
             # Server 0.6.50.1+: log at WARNING so reactor callers
@@ -7691,6 +7702,7 @@ class SessionManager:
         agent_name: str,
         on_output: Any,
         workspace_path: Optional[str] = None,
+        on_started: Any = None,
     ) -> str:
         """Implementation of ephemeral session run, called via fresh-context wrap.
 
@@ -7722,7 +7734,6 @@ class SessionManager:
         """
         import json as _json
         import uuid
-        from shared.plugins.subagent.config import build_inline_profile
 
         # Parse profile/config
         profile_data = _json.loads(profile_json) if profile_json else {}
@@ -7743,75 +7754,155 @@ class SessionManager:
         for source in (profile_data, inline_data):
             for key, value in source.items():
                 merged.setdefault(key, value)
-        profile = build_inline_profile(
-            merged,
-            name="<ephemeral>",
-            description=f"Ephemeral subagent: {agent_name}",
+        import queue
+        import threading
+
+        # Spike (§7c remote-spawn repair): route the ephemeral run through the
+        # PROVEN create_headless_session path instead of constructing an
+        # in-daemon JaatoServer.  This gives the delegated agent a real
+        # confined runner + AppArmor (the old client_id=None path ran it
+        # UNCONFINED in the daemon) and fixes the post-seat-flip TypeError
+        # (JaatoServer.send_message no longer takes on_output).  Output is
+        # sourced from the EventBus via an in-process cascade client keyed by a
+        # per-spawn cascade_driver_id; a forwarder thread relays it to
+        # ``on_output`` PER-EMIT so streaming granularity is preserved WITHOUT
+        # calling on_output under SessionManager._lock (the event callback runs
+        # under the lock and must stay trivial).  Workspace is per-session via
+        # create_headless_session(workspace_path=...) — no global chdir /
+        # JAATO_WORKSPACE_ROOT mutation (the old path raced sibling sessions by
+        # mutating daemon-global cwd).
+        from jaato_sdk.events import AgentOutputEvent, SessionTerminatedEvent
+
+        # Source taxonomy (locked with gossip): relay ONLY model output into
+        # the forwarded stream.  Drop the prompt echo (source="user"),
+        # tool/status/lifecycle, and thinking (CoT is an origin opt-in, never
+        # forwarded by default across a federation boundary).  Fail-closed: any
+        # unlisted source is dropped, never relayed.
+        relay_sources = frozenset({"model"})
+
+        cid = f"ephemeral-{uuid.uuid4().hex[:12]}"
+        in_process_client_id = f"_ephemeral:{cid}"
+        try:
+            timeout_s = float(os.environ.get("JAATO_EPHEMERAL_TIMEOUT_S", "1800"))
+        except ValueError:
+            timeout_s = 1800.0
+
+        out_q: "queue.Queue[Any]" = queue.Queue()
+        collected: List[str] = []
+        terminal: Dict[str, Any] = {}
+        done = threading.Event()
+        sentinel = object()
+
+        def _on_event(event: Any) -> None:
+            # Runs synchronously on the daemon thread under
+            # SessionManager._lock — MUST stay trivial: enqueue / signal only;
+            # never call on_output (network-bound) or re-enter SessionManager.
+            if isinstance(event, AgentOutputEvent):
+                if event.source in relay_sources:
+                    out_q.put((event.source, event.text, event.mode))
+            elif isinstance(event, SessionTerminatedEvent):
+                terminal["reason"] = event.reason
+                terminal["error_type"] = event.error_type
+                terminal["error_summary"] = event.error_summary
+                out_q.put(sentinel)
+                done.set()
+
+        def _forward() -> None:
+            # Drains off-lock and relays each chunk per-emit (live streaming).
+            while True:
+                item = out_q.get()
+                if item is sentinel:
+                    return
+                src, text, mode = item
+                collected.append(text)
+                if on_output:
+                    try:
+                        on_output(src, text, mode)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "ephemeral %s: on_output relay raised", cid,
+                        )
+
+        forwarder = threading.Thread(
+            target=_forward, name=f"ephemeral-fwd-{cid}", daemon=True,
         )
 
-        # Save and set workspace context if provided (Phase 5).
-        # The env-driven workspace root + chdir survive untouched —
-        # they're a separate concern from the bootstrap helper.
-        prev_cwd = None
-        prev_workspace_root = None
-        if workspace_path:
-            prev_cwd = os.getcwd()
-            prev_workspace_root = os.environ.get("JAATO_WORKSPACE_ROOT")
-            os.chdir(workspace_path)
-            os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
-
+        session_id = ""
         try:
-            # Build the bootstrap envelope.  ``client_id=None`` because
-            # ephemeral subagent fan-out has no client-driven apparmor
-            # opt-in (per §3.12 spec; runner-sharing semantics for
-            # default-share / opt-in-isolation come with §3.11 + the
-            # seat-flip).  ``parent_runner_handle`` stays None for now
-            # — Phase 3's spec for ephemeral migration adds the
-            # parent-runner reference for shared-runner default once
-            # the seat-flip lands.
-            envelope = BootstrapEnvelope(
-                session_id=f"ephemeral-{uuid.uuid4().hex[:12]}",
-                workspace_path=workspace_path,
-                name=agent_name or "<ephemeral>",
-                description="Ephemeral subagent fan-out",
-                client_id=None,
-                profile=profile,
-                agent_name=agent_name or "main",
+            self.register_in_process_client(
+                client_id=in_process_client_id,
+                callback=_on_event,
+                cascade_driver_id=cid,
+                role="owner",
             )
-            server, _sandbox = self._construct_and_initialize_server(envelope)
-            if server is None:
-                # Init failure already emitted via the in-init sink;
-                # surface a minimal hint to the caller so the
-                # subagent fan-out doesn't silently swallow.
+            forwarder.start()
+
+            session_id = self.create_headless_session(
+                agent_name=agent_name or "main",
+                workspace_path=workspace_path,
+                initial_prompt=prompt,
+                inline_profile_data=merged,
+                cascade_driver_id=cid,
+            )
+            if not session_id:
+                out_q.put(sentinel)
+                forwarder.join(timeout=5)
                 return "Ephemeral session initialization failed."
 
-            # Set workspace path on the registry so plugins discover it
-            if workspace_path and hasattr(server, 'registry') and server.registry:
-                server.registry.set_workspace_path(workspace_path)
+            # STOP (ii) hook: hand the real session_id to the caller BEFORE
+            # blocking so gossip can map request_id -> session_id and route a
+            # PeerStopRequest to the live session.  Optional — callers that
+            # don't pass on_started keep the pure blocking contract.
+            if on_started is not None:
+                try:
+                    on_started(session_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("ephemeral %s: on_started raised", cid)
 
-            # Run the prompt and collect output
-            collected_output = []
+            # Block on the universal terminal: SessionTerminatedEvent fires
+            # exactly once on every wind-down path; .reason classifies it.
+            finished = done.wait(timeout=timeout_s)
+            out_q.put(sentinel)  # drain + stop the forwarder even on timeout
+            forwarder.join(timeout=5)
 
-            def _output_callback(source: str, text: str, mode: str = "") -> None:
-                collected_output.append(text)
-                if on_output:
-                    on_output(source, text, mode)
+            if not finished:
+                raise RuntimeError(
+                    f"Ephemeral session {session_id} did not reach a terminal "
+                    f"event within {timeout_s}s"
+                )
 
-            response = server.send_message(prompt, on_output=_output_callback)
-
-            # Cleanup
-            server.shutdown()
-
-            return response or "".join(collected_output) or "Task completed."
-
+            # Failure surfacing (locked contract with gossip): raise on any
+            # non-clean terminal, return the collected string on natural
+            # completion.  gossip leans on a raised exception from its
+            # to_thread call to emit PeerAgentCompletedEvent(success=False).
+            reason = terminal.get("reason")
+            if reason and reason != "natural":
+                detail = (
+                    f" ({terminal.get('error_type')}: "
+                    f"{terminal.get('error_summary')})"
+                    if reason == "error" else ""
+                )
+                raise RuntimeError(
+                    f"Ephemeral session {session_id} terminated "
+                    f"reason={reason}{detail}"
+                )
+            return "".join(collected) or "Task completed."
         finally:
-            # Restore previous workspace context
-            if prev_cwd is not None:
-                os.chdir(prev_cwd)
-            if prev_workspace_root is not None:
-                os.environ["JAATO_WORKSPACE_ROOT"] = prev_workspace_root
-            elif workspace_path:
-                os.environ.pop("JAATO_WORKSPACE_ROOT", None)
+            try:
+                self.unregister_cascade_client(cid, in_process_client_id)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "ephemeral %s: unregister_cascade_client raised", cid,
+                )
+            out_q.put(sentinel)  # belt-and-suspenders forwarder stop
+            if session_id:
+                try:
+                    self.delete_session(session_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "ephemeral %s: delete_session(%s) raised",
+                        cid, session_id,
+                    )
 
     def shutdown(self) -> None:
         """Shutdown all sessions, saving to disk first."""
