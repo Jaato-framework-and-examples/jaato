@@ -839,11 +839,33 @@ Profile knobs under `plugin_configs.nebius`:
 | `context_length` | int | Manual context-window override (used when the catalog lacks the model) |
 | `modalities` | list[str] | Assert/correct input modalities (e.g. `["text","image"]`) for a model the catalog doesn't classify |
 
-> **Note (dedicated endpoints):** Token Factory also offers *dedicated
-> endpoints* (a control-plane API that provisions GPUs and exposes a
-> region-specific data-plane URL + routing key). This provider implements the
-> **serverless** path only; dedicated-endpoint provisioning is out of scope
-> (it incurs GPU cost and is managed out-of-band via the Nebius dashboard/CLI).
+**Self-deployed / fine-tuned models** are supported out of the box — they
+run on the *same* serverless endpoint, addressed by name. After you register
+a fine-tune with Token Factory (`POST /v0/models` → a custom `name` such as
+`legislation-qa-private`, a management step done out-of-band), just point the
+profile at it:
+
+```yaml
+provider: nebius
+model: legislation-qa-private   # your deployed fine-tune's name
+```
+
+`connect()` passes the name straight through as the OpenAI `model`.
+Catalog-based context/modality auto-detection works for custom models too,
+because the provider's `GET /v1/models` fetch is **authenticated** (sends the
+Bearer key) and that listing is account-scoped — your deployed fine-tunes
+appear there alongside the public catalog, so the per-model `context_length`
+(inherited from the `base_model`) is detected. If a custom model isn't listed,
+set `plugin_configs.nebius.context_length` (the provider fails loud telling you
+so). The deploy/register step itself is a management workflow, out of scope for
+this provider.
+
+> **Note (dedicated endpoints):** Distinct from the above, Token Factory also
+> offers *dedicated endpoints* (a control-plane API that provisions GPUs and
+> exposes a region-specific data-plane URL + routing key). This provider
+> implements the **serverless** path only (including serverless custom/
+> fine-tuned models); dedicated-endpoint provisioning is out of scope (it
+> incurs GPU cost and is managed out-of-band via the Nebius dashboard/CLI).
 
 ### Claude CLI Provider
 | Variable | Purpose |
