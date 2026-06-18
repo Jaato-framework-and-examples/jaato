@@ -6171,6 +6171,125 @@ NOTES
             on_trace=self._trace,
         )
 
+    @staticmethod
+    def _mime_to_modality(mime_type: Optional[str]) -> Optional[str]:
+        """Map a MIME type to its canonical input-modality token, or None.
+
+        Mirrors the modality vocabulary in
+        ``shared/plugins/model_provider/base.py`` (image / audio / video /
+        file).  Unknown types return ``None`` so the content gate leaves
+        them untouched — it never over-strips content it can't classify.
+        """
+        if not mime_type:
+            return None
+        m = mime_type.split(";", 1)[0].strip().lower()
+        if m.startswith("image/"):
+            return "image"
+        if m.startswith("audio/"):
+            return "audio"
+        if m.startswith("video/"):
+            return "video"
+        if m == "application/pdf":
+            return "file"
+        return None
+
+    def _gate_tool_results_for_active_modalities(
+        self, tool_results: List[ToolResult]
+    ) -> List[ToolResult]:
+        """Synthetic-self-correct content gate (multimodal-by-composition).
+
+        The active model can only *see* the input modalities its provider
+        declares (``provider.modalities()``).  When a tool returns
+        attachment content of a modality the active model can't view
+        (canonically a ``readFile`` image while in a text-only tier),
+        sending the bytes would silently fail.  Instead this strips those
+        attachments and appends a short, actionable note to the tool
+        result telling the agent to ``enter_tier("vision")`` (or, with no
+        vision tier, that the model can't view the content).
+
+        Per ``docs/design/multimodal-model-support.md`` this is the
+        load-bearing correctness piece: it turns the agent's mistake
+        (reading an image in a non-vision tier) into a loud, self-correcting
+        signal instead of a silent drop, and the turn continues so the
+        agent can switch tiers and re-run the tool.
+
+        No-op when the provider isn't set yet, or when every attachment's
+        modality is supported (the common case — cheap set membership per
+        attachment; vision-capable active models pass straight through).
+        """
+        provider = self._provider
+        if provider is None:
+            return tool_results
+        return [
+            self._gate_one_tool_result(r, provider) for r in tool_results
+        ]
+
+    def _gate_one_tool_result(
+        self, result: ToolResult, provider: 'ModelProviderPlugin'
+    ) -> ToolResult:
+        """Apply the modality gate to a single tool result.
+
+        Returns ``result`` unchanged when it has no attachments or all
+        attachment modalities are supported; otherwise returns a copy with
+        the unsupported attachments removed and a withheld-note appended to
+        the result text.
+        """
+        if not result.attachments:
+            return result
+        kept: List[Any] = []
+        withheld: Dict[str, int] = {}
+        for att in result.attachments:
+            modality = self._mime_to_modality(getattr(att, "mime_type", None))
+            # None = unclassifiable; keep (don't over-strip).  Otherwise
+            # keep iff the active model declares it.
+            if modality is None or provider.supports_modality(modality):
+                kept.append(att)
+            else:
+                withheld[modality] = withheld.get(modality, 0) + 1
+        if not withheld:
+            return result
+        note = self._build_withheld_attachment_note(withheld)
+        base = "" if result.result is None else str(result.result)
+        new_result = f"{base}\n\n{note}" if base else note
+        self._trace(
+            f"MODALITY_GATE: withheld {dict(withheld)} from tool "
+            f"{result.name!r} (active model {self._model_name!r} lacks them)"
+        )
+        return ToolResult(
+            call_id=result.call_id,
+            name=result.name,
+            result=new_result,
+            is_error=result.is_error,
+            attachments=(kept or None),
+            enrichment_metadata=result.enrichment_metadata,
+        )
+
+    def _build_withheld_attachment_note(self, withheld: Dict[str, int]) -> str:
+        """Build the actionable note appended to a gated tool result.
+
+        Suggests ``enter_tier("vision")`` when the session declares a
+        vision tier and an image was withheld; otherwise explains the
+        active model can't view the content and no vision tier exists.
+        """
+        kinds = ", ".join(sorted(withheld))
+        model = self._model_name or "the current model"
+        tier_config = self._tier_config
+        vision_available = (
+            tier_config is not None and "vision" in tier_config.tiers
+        )
+        if vision_available and "image" in withheld:
+            return (
+                f"[Attachment withheld: the active model ({model}) can't "
+                f"view {kinds} content.  Call enter_tier(\"vision\") first, "
+                f"then re-run this tool to view it.]"
+            )
+        return (
+            f"[Attachment withheld: the active model ({model}) can't view "
+            f"{kinds} content, and no vision tier is configured for this "
+            f"session.  Use a model that accepts {kinds} input, or declare "
+            f"a vision tier in the profile's model_tiers.]"
+        )
+
     def _sync_budget_after_truncation(
         self,
         original_results: List[ToolResult],
@@ -6236,6 +6355,7 @@ NOTES
         # Proactive size guard: cap results before they enter history
         tool_results = self._cap_tool_results(tool_results)
         # Append tool results to session history
+        tool_results = self._gate_tool_results_for_active_modalities(tool_results)
         tool_result_parts = [Part(function_response=r) for r in tool_results]
         self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
 
@@ -6635,6 +6755,7 @@ NOTES
             ToolResult(call_id=fc.id, name=fc.name, result={"error": "cancelled"}, is_error=True)
             for fc in fcs
         ]
+        tool_results = self._gate_tool_results_for_active_modalities(tool_results)
         tool_result_parts = [Part(function_response=r) for r in tool_results]
         self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
         self._trace(
@@ -7883,6 +8004,7 @@ NOTES
                 # Proactive size guard: cap results before they enter history
                 tool_results = self._cap_tool_results(tool_results)
                 # Append tool results to session history
+                tool_results = self._gate_tool_results_for_active_modalities(tool_results)
                 tool_result_parts = [Part(function_response=r) for r in tool_results]
                 self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
 
