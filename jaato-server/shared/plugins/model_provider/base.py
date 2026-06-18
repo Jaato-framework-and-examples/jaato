@@ -11,7 +11,18 @@ Providers hold only connection/auth state set by ``initialize()`` and
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    Set,
+    runtime_checkable,
+)
 
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -147,6 +158,103 @@ def resolve_context_window(
     if env_value:
         return int(env_value)
     return None
+
+
+# Canonical input-modality tokens.  Lowercase, matching OpenRouter's
+# ``architecture.input_modalities`` vocabulary so catalog detection needs
+# no translation.  Every text-completion model accepts text, so ``"text"``
+# is the floor that :func:`_normalise_modalities` always re-adds.
+MODALITY_TEXT = "text"
+MODALITY_IMAGE = "image"
+MODALITY_AUDIO = "audio"
+MODALITY_VIDEO = "video"
+MODALITY_FILE = "file"  # PDFs / documents (OpenRouter's term)
+
+
+def _normalise_modalities(raw: Iterable[str]) -> Set[str]:
+    """Lower-case, strip, drop blanks, and re-add the ``"text"`` floor.
+
+    A resolved modality set always contains ``"text"`` — every
+    text-completion model accepts text; richer modalities only *add* to
+    that floor.  This is a contract invariant, not a guessed fallback.
+    """
+    normalised = {str(m).strip().lower() for m in raw if str(m).strip()}
+    normalised.add(MODALITY_TEXT)
+    return normalised
+
+
+def resolve_modalities(
+    *,
+    detect: Optional[Callable[[], Optional[Iterable[str]]]] = None,
+    profile_value: Optional[Iterable[str]] = None,
+    table_value: Optional[Iterable[str]] = None,
+) -> Optional[Set[str]]:
+    """Resolve a model's INPUT modality set ({"text","image",...}).
+
+    Sibling of :func:`resolve_context_window` — the same per-model
+    metadata problem (a gateway serves both vision and text-only models),
+    so the same resolution discipline applies.
+
+    Precedence:
+
+    1. **detect — live catalog/endpoint (authoritative, self-updating).**
+       A provider whose backend lists per-model modalities, e.g.
+       OpenRouter's ``GET /api/v1/models`` ``architecture.input_modalities``.
+       Its non-empty return wins and tracks the catalog automatically.
+       Providers without such an endpoint omit the hook.
+    2. **profile knob — explicit override / escape hatch.**
+       ``plugin_configs.<provider>.modalities: ["text","image"]`` to assert
+       a model the catalog doesn't list yet, or to correct it.
+    3. **static per-model table — documented constants.** A provider's
+       ``MODEL_*`` map (mirrors ``MODEL_CONTEXT_LIMITS``) for closed
+       providers with no live modality endpoint.
+
+    Returns the first resolved set (normalised, ``"text"``-floored), or
+    ``None`` when nothing resolves — ``"unknown"``.  The caller (the
+    capability mixin, the tier validator, the content gate) decides what
+    ``None`` means; this helper never substitutes a guessed value.  No
+    hardcoded fallback (project no-fallback rule).
+
+    ``detect`` should be failure-tolerant (return ``None`` on an
+    unreachable/blank endpoint) so a transient blip degrades to the
+    manual tiers rather than raising here.
+    """
+    if detect is not None:
+        detected = detect()
+        if detected:
+            return _normalise_modalities(detected)
+    if profile_value:
+        return _normalise_modalities(profile_value)
+    if table_value:
+        return _normalise_modalities(table_value)
+    return None
+
+
+class ModalityCapabilityMixin:
+    """Default input-modality capability: **text-only**.
+
+    Mix into a provider to give it the honest baseline answer — its
+    adapter marshals text input only.  This is the accurate, complete
+    statement for the providers whose adapters never convert richer
+    content (the OpenAI-compat + local fleet), not a placeholder guess.
+
+    Providers whose adapter DOES convert richer input (image, …) override
+    :meth:`modalities` to resolve per-model via :func:`resolve_modalities`
+    (catalog detect / profile knob / static table).  They inherit
+    :meth:`supports_modality` unchanged.
+
+    The mixin carries no state and no ``__init__``, so adding it to a
+    provider's bases is a single-token change that never disturbs the
+    provider's own constructor.
+    """
+
+    def modalities(self) -> Set[str]:
+        """INPUT modalities the active model accepts.  Text-only floor."""
+        return {MODALITY_TEXT}
+
+    def supports_modality(self, kind: str) -> bool:
+        """Whether the active model accepts ``kind`` as input."""
+        return kind.strip().lower() in self.modalities()
 
 
 @runtime_checkable
@@ -442,6 +550,39 @@ class ModelProviderPlugin(Protocol):
 
         Returns:
             True if stop/cancel is supported, False otherwise.
+        """
+        ...
+
+    def modalities(self) -> Set[str]:
+        """INPUT modalities the CURRENTLY-CONNECTED model accepts.
+
+        Returns a set of canonical lowercase tokens (``"text"`` at
+        minimum, plus ``"image"`` / ``"audio"`` / … when the active model
+        and this provider's adapter support them).  Resolved per-model
+        via :func:`resolve_modalities` (catalog detect → profile knob →
+        static table); a gateway provider serves both vision and
+        text-only models, so the answer is for the active model, not the
+        provider as a whole.
+
+        The default text-only floor is supplied by
+        :class:`ModalityCapabilityMixin`; image-capable adapters override
+        this.  Used by tier validation (a ``vision`` tier must map to an
+        image-capable provider) and the session content-boundary gate (an
+        image ``Part`` must not be sent to a provider whose active model
+        can't view it).
+
+        Returns:
+            The active model's input-modality set (never empty — at least
+            ``{"text"}``).
+        """
+        ...
+
+    def supports_modality(self, kind: str) -> bool:
+        """Whether the active model accepts ``kind`` as input.
+
+        Convenience over :meth:`modalities`:
+        ``kind in self.modalities()``.  Supplied by
+        :class:`ModalityCapabilityMixin`.
         """
         ...
 

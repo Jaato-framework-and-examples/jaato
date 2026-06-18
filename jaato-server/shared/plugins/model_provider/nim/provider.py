@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ModelProviderPlugin,
     ProviderConfig,
@@ -89,7 +90,7 @@ REASONING_CAPABLE_MODELS = [
 ]
 
 
-class NIMProvider:
+class NIMProvider(ModalityCapabilityMixin):
     """NVIDIA NIM model provider.
 
     Provides access to NIM's model catalog via the OpenAI-compatible

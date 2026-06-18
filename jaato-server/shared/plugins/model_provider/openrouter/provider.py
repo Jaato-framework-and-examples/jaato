@@ -51,7 +51,7 @@ import copy
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +63,14 @@ if TYPE_CHECKING:
 from ..base import (
     FunctionCallDetectedCallback,
     ModelProviderPlugin,
+    MODALITY_TEXT,
+    ModalityCapabilityMixin,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
     resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -236,7 +239,7 @@ def _extract_generation_id(response_or_stream: Any) -> Optional[str]:
     return None
 
 
-class OpenRouterProvider:
+class OpenRouterProvider(ModalityCapabilityMixin):
     """OpenRouter model provider.
 
     Provides access to OpenRouter's catalog via the OpenAI-compatible
@@ -302,6 +305,11 @@ class OpenRouterProvider:
         # Optional manual context-window override (framework escape hatch
         # or env var) — the FALLBACK tier; the catalog auto-detect wins.
         self._context_length_knob: Optional[int] = None
+        # Optional manual INPUT-modality assertion — the escape hatch for a
+        # model the catalog doesn't list yet (or to correct it).  The
+        # catalog ``architecture.input_modalities`` auto-detect wins; this
+        # is only consulted when the catalog has no entry for the model.
+        self._modalities_knob: Optional[List[str]] = None
 
         # OpenRouter request-time routing controls.  ``provider`` is the
         # killer feature of OpenRouter — it constrains which upstream
@@ -622,6 +630,20 @@ class OpenRouterProvider:
             int(context_length_extra) if context_length_extra
             else resolve_context_length()
         )
+
+        # Optional INPUT-modality assertion (framework escape hatch).  Only
+        # consulted when the catalog lacks an entry for the active model.
+        modalities_extra = _knob("modalities", layer=framework_overrides)
+        if modalities_extra is not None:
+            if not isinstance(modalities_extra, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_extra
+            ):
+                raise TypeError(
+                    "OpenRouter 'modalities' config must be a list of strings "
+                    f"(e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_extra).__name__}"
+                )
+            self._modalities_knob = list(modalities_extra)
 
         # routing: OpenRouter's ``provider`` extension field (sort,
         # ignore, order, allow_fallbacks, ...).  Stored as a dict and
@@ -991,6 +1013,45 @@ class OpenRouterProvider:
                 if isinstance(ctx, int) and ctx > 0:
                     return ctx
         return None
+
+    def _lookup_modalities(self, model: str) -> Optional[List[str]]:
+        """Return the catalog-reported INPUT modalities for ``model``.
+
+        Reads ``architecture.input_modalities`` from
+        ``GET /api/v1/models`` — present for all catalog models
+        (``["text","image"]`` for vision, ``["text"]`` for text-only).
+        Returns ``None`` when the model is absent or the field is missing
+        (self-hosted gateways, catalog gaps) so resolution falls through
+        to the manual knob.
+        """
+        for entry in self._fetch_catalog():
+            if entry.get("id") == model:
+                arch = entry.get("architecture")
+                if isinstance(arch, dict):
+                    mods = arch.get("input_modalities")
+                    if isinstance(mods, list) and mods:
+                        return [str(m) for m in mods]
+                return None
+        return None
+
+    def modalities(self) -> Set[str]:
+        """INPUT modalities the active model accepts.
+
+        Catalog auto-detect PRIMARY (``architecture.input_modalities``) →
+        manual ``modalities`` knob → text-only floor.  The detect tier
+        self-updates with OpenRouter's catalog, so vision models are
+        recognised without any per-model configuration.  Resolved for the
+        currently-connected model (a gateway serves mixed fleets), so this
+        must be called after :meth:`connect`.
+        """
+        model = self._model_name
+        if not model:
+            return {MODALITY_TEXT}
+        resolved = resolve_modalities(
+            detect=lambda: self._lookup_modalities(model),
+            profile_value=self._modalities_knob,
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
 
     def _caching_active(self) -> bool:
         """Whether to stamp ``cache_control`` breakpoints on this request.

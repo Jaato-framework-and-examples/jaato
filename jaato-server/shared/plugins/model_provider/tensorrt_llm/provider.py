@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
@@ -103,7 +104,7 @@ def _extract_cache_tokens(usage_obj) -> Optional[int]:
     return None
 
 
-class TensorRTLLMProvider:
+class TensorRTLLMProvider(ModalityCapabilityMixin):
     """TensorRT-LLM provider talking to ``trtllm-serve``'s /v1 endpoint.
 
     Lifecycle:
