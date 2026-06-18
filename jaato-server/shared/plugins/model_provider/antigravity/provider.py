@@ -411,18 +411,18 @@ class AntigravityProvider(ModalityCapabilityMixin):
             f"hardcoded fallback exists per the project's no-fallback rule."
         )
 
-    def modalities(self) -> Set[str]:
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
         """INPUT modalities the active Antigravity model accepts.
 
         modalities knob -> MODEL_INPUT_MODALITIES (exact) -> text-only
         floor.  All current served models are multimodal; the floor is
         the safe answer for any future text-only addition.
         """
+        model = model or self._model_name
         resolved = resolve_modalities(
             profile_value=self._modalities_knob,
             table_value=(
-                MODEL_INPUT_MODALITIES.get(self._model_name)
-                if self._model_name else None
+                MODEL_INPUT_MODALITIES.get(model) if model else None
             ),
         )
         return resolved if resolved is not None else {MODALITY_TEXT}

@@ -821,7 +821,7 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
             f"the project's no-fallback rule."
         )
 
-    def modalities(self) -> Set[str]:
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
         """INPUT modalities the active Gemini model accepts.
 
         Precedence mirrors get_context_limit() (no live endpoint):
@@ -830,17 +830,20 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
         """
         resolved = resolve_modalities(
             profile_value=self._modalities_knob,
-            table_value=self._lookup_input_modalities(),
+            table_value=self._lookup_input_modalities(model),
         )
         return resolved if resolved is not None else {MODALITY_TEXT}
 
-    def _lookup_input_modalities(self) -> Optional[FrozenSet[str]]:
-        """Table-declared input modalities for the active model, or None."""
-        if self._model_name:
-            if self._model_name in MODEL_INPUT_MODALITIES:
-                return MODEL_INPUT_MODALITIES[self._model_name]
+    def _lookup_input_modalities(
+        self, model: Optional[str] = None
+    ) -> Optional[FrozenSet[str]]:
+        """Table-declared input modalities for ``model`` (or active)."""
+        model = model or self._model_name
+        if model:
+            if model in MODEL_INPUT_MODALITIES:
+                return MODEL_INPUT_MODALITIES[model]
             for prefix, mods in MODEL_INPUT_MODALITIES.items():
-                if self._model_name.startswith(prefix):
+                if model.startswith(prefix):
                     return mods
         return None
 

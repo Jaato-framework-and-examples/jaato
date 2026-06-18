@@ -1034,17 +1034,18 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                 return None
         return None
 
-    def modalities(self) -> Set[str]:
-        """INPUT modalities the active model accepts.
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
+        """INPUT modalities ``model`` (default: the active model) accepts.
 
         Catalog auto-detect PRIMARY (``architecture.input_modalities``) →
         manual ``modalities`` knob → text-only floor.  The detect tier
         self-updates with OpenRouter's catalog, so vision models are
-        recognised without any per-model configuration.  Resolved for the
-        currently-connected model (a gateway serves mixed fleets), so this
-        must be called after :meth:`connect`.
+        recognised without any per-model configuration.  ``model`` lets
+        callers resolve a model other than the connected one (e.g.
+        validating a vision-tier model); the catalog lookup is keyed by
+        the requested id, so no :meth:`connect` is needed.
         """
-        model = self._model_name
+        model = model or self._model_name
         if not model:
             return {MODALITY_TEXT}
         resolved = resolve_modalities(

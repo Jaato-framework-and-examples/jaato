@@ -2215,6 +2215,11 @@ class JaatoSession:
             # Wire cache plugin now that the provider exists.  Pre-defer
             # this fired at the end of configure() unconditionally.
             self._wire_cache_plugin()
+            # Fail loud if a declared ``vision`` tier maps to a model the
+            # provider can't confirm accepts image input — runs once here,
+            # alongside the context-window resolution above, before any
+            # model work (the earliest point the provider exists).
+            self._validate_vision_tier_capability()
             # Consume the stashed args — repeated calls become no-ops
             # (the fast-path above returns the cached provider).
             self._provider_lazy_pending = None
@@ -6288,6 +6293,48 @@ NOTES
             f"{kinds} content, and no vision tier is configured for this "
             f"session.  Use a model that accepts {kinds} input, or declare "
             f"a vision tier in the profile's model_tiers.]"
+        )
+
+    def _validate_vision_tier_capability(self) -> None:
+        """Fail loud when a declared ``vision`` tier maps to a model the
+        provider can't confirm accepts image input.
+
+        Mirrors ``get_context_limit()``'s fail-fast at provider-resolution
+        time: invoked once from :meth:`_ensure_provider` when the provider
+        is first created, before any model work — the earliest point the
+        provider exists (it's lazy-created).  V1 tiers are same-provider,
+        so the ``vision`` tier's model lives on the just-created provider;
+        we ask it via the parameterized ``provider.modalities(model=...)``
+        without switching the active model.  No-op unless a ``vision`` tier
+        is declared.
+
+        This is an earlier-warning over the content-boundary gate (which
+        would otherwise surface the misconfiguration only at the first
+        image): a vision tier mapped to a text-only model is a config error
+        worth catching at startup, with an actionable message.
+
+        Raises:
+            ModelTierConfigError: the vision tier maps to a model that
+                doesn't declare image input and no ``modalities`` knob
+                asserts it.
+        """
+        tier_config = self._tier_config
+        provider = self._provider
+        if tier_config is None or provider is None:
+            return
+        from .model_tiers import TIER_VISION, ModelTierConfigError
+        vision_entry = tier_config.tiers.get(TIER_VISION)
+        if vision_entry is None:
+            return
+        if provider.supports_modality("image", model=vision_entry.model):
+            return
+        provider_name = getattr(provider, "name", "the provider")
+        raise ModelTierConfigError(
+            f"The 'vision' tier maps to {vision_entry.model!r} "
+            f"({provider_name}), which does not declare image input.  Map "
+            f"the vision tier to a vision-capable model, or set "
+            f"plugin_configs.{provider_name}.modalities: "
+            f'["text", "image"] to assert it.'
         )
 
     def _sync_budget_after_truncation(

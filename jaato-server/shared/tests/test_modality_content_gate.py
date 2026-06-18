@@ -15,16 +15,20 @@ read ``_provider`` / ``_model_name`` / ``_tier_config`` / ``_trace``.
 
 from __future__ import annotations
 
+import pytest
+
 from shared.jaato_session import JaatoSession
-from shared.model_tiers import ModelTierConfig, TierEntry
+from shared.model_tiers import ModelTierConfig, ModelTierConfigError, TierEntry
 from jaato_sdk.plugins.model_provider.types import Attachment, ToolResult
 
 
 class _FakeProvider:
+    name = "openrouter"
+
     def __init__(self, modalities):
         self._modalities = set(modalities)
 
-    def supports_modality(self, kind: str) -> bool:
+    def supports_modality(self, kind: str, model=None) -> bool:
         return kind in self._modalities
 
 
@@ -138,3 +142,65 @@ class TestContentGate:
         # generic note (vision tier is for image, not audio).
         assert "no vision tier" in out[0].result.lower() \
             or "enter_tier" not in out[0].result
+
+
+class _ModelAwareProvider:
+    """Provider whose image support depends on the *queried* model — mirrors
+    a gateway serving mixed fleets (parameterized modalities(model=...))."""
+
+    name = "openrouter"
+
+    def __init__(self, vision_models):
+        self._vision = set(vision_models)
+
+    def supports_modality(self, kind: str, model=None) -> bool:
+        return kind == "image" and model in self._vision
+
+
+def _val_session(provider, tier_config):
+    s = JaatoSession.__new__(JaatoSession)
+    s._provider = provider
+    s._tier_config = tier_config
+    return s
+
+
+def _tiers(vision_model=None):
+    tiers = {"executor": TierEntry("openai/gpt-5-mini")}
+    if vision_model is not None:
+        tiers["vision"] = TierEntry(vision_model)
+    return ModelTierConfig(
+        tiers=tiers, initial_tier="executor", tier_fallback="executor"
+    )
+
+
+class TestVisionTierValidation:
+    """``_validate_vision_tier_capability`` fails loud at provider-resolution
+    time when a declared ``vision`` tier maps to a model that can't view
+    images — the earlier-warning over the runtime content gate.
+    """
+
+    def test_valid_vision_tier_passes(self):
+        prov = _ModelAwareProvider({"google/gemini-3-pro"})
+        s = _val_session(prov, _tiers(vision_model="google/gemini-3-pro"))
+        s._validate_vision_tier_capability()  # no raise
+
+    def test_text_only_vision_model_raises(self):
+        prov = _ModelAwareProvider({"google/gemini-3-pro"})
+        s = _val_session(prov, _tiers(vision_model="openai/gpt-5-mini"))
+        with pytest.raises(ModelTierConfigError) as exc:
+            s._validate_vision_tier_capability()
+        msg = str(exc.value)
+        assert "does not declare image input" in msg
+        assert "openai/gpt-5-mini" in msg
+        assert "modalities" in msg  # points at the assert-knob escape hatch
+
+    def test_no_vision_tier_is_noop(self):
+        prov = _ModelAwareProvider(set())
+        s = _val_session(prov, _tiers(vision_model=None))
+        s._validate_vision_tier_capability()  # no raise
+
+    def test_missing_provider_or_config_is_noop(self):
+        _val_session(None, None)._validate_vision_tier_capability()
+        _val_session(
+            _ModelAwareProvider(set()), None
+        )._validate_vision_tier_capability()
