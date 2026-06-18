@@ -18,7 +18,16 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    TYPE_CHECKING,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +39,7 @@ if TYPE_CHECKING:
     from google.genai import types
 
 from ..base import (
+    MODALITY_TEXT,
     ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     GoogleAuthMethod,
@@ -39,6 +49,7 @@ from ..base import (
     ThinkingCallback,
     UsageUpdateCallback,
     resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -100,6 +111,16 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "gemini-pro": 32_760,
 }
 
+# INPUT modalities per Gemini model family.  Gemini 1.5 / 2.x / 3.x are
+# multimodal (accept image input); legacy Gemini 1.0 / "gemini-pro" were
+# text-only and are absent here (-> text-only floor in modalities()).
+# Prefix-matched like MODEL_CONTEXT_LIMITS.
+MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
+    "gemini-1.5": frozenset({"text", "image"}),
+    "gemini-2": frozenset({"text", "image"}),
+    "gemini-3": frozenset({"text", "image"}),
+}
+
 
 class GoogleGenAIProvider(ModalityCapabilityMixin):
     """Google GenAI / Vertex AI model provider (stateless design).
@@ -158,6 +179,9 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
         # — escape hatch for an unlisted model.  None = use the table; unknown
         # model + no override → raise (no hardcoded fallback, per project rule).
         self._context_length_knob: Optional[int] = None
+        # INPUT-modality assertion (plugin_configs.google_genai.modalities)
+        # layered over MODEL_INPUT_MODALITIES in modalities().
+        self._modalities_knob: Optional[List[str]] = None
         self._project: Optional[str] = None
         self._location: Optional[str] = None
 
@@ -255,6 +279,20 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
             profile_value=(resolved_config.extra or {}).get("context_length"),
             env_value=None,
         )
+
+        # INPUT-modality assertion (plugin_configs.google_genai.modalities)
+        # — escape hatch for a model not in MODEL_INPUT_MODALITIES.
+        modalities_override = (resolved_config.extra or {}).get("modalities")
+        if modalities_override is not None:
+            if not isinstance(modalities_override, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_override
+            ):
+                raise TypeError(
+                    "Google GenAI 'modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_override).__name__}"
+                )
+            self._modalities_knob = list(modalities_override)
 
         # Validate configuration before attempting connection
         self._validate_config(resolved_config)
@@ -782,6 +820,29 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
             f"context_length in the profile.  No hardcoded fallback exists per "
             f"the project's no-fallback rule."
         )
+
+    def modalities(self) -> Set[str]:
+        """INPUT modalities the active Gemini model accepts.
+
+        Precedence mirrors get_context_limit() (no live endpoint):
+        modalities knob -> MODEL_INPUT_MODALITIES (exact then prefix) ->
+        text-only floor.
+        """
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=self._lookup_input_modalities(),
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
+
+    def _lookup_input_modalities(self) -> Optional[FrozenSet[str]]:
+        """Table-declared input modalities for the active model, or None."""
+        if self._model_name:
+            if self._model_name in MODEL_INPUT_MODALITIES:
+                return MODEL_INPUT_MODALITIES[self._model_name]
+            for prefix, mods in MODEL_INPUT_MODALITIES.items():
+                if self._model_name.startswith(prefix):
+                    return mods
+        return None
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.

@@ -19,11 +19,12 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 from ..base import (
+    MODALITY_TEXT,
     ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
@@ -31,6 +32,7 @@ from ..base import (
     ThinkingCallback,
     UsageUpdateCallback,
     resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -98,6 +100,18 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "claude-3-opus": 200_000,
     "claude-3-sonnet": 200_000,
     "claude-3-haiku": 200_000,
+}
+
+# INPUT modalities per Claude model family.  All shipping Claude API
+# models (3.x, 4.x) accept image input alongside text; Claude 2.x was
+# text-only and isn't listed.  Prefix-matched like MODEL_CONTEXT_LIMITS;
+# a model absent here resolves to the text-only floor in modalities()
+# (never a false image claim).
+MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
+    "claude-opus-4": frozenset({"text", "image"}),
+    "claude-sonnet-4": frozenset({"text", "image"}),
+    "claude-haiku-4": frozenset({"text", "image"}),
+    "claude-3": frozenset({"text", "image"}),
 }
 
 # Models that support extended thinking
@@ -175,6 +189,9 @@ class AnthropicProvider(ModalityCapabilityMixin):
         # table.  None = use the table; unknown model + no override → raise
         # (no hardcoded fallback, per project rule).
         self._context_length_knob: Optional[int] = None
+        # INPUT-modality assertion (framework_overrides.modalities) —
+        # the escape hatch layered over MODEL_INPUT_MODALITIES.
+        self._modalities_knob: Optional[List[str]] = None
 
         # Configuration
         self._api_key: Optional[str] = None
@@ -352,6 +369,21 @@ class AnthropicProvider(ModalityCapabilityMixin):
             profile_value=_knob("context_length", layer=framework_overrides),
             env_value=None,
         )
+
+        # INPUT-modality assertion (framework_overrides.modalities) — the
+        # escape hatch for a model not in MODEL_INPUT_MODALITIES, or to
+        # correct it.  Layered over the table in modalities().
+        modalities_override = _knob("modalities", layer=framework_overrides)
+        if modalities_override is not None:
+            if not isinstance(modalities_override, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_override
+            ):
+                raise TypeError(
+                    "Anthropic 'modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_override).__name__}"
+                )
+            self._modalities_knob = list(modalities_override)
 
         # Sampling parameters.  ``None`` means "omit from the request and
         # let Anthropic apply its server-side default" (temperature=1.0).
@@ -965,6 +997,29 @@ class AnthropicProvider(ModalityCapabilityMixin):
             f"the profile.  No hardcoded fallback exists per the project's "
             f"no-fallback rule."
         )
+
+    def modalities(self) -> Set[str]:
+        """INPUT modalities the active Claude model accepts.
+
+        Precedence mirrors get_context_limit() (no live capacity
+        endpoint, so detect is absent): framework_overrides.modalities
+        knob -> MODEL_INPUT_MODALITIES prefix match -> text-only floor
+        (every Claude model accepts text; image stays unconfirmed, so
+        the content gate / vision-tier validation treats it text-only).
+        """
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=self._lookup_input_modalities(),
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
+
+    def _lookup_input_modalities(self) -> Optional[FrozenSet[str]]:
+        """Table-declared input modalities for the active model, or None."""
+        if self._model_name:
+            for prefix, mods in MODEL_INPUT_MODALITIES.items():
+                if self._model_name.startswith(prefix):
+                    return mods
+        return None
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.

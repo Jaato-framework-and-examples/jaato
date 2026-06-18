@@ -93,6 +93,69 @@ class TestModalityCapabilityMixin:
         assert v.supports_modality("audio") is False
 
 
+class TestImageCapableProviderTables:
+    """The closed image-capable providers (no public modality catalog)
+    declare vision via per-model static tables — the table tier of the
+    resolve_modalities chain.  These pin that a known vision model resolves
+    ``image`` and a known text-only model stays at the text floor, so the
+    content-boundary gate (follow-up) doesn't regress existing
+    image-to-anthropic/google usage.
+    """
+
+    def _bare(self, cls):
+        # Construct without __init__ (no network/auth); set the two fields
+        # modalities() reads.
+        p = cls.__new__(cls)
+        p._model_name = None
+        p._modalities_knob = None
+        return p
+
+    def test_anthropic_claude_is_vision_legacy_is_text(self):
+        from ..anthropic.provider import AnthropicProvider
+
+        p = self._bare(AnthropicProvider)
+        p._model_name = "claude-opus-4-5-20251101"
+        assert p.modalities() == {"text", "image"}
+        p._model_name = "claude-3-5-sonnet-20241022"
+        assert p.modalities() == {"text", "image"}
+        p._model_name = "claude-2.1"  # legacy, text-only, absent from table
+        assert p.modalities() == {"text"}
+
+    def test_google_gemini_modern_is_vision_legacy_is_text(self):
+        from ..google_genai.provider import GoogleGenAIProvider
+
+        p = self._bare(GoogleGenAIProvider)
+        for m in ("gemini-2.5-pro", "gemini-1.5-flash-latest",
+                  "gemini-3-pro-preview", "gemini-2.0-flash"):
+            p._model_name = m
+            assert p.modalities() == {"text", "image"}, m
+        for m in ("gemini-1.0-pro", "gemini-pro"):
+            p._model_name = m
+            assert p.modalities() == {"text"}, m
+
+    def test_antigravity_served_models_are_vision(self):
+        from ..antigravity.provider import AntigravityProvider
+
+        p = self._bare(AntigravityProvider)
+        for m in ("antigravity-gemini-3-pro",
+                  "antigravity-claude-sonnet-4-5", "gemini-2.5-flash"):
+            p._model_name = m
+            assert p.modalities() == {"text", "image"}, m
+        p._model_name = "not-a-served-model"
+        assert p.modalities() == {"text"}
+
+    def test_knob_overrides_table_absence(self):
+        # The framework_overrides.modalities knob asserts a model the table
+        # doesn't cover (forward-compat for new families).
+        from ..anthropic.provider import AnthropicProvider
+
+        p = self._bare(AnthropicProvider)
+        p._model_name = "claude-5-future"
+        assert p.modalities() == {"text"}  # not yet in table
+        p._modalities_knob = ["text", "image"]
+        assert p.modalities() == {"text", "image"}
+
+
 def test_all_providers_expose_the_capability_contract():
     """Every shipped provider must answer ``modalities()`` /
     ``supports_modality()`` — the content-boundary gate (follow-up PR)

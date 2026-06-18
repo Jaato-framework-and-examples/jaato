@@ -17,11 +17,12 @@ Reference: https://github.com/NoeFabris/opencode-antigravity-auth
 import json
 import os
 from shared.session_context import get_workspace_root, get_config_root
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
 
 import httpx
 
 from ..base import (
+    MODALITY_TEXT,
     ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ModelProviderPlugin,
@@ -30,6 +31,7 @@ from ..base import (
     ThinkingCallback,
     UsageUpdateCallback,
     resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -56,6 +58,7 @@ from .constants import (
     GEMINI_CLI_CLIENT_METADATA,
     GEMINI_CLI_ENDPOINT,
     GEMINI_CLI_MODELS,
+    MODEL_INPUT_MODALITIES,
     GEMINI_CLI_USER_AGENT,
     PROVIDER_ID,
 )
@@ -146,6 +149,9 @@ class AntigravityProvider(ModalityCapabilityMixin):
         # get_context_limit() — escape hatch for an unlisted model.  None = use
         # the tables; unknown model + no override → raise (no hardcoded fallback).
         self._context_length_knob: Optional[int] = None
+        # INPUT-modality assertion (plugin_configs.antigravity.modalities)
+        # layered over MODEL_INPUT_MODALITIES in modalities().
+        self._modalities_knob: Optional[List[str]] = None
 
         # Configuration
         self._endpoint: str = ANTIGRAVITY_PRIMARY_ENDPOINT
@@ -230,6 +236,20 @@ class AntigravityProvider(ModalityCapabilityMixin):
             profile_value=config.extra.get("context_length"),
             env_value=None,
         )
+
+        # INPUT-modality assertion (plugin_configs.antigravity.modalities)
+        # — escape hatch for a model not in MODEL_INPUT_MODALITIES.
+        modalities_override = config.extra.get("modalities")
+        if modalities_override is not None:
+            if not isinstance(modalities_override, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_override
+            ):
+                raise TypeError(
+                    "Antigravity 'modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_override).__name__}"
+                )
+            self._modalities_knob = list(modalities_override)
 
     def verify_auth(
         self,
@@ -390,6 +410,22 @@ class AntigravityProvider(ModalityCapabilityMixin):
             f"plugin_configs.antigravity.context_length in the profile.  No "
             f"hardcoded fallback exists per the project's no-fallback rule."
         )
+
+    def modalities(self) -> Set[str]:
+        """INPUT modalities the active Antigravity model accepts.
+
+        modalities knob -> MODEL_INPUT_MODALITIES (exact) -> text-only
+        floor.  All current served models are multimodal; the floor is
+        the safe answer for any future text-only addition.
+        """
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=(
+                MODEL_INPUT_MODALITIES.get(self._model_name)
+                if self._model_name else None
+            ),
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.
