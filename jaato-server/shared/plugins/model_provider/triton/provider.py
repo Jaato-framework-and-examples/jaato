@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
@@ -111,7 +112,7 @@ def _extract_cache_tokens(usage_obj) -> Optional[int]:
     return None
 
 
-class TritonProvider:
+class TritonProvider(ModalityCapabilityMixin):
     """Triton provider: OpenAI-compatible chat + KServe v2 model control.
 
     Lifecycle:

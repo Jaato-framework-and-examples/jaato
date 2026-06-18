@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ModelProviderPlugin,
     ProviderConfig,
@@ -109,7 +110,7 @@ from .oauth import (
 )
 
 
-class AntigravityProvider:
+class AntigravityProvider(ModalityCapabilityMixin):
     """Antigravity provider for Google's IDE AI backend.
 
     This provider supports:

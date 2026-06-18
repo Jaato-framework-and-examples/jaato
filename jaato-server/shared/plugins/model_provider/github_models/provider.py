@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from .copilot_client import CopilotClient, CopilotResponse, ResponsesAPIResponse
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ModelProviderPlugin,
     ProviderConfig,
@@ -188,7 +189,7 @@ class GitHubModelsConfig:
     endpoint: str = DEFAULT_ENDPOINT
 
 
-class GitHubModelsProvider:
+class GitHubModelsProvider(ModalityCapabilityMixin):
     """GitHub Models provider -- stateless ``complete()`` API.
 
     All conversation state (history, tools, system instruction) is managed

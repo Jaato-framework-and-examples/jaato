@@ -1938,3 +1938,103 @@ class TestParallelToolCallsKnob:
             {"parallel_tool_calls": True}
         )
         assert provider._parallel_tool_calls is True
+
+
+# ==================== Modality Detection Tests ====================
+
+
+class TestModalityDetection:
+    """OpenRouter resolves a model's INPUT modalities from the catalog's
+    ``architecture.input_modalities`` (detect-PRIMARY, self-updating),
+    falling back to the manual ``modalities`` knob, then the text-only
+    floor.  Foundation for vision via the model-tier roles
+    (``docs/design/multimodal-model-support.md``).
+    """
+
+    def _provider_with_catalog(self, catalog):
+        provider = OpenRouterProvider()
+        provider._catalog_cache = catalog  # seed cache; detect wins
+        return provider
+
+    def test_text_floor_when_not_connected(self):
+        provider = OpenRouterProvider()
+        provider._model_name = None
+        assert provider.modalities() == {"text"}
+
+    def test_detect_vision_model_from_catalog(self):
+        provider = self._provider_with_catalog([
+            {"id": "google/gemini-3-pro",
+             "architecture": {"input_modalities": ["text", "image"]}},
+        ])
+        provider._model_name = "google/gemini-3-pro"
+        assert provider.modalities() == {"text", "image"}
+        assert provider.supports_modality("image") is True
+
+    def test_detect_text_only_model_from_catalog(self):
+        provider = self._provider_with_catalog([
+            {"id": "openai/gpt-5-mini",
+             "architecture": {"input_modalities": ["text"]}},
+        ])
+        provider._model_name = "openai/gpt-5-mini"
+        assert provider.modalities() == {"text"}
+        assert provider.supports_modality("image") is False
+
+    def test_knob_used_when_model_absent_from_catalog(self):
+        # Self-hosted gateway / catalog gap: detect returns None, the
+        # manual assertion takes over.
+        provider = self._provider_with_catalog([])  # empty catalog
+        provider._model_name = "some/uncatalogued-vision-model"
+        provider._modalities_knob = ["text", "image"]
+        assert provider.modalities() == {"text", "image"}
+
+    def test_text_floor_when_model_absent_and_no_knob(self):
+        provider = self._provider_with_catalog([])
+        provider._model_name = "some/uncatalogued-model"
+        provider._modalities_knob = None
+        # Unknown image-support degrades to the safe text floor (never a
+        # false image claim).
+        assert provider.modalities() == {"text"}
+
+    def test_detect_wins_over_knob(self):
+        provider = self._provider_with_catalog([
+            {"id": "openai/gpt-5-mini",
+             "architecture": {"input_modalities": ["text"]}},
+        ])
+        provider._model_name = "openai/gpt-5-mini"
+        provider._modalities_knob = ["text", "image"]  # stale assertion
+        # Live catalog beats the manual knob.
+        assert provider.modalities() == {"text"}
+
+    def test_missing_architecture_field_falls_through(self):
+        provider = self._provider_with_catalog([
+            {"id": "weird/model"},  # no architecture key
+        ])
+        provider._model_name = "weird/model"
+        provider._modalities_knob = ["text", "image"]
+        assert provider.modalities() == {"text", "image"}
+
+    def test_modalities_knob_parsed_from_config(self):
+        with patch(
+            "shared.plugins.model_provider.openrouter.provider."
+            "get_openai_client_class"
+        ) as mock_client_class:
+            mock_client_class.return_value = MagicMock()
+            provider = OpenRouterProvider()
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"framework_overrides": {"modalities": ["text", "image"]}},
+            ))
+        assert provider._modalities_knob == ["text", "image"]
+
+    def test_modalities_knob_rejects_non_list(self):
+        with patch(
+            "shared.plugins.model_provider.openrouter.provider."
+            "get_openai_client_class"
+        ) as mock_client_class:
+            mock_client_class.return_value = MagicMock()
+            provider = OpenRouterProvider()
+            with pytest.raises(TypeError):
+                provider.initialize(ProviderConfig(
+                    api_key="sk-or-test",
+                    extra={"framework_overrides": {"modalities": "image"}},
+                ))

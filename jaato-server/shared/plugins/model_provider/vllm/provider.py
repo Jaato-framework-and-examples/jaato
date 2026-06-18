@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
@@ -112,7 +113,7 @@ def _extract_cache_tokens(usage_obj) -> Optional[int]:
     return None
 
 
-class VLLMProvider:
+class VLLMProvider(ModalityCapabilityMixin):
     """vLLM provider talking to the OpenAI-compatible ``/v1`` endpoint.
 
     Lifecycle:

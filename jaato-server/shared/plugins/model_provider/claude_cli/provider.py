@@ -14,6 +14,7 @@ import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
@@ -79,7 +80,7 @@ class CLIProcessError(Exception):
         self.stderr = stderr
 
 
-class ClaudeCLIProvider:
+class ClaudeCLIProvider(ModalityCapabilityMixin):
     """Model provider that uses Claude Code CLI as backend.
 
     This provider spawns the ``claude`` CLI in print mode with stream-json

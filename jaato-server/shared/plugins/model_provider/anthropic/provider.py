@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
@@ -115,7 +116,7 @@ EXTENDED_MAX_TOKENS = 16000  # When thinking is enabled
 CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 
-class AnthropicProvider:
+class AnthropicProvider(ModalityCapabilityMixin):
     """Stateless Anthropic Claude provider.
 
     This provider uses a stateless design: the caller (session) owns the

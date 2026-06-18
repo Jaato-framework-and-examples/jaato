@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ModelProviderPlugin,
     ProviderConfig,
@@ -149,7 +150,7 @@ THINKING_CAPABLE_MODELS = [
 ]
 
 
-class ZhipuAIOpenAIProvider:
+class ZhipuAIOpenAIProvider(ModalityCapabilityMixin):
     """Zhipu AI provider using the OpenAI-compatible API.
 
     Accesses Z.AI's GLM models via the OpenAI-compatible endpoint

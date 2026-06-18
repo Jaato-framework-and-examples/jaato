@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from openai import OpenAI
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
@@ -100,7 +101,7 @@ def _extract_cache_tokens(usage_obj) -> Optional[int]:
     return None
 
 
-class LMStudioProvider:
+class LMStudioProvider(ModalityCapabilityMixin):
     """LM Studio provider: OpenAI-compatible chat + native load-control.
 
     Lifecycle:

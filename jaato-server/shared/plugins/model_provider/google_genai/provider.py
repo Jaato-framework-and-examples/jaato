@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from google.genai import types
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     GoogleAuthMethod,
     ModelProviderPlugin,
@@ -100,7 +101,7 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
 }
 
 
-class GoogleGenAIProvider:
+class GoogleGenAIProvider(ModalityCapabilityMixin):
     """Google GenAI / Vertex AI model provider (stateless design).
 
     This provider is **stateless** with respect to conversation history.
