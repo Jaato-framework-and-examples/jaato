@@ -136,6 +136,7 @@ Four plugin types:
 - `model_provider/tensorrt_llm/`: NVIDIA TensorRT-LLM via `trtllm-serve` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/vllm/`: vLLM via `vllm.entrypoints.openai.api_server` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
+- `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
 
 ### Tool Execution Flow
 
@@ -801,6 +802,70 @@ plugin_configs:
 legacy flat position (`temperature:` / `provider:` / `context_length:`
 directly under `openrouter:`) with a one-time deprecation warning per
 key.  Flat-key support will be removed in a future server release.
+
+### Nebius Token Factory
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_NEBIUS_API_KEY` | API key (jaato namespace, highest priority) |
+| `NEBIUS_API_KEY` | API key (the vendor's own documented variable; honored so users who already set it for the Nebius/OpenAI SDK work with no extra config) |
+| `JAATO_NEBIUS_BASE_URL` | Endpoint (default: `https://api.tokenfactory.nebius.com/v1`) |
+| `JAATO_NEBIUS_MODEL` | Default model name (e.g. `deepseek-ai/DeepSeek-R1`, `meta-llama/Llama-3.3-70B-Instruct`) |
+| `JAATO_NEBIUS_CONTEXT_LENGTH` | Override the catalog-detected context window |
+
+**Authentication Options (in priority order):**
+1. **Environment variable**: `JAATO_NEBIUS_API_KEY`, then the vendor's `NEBIUS_API_KEY`
+2. **Stored credentials**: `nebius-auth` (validates against the OpenAI-compatible `/chat/completions` endpoint and stores securely)
+
+Nebius Token Factory is a hosted **serverless** inference service for open
+models (Llama, Qwen, DeepSeek-R1, Mistral, ...) behind a single
+OpenAI-compatible API (`https://api.tokenfactory.nebius.com/v1`). Models use
+the `vendor/model` form, e.g. `deepseek-ai/DeepSeek-R1`,
+`meta-llama/Llama-3.3-70B-Instruct`.
+
+`list_models()` queries `GET /v1/models` (the **RichModel** catalog). At
+`connect()` the provider **bootstraps** the active model's metadata from that
+catalog — the per-model `context_length` is the PRIMARY context-window tier
+(then profile knob `plugin_configs.nebius.context_length` / env, else
+fail-loud), and `architecture.modality` (OpenRouter-style `input->output`,
+e.g. `text->text` or `text+image->text`) drives input-modality detection for
+the multimodal tier system (catalog → `plugin_configs.nebius.modalities` knob
+→ text floor). No hardcoded fallback.
+
+Profile knobs under `plugin_configs.nebius`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `base_url` | str | Override `JAATO_NEBIUS_BASE_URL` (e.g. a local proxy) |
+| `context_length` | int | Manual context-window override (used when the catalog lacks the model) |
+| `modalities` | list[str] | Assert/correct input modalities (e.g. `["text","image"]`) for a model the catalog doesn't classify |
+
+**Self-deployed / fine-tuned models** are supported out of the box — they
+run on the *same* serverless endpoint, addressed by name. After you register
+a fine-tune with Token Factory (`POST /v0/models` → a custom `name` such as
+`legislation-qa-private`, a management step done out-of-band), just point the
+profile at it:
+
+```yaml
+provider: nebius
+model: legislation-qa-private   # your deployed fine-tune's name
+```
+
+`connect()` passes the name straight through as the OpenAI `model`.
+Catalog-based context/modality auto-detection works for custom models too,
+because the provider's `GET /v1/models` fetch is **authenticated** (sends the
+Bearer key) and that listing is account-scoped — your deployed fine-tunes
+appear there alongside the public catalog, so the per-model `context_length`
+(inherited from the `base_model`) is detected. If a custom model isn't listed,
+set `plugin_configs.nebius.context_length` (the provider fails loud telling you
+so). The deploy/register step itself is a management workflow, out of scope for
+this provider.
+
+> **Note (dedicated endpoints):** Distinct from the above, Token Factory also
+> offers *dedicated endpoints* (a control-plane API that provisions GPUs and
+> exposes a region-specific data-plane URL + routing key). This provider
+> implements the **serverless** path only (including serverless custom/
+> fine-tuned models); dedicated-endpoint provisioning is out of scope (it
+> incurs GPU cost and is managed out-of-band via the Nebius dashboard/CLI).
 
 ### Claude CLI Provider
 | Variable | Purpose |
