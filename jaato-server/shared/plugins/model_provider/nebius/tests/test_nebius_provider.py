@@ -806,3 +806,94 @@ class TestCatalogAndModalities:
         with patch("httpx.get", side_effect=Exception("boom")):
             assert p._fetch_catalog() == []
         assert p._catalog_cache is None  # not cached -> next call retries
+
+
+# ==================== api_params Passthrough ====================
+
+class TestApiParams:
+    """plugin_configs.nebius.api_params forwarded onto chat.completions.create
+    (the determinism + tool_choice knob; parity with openrouter).  Closes the
+    third nebius parity gap after verify_auth (#302/#303).
+    """
+
+    def _provider(self, api_params):
+        with patch(
+            "shared.plugins.model_provider.nebius.provider.get_openai_client_class"
+        ) as mc:
+            mc.return_value = MagicMock()
+            p = NebiusProvider()
+            p.initialize(ProviderConfig(
+                api_key="nbk-test", extra={"api_params": api_params},
+            ))
+        return p
+
+    def test_parsed_and_filtered_at_init(self):
+        p = self._provider({
+            "temperature": 0.0, "tool_choice": "required", "max_tokens": 4096,
+            "top_k": 40, "bogus": 1,  # unsupported -> dropped (warning)
+        })
+        assert p._api_params == {
+            "temperature": 0.0, "tool_choice": "required", "max_tokens": 4096,
+        }
+
+    def test_temperature_zero_survives(self):
+        # The determinism case: 0.0 must NOT be falsy-dropped.
+        p = self._provider({"temperature": 0.0})
+        kwargs = {}
+        p._apply_api_params(kwargs, tool_choice=None)
+        assert kwargs["temperature"] == 0.0
+
+    def test_tool_choice_forwarded_with_tools(self):
+        p = self._provider({"tool_choice": "required"})
+        kwargs = {"tools": [{"type": "function"}]}
+        p._apply_api_params(kwargs, tool_choice=None)
+        assert kwargs["tool_choice"] == "required"
+
+    def test_tool_choice_dropped_without_tools(self):
+        # OpenAI rejects tool_choice without tools; profile-wide "required"
+        # must not break a tool-less call (e.g. GC summarization).
+        p = self._provider({"tool_choice": "required", "temperature": 0.0})
+        kwargs = {}
+        p._apply_api_params(kwargs, tool_choice=None)
+        assert "tool_choice" not in kwargs
+        assert kwargs["temperature"] == 0.0
+
+    def test_per_call_tool_choice_overrides_profile(self):
+        p = self._provider({"tool_choice": "required"})
+        kwargs = {"tools": [1]}
+        named = {"type": "function", "function": {"name": "x"}}
+        p._apply_api_params(kwargs, tool_choice=named)
+        assert kwargs["tool_choice"] == named
+
+    def test_non_dict_api_params_raises(self):
+        with patch(
+            "shared.plugins.model_provider.nebius.provider.get_openai_client_class"
+        ) as mc:
+            mc.return_value = MagicMock()
+            p = NebiusProvider()
+            with pytest.raises(TypeError):
+                p.initialize(ProviderConfig(
+                    api_key="nbk-test", extra={"api_params": "required"},
+                ))
+
+    def test_complete_batch_forwards_api_params_to_create(self):
+        # End-to-end: complete() must hand api_params to chat.completions.create.
+        p = self._provider({"temperature": 0.0, "tool_choice": "required",
+                            "max_tokens": 256})
+        p._model_name = "deepseek-ai/DeepSeek-V3"
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return create_mock_response(text=None,
+                                        tool_calls=[create_mock_tool_call()],
+                                        finish_reason="tool_calls")
+
+        p._client.chat.completions.create = fake_create
+        schema = ToolSchema(name="discovery_result", description="d", parameters={
+            "type": "object", "properties": {}})
+        p.complete([Message.from_text(Role.USER, "go")], tools=[schema])
+        assert captured["temperature"] == 0.0
+        assert captured["tool_choice"] == "required"
+        assert captured["max_tokens"] == 256
+        assert "tools" in captured

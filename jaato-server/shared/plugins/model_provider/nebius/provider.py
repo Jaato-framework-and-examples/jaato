@@ -32,8 +32,11 @@ Environment variables:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from ._lazy import get_openai_client_class, get_openai_module
 
@@ -99,6 +102,25 @@ REASONING_CAPABLE_MODELS = [
     "deepseek-r1",
 ]
 
+# OpenAI Chat Completions request-body fields forwarded verbatim from
+# ``plugin_configs.nebius.api_params`` onto every ``chat.completions.create``.
+# Nebius is a plain OpenAI-compatible endpoint (no routing / ``extra_body``
+# extension like OpenRouter), so these are direct ``create()`` kwargs.
+# Allowlisted (not blind passthrough) so a typo'd / unsupported key surfaces
+# as a profile warning rather than an opaque OpenAI 400, and so we never
+# forward a key the OpenAI SDK's ``create()`` signature would reject.
+_FORWARDED_API_PARAMS = frozenset({
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "tool_choice",
+    "parallel_tool_calls",
+    "frequency_penalty",
+    "presence_penalty",
+    "seed",
+    "stop",
+})
+
 
 class NebiusProvider(ModalityCapabilityMixin):
     """Nebius Token Factory model provider.
@@ -145,6 +167,11 @@ class NebiusProvider(ModalityCapabilityMixin):
         # Cached ``GET /v1/models`` catalog (RichModel entries carry
         # context_length + architecture.modality).  Fetched once, lazily.
         self._catalog_cache: Optional[List[Dict[str, Any]]] = None
+        # OpenAI Chat Completions body fields from
+        # plugin_configs.nebius.api_params (temperature, tool_choice,
+        # max_tokens, ...), filtered to _FORWARDED_API_PARAMS and forwarded
+        # on every complete() call.
+        self._api_params: Dict[str, Any] = {}
 
         # Thinking/reasoning configuration
         self._enable_thinking: bool = True
@@ -256,6 +283,31 @@ class NebiusProvider(ModalityCapabilityMixin):
                     f"{type(modalities_override).__name__}"
                 )
             self._modalities_knob = list(modalities_override)
+
+        # api_params passthrough — OpenAI Chat Completions body fields
+        # (temperature, top_p, max_tokens, tool_choice, parallel_tool_calls,
+        # ...) forwarded verbatim on every chat.completions.create.  This is
+        # the determinism + tool_choice knob: e.g. api_params.temperature: 0.0
+        # for reproducibility, api_params.tool_choice: "required" to force a
+        # tool call (models that stall under auto with hashed tool ids).
+        api_params = config.extra.get("api_params") or {}
+        if api_params:
+            if not isinstance(api_params, dict):
+                raise TypeError(
+                    "Nebius 'api_params' config must be a dict of OpenAI Chat "
+                    f"Completions fields, got {type(api_params).__name__}"
+                )
+            self._api_params = {
+                k: v for k, v in api_params.items()
+                if k in _FORWARDED_API_PARAMS
+            }
+            dropped = set(api_params) - _FORWARDED_API_PARAMS
+            if dropped:
+                logger.warning(
+                    "Nebius api_params: ignoring unsupported key(s) %s; "
+                    "forwarded fields are %s",
+                    sorted(dropped), sorted(_FORWARDED_API_PARAMS),
+                )
 
         # Create client
         self._client = self._create_client()
@@ -582,6 +634,27 @@ class NebiusProvider(ModalityCapabilityMixin):
 
     # ==================== Stateless Completion ====================
 
+    def _apply_api_params(
+        self, kwargs: Dict[str, Any], tool_choice: Optional[Any],
+    ) -> None:
+        """Forward profile ``api_params`` (+ per-call ``tool_choice``) into the
+        ``chat.completions.create`` kwargs.
+
+        Profile fields (``plugin_configs.nebius.api_params``, already filtered
+        to :data:`_FORWARDED_API_PARAMS` at init) apply to every call; a
+        per-call ``tool_choice`` overrides the profile's.  ``tool_choice`` is
+        dropped when no tools are present this turn — OpenAI rejects
+        ``tool_choice`` without ``tools`` — so a profile-wide
+        ``tool_choice: "required"`` doesn't break tool-less calls (e.g. GC
+        summarization).
+        """
+        for key, value in self._api_params.items():
+            kwargs[key] = value
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        if "tool_choice" in kwargs and "tools" not in kwargs:
+            kwargs.pop("tool_choice")
+
     def complete(
         self,
         messages: List[Message],
@@ -594,6 +667,7 @@ class NebiusProvider(ModalityCapabilityMixin):
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         """Stateless completion: convert messages to OpenAI format, call API, return response.
 
@@ -616,6 +690,9 @@ class NebiusProvider(ModalityCapabilityMixin):
             on_usage_update: Real-time token usage callback (streaming).
             on_function_call: Callback when function call detected mid-stream.
             on_thinking: Callback for extended thinking content.
+            tool_choice: Optional per-call ``tool_choice`` override (the
+                session's lifecycle-retry path).  When set, overrides the
+                profile's ``api_params.tool_choice`` for this call only.
 
         Returns:
             A ``TurnResult`` classifying the outcome.
@@ -640,6 +717,11 @@ class NebiusProvider(ModalityCapabilityMixin):
                 kwargs["tools"] = openai_tools
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
+        # Profile api_params (temperature / tool_choice / max_tokens / ...)
+        # apply to every call; a per-call tool_choice overrides the profile.
+        # Injected into the shared kwargs here so BOTH the streaming and
+        # batch paths below forward them.
+        self._apply_api_params(kwargs, tool_choice)
 
         try:
             if on_chunk:
