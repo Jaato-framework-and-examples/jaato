@@ -117,15 +117,11 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
             if content:
                 content_blocks.append({"type": "text", "text": content})
             for att in fr.attachments:
-                if att.mime_type.startswith("image/"):
-                    content_blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": att.mime_type,
-                            "data": base64.b64encode(att.data).decode("utf-8"),
-                        }
-                    })
+                media = _anthropic_media_block(
+                    att.mime_type, base64.b64encode(att.data).decode("utf-8"),
+                )
+                if media:
+                    content_blocks.append(media)
             block["content"] = content_blocks
 
         return block
@@ -135,15 +131,25 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
         data = part.inline_data.get("data", b"")
         if isinstance(data, bytes):
             data = base64.b64encode(data).decode("utf-8")
+        return _anthropic_media_block(mime_type, data)
+
+    return None
+
+
+def _anthropic_media_block(mime_type: str, b64: str) -> Optional[Dict[str, Any]]:
+    """Anthropic content block for a base64 attachment: ``image`` for
+    ``image/*``, ``document`` for ``application/pdf`` (Claude reads PDF pages
+    natively — text AND embedded figures), else ``None``."""
+    if mime_type == "application/pdf":
+        return {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
+        }
+    if (mime_type or "").startswith("image/"):
         return {
             "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": mime_type,
-                "data": data,
-            }
+            "source": {"type": "base64", "media_type": mime_type, "data": b64},
         }
-
     return None
 
 

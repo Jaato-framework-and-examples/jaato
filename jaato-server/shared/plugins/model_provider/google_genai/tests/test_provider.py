@@ -968,3 +968,24 @@ class TestToolResultImageMarshalling:
         tr = ToolResult(call_id="c1", name="readFile", result={"path": "x.png"})
         part = part_to_sdk(Part(function_response=tr))
         assert "image" not in repr(part).lower() or "x.png" in repr(part)
+
+    def test_user_message_pdf_reaches_sdk_part(self):
+        # PDF marshals via the mime-agnostic inline_data Blob (no converter
+        # change) — google reads PDF pages natively (text + embedded figures).
+        from ..converters import part_to_sdk
+        pdf = b"PDF-google-user-bytes"
+        part = part_to_sdk(Part(inline_data={"mime_type": "application/pdf", "data": pdf}))
+        assert "PDF-google-user-bytes" in repr(part)
+        assert "application/pdf" in repr(part)
+
+    def test_tool_result_pdf_reaches_sdk_part(self):
+        from jaato_sdk.plugins.model_provider.types import Attachment
+        from ..converters import part_to_sdk
+        pdf = b"PDF-google-tool-bytes"
+        tr = ToolResult(
+            call_id="c1", name="readFile", result={"path": "d.pdf"},
+            attachments=[Attachment(mime_type="application/pdf", data=pdf,
+                                    display_name="d.pdf")],
+        )
+        part = part_to_sdk(Part(function_response=tr))
+        assert "PDF-google-tool-bytes" in repr(part)

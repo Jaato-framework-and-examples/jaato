@@ -6,11 +6,11 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 
 | Provider | user_message_images | tool_result_images | pdf_input | tool_choice_forwarding | thinking | prompt_caching | streaming | cancellation |
 |---|---|---|---|---|---|---|---|---|
-| `anthropic` | ✅ | ✅ | — | — | ✅ | ✅ | ✅ | ✅ |
+| `anthropic` | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
 | `antigravity` | ✅ | — | — | — | ✅ | — | ✅ | ✅ |
 | `claude_cli` | — | — | — | — | ✅ | — | ✅ | — |
 | `github_models` | — | — | — | — | ✅ | — | ✅ | ✅ |
-| `google_genai` | ✅ | ✅ | — | — | — | ✅ | ✅ | ✅ |
+| `google_genai` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ |
 | `lmstudio` | ✅ | ✅ | — | — | — | — | ✅ | ✅ |
 | `nebius` | ✅ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ |
 | `nim` | ✅ | ✅ | — | — | ✅ | — | ✅ | ✅ |
