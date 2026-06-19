@@ -24,7 +24,12 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..anthropic.provider import AnthropicProvider
-from ..base import ProviderConfig, resolve_context_window
+from ..base import (
+    ProviderConfig,
+    resolve_context_window,
+    resolve_modalities,
+    MODALITY_TEXT,
+)
 from .env import (
     DEFAULT_OLLAMA_HOST,
     resolve_context_length,
@@ -272,6 +277,50 @@ class OllamaProvider(AnthropicProvider):
         if not skip_model_test:
             # Verify model can actually respond (catches memory issues, etc.)
             self._verify_model_responds()
+
+    def modalities(self, model: Optional[str] = None):
+        """INPUT modalities, detected from ``POST /api/show`` ``capabilities``.
+
+        Ollama reports ``"vision"`` in a model's ``capabilities`` list for
+        vision models (llava, llama3.2-vision, qwen2.5-vl, …).  This overrides
+        the inherited Anthropic ``claude-*`` prefix table, which never matches
+        an Ollama model name (so the inherited override was inert — images were
+        silently gated off even for vision models).  Precedence: live detect →
+        profile ``modalities`` knob → text floor.
+        """
+        model = model or self._model_name
+        resolved = resolve_modalities(
+            detect=lambda: self._detect_modalities(model),
+            profile_value=self._modalities_knob,
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
+
+    def _detect_modalities(self, model: Optional[str]):
+        """Read ``capabilities`` from ``POST /api/show`` (cached per model).
+
+        Returns ``None`` on any HTTP failure so resolution degrades to the knob
+        / text floor (transient failures are not cached).
+        """
+        if not model:
+            return None
+        cache = self.__dict__.setdefault("_modality_cache", {})
+        if model in cache:
+            return cache[model]
+        try:
+            response = httpx.post(
+                f"{self._host}/api/show",
+                json={"model": model},
+                timeout=10,
+            )
+            response.raise_for_status()
+            caps = response.json().get("capabilities") or []
+        except httpx.HTTPError:
+            return None
+        mods = {"text"}
+        if "vision" in caps:
+            mods.add("image")
+        cache[model] = mods
+        return mods
 
     def _detect_context_capacity(self) -> Optional[int]:
         """Tier-1 context-window auto-detection hook for Ollama.

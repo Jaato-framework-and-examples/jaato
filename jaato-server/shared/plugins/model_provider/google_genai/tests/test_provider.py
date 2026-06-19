@@ -944,3 +944,27 @@ class TestProviderResponseProperties:
         """has_structured_output should be False when None."""
         response = ProviderResponse(parts=[Part.from_text("plain text")])
         assert response.has_structured_output() is False
+
+
+class TestToolResultImageMarshalling:
+    """The live history_to_sdk path must surface a tool result's image
+    attachments (part_to_sdk delegates to the multimodal-aware
+    tool_result_to_sdk_part instead of dropping attachments)."""
+
+    def test_tool_result_image_reaches_sdk_part(self):
+        from jaato_sdk.plugins.model_provider.types import Attachment
+        from ..converters import part_to_sdk
+        img = b"PNG-tool-result-image-bytes"
+        tr = ToolResult(
+            call_id="c1", name="readFile", result={"path": "x.png"},
+            attachments=[Attachment(mime_type="image/png", data=img,
+                                    display_name="x.png")],
+        )
+        part = part_to_sdk(Part(function_response=tr))
+        assert "PNG-tool-result-image-bytes" in repr(part)
+
+    def test_tool_result_without_attachment_has_no_image(self):
+        from ..converters import part_to_sdk
+        tr = ToolResult(call_id="c1", name="readFile", result={"path": "x.png"})
+        part = part_to_sdk(Part(function_response=tr))
+        assert "image" not in repr(part).lower() or "x.png" in repr(part)

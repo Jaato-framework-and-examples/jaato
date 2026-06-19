@@ -34,7 +34,12 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..anthropic.provider import AnthropicProvider
-from ..base import ProviderConfig, resolve_context_window
+from ..base import (
+    ProviderConfig,
+    resolve_context_window,
+    resolve_modalities,
+    MODALITY_TEXT,
+)
 from .env import (
     DEFAULT_ZHIPUAI_BASE_URL,
     DEFAULT_ZHIPUAI_MODEL,
@@ -92,6 +97,16 @@ MODEL_CONTEXT_LIMITS = {
 # verified live), so there is no auto-detect tier.
 
 KNOWN_MODELS = sorted(MODEL_CONTEXT_LIMITS.keys())
+
+# GLM input-modality table (longest-prefix match).  The 4V / 4.5V family accepts
+# images; the text/coding GLMs are text-only.  This replaces the inherited
+# Anthropic ``MODEL_INPUT_MODALITIES`` table, whose ``claude-*`` prefixes never
+# match a GLM model name — so the inherited modalities() override was inert and
+# images were silently gated off even for the vision models.
+GLM_INPUT_MODALITIES = {
+    "glm-4.5v": frozenset({"text", "image"}),
+    "glm-4v": frozenset({"text", "image"}),
+}
 
 
 # GLM models that support extended thinking (chain-of-thought reasoning).
@@ -542,6 +557,26 @@ class ZhipuAIProvider(AnthropicProvider):
         models = fetch_zhipuai_models(api_key)
         self._trace(f"[_fetch_remote_models] Got {len(models)} models")
         return models
+
+    def modalities(self, model: Optional[str] = None):
+        """INPUT modalities — GLM-4V / 4.5V accept images; other GLMs text-only.
+
+        Overrides the inherited Anthropic ``modalities()`` (whose ``claude-*``
+        prefix table never matches a GLM name, so it was inert and silently
+        gated images off for the vision models).  Precedence: profile
+        ``modalities`` knob → GLM table → text floor.
+        """
+        model = (model or self._model_name or "").lower()
+        table = None
+        for prefix, mods in GLM_INPUT_MODALITIES.items():
+            if model.startswith(prefix):
+                table = mods
+                break
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=table,
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
 
     def get_context_limit(self) -> int:
         """Get context window size.
