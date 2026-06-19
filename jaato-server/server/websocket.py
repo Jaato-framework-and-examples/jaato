@@ -881,8 +881,11 @@ class JaatoWSServer:
                 server.set_reference_authorizer(authorizer)
             sess.sandbox_mode = "apparmor"
             # Record mapping so the workspace reaper can teardown
-            # the profile by workspace ID.
-            import os
+            # the profile by workspace ID.  (Uses the module-level ``os``
+            # imported at the top — a local ``import os`` here would make
+            # ``os`` function-local throughout ``_apparmor_session_hook``
+            # and raise ``UnboundLocalError`` at the earlier
+            # ``os.path.realpath`` call.)
             workspace_id = os.path.basename(sess.workspace_path)
             ws_server._workspace_to_session_id[workspace_id] = session_id
             logger.info(
