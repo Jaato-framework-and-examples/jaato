@@ -563,6 +563,23 @@ class OTelPlugin:
             self._tracer = None
             self._enabled = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (required by the ``TelemetryPlugin``
+        protocol).
+
+        On a pool slot reused across cascade sessions, the framework
+        calls this BETWEEN sessions.  End this session's per-session /
+        per-agent long-lived spans so they don't leak into the next
+        session, and reset the per-turn agent context — but KEEP the
+        provider, tracer, and redaction config (across-session-by-design
+        state; tearing those down is ``shutdown()``'s job at slot end).
+        Per the litmus test in ``docs/design/runner-cascade-sharing.md``
+        §4.3.
+        """
+        for key in list(self._long_lived_spans):
+            self._end_long_lived(key)
+        self._agent_context = threading.local()
+
     @property
     def enabled(self) -> bool:
         """Check if telemetry is enabled and initialized."""
