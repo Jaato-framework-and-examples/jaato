@@ -603,6 +603,7 @@ class ToolCallEndEvent(Event):
     tool_name: str = ""
     call_id: Optional[str] = None
     success: bool = True
+    is_error_result: bool = False  # computed deeper error check — success=True but error body; distinct from `success`
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
     backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)

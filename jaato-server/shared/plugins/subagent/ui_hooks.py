@@ -348,6 +348,7 @@ class AgentUIHooks(Protocol):
         continuation_id: Optional[str] = None,
         show_output: Optional[bool] = None,
         show_popup: Optional[bool] = None,
+        is_error_result: bool = False,
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -357,6 +358,11 @@ class AgentUIHooks(Protocol):
             success: Whether the tool executed successfully.
             duration_seconds: How long the tool took to execute.
             error_message: Error message if the tool failed.
+            is_error_result: Computed deeper error check — True when the tool
+                returned an error body (e.g. ``{"error": ...}`` or HTTP
+                status_code >= 400) even though ``success`` is True. Distinct
+                from ``success`` (which only catches raised exceptions /
+                permission / missing-executor).
             call_id: Unique identifier for this tool call (for correlation).
             backgrounded: True if tool was auto-backgrounded (still producing output).
             continuation_id: Session ID for tools that expect follow-up calls
