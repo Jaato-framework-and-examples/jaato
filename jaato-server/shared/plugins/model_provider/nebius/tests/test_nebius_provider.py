@@ -207,6 +207,46 @@ class TestMessageConversion:
         assert result["role"] == "assistant"
         assert result["content"] == "Hi there"
 
+    def test_user_message_with_image_marshals_image_url_block(self):
+        # A vision-declared OpenAI-compat model must actually RECEIVE the image:
+        # an inline_data part becomes an OpenAI image_url content block (base64
+        # data URL).  Without this the image was silently dropped and only the
+        # text reached the wire ("no image attached").
+        import base64
+        png = b"\x89PNG\r\n\x1a\nFAKEPNGBYTES"
+        msg = Message(role=Role.USER, parts=[
+            Part(text="What is in this image?"),
+            Part(inline_data={"mime_type": "image/png", "data": png}),
+        ])
+        result, = message_to_openai(msg)
+
+        assert result["role"] == "user"
+        # content is now a LIST of blocks (text + image), not a bare string
+        assert isinstance(result["content"], list)
+        text_blocks = [b for b in result["content"] if b["type"] == "text"]
+        img_blocks = [b for b in result["content"] if b["type"] == "image_url"]
+        assert text_blocks[0]["text"] == "What is in this image?"
+        assert len(img_blocks) == 1
+        expected = "data:image/png;base64," + base64.b64encode(png).decode("utf-8")
+        assert img_blocks[0]["image_url"]["url"] == expected
+
+    def test_user_message_image_only_no_text(self):
+        png = b"rawbytes"
+        msg = Message(role=Role.USER, parts=[
+            Part(inline_data={"mime_type": "image/jpeg", "data": png}),
+        ])
+        result, = message_to_openai(msg)
+        assert isinstance(result["content"], list)
+        assert all(b["type"] == "image_url" for b in result["content"])
+        assert result["content"][0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    def test_text_only_user_message_stays_a_string(self):
+        # Regression: no images -> plain-string content, unchanged wire shape.
+        msg = Message(role=Role.USER, parts=[Part(text="just text")])
+        result, = message_to_openai(msg)
+        assert result["content"] == "just text"
+        assert isinstance(result["content"], str)
+
     def test_assistant_message_with_tool_calls(self):
         fc = FunctionCall(id="call_1", name="read_file", args={"path": "/tmp"})
         msg = Message(role=Role.MODEL, parts=[Part(function_call=fc)])

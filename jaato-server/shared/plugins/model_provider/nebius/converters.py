@@ -158,7 +158,33 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 msg["content"] = None
         return [msg]
 
-    # Default to user message
+    # Default to user message.  Marshal any inline_data (image) parts into
+    # OpenAI multimodal content blocks so a vision-declared OpenAI-compat model
+    # (nebius / nim / vllm / lmstudio / tensorrt_llm) actually RECEIVES the
+    # image.  The capability is declared via ``resolve_modalities`` (the
+    # ``modalities`` knob / catalog), but without this the image part was
+    # silently dropped and only the text reached the wire ("no image
+    # attached").  Text-only turns keep a plain-string ``content`` (unchanged
+    # wire shape).
+    inline_images = [p.inline_data for p in message.parts if p.inline_data is not None]
+    if inline_images:
+        blocks: List[Dict[str, Any]] = []
+        if content:
+            blocks.append({"type": "text", "text": content})
+        for img in inline_images:
+            mime = img.get("mime_type", "image/png")
+            data = img.get("data", b"")
+            b64 = (
+                base64.b64encode(data).decode("utf-8")
+                if isinstance(data, (bytes, bytearray))
+                else data  # already-encoded base64/string payload
+            )
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+        return [{"role": "user", "content": blocks}]
+
     return [{
         "role": "user",
         "content": content,
