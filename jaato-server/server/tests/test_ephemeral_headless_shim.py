@@ -163,6 +163,12 @@ class TestEphemeralHeadlessShim:
         assert ws.startswith(tempfile.gettempdir())
         assert os.path.basename(ws).startswith("jaato-ephemeral-")
         assert os.path.isdir(ws)
+        # config_root is derived from the (scratch) workspace so the runner's
+        # core plugins (file_edit's backup manager) resolve their backup base.
+        # The auto "<workspace>/.jaato" fallback was removed (PR-147), so an
+        # unset config_root makes file_edit fail to expose with a loud (but
+        # non-fatal) RuntimeError traceback on every ephemeral spawn.
+        assert cap["create_kwargs"]["config_root"] == os.path.join(ws, ".jaato")
         shutil.rmtree(ws, ignore_errors=True)  # don't leak the scratch dir
 
     def test_workspace_provided_passes_through(self):
@@ -173,6 +179,11 @@ class TestEphemeralHeadlessShim:
             None, "/real/workspace", None,
         )
         assert cap["create_kwargs"]["workspace_path"] == "/real/workspace"
+        # config_root mirrors normal-session semantics: "<workspace>/.jaato".
+        import os
+        assert cap["create_kwargs"]["config_root"] == os.path.join(
+            "/real/workspace", ".jaato"
+        )
 
     def test_inline_spawn_decouples_agent_name_from_resolution(self):
         """For an inline spawn the display label rides ``session_name`` and

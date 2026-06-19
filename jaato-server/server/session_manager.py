@@ -7856,6 +7856,17 @@ class SessionManager:
                     cid, workspace_path,
                 )
 
+            # The runner's core plugins (canonical case: file_edit's
+            # backup manager) require a config_root.  The auto
+            # "<workspace>/.jaato" fallback was removed (PR-147), so it
+            # must be set explicitly or those plugins fail to expose with
+            # a loud RuntimeError traceback on every ephemeral spawn
+            # (non-fatal, but it masquerades as a failure in logs).
+            # Mirror normal-session semantics: derive config_root from
+            # whatever workspace this ephemeral session runs in (scratch
+            # or caller-supplied).  Deterministic, no hardcoded fallback.
+            ephemeral_config_root = str(pathlib.Path(workspace_path) / ".jaato")
+
             # For an inline-config spawn the caller's ``agent_name`` is a
             # human-readable DISPLAY label (e.g. a gossip remote-spawn's
             # "remote-subagent") — NOT a ``.jaato/agents/<name>.md`` persona.
@@ -7875,6 +7886,7 @@ class SessionManager:
                 workspace_path=workspace_path,
                 initial_prompt=prompt,
                 inline_profile_data=merged,
+                config_root=ephemeral_config_root,
                 cascade_driver_id=cid,
             )
             if not session_id:
