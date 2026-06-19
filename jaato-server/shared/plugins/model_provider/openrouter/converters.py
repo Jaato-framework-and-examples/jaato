@@ -264,6 +264,31 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 msg["content"] = None
         return [msg]
 
+    # User message.  Marshal any inline_data (image) parts into OpenAI
+    # multimodal content blocks so a vision-declared model actually RECEIVES
+    # the image.  OpenRouter declares vision via the catalog (resolve_modalities
+    # catalog-detect), but this wire converter only emitted text — the image
+    # part was silently dropped and the model confabulated.  Text-only turns
+    # keep a plain-string ``content`` (unchanged wire shape).
+    inline_images = [p.inline_data for p in message.parts if p.inline_data is not None]
+    if inline_images:
+        blocks: List[Dict[str, Any]] = []
+        if content:
+            blocks.append({"type": "text", "text": content})
+        for img in inline_images:
+            mime = img.get("mime_type", "image/png")
+            data = img.get("data", b"")
+            b64 = (
+                base64.b64encode(data).decode("utf-8")
+                if isinstance(data, (bytes, bytearray))
+                else data  # already-encoded base64/string payload
+            )
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+        return [{"role": "user", "content": blocks}]
+
     return [{
         "role": "user",
         "content": content,
