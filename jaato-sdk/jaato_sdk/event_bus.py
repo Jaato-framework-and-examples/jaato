@@ -80,6 +80,16 @@ class EventType(Enum):
     # Drift monitor events (published by drift monitor plugin)
     DRIFT_MEASURED = "drift.measured"
 
+    # Reliability reactor events (published by a tenant-authored reliability
+    # reactor — the event-driven successor to the in-process reliability
+    # plugin; see docs/design/reliability-event-driven-migration.md).
+    # Observability: emitted on every escalation / behavioral-pattern
+    # detection so traces see the signal even when no steer fires.  A reactor
+    # may also SUBSCRIBE to these (e.g. a T2/T3 headless-approval reactor
+    # reacting to reliability.escalated).
+    RELIABILITY_ESCALATED = "reliability.escalated"
+    RELIABILITY_PATTERN_DETECTED = "reliability.pattern_detected"
+
     # External events (published by plugins, not plan/step lifecycle)
     EXTERNAL_EVENT = "external_event"  # Webhook, WebSocket, or other external ingress
 
