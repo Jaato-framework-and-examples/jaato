@@ -57,6 +57,10 @@ class _RecordingSession:
     def __init__(self, **kwargs: Any) -> None:
         self.create_session_kwargs = dict(kwargs)
         self._session_env: Dict[str, str] = {}
+        self._daemon_session_id: Optional[str] = None
+
+    def set_daemon_session_id(self, session_id: str) -> None:
+        self._daemon_session_id = session_id
 
 
 class _RecordingRuntime:
@@ -169,6 +173,22 @@ def test_bootstrap_attaches_session_env_to_session(
 
     assert host.session is not None
     assert host.session._session_env.get("TEST_Y_KEY_B") == "attached"
+
+
+def test_bootstrap_stamps_daemon_session_id_on_session(
+    tmp_path, isolated_env,
+) -> None:
+    """The runner stamps ``envelope.session_id`` onto the JaatoSession's
+    ``_daemon_session_id`` so per-session consumers (memory's
+    source_session, telemetry, dynamic-instructions) read a per-sibling
+    value from ``get_current_session()`` instead of the SHARED
+    ``registry._session_id``, which leaked across sibling subagents."""
+    runtime = _RecordingRuntime()
+    env = _good_envelope(workspace_path=str(tmp_path), session_id="sess-xyz")
+    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
+
+    assert host.session is not None
+    assert host.session._daemon_session_id == "sess-xyz"
 
 
 # ----------------------------------------------------------------------

@@ -891,6 +891,21 @@ def bootstrap_session(
                 "to session; plugin reads will fall back to os.environ",
             )
 
+    # ---- 3b. Stamp the daemon session_id onto the runner-side session.
+    # Pre-this, ``_daemon_session_id`` was set ONLY daemon-side (by
+    # ``JaatoClient``), so the runner-side JaatoSession carried None.
+    # That forced any runner-tier consumer of the per-session id (the
+    # ``memory`` plugin's ``source_session``, telemetry span
+    # ``jaato.session_id``, dynamic-instructions ``{{session_id}}``) to
+    # fall back to SHARED state — ``registry._session_id`` — which is
+    # overwritten by whichever sibling subagent bootstrapped last,
+    # leaking one sibling's id into another's records.  Each sibling has
+    # its OWN JaatoSession, so stamping the id here (envelope.session_id
+    # is this session's daemon id) gives every consumer a per-execution,
+    # per-sibling-correct value via ``get_current_session()``.
+    if envelope.session_id:
+        session.set_daemon_session_id(envelope.session_id)
+
     # ---- 4. Phase 5 §5.10c — install AppArmor child-profile
     # transition callback on subprocess-spawning plugins.
     _maybe_install_child_callback(envelope, session)
