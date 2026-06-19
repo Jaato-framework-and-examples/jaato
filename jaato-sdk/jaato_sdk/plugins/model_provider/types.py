@@ -287,6 +287,18 @@ class ToolResult:
     enrichment_metadata: Optional[Dict[str, Any]] = None
 
 
+def tool_result_is_error(result: Any) -> bool:
+    """True when a tool result represents an error EVEN IF execution 'succeeded'
+    (e.g. a success=True call that returns ``{"error": ...}`` or HTTP
+    status_code >= 400).  Distinct from the executor's success flag /
+    ``ToolResult.is_error`` (= not success), which only catches raised
+    exceptions / permission / missing-executor.  Canonical definition reused by
+    the reliability plugin and the tool.call_completed event populate."""
+    if not isinstance(result, dict):
+        return False
+    return "error" in result or result.get("status_code", 200) >= 400
+
+
 @dataclass
 class Part:
     """A part of a message content.

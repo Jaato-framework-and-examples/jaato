@@ -89,6 +89,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TurnOutcome,
     TurnResult,
+    tool_result_is_error,
 )
 
 if TYPE_CHECKING:
@@ -5328,6 +5329,9 @@ NOTES
                         fc_show_output = er.get('show_output')
                         fc_show_popup = er.get('show_popup')
                 if self._ui_hooks:
+                    fc_result_payload = _split_executor_result_impl(
+                        result.executor_result
+                    )[1]
                     self._ui_hooks.on_tool_call_end(
                         agent_id=self._agent_id,
                         tool_name=fc.name,
@@ -5339,6 +5343,7 @@ NOTES
                         continuation_id=fc_continuation_id,
                         show_output=fc_show_output,
                         show_popup=fc_show_popup,
+                        is_error_result=tool_result_is_error(fc_result_payload),
                     )
 
         # Build results in original order
@@ -5599,6 +5604,7 @@ NOTES
 
         # Emit hook: tool ended
         if self._ui_hooks:
+            fc_result_payload = _split_executor_result_impl(executor_result)[1]
             self._ui_hooks.on_tool_call_end(
                 agent_id=self._agent_id,
                 tool_name=name,
@@ -5610,6 +5616,7 @@ NOTES
                 continuation_id=fc_continuation_id,
                 show_output=fc_show_output,
                 show_popup=fc_show_popup,
+                is_error_result=tool_result_is_error(fc_result_payload),
             )
 
         return _ToolExecutionResult(
@@ -8034,6 +8041,9 @@ NOTES
                     # Emit hook: tool ended
                     fc_duration = (fc_end - fc_start).total_seconds()
                     if self._ui_hooks:
+                        fc_result_payload = _split_executor_result_impl(
+                            executor_result
+                        )[1]
                         self._ui_hooks.on_tool_call_end(
                             agent_id=self._agent_id,
                             tool_name=name,
@@ -8045,6 +8055,7 @@ NOTES
                             continuation_id=fc_continuation_id,
                             show_output=fc_show_output,
                             show_popup=fc_show_popup,
+                            is_error_result=tool_result_is_error(fc_result_payload),
                         )
 
                     turn_data['function_calls'].append({

@@ -259,6 +259,7 @@ class AgentUIHooks(Protocol):
         continuation_id: Optional[str] = None,
         show_output: Optional[bool] = None,
         show_popup: Optional[bool] = None,
+        is_error_result: bool = False,
     ) -> None: ...
 
     def on_tool_output(

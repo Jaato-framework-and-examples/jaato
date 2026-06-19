@@ -4389,6 +4389,7 @@ class _AgentUIHooksNotificationShim:
         continuation_id: Optional[str] = None,
         show_output: Optional[bool] = None,
         show_popup: Optional[bool] = None,
+        is_error_result: bool = False,
     ) -> None:
         try:
             self._rpc.emit_notification(
@@ -4398,6 +4399,7 @@ class _AgentUIHooksNotificationShim:
                     "agent_id": str(agent_id or ""),
                     "tool_name": str(tool_name or ""),
                     "success": bool(success),
+                    "is_error_result": bool(is_error_result),
                     "duration_seconds": float(duration_seconds),
                     "error_message": error_message,
                     "call_id": call_id,
