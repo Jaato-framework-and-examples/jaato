@@ -17,3 +17,17 @@ __all__ = [
     "GoogleGenAIProvider",
     "create_provider",
 ]
+
+
+# --- Provider capability contract (see docs/model-provider-capabilities.md) ---
+from ..base import ProviderCapabilities  # noqa: E402
+
+PROVIDER_CAPABILITIES = ProviderCapabilities(
+    user_message_images=True,
+    tool_result_images=False,
+    tool_choice_forwarding=False,
+    thinking=False,
+    prompt_caching=True,
+    streaming=True,
+    cancellation=True,
+)

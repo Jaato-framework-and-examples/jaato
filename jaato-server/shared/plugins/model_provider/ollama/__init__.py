@@ -60,3 +60,17 @@ __all__ = [
     "resolve_context_length",
     "DEFAULT_OLLAMA_HOST",
 ]
+
+
+# --- Provider capability contract (see docs/model-provider-capabilities.md) ---
+from ..base import ProviderCapabilities  # noqa: E402
+
+PROVIDER_CAPABILITIES = ProviderCapabilities(
+    user_message_images=True,
+    tool_result_images=True,
+    tool_choice_forwarding=False,
+    thinking=False,
+    prompt_caching=False,
+    streaming=True,
+    cancellation=True,
+)

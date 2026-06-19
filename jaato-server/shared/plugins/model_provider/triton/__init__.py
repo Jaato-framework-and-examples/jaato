@@ -58,3 +58,17 @@ Environment variables:
 from .provider import TritonProvider, create_provider
 
 __all__ = ["TritonProvider", "create_provider"]
+
+
+# --- Provider capability contract (see docs/model-provider-capabilities.md) ---
+from ..base import ProviderCapabilities  # noqa: E402
+
+PROVIDER_CAPABILITIES = ProviderCapabilities(
+    user_message_images=True,
+    tool_result_images=True,
+    tool_choice_forwarding=False,
+    thinking=False,
+    prompt_caching=False,
+    streaming=True,
+    cancellation=True,
+)

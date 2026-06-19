@@ -402,8 +402,16 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
         return True
 
     def supports_stop(self) -> bool:
-        """Check if mid-turn cancellation is supported."""
-        return True
+        """Mid-turn cancellation is NOT honored.
+
+        The CLI subprocess stream loop deliberately ignores the cancel token
+        ("CANCEL_IGNORED ... letting streaming complete") — generation runs to
+        completion regardless.  Advertising ``True`` offered the user a
+        non-working cancel; report ``False`` to match the honest
+        ``cancellation=False`` capability declaration.  (If the CLI gains real
+        mid-stream interrupt, flip both together.)
+        """
+        return False
 
     # ==================== Token Management ====================
 
