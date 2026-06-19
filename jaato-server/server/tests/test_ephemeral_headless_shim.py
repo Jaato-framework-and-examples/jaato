@@ -22,11 +22,15 @@ import pytest
 from unittest.mock import MagicMock
 
 from server.session_manager import SessionManager
-from jaato_sdk.events import AgentOutputEvent, SessionTerminatedEvent
+from jaato_sdk.events import AgentOutputEvent, SessionTerminatedEvent, TurnCompletedEvent
 
 
 def _out(source: str, text: str, mode: str = "write") -> AgentOutputEvent:
     return AgentOutputEvent(agent_id="a", source=source, text=text, mode=mode)
+
+
+def _turn_completed() -> TurnCompletedEvent:
+    return TurnCompletedEvent(agent_id="a")
 
 
 def _terminated(reason: str, error_type=None, error_summary=None):
@@ -100,6 +104,26 @@ class TestEphemeralHeadlessShim:
         # Cleanup: client unregistered + session deleted.
         fake.unregister_cascade_client.assert_called_once()
         fake.delete_session.assert_called_once_with("sess-123")
+
+    def test_natural_completion_via_turn_completed_no_session_terminated(self):
+        # The production happy path: a single-shot ephemeral emits its output
+        # then turn.completed, and the headless session goes IDLE — it does
+        # NOT emit SessionTerminatedEvent on natural success.  Pre-fix the run
+        # blocked on done.wait() until the 1800s timeout (gossip co-validation
+        # 2026-06-19: origin got the full output stream but never
+        # PeerAgentCompleted, because execute_spawn sends completion only after
+        # run_ephemeral_session RETURNS).  The old tests only ever injected a
+        # mocked SessionTerminatedEvent, so CI never exercised this path.
+        chunks = []
+        fake, cap = _fake_self([
+            _out("model", "Hello "),
+            _out("model", "world", mode="append"),
+            _turn_completed(),          # natural terminal — NO SessionTerminatedEvent
+        ])
+        result = _run(fake, on_output=lambda s, t, m: chunks.append((s, t)))
+        assert chunks == [("model", "Hello "), ("model", "world")]
+        assert result == "Hello world"          # returns, does not hang
+        fake.delete_session.assert_called_once_with("sess-123")  # clean teardown
 
     def test_error_terminal_raises_with_cause(self):
         fake, _ = _fake_self([
