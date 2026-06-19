@@ -205,22 +205,51 @@ def system_message_with_cache(
 
 # ==================== Message Conversion ====================
 
-def _tool_result_image_blocks(attachments: Any) -> List[Dict[str, Any]]:
-    """OpenAI ``image_url`` content blocks for image attachments on a tool result.
+def _attachment_content_block(
+    mime: str, data: Any, filename: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """OpenAI/OpenRouter content block for a binary attachment.
 
-    OpenAI/OpenRouter ``tool`` messages cannot carry image content — images
-    live only in ``user`` messages — so a tool that returns an image (e.g.
-    ``readFile`` on a PNG) must surface it via a follow-up user message.
+    ``image/*`` -> an ``image_url`` data-URL block; ``application/pdf`` -> a
+    ``file`` block (OpenRouter's PDF-input extension — the model, or the
+    optional ``file-parser`` plugin, parses it).  Returns ``None`` for a mime
+    this wire doesn't carry.
+    """
+    mime = mime or ""
+    b64 = (
+        base64.b64encode(data).decode("utf-8")
+        if isinstance(data, (bytes, bytearray))
+        else data  # already-encoded base64/string payload
+    )
+    if mime.startswith("image/"):
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+    if mime == "application/pdf":
+        return {
+            "type": "file",
+            "file": {
+                "filename": filename or "document.pdf",
+                "file_data": f"data:application/pdf;base64,{b64}",
+            },
+        }
+    return None
+
+
+def _tool_result_attachment_blocks(attachments: Any) -> List[Dict[str, Any]]:
+    """Content blocks for image/PDF attachments on a tool result.
+
+    OpenAI/OpenRouter ``tool`` messages cannot carry image/file content — they
+    live only in ``user`` messages — so a tool that returns one (``readFile`` on
+    a PNG or a PDF) must surface it via a follow-up user message.
     """
     blocks: List[Dict[str, Any]] = []
     for att in attachments or []:
-        mime = getattr(att, "mime_type", "") or ""
-        if mime.startswith("image/"):
-            b64 = base64.b64encode(att.data).decode("utf-8")
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            })
+        block = _attachment_content_block(
+            getattr(att, "mime_type", "") or "",
+            att.data,
+            getattr(att, "display_name", None),
+        )
+        if block:
+            blocks.append(block)
     return blocks
 
 
@@ -262,23 +291,25 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 "tool_call_id": fr.call_id,
                 "content": result_str,
             })
-            # tool messages can't carry images — surface image attachments as a
-            # follow-up user message so a vision model actually SEES them.
-            blocks = _tool_result_image_blocks(getattr(fr, "attachments", None))
+            # tool messages can't carry image/file content — surface such
+            # attachments as a follow-up user message so the model SEES them.
+            blocks = _tool_result_attachment_blocks(getattr(fr, "attachments", None))
             if blocks:
                 names = ", ".join(
                     a.display_name or a.mime_type
                     for a in fr.attachments
-                    if (getattr(a, "mime_type", "") or "").startswith("image/")
+                    if _attachment_content_block(
+                        getattr(a, "mime_type", "") or "", a.data,
+                    ) is not None
                 )
                 image_followups.append({
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": f"[Image returned by tool call: {names}]"}
+                        {"type": "text", "text": f"[Attachment returned by tool call: {names}]"}
                     ] + blocks,
                 })
         # All tool messages first (each keyed to its tool_call_id), then any
-        # image follow-ups, then the model generates its next turn.
+        # attachment follow-ups, then the model generates its next turn.
         return tool_msgs + image_followups
 
     if role == Role.MODEL:
@@ -301,29 +332,27 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 msg["content"] = None
         return [msg]
 
-    # User message.  Marshal any inline_data (image) parts into OpenAI
-    # multimodal content blocks so a vision-declared model actually RECEIVES
-    # the image.  OpenRouter declares vision via the catalog (resolve_modalities
-    # catalog-detect), but this wire converter only emitted text — the image
-    # part was silently dropped and the model confabulated.  Text-only turns
-    # keep a plain-string ``content`` (unchanged wire shape).
-    inline_images = [p.inline_data for p in message.parts if p.inline_data is not None]
-    if inline_images:
+    # User message.  Marshal any inline_data (image / PDF) parts into OpenAI
+    # multimodal content blocks so a vision/file-declared model actually
+    # RECEIVES them.  OpenRouter declares these via the catalog
+    # (resolve_modalities catalog-detect), but this wire converter only emitted
+    # text — the binary part was silently dropped and the model confabulated.
+    # Text-only turns keep a plain-string ``content`` (unchanged wire shape).
+    inline_parts = [p.inline_data for p in message.parts if p.inline_data is not None]
+    media_blocks = [
+        b for b in (
+            _attachment_content_block(
+                p.get("mime_type", "image/png"), p.get("data", b""),
+                p.get("display_name"),
+            )
+            for p in inline_parts
+        ) if b
+    ]
+    if media_blocks:
         blocks: List[Dict[str, Any]] = []
         if content:
             blocks.append({"type": "text", "text": content})
-        for img in inline_images:
-            mime = img.get("mime_type", "image/png")
-            data = img.get("data", b"")
-            b64 = (
-                base64.b64encode(data).decode("utf-8")
-                if isinstance(data, (bytes, bytearray))
-                else data  # already-encoded base64/string payload
-            )
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            })
+        blocks.extend(media_blocks)
         return [{"role": "user", "content": blocks}]
 
     return [{

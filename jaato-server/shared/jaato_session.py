@@ -6761,7 +6761,8 @@ NOTES
         if isinstance(result_data, dict) and result_data.get('_multimodal'):
             attachments = _extract_multimodal_attachments_impl(result_data)
             result_data = {k: v for k, v in result_data.items()
-                          if not k.startswith('_multimodal') and k not in ('image_data',)}
+                          if not k.startswith('_multimodal')
+                          and k not in ('image_data', 'file_data')}
 
         # String results pass through directly so converters never
         # JSON-encode them (which would escape quotes, backslashes, etc.).
