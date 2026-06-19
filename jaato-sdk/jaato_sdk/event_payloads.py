@@ -141,6 +141,9 @@ class AgentCreatedPayload(TypedDict):
     profile_name: NotRequired[Optional[str]]
     parent_agent_id: NotRequired[Optional[str]]
     created_at: NotRequired[Optional[str]]
+    # Daemon-side session identifier (server 0.6.175+); mirrors the
+    # AgentCreatedEvent field added for per-stage session_id correlation.
+    session_id: NotRequired[str]
 
 
 class AgentOutputPayload(TypedDict):
