@@ -11,15 +11,15 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `claude_cli` | — | — | — | ✅ | — | ✅ | — |
 | `github_models` | — | — | — | ✅ | — | ✅ | ✅ |
 | `google_genai` | ✅ | — | — | — | ✅ | ✅ | ✅ |
-| `lmstudio` | — | — | — | — | — | ✅ | ✅ |
+| `lmstudio` | ✅ | ✅ | — | — | — | ✅ | ✅ |
 | `nebius` | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ |
-| `nim` | — | — | — | ✅ | — | ✅ | ✅ |
+| `nim` | ✅ | ✅ | — | ✅ | — | ✅ | ✅ |
 | `ollama` | ✅ | ✅ | — | — | — | ✅ | ✅ |
 | `openrouter` | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
-| `tensorrt_llm` | — | — | — | — | — | ✅ | ✅ |
-| `triton` | — | — | — | — | — | ✅ | ✅ |
-| `vllm` | — | — | ✅ | — | — | ✅ | ✅ |
+| `tensorrt_llm` | ✅ | ✅ | — | — | — | ✅ | ✅ |
+| `triton` | ✅ | ✅ | — | — | — | ✅ | ✅ |
+| `vllm` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ |
 | `zhipuai` | ✅ | ✅ | — | ✅ | — | ✅ | ✅ |
-| `zhipuai_openai` | — | — | — | ✅ | — | ✅ | ✅ |
+| `zhipuai_openai` | ✅ | ✅ | — | ✅ | — | ✅ | ✅ |
 
 **Legend:** ✅ = implemented & verified on the wire by the conformance guard · — = not implemented (text-only / not forwarded).
