@@ -1,0 +1,76 @@
+name: CI Tests
+
+# Runs on every PR (each push to a PR branch) and on direct pushes to
+# main. Pairing a job here with a branch-protection "required status
+# check" is what actually blocks a merge — see the per-job notes below.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  # ---------------------------------------------------------------
+  # REQUIRED check (promote in branch protection once confirmed green
+  # in real CI). Blocks the silent plugin-protocol-drift regression
+  # class — a plugin/fixture missing a protocol method (the telepathy +
+  # enrichment-fixture bugs) is dropped at discovery with only a WARNING,
+  # so without this gate it ships invisibly.
+  #
+  # Kept deliberately light + reliable: the only optional backend any of
+  # these guards imports is the interactive_shell plugin's `pexpect`
+  # (.[interactive]). No system-dependency extras (notably `kerberos`,
+  # whose `gssapi` needs libkrb5-dev to build) — so the required check
+  # never goes red for an unrelated install reason.
+  # ---------------------------------------------------------------
+  contract-guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install (editable + interactive backend)
+        run: |
+          pip install -e jaato-sdk/
+          pip install -e "jaato-server/.[dev,interactive]"
+      - name: Plugin contract guards
+        run: |
+          pytest -q \
+            jaato-server/shared/tests/test_all_plugins_satisfy_protocol.py \
+            jaato-server/shared/tests/test_plugin_tier_partition.py \
+            jaato-server/shared/tests/test_reset_for_next_session.py \
+            jaato-server/shared/tests/test_enrichment_plugin.py
+
+  # ---------------------------------------------------------------
+  # NON-BLOCKING (do NOT add to required checks yet). Reports the
+  # authoritative CI failure set for the full shared/tests suite so the
+  # pre-existing-failure backlog can be burned down (quarantine env-gated
+  # tests with skipif, xfail genuine drift), then promoted to a required
+  # check once green. `--continue-on-collection-errors` so a single bad
+  # import (e.g. a stale symbol) doesn't mask the rest of the suite.
+  #
+  # Installs the full `.[all]` dev env so the failure list reflects real
+  # test failures, not missing-optional-backend import noise. `.[all]`
+  # pulls the `kerberos` extra (gssapi), which needs the libkrb5 build
+  # headers — install them first; graphviz covers the diagrams plugin's
+  # render path.
+  # ---------------------------------------------------------------
+  full-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: System build deps (gssapi / diagrams)
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev graphviz
+      - name: Install (editable, all extras)
+        run: |
+          pip install -e jaato-sdk/
+          pip install -e "jaato-server/.[all]"
+      - name: Full shared/tests suite
+        run: |
+          pytest -q --continue-on-collection-errors \
+            jaato-server/shared/tests/
