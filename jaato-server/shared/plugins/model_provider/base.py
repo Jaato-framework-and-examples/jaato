@@ -263,6 +263,61 @@ class ModalityCapabilityMixin:
         """Whether ``model`` (or the active model) accepts ``kind`` as input."""
         return kind.strip().lower() in self.modalities(model)
 
+    def capabilities(self) -> "ProviderCapabilities":
+        """Declared wire-level capabilities (baseline default).
+
+        Returns the honest minimal-adapter baseline.  Providers OVERRIDE
+        this to return their ``PROVIDER_CAPABILITIES`` constant.  See
+        :class:`ProviderCapabilities`.
+        """
+        return ProviderCapabilities()
+
+
+# Canonical capability fields — the COLUMNS of the capability matrix.  Each is a
+# concrete, wire-testable behavior (not a vague label) so the CI conformance
+# guard can assert it.  Adding a field here is the one place a new capability is
+# defined; the doc generator and the guard both read this tuple.
+CAPABILITY_FIELDS = (
+    "user_message_images",
+    "tool_result_images",
+    "tool_choice_forwarding",
+    "thinking",
+    "prompt_caching",
+    "streaming",
+    "cancellation",
+)
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """Declared wire-level capabilities of a model provider.
+
+    The SINGLE SOURCE OF TRUTH for both the capability doc table
+    (``docs/model-provider-capabilities.md``) and the CI conformance guard.
+    Each provider declares a module-level ``PROVIDER_CAPABILITIES`` constant in
+    its ``__init__.py`` and returns it from :meth:`capabilities`.
+
+    The guard asserts BOTH (1) every provider declares it (structural, AST) AND
+    (2) every flag set ``True`` is actually delivered on the wire (behavioral) —
+    closing the "declared ``image: yes`` but the converter silently drops it"
+    gap this contract exists to prevent.
+
+    Defaults are the honest baseline of a minimal OpenAI-compat adapter: it
+    streams and cancels, but marshals text only and forwards no advanced knobs.
+    Providers override per the behavior they actually implement.
+    """
+
+    user_message_images: bool = False   # Part.inline_data image -> wire image block
+    tool_result_images: bool = False    # tool-result image attachment -> the model
+    tool_choice_forwarding: bool = False  # complete(tool_choice=...) reaches the wire
+    thinking: bool = False              # extended-reasoning request and/or extraction
+    prompt_caching: bool = False        # cache_control breakpoints emitted on the wire
+    streaming: bool = True              # on_chunk token streaming
+    cancellation: bool = True           # cancel_token actually halts generation
+
+    def as_dict(self) -> Dict[str, bool]:
+        return {f: bool(getattr(self, f)) for f in CAPABILITY_FIELDS}
+
 
 @runtime_checkable
 class ModelProviderPlugin(Protocol):

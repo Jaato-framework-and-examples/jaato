@@ -44,3 +44,17 @@ Environment variables:
 from .provider import LMStudioProvider, create_provider
 
 __all__ = ["LMStudioProvider", "create_provider"]
+
+
+# --- Provider capability contract (see docs/model-provider-capabilities.md) ---
+from ..base import ProviderCapabilities  # noqa: E402
+
+PROVIDER_CAPABILITIES = ProviderCapabilities(
+    user_message_images=False,
+    tool_result_images=False,
+    tool_choice_forwarding=False,
+    thinking=False,
+    prompt_caching=False,
+    streaming=True,
+    cancellation=True,
+)

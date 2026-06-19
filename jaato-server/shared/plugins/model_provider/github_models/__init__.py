@@ -17,3 +17,17 @@ Enterprise features:
 from .provider import GitHubModelsProvider, create_provider
 
 __all__ = ["GitHubModelsProvider", "create_provider"]
+
+
+# --- Provider capability contract (see docs/model-provider-capabilities.md) ---
+from ..base import ProviderCapabilities  # noqa: E402
+
+PROVIDER_CAPABILITIES = ProviderCapabilities(
+    user_message_images=False,
+    tool_result_images=False,
+    tool_choice_forwarding=False,
+    thinking=True,
+    prompt_caching=False,
+    streaming=True,
+    cancellation=True,
+)
