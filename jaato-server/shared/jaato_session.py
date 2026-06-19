@@ -114,6 +114,25 @@ AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
 REWIND_BUDGET_PER_OPERATION = 2
 
 
+def _telemetry_json_default(obj: Any) -> str:
+    """``json.dumps`` ``default=`` for telemetry span output.
+
+    Tool results can carry raw binary (a multimodal ``readFile`` returns
+    ``image_data`` bytes BEFORE ``_build_tool_result`` strips it).  A span
+    attribute must never embed megabytes of binary nor crash the model loop on
+    a non-serializable value — summarise bytes compactly and ``repr`` anything
+    else exotic.
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        return f"<{type(obj).__name__}: {len(obj)} bytes>"
+    return repr(obj)
+
+
+def _telemetry_safe_json(value: Any) -> str:
+    """Serialise a tool result for an OTel span without choking on binary."""
+    return json.dumps(value, default=_telemetry_json_default)
+
+
 class ActivityPhase(Enum):
     """Activity phases for tracking what a session is doing.
 
@@ -5575,7 +5594,7 @@ NOTES
             elif isinstance(executor_result, dict):
                 result_dict_for_output = executor_result
             if result_dict_for_output is not None:
-                tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                tool_span.set_attribute("output.value", _telemetry_safe_json(result_dict_for_output))
                 tool_span.set_attribute("output.mime_type", "application/json")
 
             # Pack jaato-specific tool metadata
@@ -5834,7 +5853,7 @@ NOTES
                 elif isinstance(executor_result, dict):
                     result_dict_for_output = executor_result
                 if result_dict_for_output is not None:
-                    tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                    tool_span.set_attribute("output.value", _telemetry_safe_json(result_dict_for_output))
                     tool_span.set_attribute("output.mime_type", "application/json")
 
                 # Pack jaato-specific tool metadata

@@ -327,6 +327,61 @@ class TestMessageConversion:
         assert result["role"] == "user"
         assert result["content"] == "Hello"
 
+    def test_user_message_with_image_marshals_image_url_block(self):
+        # OpenRouter declares vision via the catalog, but the wire converter
+        # only emitted text — the image was silently dropped and the model
+        # confabulated.  An inline_data part must become an OpenAI image_url
+        # content block (base64 data URL).
+        import base64
+        png = b"\x89PNG\r\n\x1a\nFAKEPNG"
+        msg = Message(role=Role.USER, parts=[
+            Part(text="What is in this image?"),
+            Part(inline_data={"mime_type": "image/png", "data": png}),
+        ])
+        result, = message_to_openai(msg)
+        assert result["role"] == "user"
+        assert isinstance(result["content"], list)
+        img = [b for b in result["content"] if b["type"] == "image_url"]
+        txt = [b for b in result["content"] if b["type"] == "text"]
+        assert txt[0]["text"] == "What is in this image?"
+        assert len(img) == 1
+        assert img[0]["image_url"]["url"] == (
+            "data:image/png;base64," + base64.b64encode(png).decode("utf-8")
+        )
+
+    def test_text_only_user_message_stays_a_string(self):
+        # Regression: no images -> plain-string content, unchanged wire shape.
+        msg = Message(role=Role.USER, parts=[Part(text="just text")])
+        result, = message_to_openai(msg)
+        assert result["content"] == "just text"
+        assert isinstance(result["content"], str)
+
+    def test_tool_result_image_routed_to_followup_user_message(self):
+        # OpenAI/OpenRouter tool messages can't carry images, so a tool result
+        # with an image attachment (readFile on a PNG) surfaces the image as a
+        # follow-up user message; the tool message keeps the text result.
+        from jaato_sdk.plugins.model_provider.types import Attachment
+        tr = ToolResult(
+            call_id="c1", name="readFile",
+            result={"path": "x.png", "type": "image"},
+            attachments=[Attachment(mime_type="image/png", data=b"PNGBYTES",
+                                    display_name="x.png")],
+        )
+        msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
+        out = message_to_openai(msg)
+        assert out[0]["role"] == "tool"
+        assert "x.png" in out[0]["content"]
+        assert out[-1]["role"] == "user"
+        imgs = [b for b in out[-1]["content"] if b["type"] == "image_url"]
+        assert len(imgs) == 1
+        assert imgs[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_tool_result_without_image_emits_no_followup(self):
+        tr = ToolResult(call_id="c1", name="grep", result={"matches": 3})
+        msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
+        out = message_to_openai(msg)
+        assert len(out) == 1 and out[0]["role"] == "tool"
+
     def test_assistant_message_text(self):
         msg = Message(role=Role.MODEL, parts=[Part(text="Hi there")])
         result, = message_to_openai(msg)
