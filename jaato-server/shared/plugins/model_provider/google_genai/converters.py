@@ -111,12 +111,12 @@ def part_to_sdk(part: Part) -> get_types().Part:
         )
 
     if part.function_response is not None:
-        fr = part.function_response
-        response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
-        return get_types().Part.from_function_response(
-            name=name_to_id(fr.name),
-            response=response
-        )
+        # Delegate to the multimodal-aware builder so a tool result's image
+        # attachments actually reach the model.  The inline
+        # ``from_function_response`` here dropped ``attachments`` silently — the
+        # live history_to_sdk path never used tool_result_to_sdk_part, so
+        # google_genai declared-but-didn't-deliver tool-result vision.
+        return tool_result_to_sdk_part(part.function_response)
 
     if part.inline_data is not None:
         return get_types().Part(
@@ -244,12 +244,17 @@ def tool_result_to_sdk_part(result: ToolResult) -> get_types().Part:
     if result.is_error:
         response = {"error": str(result.result)}
 
+    # Names must be id-mapped to match the function_call name emitted at
+    # part_to_sdk (``name_to_id(fc.name)``) — otherwise google can't pair the
+    # response to its call.
+    fn_name = name_to_id(result.name)
+
     # Handle multimodal attachments
     if result.attachments:
-        return _build_multimodal_function_response(result.name, response, result.attachments)
+        return _build_multimodal_function_response(fn_name, response, result.attachments)
 
     return get_types().Part.from_function_response(
-        name=result.name,
+        name=fn_name,
         response=response
     )
 
