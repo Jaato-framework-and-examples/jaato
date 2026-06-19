@@ -85,6 +85,7 @@ def _make_session(
     session._ui_hooks = None
     session._gc_plugin = None
     session._gc_config = None
+    session._tier_config = None
     session._preloaded_plugins = set()
     # _system_instruction_override and _suppress_base_instructions are
     # normally set in configure(); tests bypass __init__ with __new__ so we
