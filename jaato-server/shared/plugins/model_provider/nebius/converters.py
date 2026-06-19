@@ -94,6 +94,25 @@ def tool_schemas_to_openai(schemas: Optional[List[ToolSchema]]) -> Optional[List
 
 # ==================== Message Conversion ====================
 
+def _tool_result_image_blocks(attachments: Any) -> List[Dict[str, Any]]:
+    """OpenAI ``image_url`` content blocks for image attachments on a tool result.
+
+    OpenAI-compat ``tool`` messages cannot carry image content — images live
+    only in ``user`` messages — so a tool that returns an image (e.g.
+    ``readFile`` on a PNG) must surface it via a follow-up user message.
+    """
+    blocks: List[Dict[str, Any]] = []
+    for att in attachments or []:
+        mime = getattr(att, "mime_type", "") or ""
+        if mime.startswith("image/"):
+            b64 = base64.b64encode(att.data).decode("utf-8")
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+    return blocks
+
+
 def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     """Convert internal Message to OpenAI message dict(s).
 
@@ -127,6 +146,7 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
         # One wire ``role:"tool"`` message PER function_response so all N
         # parallel results reach the model (each keyed by its own call_id).
         tool_msgs: List[Dict[str, Any]] = []
+        image_followups: List[Dict[str, Any]] = []
         for fr in function_responses:
             result_str = json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
             tool_msgs.append({
@@ -134,7 +154,24 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 "tool_call_id": fr.call_id,
                 "content": result_str,
             })
-        return tool_msgs
+            # tool messages can't carry images — surface image attachments as a
+            # follow-up user message so a vision model actually SEES them.
+            blocks = _tool_result_image_blocks(getattr(fr, "attachments", None))
+            if blocks:
+                names = ", ".join(
+                    a.display_name or a.mime_type
+                    for a in fr.attachments
+                    if (getattr(a, "mime_type", "") or "").startswith("image/")
+                )
+                image_followups.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"[Image returned by tool call: {names}]"}
+                    ] + blocks,
+                })
+        # All tool messages first (each keyed to its tool_call_id), then any
+        # image follow-ups, then the model generates its next turn.
+        return tool_msgs + image_followups
 
     if role == Role.MODEL:
         msg: Dict[str, Any] = {

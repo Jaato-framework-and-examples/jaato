@@ -356,6 +356,32 @@ class TestMessageConversion:
         assert result["content"] == "just text"
         assert isinstance(result["content"], str)
 
+    def test_tool_result_image_routed_to_followup_user_message(self):
+        # OpenAI/OpenRouter tool messages can't carry images, so a tool result
+        # with an image attachment (readFile on a PNG) surfaces the image as a
+        # follow-up user message; the tool message keeps the text result.
+        from jaato_sdk.plugins.model_provider.types import Attachment
+        tr = ToolResult(
+            call_id="c1", name="readFile",
+            result={"path": "x.png", "type": "image"},
+            attachments=[Attachment(mime_type="image/png", data=b"PNGBYTES",
+                                    display_name="x.png")],
+        )
+        msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
+        out = message_to_openai(msg)
+        assert out[0]["role"] == "tool"
+        assert "x.png" in out[0]["content"]
+        assert out[-1]["role"] == "user"
+        imgs = [b for b in out[-1]["content"] if b["type"] == "image_url"]
+        assert len(imgs) == 1
+        assert imgs[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_tool_result_without_image_emits_no_followup(self):
+        tr = ToolResult(call_id="c1", name="grep", result={"matches": 3})
+        msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
+        out = message_to_openai(msg)
+        assert len(out) == 1 and out[0]["role"] == "tool"
+
     def test_assistant_message_text(self):
         msg = Message(role=Role.MODEL, parts=[Part(text="Hi there")])
         result, = message_to_openai(msg)
