@@ -48,9 +48,10 @@ def extract_multimodal_attachments(
 ) -> Optional[List[Attachment]]:
     """Extract multimodal attachments from a ``_multimodal`` result dict.
 
-    Currently supports ``_multimodal_type == 'image'`` (the default),
-    reading ``image_data`` / ``mime_type`` / ``display_name``. Returns
-    ``None`` when there is nothing to attach.
+    Supports ``_multimodal_type == 'image'`` (the default; reads
+    ``image_data``) and ``'file'`` (PDFs/documents; reads ``file_data``),
+    both into the generic ``Attachment(mime_type, data, display_name)``.
+    Returns ``None`` when there is nothing to attach.
     """
     multimodal_type = result.get('_multimodal_type', 'image')
 
@@ -65,6 +66,20 @@ def extract_multimodal_attachments(
         return [Attachment(
             mime_type=mime_type,
             data=image_data,
+            display_name=display_name,
+        )]
+
+    if multimodal_type == 'file':
+        file_data = result.get('file_data')
+        if not file_data:
+            return None
+
+        mime_type = result.get('mime_type', 'application/octet-stream')
+        display_name = result.get('display_name', 'file')
+
+        return [Attachment(
+            mime_type=mime_type,
+            data=file_data,
             display_name=display_name,
         )]
 

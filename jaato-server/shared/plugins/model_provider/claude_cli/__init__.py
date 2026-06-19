@@ -90,6 +90,7 @@ from ..base import ProviderCapabilities  # noqa: E402
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=False,
     tool_result_images=False,
+    pdf_input=False,
     tool_choice_forwarding=False,
     thinking=True,
     prompt_caching=False,

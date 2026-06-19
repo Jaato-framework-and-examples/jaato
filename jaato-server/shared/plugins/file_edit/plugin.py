@@ -1565,6 +1565,23 @@ Backups are automatically created for file modifications."""
             except OSError as e:
                 return {"error": f"Failed to read image: {e}"}
 
+        if ext == '.pdf':
+            self._trace("readFile: detected PDF, returning as multimodal file")
+            try:
+                data = file_path.read_bytes()
+                return {
+                    "_multimodal": True,
+                    "_multimodal_type": "file",
+                    "file_data": data,
+                    "mime_type": "application/pdf",
+                    "display_name": file_path.name,
+                    "path": normalize_result_path(path),
+                    "size": len(data),
+                    "type": "file",
+                }
+            except OSError as e:
+                return {"error": f"Failed to read PDF: {e}"}
+
         # Validate offset and limit if provided
         if offset is not None:
             if not isinstance(offset, int) or offset < 1:

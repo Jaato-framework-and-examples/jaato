@@ -70,6 +70,8 @@ _CONFORMANCE_PENDING = {"google_genai", "antigravity", "github_models", "claude_
 
 _PNG = b"\x89PNG\r\n\x1a\nCONFORMANCE-IMAGE-PAYLOAD-1234567890"
 _B64 = base64.b64encode(_PNG).decode("utf-8")
+_PDF = b"%PDF-1.4 CONFORMANCE-PDF-PAYLOAD-1234567890 %%EOF"
+_PDF_B64 = base64.b64encode(_PDF).decode("utf-8")
 
 
 def _load_converter(relpath: str, fn: str) -> Callable:
@@ -99,6 +101,49 @@ def _tool_image_msg() -> Message:
         attachments=[Attachment(mime_type="image/png", data=_PNG,
                                 display_name="x.png")],
     ))])
+
+
+def _user_pdf_msg() -> Message:
+    return Message(role=Role.USER, parts=[
+        Part(text="summarize this document"),
+        Part(inline_data={"mime_type": "application/pdf", "data": _PDF,
+                          "display_name": "doc.pdf"}),
+    ])
+
+
+def _tool_pdf_msg() -> Message:
+    return Message(role=Role.TOOL, parts=[Part(function_response=ToolResult(
+        call_id="c1", name="readFile",
+        result={"path": "doc.pdf", "type": "file"},
+        attachments=[Attachment(mime_type="application/pdf", data=_PDF,
+                                display_name="doc.pdf")],
+    ))])
+
+
+@pytest.mark.parametrize("provider", sorted(_CONVERTERS))
+def test_declared_pdf_input_user_message_is_marshalled(provider):
+    if not _read_declaration(provider).get("pdf_input"):
+        pytest.skip(f"{provider} does not declare pdf_input")
+    relpath, fn = _CONVERTERS[provider]
+    convert = _load_converter(relpath, fn)
+    wire = convert(_user_pdf_msg())
+    assert _PDF_B64 in json.dumps(wire, default=str), (
+        f"{provider} declares pdf_input=True but {fn} did NOT put the PDF on the "
+        f"wire. Fix the converter or set pdf_input=False."
+    )
+
+
+@pytest.mark.parametrize("provider", sorted(_CONVERTERS))
+def test_declared_pdf_input_tool_result_is_marshalled(provider):
+    if not _read_declaration(provider).get("pdf_input"):
+        pytest.skip(f"{provider} does not declare pdf_input")
+    relpath, fn = _CONVERTERS[provider]
+    convert = _load_converter(relpath, fn)
+    wire = convert(_tool_pdf_msg())
+    assert _PDF_B64 in json.dumps(wire, default=str), (
+        f"{provider} declares pdf_input=True but {fn} did NOT surface the "
+        f"tool-result PDF to the model. Fix the converter or set pdf_input=False."
+    )
 
 
 @pytest.mark.parametrize("provider", sorted(_CONVERTERS))
