@@ -108,10 +108,11 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
 # a model absent here resolves to the text-only floor in modalities()
 # (never a false image claim).
 MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
-    "claude-opus-4": frozenset({"text", "image"}),
-    "claude-sonnet-4": frozenset({"text", "image"}),
-    "claude-haiku-4": frozenset({"text", "image"}),
-    "claude-3": frozenset({"text", "image"}),
+    "claude-opus-4": frozenset({"text", "image", "file"}),
+    "claude-sonnet-4": frozenset({"text", "image", "file"}),
+    "claude-haiku-4": frozenset({"text", "image", "file"}),
+    # claude-3 prefix covers 3.5/3.7 (PDF-capable); 3.0 is EOL.
+    "claude-3": frozenset({"text", "image", "file"}),
 }
 
 # Models that support extended thinking

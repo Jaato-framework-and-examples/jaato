@@ -116,9 +116,9 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
 # text-only and are absent here (-> text-only floor in modalities()).
 # Prefix-matched like MODEL_CONTEXT_LIMITS.
 MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
-    "gemini-1.5": frozenset({"text", "image"}),
-    "gemini-2": frozenset({"text", "image"}),
-    "gemini-3": frozenset({"text", "image"}),
+    "gemini-1.5": frozenset({"text", "image", "file"}),
+    "gemini-2": frozenset({"text", "image", "file"}),
+    "gemini-3": frozenset({"text", "image", "file"}),
 }
 
 
