@@ -90,31 +90,38 @@ class MemoryPlugin(RunnerForwardingMixin):
         _trace_write("MEMORY", msg)
 
     def _get_session_id(self) -> Optional[str]:
-        """Return the current session ID if available.
+        """Return the current session's daemon ID, per-execution.
 
-        Server 0.6.168+: prefer the registry's live ``_session_id``
-        over the plugin's cached value.  Rationale: cascade-pool
-        reuse (PR #173 / runner_pool) reuses the SAME plugin
-        instance across multiple sessions on a HIT slot.
-        ``plugin.initialize()`` only fires on MISS (first session
-        per slot); subsequent HIT-reused sessions don't re-run
-        initialize so the cached ``self._session_id`` stays at the
-        FIRST session's id (or None pre-0.6.168).  The registry's
-        ``_session_id`` IS updated per-bootstrap via
-        ``registry.set_session_id(envelope.session_id)`` at
-        ``runner/session.py:271``, so reading from the registry
-        at call time gives the always-current value.
+        Reads the CURRENTLY EXECUTING session via
+        ``shared.session_context.get_current_session()`` and resolves its
+        ``_daemon_session_id`` (with parent-walk for any session that
+        lacks its own — the canonical resolver in ``dynamic_instructions``).
+        Each sibling subagent has its own ``JaatoSession`` (stamped with
+        its ``envelope.session_id`` at runner bootstrap), so this value is
+        per-sibling-correct.
 
-        Falls back to ``self._session_id`` when the registry
-        reference isn't wired (tests that construct the plugin
-        standalone without going through expose_tool).
+        Deliberately does NOT read ``registry._session_id``: the plugin
+        registry is SHARED across sibling subagents, so its single
+        ``_session_id`` is overwritten by whichever sibling bootstrapped
+        last — reading it leaked one sibling's id into another's
+        ``source_session``.  Fixed by stamping the id per-session
+        (``runner/session.py`` ``bootstrap_session``) and reading it here.
+
+        Falls back to ``self._session_id`` (the config-injection value
+        from ``initialize``) only when there is no session in context —
+        standalone unit tests that construct the plugin without going
+        through a real turn.
         """
-        if self._plugin_registry is not None:
-            registry_sid = getattr(
-                self._plugin_registry, "_session_id", None,
-            )
-            if registry_sid:
-                return registry_sid
+        try:
+            from shared.session_context import get_current_session
+            session = get_current_session()
+        except LookupError:
+            session = None
+        if session is not None:
+            from shared.dynamic_instructions import _resolve_session_id
+            sid = _resolve_session_id(session)
+            if sid:
+                return sid
         return self._session_id
 
     def set_plugin_registry(self, registry: Any) -> None:

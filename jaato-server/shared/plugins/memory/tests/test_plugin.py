@@ -713,8 +713,24 @@ class TestSetSessionAutoWiring(unittest.TestCase):
             "storage_path": self.storage_path,
             "global_storage_path": self.global_storage_path,
         })
+        # Isolate the per-execution session ContextVar — _get_session_id
+        # reads the current session from it.  Baseline = no session.
+        from shared.session_context import _current_session
+        self._sess_token = _current_session.set(None)
+
+    def _set_current_session(self, daemon_session_id):
+        """Wire a fake current session carrying ``daemon_session_id``
+        (no parent) into the ContextVar that ``_get_session_id`` reads."""
+        from shared.session_context import _current_session
+        fake = type("FakeSession", (), {
+            "_daemon_session_id": daemon_session_id,
+            "_parent_session": None,
+        })()
+        _current_session.set(fake)
 
     def tearDown(self):
+        from shared.session_context import _current_session
+        _current_session.reset(self._sess_token)
         self.plugin.shutdown()
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -821,81 +837,76 @@ class TestSetSessionAutoWiring(unittest.TestCase):
         finally:
             sub_plugin.shutdown()
 
-    def test_get_session_id_prefers_registry_over_cached(self):
-        """Server 0.6.168+: cascade-pool reuse (PR #173) reuses
-        the SAME plugin instance across multiple sessions on a HIT
-        slot.  ``plugin.initialize()`` only fires on MISS (first
-        session per slot); subsequent HIT-reused sessions don't
-        re-run initialize, so the cached ``self._session_id``
-        stays at the FIRST session's id.
+    def test_get_session_id_reads_current_session_not_registry_or_cache(self):
+        """``_get_session_id`` reads the CURRENT session's
+        ``_daemon_session_id`` (per-execution), NOT the shared
+        ``registry._session_id`` and NOT the cached ``self._session_id``.
 
-        Registry's ``_session_id`` IS updated per-bootstrap via
-        ``registry.set_session_id(envelope.session_id)`` for every
-        session on the reused slot.  ``_get_session_id`` MUST
-        prefer the registry value when wired via
-        ``set_plugin_registry`` so source_session matches the
-        currently-running session, not the slot's first one.
+        The registry is shared across sibling subagents, so reading its
+        single ``_session_id`` leaked the last-bootstrapped sibling's id.
+        The current session (each sibling has its own) is the correct,
+        per-sibling source.  Pin: with a stale cache AND a (now-ignored)
+        registry value AND a different current-session id, the
+        current-session id wins.
         """
         fake_registry = type("FakeRegistry", (), {})()
-        fake_registry._session_id = "20260530_session2"
-        self.plugin._session_id = "20260530_session1"  # stale cache
+        fake_registry._session_id = "registry_sibling_other"  # must be ignored
+        self.plugin._session_id = "cached_first_session"       # stale cache
         self.plugin.set_plugin_registry(fake_registry)
-        # Live registry value wins.
-        self.assertEqual(
-            self.plugin._get_session_id(), "20260530_session2"
-        )
-        # Simulate registry advancing to a third session (HIT reuse
-        # iter-3 firing registry.set_session_id again).
-        fake_registry._session_id = "20260530_session3"
-        self.assertEqual(
-            self.plugin._get_session_id(), "20260530_session3"
-        )
 
-    def test_get_session_id_falls_back_to_cached_when_no_registry(self):
-        """Standalone plugin (no set_plugin_registry call) reads
-        the cached value — preserves existing behavior for tests
-        and kb-side scripts that construct the plugin directly."""
+        self._set_current_session("current_session_A")
+        self.assertEqual(self.plugin._get_session_id(), "current_session_A")
+        # Registry advancing (a sibling bootstrapping) must NOT change us.
+        fake_registry._session_id = "registry_sibling_yet_another"
+        self.assertEqual(self.plugin._get_session_id(), "current_session_A")
+        # Switching the executing session DOES (the per-execution source).
+        self._set_current_session("current_session_B")
+        self.assertEqual(self.plugin._get_session_id(), "current_session_B")
+
+    def test_get_session_id_falls_back_to_cached_when_no_current_session(self):
+        """With no session in context (standalone plugin / no real turn),
+        ``_get_session_id`` falls back to the cached config-injection
+        value — preserves behavior for tests and kb-side scripts that
+        construct the plugin directly."""
         self.plugin._session_id = "20260530_standalone"
-        # _plugin_registry stays None from __init__.
-        self.assertIsNone(self.plugin._plugin_registry)
+        # setUp seeded the session ContextVar to None (no current session).
         self.assertEqual(
             self.plugin._get_session_id(), "20260530_standalone"
         )
 
-    def test_store_memory_under_hit_reused_slot_picks_live_session_id(self):
-        """End-to-end pin for cascade-pool-reuse HIT path: simulate
-        a registry whose ``_session_id`` advances mid-flight (as
-        happens on every HIT-reused session bootstrap).  Each
-        store_memory call must persist source_session matching the
-        registry's CURRENT value, not the first-session value
-        cached at plugin init.
+    def test_store_memory_picks_live_session_id_per_execution(self):
+        """End-to-end pin: the same plugin instance reused across
+        multiple sessions (cascade-pool HIT slot AND/OR sibling
+        subagents) must persist ``source_session`` matching the
+        CURRENTLY-EXECUTING session, not the first-session value cached
+        at plugin init and not a shared registry value.
 
-        This is the empirical scenario peer 7:1 hit at retry-49:
-        slot 198523 served sessions 172701/172720/172752/.../173811,
-        all with source_session=null because the cached _session_id
-        never matched the bootstrap-time registry value.
+        Covers two empirical scenarios at once: (1) peer 7:1 retry-49
+        HIT-slot reuse where the cached _session_id went stale, and
+        (2) the sibling-subagent leak where the shared
+        registry._session_id reflected the last-bootstrapped sibling.
+        Both are fixed by reading the per-execution current session.
         """
+        # A stale registry value that MUST be ignored throughout.
         fake_registry = type("FakeRegistry", (), {})()
-        # Slot first acquired with session_1.
-        fake_registry._session_id = "session_1"
+        fake_registry._session_id = "stale_shared_registry"
         self.plugin.set_plugin_registry(fake_registry)
+
+        self._set_current_session("session_1")
         r1 = self.plugin.get_executors()["store_memory"]({
-            "content": "first store under HIT-reused slot",
+            "content": "first store",
             "description": "session_1 memory",
             "tags": ["pin-hit-1"],
         })
-        # Pool reuses the slot for session_2 — bootstrap updates
-        # the registry's _session_id (no plugin.initialize re-run).
-        fake_registry._session_id = "session_2"
+        self._set_current_session("session_2")
         r2 = self.plugin.get_executors()["store_memory"]({
-            "content": "second store under HIT-reused slot",
+            "content": "second store",
             "description": "session_2 memory",
             "tags": ["pin-hit-2"],
         })
-        # And again for session_3.
-        fake_registry._session_id = "session_3"
+        self._set_current_session("session_3")
         r3 = self.plugin.get_executors()["store_memory"]({
-            "content": "third store under HIT-reused slot",
+            "content": "third store",
             "description": "session_3 memory",
             "tags": ["pin-hit-3"],
         })

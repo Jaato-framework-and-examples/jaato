@@ -868,11 +868,23 @@ class JaatoSession:
         # reference may not be set yet when set_agent_context is called.
 
     def set_daemon_session_id(self, session_id: str) -> None:
-        """Set the daemon session manager ID for telemetry correlation.
+        """Set the daemon session manager ID for this session.
 
-        This ID (e.g. ``"20260328_204308"``) is emitted as the
-        ``jaato.session_id`` span attribute so Phoenix traces can be
-        correlated back to jaato session manager sessions.
+        This ID (e.g. ``"20260328_204308"``) identifies the daemon-side
+        session-manager session and is the per-session source of truth
+        for any consumer that needs the session id at execution time:
+        emitted as the ``jaato.session_id`` telemetry span attribute,
+        resolved by dynamic-instructions ``{{session_id}}``, and read by
+        the ``memory`` plugin for the ``source_session`` provenance field.
+
+        **Set on BOTH tiers.**  Daemon-side it is wired by ``JaatoClient``;
+        runner-side it is stamped from ``envelope.session_id`` during
+        ``bootstrap_session`` (``runner/session.py``).  The runner-side
+        stamp is load-bearing: each sibling subagent has its own
+        JaatoSession, so reading this per-session value (via
+        ``get_current_session()``) is per-sibling-correct, whereas the
+        previous fallback to the SHARED ``registry._session_id`` leaked
+        the last-bootstrapped sibling's id across siblings.
 
         Args:
             session_id: The session manager's session ID.
