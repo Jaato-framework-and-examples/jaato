@@ -1491,20 +1491,37 @@ class SubagentPlugin:
 
         The handler must be a callable with the following keyword arguments:
 
-        ================ ====== ========================================
-        Argument         Type   Description
-        ================ ====== ========================================
-        ``server``       str    Name of the target peer server.
-        ``task``         str    The prompt/task for the subagent.
-        ``profile_name`` str    Profile name (empty for inline).
-        ``context``      Any    Context string or structured dict.
-        ``inline_config``dict|None  Optional inline config overrides.
-        ``custom_name``  str    Optional custom agent name.
-        ================ ====== ========================================
+        ==================== ====== ====================================
+        Argument             Type   Description
+        ==================== ====== ====================================
+        ``server``           str    Name of the target peer server.
+        ``task``             str    The prompt/task for the subagent.
+        ``profile_name``     str    Profile name (empty for inline).
+        ``context``          Any    Context string or structured dict.
+        ``inline_config``    dict|None  Optional inline config overrides.
+        ``custom_name``      str    Optional custom agent name.
+        ``parent_session_id``str|None  Daemon session id of the invoking
+                                    session — the key
+                                    ``SessionManager.inject_prompt_to_session``
+                                    uses to deliver the remote subagent's
+                                    output back.  Post-seat-flip this is
+                                    threaded runner→daemon: stamped into
+                                    the forwarded args from
+                                    ``get_current_session()._daemon_session_id``
+                                    (server 0.6.x / PR #311).
+        ==================== ====== ====================================
 
         The handler must return a dict with at least ``success`` (bool).
         On failure, include ``error`` (str).  On success, include
         ``subagent_id``, ``status``, ``remote_server``, ``message``.
+
+        Post-seat-flip the handler is registered on the DAEMON-side
+        subagent instance, but ``spawn_subagent`` executes runner-side;
+        the runner-side ``server=`` branch bridges the call to the
+        daemon-side instance via ``daemon.plugin_execute`` (see
+        :meth:`_execute_spawn_subagent`).  Register on the daemon-side
+        ``JaatoServer.registry`` so the forward reaches the instance
+        carrying this handler.
 
         Without this handler, the ``server`` parameter returns a clear
         error asking the user to install jaato-premium.
@@ -2684,6 +2701,43 @@ class SubagentPlugin:
         # ── Remote spawn path ──────────────────────────────────────────
         if server:
             if self._remote_spawn_handler is None:
+                # Post-seat-flip the gossip remote-spawn handler is
+                # registered (by jaato-premium) on the DAEMON-side
+                # subagent instance, but this tool executes RUNNER-side,
+                # where ``_remote_spawn_handler`` is None — the "Gap #1
+                # trap" (shared/plugins/CLAUDE.md).  Bridge runner→daemon:
+                # forward the call via ``daemon.plugin_execute`` to the
+                # daemon-side instance (where the handler IS set).  Stamp
+                # ``parent_session_id`` (this session's daemon id — the
+                # invoking session IS the parent) into the forwarded args
+                # so the daemon-side handler can inject results back via
+                # ``inject_prompt_to_session``.
+                registry = (
+                    self._runtime.registry
+                    if self._runtime is not None else None
+                )
+                rpc_client = getattr(
+                    registry, "runner_rpc_client", None,
+                ) if registry is not None else None
+                if rpc_client is not None:
+                    from shared.plugins.daemon_forwarding import (
+                        _forward_via_daemon,
+                    )
+                    from shared.session_context import get_current_session
+                    try:
+                        parent_session_id = getattr(
+                            get_current_session(), "_daemon_session_id", None,
+                        )
+                    except LookupError:
+                        parent_session_id = None
+                    forwarded = dict(args)
+                    forwarded["parent_session_id"] = parent_session_id
+                    return _forward_via_daemon(
+                        rpc_client, "subagent", "spawn_subagent", forwarded,
+                    )
+                # No runner→daemon channel AND no handler → premium
+                # genuinely isn't installed (or this is a non-runner
+                # context).  Surface the actionable error.
                 return SubagentResult(
                     success=False,
                     response='',
@@ -2692,6 +2746,10 @@ class SubagentPlugin:
                         'Install it to enable the "server" parameter on spawn_subagent.'
                     ),
                 ).to_dict()
+            # Handler is registered (daemon-side instance, reached via the
+            # forward above; or legacy in-process pre-seat-flip).
+            # ``parent_session_id`` is present on the daemon-side re-entry
+            # (stamped into args by the runner-side forward).
             return self._remote_spawn_handler(
                 server=server,
                 task=task,
@@ -2699,6 +2757,7 @@ class SubagentPlugin:
                 context=context,
                 inline_config=inline_config,
                 custom_name=custom_name,
+                parent_session_id=args.get('parent_session_id'),
             )
 
         # ── Isolated-runner opt-in (Phase 4 §4.3.1 stub) ───────────────
