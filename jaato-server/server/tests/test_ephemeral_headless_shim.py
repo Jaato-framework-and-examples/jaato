@@ -145,3 +145,42 @@ class TestEphemeralHeadlessShim:
         assert merged["model"] == "profile-model"  # profile wins collision
         assert merged["provider"] == "p"           # profile-only key
         assert merged["max_turns"] == 5            # inline fills the gap
+
+    # ---- workspace handling (co-validation regression: no workspace ->
+    #      no runner -> NoneType.session_send_message_threadsafe) ----
+
+    def test_workspace_none_provisions_scratch(self):
+        """An inline spawn with no workspace gets a scratch workspace, so the
+        runner spawns (without a cwd the runner-spawn gate is skipped,
+        ``server._runner_rpc`` stays None, and the model turn crashes)."""
+        import os
+        import shutil
+        import tempfile
+        fake, cap = _fake_self([_terminated("natural")])
+        _run(fake)  # workspace_path=None (see _run's 7th positional arg)
+        ws = cap["create_kwargs"]["workspace_path"]
+        assert ws, "no workspace -> create_headless_session must get a scratch dir"
+        assert ws.startswith(tempfile.gettempdir())
+        assert os.path.basename(ws).startswith("jaato-ephemeral-")
+        assert os.path.isdir(ws)
+        shutil.rmtree(ws, ignore_errors=True)  # don't leak the scratch dir
+
+    def test_workspace_provided_passes_through(self):
+        """A supplied workspace is forwarded verbatim — no scratch override."""
+        fake, cap = _fake_self([_terminated("natural")])
+        SessionManager._run_ephemeral_session_impl(
+            fake, '{"model": "x", "provider": "p"}', "", "do it", "worker",
+            None, "/real/workspace", None,
+        )
+        assert cap["create_kwargs"]["workspace_path"] == "/real/workspace"
+
+    def test_inline_spawn_decouples_agent_name_from_resolution(self):
+        """For an inline spawn the display label rides ``session_name`` and
+        ``agent_name`` is None — so ``_create_session_impl`` skips
+        ``_resolve_agent`` (a display label is not a ``.jaato/agents`` persona;
+        resolving it returned an empty session_id in co-validation)."""
+        fake, cap = _fake_self([_terminated("natural")])
+        _run(fake)  # agent_name="worker" + inline profile (merged truthy)
+        ck = cap["create_kwargs"]
+        assert ck["agent_name"] is None
+        assert ck["session_name"] == "worker"

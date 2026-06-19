@@ -7837,8 +7837,41 @@ class SessionManager:
             )
             forwarder.start()
 
+            # An inline ephemeral spawn (e.g. gossip remote-spawn) carries no
+            # workspace — there's no git/workspace replication for an
+            # inline-config subagent.  But the runner needs a cwd to spawn:
+            # without a workspace, ``_provision_ipc_apparmor_and_spawn_runner``
+            # skips the runner spawn, ``server._runner_rpc`` stays None, and
+            # the first model turn crashes with
+            # ``NoneType.session_send_message_threadsafe`` (the §7c seat-flip
+            # path forwards send_message to the runner).  Provision a scratch
+            # workspace so a runner spawns; the ephemeral session is
+            # short-lived and writes nothing meaningful there.
+            if not workspace_path:
+                import tempfile
+                workspace_path = tempfile.mkdtemp(prefix="jaato-ephemeral-")
+                logger.info(
+                    "ephemeral %s: no workspace supplied (inline spawn); "
+                    "provisioned scratch workspace %s so a runner can spawn",
+                    cid, workspace_path,
+                )
+
+            # For an inline-config spawn the caller's ``agent_name`` is a
+            # human-readable DISPLAY label (e.g. a gossip remote-spawn's
+            # "remote-subagent") — NOT a ``.jaato/agents/<name>.md`` persona.
+            # The inline profile IS the complete config, so there is no
+            # persona to resolve.  Passing the label as ``agent_name`` makes
+            # ``_create_session_impl`` run ``_resolve_agent(label)``, which
+            # fails (no such file) and returns an empty session_id — the
+            # remote-leg empty-init bug surfaced in gossip co-validation.
+            # Route the label to ``session_name`` for identity and pass
+            # ``agent_name=None`` when an inline profile is supplied so agent
+            # resolution is skipped; real-agent spawns (no inline profile)
+            # keep their ``agent_name`` resolution intact.
+            _display_name = agent_name or "remote-subagent"
             session_id = self.create_headless_session(
-                agent_name=agent_name or "main",
+                agent_name=None if merged else (agent_name or "main"),
+                session_name=_display_name,
                 workspace_path=workspace_path,
                 initial_prompt=prompt,
                 inline_profile_data=merged,
