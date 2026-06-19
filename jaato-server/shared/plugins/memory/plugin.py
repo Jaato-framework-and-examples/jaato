@@ -129,37 +129,32 @@ class MemoryPlugin(RunnerForwardingMixin):
 
     def set_session(self, session: Any) -> None:
         """Auto-wiring hook called by the framework after plugin
-        configure() (server 0.6.167+).
+        configure() — intentionally a NO-OP.
 
-        Extracts the daemon session_id from the JaatoSession's
-        ``_daemon_session_id`` attribute (the session-manager ID
-        used for telemetry correlation — see
-        ``jaato_session.py:442``) and stashes it so subsequent
-        ``store_memory`` calls populate the ``source_session``
-        field on the persisted ``Memory`` record.
+        **Must not store session state on ``self``.**  Plugin instances
+        are SHARED across sibling subagents within a session (shared
+        runtime registry), so a sibling's ``set_session`` would clobber
+        another's stashed value → cross-subagent leakage.  Enforced by
+        ``tests/test_plugin_session_safety.py``.
 
-        Pre-0.6.167 the plugin defined ``set_session_context(
-        session_id: str)`` but the framework's canonical wiring is
-        ``plugin.set_session(session)`` (called from five sites in
-        ``shared/jaato_session.py``).  The method-name mismatch
-        meant the framework never reached this plugin → every
-        memory ever written had ``source_session=null``.  Peer
-        7:1 empirical audit (2026-05-28) over the
-        kb-enablement-2.0 store: 25/25 memories had
-        source_session=null despite source_agent being populated.
+        Historically (PR-196, server 0.6.167+) this stashed
+        ``session._daemon_session_id`` on ``self._session_id`` to
+        populate the ``source_session`` field.  But ``_daemon_session_id``
+        is set ONLY daemon-side (``JaatoClient.set_daemon_session_id``),
+        never on the runner-side ``JaatoSession`` — and memory is
+        ``PLUGIN_TIER = "runner"`` — so this path read ``None`` for every
+        cascade session (peer 7:1 retry-49 empirical: 4/4 memories still
+        ``source_session=null`` post-PR-196).  The session_id that
+        actually reaches ``store_memory`` comes from the config-injection
+        path (``initialize`` reads ``config['session_id']`` injected by
+        ``registry._augment_plugin_config``) preferred via
+        ``_get_session_id``'s registry read — see those docstrings.
 
         Args:
-            session: The JaatoSession instance.  ``None`` is
-                tolerated (clears the stashed session_id).
+            session: The JaatoSession instance (unused).
         """
-        session_id = (
-            getattr(session, "_daemon_session_id", None)
-            if session is not None
-            else None
-        )
-        self._session_id = session_id
-        if session_id:
-            self._trace(f"set_session: session_id={session_id}")
+        # Intentionally empty — see docstring. session_id is resolved at
+        # store time via _get_session_id (registry / config injection).
 
     def set_session_context(self, session_id: str) -> None:
         """Legacy compat shim — pre-0.6.167 callers may still use

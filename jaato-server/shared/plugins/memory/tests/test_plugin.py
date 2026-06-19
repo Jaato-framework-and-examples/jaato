@@ -725,44 +725,35 @@ class TestSetSessionAutoWiring(unittest.TestCase):
             "maturity": maturity,
         })
 
-    def test_set_session_stashes_daemon_session_id(self):
-        """``set_session(session)`` extracts ``_daemon_session_id``
-        and stashes it on the plugin instance."""
-        fake_session = type("FakeSession", (), {})()
-        fake_session._daemon_session_id = "20260528_223344"
-        self.plugin.set_session(fake_session)
-        self.assertEqual(self.plugin._session_id, "20260528_223344")
-
-    def test_set_session_none_clears_session_id(self):
-        """Passing None tolerates teardown / detach — clears the
-        stashed session_id without raising."""
-        self.plugin._session_id = "stale-id"
-        self.plugin.set_session(None)
-        self.assertIsNone(self.plugin._session_id)
-
-    def test_set_session_missing_attr_stashes_none(self):
-        """A session without ``_daemon_session_id`` (defensive
-        fallback) stashes None rather than raising."""
-        bare_session = type("BareSession", (), {})()
-        self.plugin.set_session(bare_session)
-        self.assertIsNone(self.plugin._session_id)
-
-    def test_store_memory_carries_source_session_after_set_session(self):
-        """End-to-end pin: after ``set_session(session)`` wires the
-        session_id, a subsequent ``store_memory`` call persists the
-        Memory record with ``source_session`` populated.
-
-        Checks the on-disk Memory dataclass directly via
-        ``_storage.raw.get(mid)`` — the on-disk format carries the
-        full field set (verified empirically in peer's jq audit
-        showing source_session=null in raw/*.json + curated.jsonl).
-        retrieve_memories API output deliberately omits
-        source_session today; storage-side is the authoritative
-        view of what the cascade memory loop / curator sees.
+    def test_set_session_is_noop_no_self_state(self):
+        """``set_session`` must NOT store session state on ``self`` —
+        plugin instances are shared across sibling subagents, so a
+        sibling's call would clobber another's.  Enforced by
+        ``tests/test_plugin_session_safety.py``; pinned here too.
         """
+        # A fabricated session with _daemon_session_id must NOT leak onto
+        # the instance (the old stashing behavior).
         fake_session = type("FakeSession", (), {})()
         fake_session._daemon_session_id = "20260528_223344"
         self.plugin.set_session(fake_session)
+        self.assertIsNone(self.plugin._session_id)
+        # None / bare sessions are tolerated without raising.
+        self.plugin.set_session(None)
+        self.plugin.set_session(type("Bare", (), {})())
+
+    def test_store_memory_carries_source_session_via_config_injection(self):
+        """End-to-end pin: the source_session field is populated from the
+        config-injection path (``initialize`` reads ``config['session_id']``,
+        injected runner-side by ``registry._augment_plugin_config``), NOT
+        from ``set_session``/``_daemon_session_id`` (which is always None
+        runner-side).  Checks the on-disk Memory dataclass directly.
+        """
+        # Re-initialize with the session_id the framework injects via config.
+        self.plugin.initialize({
+            "storage_path": self.storage_path,
+            "global_storage_path": self.global_storage_path,
+            "session_id": "20260528_223344",
+        })
 
         store_result = self.plugin.get_executors()["store_memory"]({
             "content": "session-id propagation pin",
@@ -772,16 +763,13 @@ class TestSetSessionAutoWiring(unittest.TestCase):
         self.assertEqual(store_result["status"], "success")
         mid = store_result["memory_id"]
 
-        # Read the persisted Memory dataclass directly — this is
-        # what peer's jq audit inspects on disk.
         persisted = self.plugin._storage.raw.get(mid)
         self.assertIsNotNone(persisted, f"memory {mid} not in raw store")
         self.assertEqual(
             persisted.source_session, "20260528_223344",
-            "source_session must be populated post-set_session; pre-"
-            "0.6.167 this field was None for every memory ever "
-            "written (peer 7:1 empirical: 25/25 memories had "
-            "source_session=null).",
+            "source_session must be populated via config injection — the "
+            "real runner-side path (set_session/_daemon_session_id is None "
+            "runner-side; peer 7:1 retry-49: 4/4 source_session=null).",
         )
 
     def test_store_memory_source_session_is_none_when_set_session_not_called(self):

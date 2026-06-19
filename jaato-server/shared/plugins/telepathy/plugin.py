@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+from shared.session_context import get_current_session
 
 if TYPE_CHECKING:
     from shared.jaato_session import JaatoSession
@@ -23,9 +24,13 @@ class TelepathyPlugin:
 
     1. ``__init__()`` — empty plugin instance.
     2. ``initialize(config)`` — no-op (no config knobs).
-    3. ``set_session(session)`` — store ref to the host session; needed
-       at execute time to reach ``session._parent_session`` and
-       ``session._agent_id``.
+    3. ``_get_session()`` — resolve the host session from the
+       per-execution ContextVar (``shared.session_context``), NEVER
+       from ``self``.  Plugin instances are shared across sibling
+       subagents, so storing the session on ``self`` (the old
+       ``set_session`` approach) leaked one subagent's session into
+       another.  The session wiring sets the ContextVar in
+       ``configure()`` and around every tool execution.
     4. ``is_tool_visible(name)`` — per-turn visibility predicate
        consulted by ``JaatoSession._get_tools_for_provider`` (PR #241).
        Returns ``False`` for ``share_context`` when the host session
@@ -47,7 +52,6 @@ class TelepathyPlugin:
 
     def __init__(self) -> None:
         self._initialized: bool = False
-        self._session: Optional['JaatoSession'] = None
 
     @property
     def name(self) -> str:
@@ -63,7 +67,6 @@ class TelepathyPlugin:
 
     def shutdown(self) -> None:
         self._initialized = False
-        self._session = None
 
     def reset_for_next_session(self) -> None:
         """Cascade-sharing reset — NO-OP for this plugin.
@@ -72,25 +75,32 @@ class TelepathyPlugin:
         ``isinstance`` check (its absence silently dropped the plugin
         at discovery — see the registry protocol-skip warning).  Per
         Daniel's litmus test (``docs/design/runner-cascade-sharing.md``
-        §4.3), telepathy holds no per-session state the next cascade
-        session would benefit from having cleared: its only
-        per-session reference (``_session``) is re-wired by
-        :meth:`set_session` during the next session's
-        ``JaatoSession.configure()``, so there is nothing to clear here.
+        §4.3), telepathy holds NO per-session state at all: the host
+        session is resolved per-execution from the ContextVar (see
+        :meth:`_get_session`), never stored on ``self``.  Nothing to
+        clear.
         """
-        # Intentionally empty — _session is re-set per session.
+        # Intentionally empty — no per-session state on self.
 
-    def set_session(self, session: 'JaatoSession') -> None:
-        """Capture a reference to the host session.
+    # NOTE: deliberately no ``set_session()``.  Plugin instances are
+    # shared across sibling subagents within a session, so storing the
+    # session on ``self`` would leak one subagent's session into another
+    # (and trip tests/test_plugin_session_safety.py).  Resolve it
+    # per-execution from the ContextVar instead.
+    def _get_session(self) -> Optional['JaatoSession']:
+        """Return the current host session, or ``None`` when unset.
 
-        The executor needs ``session._parent_session`` (to push
-        context up) and ``session._agent_id`` (for the ``source_id``
-        attribution on the parent's inject_prompt call).  Called by
-        ``JaatoSession.configure()`` for every plugin that
-        implements this hook — the standard mechanism for
-        session-aware plugins.
+        Reads ``shared.session_context.get_current_session()`` — the
+        session wiring sets that ContextVar in ``configure()`` (so the
+        visibility + instruction phases on the session's main thread see
+        it) and around every tool execution (so the executor does too).
+        ``LookupError`` means no session in this context (catalog
+        discovery before configure, isolated unit tests) → ``None``.
         """
-        self._session = session
+        try:
+            return get_current_session()
+        except LookupError:
+            return None
 
     def is_tool_visible(self, tool_name: str) -> bool:
         """Per-turn visibility predicate (PR #241 hook).
@@ -106,9 +116,10 @@ class TelepathyPlugin:
         """
         if tool_name != "share_context":
             return True
-        if self._session is None:
+        session = self._get_session()
+        if session is None:
             return False
-        return getattr(self._session, '_parent_session', None) is not None
+        return getattr(session, '_parent_session', None) is not None
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         return [
@@ -185,9 +196,10 @@ class TelepathyPlugin:
         per-turn visibility filter is hiding.  Returns ``None`` for root /
         parentless sessions.
         """
-        if self._session is None:
+        session = self._get_session()
+        if session is None:
             return None
-        if getattr(self._session, '_parent_session', None) is None:
+        if getattr(session, '_parent_session', None) is None:
             return None
         return (
             "You have access to `share_context`, which pushes context up "
@@ -208,13 +220,14 @@ class TelepathyPlugin:
         # session module at plugin-discovery time.
         from shared.message_queue import SourceType
 
-        if self._session is None:
+        session = self._get_session()
+        if session is None:
             return {
                 'success': False,
                 'error': (
-                    'TelepathyPlugin has no session reference.  This '
-                    'is a programmer error — set_session() must be '
-                    'called before the executor runs.'
+                    'TelepathyPlugin has no session in context.  The '
+                    'session ContextVar must be set (configure() / tool '
+                    'execution) before the executor runs.'
                 ),
             }
 
@@ -232,7 +245,7 @@ class TelepathyPlugin:
                 )
             }
 
-        parent_session = getattr(self._session, '_parent_session', None)
+        parent_session = getattr(session, '_parent_session', None)
         if not parent_session:
             # Defensive: the visibility filter should have hidden
             # the tool when no parent — this error path only fires
@@ -247,7 +260,7 @@ class TelepathyPlugin:
             }
 
         formatted_context = self._format_shared_context(files, findings, notes)
-        agent_id = getattr(self._session, '_agent_id', 'unknown')
+        agent_id = getattr(session, '_agent_id', 'unknown')
 
         try:
             # Use same pattern as subagent communication: inject if

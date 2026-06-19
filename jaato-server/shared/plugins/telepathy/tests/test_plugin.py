@@ -28,7 +28,27 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from shared.session_context import _current_session, set_current_session
+
 from ..plugin import TelepathyPlugin, create_plugin
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_context():
+    """Reset the per-execution session ContextVar around every test.
+
+    Telepathy resolves the host session from
+    ``shared.session_context.get_current_session()`` (NOT from ``self``,
+    to avoid cross-subagent leakage), so tests wire a session by calling
+    ``set_current_session(...)`` instead of the old ``plugin.set_session``.
+    Seed it to ``None`` so "no session" tests see a clean context, and
+    reset after so nothing leaks between tests.
+    """
+    token = _current_session.set(None)
+    try:
+        yield
+    finally:
+        _current_session.reset(token)
 
 
 # ============================================================
@@ -49,12 +69,15 @@ class TestFactoryAndLifecycle:
         plugin.initialize({"some": "config"})  # config accepted but ignored
         assert plugin._initialized is True
 
-    def test_shutdown_clears_session_ref(self):
+    def test_shutdown_resets_initialized(self):
+        # Telepathy holds no per-session state on self (the session is
+        # resolved per-execution from the ContextVar), so shutdown only
+        # needs to flip _initialized back.
         plugin = TelepathyPlugin()
-        plugin.set_session(MagicMock())
+        plugin.initialize()
         plugin.shutdown()
-        assert plugin._session is None
         assert plugin._initialized is False
+        assert not hasattr(plugin, "_session")
 
 
 # ============================================================
@@ -105,7 +128,7 @@ class TestVisibilityPredicate:
         """The vLLM-smoke case: root session, no parent set."""
         plugin = TelepathyPlugin()
         session = MagicMock(_parent_session=None)
-        plugin.set_session(session)
+        set_current_session(session)
         assert plugin.is_tool_visible("share_context") is False
 
     def test_visible_when_session_has_parent(self):
@@ -113,14 +136,14 @@ class TestVisibilityPredicate:
         plugin = TelepathyPlugin()
         parent = MagicMock()
         session = MagicMock(_parent_session=parent)
-        plugin.set_session(session)
+        set_current_session(session)
         assert plugin.is_tool_visible("share_context") is True
 
     def test_other_tool_names_pass_through(self):
         """The predicate has no opinion on tools owned by other
         plugins — must return True so they're not silently hidden."""
         plugin = TelepathyPlugin()
-        plugin.set_session(MagicMock(_parent_session=None))
+        set_current_session(MagicMock(_parent_session=None))
         assert plugin.is_tool_visible("cli_based_tool") is True
         assert plugin.is_tool_visible("signal_completion") is True
         assert plugin.is_tool_visible("createPlan") is True
@@ -138,15 +161,15 @@ class TestExecutor:
         parent = MagicMock()
         parent.is_running = parent_running
         session = MagicMock(_parent_session=parent, _agent_id="test-agent")
-        plugin.set_session(session)
+        set_current_session(session)
         return plugin, parent
 
     def test_no_session_returns_programmer_error(self):
         plugin = TelepathyPlugin()
-        # set_session not called.
+        # No session in the ContextVar (autouse fixture seeds it to None).
         result = plugin._execute_share_context({"notes": "x"})
         assert result["success"] is False
-        assert "set_session" in result["error"]
+        assert "no session in context" in result["error"].lower()
 
     def test_empty_payload_returns_error(self):
         plugin, _ = self._make_plugin_with_parent()
@@ -156,7 +179,7 @@ class TestExecutor:
 
     def test_no_parent_returns_error(self):
         plugin = TelepathyPlugin()
-        plugin.set_session(MagicMock(_parent_session=None))
+        set_current_session(MagicMock(_parent_session=None))
         result = plugin._execute_share_context({"notes": "anything"})
         assert result["success"] is False
         assert "No parent session" in result["error"]
