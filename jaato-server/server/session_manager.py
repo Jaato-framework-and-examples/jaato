@@ -7771,7 +7771,7 @@ class SessionManager:
         # create_headless_session(workspace_path=...) — no global chdir /
         # JAATO_WORKSPACE_ROOT mutation (the old path raced sibling sessions by
         # mutating daemon-global cwd).
-        from jaato_sdk.events import AgentOutputEvent, SessionTerminatedEvent
+        from jaato_sdk.events import AgentOutputEvent, SessionTerminatedEvent, TurnCompletedEvent
 
         # Source taxonomy (locked with gossip): relay ONLY model output into
         # the forwarded stream.  Drop the prompt echo (source="user"),
@@ -7804,6 +7804,24 @@ class SessionManager:
                 terminal["reason"] = event.reason
                 terminal["error_type"] = event.error_type
                 terminal["error_summary"] = event.error_summary
+                out_q.put(sentinel)
+                done.set()
+            elif isinstance(event, TurnCompletedEvent):
+                # A single-shot ephemeral runs exactly one turn (one
+                # prompt -> one turn, including all tool iterations).  A
+                # NATURAL success emits turn.completed and then goes IDLE:
+                # a headless session does NOT self-terminate after its
+                # prompt, so NO SessionTerminatedEvent fires on the happy
+                # path.  Without treating turn.completed as the terminal,
+                # done.wait() blocks until the 1800s timeout and
+                # execute_spawn never sends PeerAgentCompleted (origin gets
+                # the full output stream but never the completion).
+                # turn.completed fires AFTER all of the turn's
+                # agent.output, so the sentinel lands behind every relayed
+                # chunk.  Errors still arrive as SessionTerminatedEvent
+                # (error) above; setdefault lets a real error reason win if
+                # it somehow raced in first.
+                terminal.setdefault("reason", "natural")
                 out_q.put(sentinel)
                 done.set()
 
@@ -7904,8 +7922,11 @@ class SessionManager:
                 except Exception:  # noqa: BLE001
                     logger.exception("ephemeral %s: on_started raised", cid)
 
-            # Block on the universal terminal: SessionTerminatedEvent fires
-            # exactly once on every wind-down path; .reason classifies it.
+            # Block on the terminal.  Two paths set ``done``: a NATURAL
+            # single-shot success arrives as turn.completed (a headless
+            # session goes idle, NOT terminated, after its one prompt),
+            # while error/stop winds down via SessionTerminatedEvent.
+            # ``terminal['reason']`` classifies it (default "natural").
             finished = done.wait(timeout=timeout_s)
             out_q.put(sentinel)  # drain + stop the forwarder even on timeout
             forwarder.join(timeout=5)
