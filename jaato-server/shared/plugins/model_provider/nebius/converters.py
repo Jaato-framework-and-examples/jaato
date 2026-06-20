@@ -374,6 +374,20 @@ def extract_finish_reason(response: "ChatCompletion") -> FinishReason:
     return FinishReason.UNKNOWN
 
 
+def cached_tokens_from(usage: Any) -> Optional[int]:
+    """OpenAI-compatible cache-hit count (``usage.prompt_tokens_details.cached_tokens``).
+
+    Nebius's Context Caching (and the vLLM backends it serves) report automatic
+    prefix-cache hits here.  Returns the count when present + nonzero, else
+    ``None`` — so it maps onto ``TokenUsage.cache_read_tokens`` for cost /
+    cache-hit-rate measurement.  Defensive: the field is absent on responses
+    without a cache hit (and on backends that don't report it).
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    return cached if cached else None
+
+
 def extract_usage(response: "ChatCompletion") -> TokenUsage:
     """Extract token usage from OpenAI response.
 
@@ -381,7 +395,7 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
         response: OpenAI ChatCompletion response object.
 
     Returns:
-        TokenUsage with counts.
+        TokenUsage with counts (incl. ``cache_read_tokens`` on a cache hit).
     """
     usage = TokenUsage()
 
@@ -391,6 +405,7 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
     usage.prompt_tokens = response.usage.prompt_tokens or 0
     usage.output_tokens = response.usage.completion_tokens or 0
     usage.total_tokens = response.usage.total_tokens or 0
+    usage.cache_read_tokens = cached_tokens_from(response.usage)
 
     return usage
 
