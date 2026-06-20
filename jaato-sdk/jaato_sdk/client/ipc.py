@@ -232,6 +232,7 @@ class IPCClient:
         config_root: Optional[str] = None,
         apparmor: bool = False,
         min_protocol_version: Optional[str] = None,
+        autostart_timeout: float = 120.0,
     ):
         """Initialize the IPC client.
 
@@ -296,9 +297,22 @@ class IPCClient:
                 deployments should pin a real minimum at the class
                 level so the SDK refuses to talk to incompatible servers.
         """
+        if env_file is None:
+            raise ValueError(
+                "IPCClient(env_file=...) must be a path (e.g. '.env'), not "
+                "None — the IPC handshake serializes it, and None raises an "
+                "opaque os.PathLike TypeError mid-connect.  Pass a real .env "
+                "path (a minimal one is fine if the daemon gets provider "
+                "config another way)."
+            )
         self.socket_path = socket_path
         self.auto_start = auto_start
         self.env_file = env_file
+        # Cold-daemon autostart can take ~30-60s (plugin discovery + imports);
+        # the connect ``timeout`` (default 5s) is for an already-running daemon.
+        # When THIS client launches the daemon, the post-launch wait + connect
+        # retry budget uses this longer ``autostart_timeout`` instead.
+        self.autostart_timeout = autostart_timeout
         self.workspace_path = workspace_path
         self.config_root = config_root
         self.apparmor = apparmor
@@ -580,7 +594,8 @@ class IPCClient:
                     # ghost client.  Instead we use the full remaining budget
                     # and only retry on errors that prove no connection was
                     # established (ConnectionRefused, FileNotFound, OSError).
-                    deadline = time.time() + timeout
+                    # Use the cold-start budget: we just launched the daemon.
+                    deadline = time.time() + self.autostart_timeout
                     last_err: Optional[Exception] = None
                     while True:
                         remaining = deadline - time.time()
@@ -644,7 +659,8 @@ class IPCClient:
                     # Only retry on ConnectionRefusedError/OSError (no
                     # transport created).  On TimeoutError, stop to avoid
                     # leaking a transport that the server already accepted.
-                    deadline = time.time() + timeout
+                    # Use the cold-start budget: we just launched the daemon.
+                    deadline = time.time() + self.autostart_timeout
                     last_err: Optional[Exception] = None
                     while True:
                         remaining = deadline - time.time()
@@ -938,6 +954,30 @@ class IPCClient:
             presentation=presentation.to_dict(),
         ))
 
+    def _endpoint_is_live(self) -> bool:
+        """Whether the socket/pipe actually ACCEPTS a connection (not just exists).
+
+        The authoritative "is the daemon up" signal — unlike a pidfile PID
+        (which can be a recycled, unrelated process) or a socket *file* (which
+        can be stale after a crash).  Gates trusting the pidfile in
+        :meth:`_start_server` so a reused PID can't block auto-start on a dead
+        socket.
+        """
+        if self._is_windows_pipe():
+            try:
+                return bool(self._check_pipe_exists())
+            except Exception:
+                return False
+        import socket as _socket
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        try:
+            return s.connect_ex(self.socket_path) == 0
+        except OSError:
+            return False
+        finally:
+            s.close()
+
     async def _start_server(self) -> bool:
         """Auto-start the server daemon.
 
@@ -954,11 +994,28 @@ class IPCClient:
             True if server started (or was already running) and the IPC
             endpoint became available within the timeout.
         """
-        # Check if server is already running
+        # Check if server is already running.  A live pidfile PID alone is NOT
+        # proof the daemon is up: ``os.kill(pid, 0)`` only confirms SOME
+        # process exists at that PID, and PIDs get recycled.  Require the
+        # endpoint to actually accept a connection — otherwise a stale pidfile
+        # (dead daemon whose PID was reused by an unrelated process) makes us
+        # wait on a dead socket forever instead of relaunching.
         pid = self._check_server_running()
         if pid:
-            # Server is running, just wait for socket/pipe
-            return await self._wait_for_socket()
+            if self._endpoint_is_live():
+                # Genuinely running — wait for the socket/pipe and attach.
+                return await self._wait_for_socket()
+            # PID alive but endpoint dead → stale daemon / reused PID.  Clear
+            # the stale pidfile so the relaunch below starts from a clean slate.
+            logger.info(
+                "pidfile %s -> PID %s is alive but the endpoint is not "
+                "listening (stale daemon / reused PID); relaunching",
+                DEFAULT_PID_FILE, pid,
+            )
+            try:
+                Path(DEFAULT_PID_FILE).unlink()
+            except OSError:
+                pass
 
         # On Windows, the PID-file check can fail even when the server IS
         # running (e.g. stale PID, ctypes truncation on 64-bit, or the
@@ -1012,8 +1069,10 @@ class IPCClient:
             print(f"Failed to start server: {e}")
             return False
 
-        # Wait for socket/pipe to appear
-        return await self._wait_for_socket()
+        # Wait for the socket/pipe to appear.  We just launched a COLD daemon
+        # (plugin discovery + imports) — use the longer autostart budget, not
+        # the short already-running connect timeout.
+        return await self._wait_for_socket(timeout=self.autostart_timeout)
 
     async def _wait_for_socket(self, timeout: float = 10.0) -> bool:
         """Wait for the IPC endpoint to become available.
