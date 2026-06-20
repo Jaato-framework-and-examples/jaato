@@ -83,15 +83,36 @@ class ToolInfo:
 
 
 @dataclass
+class ConfigSetting:
+    """One configurable plugin setting (from ``get_config_schema``)."""
+    name: str
+    type: str = ""
+    default: Any = None
+    description: str = ""
+
+
+@dataclass
 class PluginInfo:
     """Introspected metadata for one plugin (best-effort, offline)."""
 
     name: str
     kind: str = "tool"
     tier: Optional[str] = None
+    description: str = ""               # plugin class docstring, first line
     tools: List[ToolInfo] = field(default_factory=list)
     config_keys: List[str] = field(default_factory=list)
+    config_settings: List["ConfigSetting"] = field(default_factory=list)
     dynamic: bool = False               # tool list needs a live session (mcp, …)
+
+
+@dataclass
+class ProfileField:
+    """One ``SubagentProfile`` schema field (name/type/default/description)."""
+    name: str
+    type: str = ""
+    default: Any = None
+    description: str = ""
+    allowed: str = ""               # resolved value-constraint (actual values)
 
 
 @dataclass
@@ -180,6 +201,78 @@ def gc_strategies() -> Dict[str, List[str]]:
     return {name: fields for name in sorted(discover_gc_plugins().keys())}
 
 
+# ------------------------------------------------------------------ profile
+
+def _type_name(t) -> str:
+    """Readable display name for a dataclass field annotation (type or string).
+
+    Plain types render as their name (``str``, not ``<class 'str'>``); generics
+    keep their shape but drop ``typing.`` and module qualifiers
+    (``shared...GCProfileConfig`` -> ``GCProfileConfig``); ``NoneType`` -> ``None``.
+    """
+    import re
+    if isinstance(t, type):
+        return t.__name__
+    s = (t if isinstance(t, str) else str(t)).replace("typing.", "").replace(
+        "NoneType", "None")
+    return re.sub(r"\b\w+(?:\.\w+)+\.(\w+)", r"\1", s)  # a.b.C -> C
+
+
+def _profile_field_constraints() -> Dict[str, str]:
+    """Resolve value-constraints bounded by a framework constant — so an author
+    sees the ACTUAL allowed values, not a source symbol to chase.
+
+    e.g. ``model_tiers`` keys are constrained by
+    ``shared.model_tiers.VALID_TIER_NAMES``; surfaced here as the real tier
+    names (the same "introspect the installed code" principle as the rest of
+    ``explain``).  Soft — a field with no resolvable constraint is simply absent.
+    """
+    out: Dict[str, str] = {}
+    try:
+        from shared import model_tiers as mt
+        tiers = ", ".join(sorted(mt.VALID_TIER_NAMES))
+        reserved = ", ".join(sorted(mt.RESERVED_KEYS))
+        out["model_tiers"] = f"tier keys: {tiers}  |  reserved control keys: {reserved}"
+    except Exception:
+        pass
+    return out
+
+
+def profile_schema() -> List[ProfileField]:
+    """The ``SubagentProfile`` schema — the knobs a profile author can set.
+
+    Names / types / defaults come from ``dataclasses.fields``; descriptions come
+    from each field's ``metadata['description']`` (the structured source on the
+    dataclass); and value-constraints that reference a framework constant (e.g.
+    ``model_tiers``' valid tier keys) are RESOLVED to their actual values via
+    :func:`_profile_field_constraints` — so an author discovers every knob,
+    incl. the AppArmor knobs and the real tier names, without reading any
+    source.  Fields with no metadata show name / type / default only.
+    """
+    from shared.plugins.subagent.config import SubagentProfile
+
+    constraints = _profile_field_constraints()
+    out: List[ProfileField] = []
+    for f in dataclasses.fields(SubagentProfile):
+        if f.default is not dataclasses.MISSING:
+            default = f.default
+        elif f.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+            try:
+                default = f.default_factory()  # type: ignore[misc]
+            except Exception:
+                default = None
+        else:
+            default = "<required>"
+        out.append(ProfileField(
+            name=f.name,
+            type=_type_name(f.type),
+            default=default,
+            description=f.metadata.get("description", ""),
+            allowed=constraints.get(f.name, ""),
+        ))
+    return out
+
+
 # ----------------------------------------------------------------- plugins
 
 def plugins() -> Dict[str, PluginInfo]:
@@ -220,10 +313,25 @@ def plugins() -> Dict[str, PluginInfo]:
                 ))
         except Exception:
             info.dynamic = True
-        # config schema keys (best-effort)
+        # plugin-level description (class docstring, first line)
+        doc = (type(plugin).__doc__ or "").strip()
+        info.description = doc.split("\n", 1)[0].strip() if doc else ""
+        # config schema (best-effort) — names + descriptions / types / defaults
         try:
             schema = reg.get_plugin_config_schema(name) or []
-            info.config_keys = [getattr(s, "name", str(s)) for s in schema]
+            # Only real PluginSetting objects (some plugins return a raw
+            # JSON-schema dict, whose iteration would yield bogus key strings).
+            settings = [s for s in schema if hasattr(s, "name")]
+            info.config_keys = [s.name for s in settings]
+            info.config_settings = [
+                ConfigSetting(
+                    name=s.name,
+                    type=str(getattr(s, "type", "") or ""),
+                    default=getattr(s, "default", None),
+                    description=getattr(s, "description", "") or "",
+                )
+                for s in settings
+            ]
         except Exception:
             pass
         out[name] = info

@@ -924,10 +924,18 @@ class SubagentProfile:
             the rest is read by the CLI/interactive_shell plugins at
             tool-call time.  ``None`` means "no limits" (host defaults).
     """
-    name: str
-    description: str
-    plugins: List[str] = field(default_factory=list)
-    preloaded_plugins: set = field(default_factory=set)
+    name: str = field(metadata={
+        "description": "Unique profile identifier (the <agent>.yaml stem)."})
+    description: str = field(metadata={
+        "description": "Human-readable summary of what this (sub)agent does."})
+    plugins: List[str] = field(default_factory=list, metadata={
+        "description": "Plugin names to enable. `name(preload)` bypasses "
+        "deferred tool-loading (all its tools, incl. discoverable, enter the "
+        "initial context); `name(tools:[a,b])` scopes which tools are exposed "
+        "(see tool_scopes)."})
+    preloaded_plugins: set = field(default_factory=set, metadata={
+        "description": "DERIVED from `(preload)` annotations in `plugins` during "
+        "parsing — not set directly."})
     # Per-plugin tool allow-lists derived from ``tools:[...]`` modifiers
     # in the raw ``plugins`` list (see :func:`parse_plugin_entry`).  Maps
     # plugin name → list of tool names to expose; every other tool the
@@ -943,9 +951,19 @@ class SubagentProfile:
     # cross-persona instruction) names a tool that the allow-list omits,
     # the model will be told to use a tool it cannot see.  Keep the
     # allow-list and the persona's referenced tools in sync.
-    tool_scopes: Dict[str, List[str]] = field(default_factory=dict)
-    plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    system_instructions: Optional[str] = None
+    tool_scopes: Dict[str, List[str]] = field(default_factory=dict, metadata={
+        "description": "Per-plugin tool allow-lists (plugin -> [tool names to "
+        "expose]); every other tool that plugin ships is dropped from this "
+        "session's wire + grammar. Absent plugin = all its tools. Keep in sync "
+        "with the persona's referenced tools."})
+    plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict, metadata={
+        "description": "Per-plugin config overrides (plugin name -> config "
+        "dict), e.g. plugin_configs.<provider>.api_params / .extra_body, "
+        "plugin_configs.permission.policy."})
+    system_instructions: Optional[str] = field(default=None, metadata={
+        "description": "DEPRECATED — use agents (.jaato/agents/<name>.md) "
+        "instead; an `--agent`'s rendered markdown replaces this. Profiles "
+        "should carry runtime config only."})
     # When True, drop the framework's BASE instructions layer (the
     # "Principle 1: Transparency Mandate" and other always-on framework
     # instructions) from this profile's system prompt.  Plugin-contributed
@@ -957,15 +975,41 @@ class SubagentProfile:
     # per turn, which can be the difference between fitting in a small
     # model's context window and triggering aggressive GC.  Defaults to
     # ``False`` (full framework instructions).
-    suppress_base_instructions: bool = False
-    model: Optional[str] = None
-    provider: Optional[str] = None
-    max_turns: int = 10
-    gc: Optional[GCProfileConfig] = None
-    env: Dict[str, str] = field(default_factory=dict)
-    inherits: Optional[List[str]] = None
-    completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
-    spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
+    suppress_base_instructions: bool = field(default=False, metadata={
+        "description": "Drop the framework's always-on BASE instructions layer "
+        "from the system prompt (plugin + agent instructions still included). "
+        "Saves ~3-5k tokens/turn for narrow goal-focused agents. Default False."})
+    model: Optional[str] = field(default=None, metadata={
+        "description": "Model override (uses the parent's model if unset). "
+        "Silently ignored when model_tiers is non-empty."})
+    provider: Optional[str] = field(default=None, metadata={
+        "description": "Provider override (e.g. anthropic, nebius, vllm). A "
+        "profile binds exactly one provider + model."})
+    max_turns: int = field(default=10, metadata={
+        "description": "Max conversation turns before the (sub)agent returns."})
+    gc: Optional[GCProfileConfig] = field(default=None, metadata={
+        "description": "Garbage-collection strategy + thresholds for this "
+        "session (type + threshold_percent / target / preserve_recent_turns). "
+        "None = framework default."})
+    env: Dict[str, str] = field(default_factory=dict, metadata={
+        "description": "Session-scoped env vars (support ${VAR} expansion + "
+        "secret URIs, e.g. vault://secret/app#key). Applied for the session's "
+        "duration, never leak to other sessions."})
+    inherits: Optional[List[str]] = field(default=None, metadata={
+        "description": "Parent profile names to inherit from (tier-1 _base_* / "
+        "profile-set composition). Resolved + flattened at discover_profiles(); "
+        "cleared after."})
+    completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = field(
+        default=None, metadata={
+        "description": "JSON Schema constraining signal_completion's `payload` "
+        "(inline dict or a path under .jaato/completion_schemas/). Carried on "
+        "the tool so providers enforce it at sampling time + LifecycleTools "
+        "validates server-side. None = legacy `summary: str`."})
+    spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = field(
+        default=None, metadata={
+        "description": "JSON Schema constraining the spawn-time payload "
+        "(input boundary), mirror of completion_payload_schema. Inline dict or "
+        "a .jaato/completion_schemas/ path."})
     # Unified completion-processor surface (server 0.6.125+).  Replaces
     # the prior split between ``completion_artifacts`` (renderers that
     # produce files) and ``completion_validators`` (kb Python that
@@ -976,8 +1020,16 @@ class SubagentProfile:
     # docstring for the full kb author contract (probe-by-symbol:
     # ``render`` and/or ``validate``).  Inheritance concatenates
     # parent + child — each processor is independent and all fire.
-    completion_processors: List[CompletionProcessor] = field(default_factory=list)
-    runtime_limits: Optional[RuntimeLimits] = None
+    completion_processors: List[CompletionProcessor] = field(
+        default_factory=list, metadata={
+        "description": "kb Python hooks (.jaato/scripts/processors/, probed for "
+        "`render` and/or `validate`) run after jsonschema.validate passes; a "
+        "validator's error list blocks completion, a renderer produces files. "
+        "Inheritance concatenates parent + child; all fire."})
+    runtime_limits: Optional[RuntimeLimits] = field(default=None, metadata={
+        "description": "Per-session resource caps (memory, PIDs, CPU weight, "
+        "tool wall-clock timeout, stdout). 'How much can it consume' — "
+        "orthogonal to AppArmor's 'what can it touch'. None = host defaults."})
     # Per-turn model-tier config.  Empty dict means "single-model
     # mode" — the framework falls back to env vars (JAATO_TIER_*) at
     # session-init time, and from there to single-model behavior using
@@ -992,7 +1044,15 @@ class SubagentProfile:
     # enforces same-provider across all tiers).  See
     # ``shared/model_tiers.py`` for the resolver and validation, and
     # ``project_backlog_per_turn_model`` for the full design.
-    model_tiers: Dict[str, Any] = field(default_factory=dict)
+    model_tiers: Dict[str, Any] = field(default_factory=dict, metadata={
+        "description": "Per-turn model-tier selection. Single-level dict "
+        "mapping a tier key to a model (a model-name string, or "
+        "{model (required), provider (optional; V1 requires the same provider "
+        "across all tiers)}), plus the reserved control keys initial / fallback. "
+        "Non-empty silently ignores `model` (warns at load) — the active model "
+        "is picked per turn from model_tiers[<active_tier>]. Empty = "
+        "single-model mode (falls back to the JAATO_TIER_* env vars, then "
+        "`model`)."})
     # AppArmor confinement intent for the session (PR-A, 2026-05-14).
     #
     # ``False`` (default, back-compat) — the session bootstraps
@@ -1022,7 +1082,11 @@ class SubagentProfile:
     #      ``SessionManager.create_headless_session`` (kwarg wins).
     #   2. This profile field.
     #   3. Legacy unconfined default (``False`` until PR-B).
-    apparmor: bool = False
+    apparmor: bool = field(default=False, metadata={
+        "description": "Opt into per-session kernel-enforced AppArmor "
+        "confinement (best-effort; no-ops on hosts without AppArmor). "
+        "False = unconfined. Resolution: create_headless_session kwarg > this "
+        "field > legacy unconfined default."})
 
     # Provider/model quirks declarations (server 0.6.194+).
     #
@@ -1050,7 +1114,10 @@ class SubagentProfile:
     # Defaults to an empty dict (no quirks active).  Inheritance follows
     # the collection-union rule: child + parent keys are merged; on
     # key collision the child wins.
-    quirks: Dict[str, Any] = field(default_factory=dict)
+    quirks: Dict[str, Any] = field(default_factory=dict, metadata={
+        "description": "Opt the active provider into known wire-format / "
+        "model-behavior workarounds (the provider reads the keys it knows; "
+        "unknown keys warn). e.g. coerce_typed_tool_args (vllm)."})
 
     # Per-profile AppArmor fragment scoping (Piece 1, 2026-05-14).
     #
@@ -1090,7 +1157,12 @@ class SubagentProfile:
     # design ask + the cascade footgun this closes (workspace-tier
     # fragments bleeding binary-exec across all cascade stages when
     # only one stage should have it).
-    apparmor_fragments: Optional[List[str]] = None
+    apparmor_fragments: Optional[List[str]] = field(default=None, metadata={
+        "description": "Scope WHICH AppArmor .rules fragments compose this "
+        "session's policy, by basename, from the fragment search path "
+        "(~/.jaato/apparmor-fragments/, <workspace>/.jaato/apparmor-fragments/, "
+        "+ the .cache/ layer). None = compose ALL fragments; [] = none "
+        "(maximally locked-down)."})
 
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
