@@ -87,6 +87,7 @@ class DaemonInfo:
     home: Optional[str] = None
     user: Optional[str] = None
     password_store_dir: Optional[str] = None
+    env: Optional[dict] = None           # the daemon's full /proc/<pid>/environ
 
 
 # --------------------------------------------------------------------------
@@ -166,6 +167,7 @@ def probe_daemon(socket_path: str, pidfile: str) -> DaemonInfo:
         if info.pid_alive:
             env = _proc_environ(info.pid)
             if env is not None:
+                info.env = env
                 info.home = env.get("HOME")
                 info.user = env.get("USER")
                 info.password_store_dir = env.get("PASSWORD_STORE_DIR")
@@ -285,6 +287,38 @@ def check_home_match(info: DaemonInfo) -> List[Check]:
                   f"{my_home}/.password-store.  Fix: stop targeting that "
                   f"daemon; let the client autostart its own on a fresh "
                   f"socket so it inherits your HOME.")]
+
+
+def check_daemon_env(info: DaemonInfo) -> List[Check]:
+    """Report the JAATO_* env vars the running daemon was fired with.
+
+    The daemon's full environ is already read for the HOME check; this
+    surfaces the framework-namespace (``JAATO_*``) vars it was started with —
+    so an override the daemon inherited at launch (a stale
+    ``JAATO_GC_THRESHOLD``, ``JAATO_RUNNER_POOL_SIZE``, ``JAATO_PROVIDER``, a
+    ``JAATO_<provider>_*`` key) is visible rather than silent.  Secret-valued
+    vars (name contains KEY/TOKEN/SECRET/PASSWORD) are shown set-but-redacted,
+    never printed.  Scoped to ``JAATO_*`` to stay pure client-side (no
+    dependency on the server's env-var registry).
+    """
+    if not info.listening or info.env is None:
+        return [Check("daemon env", WARN,
+                      "daemon environ unavailable (not listening / non-Linux / "
+                      "no pidfile) — cannot show how it was fired.")]
+    secret = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+    items = []
+    for k in sorted(info.env):
+        if not k.startswith("JAATO_"):
+            continue
+        v = info.env[k]
+        if any(s in k.upper() for s in secret):
+            v = "<set, redacted>" if v else "<empty>"
+        items.append(f"{k}={v}")
+    if not items:
+        return [Check("daemon env", PASS,
+                      "no JAATO_* vars — daemon fired with framework defaults.")]
+    return [Check("daemon env", PASS,
+                  f"{len(items)} JAATO_* var(s) at launch: " + ", ".join(items))]
 
 
 def _pass_resolves(secret_path: str, home: str) -> Optional[bool]:
@@ -414,6 +448,7 @@ def run_checks(
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
     checks += check_home_match(info)
+    checks += check_daemon_env(info)
     checks += check_secret(info, secret)
     checks += check_env_file(env_file, workspace)
     checks += check_workspace(workspace, config_root)
