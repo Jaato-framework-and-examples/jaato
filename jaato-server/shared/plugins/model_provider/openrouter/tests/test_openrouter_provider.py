@@ -1968,7 +1968,7 @@ class TestParallelToolCallsKnob:
         block under config.extra."""
         from shared.plugins.model_provider.base import ProviderConfig
         provider = OpenRouterProvider()
-        provider._verify_connectivity = lambda: None  # type: ignore[assignment]
+        provider._verify_connectivity = lambda *a, **k: None  # type: ignore[assignment]
         provider._trace = lambda _msg: None  # type: ignore[assignment]
         provider._list_models_for_catalog = lambda: []  # type: ignore[assignment]
         cfg = ProviderConfig(
