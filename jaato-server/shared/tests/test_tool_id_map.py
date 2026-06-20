@@ -79,6 +79,10 @@ class TestToolChoiceToWire:
             {"type": "function", "function": {"name": "X"}})["function"]["name"]
             == name_to_id("X"))
 
+    def test_anthropic_shape_name_mapped(self):
+        tc = {"type": "tool", "name": "signal_completion"}
+        assert tool_choice_to_wire(tc)["name"] == name_to_id("signal_completion")
+
     def test_does_not_mutate_input(self):
         tc = {"type": "function", "function": {"name": "signal_completion"}}
         tool_choice_to_wire(tc)
