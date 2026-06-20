@@ -27,7 +27,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ._lazy import get_openai_client_class, get_openai_module
+from .._openai_compat._lazy import get_openai_client_class, get_openai_module
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -57,7 +57,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ThinkingConfig,
     TurnResult,
 )
-from .converters import (
+from .._openai_compat.converters import (
     get_original_tool_name,
     history_to_openai,
     map_finish_reason,

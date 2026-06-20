@@ -925,11 +925,15 @@ class TestApiParams:
         assert kwargs["temperature"] == 0.0
 
     def test_per_call_tool_choice_overrides_profile(self):
+        from shared.tool_id_map import name_to_id
         p = self._provider({"tool_choice": "required"})
         kwargs = {"tools": [1]}
         named = {"type": "function", "function": {"name": "x"}}
         p._apply_api_params(kwargs, tool_choice=named)
-        assert kwargs["tool_choice"] == named
+        # Per-call wins over the profile's "required"; the function name is
+        # mapped to its wire id (name_to_id) like the tools array (#332).
+        assert kwargs["tool_choice"] == {
+            "type": "function", "function": {"name": name_to_id("x")}}
 
     def test_non_dict_api_params_raises(self):
         with patch(

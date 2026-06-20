@@ -51,14 +51,14 @@ from shared.tests.test_provider_capabilities import (  # noqa: E402
 # Providers without their own converters.py inherit another's (the value points
 # at the file they actually use at runtime).
 _CONVERTERS: Dict[str, Tuple[str, str]] = {
-    "nim":            ("nim/converters.py",        "message_to_openai"),
+    "nim":            ("_openai_compat/converters.py",        "message_to_openai"),
     "nebius":         ("nebius/converters.py",     "message_to_openai"),
     "openrouter":     ("openrouter/converters.py", "message_to_openai"),
-    "vllm":           ("nim/converters.py",        "message_to_openai"),
-    "lmstudio":       ("nim/converters.py",        "message_to_openai"),
-    "tensorrt_llm":   ("nim/converters.py",        "message_to_openai"),
-    "zhipuai_openai": ("nim/converters.py",        "message_to_openai"),
-    "triton":         ("nim/converters.py",        "message_to_openai"),
+    "vllm":           ("_openai_compat/converters.py",        "message_to_openai"),
+    "lmstudio":       ("_openai_compat/converters.py",        "message_to_openai"),
+    "tensorrt_llm":   ("_openai_compat/converters.py",        "message_to_openai"),
+    "zhipuai_openai": ("_openai_compat/converters.py",        "message_to_openai"),
+    "triton":         ("_openai_compat/converters.py",        "message_to_openai"),
     "anthropic":      ("anthropic/converters.py",  "message_to_anthropic"),
     "ollama":         ("anthropic/converters.py",  "message_to_anthropic"),
     "zhipuai":        ("anthropic/converters.py",  "message_to_anthropic"),

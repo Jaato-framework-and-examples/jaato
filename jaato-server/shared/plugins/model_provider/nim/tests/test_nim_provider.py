@@ -26,7 +26,7 @@ from ..errors import (
     ContextLimitError,
     InfrastructureError,
 )
-from ..converters import (
+from ..._openai_compat.converters import (
     sanitize_tool_name,
     get_original_tool_name,
     clear_tool_name_mapping,
