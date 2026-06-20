@@ -16,7 +16,7 @@
   <a href="https://jaato-framework-and-examples.github.io/jaato/web/index.html">Documentation</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html">Plugin Reference</a> &bull;
-  <a href="docs/architecture.md">Architecture</a>
+  <a href="https://github.com/Jaato-framework-and-examples/the_Jaato_Arch_visualization">Architecture</a>
 </p>
 
 ## Overview
@@ -44,27 +44,7 @@ The metaphor is intentional: just as a traditional jaato grinds raw grains into 
 
 jaato uses a server-first design where the server is the source of truth and clients are thin presentation layers.
 
-```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│  TUI Client │  │  Web Client │  │   Headless   │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │ IPC            │ WebSocket       │ IPC
-       └────────┬───────┴─────────┬───────┘
-          ┌─────┴─────────────────┴─────┐
-          │        jaato Server          │
-          │  ┌───────────────────────┐   │
-          │  │    Session Manager    │   │
-          │  │  ┌─────┐  ┌─────┐    │   │
-          │  │  │Ses. 1│  │Ses. 2│   │   │
-          │  │  └─────┘  └─────┘    │   │
-          │  └───────────────────────┘   │
-          │  ┌───────────────────────┐   │
-          │  │    Shared Runtime     │   │
-          │  │  Providers │ Plugins  │   │
-          │  │  Registry  │ Ledger   │   │
-          │  └───────────────────────┘   │
-          └──────────────────────────────┘
-```
+The full, current architecture — component diagrams, event flows, the cascade/reactor and confined-runner models — lives in its own visualization repo: **[the_Jaato_Arch_visualization](https://github.com/Jaato-framework-and-examples/the_Jaato_Arch_visualization)**.
 
 **Key design decisions:**
 - **Multi-client support** - Multiple UIs connect to the same running server
@@ -72,7 +52,7 @@ jaato uses a server-first design where the server is the source of truth and cli
 - **Resource sharing** - Single runtime for multiple agents with a shared token ledger
 - **Pipeline-presentation split** - Server emits structured events; clients choose how to render them
 
-See [Architecture Overview](docs/architecture.md) for detailed diagrams and [Design Philosophy](docs/design-philosophy.md) for rationale.
+See **[the_Jaato_Arch_visualization](https://github.com/Jaato-framework-and-examples/the_Jaato_Arch_visualization)** for current, detailed diagrams, and [Design Philosophy](docs/design-philosophy.md) for rationale.
 
 ## Provider Support
 
@@ -345,22 +325,15 @@ jaato/
 
 ### Provider Configuration
 
-| Variable | Provider | Description |
-|----------|----------|-------------|
-| `PROJECT_ID` / `LOCATION` | Google GenAI | GCP project ID / Vertex AI region |
-| `MODEL_NAME` | Google GenAI | Model name (e.g., `gemini-2.5-flash`) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Google GenAI | Path to service account JSON key |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | Anthropic | API key (credits) / OAuth token (subscription) |
-| `GITHUB_TOKEN` | GitHub Models | GitHub PAT with `models: read` |
-| `OLLAMA_HOST` / `OLLAMA_MODEL` | Ollama | Server URL (default `http://localhost:11434`) / model |
-| `LMSTUDIO_HOST` / `LMSTUDIO_MODEL` | LM Studio | Server URL (default `http://localhost:1234`) / model |
-| `VLLM_HOST` / `VLLM_MODEL` | vLLM | `vllm serve` URL (required) / model |
-| `TENSORRT_LLM_HOST` / `TENSORRT_LLM_MODEL` | TensorRT-LLM | `trtllm-serve` URL (required) / model |
-| `JAATO_NIM_API_KEY` / `JAATO_NIM_MODEL` | NVIDIA NIM | API key (`nvapi-…`) / model |
-| `JAATO_OPENROUTER_API_KEY` / `JAATO_OPENROUTER_MODEL` | OpenRouter | API key (`sk-or-…`) / `vendor/model` |
-| `JAATO_NEBIUS_API_KEY` / `JAATO_NEBIUS_MODEL` | Nebius | API key / `vendor/model` |
+Provider environment variables (credentials, endpoints, model selection) differ per provider and change as providers are added — so jaato doesn't hardcode them here, where they'd drift. Discover them from the **installed framework**, which is the source of truth:
 
-> Common subset only. Each provider has more knobs (context-length / base-URL overrides, bearer tokens, thinking budgets, routing). Run `jaato-scaffold explain provider <name>` for the full typed per-provider list, or see the [provider docs](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/providers/index.html).
+```bash
+jaato-scaffold explain provider <name>      # typed env vars + knobs for one provider (e.g. anthropic, vllm, nebius)
+jaato-scaffold explain providers            # the full provider list + capability matrix
+jaato-doctor --workspace . --env-file .env  # verify your env actually resolves (creds, socket, daemon HOME)
+```
+
+Each provider's setup is also written up in the per-provider [provider docs](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/providers/index.html).
 
 ### Runtime Configuration
 
@@ -403,7 +376,7 @@ jaato/
 
 | Resource | Description |
 |----------|-------------|
-| [Architecture Overview](docs/architecture.md) | Server-first architecture, event protocol, component diagrams |
+| [Architecture Visualization](https://github.com/Jaato-framework-and-examples/the_Jaato_Arch_visualization) | Current component diagrams, event flows, cascade/reactor & confined-runner models (dedicated repo) |
 | [Design Philosophy](docs/design-philosophy.md) | Opinionated design decisions and rationale |
 | [Plugin Reference](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html) | All built-in plugins with configuration and examples |
 | [Plugin Development](jaato-server/shared/plugins/README.md) | Guide for creating custom plugins |
