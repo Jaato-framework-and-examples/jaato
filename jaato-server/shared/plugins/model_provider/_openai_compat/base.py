@@ -420,6 +420,11 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     **kwargs,
                 )
                 provider_response = response_from_openai(response)
+                # Non-streaming cache-hit count (the streaming path sets this
+                # per-chunk); response_from_openai doesn't carry it.
+                cached = self._extract_cache_tokens(getattr(response, "usage", None))
+                if cached is not None and provider_response.usage is not None:
+                    provider_response.usage.cache_read_tokens = cached
 
             # Per-call accounting (NOT conversation state)
             self._last_usage = provider_response.usage

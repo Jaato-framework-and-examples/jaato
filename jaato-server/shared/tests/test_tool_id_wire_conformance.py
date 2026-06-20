@@ -73,9 +73,10 @@ def test_tools_array_never_leaks_human_tool_names(provider):
 # Providers whose provider.py forwards a tool_choice to the wire.
 _TOOL_CHOICE_FORWARDERS = {"nebius", "vllm", "tensorrt_llm", "triton", "anthropic"}
 
-# Of those, the ones not YET routing through tool_choice_to_wire.  nebius is
-# done; the rest fold into the shared OpenAI-compat base refactor.  SHRINK-ONLY.
-_TOOL_CHOICE_MAPPING_PENDING = {"vllm", "tensorrt_llm", "triton", "anthropic"}
+# Of those, the ones not YET routing through tool_choice_to_wire.  nebius +
+# tensorrt_llm are migrated onto the OpenAICompat base (which maps); the rest
+# fold in as they migrate.  SHRINK-ONLY.
+_TOOL_CHOICE_MAPPING_PENDING = {"vllm", "triton", "anthropic"}
 
 
 def _provider_src(provider: str) -> str:
@@ -92,7 +93,11 @@ def _maps_tool_choice(provider: str) -> bool:
     is what lets them leave ``_TOOL_CHOICE_MAPPING_PENDING``.
     """
     src = _provider_src(provider)
-    return "tool_choice_to_wire" in src or "OpenAICompatProvider" in src
+    return (
+        "tool_choice_to_wire" in src
+        or "OpenAICompatProvider" in src
+        or "OpenAICompatLocalHostProvider" in src   # IS-A OpenAICompatProvider
+    )
 
 
 def test_tool_choice_forwarders_route_through_the_mapper():
