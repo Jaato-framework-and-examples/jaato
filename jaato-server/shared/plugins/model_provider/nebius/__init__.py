@@ -18,7 +18,7 @@ __all__ = ["NebiusProvider", "create_provider"]
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -53,3 +53,13 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="OpenAI Chat Completions params (filtered allow-list)"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_key",
+               "plugin_configs.nebius.api_key (pass:// ok)"),
+    AuthSource("env", "JAATO_NEBIUS_API_KEY"),
+    AuthSource("env", "NEBIUS_API_KEY", "vendor var"),
+    AuthSource("stored", "nebius-auth",
+               "nebius_auth.json (config_root → workspace → ~/.jaato)"),
+)

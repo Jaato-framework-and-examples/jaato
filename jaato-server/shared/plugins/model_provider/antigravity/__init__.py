@@ -109,7 +109,7 @@ __all__ = [
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -140,3 +140,9 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="quota / endpoint / generation"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("oauth", "antigravity_accounts.json",
+               "Google OAuth account store (.jaato/ → ~/.jaato)"),
+)

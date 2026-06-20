@@ -45,11 +45,13 @@ _PROVIDER_NS = {
     "ProviderKnobs": _pbase.ProviderKnobs,
     "KnobLayer": _pbase.KnobLayer,
     "KnobSpec": _pbase.KnobSpec,
+    "AuthSource": _pbase.AuthSource,
     "frozenset": frozenset,
     "__builtins__": {},
 }
 
-_WANTED_CONSTS = ("PROVIDER_CAPABILITIES", "PROVIDER_KNOBS", "PROVIDER_QUIRKS")
+_WANTED_CONSTS = ("PROVIDER_CAPABILITIES", "PROVIDER_KNOBS", "PROVIDER_QUIRKS",
+                  "PROVIDER_AUTH_RESOLUTION")
 
 
 # -------------------------------------------------------------------- models
@@ -62,6 +64,7 @@ class ProviderInfo:
     capabilities: Optional[_pbase.ProviderCapabilities] = None
     knobs: Optional[_pbase.ProviderKnobs] = None
     quirks: frozenset = field(default_factory=frozenset)
+    auth: tuple = ()                    # ordered AuthSource credential chain
 
     def normalized_names(self) -> set:
         """Names a profile's ``provider:`` field might use for this provider.
@@ -146,6 +149,7 @@ def providers() -> Dict[str, ProviderInfo]:
             capabilities=consts.get("PROVIDER_CAPABILITIES"),
             knobs=consts.get("PROVIDER_KNOBS"),
             quirks=consts.get("PROVIDER_QUIRKS") or frozenset(),
+            auth=consts.get("PROVIDER_AUTH_RESOLUTION") or (),
         )
     return out
 

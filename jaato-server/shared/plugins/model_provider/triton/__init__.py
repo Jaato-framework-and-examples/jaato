@@ -62,7 +62,7 @@ __all__ = ["TritonProvider", "create_provider"]
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -90,3 +90,11 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
                           "(parameters.config, ...)"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_token",
+               "plugin_configs.triton.api_token (optional)"),
+    AuthSource("env", "TRITON_API_TOKEN",
+               "optional — only behind an auth proxy"),
+)

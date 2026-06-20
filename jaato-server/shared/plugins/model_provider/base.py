@@ -452,6 +452,40 @@ class ProviderKnobs:
         return True if lyr.opaque else key in lyr.keys
 
 
+# Canonical credential-source kinds for PROVIDER_AUTH_RESOLUTION steps.
+AUTH_SOURCE_KINDS = (
+    "api_key_param",  # api_key via ProviderConfig / plugin_configs.<provider>.api_key
+    "env",            # an environment variable (name = the var)
+    "stored",         # a credential persisted by an auth plugin (name = command/file)
+    "oauth",          # an interactive OAuth token store (name = the store file)
+    "adc",            # Google Application Default Credentials
+    "cli",            # delegates to an external CLI's own session
+    "none",           # no credential required (local servers)
+)
+
+
+@dataclass(frozen=True)
+class AuthSource:
+    """One step in a provider's credential-resolution chain.
+
+    Providers try sources in order, highest priority first, until one yields a
+    credential (the ``or``-chain in ``resolve_api_key`` / ``verify_auth``).
+    Authored from the provider's actual auth code, NOT prose — so
+    ``explain provider`` can show *why* a credential resolved the way it did
+    (the #1 provider confusion source: "I set X but it used Y").
+
+    Attributes:
+        kind: one of :data:`AUTH_SOURCE_KINDS`.
+        name: the concrete identifier — env var name, auth command, store file
+            (empty for ``adc`` / ``none``).
+        note: optional human note (e.g. "vendor var", "optional").
+    """
+
+    kind: str
+    name: str = ""
+    note: str = ""
+
+
 # Default empty quirk set.  Providers that honor model quirks declare a
 # module-level ``PROVIDER_QUIRKS = frozenset({...})`` in their ``__init__.py``
 # enumerating the quirk names they read from ``profile.quirks`` /

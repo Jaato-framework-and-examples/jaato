@@ -116,6 +116,40 @@ def providers() -> Rendered:
     return data, text
 
 
+def _resolution_order(info, EV) -> list:
+    """Provider-specific resolution chains, from the uniform helper contracts.
+
+    The precedence is the framework's (``resolve_context_window`` /
+    ``resolve_modalities`` / the ``_knob`` helper); the concrete env-var name
+    is the provider's own (looked up in the introspected env vars).
+    """
+    d = info.dir_name
+    lines = []
+    if info.auth:
+        steps = [a.kind if not a.name else f"{a.kind}:{a.name}"
+                 for a in info.auth]
+        lines.append("    credentials    : " + " → ".join(steps)
+                     + "   (first source that yields a credential wins)")
+    ctx_env = sorted(n for n in EV
+                     if EV[n].category == f"provider:{d}"
+                     and n.endswith("CONTEXT_LENGTH"))
+    tail = f" → env {ctx_env[0]}" if ctx_env else ""
+    lines.append(
+        f"    context window : catalog/endpoint detect → profile knob "
+        f"'context_length'{tail} → else error  (detect WINS over the knob)")
+    if info.knobs and any(any(k.name == "modalities" for k in l.knobs)
+                          for l in info.knobs.layers):
+        lines.append(
+            "    modalities     : catalog detect → profile knob 'modalities' "
+            "→ static table → text floor")
+    if info.knobs and any(l.layer in ("api_params", "framework_overrides")
+                          for l in info.knobs.layers):
+        lines.append(
+            "    layered knobs  : layer dict → flat key (deprecated, warns) "
+            "→ default")
+    return lines
+
+
 def provider(name: str) -> Rendered:
     info = introspect.resolve_provider(name)
     if info is None:
@@ -123,13 +157,19 @@ def provider(name: str) -> Rendered:
                 f"unknown provider {name!r} — see `explain providers`")
     caps = info.capabilities.as_dict() if info.capabilities else {}
     knobs = info.knobs.as_dict() if info.knobs else {}
+    res = _resolution_order(info, introspect.env_vars())
     data = {"provider": info.dir_name, "capabilities": caps,
-            "quirks": sorted(info.quirks), "knobs": knobs}
+            "quirks": sorted(info.quirks), "knobs": knobs,
+            "auth": [{"kind": a.kind, "name": a.name, "note": a.note}
+                     for a in info.auth],
+            "resolution_order": res}
 
     lines = [f"provider: {info.dir_name}"]
     lines.append("  capabilities: "
                  + ", ".join(k for k, v in caps.items() if v) or "  (none)")
     lines.append("  quirks: " + (", ".join(sorted(info.quirks)) or "(none)"))
+    lines.append("  resolution order:")
+    lines.extend(res)
     lines.append("  knobs (plugin_configs.%s.*):" % info.dir_name)
     if info.knobs:
         for layer in info.knobs.layers:

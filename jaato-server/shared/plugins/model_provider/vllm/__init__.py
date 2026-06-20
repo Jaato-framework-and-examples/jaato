@@ -94,7 +94,7 @@ __all__ = ["VLLMProvider", "create_provider"]
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -130,3 +130,11 @@ PROVIDER_QUIRKS = frozenset({
     "force_narration_between_tools",
     "auto_finalize_on_complete",
 })
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_token",
+               "plugin_configs.vllm.api_token (optional)"),
+    AuthSource("env", "VLLM_API_TOKEN",
+               "optional — only if launched with --api-key"),
+)

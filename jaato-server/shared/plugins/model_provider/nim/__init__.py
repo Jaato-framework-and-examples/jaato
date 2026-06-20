@@ -16,7 +16,7 @@ __all__ = ["NIMProvider", "create_provider"]
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -40,3 +40,12 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="connection / identity"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_key", "plugin_configs.nim.api_key"),
+    AuthSource("env", "JAATO_NIM_API_KEY"),
+    AuthSource("stored", "nim-auth",
+               "nim_auth.json (config_root → workspace → ~/.jaato); "
+               "self-hosted endpoints may need none"),
+)

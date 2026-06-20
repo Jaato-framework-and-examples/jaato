@@ -17,7 +17,7 @@ __all__ = ["OpenRouterProvider", "create_provider"]
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -66,3 +66,11 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="rare escape hatches"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_key", "plugin_configs.openrouter.api_key"),
+    AuthSource("env", "JAATO_OPENROUTER_API_KEY"),
+    AuthSource("stored", "openrouter-auth",
+               "openrouter_auth.json (workspace → ~/.jaato)"),
+)

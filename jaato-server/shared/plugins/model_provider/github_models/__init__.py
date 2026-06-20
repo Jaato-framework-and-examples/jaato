@@ -21,7 +21,7 @@ __all__ = ["GitHubModelsProvider", "create_provider"]
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -45,3 +45,10 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="connection / billing"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("oauth", "github_oauth.json",
+               "device-code token (.jaato/ → ~/.jaato)"),
+    AuthSource("env", "GITHUB_TOKEN"),
+)

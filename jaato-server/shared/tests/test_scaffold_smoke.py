@@ -11,7 +11,7 @@ import py_compile
 
 import pytest
 
-from shared.scaffold import introspect, build
+from shared.scaffold import introspect, build, explain
 from shared.scaffold import validate as V
 
 
@@ -136,6 +136,18 @@ def test_composed_env_has_provider_and_framework_knobs(tmp_path):
     assert env.count("MODEL_NAME") == 1            # not active+commented dup
     assert "# JAATO_NEBIUS_API_KEY=" in env        # provider block
     assert "# JAATO_GC_THRESHOLD=" in env          # plugin:gc knob included
+
+
+def test_provider_auth_resolution_is_introspected_and_explained():
+    P = introspect.providers()
+    nebius = P["nebius"]
+    assert nebius.auth, "nebius should declare an auth resolution chain"
+    kinds = [a.kind for a in nebius.auth]
+    assert kinds[0] == "api_key_param"   # profile api_key wins
+    assert "stored" in kinds
+    data, text = explain.provider("nebius")
+    assert "credentials" in text and "resolution order" in text
+    assert any(a["kind"] == "env" for a in data["auth"])
 
 
 def test_validate_unread_env_var_is_info_never_error(tmp_path):

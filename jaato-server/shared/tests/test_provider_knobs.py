@@ -32,6 +32,9 @@ _EXCLUDE = {"tests", "__pycache__", "bundle_common", "echo"}
 # Allowed KnobSpec.type hint strings (kept in sync with KnobSpec's docstring).
 _ALLOWED_TYPES = {"str", "int", "float", "bool", "list", "dict"}
 
+# Allowed AuthSource.kind values (kept in sync with base.AUTH_SOURCE_KINDS).
+_AUTH_KINDS = {"api_key_param", "env", "stored", "oauth", "adc", "cli", "none"}
+
 
 def _provider_dirs() -> List[str]:
     out = []
@@ -140,6 +143,40 @@ def test_knoblayers_have_string_layer_names():
                 and isinstance(n.args[0].value, str)
             ):
                 problems.append(f"{p}: a KnobLayer is missing a string layer name")
+    assert problems == [], "\n".join(problems)
+
+
+def test_every_provider_declares_auth_resolution():
+    """Every provider must declare PROVIDER_AUTH_RESOLUTION = (AuthSource(...), ...)."""
+    missing = []
+    for p in _provider_dirs():
+        node = _assign_value(p, "PROVIDER_AUTH_RESOLUTION")
+        ok = isinstance(node, ast.Tuple) and node.elts and all(
+            _is_call_to(e, "AuthSource") for e in node.elts)
+        if not ok:
+            missing.append(p)
+    assert missing == [], (
+        "providers missing a PROVIDER_AUTH_RESOLUTION = (AuthSource(...), ...) "
+        f"declaration in __init__.py: {missing}. Author the ordered credential "
+        "chain from the provider's resolve_api_key/verify_auth code."
+    )
+
+
+def test_auth_sources_have_valid_kinds():
+    """Every AuthSource's first arg (kind) must be a literal in AUTH_SOURCE_KINDS."""
+    problems = []
+    for p in _provider_dirs():
+        node = _assign_value(p, "PROVIDER_AUTH_RESOLUTION")
+        if not isinstance(node, ast.Tuple):
+            continue
+        for n in ast.walk(node):
+            if not _is_call_to(n, "AuthSource"):
+                continue
+            if not n.args or not (isinstance(n.args[0], ast.Constant)
+                                  and n.args[0].value in _AUTH_KINDS):
+                problems.append(
+                    f"{p}: AuthSource kind must be a literal in "
+                    f"{sorted(_AUTH_KINDS)}")
     assert problems == [], "\n".join(problems)
 
 

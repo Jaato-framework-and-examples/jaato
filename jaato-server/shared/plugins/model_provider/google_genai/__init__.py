@@ -21,7 +21,7 @@ __all__ = [
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -43,3 +43,11 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="context / modality overrides"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_key", "plugin_configs.google_genai.api_key"),
+    AuthSource("env", "GOOGLE_GENAI_API_KEY", "AI Studio api-key mode"),
+    AuthSource("stored", "GOOGLE_APPLICATION_CREDENTIALS", "service-account file"),
+    AuthSource("adc", "", "Application Default Credentials (gcloud / GCE metadata)"),
+)

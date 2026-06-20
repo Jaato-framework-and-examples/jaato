@@ -65,7 +65,7 @@ __all__ = [
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -102,3 +102,12 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="rare escape hatches"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_key", "plugin_configs.anthropic.api_key"),
+    AuthSource("oauth", "anthropic_oauth.json", "PKCE token (.jaato/ → ~/.jaato)"),
+    AuthSource("env", "ANTHROPIC_AUTH_TOKEN", "OAuth token"),
+    AuthSource("env", "CLAUDE_CODE_OAUTH_TOKEN", "OAuth token"),
+    AuthSource("env", "ANTHROPIC_API_KEY"),
+)

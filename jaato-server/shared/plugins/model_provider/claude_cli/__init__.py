@@ -86,7 +86,7 @@ def create_plugin() -> ClaudeCLIProvider:
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -111,3 +111,8 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="CLI backend configuration"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("cli", "claude", "external claude CLI's own login session"),
+)

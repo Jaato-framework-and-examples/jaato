@@ -58,7 +58,7 @@ __all__ = [
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
 from ..base import (  # noqa: E402
-    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
 )
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
@@ -82,3 +82,11 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     ), description="connection / generation"),
 ))
 PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_key",
+               "plugin_configs.zhipuai_openai.api_key"),
+    AuthSource("env", "ZHIPUAI_API_KEY", "shared with zhipuai provider"),
+    AuthSource("stored", "zhipuai-auth", "shared zhipuai_auth.json"),
+)
