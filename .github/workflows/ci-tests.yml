@@ -41,6 +41,7 @@ jobs:
             jaato-server/shared/tests/test_plugin_tier_partition.py \
             jaato-server/shared/tests/test_provider_capabilities.py \
             jaato-server/shared/tests/test_provider_capability_conformance.py \
+            jaato-server/shared/tests/test_provider_knobs.py \
             jaato-server/shared/tests/test_reset_for_next_session.py \
             jaato-server/shared/tests/test_enrichment_plugin.py
 

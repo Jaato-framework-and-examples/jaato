@@ -52,7 +52,9 @@ __all__ = ["TensorRTLLMProvider", "create_provider"]
 
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
-from ..base import ProviderCapabilities  # noqa: E402
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
+)
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
@@ -63,4 +65,23 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,
     cancellation=True,
+)
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("host", "str", None, "trtllm-serve URL (TENSORRT_LLM_HOST)"),
+        KnobSpec("api_token", "str", None, "bearer token (auth proxy)"),
+        KnobSpec("context_length", "int"),
+        KnobSpec("max_tokens", "int"),
+    ), description="server connection + generation"),
+))
+PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_token",
+               "plugin_configs.tensorrt_llm.api_token (optional)"),
+    AuthSource("env", "TENSORRT_LLM_API_TOKEN",
+               "optional — only behind an auth proxy"),
 )

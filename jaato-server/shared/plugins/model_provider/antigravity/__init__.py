@@ -108,7 +108,9 @@ __all__ = [
 
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
-from ..base import ProviderCapabilities  # noqa: E402
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
+)
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
@@ -119,4 +121,28 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,
     cancellation=True,
+)
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("endpoint", "str"),
+        KnobSpec("quota_type", "str", None, "antigravity|gemini-cli"),
+        KnobSpec("project_id", "str"),
+        KnobSpec("auto_rotate", "bool", None, "multi-account rotation"),
+        KnobSpec("retry_empty", "bool"),
+        KnobSpec("session_recovery", "bool"),
+        KnobSpec("thinking_level", "str", None,
+                 "minimal|low|medium|high (Gemini 3)"),
+        KnobSpec("thinking_budget", "int", None, "Claude thinking budget"),
+        KnobSpec("context_length", "int"),
+        KnobSpec("modalities", "list"),
+    ), description="quota / endpoint / generation"),
+))
+PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("oauth", "antigravity_accounts.json",
+               "Google OAuth account store (.jaato/ → ~/.jaato)"),
 )

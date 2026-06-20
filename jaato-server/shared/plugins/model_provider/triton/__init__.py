@@ -61,7 +61,9 @@ __all__ = ["TritonProvider", "create_provider"]
 
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
-from ..base import ProviderCapabilities  # noqa: E402
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
+)
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
@@ -72,4 +74,27 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,
     cancellation=True,
+)
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("openai_url", "str", None, "OpenAI frontend URL"),
+        KnobSpec("control_url", "str", None, "Triton KServe control URL"),
+        KnobSpec("host", "str", None, "shorthand host (derives both URLs)"),
+        KnobSpec("api_token", "str", None, "bearer token (auth proxy)"),
+        KnobSpec("context_length", "int"),
+    ), description="server connection"),
+    KnobLayer("load", opaque=True,
+              description="KServe model-load body — forwarded verbatim "
+                          "(parameters.config, ...)"),
+))
+PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_token",
+               "plugin_configs.triton.api_token (optional)"),
+    AuthSource("env", "TRITON_API_TOKEN",
+               "optional — only behind an auth proxy"),
 )

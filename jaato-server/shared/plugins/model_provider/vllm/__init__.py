@@ -93,7 +93,9 @@ __all__ = ["VLLMProvider", "create_provider"]
 
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
-from ..base import ProviderCapabilities  # noqa: E402
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
+)
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
@@ -104,4 +106,35 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,
     cancellation=True,
+)
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("host", "str", None, "vLLM server URL (VLLM_HOST)"),
+        KnobSpec("api_token", "str", None, "bearer token (when --api-key set)"),
+        KnobSpec("context_length", "int"),
+        KnobSpec("max_tokens", "int"),
+        KnobSpec("parallel_tool_calls", "bool"),
+        KnobSpec("quirks", "dict", None,
+                 "model-quirk toggles (see PROVIDER_QUIRKS)"),
+    ), description="vLLM server connection + generation knobs"),
+))
+# vLLM is the only provider that honors model quirks (the _KNOWN_QUIRKS
+# allow-list in provider.py).  This declaration lifts that method-local
+# frozenset to a module constant so explain/validate can read it and the
+# linter can reject unknown quirk names (previously silently dropped).
+PROVIDER_QUIRKS = frozenset({
+    "coerce_typed_tool_args",
+    "force_tool_choice_for_lifecycle",
+    "force_narration_between_tools",
+    "auto_finalize_on_complete",
+})
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_token",
+               "plugin_configs.vllm.api_token (optional)"),
+    AuthSource("env", "VLLM_API_TOKEN",
+               "optional — only if launched with --api-key"),
 )
