@@ -377,7 +377,7 @@ class TestAuthentication:
 
         assert "JAATO_NIM_API_KEY" in str(exc_info.value)
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_with_api_key(self, mock_client_class):
         """Should initialize with key from config.api_key."""
         mock_client_class.return_value = MagicMock()
@@ -392,7 +392,7 @@ class TestAuthentication:
         assert provider._api_key == "nvapi-test"
         assert provider._client is not None
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NIM_API_KEY": "nvapi-env"}, clear=True)
     def test_initialize_from_env(self, mock_client_class):
         """Should auto-detect key from JAATO_NIM_API_KEY env var."""
@@ -403,7 +403,7 @@ class TestAuthentication:
 
         assert provider._api_key == "nvapi-env"
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NIM_BASE_URL": "http://localhost:8000/v1"}, clear=True)
     def test_initialize_self_hosted_no_key(self, mock_client_class):
         """Should initialize without key for self-hosted endpoints."""
@@ -415,7 +415,7 @@ class TestAuthentication:
         assert provider._api_key is None
         assert provider._client is not None
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {}, clear=True)
     def test_initialize_raises_when_context_unresolved(self, mock_client_class):
         """No hardcoded fallback: with neither profile knob nor env set, the
@@ -425,7 +425,7 @@ class TestAuthentication:
         with pytest.raises(ValueError, match="context_length could not be resolved"):
             provider.initialize(ProviderConfig(api_key="nvapi-test"))
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "200000"}, clear=True)
     def test_initialize_resolves_context_from_env(self, mock_client_class):
         """Env tier resolves when no profile knob is set."""
@@ -434,7 +434,7 @@ class TestAuthentication:
         provider.initialize(ProviderConfig(api_key="nvapi-test"))
         assert provider._context_length == 200000
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_profile_knob_beats_env(self, mock_client_class):
         """Profile knob (config.extra.context_length) wins over the env tier."""
         mock_client_class.return_value = MagicMock()
@@ -445,7 +445,7 @@ class TestAuthentication:
             ))
             assert provider._context_length == 131072
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_custom_base_url(self, mock_client_class):
         """Should use custom base_url from config.extra."""
         mock_client_class.return_value = MagicMock()
@@ -458,7 +458,7 @@ class TestAuthentication:
 
         assert provider._base_url == "http://nim.internal:8080/v1"
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_custom_context_length(self, mock_client_class):
         """Should use custom context_length from config.extra."""
         mock_client_class.return_value = MagicMock()
