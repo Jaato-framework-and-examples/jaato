@@ -52,9 +52,11 @@ def _cmd_explain(args) -> int:
         data, text = _explain.env(name)
     elif scope == "sets":
         data, text = _explain.sets(ws)
+    elif scope == "profile":
+        data, text = _explain.profile()
     else:
         print(f"unknown explain scope {scope!r} — one of: plugins, plugin, "
-              "providers, provider, gc, env, sets", file=sys.stderr)
+              "providers, provider, gc, env, sets, profile", file=sys.stderr)
         return 2
     print(json.dumps(data, indent=2, default=str) if args.json else text)
     return 0
@@ -118,7 +120,8 @@ def main(argv=None) -> int:
 
     pe = sub.add_parser("explain", help="interrogate the installed framework")
     pe.add_argument("scope", nargs="?",
-                    help="plugins | plugin | providers | provider | gc | sets")
+                    help="plugins | plugin | providers | provider | gc | env "
+                         "| sets | profile")
     pe.add_argument("name", nargs="?", help="name for plugin/provider scope")
     pe.add_argument("--workspace", help="workspace dir (for `sets`)")
     pe.add_argument("--json", action="store_true")

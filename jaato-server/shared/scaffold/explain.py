@@ -76,20 +76,28 @@ def plugin(name: str) -> Rendered:
     if pi is None:
         return ({"error": f"unknown plugin {name!r}"},
                 f"unknown plugin {name!r} — see `explain plugins`")
-    lines = [f"plugin: {name}",
-             f"  kind={pi.kind}  tier={pi.tier or '-'}"
-             + ("  (tools dynamic — need a live session)" if pi.dynamic else "")]
+    lines = [f"plugin: {name}"]
+    if pi.description:
+        lines.append(f"  {pi.description}")
+    lines.append(f"  kind={pi.kind}  tier={pi.tier or '-'}"
+                 + ("  (tools dynamic — need a live session)" if pi.dynamic else ""))
     if pi.tools:
         lines.append("  tools:")
         for t in pi.tools:
             badge = "core" if t.discoverability == "core" else "disc"
             lines.append(f"    [{badge}] {t.name:28} {t.description}")
-    if pi.config_keys:
-        lines.append("  config keys: " + ", ".join(pi.config_keys))
-    data = {"kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
-            "tools": [{"name": t.name, "discoverability": t.discoverability}
-                      for t in pi.tools],
-            "config_keys": pi.config_keys}
+    if pi.config_settings:
+        lines.append(f"  config (plugin_configs.{name}.*):")
+        for s in pi.config_settings:
+            dflt = f"  (default {s.default!r})" if s.default is not None else ""
+            d = f"  {s.description}" if s.description else ""
+            lines.append(f"    {s.name:22} {s.type:8}{d}{dflt}")
+    data = {"description": pi.description,
+            "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
+            "tools": [{"name": t.name, "discoverability": t.discoverability,
+                       "description": t.description} for t in pi.tools],
+            "config": [{"name": s.name, "type": s.type, "default": s.default,
+                        "description": s.description} for s in pi.config_settings]}
     return data, "\n".join(lines)
 
 
@@ -268,4 +276,40 @@ def sets(workspace: str) -> Rendered:
         binds = ", ".join(f"{b['provider']}/{b['model']}" for b in d["bindings"]) \
             or "(no provider/model bound)"
         lines.append(f"  {sname:24} {len(d['agents'])} agents → {binds}")
+    return data, "\n".join(lines)
+
+
+# ----------------------------------------------------------------- profile
+
+def profile() -> Rendered:
+    """The ``SubagentProfile`` schema — every knob a profile author can set.
+
+    Surfaces the security knobs an author would otherwise have to dig out of
+    ``config.py``: ``apparmor`` (opt into per-session confinement) and
+    ``apparmor_fragments`` (which client-side ``.rules`` fragments compose the
+    AppArmor policy).
+    """
+    PF = introspect.profile_schema()
+    data = [{"name": f.name, "type": f.type, "default": f.default,
+             "description": f.description, "allowed": f.allowed} for f in PF]
+    lines = ["profile schema  (.jaato/profiles/<set>/<agent>.yaml fields):"]
+    for f in PF:
+        if f.default == "<required>":
+            tail = "  (required)"
+        elif f.default in (None, "", [], {}, set()):
+            tail = ""
+        else:
+            tail = f"  (default {f.default!r})"
+        lines.append(f"  {f.name:22} {f.type:26}{tail}")
+        if f.allowed:
+            lines.append(f"      allowed → {f.allowed}")
+        if f.description:
+            lines.append(f"      {f.description}")
+    lines.append(
+        "\n  AppArmor — add client-side extra rules via the profile:\n"
+        "    apparmor: true              opt the session into kernel-enforced confinement\n"
+        "    apparmor_fragments:         compose only these .rules fragments (by basename), from the\n"
+        "      - my_extra_rules          search path ~/.jaato/apparmor-fragments/ and\n"
+        "                                <workspace>/.jaato/apparmor-fragments/ (+ the .cache/ layer).\n"
+        "    drop <name>.rules in that dir, then list <name>.  null = ALL fragments; [] = none.")
     return data, "\n".join(lines)
