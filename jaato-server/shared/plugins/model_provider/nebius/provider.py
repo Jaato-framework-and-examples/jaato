@@ -71,6 +71,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
 )
 from .converters import (
+    cached_tokens_from,
     get_original_tool_name,
     history_to_openai,
     map_finish_reason,
@@ -172,6 +173,7 @@ class NebiusProvider(ModalityCapabilityMixin):
         # max_tokens, ...), filtered to _FORWARDED_API_PARAMS and forwarded
         # on every complete() call.
         self._api_params: Dict[str, Any] = {}
+        self._extra_body: Optional[Dict[str, Any]] = None
 
         # Thinking/reasoning configuration
         self._enable_thinking: bool = True
@@ -308,6 +310,21 @@ class NebiusProvider(ModalityCapabilityMixin):
                     "forwarded fields are %s",
                     sorted(dropped), sorted(_FORWARDED_API_PARAMS),
                 )
+
+        # extra_body: opaque passthrough for endpoint-specific request-body
+        # extensions Nebius's vLLM backend honors but the OpenAI create()
+        # signature doesn't name — e.g. guided_json / guided_choice structured
+        # decoding, or cache_salt for prefix-cache scoping.  Forwarded verbatim
+        # via the OpenAI SDK's extra_body kwarg; opaque (no allowlist) because
+        # the valid key set is the upstream's, not ours.
+        extra_body = config.extra.get("extra_body")
+        if extra_body is not None:
+            if not isinstance(extra_body, dict):
+                raise TypeError(
+                    "Nebius 'extra_body' config must be a dict, got "
+                    f"{type(extra_body).__name__}"
+                )
+            self._extra_body = extra_body
 
         # Create client
         self._client = self._create_client()
@@ -650,6 +667,8 @@ class NebiusProvider(ModalityCapabilityMixin):
         """
         for key, value in self._api_params.items():
             kwargs[key] = value
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
         if "tool_choice" in kwargs and "tools" not in kwargs:
@@ -859,6 +878,7 @@ class NebiusProvider(ModalityCapabilityMixin):
                             prompt_tokens=chunk.usage.prompt_tokens or 0,
                             output_tokens=chunk.usage.completion_tokens or 0,
                             total_tokens=chunk.usage.total_tokens or 0,
+                            cache_read_tokens=cached_tokens_from(chunk.usage),
                         )
                         self._trace(f"{trace_prefix}_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens}")
                         if on_usage_update and usage.total_tokens > 0:
@@ -917,6 +937,7 @@ class NebiusProvider(ModalityCapabilityMixin):
                         prompt_tokens=chunk.usage.prompt_tokens or 0,
                         output_tokens=chunk.usage.completion_tokens or 0,
                         total_tokens=chunk.usage.total_tokens or 0,
+                        cache_read_tokens=cached_tokens_from(chunk.usage),
                     )
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)

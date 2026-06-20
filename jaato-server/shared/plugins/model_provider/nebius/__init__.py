@@ -39,6 +39,9 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("base_url", "str", None, "JAATO_NEBIUS_BASE_URL override"),
         KnobSpec("context_length", "int"),
         KnobSpec("modalities", "list"),
+        KnobSpec("extra_body", "dict", None,
+                 "opaque passthrough to OpenAI create() extra_body "
+                 "(guided_json/guided_choice, cache_salt, ...)"),
     ), description="connection / identity"),
     KnobLayer("api_params", (
         KnobSpec("temperature", "float"),
