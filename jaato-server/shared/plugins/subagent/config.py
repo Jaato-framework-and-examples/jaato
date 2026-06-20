@@ -1877,7 +1877,17 @@ def _scan_profiles_dir(
         profiles: Accumulator dict — discovered profiles are added here.
         errors: Accumulator dict — parse errors are added here.
     """
-    if not directory.is_dir():
+    try:
+        if not directory.is_dir():
+            return
+        entries = list(directory.iterdir())
+    except OSError as exc:
+        # The directory is inaccessible: missing, or a confined session
+        # correctly denied this tier (e.g. ~/.jaato/profiles under AppArmor —
+        # is_dir()/iterdir() raise PermissionError, not return False).  This is
+        # an OPTIONAL tier: skip it so the other tiers (workspace, premium)
+        # still discover.  A denied tier must NEVER abort the whole discovery.
+        logger.debug("Profiles tier %s not scannable (%s); skipping", directory, exc)
         return
 
     # Track names actually registered IN THIS PASS so the summary
@@ -1889,7 +1899,7 @@ def _scan_profiles_dir(
     # 'codegen' in it?  it doesn't.").  See 2026-05-15 finding.
     found_names: List[str] = []
     found = 0
-    for file_path in directory.iterdir():
+    for file_path in entries:
         if not file_path.is_file():
             continue
         if file_path.suffix not in ('.json', '.yaml', '.yml'):

@@ -279,7 +279,11 @@ class SubagentPlugin:
                 self._config.default_model = env_conn['model']
                 logger.debug("Using MODEL_NAME from environment: %s", env_conn['model'])
 
-        # Auto-discover profiles from profiles_dir if enabled
+        # Auto-discover profiles from profiles_dir if enabled.  discover_profiles
+        # scans three tiers (workspace / ~/.jaato/profiles / premium) and skips
+        # any tier that's missing or inaccessible — so a confined session denied
+        # the HOME tier still discovers the workspace tier (set_config_root
+        # re-runs this per session).  See _scan_profiles_dir's OSError handling.
         if self._config.auto_discover_profiles:
             discovery = discover_profiles(self._config.profiles_dir)
             # Merge discovered profiles, with explicit profiles taking precedence
