@@ -1198,7 +1198,7 @@ def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:
 
 
 def check_pipe_exists(pipe_name: str) -> bool:
-    """Check if a Windows named pipe already exists.
+    r"""Check if a Windows named pipe already exists.
 
     Uses ``WaitNamedPipeW`` with a minimal timeout to probe without consuming
     a pipe instance.
