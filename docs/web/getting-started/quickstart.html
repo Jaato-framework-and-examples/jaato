@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="quickstart.html" class="active">Quickstart</a></li>
+          <li><a href="quickstart.html#developer-tooling">Developer Tooling</a></li>
         </ul>
       </div>
 
@@ -208,6 +209,53 @@ MODEL_NAME=gemini-2.5-flash</code></pre>
             <pre><code class="language-bash">JAATO_PROVIDER=ollama
 MODEL_NAME=qwen3:32b
 # Requires: ollama serve &amp;&amp; ollama pull qwen3:32b</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Developer tooling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="developer-tooling">Developer Tooling</h2>
+          <p>
+            Two console scripts help you build and debug clients and agent
+            profiles <strong>against the installed framework</strong>, so they
+            can't drift from the code.
+          </p>
+          <p>
+            <code>jaato-doctor</code> (ships with <code>jaato-sdk</code>) is a
+            client preflight — run it before your client calls
+            <code>connect()</code>. It checks whether <code>server</code> is
+            importable (autostart), the socket is listening or stale, the
+            daemon's <code>HOME</code> vs yours (why <code>pass://</code> secrets
+            resolve from the wrong store), the <code>env_file</code>, and where
+            profiles/logs land. Non-zero exit on any failure, so it doubles as a
+            CI gate.
+          </p>
+          <p>
+            <code>jaato-scaffold</code> (ships with <code>jaato-server</code>)
+            interrogates, validates, and scaffolds: <code>explain</code> reads
+            the live plugin/provider registry, <code>validate</code> lints a
+            profile against it, and <code>new</code> generates a starting client
+            or cascade — the source of truth for <em>current</em> patterns.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">jaato-doctor — client preflight</div>
+          <div class="code-block">
+            <pre><code class="language-bash">jaato-doctor --workspace . --env-file .env
+# non-zero exit on any FAIL → usable as a gate
+# (equivalent: python -m jaato_sdk.doctor)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">jaato-scaffold — interrogate / validate / scaffold</div>
+          <div class="code-block">
+            <pre><code class="language-bash">jaato-scaffold explain                 # plugins · providers · gc · archetypes
+jaato-scaffold explain provider anthropic   # capabilities · knobs · quirks
+jaato-scaffold explain profile         # the agent-profile schema, field by field
+jaato-scaffold validate my-profile.yaml     # lint vs the live registry
+jaato-scaffold new client --workspace . --provider anthropic --model claude-sonnet-4-20250514
+# (equivalent: python -m shared.scaffold ...)</code></pre>
           </div>
         </div>
       </section>

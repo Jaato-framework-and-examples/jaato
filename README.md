@@ -232,6 +232,35 @@ python3 -m venv .venv
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock --cmd "What time is it?"
 ```
 
+### Developer Tooling — `jaato-doctor` & `jaato-scaffold`
+
+Two console scripts (installed with the SDK / server) help you build and debug
+custom clients and agent profiles **against the installed framework** — so they
+can't drift from the code:
+
+```bash
+# jaato-doctor (ships with jaato-sdk) — client preflight: diagnose
+# env / socket / daemon / auth BEFORE your client calls connect().
+jaato-doctor --workspace . --env-file .env
+#   Checks: `server` importable (autostart), socket listening / stale,
+#   the daemon's HOME vs yours (why pass:// secrets resolve wrong),
+#   env_file, and where profiles/logs land. Non-zero exit on any FAIL,
+#   so it doubles as a CI gate.
+
+# jaato-scaffold (ships with jaato-server) — interrogate / validate / scaffold.
+jaato-scaffold explain                      # plugins · providers · gc · client archetypes
+jaato-scaffold explain provider <name>      # capabilities · knobs (typed, by layer) · quirks
+jaato-scaffold explain profile              # the agent-profile schema, field by field
+jaato-scaffold validate <profile.yaml|workspace>   # lint a profile vs the live registry
+jaato-scaffold new client --workspace DIR --provider P --model M   # generate a starting client
+```
+
+`explain` reads the live plugin/provider registry, `validate` lints against it,
+and `doctor` inspects the actual daemon you target — together they're the source
+of truth for *current* patterns when authoring a client or profile. (Equivalent
+module forms, if the scripts aren't on `PATH`: `python -m jaato_sdk.doctor`,
+`python -m shared.scaffold`.)
+
 ### TUI Features
 
 - **Multi-turn conversations** with full context preservation

@@ -502,7 +502,7 @@ def _print(checks: List[Check]) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point: ``python -m jaato_sdk.doctor [options]``."""
     ap = argparse.ArgumentParser(
-        prog="python -m jaato_sdk.doctor",
+        prog="jaato-doctor",
         description="Preflight diagnostic for jaato SDK clients — verifies "
                     "daemon reachability, daemon HOME vs yours (pass:// "
                     "resolution), socket staleness, env_file, and config "
