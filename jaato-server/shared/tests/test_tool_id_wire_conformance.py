@@ -76,7 +76,7 @@ _TOOL_CHOICE_FORWARDERS = {"nebius", "vllm", "tensorrt_llm", "triton", "anthropi
 # Of those, the ones not YET routing through tool_choice_to_wire.  nebius +
 # tensorrt_llm are migrated onto the OpenAICompat base (which maps); the rest
 # fold in as they migrate.  SHRINK-ONLY.
-_TOOL_CHOICE_MAPPING_PENDING = {"vllm", "anthropic"}
+_TOOL_CHOICE_MAPPING_PENDING = {"anthropic"}
 
 
 def _provider_src(provider: str) -> str:

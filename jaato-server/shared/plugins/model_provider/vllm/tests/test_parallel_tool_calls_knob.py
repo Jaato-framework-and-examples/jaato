@@ -26,7 +26,7 @@ def _make_provider_with_extra(extra: dict) -> VLLMProvider:
     no-context-length error doesn't fire.
     """
     provider = VLLMProvider()
-    provider._verify_connectivity = lambda: None
+    provider._verify_connectivity = lambda *a, **k: None
     provider._trace = lambda _msg: None
     cfg = ProviderConfig(
         api_key=extra.get("api_token", "EMPTY"),
