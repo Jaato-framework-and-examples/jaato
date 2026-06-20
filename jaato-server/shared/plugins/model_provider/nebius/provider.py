@@ -78,6 +78,7 @@ from .converters import (
     response_from_openai,
     tool_schemas_to_openai,
 )
+from shared.tool_id_map import tool_choice_to_wire
 from .env import (
     DEFAULT_BASE_URL,
     ENV_NEBIUS_CONTEXT_LENGTH,
@@ -673,6 +674,15 @@ class NebiusProvider(ModalityCapabilityMixin):
             kwargs["tool_choice"] = tool_choice
         if "tool_choice" in kwargs and "tools" not in kwargs:
             kwargs.pop("tool_choice")
+        # Tool names are hashed on the wire (name_to_id); a tool_choice that
+        # NAMES a function must use the same wire id or the upstream rejects it
+        # ("Tool X not found in tools list").  Map it — covers both the profile
+        # api_params form and the per-call form; string ("required"/"auto")
+        # forms pass through.  This is what lets a profile force the completion
+        # tool so the backend grammar-constrains its args to the completion
+        # schema (cheap single-shot).
+        if "tool_choice" in kwargs:
+            kwargs["tool_choice"] = tool_choice_to_wire(kwargs["tool_choice"])
 
     def complete(
         self,

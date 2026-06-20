@@ -22,7 +22,7 @@ convention rather than via shared ID prefixes.
 """
 
 import hashlib
-from typing import Dict
+from typing import Any, Dict
 
 
 _reverse: Dict[str, str] = {}
@@ -63,3 +63,27 @@ def id_to_name(id_str: str) -> str:
         Original name, or the input if not found.
     """
     return _reverse.get(id_str, id_str)
+
+
+def tool_choice_to_wire(tool_choice: Any) -> Any:
+    """Map a ``tool_choice`` that NAMES a function to its wire id.
+
+    Tool names are hashed to opaque ids on the wire (:func:`name_to_id`), so a
+    ``tool_choice`` of the form ``{"type": "function", "function": {"name":
+    "<human>"}}`` must reference the same wire id — otherwise the upstream
+    rejects it ("Tool '<human>' not found in tools list").  This closes the
+    boundary gap where the ``tools`` array was hashed but a name-bearing
+    ``tool_choice`` was forwarded verbatim.
+
+    String forms (``"auto"`` / ``"required"`` / ``"none"``) and any shape
+    without a string ``function.name`` pass through unchanged.  Returns a NEW
+    dict when remapping (never mutates the input).
+    """
+    if isinstance(tool_choice, dict):
+        fn = tool_choice.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            return {
+                **tool_choice,
+                "function": {**fn, "name": name_to_id(fn["name"])},
+            }
+    return tool_choice

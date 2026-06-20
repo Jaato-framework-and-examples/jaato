@@ -1,6 +1,6 @@
 """Tests for shared/tool_id_map.py — deterministic tool/category name-to-ID mapping."""
 
-from shared.tool_id_map import id_to_name, name_to_id
+from shared.tool_id_map import id_to_name, name_to_id, tool_choice_to_wire
 
 
 class TestNameToId:
@@ -59,6 +59,38 @@ class TestStreamingVariant:
         # Both base and -stream variant IDs are ``t_`` + 8 hex chars = 10.
         assert len(name_to_id("readFile")) == 10
         assert len(name_to_id("readFile-stream")) == 10
+
+
+class TestToolChoiceToWire:
+    """Map a name-bearing tool_choice to its wire id (closes the verbatim gap).
+
+    The tools array is hashed via ``name_to_id``; a ``tool_choice`` naming a
+    function must use the SAME id or the upstream rejects it ("Tool X not found
+    in tools list").
+    """
+
+    def test_function_name_mapped_to_wire_id(self):
+        tc = {"type": "function", "function": {"name": "signal_completion"}}
+        assert (tool_choice_to_wire(tc)["function"]["name"]
+                == name_to_id("signal_completion"))
+
+    def test_mapped_id_equals_tools_array_hash(self):
+        assert (tool_choice_to_wire(
+            {"type": "function", "function": {"name": "X"}})["function"]["name"]
+            == name_to_id("X"))
+
+    def test_does_not_mutate_input(self):
+        tc = {"type": "function", "function": {"name": "signal_completion"}}
+        tool_choice_to_wire(tc)
+        assert tc["function"]["name"] == "signal_completion"
+
+    def test_string_forms_pass_through(self):
+        for s in ("auto", "required", "none"):
+            assert tool_choice_to_wire(s) == s
+
+    def test_no_function_name_passes_through(self):
+        assert tool_choice_to_wire({"type": "function"}) == {"type": "function"}
+        assert tool_choice_to_wire(None) is None
 
 
 class TestIdToName:
