@@ -40,7 +40,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # Import the SDK's own path constants so the doctor diagnoses exactly the
 # files the real client uses — never a re-declared copy that could drift.
@@ -455,6 +455,143 @@ def check_workspace(workspace: str, config_root: Optional[str]) -> List[Check]:
 
 
 # --------------------------------------------------------------------------
+# WebSocket transport (daemon-side preflight)
+#
+# The Python SDK is IPC-only; WebSocket clients use the TypeScript SDK
+# (``jaato-sdk-ts``) / the browser web-client.  The doctor can't preflight a
+# TS client, but it CAN verify the daemon side those clients depend on — which
+# is exactly the part that's easy to get wrong (port not up, missing/loose
+# bearer token, auth accidentally disabled).
+# --------------------------------------------------------------------------
+
+def _daemon_cmdline(pid: int) -> Optional[List[str]]:
+    """Parse ``/proc/<pid>/cmdline`` into argv; ``None`` if unavailable.
+
+    Used to cross-check the running daemon's *actual* WS flags
+    (``--web-socket`` / ``--ws-unsafe-no-auth`` / ``--ws-token-file``).
+    """
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    return [a.decode("utf-8", "replace") for a in raw.split(b"\x00") if a]
+
+
+def _parse_ws_addr(addr: str) -> Tuple[str, Optional[int]]:
+    """``[host:]port`` (or a ``ws://`` URL) -> ``(host, port)``.
+
+    Mirrors the daemon's ``--web-socket`` parsing: a bare ``:8080`` binds all
+    interfaces, which a local client reaches at ``127.0.0.1``.
+    """
+    addr = addr.strip()
+    if "://" in addr:
+        addr = addr.split("://", 1)[1]
+    addr = addr.rstrip("/")
+    host, _, port = addr.rpartition(":")
+    host = host or "127.0.0.1"
+    try:
+        return host, int(port)
+    except ValueError:
+        return host, None
+
+
+def _tcp_listening(host: str, port: int) -> bool:
+    """True if something accepts a TCP connection at ``host:port`` (2s timeout)."""
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def _ws_token_path(info: DaemonInfo, ws_token_file: Optional[str]) -> Path:
+    """The bearer-token file a WS client reads.
+
+    Explicit ``--ws-token-file`` wins; otherwise the daemon's default
+    ``~/.jaato/ws.token`` — resolved against the DAEMON's HOME when the doctor
+    found it (a cross-user daemon writes its own home, not yours).
+    """
+    if ws_token_file:
+        return Path(ws_token_file).expanduser()
+    home = info.home or str(Path.home())
+    return Path(home) / ".jaato" / "ws.token"
+
+
+def check_websocket(
+    web_socket: str,
+    info: DaemonInfo,
+    *,
+    ws_token_file: Optional[str] = None,
+) -> List[Check]:
+    """Daemon-side WebSocket preflight — the endpoint a TS-SDK / browser client
+    connects to.  Only runs when ``--web-socket`` is supplied.
+
+    Verifies: the WS port is listening, the bearer-token file is present and
+    0600, and (when the daemon's pid is known) the daemon's actual WS flags
+    match what a client expects.
+    """
+    host, port = _parse_ws_addr(web_socket)
+    if port is None:
+        return [Check("websocket", FAIL,
+                      f"--web-socket {web_socket!r} is not a valid [host:]port")]
+
+    checks: List[Check] = []
+    if _tcp_listening(host, port):
+        checks.append(Check("ws-port", PASS, f"{host}:{port} — accepting connections"))
+    else:
+        checks.append(Check("ws-port", FAIL,
+            f"{host}:{port} not reachable — start the daemon with "
+            f"`--web-socket {web_socket}` (TS-SDK / browser clients connect here)."))
+
+    # Cross-check the running daemon's WS flags from its cmdline.
+    unsafe = False
+    cmd_token_file: Optional[str] = None
+    if info.pid is not None:
+        argv = _daemon_cmdline(info.pid)
+        if argv is not None:
+            if "--web-socket" not in argv:
+                checks.append(Check("ws-config", WARN,
+                    f"daemon PID {info.pid} was started WITHOUT --web-socket — "
+                    f"the WS transport is off on the attached daemon."))
+            unsafe = "--ws-unsafe-no-auth" in argv
+            if "--ws-token-file" in argv:
+                i = argv.index("--ws-token-file")
+                cmd_token_file = argv[i + 1] if i + 1 < len(argv) else None
+
+    # Bearer token the WS client must present.
+    if unsafe:
+        checks.append(Check("ws-auth", WARN,
+            "daemon runs with --ws-unsafe-no-auth — WS accepts any client (no "
+            "bearer token).  Acceptable on a trusted host; otherwise drop it."))
+        return checks
+
+    token_path = _ws_token_path(info, ws_token_file or cmd_token_file)
+    if not token_path.exists():
+        checks.append(Check("ws-token", WARN,
+            f"{token_path} absent — the daemon auto-generates it (0600) on first "
+            f"WS start; a client reads its bearer token from there."))
+        return checks
+    try:
+        mode = token_path.stat().st_mode & 0o777
+        readable = os.access(token_path, os.R_OK)
+    except OSError as e:
+        return checks + [Check("ws-token", WARN, f"{token_path}: {e}")]
+    if not readable:
+        checks.append(Check("ws-token", FAIL,
+            f"{token_path} present but not readable by you — you can't get the "
+            f"bearer token a WS client needs."))
+    elif mode != 0o600:
+        checks.append(Check("ws-token", WARN,
+            f"{token_path} mode is {oct(mode)} (expected 0600) — "
+            f"`chmod 600 {token_path}`."))
+    else:
+        checks.append(Check("ws-token", PASS,
+            f"{token_path} present (0600) — clients send it as "
+            f"`Authorization: Bearer <token>` (or `?token=<token>` from a browser)."))
+    return checks
+
+
+# --------------------------------------------------------------------------
 # Orchestration + CLI
 # --------------------------------------------------------------------------
 
@@ -467,6 +604,8 @@ def run_checks(
     env_file: Optional[str],
     secret: Optional[str],
     auto_start: bool,
+    web_socket: Optional[str] = None,
+    ws_token_file: Optional[str] = None,
 ) -> List[Check]:
     """Run every check and return the flat result list (in display order)."""
     info = probe_daemon(socket_path, pidfile)
@@ -474,6 +613,8 @@ def run_checks(
     checks += check_python_env()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
+    if web_socket:
+        checks += check_websocket(web_socket, info, ws_token_file=ws_token_file)
     checks += check_home_match(info)
     checks += check_daemon_env(info, load_known_env_vars())
     checks += check_secret(info, secret)
@@ -523,6 +664,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "pass://jaato/nebius/api-key")
     ap.add_argument("--no-auto-start", action="store_true",
                     help="diagnose as if the client has auto_start=False")
+    ap.add_argument("--web-socket", default=None, metavar="[HOST:]PORT",
+                    help="also preflight the daemon's WebSocket transport at "
+                         "this address (WS clients use the TS SDK / browser web "
+                         "client) — checks port + bearer-token file + auth mode")
+    ap.add_argument("--ws-token-file", default=None,
+                    help="override the WS bearer-token file path "
+                         "(default: the daemon's ~/.jaato/ws.token)")
     args = ap.parse_args(argv)
 
     checks = run_checks(
@@ -533,6 +681,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         env_file=args.env_file,
         secret=args.secret,
         auto_start=not args.no_auto_start,
+        web_socket=args.web_socket,
+        ws_token_file=args.ws_token_file,
     )
     return _print(checks)
 
