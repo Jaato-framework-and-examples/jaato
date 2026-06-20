@@ -243,25 +243,56 @@ class MemoryPlugin(RunnerForwardingMixin):
         self._storage = MemoryStorage(self._storage_path_template)
         self._indexer = MemoryIndexer()
 
-        # Build index from CURATED memories only — raw memories are
-        # the curator's queue and aren't surfaced as enrichment hints.
-        existing_memories = self._storage.load_curated()
+        # Build index from CURATED memories only — raw memories are the
+        # curator's queue and aren't surfaced as enrichment hints.
+        #
+        # The template is RELATIVE: at global registry-init time it resolves
+        # against the daemon cwd, NOT the session workspace.  The real
+        # per-session store is wired later by set_workspace_path().  So a
+        # confined session is (correctly) denied this path here — tolerate it
+        # and let set_workspace_path() resolve the workspace-tier store.  See
+        # _safe_load_curated for why this must not disable the plugin.
+        existing_memories = self._safe_load_curated(
+            self._storage, tier="workspace (pre-set_workspace_path)")
         self._indexer.build_index(existing_memories)
         self._trace(f"initialize: storage_path={self._storage_path_template}, curated_memories={len(existing_memories)}")
 
-        # Global storage at ~/.jaato/memories.jsonl — cross-session
-        # knowledge shared by all agents.  Fixed path, no workspace
-        # dependency.  AppArmor profile grants rw access.
-        # Configurable via "global_storage_path" for testing.
+        # Global storage at ~/.jaato/memories.jsonl — cross-session knowledge
+        # shared by UNCONFINED agents.  This tier is OPTIONAL: a confined
+        # session is correctly denied HOME, so the tier is simply absent for it
+        # and the workspace tier is the only (priority) store.  Configurable via
+        # "global_storage_path" for testing.
         global_path = config.get(
             "global_storage_path",
             str(Path.home() / ".jaato" / "memories.jsonl"),
         )
         self._global_storage = MemoryStorage(global_path)
         self._global_indexer = MemoryIndexer()
-        global_memories = self._global_storage.load_curated()
+        global_memories = self._safe_load_curated(
+            self._global_storage, tier="global (HOME)")
         self._global_indexer.build_index(global_memories)
         self._trace(f"initialize: global_path={global_path}, global_curated_memories={len(global_memories)}")
+
+    def _safe_load_curated(self, storage: "MemoryStorage", tier: str) -> List["Memory"]:
+        """Load a tier's curated memories, tolerating an inaccessible store.
+
+        Memory has two tiers: a per-session WORKSPACE store (the priority,
+        wired by set_workspace_path) and an OPTIONAL global HOME store.  At
+        global registry init neither is guaranteed reachable — a confined
+        session is *correctly* denied both the daemon-cwd-relative template and
+        HOME.  An ``OSError`` loading a tier therefore means "this tier is
+        absent here", not "the plugin is broken": degrade to an empty index so
+        the plugin stays EXPOSED and set_workspace_path() can wire the real
+        workspace store.  A non-OSError (a genuine bug) still propagates.
+        """
+        try:
+            return storage.load_curated()
+        except OSError as e:
+            self._trace(
+                f"initialize: {tier} memory tier not loadable here ({e}); "
+                f"degrading to empty — the workspace tier is wired by "
+                f"set_workspace_path()")
+            return []
 
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
