@@ -1232,11 +1232,66 @@ def check_pipe_exists(pipe_name: str) -> bool:
     return error == ERROR_SEM_TIMEOUT
 
 
-def check_running(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
-    """Check if a server is already running.
+def _pid_on_socket(socket_path: Optional[str]) -> Optional[int]:
+    """PID of the jaato daemon bound to a Unix socket (the authoritative signal).
+
+    Fallback for when the pidfile is missing/stale but a daemon is still
+    listening — e.g. an ephemeral client-autostarted daemon that began teardown
+    (removed its pidfile) but survived.  Without this, ``--stop`` trusts the
+    pidfile alone and reports "not running" while orphaning a live daemon (the
+    gap peer-reported 2026-06-20: ``jaato-server --stop`` missing an
+    autostarted daemon on the default socket).
+
+    Verifies the owner is actually a jaato server process (cmdline contains
+    ``-m server`` / ``jaato-server``) before returning it, so a process that
+    merely happens to bind the path is never targeted.  Returns None on
+    Windows / no listener / permission / non-jaato owner.
+    """
+    if sys.platform == "win32" or not socket_path:
+        return None
+    if not os.path.exists(socket_path):
+        return None
+    try:
+        import psutil
+        for conn in psutil.net_connections(kind="unix"):
+            if conn.laddr == socket_path and conn.pid:
+                try:
+                    cmdline = " ".join(psutil.Process(conn.pid).cmdline())
+                except Exception:
+                    continue
+                if "-m server" in cmdline or "jaato-server" in cmdline:
+                    return conn.pid
+    except Exception:
+        return None
+    return None
+
+
+def check_running(
+    pid_file: str = DEFAULT_PID_FILE,
+    ipc_socket: Optional[str] = None,
+) -> Optional[int]:
+    """Check if a server is already running — pidfile first, socket fallback.
+
+    Resolves via the pidfile; if that yields nothing (missing / stale / points
+    at a dead PID) but a daemon is still bound to ``ipc_socket``, falls back to
+    the authoritative socket signal (:func:`_pid_on_socket`).  This is what lets
+    ``--stop`` / ``--status`` find a client-autostarted daemon whose ephemeral
+    teardown removed the pidfile but survived.
 
     Returns:
         The PID if running, None otherwise.
+    """
+    pid = _check_running_via_pidfile(pid_file)
+    if pid is not None:
+        return pid
+    return _pid_on_socket(ipc_socket) if ipc_socket else None
+
+
+def _check_running_via_pidfile(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
+    """Check the pidfile alone for a running server (no socket fallback).
+
+    Returns:
+        The PID if the pidfile names a live process, None otherwise.
     """
     if not os.path.exists(pid_file):
         return None
@@ -1393,7 +1448,10 @@ def _reap_orphan_descendants(pids: List[int]) -> int:
     return killed
 
 
-def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
+def stop_server(
+    pid_file: str = DEFAULT_PID_FILE,
+    ipc_socket: Optional[str] = None,
+) -> bool:
     """Stop a running server.
 
     Snapshots the daemon's descendant PIDs BEFORE sending SIGTERM
@@ -1406,7 +1464,7 @@ def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
     Returns:
         True if stopped, False if not running.
     """
-    pid = check_running(pid_file)
+    pid = check_running(pid_file, ipc_socket)
     if not pid:
         return False
 
@@ -1756,7 +1814,7 @@ Examples:
 
     # Handle --status
     if args.status:
-        pid = check_running(args.pid_file)
+        pid = check_running(args.pid_file, args.ipc_socket or DEFAULT_SOCKET_PATH)
         if pid:
             print(f"Jaato server is running (PID: {pid})")
             # Show socket info
@@ -1769,7 +1827,7 @@ Examples:
 
     # Handle --stop
     if args.stop:
-        if stop_server(args.pid_file):
+        if stop_server(args.pid_file, args.ipc_socket or DEFAULT_SOCKET_PATH):
             print("Jaato server stopped")
             sys.exit(0)
         else:
@@ -1785,10 +1843,11 @@ Examples:
             sys.exit(1)
 
         # Stop current server
-        pid = check_running(args.pid_file)
+        _probe = args.ipc_socket or DEFAULT_SOCKET_PATH
+        pid = check_running(args.pid_file, _probe)
         if pid:
             print(f"Stopping server (PID: {pid})...")
-            if not stop_server(args.pid_file):
+            if not stop_server(args.pid_file, _probe):
                 print("Error: Failed to stop server")
                 sys.exit(1)
             print("Server stopped")
@@ -1826,8 +1885,11 @@ Examples:
         else:
             print(f"No endpoint specified, using default IPC socket: {args.ipc_socket}")
 
-    # Check if already running
-    pid = check_running(args.pid_file)
+    # Check if already running.  Pass the socket being started so a daemon
+    # already bound to it is detected even when its pidfile is missing/stale
+    # — preventing a duplicate daemon (the Unix analog of the Windows
+    # named-pipe fallback below).
+    pid = check_running(args.pid_file, args.ipc_socket)
     if pid:
         print(f"Error: Jaato server is already running (PID: {pid})")
         print(f"  Use 'python -m server --stop' to stop it")
