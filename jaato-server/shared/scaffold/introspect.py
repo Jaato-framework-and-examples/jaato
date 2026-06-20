@@ -107,6 +107,7 @@ class EnvVar:
     name: str
     default: Optional[str] = None       # literal default at the read site, if any
     category: str = "framework"         # provider:<x> | plugin:<x> | daemon | framework | rate_limit | telemetry | proxy
+    tier: str = "daemon"                # daemon | runner | daemon_callable | unknown (PLUGIN_TIER of the reader)
     sources: List[str] = field(default_factory=list)  # relative file paths
 
 
@@ -328,11 +329,46 @@ def _categorize(name: str, rel_path: str) -> str:
     return "framework"
 
 
+_PLUGIN_DIR = _SERVER_ROOT / "shared" / "plugins"
+_TIER_CACHE: Dict[str, str] = {}
+
+
+def _plugin_tier(plugin: str) -> str:
+    """AST-read a plugin's ``PLUGIN_TIER`` from its ``__init__.py`` (cached)."""
+    if plugin in _TIER_CACHE:
+        return _TIER_CACHE[plugin]
+    tier = "unknown"
+    try:
+        tree = ast.parse((_PLUGIN_DIR / plugin / "__init__.py")
+                         .read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                if any(isinstance(t, ast.Name) and t.id == "PLUGIN_TIER"
+                       for t in node.targets):
+                    tier = str(node.value.value)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        pass
+    _TIER_CACHE[plugin] = tier
+    return tier
+
+
+def _tier_for(category: str) -> str:
+    """The PLUGIN_TIER the reader of a category's env var runs in.
+
+    Plugin vars take the plugin's declared ``PLUGIN_TIER``; model providers are
+    daemon-tier; server / framework-core / cross-cutting all run daemon-side.
+    """
+    if category.startswith("plugin:"):
+        return _plugin_tier(category.split(":", 1)[1])
+    return "daemon"
+
+
 def env_vars() -> Dict[str, EnvVar]:
     """All env vars the installed daemon + plugins read (offline source scan).
 
     Keyed by var name; merges read sites (union of sources; first literal
-    default wins).  Reflects the INSTALLED code — no prose, no declaration.
+    default wins).  Each var carries the ``tier`` (daemon/runner/...) of the
+    code that reads it.  Reflects the INSTALLED code — no prose, no declaration.
     """
     out: Dict[str, EnvVar] = {}
     for d in _SCAN_DIRS:
@@ -351,7 +387,8 @@ def env_vars() -> Dict[str, EnvVar]:
             for name, default_node in _env_reads(tree, const_map):
                 ev = out.get(name)
                 if ev is None:
-                    ev = EnvVar(name=name, category=_categorize(name, rel))
+                    cat = _categorize(name, rel)
+                    ev = EnvVar(name=name, category=cat, tier=_tier_for(cat))
                     out[name] = ev
                 if rel not in ev.sources:
                     ev.sources.append(rel)

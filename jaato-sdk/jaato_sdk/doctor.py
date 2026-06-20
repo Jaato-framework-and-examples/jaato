@@ -40,7 +40,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 # Import the SDK's own path constants so the doctor diagnoses exactly the
 # files the real client uses — never a re-declared copy that could drift.
@@ -289,36 +289,63 @@ def check_home_match(info: DaemonInfo) -> List[Check]:
                   f"socket so it inherits your HOME.")]
 
 
-def check_daemon_env(info: DaemonInfo) -> List[Check]:
-    """Report the JAATO_* env vars the running daemon was fired with.
+def load_known_env_vars() -> Optional[Dict[str, str]]:
+    """Map ``{env_var_name: tier}`` the framework actually reads, or ``None``.
 
-    The daemon's full environ is already read for the HOME check; this
-    surfaces the framework-namespace (``JAATO_*``) vars it was started with —
-    so an override the daemon inherited at launch (a stale
-    ``JAATO_GC_THRESHOLD``, ``JAATO_RUNNER_POOL_SIZE``, ``JAATO_PROVIDER``, a
-    ``JAATO_<provider>_*`` key) is visible rather than silent.  Secret-valued
-    vars (name contains KEY/TOKEN/SECRET/PASSWORD) are shown set-but-redacted,
-    never printed.  Scoped to ``JAATO_*`` to stay pure client-side (no
-    dependency on the server's env-var registry).
+    Soft-imports the server-side introspector (``shared.scaffold.introspect``)
+    — the SAME scan that powers ``jaato-scaffold explain env`` — so the doctor
+    reports the daemon's environ against the REAL read-set (``JAATO_*`` AND
+    ``OTEL_*`` / ``AI_*`` / provider vendor vars / …), not a hardcoded prefix
+    list.  Returns ``None`` when the introspector isn't importable (a
+    client-only install); the daemon-env check then WARNs rather than guessing.
+    """
+    try:
+        from shared.scaffold.introspect import env_vars  # type: ignore
+    except Exception:
+        return None
+    return {n: v.tier for n, v in env_vars().items()}
+
+
+def check_daemon_env(
+    info: DaemonInfo, known: Optional[Dict[str, str]],
+) -> List[Check]:
+    """Report the framework env vars the running daemon was fired with.
+
+    The daemon's full environ is already read for the HOME check; this surfaces
+    every var the framework code actually reads (per :func:`load_known_env_vars`
+    — any tier, any namespace) that the daemon was started with, each tagged
+    with the tier of its reader, so a stale/overriding launch knob (a
+    ``JAATO_GC_THRESHOLD``, an ``OTEL_EXPORTER_OTLP_ENDPOINT``, a provider key)
+    is visible rather than silent.  Secret-valued vars (name contains
+    KEY/TOKEN/SECRET/PASSWORD) are shown set-but-redacted, never printed.
     """
     if not info.listening or info.env is None:
         return [Check("daemon env", WARN,
                       "daemon environ unavailable (not listening / non-Linux / "
                       "no pidfile) — cannot show how it was fired.")]
+    if known is None:
+        return [Check("daemon env", WARN,
+                      "jaato-server's introspector is not importable here — "
+                      "cannot map the daemon's environ to the framework's "
+                      "read-set (install jaato-server / run from its env).")]
     secret = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+    # HOME / USER / PASSWORD_STORE_DIR are already shown by the identity check.
+    shown_elsewhere = ("HOME", "USER", "PASSWORD_STORE_DIR")
     items = []
     for k in sorted(info.env):
-        if not k.startswith("JAATO_"):
-            continue
+        if k not in known or k in shown_elsewhere:
+            continue   # not a framework-read var, or already in the identity line
         v = info.env[k]
         if any(s in k.upper() for s in secret):
             v = "<set, redacted>" if v else "<empty>"
-        items.append(f"{k}={v}")
+        items.append(f"{k}={v} [{known[k]}]")
     if not items:
         return [Check("daemon env", PASS,
-                      "no JAATO_* vars — daemon fired with framework defaults.")]
+                      "none of the framework's env vars are set — daemon fired "
+                      "with defaults.")]
     return [Check("daemon env", PASS,
-                  f"{len(items)} JAATO_* var(s) at launch: " + ", ".join(items))]
+                  f"{len(items)} framework env var(s) at launch "
+                  f"(name=value [tier]): " + ", ".join(items))]
 
 
 def _pass_resolves(secret_path: str, home: str) -> Optional[bool]:
@@ -448,7 +475,7 @@ def run_checks(
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
     checks += check_home_match(info)
-    checks += check_daemon_env(info)
+    checks += check_daemon_env(info, load_known_env_vars())
     checks += check_secret(info, secret)
     checks += check_env_file(env_file, workspace)
     checks += check_workspace(workspace, config_root)
