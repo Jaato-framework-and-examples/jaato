@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Multi-provider AI integration &bull; 55+ plugins &bull; Server-first architecture &bull; MCP &amp; CLI tool orchestration
+  15 model providers &bull; 40+ plugins &bull; Server-first architecture &bull; MCP &amp; CLI tool orchestration
 </p>
 
 <p align="center">
@@ -19,23 +19,20 @@
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
-## Demo
-
-![jaato Demo](demo.svg)
-
 ## Overview
 
 jaato is a framework for building agentic AI applications with LLM function calling, tool orchestration, and an extensible plugin architecture. It runs as a daemon with a typed event protocol, allowing multiple clients (TUI, web, headless) to connect simultaneously via IPC or WebSocket.
 
 **Core capabilities:**
 
-- **8 Model Providers** - Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, Ollama, ZhipuAI, and NVIDIA NIM through a unified provider abstraction
-- **55+ Plugins** - File editing, shell execution, interactive PTY sessions, MCP servers, subagent delegation, AST search, LSP diagnostics, memory, web search, and more
-- **Server-First Architecture** - Daemon mode with IPC (Unix socket) and WebSocket transports, multi-session orchestration, and disk persistence
-- **Parallel Tool Execution** - Concurrent tool calls with thread-safe callbacks (up to 8 tools per turn)
-- **Context Management** - Three garbage collection strategies (truncation, summarization, hybrid generational) with proactive threshold-based triggering
-- **Subagent Architecture** - Lightweight session spawning with shared runtime resources (provider config, plugin registry, permissions, token ledger)
-- **OpenTelemetry Observability** - Structured tracing with span hierarchy (`jaato.turn` > `jaato.tool` > `jaato.permission`)
+- **15 Model Providers** - hosted APIs (Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, ZhipuAI), local & self-hosted engines (Ollama, LM Studio, vLLM, TensorRT-LLM, Triton, NVIDIA NIM), and unified gateways (OpenRouter, Nebius) — all behind one provider abstraction, switchable by configuration
+- **40+ Plugins** - file editing, shell execution, interactive PTY sessions, MCP servers, subagent delegation, AST search, LSP diagnostics, memory, web search, inbound webhooks, and more — auto-discovered and auto-wired
+- **Server-First Architecture** - daemon mode with IPC (Unix socket) and WebSocket (bearer-authenticated) transports, multi-session orchestration, and disk persistence
+- **Agent Profiles & Subagents** - YAML/JSON profiles configure model, provider, plugins, and GC per agent; subagents spawn as lightweight sessions that share the parent's runtime (provider config, plugin registry, permissions, token ledger)
+- **Per-Session Isolation** - optional kernel-enforced AppArmor confinement, plus a pre-warm runner-process pool that cuts per-session bootstrap from ~30s to ~7s
+- **Parallel Tool Execution** - concurrent tool calls with thread-safe callbacks (up to 8 tools per turn), plus deferred (on-demand) tool loading
+- **Context Management** - four garbage-collection strategies (truncation, summarization, hybrid generational, token-budget) with proactive threshold-based triggering
+- **OpenTelemetry Observability** - structured tracing with span hierarchy (`jaato.turn` > `jaato.tool` > `jaato.permission`)
 
 ### Etymology
 
@@ -81,20 +78,28 @@ See [Architecture Overview](docs/architecture.md) for detailed diagrams and [Des
 
 jaato abstracts model providers behind a unified interface. Switch providers by changing a configuration value — no code changes required.
 
-| Provider | Models | Authentication |
-|----------|--------|----------------|
-| **Google GenAI / Vertex AI** | Gemini 2.5 Flash, Gemini 2.5 Pro | Service account JSON or Application Default Credentials |
-| **Anthropic Claude** | Claude Opus, Sonnet, Haiku | PKCE OAuth (subscription) or API key |
-| **Claude CLI** | Claude via CLI subscription | `claude login` (uses subscription, not API credits) |
-| **GitHub Models** | Models via GitHub API | Device code OAuth or Personal Access Token |
-| **Google Antigravity** | Gemini 3, Claude (via Google OAuth) | PKCE OAuth flow |
-| **Ollama** | Any Ollama-supported model (Qwen, Llama, Mistral, etc.) | Local — no auth required |
-| **ZhipuAI** | ZhipuAI models | API key |
-| **NVIDIA NIM** | Llama, DeepSeek-R1, Nemotron (hosted + self-hosted) | API key or self-hosted (no auth) |
+| Provider | Type | Models | Authentication |
+|----------|------|--------|----------------|
+| **Google GenAI / Vertex AI** | Hosted API | Gemini 2.5 / 3 (Flash & Pro) | Service account JSON or Application Default Credentials |
+| **Anthropic Claude** | Hosted API | Claude Opus, Sonnet, Haiku | PKCE OAuth (subscription) or API key |
+| **Claude CLI** | Hosted API | Claude via CLI subscription | `claude login` (subscription, not API credits) |
+| **GitHub Models** | Hosted API | Models via GitHub API | Device code OAuth or Personal Access Token |
+| **Google Antigravity** | Hosted API | Gemini 3, Claude (via Google OAuth) | PKCE OAuth flow |
+| **ZhipuAI** | Hosted API | GLM family (native + OpenAI-compatible surfaces) | API key |
+| **Ollama** | Local | Any Ollama model (Qwen, Llama, Mistral, …) | Local — no auth |
+| **LM Studio** | Local | Any LM Studio model (+ native load-control) | Local — optional bearer |
+| **vLLM** | Self-hosted | Any `vllm serve` model | Local — optional `--api-key` bearer |
+| **TensorRT-LLM** | Self-hosted | `trtllm-serve` engines | Local — optional bearer |
+| **Triton** | Self-hosted | Triton + KServe v2 model repository | Local — optional bearer |
+| **NVIDIA NIM** | Gateway / self-hosted | Llama, DeepSeek-R1, Nemotron, … | API key (hosted) or self-hosted (no auth) |
+| **OpenRouter** | Gateway | 300+ models across vendors (`vendor/model`) | API key |
+| **Nebius Token Factory** | Gateway | Serverless open models (Llama, Qwen, DeepSeek-R1, …) | API key |
+
+ZhipuAI ships as two registry entries — `zhipuai` (native API) and `zhipuai_openai` (OpenAI-compatible surface) — for **15 providers** total. Run `jaato-scaffold explain providers` for the live capability matrix: per-provider vision, PDF input, tool-choice forwarding, thinking, prompt caching, and streaming/cancellation support.
 
 ## Plugin Ecosystem
 
-jaato ships with **55+ built-in plugins** organized by function. Plugins are auto-discovered and auto-wired — no manual registration needed.
+jaato ships with **40+ built-in plugins** organized by function. Plugins are auto-discovered and auto-wired — no manual registration needed.
 
 ### Tool Execution
 | | Plugin | Description |
@@ -104,6 +109,7 @@ jaato ships with **55+ built-in plugins** organized by function. Plugins are aut
 | <img src="docs/web/assets/images/plugins/plugin-background.png" width="32"> | **background** | Orchestrate parallel background tasks across all BackgroundCapable plugins |
 | | **interactive_shell** | Drive interactive processes (REPLs, debuggers, SSH, wizards) via persistent PTY sessions |
 | | **environment** | Query execution environment (OS, shell, architecture) for platform-appropriate commands |
+| | **webhook** | Inbound HTTP listener for external webhooks (GitHub, Slack, Jira) delivered to long-running agent sessions via subscribe/poll |
 
 ### File & Code Operations
 | | Plugin | Description |
@@ -149,20 +155,23 @@ jaato ships with **55+ built-in plugins** organized by function. Plugins are aut
 | <img src="docs/web/assets/images/plugins/plugin-multimodal.png" width="32"> | **multimodal** | Handle images via @file references with lazy-loading |
 | | **vision_capture** | Capture TUI screenshots as SVG/PNG for vision model input |
 | | **thinking** | Extended thinking / chain-of-thought support for compatible models |
+| | **telepathy** | Share context between concurrent agents (cross-agent messaging) |
+| | **result_grep** | Model-directed regex filtering that shrinks large tool results before they reach the context |
 
 ### Infrastructure
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/web/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer (7 providers) |
+| <img src="docs/web/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer (15 providers) |
 | <img src="docs/web/assets/images/plugins/plugin-registry.png" width="32"> | **registry** | Plugin discovery, lifecycle management, and tool exposure control |
 | | **introspection** | Runtime self-inspection for tool and plugin discovery |
 | | **streaming** | Token-level streaming with cancellation support |
 | | **telemetry** | OpenTelemetry tracing integration |
 | | **reliability** | Per-tool reliability policies with configurable thresholds |
 | | **sandbox_manager** | Sandboxed execution environments for untrusted tools |
-| | **service_connector** | External service integration (APIs, databases) |
+| | **service_connector** | External web-service discovery and consumption (APIs, databases) |
+| | **session_ops** | Cross-session introspection — interrogate, snapshot, and replay other live sessions |
 
-Plus additional plugins for caching (per-provider), output formatting (code blocks, diffs, tables, Mermaid, notebooks), content filtering, and authentication (per-provider OAuth flows).
+Plus additional plugins for caching (per-provider), output formatting (code blocks, diffs, tables, Mermaid, notebooks), templating, content filtering, and per-provider authentication (OAuth flows + API-key managers).
 
 For the complete reference, see the **[Plugin Documentation](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html)**. For plugin development, see [Plugin Development Guide](jaato-server/shared/plugins/README.md).
 
@@ -171,7 +180,7 @@ For the complete reference, see the **[Plugin Documentation](https://jaato-frame
 ### Prerequisites
 
 - Python 3.10+
-- An AI provider account (any of the 7 supported providers)
+- An AI provider account (any of the 15 supported providers) — or a local engine (Ollama / LM Studio / vLLM) that needs no account
 
 ### Installation
 
@@ -214,7 +223,9 @@ python3 -m venv .venv
 # Start server as daemon with IPC socket
 .venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
 
-# Start with both IPC and WebSocket (for remote/web clients)
+# Start with both IPC and WebSocket (for remote/web clients).
+# WS clients present a bearer token; the daemon auto-generates one at
+# ~/.jaato/ws.token on first WS start (override with --ws-token / --ws-token-file).
 .venv/bin/python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
 
 # Server management
@@ -227,6 +238,9 @@ python3 -m venv .venv
 ```bash
 # TUI client (interactive)
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock
+
+# With an agent profile (model + provider + plugins + GC from .jaato/profiles/<name>)
+.venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock --profile researcher
 
 # Headless mode (scripting)
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock --cmd "What time is it?"
@@ -283,36 +297,13 @@ module forms, if the scripts aren't on `PATH`: `python -m jaato_sdk.doctor`,
 | `model <name>` | Switch to a different model |
 | `history` | Display conversation history |
 | `context` | Show context window usage |
-| `export [file]` | Export session to YAML for replay |
+| `export [file]` | Export the current session to a file |
 | `plan` | Show current task plan |
 | `save` / `resume` | Save or resume sessions |
 | `sessions` | List all saved sessions |
 | `permissions` | Manage tool permission policies |
 | `backtoturn <id>` | Revert conversation to a specific turn |
 | `screenshot` | Capture TUI as SVG/PNG |
-
-### Session Export for Replay
-
-Export interactive sessions to YAML for reproducible demos, testing, and sharing:
-
-```
-You> List the Python files in the current directory
-Model> [executes cli_execute tool...]
-
-You> export my_session.yaml
-[Session exported to: my_session.yaml]
-  Replay with: python demo-scripts/run_demo.py my_session.yaml
-```
-
-```bash
-# Replay a session
-python demo-scripts/run_demo.py my_session.yaml
-
-# Record as SVG animation
-termtosvg -c "python demo-scripts/run_demo.py my_session.yaml" -g 100x40 my_demo.svg
-```
-
-See [demo-scripts/README.md](demo-scripts/README.md) for the complete YAML script format.
 
 ## Project Structure
 
@@ -337,7 +328,7 @@ jaato/
 │       ├── ai_tool_runner.py      # Tool execution with permissions
 │       ├── token_accounting.py    # Token ledger with rate-limit retries
 │       ├── mcp_context_manager.py # Multi-server MCP management
-│       └── plugins/               # 55+ plugins (see above)
+│       └── plugins/               # 40+ plugins (see above)
 ├── jaato-tui/                     # Terminal UI client
 │   ├── rich_client.py             # Entry point
 │   ├── output_buffer.py           # Output rendering engine
@@ -347,7 +338,6 @@ jaato/
 ├── docs/                          # Comprehensive documentation (45+ docs)
 ├── examples/                      # Usage examples
 ├── out-of-tree-plugins/           # Third-party plugin template
-├── demo-scripts/                  # YAML-driven demo recording
 └── scripts/                       # Utility scripts
 ```
 
@@ -357,15 +347,20 @@ jaato/
 
 | Variable | Provider | Description |
 |----------|----------|-------------|
-| `PROJECT_ID` | Google GenAI | GCP project ID |
-| `LOCATION` | Google GenAI | Vertex AI region (e.g., `us-central1`) |
+| `PROJECT_ID` / `LOCATION` | Google GenAI | GCP project ID / Vertex AI region |
 | `MODEL_NAME` | Google GenAI | Model name (e.g., `gemini-2.5-flash`) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Google GenAI | Path to service account JSON key |
-| `ANTHROPIC_API_KEY` | Anthropic | API key (uses API credits) |
-| `ANTHROPIC_AUTH_TOKEN` | Anthropic | OAuth token (uses subscription) |
-| `GITHUB_TOKEN` | GitHub Models | GitHub PAT with `models: read` permission |
-| `OLLAMA_HOST` | Ollama | Ollama server URL (default: `http://localhost:11434`) |
-| `OLLAMA_MODEL` | Ollama | Default model name |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | Anthropic | API key (credits) / OAuth token (subscription) |
+| `GITHUB_TOKEN` | GitHub Models | GitHub PAT with `models: read` |
+| `OLLAMA_HOST` / `OLLAMA_MODEL` | Ollama | Server URL (default `http://localhost:11434`) / model |
+| `LMSTUDIO_HOST` / `LMSTUDIO_MODEL` | LM Studio | Server URL (default `http://localhost:1234`) / model |
+| `VLLM_HOST` / `VLLM_MODEL` | vLLM | `vllm serve` URL (required) / model |
+| `TENSORRT_LLM_HOST` / `TENSORRT_LLM_MODEL` | TensorRT-LLM | `trtllm-serve` URL (required) / model |
+| `JAATO_NIM_API_KEY` / `JAATO_NIM_MODEL` | NVIDIA NIM | API key (`nvapi-…`) / model |
+| `JAATO_OPENROUTER_API_KEY` / `JAATO_OPENROUTER_MODEL` | OpenRouter | API key (`sk-or-…`) / `vendor/model` |
+| `JAATO_NEBIUS_API_KEY` / `JAATO_NEBIUS_MODEL` | Nebius | API key / `vendor/model` |
+
+> Common subset only. Each provider has more knobs (context-length / base-URL overrides, bearer tokens, thinking budgets, routing). Run `jaato-scaffold explain provider <name>` for the full typed per-provider list, or see the [provider docs](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/providers/index.html).
 
 ### Runtime Configuration
 
@@ -401,27 +396,6 @@ jaato/
 |----------|-------------|---------|
 | `JAATO_TELEMETRY_ENABLED` | Enable OTel tracing | `false` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint | — |
-
-## Tooling
-
-### Sequence Diagram Generator
-
-Generate sequence diagrams from execution traces:
-
-```bash
-.venv/bin/python sequence-diagram-generator/trace_to_sequence.py \
-  --trace traces/trace.json -o diagram.pdf
-```
-
-Supports PDF, PlantUML (`--export-plantuml`), and Mermaid (`--export-mermaid`) output.
-
-### Demo Recording
-
-Record terminal demos from YAML-driven scripts:
-
-```bash
-termtosvg -c "python demo-scripts/run_demo.py demo.yaml" -g 100x40 demo.svg
-```
 
 ## Documentation
 
