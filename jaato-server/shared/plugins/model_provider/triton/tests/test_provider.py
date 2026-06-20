@@ -517,13 +517,12 @@ class TestContextLimit:
         with pytest.raises(ValueError, match="OpenAI frontend URL is not configured"):
             provider.initialize(ProviderConfig())
 
-    def test_get_context_limit_raises_before_initialize(self):
-        """``get_context_limit`` raises ``RuntimeError`` when called on
-        an uninitialized provider — no silent fallback to a hardcoded
-        default."""
+    def test_get_context_limit_zero_before_initialize(self):
+        """Uninitialized provider reports 0 — no silent fallback to a hardcoded
+        context default (the shared base returns the unset ``_context_length``,
+        0 until initialize() resolves it)."""
         provider = TritonProvider()
-        with pytest.raises(RuntimeError, match="before initialize"):
-            provider.get_context_limit()
+        assert provider.get_context_limit() == 0
 
 
 # ============================================================
@@ -604,7 +603,7 @@ class TestMidStreamErrorDistinction:
     """
 
     def _make_apicon_error(self, message: str):
-        from shared.plugins.model_provider.triton.provider import (
+        from shared.plugins.model_provider._openai_compat._lazy import (
             get_openai_module,
         )
         openai = get_openai_module()

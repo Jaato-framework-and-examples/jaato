@@ -1,0 +1,795 @@
+"""Shared base for OpenAI-compatible model providers.
+
+``OpenAICompatProvider`` owns the transport-level machinery that the providers
+fronting an OpenAI-compatible chat-completions API (nim, nebius, vllm, lmstudio,
+tensorrt_llm, triton, zhipuai_openai) otherwise copy-paste: the streaming loop,
+the completion skeleton, OpenAI client construction, error mapping, and the
+capability / token / trace boilerplate.
+
+Provider-specific concerns are hooks:
+
+- **credentials / base_url** — ``_resolve_credentials(config)`` sets
+  ``self._base_url`` + ``self._api_key`` (the canonical attributes
+  ``_create_client`` reads) and validates auth.  Subclasses with env-var names
+  like ``host``/``token`` normalise into ``_base_url``/``_api_key`` here.
+- **context window** — ``_detect_context(config) -> Optional[int]`` (the
+  provider's resolution tier); ``_context_error_message()`` for the fail-loud
+  "no hardcoded fallback" message.
+- **error taxonomy** — the ``_ERR_*`` class attributes name the provider's
+  exception classes; the nim-family shares the parameterized
+  ``_handle_api_error`` / ``classify_error`` / ``get_retry_after``, while a
+  family with a different taxonomy (the local-host providers) overrides them.
+- **identity** — ``name`` (property), plus ``verify_auth`` / ``get_auth_info``
+  / ``list_models``.
+- ``REASONING_CAPABLE_MODELS`` — models exposing ``reasoning_content``.
+
+Subclasses are stateless w.r.t. conversation history (the session owns the
+message list and passes it to ``complete()`` each call).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+from ._lazy import get_openai_client_class, get_openai_module
+
+if TYPE_CHECKING:
+    from openai import OpenAI
+
+from ..base import (
+    ModalityCapabilityMixin,
+    FunctionCallDetectedCallback,
+    ProviderConfig,
+    StreamingCallback,
+    ThinkingCallback,
+    UsageUpdateCallback,
+)
+from jaato_sdk.plugins.model_provider.types import (
+    CancelToken,
+    FinishReason,
+    FunctionCall,
+    Message,
+    Part,
+    ProviderResponse,
+    ToolSchema,
+    TokenUsage,
+    ThinkingConfig,
+    TurnResult,
+)
+from .converters import (
+    get_original_tool_name,
+    history_to_openai,
+    map_finish_reason,
+    response_from_openai,
+    tool_schemas_to_openai,
+)
+from shared.tool_id_map import tool_choice_to_wire
+
+logger = logging.getLogger(__name__)
+
+
+class OpenAICompatProvider(ModalityCapabilityMixin):
+    """Base class for OpenAI-compatible chat-completions providers.
+
+    See the module docstring for the hook contract.  Lifecycle:
+
+        1. ``__init__()`` — create instance (no connections yet)
+        2. ``initialize(config)`` — resolve credentials, create OpenAI client
+        3. ``connect(model)`` — set the active model
+        4. ``complete(messages, ...)`` — stateless completion
+        5. ``shutdown()`` — release resources
+    """
+
+    # --- subclass-provided exception classes (parameterize the shared error
+    # mapping for the nim-family; local-host providers override the handlers).
+    _ERR_AUTHENTICATION: type
+    _ERR_RATE_LIMIT: type
+    _ERR_MODEL_NOT_FOUND: type
+    _ERR_CONTEXT_LIMIT: type
+    _ERR_INFRASTRUCTURE: type
+
+    # OpenAI Chat Completions body fields forwarded from
+    # ``plugin_configs.<provider>.api_params``.  Allowlisted (not blind
+    # passthrough) so a typo'd / unsupported key surfaces as a profile warning
+    # rather than an opaque OpenAI 400.  Subclasses may override.
+    _FORWARDED_API_PARAMS = frozenset({
+        "temperature", "top_p", "max_tokens", "tool_choice",
+        "parallel_tool_calls", "frequency_penalty", "presence_penalty",
+        "seed", "stop",
+    })
+
+    # Models known to expose reasoning/thinking via ``reasoning_content``.
+    REASONING_CAPABLE_MODELS: List[str] = []
+
+    def __init__(self) -> None:
+        """Initialize the provider (not yet connected)."""
+        self._client: Optional[OpenAI] = None
+        self._model_name: Optional[str] = None
+
+        # Credentials (canonical attrs; ``_resolve_credentials`` populates them)
+        self._api_key: Optional[str] = None
+        self._base_url: str = ""
+
+        # Per-call accounting (NOT conversation state)
+        self._last_usage: TokenUsage = TokenUsage()
+        self._context_length: int = 0
+
+        # OpenAI Chat Completions body fields from
+        # plugin_configs.<provider>.api_params (filtered to
+        # _FORWARDED_API_PARAMS) + opaque extra_body, forwarded on each call.
+        self._api_params: Dict[str, Any] = {}
+        self._extra_body: Optional[Dict[str, Any]] = None
+
+        # Thinking/reasoning configuration
+        self._enable_thinking: bool = True
+
+        # Agent context for trace identification
+        self._agent_type: str = "main"
+        self._agent_name: Optional[str] = None
+        self._agent_id: str = "main"
+
+        # Stashed config (post-init helpers reuse workspace_path/config_root)
+        self._config: Optional[ProviderConfig] = None
+
+    # ==================== Identity / tracing ====================
+
+    @property
+    def name(self) -> str:
+        """Provider identifier (e.g. ``"nim"``).  Subclasses must override."""
+        raise NotImplementedError
+
+    def set_agent_context(
+        self,
+        agent_type: str = "main",
+        agent_name: Optional[str] = None,
+        agent_id: str = "main",
+    ) -> None:
+        """Set agent context for trace identification.
+
+        Args:
+            agent_type: Type of agent ("main" or "subagent").
+            agent_name: Optional name for the agent.
+            agent_id: Unique identifier for the agent instance.
+        """
+        self._agent_type = agent_type
+        self._agent_name = agent_name
+        self._agent_id = agent_id
+
+    def _trace(self, msg: str) -> None:
+        """Write a trace message to the per-agent provider log."""
+        from shared.trace import provider_trace
+        slug = self.name
+        if self._agent_type == "main":
+            prefix = f"{slug}:main"
+        elif self._agent_name:
+            prefix = f"{slug}:subagent:{self._agent_name}"
+        else:
+            prefix = f"{slug}:subagent:{self._agent_id}"
+        provider_trace(prefix, msg)
+
+    # ==================== Lifecycle ====================
+
+    def initialize(self, config: Optional[ProviderConfig] = None) -> None:
+        """Resolve credentials + context window and create the OpenAI client.
+
+        Skeleton shared by all OpenAI-compat providers; the provider-specific
+        parts are the ``_resolve_credentials`` / ``_detect_context`` /
+        ``_context_error_message`` hooks.
+
+        Raises:
+            Whatever ``_resolve_credentials`` raises on missing auth, or
+            ``ValueError`` (``_context_error_message``) if the context window
+            cannot be resolved (no hardcoded fallback).
+        """
+        if config is None:
+            config = ProviderConfig()
+        self._config = config
+
+        # Hook: sets self._base_url + self._api_key and validates auth.
+        self._resolve_credentials(config)
+
+        # Common: api_params (allowlisted) + extra_body from the profile.
+        self._read_api_params(config)
+
+        # Hook: provider's context-window resolution.  Runs after the auth
+        # check so an auth failure surfaces first.
+        self._resolve_context(config)
+
+        self._client = self._create_client()
+        self._trace(f"[INIT] client created, base_url={self._base_url}")
+
+    def _resolve_credentials(self, config: ProviderConfig) -> None:
+        """Hook: populate ``self._base_url`` + ``self._api_key``, validate auth.
+
+        Subclasses normalise their env-var / profile credentials into the two
+        canonical attributes that ``_create_client`` reads, and raise on
+        missing-and-required auth.
+        """
+        raise NotImplementedError
+
+    def _detect_context(self, config: ProviderConfig) -> Optional[int]:
+        """Hook: resolve the context window (detect → profile → env → None)."""
+        raise NotImplementedError
+
+    def _context_error_message(self) -> str:
+        """Hook: the fail-loud message when the context window is unresolved."""
+        raise NotImplementedError
+
+    def _resolve_context(self, config: ProviderConfig) -> None:
+        """Resolve + validate the context window (default: at-init, fail-loud).
+
+        Default (nim-family): ``_detect_context`` then fail-loud via
+        ``_context_error_message``.  Providers that bootstrap the window LATER
+        — nebius reads it from the catalog at ``connect()`` once the model is
+        known — override this to stash their knobs instead.
+        """
+        self._context_length = self._detect_context(config)
+        if not self._context_length:
+            raise ValueError(self._context_error_message())
+
+    def _read_api_params(self, config: ProviderConfig) -> None:
+        """Read ``api_params`` (allowlisted) + ``extra_body`` from the profile.
+
+        Lifted so every OpenAI-compat provider uniformly honors
+        ``plugin_configs.<provider>.api_params`` (temperature / tool_choice /
+        max_tokens / ...) and ``.extra_body`` (opaque passthrough for
+        endpoint-specific request-body extensions the OpenAI ``create()``
+        signature doesn't name — e.g. guided decoding, cache_salt).
+        """
+        api_params = config.extra.get("api_params") or {}
+        if api_params:
+            if not isinstance(api_params, dict):
+                raise TypeError(
+                    f"{self.name} 'api_params' config must be a dict of OpenAI "
+                    f"Chat Completions fields, got {type(api_params).__name__}"
+                )
+            self._api_params = {
+                k: v for k, v in api_params.items()
+                if k in self._FORWARDED_API_PARAMS
+            }
+            dropped = set(api_params) - self._FORWARDED_API_PARAMS
+            if dropped:
+                logger.warning(
+                    "%s api_params: ignoring unsupported key(s) %s; forwarded "
+                    "fields are %s",
+                    self.name, sorted(dropped), sorted(self._FORWARDED_API_PARAMS),
+                )
+        extra_body = config.extra.get("extra_body")
+        if extra_body is not None:
+            if not isinstance(extra_body, dict):
+                raise TypeError(
+                    f"{self.name} 'extra_body' config must be a dict, got "
+                    f"{type(extra_body).__name__}"
+                )
+            self._extra_body = extra_body
+
+    def _create_client(self) -> "OpenAI":
+        """Create the OpenAI client for ``self._base_url`` / ``self._api_key``.
+
+        The OpenAI SDK requires a key string even for keyless self-hosted
+        endpoints, so a placeholder is substituted when no key is set.
+        """
+        client_class = get_openai_client_class()
+        api_key = self._api_key or "not-needed"
+        return client_class(base_url=self._base_url, api_key=api_key)
+
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
+    ) -> bool:
+        """Hook: verify credentials exist WITHOUT touching ``self._client``.
+
+        Called on a fresh, uninitialized instance before a session is created
+        (see the plugin guide's ``verify_auth`` contract).  Subclasses must
+        implement.
+        """
+        raise NotImplementedError
+
+    def shutdown(self) -> None:
+        """Clean up resources."""
+        if self._client:
+            self._client.close()
+        self._client = None
+        self._model_name = None
+
+    def get_auth_info(self) -> str:
+        """Hook: short human-readable description of the credential source."""
+        raise NotImplementedError
+
+    # ==================== Connection ====================
+
+    def connect(self, model: str, *, skip_model_test: bool = False) -> None:
+        """Set the model to use.  Validation is deferred to the first API call.
+
+        Args:
+            model: Model ID.
+            skip_model_test: Accepted for protocol compatibility; this provider
+                already defers validation to the first API call.
+        """
+        self._model_name = model
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if provider is connected and ready."""
+        return self._client is not None and self._model_name is not None
+
+    @property
+    def model_name(self) -> Optional[str]:
+        """Get the current model name."""
+        return self._model_name
+
+    def list_models(self, prefix: Optional[str] = None) -> List[str]:
+        """Hook: list available models (provider-specific).  Default: none."""
+        return []
+
+    # ==================== Stateless Completion ====================
+
+    def _apply_api_params(
+        self, kwargs: Dict[str, Any], tool_choice: Optional[Any],
+    ) -> None:
+        """Forward profile ``api_params`` (+ per-call ``tool_choice``) into the
+        ``chat.completions.create`` kwargs.
+
+        Profile fields (already filtered to :data:`_FORWARDED_API_PARAMS` at
+        init) apply to every call; a per-call ``tool_choice`` overrides the
+        profile's.  ``tool_choice`` is dropped when no tools are present this
+        turn (OpenAI rejects ``tool_choice`` without ``tools``).  A name-bearing
+        ``tool_choice`` is mapped through :func:`tool_choice_to_wire` — tool
+        names are hashed on the wire, so forcing a tool by its human name would
+        otherwise be rejected ("Tool X not found in tools list"); string forms
+        ("required"/"auto") pass through.
+        """
+        for key, value in self._api_params.items():
+            kwargs[key] = value
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        if "tool_choice" in kwargs and "tools" not in kwargs:
+            kwargs.pop("tool_choice")
+        if "tool_choice" in kwargs:
+            kwargs["tool_choice"] = tool_choice_to_wire(kwargs["tool_choice"])
+
+    def complete(
+        self,
+        messages: List[Message],
+        system_instruction: Optional[str] = None,
+        tools: Optional[List[ToolSchema]] = None,
+        *,
+        response_schema: Optional[Dict[str, Any]] = None,
+        cancel_token: Optional[CancelToken] = None,
+        on_chunk: Optional[StreamingCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
+    ) -> TurnResult:
+        """Stateless completion: convert messages, call the API, return the result.
+
+        The caller (session) owns the message list and passes it in full each
+        call — this method holds no conversation state.  Returns
+        ``TurnResult.from_provider_response(r)`` on success and **raises**
+        transient errors for ``with_retry``.
+
+        Raises:
+            RuntimeError: If the provider is not initialized/connected.
+        """
+        if not self._client or not self._model_name:
+            raise RuntimeError(
+                "Provider not connected. Call initialize() and connect() first."
+            )
+
+        # Build OpenAI-format messages from explicit parameters
+        openai_messages: List[Dict[str, Any]] = []
+        if system_instruction:
+            openai_messages.append({"role": "system", "content": system_instruction})
+        openai_messages.extend(history_to_openai(list(messages)))
+
+        # Build kwargs
+        kwargs: Dict[str, Any] = {}
+        if tools:
+            openai_tools = tool_schemas_to_openai(tools)
+            if openai_tools:
+                kwargs["tools"] = openai_tools
+        if response_schema:
+            kwargs["response_format"] = {"type": "json_object"}
+        # Profile api_params (+ per-call tool_choice override) into the shared
+        # kwargs so BOTH the streaming and batch paths forward them.
+        self._apply_api_params(kwargs, tool_choice)
+
+        try:
+            if on_chunk:
+                provider_response = self._stream_response(
+                    messages=openai_messages,
+                    kwargs=kwargs,
+                    on_chunk=on_chunk,
+                    cancel_token=cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_thinking=on_thinking,
+                    trace_prefix="COMPLETE_STREAM",
+                )
+            else:
+                response = self._client.chat.completions.create(
+                    model=self._model_name,
+                    messages=openai_messages,
+                    **kwargs,
+                )
+                provider_response = response_from_openai(response)
+                # Non-streaming cache-hit count (the streaming path sets this
+                # per-chunk); response_from_openai doesn't carry it.
+                cached = self._extract_cache_tokens(getattr(response, "usage", None))
+                if cached is not None and provider_response.usage is not None:
+                    provider_response.usage.cache_read_tokens = cached
+
+            # Per-call accounting (NOT conversation state)
+            self._last_usage = provider_response.usage
+
+            # Parse structured output if schema was requested
+            text = provider_response.get_text()
+            if response_schema and text:
+                try:
+                    provider_response.structured_output = json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+
+            return TurnResult.from_provider_response(provider_response)
+        except Exception as e:
+            self._handle_api_error(e)
+            raise
+
+    @staticmethod
+    def _extract_cache_tokens(usage: Any) -> Optional[int]:
+        """OpenAI-compatible cache-hit count (``usage.prompt_tokens_details
+        .cached_tokens``), or None when absent / zero (no cache hit).
+
+        Lets cache hit-rate and $ savings be measured uniformly across the
+        fleet — previously a per-provider copy (and missing entirely on nim).
+        """
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = getattr(details, "cached_tokens", None) if details is not None else None
+        return cached if cached else None
+
+    def _stream_response(
+        self,
+        messages: List[Dict[str, Any]],
+        kwargs: Dict[str, Any],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
+        trace_prefix: str = "STREAM",
+    ) -> ProviderResponse:
+        """Core streaming loop.
+
+        Accumulates text chunks, tool-call deltas, reasoning content, and usage
+        (including cache-read tokens) from the streaming response.  Handles
+        cancellation via ``cancel_token`` and closes the HTTP connection +
+        httpx pool on cancel so the upstream stops generating immediately.
+        """
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+
+        accumulated_text: List[str] = []
+        accumulated_thinking: List[str] = []
+        parts: List[Part] = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls: List[FunctionCall] = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        # Track tool call accumulation (streaming sends tool calls in pieces)
+        tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+
+        def flush_text_block():
+            """Flush accumulated text as a single Part."""
+            nonlocal accumulated_text
+            if accumulated_text:
+                text = "".join(accumulated_text)
+                parts.append(Part.from_text(text))
+                accumulated_text = []
+
+        def flush_tool_calls():
+            """Flush accumulated tool calls as Parts."""
+            nonlocal tool_call_accumulators
+            for idx in sorted(tool_call_accumulators.keys()):
+                tc = tool_call_accumulators[idx]
+                func_name = tc.get("function", {}).get("name")
+                if func_name:
+                    try:
+                        args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_id = tc.get("id")
+                    original_name = get_original_tool_name(func_name)
+                    if not tool_id:
+                        self._trace(f"ERROR: Missing tool call ID for {func_name}")
+                    fc = FunctionCall(
+                        id=tool_id,
+                        name=original_name,
+                        args=args,
+                    )
+                    parts.append(Part.from_function_call(fc))
+                    function_calls.append(fc)
+            tool_call_accumulators.clear()
+
+        response_stream = None
+        try:
+            self._trace(f"{trace_prefix}_START")
+            chunk_count = 0
+            response_stream = self._client.chat.completions.create(
+                model=self._model_name,
+                messages=messages,
+                **kwargs,
+            )
+
+            for chunk in response_stream:
+                # Check for cancellation
+                if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"{trace_prefix}_CANCELLED after {chunk_count} chunks")
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                if not chunk.choices:
+                    # Final chunk may have only usage
+                    if chunk.usage:
+                        usage = TokenUsage(
+                            prompt_tokens=chunk.usage.prompt_tokens or 0,
+                            output_tokens=chunk.usage.completion_tokens or 0,
+                            total_tokens=chunk.usage.total_tokens or 0,
+                            cache_read_tokens=self._extract_cache_tokens(chunk.usage),
+                        )
+                        self._trace(f"{trace_prefix}_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens}")
+                        if on_usage_update and usage.total_tokens > 0:
+                            on_usage_update(usage)
+                    continue
+
+                for choice in chunk.choices:
+                    delta = choice.delta
+                    if not delta:
+                        if choice.finish_reason:
+                            finish_reason = map_finish_reason(choice.finish_reason)
+                        continue
+
+                    # Extract reasoning/thinking (e.g. DeepSeek-R1)
+                    if self._enable_thinking:
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning and isinstance(reasoning, str):
+                            self._trace(f"{trace_prefix}_THINKING len={len(reasoning)}")
+                            accumulated_thinking.append(reasoning)
+                            if on_thinking:
+                                on_thinking(reasoning)
+
+                    # Accumulate text
+                    if delta.content:
+                        chunk_count += 1
+                        accumulated_text.append(delta.content)
+                        on_chunk(delta.content)
+
+                    # Accumulate tool calls (they come in pieces)
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+                            if idx not in tool_call_accumulators:
+                                self._trace(f"TOOL_CALL_START idx={idx} id={tc_delta.id!r} name={getattr(tc_delta.function, 'name', '')!r}")
+                                tool_call_accumulators[idx] = {
+                                    "id": tc_delta.id,
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            acc = tool_call_accumulators[idx]
+                            if tc_delta.id:
+                                acc["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    acc["function"]["name"] = tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    acc["function"]["arguments"] += tc_delta.function.arguments
+
+                    # Extract finish reason
+                    if choice.finish_reason:
+                        finish_reason = map_finish_reason(choice.finish_reason)
+
+                # Extract usage from chunk (some providers include it per-chunk)
+                if chunk.usage:
+                    usage = TokenUsage(
+                        prompt_tokens=chunk.usage.prompt_tokens or 0,
+                        output_tokens=chunk.usage.completion_tokens or 0,
+                        total_tokens=chunk.usage.total_tokens or 0,
+                        cache_read_tokens=self._extract_cache_tokens(chunk.usage),
+                    )
+                    if on_usage_update and usage.total_tokens > 0:
+                        on_usage_update(usage)
+
+            self._trace(f"{trace_prefix}_END chunks={chunk_count} finish_reason={finish_reason}")
+
+        except Exception as e:
+            self._trace(f"{trace_prefix}_ERROR {type(e).__name__}: {e}")
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                raise
+        finally:
+            # Close the underlying HTTP connection so the upstream stops
+            # generating immediately on cancel. The SDK ``Stream`` only sends
+            # TCP-close at GC time, which on a cancelled turn keeps the upstream
+            # billing the entire response.
+            if response_stream is not None:
+                try:
+                    response_stream.close()
+                except Exception as close_exc:  # pragma: no cover - best effort
+                    self._trace(
+                        f"{trace_prefix}_CLOSE_ERROR "
+                        f"{type(close_exc).__name__}: {close_exc}"
+                    )
+
+            # SHAPE B (cancel-leak fix, 2026-06-09): close the openai client's
+            # httpx pool when cancelled.  ``response_stream.close()`` alone does
+            # NOT propagate TCP-FIN to the upstream.
+            if was_cancelled and self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+
+        # Flush remaining text and tool calls
+        flush_text_block()
+        flush_tool_calls()
+
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        thinking = "".join(accumulated_thinking) if accumulated_thinking else None
+
+        return ProviderResponse(
+            parts=parts,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,
+            thinking=thinking,
+        )
+
+    # ==================== Error Handling ====================
+
+    def _handle_api_error(self, error: Exception) -> None:
+        """Map OpenAI SDK exceptions to the provider's error taxonomy.
+
+        Parameterized by the ``_ERR_*`` class attributes so the nim-family
+        (identical mapping, different classes) shares this one implementation.
+        Providers with a different taxonomy override it.
+        """
+        openai = get_openai_module()
+
+        if isinstance(error, openai.AuthenticationError):
+            raise self._ERR_AUTHENTICATION(
+                original_error=str(error),
+            ) from error
+
+        if isinstance(error, openai.RateLimitError):
+            retry_after = None
+            response = getattr(error, "response", None)
+            if response:
+                retry_header = getattr(response.headers, "get", lambda *a: None)("retry-after")
+                if retry_header:
+                    try:
+                        retry_after = float(retry_header)
+                    except ValueError:
+                        pass
+            raise self._ERR_RATE_LIMIT(
+                retry_after=retry_after,
+                original_error=str(error),
+            ) from error
+
+        if isinstance(error, openai.NotFoundError):
+            raise self._ERR_MODEL_NOT_FOUND(
+                model=self._model_name or "unknown",
+                original_error=str(error),
+            ) from error
+
+        if isinstance(error, openai.APIConnectionError):
+            raise self._ERR_INFRASTRUCTURE(
+                status_code=0,
+                original_error=str(error),
+            ) from error
+
+        if isinstance(error, openai.InternalServerError):
+            status_code = getattr(error, "status_code", 500)
+            raise self._ERR_INFRASTRUCTURE(
+                status_code=status_code,
+                original_error=str(error),
+            ) from error
+
+        if isinstance(error, openai.APIStatusError):
+            status_code = getattr(error, "status_code", 0)
+            error_str = str(error).lower()
+
+            # Context limit errors
+            if any(x in error_str for x in ("context_length", "too large", "max size", "tokens_limit")):
+                max_tokens = None
+                match = re.search(r'max (?:size|tokens)[:\s]+(\d+)', error_str)
+                if match:
+                    max_tokens = int(match.group(1))
+                raise self._ERR_CONTEXT_LIMIT(
+                    model=self._model_name or "unknown",
+                    max_tokens=max_tokens,
+                    original_error=str(error),
+                ) from error
+
+            # 5xx infrastructure errors
+            if 500 <= status_code < 600:
+                raise self._ERR_INFRASTRUCTURE(
+                    status_code=status_code,
+                    original_error=str(error),
+                ) from error
+
+    # ==================== Token Management ====================
+
+    def count_tokens(self, content: str) -> int:
+        """Estimate tokens (~4 chars/token); OpenAI-compat APIs expose no
+        token-count endpoint."""
+        return len(content) // 4
+
+    def get_context_limit(self) -> int:
+        """Context window size resolved at ``initialize()``."""
+        return self._context_length
+
+    def get_token_usage(self) -> TokenUsage:
+        """Token usage from the last response."""
+        return self._last_usage
+
+    # ==================== Capabilities ====================
+
+    def supports_structured_output(self) -> bool:
+        """OpenAI-compatible ``response_format`` is supported."""
+        return True
+
+    def supports_streaming(self) -> bool:
+        """Streaming is supported via the OpenAI-compatible API."""
+        return True
+
+    def supports_stop(self) -> bool:
+        """Streaming responses can be cancelled via ``cancel_token``."""
+        return True
+
+    def supports_thinking(self) -> bool:
+        """True for models known to expose ``reasoning_content``."""
+        return self._is_reasoning_capable()
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Enable/disable extraction of ``reasoning_content``."""
+        self._enable_thinking = config.enabled
+
+    def _is_reasoning_capable(self) -> bool:
+        """Check if the current model exposes reasoning content."""
+        if not self._model_name:
+            return False
+        name_lower = self._model_name.lower()
+        for prefix in self.REASONING_CAPABLE_MODELS:
+            if name_lower.startswith(prefix) or name_lower.endswith(prefix):
+                return True
+        return False
+
+    # ==================== Error Classification for Retry ====================
+
+    def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
+        """Classify an exception for retry (parameterized by ``_ERR_*``)."""
+        if isinstance(exc, self._ERR_RATE_LIMIT):
+            return {"transient": True, "rate_limit": True, "infra": False}
+
+        if isinstance(exc, self._ERR_INFRASTRUCTURE):
+            return {"transient": True, "rate_limit": False, "infra": True}
+
+        return None
+
+    def get_retry_after(self, exc: Exception) -> Optional[float]:
+        """Extract a retry-after hint from a rate-limit exception."""
+        if isinstance(exc, self._ERR_RATE_LIMIT) and getattr(exc, "retry_after", None):
+            return float(exc.retry_after)
+
+        return None

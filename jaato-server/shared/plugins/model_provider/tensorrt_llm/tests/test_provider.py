@@ -184,7 +184,7 @@ class TestInitialize:
         mock_get.return_value = _health_response()
         provider = TensorRTLLMProvider()
         provider.initialize(ProviderConfig(extra={"max_tokens": 4096}))
-        assert provider._max_tokens == 4096
+        assert provider._api_params.get("max_tokens") == 4096
 
     @patch("shared.plugins.model_provider.tensorrt_llm.provider.httpx.get")
     def test_initialize_max_tokens_stays_none_when_absent(self, mock_get):
@@ -197,7 +197,7 @@ class TestInitialize:
         mock_get.return_value = _health_response()
         provider = TensorRTLLMProvider()
         provider.initialize(ProviderConfig())
-        assert provider._max_tokens is None
+        assert "max_tokens" not in provider._api_params
 
     @patch("shared.plugins.model_provider.tensorrt_llm.provider.httpx.get")
     def test_initialize_connection_failure_raises(self, mock_get):
@@ -403,13 +403,12 @@ class TestContextLimit:
         with pytest.raises(ValueError, match="host is not configured"):
             provider.initialize(ProviderConfig())
 
-    def test_get_context_limit_raises_before_initialize(self):
-        """``get_context_limit`` raises ``RuntimeError`` when called on
-        an uninitialized provider — no silent fallback to a hardcoded
-        default."""
+    def test_get_context_limit_zero_before_initialize(self):
+        """Uninitialized provider reports 0 — no silent fallback to a hardcoded
+        context default (the shared base returns the unset ``_context_length``,
+        which is 0 until initialize() resolves it)."""
         provider = TensorRTLLMProvider()
-        with pytest.raises(RuntimeError, match="before initialize"):
-            provider.get_context_limit()
+        assert provider.get_context_limit() == 0
 
 
 # ============================================================
@@ -496,7 +495,7 @@ class TestMidStreamErrorDistinction:
         the given text — that's the substring ``_handle_api_error``
         regex-matches on.
         """
-        from shared.plugins.model_provider.tensorrt_llm.provider import (
+        from shared.plugins.model_provider._openai_compat._lazy import (
             get_openai_module,
         )
         openai = get_openai_module()
