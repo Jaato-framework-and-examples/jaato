@@ -83,24 +83,37 @@ def _provider_src(provider: str) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
+def _maps_tool_choice(provider: str) -> bool:
+    """Does this forwarder route tool_choice through the wire-id mapper?
+
+    True if it calls ``tool_choice_to_wire`` directly, OR subclasses
+    ``OpenAICompatProvider`` — whose shared ``_apply_api_params`` maps it for
+    the whole fleet.  As providers migrate onto the base, the inheritance arm
+    is what lets them leave ``_TOOL_CHOICE_MAPPING_PENDING``.
+    """
+    src = _provider_src(provider)
+    return "tool_choice_to_wire" in src or "OpenAICompatProvider" in src
+
+
 def test_tool_choice_forwarders_route_through_the_mapper():
     """Every tool_choice forwarder maps the name (unless explicitly pending)."""
     offenders = [
         p for p in sorted(_TOOL_CHOICE_FORWARDERS)
-        if "tool_choice_to_wire" not in _provider_src(p)
+        if not _maps_tool_choice(p)
         and p not in _TOOL_CHOICE_MAPPING_PENDING
     ]
     assert offenders == [], (
         f"providers forward a name-bearing tool_choice without mapping it "
-        f"through tool_choice_to_wire: {offenders}.  A tool_choice naming a "
-        "tool must use the hashed wire id, or the upstream rejects it."
+        f"through tool_choice_to_wire (directly or via OpenAICompatProvider): "
+        f"{offenders}.  A tool_choice naming a tool must use the hashed wire "
+        "id, or the upstream rejects it."
     )
 
 
 def test_tool_choice_pending_list_only_shrinks():
     """A provider that now maps tool_choice must be removed from PENDING."""
     stale = [p for p in sorted(_TOOL_CHOICE_MAPPING_PENDING)
-             if "tool_choice_to_wire" in _provider_src(p)]
+             if _maps_tool_choice(p)]
     assert stale == [], (
         f"these providers now route tool_choice through the mapper — drop them "
         f"from _TOOL_CHOICE_MAPPING_PENDING: {stale}"

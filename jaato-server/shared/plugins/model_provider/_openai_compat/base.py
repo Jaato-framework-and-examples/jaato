@@ -30,6 +30,7 @@ message list and passes it to ``complete()`` each call).
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -65,6 +66,9 @@ from .converters import (
     response_from_openai,
     tool_schemas_to_openai,
 )
+from shared.tool_id_map import tool_choice_to_wire
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAICompatProvider(ModalityCapabilityMixin):
@@ -87,6 +91,16 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
     _ERR_CONTEXT_LIMIT: type
     _ERR_INFRASTRUCTURE: type
 
+    # OpenAI Chat Completions body fields forwarded from
+    # ``plugin_configs.<provider>.api_params``.  Allowlisted (not blind
+    # passthrough) so a typo'd / unsupported key surfaces as a profile warning
+    # rather than an opaque OpenAI 400.  Subclasses may override.
+    _FORWARDED_API_PARAMS = frozenset({
+        "temperature", "top_p", "max_tokens", "tool_choice",
+        "parallel_tool_calls", "frequency_penalty", "presence_penalty",
+        "seed", "stop",
+    })
+
     # Models known to expose reasoning/thinking via ``reasoning_content``.
     REASONING_CAPABLE_MODELS: List[str] = []
 
@@ -102,6 +116,12 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # Per-call accounting (NOT conversation state)
         self._last_usage: TokenUsage = TokenUsage()
         self._context_length: int = 0
+
+        # OpenAI Chat Completions body fields from
+        # plugin_configs.<provider>.api_params (filtered to
+        # _FORWARDED_API_PARAMS) + opaque extra_body, forwarded on each call.
+        self._api_params: Dict[str, Any] = {}
+        self._extra_body: Optional[Dict[str, Any]] = None
 
         # Thinking/reasoning configuration
         self._enable_thinking: bool = True
@@ -171,11 +191,12 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # Hook: sets self._base_url + self._api_key and validates auth.
         self._resolve_credentials(config)
 
-        # Hook: provider's context-window resolution tier.  Runs after the auth
+        # Common: api_params (allowlisted) + extra_body from the profile.
+        self._read_api_params(config)
+
+        # Hook: provider's context-window resolution.  Runs after the auth
         # check so an auth failure surfaces first.
-        self._context_length = self._detect_context(config)
-        if not self._context_length:
-            raise ValueError(self._context_error_message())
+        self._resolve_context(config)
 
         self._client = self._create_client()
         self._trace(f"[INIT] client created, base_url={self._base_url}")
@@ -196,6 +217,54 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
     def _context_error_message(self) -> str:
         """Hook: the fail-loud message when the context window is unresolved."""
         raise NotImplementedError
+
+    def _resolve_context(self, config: ProviderConfig) -> None:
+        """Resolve + validate the context window (default: at-init, fail-loud).
+
+        Default (nim-family): ``_detect_context`` then fail-loud via
+        ``_context_error_message``.  Providers that bootstrap the window LATER
+        — nebius reads it from the catalog at ``connect()`` once the model is
+        known — override this to stash their knobs instead.
+        """
+        self._context_length = self._detect_context(config)
+        if not self._context_length:
+            raise ValueError(self._context_error_message())
+
+    def _read_api_params(self, config: ProviderConfig) -> None:
+        """Read ``api_params`` (allowlisted) + ``extra_body`` from the profile.
+
+        Lifted so every OpenAI-compat provider uniformly honors
+        ``plugin_configs.<provider>.api_params`` (temperature / tool_choice /
+        max_tokens / ...) and ``.extra_body`` (opaque passthrough for
+        endpoint-specific request-body extensions the OpenAI ``create()``
+        signature doesn't name — e.g. guided decoding, cache_salt).
+        """
+        api_params = config.extra.get("api_params") or {}
+        if api_params:
+            if not isinstance(api_params, dict):
+                raise TypeError(
+                    f"{self.name} 'api_params' config must be a dict of OpenAI "
+                    f"Chat Completions fields, got {type(api_params).__name__}"
+                )
+            self._api_params = {
+                k: v for k, v in api_params.items()
+                if k in self._FORWARDED_API_PARAMS
+            }
+            dropped = set(api_params) - self._FORWARDED_API_PARAMS
+            if dropped:
+                logger.warning(
+                    "%s api_params: ignoring unsupported key(s) %s; forwarded "
+                    "fields are %s",
+                    self.name, sorted(dropped), sorted(self._FORWARDED_API_PARAMS),
+                )
+        extra_body = config.extra.get("extra_body")
+        if extra_body is not None:
+            if not isinstance(extra_body, dict):
+                raise TypeError(
+                    f"{self.name} 'extra_body' config must be a dict, got "
+                    f"{type(extra_body).__name__}"
+                )
+            self._extra_body = extra_body
 
     def _create_client(self) -> "OpenAI":
         """Create the OpenAI client for ``self._base_url`` / ``self._api_key``.
@@ -260,6 +329,32 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
     # ==================== Stateless Completion ====================
 
+    def _apply_api_params(
+        self, kwargs: Dict[str, Any], tool_choice: Optional[Any],
+    ) -> None:
+        """Forward profile ``api_params`` (+ per-call ``tool_choice``) into the
+        ``chat.completions.create`` kwargs.
+
+        Profile fields (already filtered to :data:`_FORWARDED_API_PARAMS` at
+        init) apply to every call; a per-call ``tool_choice`` overrides the
+        profile's.  ``tool_choice`` is dropped when no tools are present this
+        turn (OpenAI rejects ``tool_choice`` without ``tools``).  A name-bearing
+        ``tool_choice`` is mapped through :func:`tool_choice_to_wire` — tool
+        names are hashed on the wire, so forcing a tool by its human name would
+        otherwise be rejected ("Tool X not found in tools list"); string forms
+        ("required"/"auto") pass through.
+        """
+        for key, value in self._api_params.items():
+            kwargs[key] = value
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        if "tool_choice" in kwargs and "tools" not in kwargs:
+            kwargs.pop("tool_choice")
+        if "tool_choice" in kwargs:
+            kwargs["tool_choice"] = tool_choice_to_wire(kwargs["tool_choice"])
+
     def complete(
         self,
         messages: List[Message],
@@ -272,6 +367,7 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         """Stateless completion: convert messages, call the API, return the result.
 
@@ -302,6 +398,9 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                 kwargs["tools"] = openai_tools
         if response_schema:
             kwargs["response_format"] = {"type": "json_object"}
+        # Profile api_params (+ per-call tool_choice override) into the shared
+        # kwargs so BOTH the streaming and batch paths forward them.
+        self._apply_api_params(kwargs, tool_choice)
 
         try:
             if on_chunk:

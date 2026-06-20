@@ -443,7 +443,7 @@ class TestAuthentication:
 
         assert "JAATO_NEBIUS_API_KEY" in str(exc_info.value)
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_with_api_key(self, mock_client_class):
         """Should initialize with key from config.api_key."""
         mock_client_class.return_value = MagicMock()
@@ -458,7 +458,7 @@ class TestAuthentication:
         assert provider._api_key == "nbk-test-test"
         assert provider._client is not None
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NEBIUS_API_KEY": "nbk-test-env"}, clear=True)
     def test_initialize_from_env(self, mock_client_class):
         """Should auto-detect key from JAATO_NEBIUS_API_KEY env var."""
@@ -469,7 +469,7 @@ class TestAuthentication:
 
         assert provider._api_key == "nbk-test-env"
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NEBIUS_BASE_URL": "http://localhost:8000/v1"}, clear=True)
     def test_initialize_self_hosted_no_key(self, mock_client_class):
         """Should initialize without key for self-hosted endpoints."""
@@ -481,7 +481,7 @@ class TestAuthentication:
         assert provider._api_key is None
         assert provider._client is not None
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {}, clear=True)
     def test_connect_raises_when_context_unresolved(self, mock_client_class):
         """No hardcoded fallback: with the catalog empty (no per-model entry)
@@ -495,7 +495,7 @@ class TestAuthentication:
         with pytest.raises(ValueError, match="context_length could not be resolved"):
             provider.connect("some/model")
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NEBIUS_CONTEXT_LENGTH": "200000"}, clear=True)
     def test_env_knob_stashed_at_init_resolves_at_connect(self, mock_client_class):
         """The env override is stashed at init and used at connect when the
@@ -509,7 +509,7 @@ class TestAuthentication:
         provider.connect("some/model")
         assert provider._context_length == 200000
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_catalog_context_beats_knob_at_connect(self, mock_client_class):
         """Catalog auto-detect is PRIMARY: the per-model context_length from
         GET /v1/models wins over the manual knob."""
@@ -525,7 +525,7 @@ class TestAuthentication:
             provider.connect("meta-llama/Llama-3.3-70B-Instruct")
             assert provider._context_length == 131072  # catalog wins over 200000
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_stashes_profile_knob_over_env(self, mock_client_class):
         """Profile knob (config.extra.context_length) wins over the env tier
         when stashed at init."""
@@ -537,7 +537,7 @@ class TestAuthentication:
             ))
             assert provider._context_length_knob == 131072
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_custom_base_url(self, mock_client_class):
         """Should use custom base_url from config.extra."""
         mock_client_class.return_value = MagicMock()
@@ -550,7 +550,7 @@ class TestAuthentication:
 
         assert provider._base_url == "http://nim.internal:8080/v1"
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_stashes_custom_context_length_knob(self, mock_client_class):
         """A custom context_length from config.extra is stashed as the knob
         (used at connect when the catalog lacks the model)."""
@@ -884,7 +884,7 @@ class TestApiParams:
 
     def _provider(self, api_params):
         with patch(
-            "shared.plugins.model_provider.nebius.provider.get_openai_client_class"
+            "shared.plugins.model_provider._openai_compat.base.get_openai_client_class"
         ) as mc:
             mc.return_value = MagicMock()
             p = NebiusProvider()
@@ -937,7 +937,7 @@ class TestApiParams:
 
     def test_non_dict_api_params_raises(self):
         with patch(
-            "shared.plugins.model_provider.nebius.provider.get_openai_client_class"
+            "shared.plugins.model_provider._openai_compat.base.get_openai_client_class"
         ) as mc:
             mc.return_value = MagicMock()
             p = NebiusProvider()
