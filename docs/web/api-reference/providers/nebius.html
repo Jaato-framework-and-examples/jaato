@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nebius Token Factory Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+          <li><a href="zhipuai.html">Zhipu AI</a></li>
+          <li><a href="nim.html">NVIDIA NIM</a></li>
+          <li><a href="lmstudio.html">LM Studio</a></li>
+          <li><a href="vllm.html">vLLM</a></li>
+          <li><a href="tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="openrouter.html">OpenRouter</a></li>
+          <li><a href="nebius.html" class="active">Nebius</a></li>
+          <li><a href="triton.html">Triton</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Nebius Token Factory Provider</h1>
+          <p class="lead">
+            Hosted <strong>serverless</strong> inference for open models (Llama, Qwen,
+            DeepSeek-R1, Mistral, &hellip;) behind a single OpenAI-compatible API. Models
+            use the <code>vendor/model</code> form; your own registered fine-tunes run on
+            the same endpoint, addressed by name.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>nebius</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.nebius</code></td></tr>
+              <tr><td><strong>SDK</strong></td><td><code>openai</code> (OpenAI-compatible API)</td></tr>
+              <tr><td><strong>Auth</strong></td><td>API key (from the <a href="https://tokenfactory.nebius.com" target="_blank">Nebius Token Factory</a> dashboard)</td></tr>
+              <tr><td><strong>Default endpoint</strong></td><td><code>https://api.tokenfactory.nebius.com/v1</code></td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="highlights">Highlights</h2>
+          <ul>
+            <li><strong>Serverless open models</strong> &mdash; Llama, Qwen, DeepSeek-R1, Mistral and more, with no GPU provisioning</li>
+            <li><strong>OpenAI-compatible</strong> &mdash; standard <code>/v1/chat/completions</code> surface</li>
+            <li><strong>Catalog auto-detect</strong> &mdash; the <code>RichModel</code> catalog (<code>GET /v1/models</code>) drives per-model context window <em>and</em> input modalities at <code>connect()</code></li>
+            <li><strong>Fine-tunes supported</strong> &mdash; registered custom models run on the <em>same</em> serverless endpoint; just point the profile at the model name</li>
+            <li><strong>Extended thinking</strong> &mdash; reasoning extraction for models that emit it (e.g. DeepSeek-R1)</li>
+            <li><strong>Cache reporting</strong> &mdash; <code>cached_tokens</code> parsed from the usage object when the upstream reports it</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Discover the config + verify your setup (source of truth — never drifts):
+jaato-scaffold explain provider nebius        # typed knobs, modalities, context
+jaato-doctor --workspace . --env-file .env    # confirm creds + endpoint resolve</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Python quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import JaatoClient
+
+client = JaatoClient(provider_name="nebius")
+client.connect(
+    project=None,
+    location=None,
+    model="deepseek-ai/DeepSeek-R1"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from Nebius!",
+    on_output=on_output
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Use your own fine-tune</div>
+          <div class="code-block">
+            <pre><code class="language-python"># A registered Token Factory fine-tune is addressed by name —
+# same serverless endpoint, catalog-detected context + modality.
+client.connect(None, None, "legislation-qa-private")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication</h2>
+
+          <h3>Get Your API Key</h3>
+          <ol>
+            <li>Create a key in the <a href="https://tokenfactory.nebius.com" target="_blank">Nebius Token Factory</a> dashboard</li>
+            <li>Store it with <code>nebius-auth</code> (validates against <code>/chat/completions</code> and stores securely)</li>
+          </ol>
+          <p>
+            For the exact credential variables and their precedence, run
+            <code>jaato-scaffold explain provider nebius</code> &mdash; the live registry is
+            the source of truth, so it never drifts from the code. Then
+            <code>jaato-doctor</code> confirms the credential resolves and the endpoint is
+            reachable before your client calls <code>connect()</code>.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Authenticate + verify</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Store credentials (validates against /chat/completions)
+nebius-auth
+nebius-auth status      # check
+nebius-auth logout      # clear
+
+# Confirm the daemon will resolve them
+jaato-doctor --workspace . --env-file .env</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+          <p>
+            jaato doesn't duplicate the provider's environment variables here &mdash; they
+            drift. The installed framework is the source of truth: run
+            <code>jaato-scaffold explain provider nebius</code> for the full typed
+            configuration (credential variables, <code>base_url</code> /
+            <code>context_length</code> / <code>modalities</code> knobs and their defaults),
+            and <code>jaato-doctor</code> to verify your environment resolves them.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Inspect config + verify</div>
+          <div class="code-block">
+            <pre><code class="language-bash">jaato-scaffold explain provider nebius        # typed knobs + env, from the live registry
+jaato-doctor --workspace . --env-file .env</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Popular model names</div>
+          <div class="code-block">
+            <pre><code class="language-text">deepseek-ai/DeepSeek-R1
+meta-llama/Llama-3.3-70B-Instruct
+Qwen/Qwen2.5-72B-Instruct
+mistralai/Mistral-Nemo-Instruct-2407
+# your own registered fine-tune, addressed by name:
+legislation-qa-private</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Plugin Configs Layers -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="profile-config">Profile Configuration</h2>
+          <p>
+            Nebius has a small set of profile knobs under
+            <code>plugin_configs.nebius</code> &mdash; the catalog auto-detects most
+            settings, so overrides are rarely needed.
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>base_url</code></td><td>str</td><td>Override the default base URL (e.g. a local proxy)</td></tr>
+              <tr><td><code>context_length</code></td><td>int</td><td>Manual context-window override, used when the catalog lacks the model</td></tr>
+              <tr><td><code>modalities</code></td><td>list[str]</td><td>Assert / correct input modalities (e.g. <code>["text","image"]</code>) for a model the catalog doesn't classify</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Self-deployed &amp; fine-tuned models</h3>
+          <p>
+            Fine-tunes run on the <em>same</em> serverless endpoint, addressed by name.
+            After you register one with Token Factory (a custom <code>name</code> such as
+            <code>legislation-qa-private</code>), point the profile at it. The provider's
+            authenticated <code>GET /v1/models</code> is account-scoped, so your fine-tunes
+            appear in the catalog and their context window (inherited from the base model)
+            is detected automatically.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Profile config example (YAML)</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: nebius-reasoning
+model: deepseek-ai/DeepSeek-R1
+provider: nebius
+
+plugins:
+  - cli
+  - file_edit
+
+plugin_configs:
+  nebius:
+    # Usually unnecessary — the catalog auto-detects context + modality.
+    context_length: 131072
+    modalities: ["text"]</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Point a profile at your fine-tune</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">provider: nebius
+model: legislation-qa-private   # your deployed fine-tune's name</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Model Catalog -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="models">Model Catalog</h2>
+          <p>
+            <code>list_models()</code> queries the <code>RichModel</code> catalog at
+            <code>GET /v1/models</code>. The fetch is <strong>authenticated</strong> (sends
+            your key), so the listing is account-scoped &mdash; your deployed fine-tunes
+            appear alongside the public catalog.
+          </p>
+          <p>
+            At <code>connect()</code> the provider bootstraps the active model's metadata
+            from that catalog: the per-model <code>context_length</code> is the primary
+            context-window tier, and <code>architecture.modality</code> (OpenRouter-style
+            <code>input-&gt;output</code>) drives input-modality detection. There is no
+            hardcoded fallback &mdash; if a model isn't listed, set <code>context_length</code>
+            and the provider fails loud telling you so.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Browse the catalog</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.nebius.provider import (
+    NebiusProvider
+)
+from shared.plugins.model_provider.base import ProviderConfig
+
+provider = NebiusProvider()
+provider.initialize(ProviderConfig())
+
+# List models (authenticated → includes your fine-tunes)
+models = provider.list_models()
+
+# Connect and check the catalog-detected context limit
+provider.connect("deepseek-ai/DeepSeek-R1")
+print(provider.get_context_limit())</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+
+          <table>
+            <thead>
+              <tr><th>Exception</th><th>Cause</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>APIKeyNotFoundError</code></td>
+                <td>No API key in env or stored credentials</td>
+              </tr>
+              <tr>
+                <td><code>AuthenticationError</code></td>
+                <td>API key rejected (401/403)</td>
+              </tr>
+              <tr>
+                <td><code>RateLimitError</code></td>
+                <td>Rate limit or credits exhausted (429)</td>
+              </tr>
+              <tr>
+                <td><code>ModelNotFoundError</code></td>
+                <td>Model not in the Nebius catalog</td>
+              </tr>
+              <tr>
+                <td><code>ContextLimitError</code></td>
+                <td>Prompt exceeds the model's context window</td>
+              </tr>
+              <tr>
+                <td><code>InfrastructureError</code></td>
+                <td>Upstream server error (5xx) or connection failure</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handle errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.nebius.errors import (
+    APIKeyNotFoundError,
+    AuthenticationError,
+    RateLimitError,
+    ContextLimitError,
+)
+
+try:
+    provider.initialize(config)
+    provider.connect("deepseek-ai/DeepSeek-R1")
+    result = provider.complete(messages, tools=tools)
+except APIKeyNotFoundError:
+    print("Run: nebius-auth  (jaato-doctor confirms it resolves)")
+except AuthenticationError:
+    print("Invalid API key")
+except RateLimitError as e:
+    if e.retry_after:
+        print(f"Rate limited; retry in {e.retry_after}s")
+except ContextLimitError:
+    print("Prompt too long for this model")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
