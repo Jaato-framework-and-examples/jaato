@@ -30,6 +30,12 @@ dependencies = [
 Repository = "https://github.com/Jaato-framework-and-examples/jaato"
 Issues = "https://github.com/Jaato-framework-and-examples/jaato/issues"
 
+[project.scripts]
+# Client-side preflight doctor — diagnoses an SDK client's env / socket /
+# daemon / auth before it ever calls connect().  Mirrors jaato-server's
+# jaato-scaffold console script (see jaato-server/pyproject.toml).
+jaato-doctor = "jaato_sdk.doctor:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest",

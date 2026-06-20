@@ -8,14 +8,18 @@ description: Build, validate, and debug a jaato SDK client or profile WITHOUT re
 Two executable tools carry the truth (they read the *installed* framework, so
 they can't drift). Reach for them before reading source.
 
-## 1. Preflight — `python -m jaato_sdk.doctor`
+## 1. Preflight — `jaato-doctor`
 
 Run this FIRST, from the same Python env as the daemon you target. It answers
 the questions that otherwise cost an hour:
 
 ```
-python -m jaato_sdk.doctor --workspace . --env-file .env --secret pass://jaato/<provider>/api-key
+jaato-doctor --workspace . --env-file .env --secret pass://jaato/<provider>/api-key
 ```
+
+(`jaato-doctor` is the console-script shortcut installed with `jaato-sdk`;
+`python -m jaato_sdk.doctor` remains a working equivalent if the SDK isn't on
+your `PATH`.)
 
 It checks: `server` importable (autostart needs it), socket listening / **stale**
 (the dead-pidfile state that blocks autostart, with the exact fix), the
