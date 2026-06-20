@@ -64,7 +64,9 @@ __all__ = [
 
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
-from ..base import ProviderCapabilities  # noqa: E402
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+)
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
@@ -76,3 +78,27 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     cancellation=True,
 )
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+# Anthropic's Messages API has no gateway routing extension, so there is no
+# ``routing`` layer (mirrors the namespacing documented in CLAUDE.md).
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("api_key", "str", None, "Anthropic API key (sk-ant-api...)"),
+        KnobSpec("oauth_token", "str", None,
+                 "OAuth token for Pro/Max subscription"),
+    ), description="auth / identity"),
+    KnobLayer("api_params", (
+        KnobSpec("temperature", "float"),
+        KnobSpec("top_p", "float"),
+        KnobSpec("top_k", "int"),
+        KnobSpec("max_tokens", "int"),
+        KnobSpec("enable_thinking", "bool"),
+        KnobSpec("thinking_budget", "int"),
+    ), description="Anthropic Messages API request-body fields"),
+    KnobLayer("framework_overrides", (
+        KnobSpec("context_length", "int"),
+        KnobSpec("modalities", "list"),
+    ), description="rare escape hatches"),
+))
+PROVIDER_QUIRKS = frozenset()

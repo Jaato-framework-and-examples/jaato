@@ -109,6 +109,7 @@ all = [
 
 [project.scripts]
 jaato-server = "server.__main__:main"
+jaato-scaffold = "shared.scaffold.__main__:main"
 
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group

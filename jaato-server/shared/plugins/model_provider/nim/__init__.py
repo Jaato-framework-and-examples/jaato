@@ -15,7 +15,9 @@ __all__ = ["NIMProvider", "create_provider"]
 
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
-from ..base import ProviderCapabilities  # noqa: E402
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+)
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
@@ -27,3 +29,14 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     cancellation=True,
 )
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("api_key", "str", None, "NIM API key (nvapi-...)"),
+        KnobSpec("base_url", "str", None,
+                 "JAATO_NIM_BASE_URL (self-hosted endpoint)"),
+        KnobSpec("context_length", "int"),
+    ), description="connection / identity"),
+))
+PROVIDER_QUIRKS = frozenset()

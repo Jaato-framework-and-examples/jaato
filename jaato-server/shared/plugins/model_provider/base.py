@@ -15,12 +15,14 @@ from typing import (
     Any,
     Callable,
     Dict,
+    FrozenSet,
     Iterable,
     List,
     Literal,
     Optional,
     Protocol,
     Set,
+    Tuple,
     runtime_checkable,
 )
 
@@ -319,6 +321,144 @@ class ProviderCapabilities:
 
     def as_dict(self) -> Dict[str, bool]:
         return {f: bool(getattr(self, f)) for f in CAPABILITY_FIELDS}
+
+
+# Canonical config-knob layers — the named sub-dicts under
+# ``plugin_configs.<provider>`` an author can set.  ``top_level`` is the
+# special layer for keys read directly off the provider config (not nested).
+# Adding a layer name here is informational only; ProviderKnobs accepts any
+# layer string, but keeping the vocabulary in one place lets the doc
+# generator and the validator share a stable set of column names.
+KNOB_LAYERS = (
+    "top_level",            # keys directly under plugin_configs.<provider>
+    "api_params",           # request-body sampling / generation params
+    "routing",              # gateway routing extension (provider-specific)
+    "load",                 # model-load passthrough (local runtimes)
+    "framework_overrides",  # rare escape hatches (context_length, base_url)
+)
+
+
+@dataclass(frozen=True)
+class KnobSpec:
+    """One config knob the provider reads: key, type, default, description.
+
+    ``type`` is a hint string — one of ``"str"``, ``"int"``, ``"float"``,
+    ``"bool"``, ``"list"``, ``"dict"``.  ``default`` is the provider's
+    STATIC default when the key is absent, or ``None`` when the provider
+    RESOLVES it at runtime (env var → auth store → catalog).  ``None`` here
+    honestly means "no static default; the provider has a resolution chain",
+    NOT "defaults to null" — authored from the provider.py read site.
+    """
+
+    name: str
+    type: str = "str"
+    default: Any = None
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class KnobLayer:
+    """One config layer of a provider and the knobs it recognizes.
+
+    A layer maps to a nesting level under ``plugin_configs.<provider>``:
+    ``top_level`` knobs sit directly under the provider; named layers
+    (``api_params``, ``routing``, ``load``, ``framework_overrides``) are
+    sub-dicts the provider reads.
+
+    ``opaque=True`` marks a **pass-through** layer — the provider forwards
+    every key verbatim to its upstream (e.g. OpenRouter's ``routing``
+    provider-extension dict, LM Studio's ``load`` body).  For an opaque
+    layer ``knobs`` is advisory documentation only; the validator MUST NOT
+    reject unknown keys in it (there is no fixed key set — that's the
+    point).  For a non-opaque layer ``knobs`` is the authoritative, closed
+    set: the validator rejects anything outside it (these are the
+    silently-ignored-typo failures the contract exists to catch).
+    """
+
+    layer: str
+    knobs: Tuple[KnobSpec, ...] = ()
+    opaque: bool = False
+    description: str = ""
+
+    @property
+    def keys(self) -> FrozenSet[str]:
+        """The recognized key names (for the validator's membership test)."""
+        return frozenset(k.name for k in self.knobs)
+
+
+@dataclass(frozen=True)
+class ProviderKnobs:
+    """Declared config knobs of a provider, grouped by layer.
+
+    The SINGLE SOURCE OF TRUTH for ``jaato-scaffold explain provider <name>
+    --knobs`` and for the ``validate`` linter's unknown-knob detection.
+    Each provider declares a module-level ``PROVIDER_KNOBS`` constant in its
+    ``__init__.py`` (sibling of ``PROVIDER_CAPABILITIES``), authored from the
+    keys the provider's code actually reads — NOT from prose docs, which
+    drift.
+
+    **Framework-wiring keys are intentionally excluded.**  ``workspace_path``
+    / ``config_root`` are set by the framework, never by a profile author, so
+    they are not knobs (same exclusion rule as ``PluginSetting`` /
+    ``get_config_schema``).  Auth/identity keys an author CAN set in a
+    profile (``api_key``, ``oauth_token``) ARE included, in ``top_level``.
+
+    A CI guard asserts every provider declares ``PROVIDER_KNOBS`` (+
+    ``PROVIDER_QUIRKS``), mirroring the capability guard — so a new provider
+    cannot silently ship prose-only knobs again.
+    """
+
+    layers: Tuple[KnobLayer, ...] = ()
+
+    def get_layer(self, name: str) -> Optional[KnobLayer]:
+        """Return the declared :class:`KnobLayer` named ``name``, or None."""
+        for lyr in self.layers:
+            if lyr.layer == name:
+                return lyr
+        return None
+
+    def as_dict(self) -> Dict[str, Dict[str, Any]]:
+        """Flatten to JSON-friendly ``{layer: {opaque, description, knobs}}``.
+
+        Each knob carries ``{type, default, description}``.  Used by
+        ``explain --json`` and the doc generator.
+        """
+        return {
+            lyr.layer: {
+                "opaque": lyr.opaque,
+                "description": lyr.description,
+                "knobs": {
+                    k.name: {
+                        "type": k.type,
+                        "default": k.default,
+                        "description": k.description,
+                    }
+                    for k in lyr.knobs
+                },
+            }
+            for lyr in self.layers
+        }
+
+    def accepts(self, layer: str, key: str) -> bool:
+        """Whether ``key`` is valid in ``layer`` (for the validator).
+
+        Opaque layers accept any key (pass-through).  A non-opaque layer
+        accepts only its declared keys.  An undeclared layer name is
+        rejected (the author nested under a layer the provider never reads).
+        """
+        lyr = self.get_layer(layer)
+        if lyr is None:
+            return False
+        return True if lyr.opaque else key in lyr.keys
+
+
+# Default empty quirk set.  Providers that honor model quirks declare a
+# module-level ``PROVIDER_QUIRKS = frozenset({...})`` in their ``__init__.py``
+# enumerating the quirk names they read from ``profile.quirks`` /
+# ``config.extra["quirks"]``.  Today only ``vllm`` is non-empty; the guard
+# requires every provider to declare the constant (empty is the honest answer
+# for the rest) so a new quirk consumer can't ship an unvalidated allow-list.
+PROVIDER_QUIRKS_DEFAULT: FrozenSet[str] = frozenset()
 
 
 @runtime_checkable

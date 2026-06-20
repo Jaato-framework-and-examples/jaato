@@ -16,7 +16,9 @@ __all__ = ["OpenRouterProvider", "create_provider"]
 
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
-from ..base import ProviderCapabilities  # noqa: E402
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+)
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
@@ -28,3 +30,39 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     cancellation=True,
 )
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("api_key", "str", None, "OpenRouter API key (sk-or-...)"),
+        KnobSpec("http_referer", "str", None, "HTTP-Referer attribution header"),
+        KnobSpec("app_title", "str", None, "X-OpenRouter-Title header"),
+        KnobSpec("app_categories", "list", None, "X-OpenRouter-Categories header"),
+        KnobSpec("extra_headers", "dict", None,
+                 "additional headers (e.g. x-anthropic-beta)"),
+    ), description="auth / app-attribution identity"),
+    KnobLayer("api_params", (
+        KnobSpec("models", "list", None, "cross-model fallback list"),
+        KnobSpec("temperature", "float"),
+        KnobSpec("top_p", "float"),
+        KnobSpec("top_k", "int"),
+        KnobSpec("max_tokens", "int"),
+        KnobSpec("parallel_tool_calls", "bool"),
+        KnobSpec("strict_tools", "bool", None, "emit strict:true on tool defs"),
+        KnobSpec("enable_thinking", "bool"),
+        KnobSpec("thinking_budget", "int", None, "→ reasoning.max_tokens"),
+        KnobSpec("thinking_level", "str", None, "low|medium|high → reasoning.effort"),
+        KnobSpec("cache_prompt", "str", "auto", "auto|true|false"),
+        KnobSpec("cache_ttl", "str", "5m", "5m|1h"),
+    ), description="OpenAI Chat Completions request-body fields"),
+    KnobLayer("routing", opaque=True,
+              description="OpenRouter provider-routing extension — any key "
+                          "forwarded verbatim (order, sort, only, ignore, "
+                          "quantizations, max_price, ...)"),
+    KnobLayer("framework_overrides", (
+        KnobSpec("context_length", "int"),
+        KnobSpec("base_url", "str"),
+        KnobSpec("modalities", "list"),
+    ), description="rare escape hatches"),
+))
+PROVIDER_QUIRKS = frozenset()

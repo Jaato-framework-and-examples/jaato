@@ -85,7 +85,9 @@ def create_plugin() -> ClaudeCLIProvider:
 
 
 # --- Provider capability contract (see docs/model-provider-capabilities.md) ---
-from ..base import ProviderCapabilities  # noqa: E402
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec,
+)
 
 PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=False,
@@ -97,3 +99,15 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     cancellation=False,
 )
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("cli_path", "str", None, "path to claude CLI"),
+        KnobSpec("cli_mode", "str", None, "delegated|passthrough"),
+        KnobSpec("max_turns", "int", None, "max agentic turns"),
+        KnobSpec("permission_mode", "str", None, "CLI permission mode"),
+        KnobSpec("context_length", "int"),
+    ), description="CLI backend configuration"),
+))
+PROVIDER_QUIRKS = frozenset()
