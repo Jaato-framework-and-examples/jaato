@@ -5,6 +5,7 @@
   "tool_name": "",
   "call_id": null,
   "success": true,
+  "is_error_result": false,
   "duration_seconds": 0.0,
   "error_message": null,
   "backgrounded": false,
