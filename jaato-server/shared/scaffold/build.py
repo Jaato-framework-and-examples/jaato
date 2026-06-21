@@ -210,6 +210,14 @@ def _set_profile_yaml(agent: str, provider: str, model: str) -> str:
         "plugins: []  # empty keeps the inherited _base surface",
         f"model: {model}",
         f"provider: {provider}",
+        "# Optional multi-model tiers — cognitive roles + a 'vision' modality",
+        "# tier.  V2 allows a DIFFERENT provider per tier (e.g. this cheap text",
+        "# executor + a vision model elsewhere).  See `jaato-scaffold explain tiers`.",
+        "# model_tiers:",
+        f"#   executor: {{model: {model}, provider: {provider}}}",
+        "#   vision:   {model: google/gemini-2.5-flash-lite, provider: openrouter}",
+        "#   initial: executor",
+        "#   fallback: executor",
     ]
     knobs = info.knobs if info else None
     if knobs is not None:

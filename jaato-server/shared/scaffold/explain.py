@@ -47,6 +47,7 @@ def overview() -> Rendered:
         "  jaato-scaffold explain transports\n"
         "  jaato-scaffold explain clients\n"
         "  jaato-scaffold explain runtime\n"
+        "  jaato-scaffold explain tiers\n"
         "  jaato-scaffold explain sets [--workspace DIR]\n"
     )
     return data, text
@@ -227,6 +228,63 @@ def runtime() -> Rendered:
         "  jaato-doctor --session <id|latest> --workspace DIR\n"
         "  -> reports whether the runner-tier path plugins resolved the workspace\n"
         "     (PASS=<ws>) or got workspace=none (FAIL + the fix), plus the log map.\n"
+    )
+    return data, text
+
+
+# ------------------------------------------------------------------- tiers
+
+def tiers() -> Rendered:
+    """Model tiers — multi-model sessions: cognitive roles + modality (vision)
+    roles, switched mid-session via ``enter_tier``.  V2 (#354): tiers may span
+    PROVIDERS.  Introspects ``shared.model_tiers`` (VALID_TIER_NAMES /
+    RESERVED_KEYS) so it tracks the installed framework.
+    """
+    from shared import model_tiers as mt
+    valid = sorted(mt.VALID_TIER_NAMES)
+    reserved = sorted(mt.RESERVED_KEYS)
+    data = {
+        "tier_names": valid,
+        "reserved_keys": reserved,
+        "shape": "model_tiers: { <tier>: <model-str> | {model, provider}, "
+                 "initial: <tier>, fallback: <tier> }",
+        "switching": "the MODEL calls enter_tier('<tier>') mid-session; the "
+                     "active tier selects the model (and, V2, the provider); "
+                     "history is preserved across the switch",
+        "vision": "a 'vision' tier maps to an image-capable model; an image to a "
+                  "non-vision active provider trips the content gate (a synthetic "
+                  "'enter_tier(\"vision\") first' the agent self-corrects on). "
+                  "user-message images ride the attachment ferry (#353): SDK "
+                  "send_message(attachments=[path | {mime_type,data,display_name}])",
+        "cross_provider": "V2 (#354): tiers may declare DIFFERENT providers; "
+                          "switch_tier swaps to a cached per-tier provider "
+                          "instance (history is provider-neutral; switch-back is "
+                          "O(1)). e.g. a cheap zhipuai text executor + a gemini/"
+                          "OpenRouter vision tier in ONE profile.",
+    }
+    text = (
+        "jaato model tiers — multi-model sessions (cognitive + modality roles)\n"
+        "  ----------------------------------------------------------------\n"
+        f"TIER NAMES   {', '.join(valid)}\n"
+        f"CONTROL KEYS {', '.join(reserved)}  (reserved: initial tier + fallback)\n\n"
+        "SHAPE  (in a profile)\n"
+        "  model_tiers:\n"
+        "    <tier>:   <model-string>   OR   {model: <m>, provider: <p>}\n"
+        "    initial:  <tier>           # the tier a session starts in\n"
+        "    fallback: <tier>           # when enter_tier names an undeclared tier\n\n"
+        "SWITCHING\n"
+        "  the MODEL calls enter_tier('<tier>') mid-session; the active tier picks\n"
+        "  the model (and, V2, the provider).  conversation history is preserved.\n\n"
+        "VISION  (a modality tier)\n"
+        "  map a 'vision' tier to an image-capable model.  an image reaching a\n"
+        "  non-vision active provider trips the content gate: a synthetic note\n"
+        "  'enter_tier(\"vision\") first' the agent self-corrects on.  user-message\n"
+        "  images ride the attachment ferry — SDK send_message(attachments=...).\n\n"
+        "CROSS-PROVIDER  (V2)\n"
+        "  tiers may declare DIFFERENT providers — switch_tier swaps to a cached\n"
+        "  per-tier provider instance (history is provider-neutral; switch-back is\n"
+        "  O(1)).  e.g. a cheap zhipuai text executor + a gemini/OpenRouter vision\n"
+        "  tier in ONE profile (no need to relocate the whole profile).\n"
     )
     return data, text
 
