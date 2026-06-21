@@ -19,6 +19,19 @@
   <a href="https://github.com/Jaato-framework-and-examples/the_Jaato_Arch_visualization">Architecture</a>
 </p>
 
+> **🤖 Building on jaato with an AI coding agent? Point it at the skill and let it drive.**
+> jaato ships a self-describing toolkit: the [`jaato-sdk-client` skill](.claude/skills/jaato-sdk-client/SKILL.md) plus two executable tools — **`jaato-scaffold`** (interrogate · validate · scaffold) and **`jaato-doctor`** (preflight · debug). They **introspect the _installed_ framework**, so your agent gets _current_ answers — providers, plugins, knobs, profiles, runtime + log layout — without reading the source and without drifting from the code. Point your agent (Claude Code, etc.) at the skill, say what you want to build, and let it scaffold a client, validate a profile, and debug a running session for you.
+
+```bash
+jaato-scaffold explain              # what the framework offers, right now
+jaato-scaffold new client ...       # a runnable client, valid by construction
+jaato-scaffold validate <profile>   # lint an agent profile vs the live registry
+jaato-doctor   --workspace .        # preflight before connect()
+jaato-doctor   --session latest     # debug a running session (workspace / path-tool failures)
+```
+
+See the **Developer Tooling** section below for the full surface.
+
 ## Overview
 
 jaato is a framework for building agentic AI applications with LLM function calling, tool orchestration, and an extensible plugin architecture. It runs as a daemon with a typed event protocol, allowing multiple clients (TUI, web, headless) to connect simultaneously via IPC or WebSocket.
