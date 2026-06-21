@@ -139,6 +139,35 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
     )
 
 
+def _set_runner_workspace_context(
+    workspace_path: Optional[str], config_root: Optional[str]
+) -> None:
+    """Seed the runner process's workspace/config root for runner-tier plugins.
+
+    Runner-tier path plugins (filesystem_query / file_edit / cli / notebook) read
+    the session workspace from ``session_context.get_workspace_root()`` (a
+    ContextVar, with an ``os.environ['JAATO_WORKSPACE_ROOT']`` fallback) when
+    their per-plugin config carries no explicit root.  The runner — unlike the
+    daemon's ``JaatoServer._in_workspace`` (core.py:913-948) — historically set
+    NEITHER, so a pool-/cold-served session initialized with ``workspace=none``
+    and path tools were denied, UNLESS ``JAATO_WORKSPACE_ROOT`` happened to be
+    exported globally (the env mask that hid this build-wide regression).
+
+    Both surfaces are seeded: the ContextVar (read + cached by each plugin's
+    ``initialize()`` in the bootstrap context) and ``os.environ`` (for
+    cross-thread / ``os.environ``-reading consumers).  There is NO reset — a
+    runner process serves exactly one session for its whole lifetime, so the
+    root is constant.  Must be called BEFORE ``expose_all``.
+    """
+    from shared.session_context import set_workspace_root, set_config_root
+    if workspace_path:
+        set_workspace_root(workspace_path)
+        os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
+    if config_root:
+        set_config_root(config_root)
+        os.environ["JAATO_CONFIG_ROOT"] = config_root
+
+
 def _configure_runtime_plugins(
     runtime: "JaatoRuntime", envelope: SessionInitEnvelope,
 ) -> None:
@@ -267,6 +296,11 @@ def _configure_runtime_plugins(
         registry.set_workspace_path(workspace_path)
     if envelope.config_root:
         registry.set_config_root(envelope.config_root)
+    # Seed the runner PROCESS's workspace/config context (session_context
+    # ContextVar + os.environ fallback) so runner-tier path plugins resolve the
+    # session workspace at ``initialize()`` — BEFORE ``expose_all`` below.  See
+    # the helper for why the runner must do this and why both surfaces.
+    _set_runner_workspace_context(workspace_path, envelope.config_root)
     if session_id:
         registry.set_session_id(session_id)
     if envelope.agent_id:
