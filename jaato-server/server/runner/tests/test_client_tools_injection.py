@@ -44,8 +44,14 @@ def test_register_registers_schema_and_forwarder():
 
 def test_forwarder_routes_via_sentinel():
     calls = []
-    rpc = SimpleNamespace(
-        daemon_plugin_execute=lambda p, t, a: calls.append((p, t, a)) or {"ok": 1})
+    # KEYWORD-ONLY mock matching the real RunnerRPCClient.daemon_plugin_execute
+    # signature (``def ...(self, *, plugin_name, tool_name, args, timeout=None)``)
+    # — a positional call raises TypeError, so this catches the regression where
+    # the forwarder passed args positionally.
+    def _fake(*, plugin_name, tool_name, args, timeout=None):
+        calls.append((plugin_name, tool_name, args))
+        return {"ok": 1}
+    rpc = SimpleNamespace(daemon_plugin_execute=_fake)
     ex = _make_client_tool_forwarder(_FakeRegistry(rpc=rpc), "send_to_telegram")
     assert ex({"text": "hi"}) == {"ok": 1}
     assert calls == [(_CLIENT_TOOL_PLUGIN, "send_to_telegram", {"text": "hi"})]
