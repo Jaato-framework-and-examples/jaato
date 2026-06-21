@@ -204,6 +204,41 @@ class _CancellationResult:
     new_response: Optional[ProviderResponse] = None
 
 
+# Introspection's tools (list_tools / get_tool_schemas) give the model SCHEMA
+# VISIBILITY — the ability to discover deferred tools.
+_INTROSPECTION_TOOL_NAMES = frozenset({"list_tools", "get_tool_schemas"})
+
+
+def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
+                              tool_scopes, plugin_of) -> bool:
+    """Is there genuinely something for the model to discover?
+
+    True iff a discoverable (non-``core``) tool that belongs to a profile plugin
+    which is NOT ``(preload)``-ed and NOT scoped-out is exposed.  When this is
+    False, every tool is already eager (core or preloaded), so introspection's
+    tools are dead weight and can be dropped from the initial schema.
+
+    Pure (no session/registry deps) so it is unit-testable.  ``plugin_of(name)``
+    maps a tool name to its owning plugin name (or ``None``).
+    """
+    profile = set(profile_plugins or [])
+    pre = set(preloaded or [])
+    scopes = tool_scopes or {}
+    for sc in exposed_schemas:
+        if sc.name in _INTROSPECTION_TOOL_NAMES:
+            continue
+        if getattr(sc, "discoverability", "discoverable") == "core":
+            continue  # eager — not something to "discover"
+        pname = plugin_of(sc.name)
+        if pname is None or pname not in profile or pname in pre:
+            continue
+        allow = scopes.get(pname)
+        if allow is not None and sc.name not in allow:
+            continue  # scoped out — not exposed
+        return True
+    return False
+
+
 class JaatoSession:
     """Per-agent conversation session.
 
@@ -1970,6 +2005,29 @@ class JaatoSession:
                         f"tool(s) from the initial surface "
                         f"(scopes={self._tool_scopes})"
                     )
+
+            # Gate introspection on the presence of something to discover.
+            # Its [core] tools are always in the initial schema, but they are
+            # dead weight (and invite a wasted discovery turn) when EVERY profile
+            # tool is already eager — core, or its plugin is (preload)-ed.  The
+            # deferred set is read from the LIVE registry, so a dynamic plugin
+            # (mcp) that already surfaced discoverable tools keeps introspection
+            # automatically — no hardcoded plugin list.  Conservative: only act
+            # with an explicit profile plugin filter (an unfiltered session
+            # exposes everything and may legitimately need discovery).
+            if self._tool_plugins is not None and self._tools:
+                reg = self._runtime.registry
+                if not _has_deferred_to_discover(
+                        reg.get_exposed_tool_schemas(), self._tool_plugins,
+                        self._preloaded_plugins, self._tool_scopes,
+                        lambda n: getattr(reg.get_plugin_for_tool(n), "name", None)):
+                    n0 = len(self._tools)
+                    self._tools = [t for t in self._tools
+                                   if t.name not in _INTROSPECTION_TOOL_NAMES]
+                    if len(self._tools) != n0:
+                        self._trace(
+                            "configure: dropped introspection — nothing deferred "
+                            "to discover (every profile tool is core or preloaded)")
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
