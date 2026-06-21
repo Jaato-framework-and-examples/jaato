@@ -37,7 +37,8 @@ jaato-scaffold explain sets --workspace DIR # profile-sets + the provider/model 
 jaato-scaffold validate <profile.yaml|workspace> [--set S]   # lint vs the live registry
 jaato-scaffold new profile-set --workspace DIR --set <provider_model> \
     --provider P --model M --agents a,b,c   # emit base+set, then re-validate
-jaato-scaffold new client|fire|cascade|observer --workspace DIR --provider P --model M
+jaato-scaffold new client|fire|cascade|observer --workspace DIR --provider P --model M [--recoverable]
+jaato-scaffold explain clients              # IPCClient (simple) vs IPCRecoveryClient
 ```
 
 `validate` catches the silent-ignore failures the runtime drops without a word:
@@ -86,6 +87,14 @@ Don't hand-write it — `jaato-scaffold new client` emits it. It bakes in:
 crashes the handshake), and completion via
 `subscribe_once(EventType.SESSION_TERMINATED)` then wait (NOT
 `set_event_callback` — that method does not exist).
+
+**Simple vs recoverable client.** That recipe uses the plain `IPCClient`; pass
+`--recoverable` to `new client` to emit `IPCRecoveryClient` instead —
+auto-reconnect state machine + `on_status_change` callback, with
+`IncompatibleServerError` treated as permanent. Reach for it for anything
+long-lived (a TUI, an observer, a cascade driver, anything that must survive a
+daemon restart — a per-run `jaato-server --stop` + autostart). `jaato-scaffold
+explain clients` lays out the choice.
 
 ## Profile sets
 

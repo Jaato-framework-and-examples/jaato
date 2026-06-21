@@ -38,7 +38,7 @@ Preflight first:
   python -m jaato_sdk.doctor --workspace __WORKSPACE__ --env-file __ENV_FILE__
 """
 import asyncio
-from jaato_sdk import IPCClient, ClientType, EventType
+from jaato_sdk import __CLIENT_CLASS__, ClientType, EventType
 
 SOCKET = "__SOCKET__"
 ENV_FILE = "__ENV_FILE__"
@@ -47,14 +47,14 @@ MODEL = "__MODEL__"
 PROVIDER = "__PROVIDER__"
 
 
-def _new_client():
+__ON_STATUS_DEF__def _new_client():
     """Construct the API client with the known-good knobs."""
-    return IPCClient(
+    return __CLIENT_CLASS__(
         SOCKET,
         client_type=ClientType.API,   # load-bearing: keeps signal_completion
         auto_start=True,
         env_file=ENV_FILE,            # never None (handshake crashes on None)
-        workspace_path=WORKSPACE,
+        workspace_path=WORKSPACE,__ON_STATUS_ARG__
     )
 '''
 

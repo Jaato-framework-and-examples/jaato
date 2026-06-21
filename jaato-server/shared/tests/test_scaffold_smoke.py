@@ -46,7 +46,8 @@ def test_gc_strategies_present():
 def _args(**kw):
     ns = argparse.Namespace()
     defaults = dict(archetype=None, workspace=None, provider=None, model=None,
-                    set=None, agents=None, force=True, json=False)
+                    set=None, agents=None, force=True, json=False,
+                    recoverable=False)
     defaults.update(kw)
     for k, v in defaults.items():
         setattr(ns, k, v)
@@ -68,6 +69,29 @@ def test_new_client_archetypes_compile(tmp_path, arch):
         archetype=arch, workspace=str(ws), provider="nebius", model="m"))
     assert rc == 0
     py_compile.compile(str(ws / f"run_{arch}.py"), doraise=True)
+
+
+@pytest.mark.parametrize("arch", ["client", "fire", "cascade", "observer"])
+def test_new_client_recoverable_emits_recovery_client(tmp_path, arch):
+    # --recoverable swaps IPCClient → IPCRecoveryClient for every archetype.
+    ws = tmp_path / f"{arch}_recov"
+    rc = build.run(_args(archetype=arch, workspace=str(ws), provider="nebius",
+                         model="m", recoverable=True))
+    assert rc == 0
+    src = (ws / f"run_{arch}.py").read_text()
+    assert "IPCRecoveryClient(" in src           # the recoverable client
+    assert "on_status_change=_on_status" in src  # wired the status callback
+    assert "def _on_status" in src               # and defined it
+    py_compile.compile(str(ws / f"run_{arch}.py"), doraise=True)
+
+
+def test_new_client_default_is_plain_ipcclient(tmp_path):
+    ws = tmp_path / "plain"
+    build.run(_args(archetype="client", workspace=str(ws), provider="nebius",
+                    model="m"))
+    src = (ws / "run_client.py").read_text()
+    assert "IPCClient(" in src and "IPCRecoveryClient" not in src
+    assert "_on_status" not in src
 
 
 def test_new_rejects_unknown_provider(tmp_path):
