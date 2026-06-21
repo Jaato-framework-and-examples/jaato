@@ -76,6 +76,10 @@ def _make_session(
     session._model_name = "test-model"
     session._provider_name_override = None
     session._provider = provider
+    # V2 cross-provider tiers: __init__ sets these; mirror them here (this
+    # helper bypasses __init__ via __new__).
+    session._provider_cache = {}
+    session._active_provider_name = None
     session._agent_id = "test"
     session._agent_type = "main"
     session._agent_name = None
