@@ -62,13 +62,23 @@ def test_new_profile_set_is_valid_by_construction(tmp_path):
     assert rc == 0  # emit-then-validate returned clean
 
 
-@pytest.mark.parametrize("arch", ["client", "fire", "cascade", "observer"])
+@pytest.mark.parametrize(
+    "arch", ["client", "fire", "cascade", "observer", "host-tools"])
 def test_new_client_archetypes_compile(tmp_path, arch):
     ws = tmp_path / arch
     rc = build.run(_args(
         archetype=arch, workspace=str(ws), provider="nebius", model="m"))
     assert rc == 0
     py_compile.compile(str(ws / f"run_{arch}.py"), doraise=True)
+
+
+def test_new_host_tools_registers_client_tools(tmp_path):
+    rc = build.run(_args(archetype="host-tools", workspace=str(tmp_path),
+                         provider="nebius", model="m"))
+    assert rc == 0
+    src = (tmp_path / "run_host-tools.py").read_text()
+    assert "register_client_tools" in src       # the agent-callable host tool
+    assert '"handler": _send_to_user' in src    # executed locally by the client
 
 
 @pytest.mark.parametrize("arch", ["client", "fire", "cascade", "observer"])

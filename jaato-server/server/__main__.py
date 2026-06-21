@@ -542,6 +542,10 @@ class JaatoDaemon:
         if self._ipc_server:
             self._ipc_server._on_session_request = self._command_router.handle_request
             self._ipc_server._on_command_list_request = self._command_router.get_command_list
+            # Give the IPC transport a SessionManager handle so it can register
+            # client-provided ("host") tools onto a session's registry (mirrors
+            # the WS transport's _command_router access).
+            self._ipc_server._session_manager = self._session_manager
             self._ipc_server._on_client_disconnect = self._command_router.handle_client_disconnect
         if self._ws_server:
             self._ws_server.set_command_router(self._command_router)

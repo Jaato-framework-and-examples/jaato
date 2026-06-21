@@ -1649,6 +1649,52 @@ class IPCClient:
             error=error,
         ))
 
+    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+        """Register client-provided ("host") tools the agent can call.
+
+        Each entry: ``{"name", "description", "parameters", "handler"}`` (plus
+        optional ``"timeout"`` ms / ``"auto_approve"``).  ``handler(args) -> Any``
+        runs when the agent invokes the tool; its return (JSON-encoded if not a
+        str) is sent back as the result.  Register **before** ``create_session``
+        so the schema reaches the runner-tier model (mid-session registration
+        isn't seen until a follow-up lands the runner mid-session push).
+        """
+        from jaato_sdk.events import ToolsRegisterClientRequest, EventType
+        if not hasattr(self, "_host_tool_handlers"):
+            self._host_tool_handlers: Dict[str, Any] = {}
+            self.subscribe(
+                EventType.TOOL_EXECUTE_REQUEST, self._on_tool_execute_request)
+        for t in tools:
+            if t.get("handler"):
+                self._host_tool_handlers[t["name"]] = t["handler"]
+        wire = [{k: v for k, v in t.items() if k != "handler"} for t in tools]
+        await self._send_event(
+            ToolsRegisterClientRequest(tools=wire, categories={}))
+
+    def _on_tool_execute_request(self, event: Any) -> None:
+        """Run the registered host-tool handler for an agent tool call and send
+        the result back via :meth:`respond_to_tool_execution`."""
+        import asyncio
+        import json
+        fn = getattr(self, "_host_tool_handlers", {}).get(event.tool_name)
+
+        async def _run() -> None:
+            if fn is None:
+                await self.respond_to_tool_execution(
+                    event.call_id,
+                    error=f"no handler for host tool {event.tool_name!r}")
+                return
+            try:
+                out = fn(event.tool_args)
+                if asyncio.iscoroutine(out):
+                    out = await out
+                result = out if isinstance(out, str) else json.dumps(out)
+                await self.respond_to_tool_execution(event.call_id, result=result)
+            except Exception as exc:  # report the failure to the model
+                await self.respond_to_tool_execution(event.call_id, error=str(exc))
+
+        asyncio.create_task(_run())
+
     async def stop(self) -> None:
         """Stop current operation."""
         await self._send_event(StopRequest())

@@ -97,6 +97,8 @@ from jaato_sdk.events import (
     CommandListRequest,
     ClientConfigRequest,
     PostAuthSetupResponse,
+    ToolsRegisterClientRequest,
+    ToolExecuteResultEvent,
 )
 
 
@@ -242,6 +244,17 @@ class JaatoIPCServer:
         self._clients: Dict[str, IPCClientConnection] = {}
         self._client_counter = 0
         self._lock = asyncio.Lock()
+        # Client-provided ("host") tool support.  ``_session_manager`` is wired
+        # at construction (server/__main__.py) so the IPC transport can reach a
+        # session's registry to register the proxy tools; ``_client_tool_waiters``
+        # holds call_id -> (Event, holder) for the proxy executors' blocking wait
+        # on the client's ToolExecuteResultEvent.
+        self._session_manager = None
+        self._client_tool_waiters: Dict[str, Any] = {}
+        # Host tools registered BEFORE session.new — buffered here for the
+        # post-session.new proxy-EXECUTOR registration (the SCHEMAS are buffered
+        # separately in SessionManager for the pre-spawn envelope seeding).
+        self._pending_client_tools_ipc: Dict[str, Any] = {}
 
         # Custom message-type handlers registered by daemon extensions
         # via ``register_message_handler``.  Fires when a client sends
@@ -619,6 +632,23 @@ class JaatoIPCServer:
             )
             return
 
+        # Client-provided ("host") tool registration (mirrors the WS path; uses
+        # the shared registration helper) — register the proxy schema/executor so
+        # the agent can call it, the executor proxying back to this IPC client.
+        if isinstance(event, ToolsRegisterClientRequest):
+            self._register_client_tools_ipc(
+                client_id, event.tools, getattr(event, "categories", None))
+            return
+        # Client-side tool execution result — wake the proxy executor's waiter.
+        if isinstance(event, ToolExecuteResultEvent):
+            entry = self._client_tool_waiters.pop(event.call_id, None)
+            if entry is not None:
+                waiter, holder = entry
+                holder["result"] = event.result
+                holder["error"] = event.error
+                waiter.set()
+            return
+
         # Get client's session
         async with self._lock:
             client = self._clients.get(client_id)
@@ -652,6 +682,16 @@ class JaatoIPCServer:
                         session_id or "",
                         event,
                     )
+                    # After session.new/attach, register buffered host-tool
+                    # EXECUTORS now that the session (+ registry) exists.  The
+                    # SCHEMAS already rode the runner envelope (seeded pre-spawn
+                    # in the session.new flow); this wires the daemon-side proxy
+                    # executors for execution.  Mirrors websocket's post-apply.
+                    if (isinstance(event, CommandRequest)
+                            and event.command.lower() in ("session.new", "session.attach")
+                            and client_id in self._pending_client_tools_ipc):
+                        pending = self._pending_client_tools_ipc.pop(client_id)
+                        self._register_client_tools_ipc(client_id, pending)
             else:
                 await self._send_error(
                     client_id,
@@ -676,6 +716,56 @@ class JaatoIPCServer:
             client_id,
             ErrorEvent(error=error, error_type="RequestError")
         )
+
+    def _make_ipc_send_request(self, session_id: str):
+        """Build the proxy executor's transport send: dispatch the
+        ``ToolExecuteRequestEvent`` to every IPC client attached to
+        ``session_id``.  Returns True iff at least one received it (the shared
+        helper retries while none is connected)."""
+        def _send(event) -> bool:
+            sent = False
+            for cid, client in list(self._clients.items()):
+                if client.session_id == session_id:
+                    self.send_event(cid, event)
+                    sent = True
+            return sent
+        return _send
+
+    def _register_client_tools_ipc(self, client_id, tools, categories=None) -> None:
+        """Register client-provided ("host") tools for an IPC client.
+
+        Before the session exists (registered before session.new): buffer the
+        SCHEMAS via the ``SessionManager`` so the session.new flow seeds the
+        runner envelope before the spawn (shared with the WS path).  Once the
+        session exists: register the proxy executors (which send
+        ``ToolExecuteRequestEvent`` to this IPC client) on the session registry
+        via the shared helper.
+        """
+        sm = self._session_manager
+        if sm is None:
+            logger.warning("IPC client tools: no session_manager wired — ignoring")
+            return
+        client = self._clients.get(client_id)
+        session_id = client.session_id if client else None
+        session = sm.get_session(session_id) if session_id else None
+        if (session is None or getattr(session, "server", None) is None
+                or session.server.registry is None):
+            # No session yet: buffer the SCHEMAS (SessionManager → pre-spawn
+            # envelope seed) AND the tools for the post-session.new proxy-executor
+            # registration below.
+            sm.buffer_client_tools(client_id, tools)
+            self._pending_client_tools_ipc[client_id] = tools
+            logger.info("Buffered %d IPC client tools for %s (session pending)",
+                        len(tools or []), client_id)
+            return
+        from server.client_tools import register_client_tools
+        registered = register_client_tools(
+            session.server.registry, session.server, tools,
+            send_request=self._make_ipc_send_request(session_id),
+            waiters=self._client_tool_waiters,
+        )
+        logger.info("Registered %d IPC client tools for %s: %s",
+                    len(registered), client_id, registered)
 
     def send_event(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client (``EventSink`` protocol).
