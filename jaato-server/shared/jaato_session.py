@@ -409,6 +409,16 @@ class JaatoSession:
         # session).  Once the provider exists, the lock's hot path
         # is just an "already initialized" check.
         self._provider_init_lock = threading.Lock()
+        # V2 cross-provider tiers: per-provider instance cache (provider_name ->
+        # ModelProviderPlugin) so a tier that declares a DIFFERENT provider gets
+        # its own cached instance, switched in O(1) by switch_tier without
+        # re-paying create_provider's init cost on every text<->vision hop.
+        # ``_active_provider_name`` tracks which provider self._provider IS
+        # (the provider's own .name is unreliable for subclassed providers like
+        # zhipuai-extends-anthropic, so we track the name we created it under).
+        # Empty/None until the default provider is created in _ensure_provider.
+        self._provider_cache: Dict[str, 'ModelProviderPlugin'] = {}
+        self._active_provider_name: Optional[str] = None
         # True iff ``configure()`` finished its work successfully.
         # Decoupled from ``_provider is not None`` because the
         # provider is now lazy; ``is_configured`` checks this flag
@@ -2282,6 +2292,12 @@ class JaatoSession:
                 skip_model_test=cfg['skip_model_test'],
                 plugin_configs=cfg['plugin_configs'],
             )
+            # V2 cross-provider tiers: record which provider this instance IS and
+            # seed the per-provider cache so switch_tier can compare against it
+            # and reuse it on a switch back.
+            self._active_provider_name = cfg['provider_name']
+            if cfg['provider_name'] is not None:
+                self._provider_cache[cfg['provider_name']] = self._provider
             # Propagate agent context to provider for trace identification.
             if hasattr(self._provider, 'set_agent_context'):
                 self._provider.set_agent_context(
@@ -6461,6 +6477,14 @@ NOTES
         vision_entry = tier_config.tiers.get(TIER_VISION)
         if vision_entry is None:
             return
+        # V2 cross-provider: a vision tier on a DIFFERENT provider is NOT checked
+        # here — validating it would eagerly create that provider (paying its
+        # init cost on turn 1 even if vision is never entered).  Such tiers are
+        # validated lazily when first entered + by the content-boundary gate;
+        # only same-provider vision tiers (the active provider owns the model)
+        # are fail-fast checked at startup.
+        if vision_entry.provider and vision_entry.provider != self._active_provider_name:
+            return
         if provider.supports_modality("image", model=vision_entry.model):
             return
         provider_name = getattr(provider, "name", "the provider")
@@ -8731,6 +8755,33 @@ NOTES
             return self._system_instruction + "\n\n" + tier_line
         return tier_line
 
+    def _provider_for_tier(self, provider_name: str, model: str) -> 'ModelProviderPlugin':
+        """Cached provider instance for a cross-provider tier (V2).
+
+        Creates + caches on first use, keyed by ``provider_name``.  Reuses the
+        session's lazy-pending ``plugin_configs`` / ``skip_model_test`` so each
+        provider reads its OWN ``plugin_configs`` section (e.g.
+        ``plugin_configs.openrouter``).  A later switch back is O(1) (cache hit).
+        """
+        prov = self._provider_cache.get(provider_name)
+        if prov is not None:
+            return prov
+        cfg = self._provider_lazy_pending or {}
+        prov = self._runtime.create_provider(
+            model,
+            provider_name=provider_name,
+            skip_model_test=cfg.get('skip_model_test', True),
+            plugin_configs=cfg.get('plugin_configs'),
+        )
+        if hasattr(prov, 'set_agent_context'):
+            prov.set_agent_context(
+                agent_type=self._agent_type,
+                agent_name=self._agent_name,
+                agent_id=self._agent_id,
+            )
+        self._provider_cache[provider_name] = prov
+        return prov
+
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.
 
@@ -8778,11 +8829,21 @@ NOTES
             }
 
         if self._provider is not None:
+            target_provider = entry.provider
             try:
+                if target_provider and target_provider != self._active_provider_name:
+                    # V2 cross-provider tier: swap self._provider to the cached
+                    # (or newly-created) instance for this tier's provider, then
+                    # point it at the tier's model.  History is provider-neutral
+                    # (Message/Part), so the conversation flows across the swap.
+                    self._provider = self._provider_for_tier(
+                        target_provider, entry.model)
+                    self._active_provider_name = target_provider
                 self._provider.connect(entry.model, skip_model_test=True)
             except Exception as exc:
                 logger.warning(
-                    "switch_tier: provider.connect(%s) failed: %s",
+                    "switch_tier: swap/connect to %s/%s failed: %s",
+                    target_provider or self._active_provider_name,
                     entry.model, exc,
                 )
                 raise
