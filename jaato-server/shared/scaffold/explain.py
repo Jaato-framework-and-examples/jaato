@@ -125,7 +125,10 @@ def plugins() -> Rendered:
         tools = "dynamic" if pi.dynamic else f"{len(pi.tools)} ({core} core/{disc} disc)"
         rows.append(f"  {name:22} {pi.kind:10} {str(pi.tier or '-'):8} {tools}")
     text = (f"{'plugin':24}{'kind':12}{'tier':10}tools\n"
-            + "  " + "-" * 56 + "\n" + "\n".join(rows))
+            + "  " + "-" * 56 + "\n" + "\n".join(rows)
+            + "\n\n  core = in the model's initial schema; disc = deferred "
+              "(discoverable via\n  list_tools/get_tool_schemas, or force eager "
+              "with `<plugin>(preload)` in a profile)")
     return data, text
 
 
@@ -145,6 +148,13 @@ def plugin(name: str) -> Rendered:
         for t in pi.tools:
             badge = "core" if t.discoverability == "core" else "disc"
             lines.append(f"    [{badge}] {t.name:28} {t.description}")
+        if any(t.discoverability != "core" for t in pi.tools):
+            lines.append(
+                f"  note: [core] tools are in the model's INITIAL schema; [disc] "
+                f"are DEFERRED — the model reaches them by calling list_tools / "
+                f"get_tool_schemas (introspection is always core, so they're never "
+                f"lost), OR add `{name}(preload)` to a profile's plugins to force "
+                f"ALL of this plugin's tools eager.")
     if pi.config_settings:
         lines.append(f"  config (plugin_configs.{name}.*):")
         for s in pi.config_settings:
