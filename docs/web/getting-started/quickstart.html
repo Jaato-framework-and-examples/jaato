@@ -241,12 +241,24 @@ MODEL_NAME=qwen3:32b
             profile against it, and <code>new</code> generates a starting client
             or cascade — the source of truth for <em>current</em> patterns.
           </p>
+          <p>
+            For <strong>runtime</strong> failures, <code>jaato-scaffold explain
+            runtime</code> is the map — the session/runner entities, how the
+            workspace flows from client to plugin, and where each log lands — and
+            <code>jaato-doctor --session &lt;id|latest&gt;</code> applies it to a
+            live session, reporting whether its runner-tier path plugins resolved
+            the workspace or got <code>workspace=none</code> (path tools denied).
+            That turns a manual log hunt into one command.
+          </p>
         </div>
         <div class="panel-code">
           <div class="code-label">jaato-doctor — client preflight</div>
           <div class="code-block">
             <pre><code class="language-bash">jaato-doctor --workspace . --env-file .env
 # non-zero exit on any FAIL → usable as a gate
+jaato-doctor --session latest --workspace .  # debug a RUNNING session:
+# did its runner-tier path plugins resolve the workspace, or get
+# workspace=none (→ readFile/file_edit/cli Permission-denied)?
 # (equivalent: python -m jaato_sdk.doctor)</code></pre>
           </div>
 
@@ -255,6 +267,7 @@ MODEL_NAME=qwen3:32b
             <pre><code class="language-bash">jaato-scaffold explain                 # plugins · providers · gc · archetypes
 jaato-scaffold explain provider anthropic   # capabilities · knobs · quirks
 jaato-scaffold explain profile         # the agent-profile schema, field by field
+jaato-scaffold explain runtime         # session/runner entities · workspace flow · log map
 jaato-scaffold validate my-profile.yaml     # lint vs the live registry
 jaato-scaffold new client --workspace . --provider anthropic --model claude-sonnet-4-20250514
 # (equivalent: python -m shared.scaffold ...)</code></pre>
