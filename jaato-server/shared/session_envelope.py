@@ -267,6 +267,16 @@ class SessionInitEnvelope:
     # all" (mirrors ``JaatoServer._build_session_overrides`` at
     # core.py:2504, where ``override is not None`` is the gate).
     system_instruction_override: Optional[str] = None
+    # 2026-06-21: client-provided ("host") tools registered by the client
+    # BEFORE session.new (e.g. a WS telegram client's send_to_telegram).  Each
+    # entry is a schema dict (name/description/parameters).  Carried so the
+    # RUNNER-tier model can SEE them in list_tools — pre-fix they registered only
+    # on the daemon registry (websocket._register_client_tools) and the runner's
+    # model never received the schema (the #344-sibling daemon-vs-runner split).
+    # Execution forwards back to the daemon's existing proxy executor via
+    # daemon.plugin_execute (sentinel plugin name).  Empty default = backward
+    # compat; same-build daemon+runner so no schema_version bump needed.
+    client_tools: List[Dict[str, Any]] = field(default_factory=list)
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
@@ -304,6 +314,7 @@ class SessionInitEnvelope:
             # docstrings for the bug history (silent no-op pre-fix).
             "suppress_base_instructions": self.suppress_base_instructions,
             "system_instruction_override": self.system_instruction_override,
+            "client_tools": [dict(t) for t in self.client_tools],
         }
 
     @classmethod
@@ -367,6 +378,10 @@ class SessionInitEnvelope:
                 d.get("suppress_base_instructions", False)
             ),
             system_instruction_override=d.get("system_instruction_override"),
+            client_tools=[
+                dict(t) for t in (d.get("client_tools") or [])
+                if isinstance(t, dict)
+            ],
         )
 
 

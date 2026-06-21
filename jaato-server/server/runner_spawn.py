@@ -633,6 +633,15 @@ def build_session_envelope(
         system_instruction_override=getattr(
             server, "_system_instruction_override", None,
         ),
+        # 2026-06-21: client-provided ("host") tools registered via the WS/IPC
+        # protocol BEFORE session.new (e.g. a telegram client's send_to_telegram),
+        # ferried so the RUNNER-tier model SEES them in list_tools.  Pre-fix they
+        # registered only on the daemon registry and the runner model was blind
+        # (#344-sibling daemon-vs-runner split).  Execution forwards back to the
+        # daemon's proxy executor via daemon.plugin_execute (sentinel name).
+        client_tools=list(
+            getattr(server, "client_tool_schemas", {}).values()
+        ),
     )
 
 
