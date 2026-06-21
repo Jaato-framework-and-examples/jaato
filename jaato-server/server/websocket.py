@@ -1945,6 +1945,13 @@ class JaatoWSServer:
                 self._pending_client_tools[client_id] = event.tools
                 self._pending_client_categories = getattr(self, '_pending_client_categories', {})
                 self._pending_client_categories[client_id] = event.categories
+                # Buffer the SCHEMAS daemon-side too so the session.new flow seeds
+                # JaatoServer.client_tool_schemas BEFORE the spawn reads it for
+                # envelope.client_tools — the proxy-executor apply below (after
+                # handle_request) races the spawn (PR #349 e2e bug).  Transport
+                # keeps its own buffer for the post-session.new executor register.
+                self._command_router._session_manager.buffer_client_tools(
+                    client_id, event.tools)
                 logger.info("Buffered %d client tools for %s (session pending)", len(event.tools), client_id)
             else:
                 self._register_client_tools(client_id, event.tools, event.categories)

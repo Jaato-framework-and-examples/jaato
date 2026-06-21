@@ -373,6 +373,12 @@ class SessionManager:
 
         # Per-client configuration (presentation context, working_dir, etc.)
         self._client_config: Dict[str, Dict[str, Any]] = {}
+        # Client-provided ("host") tool schema dicts buffered by the transport
+        # when registered BEFORE session.new (client_id -> [tool_def, ...]).
+        # Drained in the session.new flow to seed JaatoServer.client_tool_schemas
+        # BEFORE spawn_session_runner reads it for envelope.client_tools — the
+        # schemas must beat the spawn (PR #349 race fix).  Transport-agnostic.
+        self._pending_client_tools: Dict[str, List[Dict[str, Any]]] = {}
 
         # Event routing callback
         self._event_callback: Optional[Callable[[str, Event], None]] = None
@@ -398,6 +404,20 @@ class SessionManager:
         self._pre_initialize_hooks: List[Callable] = []
 
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
+
+    def buffer_client_tools(
+        self, client_id: str, tools: List[Dict[str, Any]]
+    ) -> None:
+        """Buffer client-provided ("host") tool schema dicts a transport
+        received BEFORE this client's session exists.
+
+        Drained in the session.new flow to seed
+        ``JaatoServer.client_tool_schemas`` BEFORE ``spawn_session_runner``
+        reads it for ``envelope.client_tools`` (the schemas must beat the
+        spawn — PR #349 race fix).  The transport still registers the proxy
+        EXECUTORS itself, post-session.new (execution is transport-specific).
+        """
+        self._pending_client_tools[client_id] = list(tools or [])
 
     def _session_storage_dir(self, workspace_path: str) -> pathlib.Path:
         """Resolve session storage directory for a workspace.
@@ -954,6 +974,22 @@ class SessionManager:
                 # runner is unconfined — that's the §7a intent
                 # (always have a runner; confinement is layered).
                 pass
+
+        # Seed client-provided ("host") tool SCHEMAS the transport buffered for
+        # this client BEFORE session.new, so spawn_session_runner's
+        # envelope.client_tools sees them.  The transport registers the proxy
+        # EXECUTORS post-session.new (execution-side, before the model's first
+        # turn) — only the schemas must beat the spawn.  Fixes the
+        # spawn-vs-buffered-apply race in PR #349 (peer e2e 2026-06-21).
+        for _ct in self._pending_client_tools.pop(client_id, []):
+            _ctn = _ct.get("name")
+            if _ctn:
+                server.client_tool_schemas[_ctn] = {
+                    "name": _ctn,
+                    "description": _ct.get("description", ""),
+                    "parameters": _ct.get("parameters", {}),
+                    "category": _ct.get("category", ""),
+                }
 
         # ----- Step 5: spawn (unconditional) -----
         spawn_ok = self._spawn_session_runner_unconditional(
