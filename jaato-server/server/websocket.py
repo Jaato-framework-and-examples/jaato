@@ -2246,6 +2246,29 @@ class JaatoWSServer:
                     runtime._all_tool_schemas.append(schema)
             logger.info("Refreshed runtime tool list for client %s", client_id)
 
+        # Glue the schemas to the RUNNER-tier model (where the model actually
+        # runs — the daemon-runtime refresh above is daemon-side only).  For a
+        # tool registered AFTER session.new, this RPC registers it on the LIVE
+        # runner registry so the model's next get_tool_schemas surfaces it
+        # without a session restart.  Best-effort: bootstrap-registered tools
+        # already rode envelope.client_tools, and a just-spawned runner that
+        # isn't ready yet fails harmlessly (it already has the tools).
+        runner_rpc = getattr(session.server, "_runner_rpc", None)
+        if runner_rpc is not None:
+            # Off the daemon event loop (this runs in the async dispatch; the
+            # threadsafe RPC's future.result() against the same loop would
+            # deadlock).  Best-effort background thread; proxy already registered.
+            import threading
+
+            def _push(rpc=runner_rpc, t=tools, cid=client_id):
+                try:
+                    rpc.session_register_client_tools_threadsafe(t)
+                except Exception:
+                    logger.exception(
+                        "mid-session client-tool runner push failed for %s", cid)
+
+            threading.Thread(target=_push, daemon=True).start()
+
         # Emit updated tool ID registry so clients can resolve IDs for
         # the newly-registered client-provided tools.
         if session.server:

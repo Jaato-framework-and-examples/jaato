@@ -42,6 +42,30 @@ def test_register_registers_schema_and_forwarder():
     assert schema.name == "send_to_telegram" and auto is True and callable(executor)
 
 
+def test_mid_session_handler_registers_and_appends_to_session_tools():
+    # The session.register_client_tools RPC handler glues a tool registered
+    # AFTER session.new onto the LIVE runner: registers it on the registry
+    # (forwarding executor) AND appends the schema to session._tools (the
+    # cached per-turn list the model is actually sent) so it can be CALLED.
+    from server.runner.rpc import RunnerRPC
+    reg = _FakeRegistry()
+    session = SimpleNamespace(_runtime=SimpleNamespace(registry=reg), _tools=[])
+    rpc = SimpleNamespace(_require_ready_session=lambda: (True, None, session))
+    ok, payload = RunnerRPC._handle_session_register_client_tools(
+        rpc, {"client_tools": [
+            {"name": "new_tool", "description": "d", "parameters": {}}]})
+    assert ok and payload["registered"] == ["new_tool"]
+    assert "new_tool" in reg.core                              # forwarding executor
+    assert any(s.name == "new_tool" for s in session._tools)   # model can call it
+
+
+def test_mid_session_handler_rejects_non_list():
+    from server.runner.rpc import RunnerRPC
+    ok, payload = RunnerRPC._handle_session_register_client_tools(
+        SimpleNamespace(), {"client_tools": "nope"})
+    assert ok is False and payload["stage"] == "decode"
+
+
 def test_forwarder_routes_via_sentinel():
     calls = []
     # KEYWORD-ONLY mock matching the real RunnerRPCClient.daemon_plugin_execute
