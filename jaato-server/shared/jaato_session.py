@@ -419,6 +419,11 @@ class JaatoSession:
         # Empty/None until the default provider is created in _ensure_provider.
         self._provider_cache: Dict[str, 'ModelProviderPlugin'] = {}
         self._active_provider_name: Optional[str] = None
+        # Persistent provider base config (plugin_configs + skip_model_test) for
+        # V2 cross-provider tier switches — set in configure(), read by
+        # _provider_for_tier.  Distinct from _provider_lazy_pending (which is
+        # cleared once the main provider is created).
+        self._tier_provider_base: Optional[Dict[str, Any]] = None
         # True iff ``configure()`` finished its work successfully.
         # Decoupled from ``_provider is not None`` because the
         # provider is now lazy; ``is_configured`` checks this flag
@@ -1895,6 +1900,16 @@ class JaatoSession:
                 'skip_model_test': skip_model_test,
                 'plugin_configs': plugin_configs,
             }
+        # Persist the provider base config (plugin_configs + skip_model_test) for
+        # V2 cross-provider tier switches.  _provider_lazy_pending is CLEARED once
+        # the main provider is created (_ensure_provider), but _provider_for_tier
+        # still needs these to build a tier's provider — without this it received
+        # plugin_configs=None and built the tier provider with no api_key at all
+        # (#354 cross-provider tier bug: "No <provider> API key found").
+        self._tier_provider_base = {
+            'skip_model_test': skip_model_test,
+            'plugin_configs': plugin_configs,
+        }
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
@@ -8766,7 +8781,11 @@ NOTES
         prov = self._provider_cache.get(provider_name)
         if prov is not None:
             return prov
-        cfg = self._provider_lazy_pending or {}
+        # Read the PERSISTENT base config, NOT _provider_lazy_pending — the
+        # latter is cleared to None once the main provider is created, which
+        # left cross-provider tier providers with plugin_configs=None (no
+        # api_key).  _tier_provider_base survives that clear.
+        cfg = self._tier_provider_base or {}
         prov = self._runtime.create_provider(
             model,
             provider_name=provider_name,
