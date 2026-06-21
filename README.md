@@ -240,19 +240,27 @@ jaato-doctor --workspace . --env-file .env
 #   the daemon's HOME vs yours (why pass:// secrets resolve wrong),
 #   env_file, and where profiles/logs land. Non-zero exit on any FAIL,
 #   so it doubles as a CI gate.
+jaato-doctor --session latest --workspace .  # debug a RUNNING session: did its
+#   runner-tier path plugins resolve the workspace, or get workspace=none
+#   (→ readFile/file_edit/cli Permission-denied)? Reads the session's logs.
 
 # jaato-scaffold (ships with jaato-server) — interrogate / validate / scaffold.
 jaato-scaffold explain                      # plugins · providers · gc · client archetypes
 jaato-scaffold explain provider <name>      # capabilities · knobs (typed, by layer) · quirks
 jaato-scaffold explain profile              # the agent-profile schema, field by field
+jaato-scaffold explain runtime              # session/runner entities · workspace flow · log map
 jaato-scaffold validate <profile.yaml|workspace>   # lint a profile vs the live registry
 jaato-scaffold new client --workspace DIR --provider P --model M   # generate a starting client
 ```
 
 `explain` reads the live plugin/provider registry, `validate` lints against it,
 and `doctor` inspects the actual daemon you target — together they're the source
-of truth for *current* patterns when authoring a client or profile. (Equivalent
-module forms, if the scripts aren't on `PATH`: `python -m jaato_sdk.doctor`,
+of truth for *current* patterns when authoring a client or profile. For runtime
+failures, `explain runtime` is the map (session/runner entities, how the
+workspace flows from client to plugin, and where each log lands) and
+`doctor --session <id|latest>` applies it — turning a path-tool / `workspace=none`
+hunt into one command instead of manual log-archaeology. (Equivalent module
+forms, if the scripts aren't on `PATH`: `python -m jaato_sdk.doctor`,
 `python -m shared.scaffold`.)
 
 ### TUI Features
