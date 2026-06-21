@@ -127,6 +127,23 @@ def _new_client_archetype(args, archetype: str) -> int:
         "__KEY_ENV__": f"JAATO_{provider.upper()}_API_KEY",
         "__CASCADE_ID__": "REPLACE_WITH_THE_CASCADE_DRIVER_ID",
     }
+    # --recoverable: emit IPCRecoveryClient (auto-reconnect, survives daemon
+    # restarts) instead of the plain IPCClient.  Applies to every archetype —
+    # the long-lived ones (cascade/observer) benefit most.
+    if getattr(args, "recoverable", False):
+        subs["__CLIENT_CLASS__"] = "IPCRecoveryClient"
+        subs["__ON_STATUS_DEF__"] = (
+            "def _on_status(status):\n"
+            "    # Reconnection lifecycle — IPCRecoveryClient auto-reconnects and\n"
+            "    # survives daemon restarts (a per-run jaato-server --stop +\n"
+            "    # autostart); IncompatibleServerError is treated as permanent.\n"
+            "    print(f\"[connection] {getattr(status, 'state', status)}\")\n\n\n"
+        )
+        subs["__ON_STATUS_ARG__"] = "\n        on_status_change=_on_status,"
+    else:
+        subs["__CLIENT_CLASS__"] = "IPCClient"
+        subs["__ON_STATUS_DEF__"] = ""
+        subs["__ON_STATUS_ARG__"] = ""
 
     def _fill(text: str) -> str:
         for k, v in subs.items():

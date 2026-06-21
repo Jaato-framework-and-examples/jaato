@@ -45,6 +45,7 @@ def overview() -> Rendered:
         "  jaato-scaffold explain provider <name>\n"
         "  jaato-scaffold explain gc\n"
         "  jaato-scaffold explain transports\n"
+        "  jaato-scaffold explain clients\n"
         "  jaato-scaffold explain sets [--workspace DIR]\n"
     )
     return data, text
@@ -104,6 +105,55 @@ def transports() -> Rendered:
         "NOTE: the Python SDK is IPC-only.  `jaato-scaffold new client` scaffolds\n"
         "the Python IPC client; a WebSocket client is authored with the TypeScript\n"
         "SDK (jaato-sdk-ts) — start from the web-client.\n"
+    )
+    return data, text
+
+
+# --------------------------------------------------------------- clients
+
+def clients() -> Rendered:
+    """The two Python IPC client classes — when to use each.
+
+    The Python SDK ships two IPC clients (WebSocket is the TS SDK — see
+    ``transports``).  ``new client`` emits ``IPCClient`` by default; pass
+    ``--recoverable`` to emit ``IPCRecoveryClient``.
+    """
+    data = {
+        "ipc_client": {
+            "class": "jaato_sdk.IPCClient",
+            "recovery": "none — a dropped connection ends the client",
+            "use_for": ["short-lived / one-shot", "a single send_message",
+                        "a scripted run that exits"],
+            "scaffold": "jaato-scaffold new client ...",
+        },
+        "ipc_recovery_client": {
+            "class": "jaato_sdk.IPCRecoveryClient",
+            "recovery": ("auto-reconnect state machine "
+                         "(DISCONNECTED→CONNECTING→CONNECTED→RECONNECTING→CLOSED); "
+                         "on_status_change callback; IncompatibleServerError is "
+                         "permanent (no retry)"),
+            "use_for": ["long-lived / resilient",
+                        "TUI / observer / cascade driver",
+                        "must survive a daemon restart "
+                        "(per-run jaato-server --stop + autostart)"],
+            "scaffold": "jaato-scaffold new client --recoverable ...",
+        },
+    }
+    text = (
+        "Python IPC clients  (WebSocket is the TS SDK — see `explain transports`)\n"
+        "  ----------------------------------------------------------------\n"
+        "  IPCClient                       IPCRecoveryClient\n"
+        "  - no reconnect                  - auto-reconnect (state machine)\n"
+        "  - dropped conn ends the client  - on_status_change callback\n"
+        "  - short-lived / one-shot        - long-lived / resilient\n"
+        "    (one send, a scripted run)      (TUI, observer, cascade driver;\n"
+        "                                     survives a daemon restart)\n\n"
+        "the SDK README features IPCRecoveryClient for anything long-lived — it\n"
+        "rides through a per-run `jaato-server --stop` + autostart; on a permanent\n"
+        "IncompatibleServerError it stops rather than looping.\n\n"
+        "scaffold either (the flag works for every archetype):\n"
+        "  jaato-scaffold new client ...                # IPCClient\n"
+        "  jaato-scaffold new client --recoverable ...  # IPCRecoveryClient\n"
     )
     return data, text
 
