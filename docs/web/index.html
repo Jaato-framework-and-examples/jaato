@@ -343,6 +343,24 @@
       </div>
     </section>
 
+    <!-- AI agent toolkit callout -->
+    <section style="max-width: 900px; margin: 0 auto 24px; padding: 24px 28px; border: 1px solid var(--color-border); border-radius: 14px; background: var(--color-bg-secondary);">
+      <h2 style="margin: 0 0 10px; font-size: 22px; border: none; padding: 0;">🤖 Building with an AI coding agent? Point it at the skill.</h2>
+      <p style="margin: 0 0 16px; color: var(--color-text-secondary); line-height: 1.6;">
+        jaato ships a self-describing toolkit — the <code>jaato-sdk-client</code> skill plus two executable tools,
+        <code>jaato-scaffold</code> (interrogate · validate · scaffold) and <code>jaato-doctor</code> (preflight · debug).
+        They <strong>introspect the installed framework</strong>, so your agent gets <em>current</em> answers —
+        providers, plugins, knobs, profiles, runtime + log layout — without reading the source and without drifting
+        from the code. Point your agent at the skill, say what you want to build, and let it scaffold a client,
+        validate a profile, and debug a running session for you.
+      </p>
+      <pre style="margin: 0; padding: 16px 18px; border-radius: 10px; overflow-x: auto; background: var(--color-bg); border: 1px solid var(--color-border); font-size: 13px; line-height: 1.7;"><code>jaato-scaffold explain              # what the framework offers, right now
+jaato-scaffold new client ...       # a runnable client, valid by construction
+jaato-scaffold validate &lt;profile&gt;   # lint an agent profile vs the live registry
+jaato-doctor   --workspace .        # preflight before connect()
+jaato-doctor   --session latest     # debug a running session</code></pre>
+    </section>
+
     <!-- Personas Section -->
     <section class="personas-section">
       <div class="personas-intro">
