@@ -764,6 +764,29 @@ class JaatoIPCServer:
             send_request=self._make_ipc_send_request(session_id),
             waiters=self._client_tool_waiters,
         )
+        # Glue the schemas to the RUNNER-tier model so it SEES a tool registered
+        # AFTER session.new (register_client_tools above wires daemon-side
+        # execution only; the model runs in the runner).  Best-effort — see the
+        # WS path for the rationale.
+        runner_rpc = getattr(session.server, "_runner_rpc", None)
+        if runner_rpc is not None:
+            # Run the blocking runner-RPC OFF the daemon event loop: this method
+            # runs in the async dispatch, and the threadsafe RPC waits on
+            # future.result() against that same loop — calling it inline
+            # deadlocks (the loop can't deliver the RPC response while blocked).
+            # Best-effort background thread; the proxy is already registered.
+            import threading
+
+            def _push(rpc=runner_rpc, t=tools, cid=client_id):
+                try:
+                    res = rpc.session_register_client_tools_threadsafe(t)
+                    logger.info(
+                        "mid-session client-tool runner push for %s: %s", cid, res)
+                except Exception:
+                    logger.exception(
+                        "mid-session client-tool runner push failed for %s", cid)
+
+            threading.Thread(target=_push, daemon=True).start()
         logger.info("Registered %d IPC client tools for %s: %s",
                     len(registered), client_id, registered)
 

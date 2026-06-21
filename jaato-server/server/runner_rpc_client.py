@@ -954,6 +954,30 @@ class RunnerRPCClient:
             self.session_health_check(timeout=timeout), timeout=timeout,
         )
 
+    async def session_register_client_tools(
+        self, client_tools: List[Dict[str, Any]], *,
+        timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        """Mid-session: glue newly-registered client-provided ("host") tool
+        SCHEMAS to the LIVE runner registry so the runner-tier model sees them
+        WITHOUT a session restart (calls ``_register_client_tools_on_runner``).
+        Execution still forwards daemon-side → the client via the existing
+        host-tool proxy.  Returns ``{"registered": [names]}``.
+        """
+        return await self._call_named(
+            "session.register_client_tools",
+            {"client_tools": client_tools}, timeout=timeout,
+        )
+
+    def session_register_client_tools_threadsafe(
+        self, client_tools: List[Dict[str, Any]], *,
+        timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_register_client_tools(client_tools, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_state(
         self,
         key: str,

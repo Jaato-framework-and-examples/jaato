@@ -585,6 +585,9 @@ class RunnerRPC:
             # primitive fields (value, description), no callables.
             return self._handle_session_get_model_completions(env.args)
 
+        if env.method == "session.register_client_tools":
+            return self._handle_session_register_client_tools(env.args)
+
         if env.method == "session.get_tool_schemas":
             # Phase 3 §7c step 6.6.4.5c.5: read the runner-side
             # session's resolved tool schemas (preloaded plugins +
@@ -3973,6 +3976,63 @@ class RunnerRPC:
             for c in (completions or [])
         ]
         return True, {"completions": serialized}
+
+    def _handle_session_register_client_tools(self, args) -> "tuple[bool, Any]":
+        """Mid-session glue of client-provided ("host") tool SCHEMAS onto the
+        LIVE runner registry, so the runner-tier model sees a tool the client
+        registered AFTER session.new — without a session restart.
+
+        Mirrors the bootstrap-time ``_register_client_tools_on_runner`` (which
+        only ran from ``envelope.client_tools`` at spawn); the model's next
+        ``get_tool_schemas`` (live-read) surfaces the new tool.  Execution is
+        unchanged — the runner-side forwarding executor proxies daemon-side via
+        the ``__client_tools__`` sentinel → the existing ToolExecuteRequestEvent
+        → the client runs the handler.
+
+        Args (over the wire): ``{"client_tools": [schema_dict, ...]}``.
+        Returns ``{"registered": [names]}``.
+        """
+        client_tools = args.get("client_tools")
+        if not isinstance(client_tools, list):
+            return False, {
+                "error": "session.register_client_tools: 'client_tools' must "
+                         "be a list",
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        if registry is None:
+            return False, {
+                "error": "session.register_client_tools: no runner registry",
+                "stage": "no_registry",
+            }
+        from server.runner.session import _register_client_tools_on_runner
+        _register_client_tools_on_runner(registry, client_tools)
+        # The registry registration above wires the forwarding EXECUTOR, but the
+        # model's per-turn tool list is the cached ``session._tools`` (built at
+        # configure()).  Append the new schemas so the model both SEES and can
+        # CALL them — mirrors the refresh path at jaato_session.py:~1971.  The
+        # next provider call / get_tool_schemas surfaces them.
+        from jaato_sdk.plugins.model_provider.types import ToolSchema
+        if getattr(session, "_tools", None) is not None:
+            existing = {s.name for s in session._tools}
+            for ct in client_tools:
+                nm = ct.get("name")
+                if nm and nm not in existing:
+                    session._tools.append(ToolSchema(
+                        name=nm,
+                        description=ct.get("description", ""),
+                        parameters=ct.get("parameters", {}),
+                        category=ct.get("category") or None,
+                    ))
+        return True, {
+            "registered": [
+                ct.get("name") for ct in client_tools if ct.get("name")
+            ],
+        }
 
     def _handle_session_get_tool_schemas(self) -> "tuple[bool, Any]":
         """Read the runner-side session's resolved tool schemas.
