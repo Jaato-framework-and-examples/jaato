@@ -188,7 +188,8 @@ def _make_client_tool_forwarder(registry, tool_name):
         if rpc is None:
             return {"error": f"client tool '{tool_name}': runner->daemon channel "
                              "unavailable (bootstrap incomplete?)"}
-        return rpc.daemon_plugin_execute(_CLIENT_TOOL_PLUGIN, tool_name, args)
+        return rpc.daemon_plugin_execute(
+            plugin_name=_CLIENT_TOOL_PLUGIN, tool_name=tool_name, args=args)
     return _executor
 
 
