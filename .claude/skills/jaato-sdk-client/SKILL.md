@@ -46,6 +46,28 @@ doesn't honor. `new` runs its own output back through `validate` (profiles) or a
 compile-check (clients), so scaffolded output is valid by construction.
 Add `--json` to any verb for machine consumption.
 
+## Transports — IPC (this SDK) vs WebSocket (TS SDK)
+
+**This skill and the Python SDK (`jaato_sdk.IPCClient`) are IPC-only** — a local
+Unix socket, unauthenticated (`--socket-mode`, default 660). **WebSocket clients
+are authored with the TypeScript SDK (`jaato-sdk-ts`) / the browser web-client,
+NOT the Python SDK** — so `jaato-scaffold new client` scaffolds the Python IPC
+client; for a WS client start from the web-client.
+
+What you still own from here, even for a TS client, is the **daemon's WS side**:
+
+```
+jaato-scaffold explain transports        # IPC-vs-WS matrix, daemon flags, auth contract
+jaato-doctor --web-socket [host:]port    # preflight: WS port + bearer-token file + auth mode
+```
+
+Daemon WS flags: `--web-socket [HOST:]PORT`, plus one of `--ws-token TOKEN` /
+`--ws-token-file PATH` / `--ws-unsafe-no-auth` (no flag → the daemon
+auto-generates `~/.jaato/ws.token`, mode 0600). A TS/browser client presents the
+bearer either as `Authorization: Bearer <token>` (header) or `?token=<token>`
+(query param — browsers can't set headers on `new WebSocket()`); a bad token is
+closed with WS code 1008.
+
 ## Mental model (the one thing to hold in your head)
 
 A jaato client **attaches to a stateful daemon singleton**; the daemon's

@@ -44,7 +44,66 @@ def overview() -> Rendered:
         "  jaato-scaffold explain providers\n"
         "  jaato-scaffold explain provider <name>\n"
         "  jaato-scaffold explain gc\n"
+        "  jaato-scaffold explain transports\n"
         "  jaato-scaffold explain sets [--workspace DIR]\n"
+    )
+    return data, text
+
+
+# ------------------------------------------------------------- transports
+
+def transports() -> Rendered:
+    """The two client transports + the daemon flags / auth that gate them.
+
+    Source of truth for "how does a client connect" — IPC (Python SDK) vs
+    WebSocket (TypeScript SDK).  The Python SDK is IPC-only; WS clients are
+    authored with ``jaato-sdk-ts`` / the browser web-client.
+    """
+    data = {
+        "ipc": {
+            "sdk": "jaato-sdk (Python) — jaato_sdk.IPCClient",
+            "scope": "local (same host / container)",
+            "daemon_flags": ["--ipc-socket PATH", "--socket-mode MODE (default 660)"],
+            "auth": "none — any principal that can open the socket drives the agent",
+        },
+        "websocket": {
+            "sdk": "jaato-sdk-ts (TypeScript) / browser web-client — NOT the Python SDK",
+            "scope": "remote / browser",
+            "daemon_flags": ["--web-socket [HOST:]PORT", "--ws-token TOKEN",
+                             "--ws-token-file PATH", "--ws-unsafe-no-auth"],
+            "token_default": "~/.jaato/ws.token (auto-generated, 0600, on first WS start)",
+            "auth": "bearer token (required unless --ws-unsafe-no-auth)",
+            "client_auth": ["Authorization: Bearer <token>  (header)",
+                            "?token=<token>  (query param — browsers)"],
+            "bad_token": "WS close code 1008",
+            "preflight": "jaato-doctor --web-socket [host:]port",
+        },
+    }
+    text = (
+        "client transports\n"
+        "  ----------------------------------------------------------------\n"
+        "  IPC (Unix socket)             WebSocket\n"
+        "  - Python SDK                  - TypeScript SDK (jaato-sdk-ts)\n"
+        "    jaato_sdk.IPCClient           / browser web-client\n"
+        "  - local only                  - remote / browser\n"
+        "  - unauthenticated             - bearer-token authenticated\n"
+        "    (socket-mode 660)\n\n"
+        "daemon flags:\n"
+        "  IPC:  --ipc-socket PATH   [--socket-mode 660]\n"
+        "  WS:   --web-socket [HOST:]PORT\n"
+        "        --ws-token TOKEN | --ws-token-file PATH | --ws-unsafe-no-auth\n"
+        "        (no token flag → daemon auto-generates ~/.jaato/ws.token, 0600)\n\n"
+        "WS auth contract — the TS client presents ONE of:\n"
+        "  Authorization: Bearer <token>   (header — SDK / proxies / curl)\n"
+        "  ?token=<token>                  (query — browsers can't set headers on\n"
+        "                                   new WebSocket())\n"
+        "  bad token → WS close 1008.  Daemon stores only the SHA-256 digest and\n"
+        "  compares with hmac.compare_digest.\n\n"
+        "preflight the WS daemon side (port + token file + auth mode):\n"
+        "  jaato-doctor --web-socket [host:]port\n\n"
+        "NOTE: the Python SDK is IPC-only.  `jaato-scaffold new client` scaffolds\n"
+        "the Python IPC client; a WebSocket client is authored with the TypeScript\n"
+        "SDK (jaato-sdk-ts) — start from the web-client.\n"
     )
     return data, text
 

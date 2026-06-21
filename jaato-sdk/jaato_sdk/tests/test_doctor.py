@@ -57,3 +57,65 @@ def test_daemon_env_unavailable_when_not_listening():
 def test_daemon_env_reports_defaults_when_none_set():
     c = check_daemon_env(_info({"HOME": "/h"}), _KNOWN)[0]
     assert c.status == "PASS" and "defaults" in c.detail
+
+
+# ── WebSocket transport preflight (check_websocket) ──────────────────────
+#
+# WS clients use the TS SDK; the doctor preflights the DAEMON side they hit:
+# port listening, bearer-token file present + 0600, auth mode.
+
+import socket as _socket
+
+from jaato_sdk.doctor import check_websocket, PASS, FAIL, WARN
+
+
+def _ws_info(pid=None):
+    return DaemonInfo(socket_path="/tmp/x", socket_exists=False,
+                      listening=False, pid=pid)
+
+
+def test_websocket_bad_address():
+    checks = check_websocket("not-a-port", _ws_info())
+    assert checks[0].name == "websocket" and checks[0].status == FAIL
+
+
+def test_websocket_port_listening_and_token_ok(tmp_path):
+    srv = _socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    tok = tmp_path / "ws.token"
+    tok.write_text("secret")
+    tok.chmod(0o600)
+    try:
+        checks = check_websocket(f"127.0.0.1:{port}", _ws_info(),
+                                 ws_token_file=str(tok))
+    finally:
+        srv.close()
+    by = {c.name: c for c in checks}
+    assert by["ws-port"].status == PASS
+    assert by["ws-token"].status == PASS
+    assert "Bearer" in by["ws-token"].detail
+
+
+def test_websocket_port_down_fails():
+    checks = check_websocket("127.0.0.1:1", _ws_info())   # nothing on :1
+    by = {c.name: c for c in checks}
+    assert by["ws-port"].status == FAIL
+
+
+def test_websocket_loose_token_mode_warns(tmp_path):
+    srv = _socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    tok = tmp_path / "ws.token"
+    tok.write_text("secret")
+    tok.chmod(0o644)   # too permissive
+    try:
+        checks = check_websocket(f"127.0.0.1:{port}", _ws_info(),
+                                 ws_token_file=str(tok))
+    finally:
+        srv.close()
+    by = {c.name: c for c in checks}
+    assert by["ws-token"].status == WARN and "0600" in by["ws-token"].detail
