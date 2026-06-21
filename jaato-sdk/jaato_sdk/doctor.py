@@ -595,6 +595,87 @@ def check_websocket(
 # Orchestration + CLI
 # --------------------------------------------------------------------------
 
+def _plugin_workspaces(log_path: Path) -> List[str]:
+    """Every ``FilesystemQueryPlugin initialized ... workspace=<v>`` value in a log.
+
+    ``<v>`` is ``"none"`` or an absolute path.  A log may carry both a daemon-tier
+    copy (``none``, harmless) and the runner-tier one that actually drives
+    path-tool permission, so the caller prefers a non-``none`` value.
+    """
+    if not log_path.is_file():
+        return []
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError:
+        return []
+    vals: List[str] = []
+    for line in text.splitlines():
+        i = line.find("FilesystemQueryPlugin initialized")
+        if i == -1:
+            continue
+        j = line.find("workspace=", i)
+        if j == -1:
+            continue
+        vals.append(line[j + len("workspace="):].split(",")[0].split(")")[0].strip())
+    return vals
+
+
+def check_session(session_id: str, workspace: str) -> List[Check]:
+    """RUNTIME diagnostic for a recent session — log-based, no daemon needed.
+
+    The one-command form of the manual log-archaeology the #344 runner-workspace
+    regression required: *for session X, did the runner-tier path plugins resolve
+    the workspace, or get ``workspace=none`` (→ path tools Permission-denied)?*
+    Reads the session's logs under ``<workspace>/.jaato/logs/``.  Pass
+    ``--session latest`` to pick the newest session under the workspace.  See
+    ``jaato-scaffold explain runtime`` for the full workspace-flow + log map.
+    """
+    out: List[Check] = []
+    logs = Path(workspace) / ".jaato" / "logs"
+    sessions = Path(workspace) / ".jaato" / "sessions"
+
+    if session_id == "latest":
+        cands = (sorted(logs.glob("runner-*.log"), key=lambda p: p.stat().st_mtime)
+                 if logs.is_dir() else [])
+        if not cands and sessions.is_dir():
+            cands = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        if not cands:
+            return [Check("session", FAIL,
+                          f"no sessions under {logs} or {sessions} — wrong "
+                          "--workspace? (logs land in <workspace>/.jaato/logs)")]
+        stem = cands[-1].stem
+        session_id = stem[len("runner-"):] if stem.startswith("runner-") else stem
+        out.append(Check("session", PASS, f"latest = {session_id}"))
+
+    record = sessions / f"{session_id}.json"
+    out.append(Check("session-record", PASS if record.exists() else WARN,
+                     str(record) if record.exists()
+                     else f"no record at {record} (wrong --workspace, or not persisted)"))
+
+    session_logs = sorted(logs.glob(f"*{session_id}*.log")) if logs.is_dir() else []
+    vals = [v for lp in session_logs for v in _plugin_workspaces(lp)]
+    resolved = [v for v in vals if v and v != "none"]
+    if resolved:
+        out.append(Check("runner-workspace", PASS,
+                         f"runner-tier path plugins resolved workspace={resolved[-1]}"))
+    elif vals:  # all 'none'
+        out.append(Check("runner-workspace", FAIL,
+                         "runner-tier path plugins initialized with workspace=none → "
+                         "path tools (readFile/file_edit/cli/notebook) Permission-denied. "
+                         "The client must send working_dir "
+                         "(IPCClient(workspace_path=...)); needs the #344 "
+                         "runner-workspace fix.  See `jaato-scaffold explain runtime`."))
+    else:
+        out.append(Check("runner-workspace", WARN,
+                         f"no filesystem_query init found for {session_id} (plugin not "
+                         f"loaded, or logs elsewhere) — looked under {logs}"))
+
+    out.append(Check("session-logs", PASS if session_logs else WARN,
+                     "; ".join(str(p) for p in session_logs) if session_logs
+                     else f"none under {logs}"))
+    return out
+
+
 def run_checks(
     *,
     socket_path: str,
@@ -671,19 +752,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--ws-token-file", default=None,
                     help="override the WS bearer-token file path "
                          "(default: the daemon's ~/.jaato/ws.token)")
+    ap.add_argument("--session", default=None, metavar="ID",
+                    help="RUNTIME diagnostic mode (instead of preflight): inspect a "
+                         "recent session's logs under <workspace>/.jaato/logs — did "
+                         "its runner-tier path plugins resolve the workspace, or get "
+                         "workspace=none? Use 'latest' for the newest session.")
     args = ap.parse_args(argv)
 
-    checks = run_checks(
-        socket_path=args.socket,
-        pidfile=args.pidfile,
-        workspace=args.workspace,
-        config_root=args.config_root,
-        env_file=args.env_file,
-        secret=args.secret,
-        auto_start=not args.no_auto_start,
-        web_socket=args.web_socket,
-        ws_token_file=args.ws_token_file,
-    )
+    if args.session:
+        checks = check_session(args.session, args.workspace)
+    else:
+        checks = run_checks(
+            socket_path=args.socket,
+            pidfile=args.pidfile,
+            workspace=args.workspace,
+            config_root=args.config_root,
+            env_file=args.env_file,
+            secret=args.secret,
+            auto_start=not args.no_auto_start,
+            web_socket=args.web_socket,
+            ws_token_file=args.ws_token_file,
+        )
     return _print(checks)
 
 

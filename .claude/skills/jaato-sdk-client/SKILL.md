@@ -27,6 +27,19 @@ It checks: `server` importable (autostart needs it), socket listening / **stale*
 `pass://` secrets resolve from the wrong store), `pass://` resolvability, and
 where profiles/logs land. Non-zero exit on any FAIL → usable as a gate.
 
+**Debug a *running* session** (not preflight):
+
+```
+jaato-doctor --session <id|latest> --workspace DIR
+```
+
+reads that session's logs under `<workspace>/.jaato/logs/` and reports whether
+its **runner-tier path plugins resolved the workspace** (`PASS=<ws>`) or got
+`workspace=none` (`FAIL` — path tools `readFile`/`file_edit`/`cli` get
+Permission-denied; the #344 class, fixed by the client sending `working_dir`).
+The map it applies — the session/runner entities, the workspace flow, and where
+each log lands — is `jaato-scaffold explain runtime`.
+
 ## 2. Interrogate / validate / scaffold — `jaato-scaffold`
 
 ```

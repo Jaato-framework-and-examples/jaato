@@ -46,6 +46,7 @@ def overview() -> Rendered:
         "  jaato-scaffold explain gc\n"
         "  jaato-scaffold explain transports\n"
         "  jaato-scaffold explain clients\n"
+        "  jaato-scaffold explain runtime\n"
         "  jaato-scaffold explain sets [--workspace DIR]\n"
     )
     return data, text
@@ -154,6 +155,78 @@ def clients() -> Rendered:
         "scaffold either (the flag works for every archetype):\n"
         "  jaato-scaffold new client ...                # IPCClient\n"
         "  jaato-scaffold new client --recoverable ...  # IPCRecoveryClient\n"
+    )
+    return data, text
+
+
+# --------------------------------------------------------------- runtime
+
+def runtime() -> Rendered:
+    """How a session runs + how to DEBUG it — entities, the workspace flow, the
+    log map, and the one-command session diagnostic.
+
+    Curated (the runtime architecture is not in the plugin registry).  Pairs with
+    ``jaato-doctor --session <id>``, which applies this map to a live session.
+    """
+    data = {
+        "entities": {
+            "daemon": "long-lived singleton on the IPC socket; daemon-tier plugins, "
+                      "provider/OAuth/GC/sessions live here",
+            "session": "per-conversation state (history/profile/workspace); "
+                       "session.new -> bootstrap -> runner spawn -> plugin init -> turns",
+            "runner": "per-session SUBPROCESS running the model loop + runner-tier "
+                      "plugins (filesystem_query/file_edit/cli/lsp/mcp/notebook); "
+                      "pool-served or cold-spawned; its OWN ContextVars + env",
+        },
+        "workspace_flow": [
+            "client: IPCClient(workspace_path=ws) -> set_workspace + working_dir",
+            "daemon: working_dir -> session.workspace_path -> envelope.workspace_path",
+            "runner: envelope.workspace_path -> registry.set_workspace_path (config+hook)"
+            " + set_workspace_root() ContextVar + os.environ, BEFORE expose_all",
+            "plugin: initialize() reads config['workspace_root'] / get_workspace_root()"
+            " -> caches self._workspace_root",
+            "BREAKS: working_dir not sent OR runner didn't seed ContextVar/env"
+            " -> workspace=none -> path tools Permission-denied (#344 class)",
+        ],
+        "logs": {
+            "logs/runner-<sid>.log": "runner bootstrap + runner-tier plugin init "
+                                     "(where workspace=none surfaces)",
+            "logs/session_<id>_client_*.log": "session-level",
+            "sessions/<id>.json": "history + workspace_path",
+            "daemon log": "daemon-tier (e.g. /tmp/jaato.log)",
+        },
+        "debug": "jaato-doctor --session <id|latest> --workspace DIR",
+    }
+    text = (
+        "jaato runtime — entities, workspace flow, logs, how to debug\n"
+        "  ----------------------------------------------------------------\n"
+        "ENTITIES\n"
+        "  daemon   long-lived singleton on the IPC socket; daemon-tier plugins,\n"
+        "           provider / OAuth / GC / sessions live here.\n"
+        "  session  per-conversation state (history/profile/workspace):\n"
+        "           session.new -> bootstrap -> runner spawn -> plugin init -> turns.\n"
+        "  runner   per-session SUBPROCESS running the model loop + RUNNER-TIER\n"
+        "           plugins (filesystem_query/file_edit/cli/lsp/mcp/notebook);\n"
+        "           pool-served (warm) or cold-spawned; its OWN ContextVars + env.\n\n"
+        "WORKSPACE FLOW  (the path-tool 'workspace=none' class of bug)\n"
+        "  client   IPCClient(workspace_path=ws) -> set_workspace + working_dir\n"
+        "  daemon   working_dir -> session.workspace_path -> envelope.workspace_path\n"
+        "  runner   envelope.workspace_path -> registry.set_workspace_path (config+hook)\n"
+        "           + set_workspace_root() ContextVar + os.environ, BEFORE expose_all\n"
+        "  plugin   initialize() reads config['workspace_root'] / get_workspace_root()\n"
+        "           -> caches self._workspace_root (path tools enforce this boundary)\n"
+        "  BREAKS   working_dir not sent, OR runner didn't seed the ContextVar/env\n"
+        "           -> workspace=none -> path tools Permission-denied (the #344 class)\n\n"
+        "LOGS  (under <workspace>/.jaato/)\n"
+        "  logs/runner-<sid>.log           runner bootstrap + runner-tier plugin init\n"
+        "                                  (where 'workspace=none' surfaces)\n"
+        "  logs/session_<id>_client_*.log  session-level\n"
+        "  sessions/<id>.json              history + workspace_path\n"
+        "  <daemon stdout/log>             daemon-tier (e.g. /tmp/jaato.log)\n\n"
+        "DEBUG A SESSION (one command — reads the logs above):\n"
+        "  jaato-doctor --session <id|latest> --workspace DIR\n"
+        "  -> reports whether the runner-tier path plugins resolved the workspace\n"
+        "     (PASS=<ws>) or got workspace=none (FAIL + the fix), plus the log map.\n"
     )
     return data, text
 
