@@ -1668,6 +1668,14 @@ def _merge_profiles(
     # so two parents declaring the same limits don't conflict.
     merged_runtime_limits = _resolve_scalar('runtime_limits', child.runtime_limits)
 
+    # model_tiers: scalar-override (the child's whole tier-config wins; inherit
+    # the parent's when the child declares none).  default={} so an unset child
+    # ({}) is treated as "not set" and inherits.  WAS DROPPED entirely pre-fix:
+    # the construction below omitted model_tiers, so inherits/set-based tiered
+    # profiles silently lost their tiers and fell back to single-model.
+    merged_model_tiers = _resolve_scalar(
+        'model_tiers', child.model_tiers, default={})
+
     # completion_payload_schema: scalar-override (parents must agree or
     # child overrides). Inline dicts and string paths both compared as-is
     # via str() in _resolve_scalar.
@@ -1792,6 +1800,7 @@ def _merge_profiles(
         spawn_payload_schema=merged_spawn_schema,
         completion_processors=merged_completion_processors,
         runtime_limits=merged_runtime_limits,
+        model_tiers=merged_model_tiers,
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
         quirks=merged_quirks,

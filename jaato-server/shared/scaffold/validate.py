@@ -95,6 +95,30 @@ def validate_profile(
                 f"plugin '{plug}' is not installed (run "
                 "`jaato-scaffold explain plugins`)", where=f"plugins.{plug}")
 
+    # --- model_tiers (V2: cross-provider tiers allowed) ------------------
+    # Catch tier-name typos + a (V2) cross-provider tier naming an uninstalled
+    # provider, statically — runtime ModelTierConfig would otherwise only raise
+    # at session create.  See `jaato-scaffold explain tiers`.  (model_tiers now
+    # survives the inherits/set merge — see config._merge_profiles.)
+    mt_cfg = getattr(profile, "model_tiers", None) or {}
+    if mt_cfg:
+        from shared.model_tiers import VALID_TIER_NAMES, RESERVED_KEYS
+        for key, entry in mt_cfg.items():
+            if key not in VALID_TIER_NAMES and key not in RESERVED_KEYS:
+                add("error", "unknown_tier",
+                    f"model_tiers key '{key}' is neither a tier name "
+                    f"({', '.join(sorted(VALID_TIER_NAMES))}) nor a control key "
+                    f"({', '.join(sorted(RESERVED_KEYS))})",
+                    where=f"model_tiers.{key}")
+                continue
+            tprov = entry.get("provider") if isinstance(entry, dict) else None
+            if tprov and introspect.resolve_provider(tprov) is None:
+                add("error", "unknown_provider",
+                    f"model_tiers.{key} provider '{tprov}' is not installed "
+                    "(V2 cross-provider tiers must name a real provider — see "
+                    "`jaato-scaffold explain providers`)",
+                    where=f"model_tiers.{key}.provider")
+
     # --- per-plugin tool allow-lists (tool_scopes) -----------------------
     for plug, tools in (getattr(profile, "tool_scopes", None) or {}).items():
         pi = plugins.get(plug)
