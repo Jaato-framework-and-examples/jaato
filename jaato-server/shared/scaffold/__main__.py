@@ -143,7 +143,7 @@ def main(argv=None) -> int:
 
     pn = sub.add_parser("new", help="scaffold a profile-set / SDK client")
     pn.add_argument("archetype", nargs="?",
-                    help="client | fire | cascade | observer | profile-set")
+                    help="client | fire | cascade | observer | host-tools | profile-set")
     pn.add_argument("--workspace", required=True, help="target workspace dir")
     pn.add_argument("--provider", help="provider name")
     pn.add_argument("--model", help="model name")

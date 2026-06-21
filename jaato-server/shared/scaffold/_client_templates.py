@@ -221,7 +221,71 @@ if __name__ == "__main__":
 '''
 
 
+HOST_TOOLS_TEMPLATE = _COMMON_HEADER + '''
+
+# A client-provided ("host") tool: the AGENT calls it; YOUR client executes it
+# locally and returns the result.  Register it BEFORE create_session so its
+# schema reaches the runner-tier model (mid-session registration isn't seen yet).
+def _send_to_user(args):
+    """Tool body — runs in THIS process when the agent invokes the tool."""
+    text = args.get("text", "")
+    print(f"\\n[host tool] send_to_user({text!r})")
+    return {"delivered": True, "text": text}
+
+
+async def main() -> int:
+    client = _new_client()
+    if not await client.connect(timeout=120.0):   # cold autostart ~30-60s
+        print("could not connect/autostart the daemon — run the doctor")
+        return 1
+
+    # Register host tools BEFORE the session so the runner-tier model sees them.
+    await client.register_client_tools([{
+        "name": "send_to_user",
+        "description": "Send a text message to the user.",
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+        "handler": _send_to_user,   # runs locally when the agent calls the tool
+    }])
+
+    done = asyncio.Event()
+
+    def on_done(ev):
+        done.set()
+
+    def on_output(ev):
+        text = getattr(ev, "text", "") or getattr(ev, "content", "")
+        if text:
+            print(text, end="", flush=True)
+
+    client.subscribe(EventType.AGENT_OUTPUT, on_output)
+    client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
+
+    sid = await client.create_session(
+        profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+    if not sid:
+        print("session.new failed — check provider auth / the daemon log")
+        await client.disconnect()
+        return 1
+
+    await client.send_message("Use the send_to_user tool to greet the user.")
+    await done.wait()
+    print()
+    await client.disconnect()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
+'''
+
+
 TEMPLATES = {
+    "host-tools": ("HOST_TOOLS_TEMPLATE", HOST_TOOLS_TEMPLATE,
+                   "Client-provided ('host') tools — the agent calls a tool YOUR client runs."),
     "client": ("CLIENT_TEMPLATE", CLIENT_TEMPLATE,
                "Minimal jaato SDK client — single session, send + wait."),
     "fire": ("FIRE_TEMPLATE", FIRE_TEMPLATE,
