@@ -2205,6 +2205,16 @@ class JaatoWSServer:
                 category=category or None,
             )
             registry.register_core_tool(schema, executor, auto_approved=auto_approve)
+            # Track the schema so the RUNNER-tier model receives it (the daemon
+            # register_core_tool above only reaches the daemon registry; the
+            # model runs in the runner subprocess).  spawn_session_runner seeds
+            # envelope.client_tools from here for register-before-session.new.
+            session.server.client_tool_schemas[tool_name] = {
+                "name": tool_name,
+                "description": description,
+                "parameters": parameters,
+                "category": category or "",
+            }
 
             logger.info(
                 "Registered client tool '%s' for client %s (timeout=%ss, auto_approve=%s)",

@@ -168,6 +168,53 @@ def _set_runner_workspace_context(
         os.environ["JAATO_CONFIG_ROOT"] = config_root
 
 
+# Sentinel plugin name routed daemon-side by the daemon.plugin_execute handler
+# to the session registry's client-tool proxy executor.
+_CLIENT_TOOL_PLUGIN = "__client_tools__"
+
+
+def _make_client_tool_forwarder(registry, tool_name):
+    """Runner-side executor for a client-provided ("host") tool.
+
+    Forwards the call to the daemon via ``daemon.plugin_execute`` (under the
+    ``__client_tools__`` sentinel plugin name), which the daemon-side handler
+    routes to the session registry's existing proxy executor →
+    ``ToolExecuteRequestEvent`` → the ws client → ``ToolExecuteResultEvent``.
+    ``runner_rpc_client`` is resolved per-call (the registry attribute is set
+    runner-side after bootstrap completes, before any tool call).
+    """
+    def _executor(args):
+        rpc = getattr(registry, "runner_rpc_client", None)
+        if rpc is None:
+            return {"error": f"client tool '{tool_name}': runner->daemon channel "
+                             "unavailable (bootstrap incomplete?)"}
+        return rpc.daemon_plugin_execute(_CLIENT_TOOL_PLUGIN, tool_name, args)
+    return _executor
+
+
+def _register_client_tools_on_runner(registry, client_tools) -> None:
+    """Register client-provided tool SCHEMAS on the runner registry as core
+    tools (so the model sees them in list_tools), each with a daemon-forwarding
+    executor.  Entries are schema dicts (name/description/parameters/category)
+    ferried in ``envelope.client_tools``.
+    """
+    from jaato_sdk.plugins.model_provider.types import ToolSchema
+    for ct in client_tools:
+        name = ct.get("name")
+        if not name:
+            continue
+        schema = ToolSchema(
+            name=name,
+            description=ct.get("description", ""),
+            parameters=ct.get("parameters", {}),
+            category=ct.get("category") or None,
+        )
+        registry.register_core_tool(
+            schema, _make_client_tool_forwarder(registry, name),
+            auto_approved=True,
+        )
+
+
 def _configure_runtime_plugins(
     runtime: "JaatoRuntime", envelope: SessionInitEnvelope,
 ) -> None:
@@ -347,6 +394,16 @@ def _configure_runtime_plugins(
             registry.set_workspace_path(workspace_path)
         if envelope.config_root:
             registry.set_config_root(envelope.config_root)
+
+    # Step 7.5: client-provided ("host") tools.  Register the schemas the client
+    # registered BEFORE session.new (carried in envelope.client_tools) on the
+    # RUNNER registry as core tools, so the model SEES them in list_tools.
+    # Execution forwards back to the daemon's existing proxy executor via
+    # daemon.plugin_execute (sentinel plugin name) → ToolExecuteRequestEvent →
+    # ws client.  Pre-fix these registered only on the daemon registry, so the
+    # runner-tier model was blind (the #344-sibling daemon-vs-runner split).
+    if envelope.client_tools:
+        _register_client_tools_on_runner(registry, envelope.client_tools)
 
     # Step 8: permission plugin.  Default policy mirrors daemon-side
     # `core.py:1778-1794` baseline; profile-supplied

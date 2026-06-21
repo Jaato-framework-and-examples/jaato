@@ -319,6 +319,12 @@ class JaatoServer:
         self._profile = profile
         self._system_instruction_override = system_instruction_override
         self._suppress_base_instructions = suppress_base_instructions
+        # Client-provided ("host") tools registered via the WS/IPC protocol
+        # (websocket._register_client_tools).  name -> schema dict.  Read by
+        # spawn_session_runner to seed envelope.client_tools so the RUNNER-tier
+        # model sees them in list_tools (registering only on self.registry left
+        # the runner model blind — the #344-sibling daemon-vs-runner split).
+        self.client_tool_schemas: Dict[str, Dict[str, Any]] = {}
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
 
