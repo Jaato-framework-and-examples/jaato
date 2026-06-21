@@ -1546,6 +1546,40 @@ class IPCClient:
     # Requests
     # =========================================================================
 
+    @staticmethod
+    def _normalize_attachments(attachments: Optional[list]) -> List[Dict[str, Any]]:
+        """Normalize user-message attachments to the canonical wire shape
+        ``{mime_type, data: base64-str, display_name}`` (client-expanded — the
+        daemon/runner can't read client-side paths, esp. cross-host WS).
+
+        Accepts, per item:
+          - a file-path ``str`` → read bytes, base64-encode, guess mime from ext
+          - a ``dict`` with ``bytes`` ``data`` → base64-encode it
+          - a ``dict`` with base64-``str`` ``data`` → pass through unchanged
+        Unknown shapes are skipped (no fabricated content).
+        """
+        import base64
+        import mimetypes
+        import os
+        out: List[Dict[str, Any]] = []
+        for a in attachments or []:
+            if isinstance(a, str):
+                with open(a, "rb") as fh:
+                    raw = fh.read()
+                out.append({
+                    "mime_type": mimetypes.guess_type(a)[0]
+                                 or "application/octet-stream",
+                    "data": base64.b64encode(raw).decode("ascii"),
+                    "display_name": os.path.basename(a),
+                })
+            elif isinstance(a, dict):
+                d = dict(a)
+                data = d.get("data")
+                if isinstance(data, (bytes, bytearray)):
+                    d["data"] = base64.b64encode(bytes(data)).decode("ascii")
+                out.append(d)
+        return out
+
     async def send_message(
         self,
         text: str,
@@ -1556,7 +1590,12 @@ class IPCClient:
 
         Args:
             text: The message text.
-            attachments: Optional file attachments.
+            attachments: Optional user-message attachments — each a file-path
+                ``str`` OR a ``{mime_type, data, display_name}`` dict (``data``
+                as raw ``bytes`` or a base64 ``str``).  Normalized client-side
+                to the canonical wire shape ``{mime_type, data: base64-str,
+                display_name}`` and delivered to the model's multimodal path
+                (gated by the provider's vision/input modality).
             parallel_tools: Per-call override for parallel tool execution.
                 ``None`` (default) keeps the env-configured behaviour
                 (``JAATO_PARALLEL_TOOLS``).  ``True`` / ``False`` forces
@@ -1564,7 +1603,7 @@ class IPCClient:
         """
         await self._send_event(SendMessageRequest(
             text=text,
-            attachments=attachments or [],
+            attachments=self._normalize_attachments(attachments),
             parallel_tools=parallel_tools,
         ))
 

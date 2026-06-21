@@ -2186,6 +2186,7 @@ class RunnerRPCClient:
         on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Phase 3 §7b.2: dispatch ``session.send_message`` to the
         runner.  Long-running — streams output via ``on_output``
@@ -2224,9 +2225,14 @@ class RunnerRPCClient:
                 (``stage="cancelled"``), or send-loop crash
                 (``stage="send"``).
         """
+        # Text-only sends stay wire-identical (no attachments key); user-message
+        # multimodal adds the base64 attachment list for the runner session.
+        args: Dict[str, Any] = {"prompt": prompt}
+        if attachments:
+            args["attachments"] = attachments
         coro = self.call(
             "session.send_message",
-            {"prompt": prompt},
+            args,
             on_output=on_output,
             on_notification=on_notification,
             cancel_token=cancel_token,
@@ -2256,6 +2262,7 @@ class RunnerRPCClient:
         on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Synchronous wrapper for ``session_send_message`` from
         worker threads.  Note: long-running; the future may block
@@ -2273,6 +2280,7 @@ class RunnerRPCClient:
             on_notification=on_notification,
             cancel_token=cancel_token,
             timeout=timeout,
+            attachments=attachments,
         )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(

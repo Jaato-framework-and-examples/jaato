@@ -3569,12 +3569,38 @@ NOTES
 
         return []
 
+    def _parts_from_user_message(
+        self, message: str, attachments: List[Dict[str, Any]]
+    ) -> List["Part"]:
+        """Build a Part list from a user message text + wire attachments.
+
+        Wire attachments are ``{mime_type, data: base64-str, display_name}``
+        (the canonical user-message multimodal contract — client-expanded,
+        JSON-safe).  ``data`` is base64-decoded to the ``bytes`` that
+        ``Part.inline_data`` expects.  The text part precedes the inline-data
+        parts; an empty ``message`` (image-only turn) yields parts with no text.
+        """
+        import base64
+        parts: List[Part] = []
+        if message:
+            parts.append(Part.from_text(message))
+        for att in attachments or []:
+            data = att.get("data")
+            if isinstance(data, str):      # base64 wire form → raw bytes
+                data = base64.b64decode(data)
+            parts.append(Part(inline_data={
+                "mime_type": att.get("mime_type"),
+                "data": data,
+            }))
+        return parts
+
     def send_message(
         self,
         message: str,
         on_output: Optional[OutputCallback] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_gc_threshold: Optional[GCThresholdCallback] = None
+        on_gc_threshold: Optional[GCThresholdCallback] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """Send a message to the model.
 
@@ -3586,6 +3612,12 @@ NOTES
                 Signature: (usage: TokenUsage) -> None
             on_gc_threshold: Optional callback when GC threshold is crossed.
                 Signature: (percent_used: float, threshold: float) -> None
+            attachments: Optional user-message multimodal attachments, each a
+                ``{mime_type, data: base64-str, display_name}`` dict (the
+                client-expanded wire contract).  When present, the turn is
+                routed through the multimodal parts loop (text + inline image/
+                file Parts); the model receives them gated by its provider's
+                vision/input modality (see resolve_modalities).
 
         Returns:
             The final model response text.
@@ -3595,6 +3627,13 @@ NOTES
         """
         if not self._configured:
             raise RuntimeError("Session not configured. Call configure() first.")
+
+        # User-message multimodal: attachments present → build a Part list
+        # (text + inline image/file data) and route through the canonical parts
+        # loop instead of the text-only path below.  Keeps one multimodal entry.
+        if attachments:
+            parts = self._parts_from_user_message(message, attachments)
+            return self.send_message_with_parts(parts, on_output)
 
         # Lazy-init the provider on first model use (deferred-provider-INIT
         # design 2026-05-13).  The 9s/2-3s INIT cost happens here on first
@@ -8038,7 +8077,7 @@ NOTES
                 else:
                     return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
-            function_calls = list(response.function_calls) if response.function_calls else []
+            function_calls = list(response.get_function_calls())
             while function_calls:
                 response_text = response.get_text()
                 if response_text and on_output:
@@ -8183,7 +8222,7 @@ NOTES
                     self._accumulate_turn_tokens(response, turn_data)
                     # Record token usage to telemetry span
                     self._record_token_telemetry(llm_telemetry, response)
-                function_calls = list(response.function_calls) if response.function_calls else []
+                function_calls = list(response.get_function_calls())
 
             final_text = response.get_text()
             if final_text and on_output:

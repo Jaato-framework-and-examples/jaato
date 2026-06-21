@@ -4117,8 +4117,9 @@ class JaatoServer:
             status="active",
         ))
 
-        # Start model in background (file references should be expanded client-side)
-        self._start_model_thread(text)
+        # Start model in background.  Attachments (client-expanded base64 dicts)
+        # ride the first send to the runner session's multimodal path.
+        self._start_model_thread(text, attachments=attachments)
 
     def _build_send_message_notification_handler(self):
         """Build the per-call ``on_notification`` demuxer used by
@@ -4507,8 +4508,15 @@ class JaatoServer:
 
         return _handle
 
-    def _start_model_thread(self, prompt: str) -> None:
+    def _start_model_thread(
+        self, prompt: str, attachments: Optional[List[Dict]] = None
+    ) -> None:
         """Start the model call in a background thread.
+
+        ``attachments`` (user-message multimodal: ``[{mime_type, data:
+        base64-str, display_name}, ...]``) ride only the FIRST send to the
+        runner session; continuation sends (formatter feedback, nudges, child
+        messages) are text-only.
 
         Phase 3 §7c step 6.6.4.3b: switched from
         ``server._jaato.send_message(...)`` (daemon-side
@@ -4584,6 +4592,7 @@ class JaatoServer:
                         prompt,
                         on_output=output_callback,
                         on_notification=notification_handler,
+                        attachments=attachments,
                     )
 
                     # Auto-continuation for formatter feedback

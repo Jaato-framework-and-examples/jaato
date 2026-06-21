@@ -2839,6 +2839,15 @@ class RunnerRPC:
                 "error": "session.send_message: missing 'prompt' arg (str)",
                 "stage": "decode",
             }
+        # Optional user-message multimodal attachments (wire form:
+        # ``[{mime_type, data: base64-str, display_name}, ...]``).  Forwarded to
+        # the session's multimodal path; absent/empty → text-only (unchanged).
+        attachments = args.get("attachments") or None
+        if attachments is not None and not isinstance(attachments, list):
+            return False, {
+                "error": "session.send_message: 'attachments' must be a list",
+                "stage": "decode",
+            }
         ready, err, session = self._require_ready_session()
         if not ready:
             return err
@@ -2917,6 +2926,7 @@ class RunnerRPC:
                     on_output=on_output,
                     on_usage_update=usage_shim,
                     on_gc_threshold=gc_shim,
+                    attachments=attachments,
                 )
             except Exception as exc:  # noqa: BLE001 — boundary
                 # Cancellation surfaces as a typed exception today
