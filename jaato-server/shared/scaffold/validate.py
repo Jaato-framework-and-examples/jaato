@@ -110,6 +110,35 @@ def validate_profile(
                     f"(has: {', '.join(sorted(known))})",
                     where=f"tool_scopes.{plug}")
 
+    # --- discovery-gated tools (the deferred-loading nuance) -------------
+    # A tool is in the model's INITIAL schema iff it is [core] OR its plugin is
+    # (preload)-ed.  [disc] tools of non-preloaded plugins are reachable only
+    # after the model calls list_tools/get_tool_schemas — introspection is
+    # always core, so they're never LOST, just deferred.  Surface them (info,
+    # not a defect) so an author who assumed a tool was immediately available
+    # isn't surprised.
+    preloaded = getattr(profile, "preloaded_plugins", None) or set()
+    gated: List[str] = []
+    for plug in getattr(profile, "plugins", None) or []:
+        pi = plugins.get(plug)
+        if pi is None or pi.dynamic or plug in preloaded:
+            continue
+        scope = (getattr(profile, "tool_scopes", None) or {}).get(plug)
+        for t in pi.tools:
+            if t.discoverability == "core":
+                continue
+            if scope is not None and t.name not in scope:
+                continue  # scoped out entirely — not exposed at all
+            gated.append(f"{plug}.{t.name}")
+    if gated:
+        preview = ", ".join(gated[:8]) + (" …" if len(gated) > 8 else "")
+        add("info", "discovery_gated_tools",
+            f"{len(gated)} tool(s) are discovery-gated — DEFERRED, not in the "
+            f"model's initial schema (the model must call list_tools/"
+            f"get_tool_schemas to reach them): {preview}.  Add "
+            f"`<plugin>(preload)` to force a plugin's tools eager.",
+            where="plugins")
+
     # --- plugin_configs knobs (the silent-ignore class) ------------------
     plugin_configs = getattr(profile, "plugin_configs", None) or {}
     for cfg_name, cfg in plugin_configs.items():
