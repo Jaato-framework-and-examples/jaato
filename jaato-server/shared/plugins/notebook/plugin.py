@@ -169,13 +169,25 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         local_backend.initialize(config)
         self._backends["local"] = local_backend
 
+        # Opt-in subprocess-kernel backend (design 1c): each notebook runs in its
+        # OWN subprocess rooted at workspace_root, so notebook code's relative
+        # paths resolve in-workspace (no process-global chdir, core.py:915).
+        # Default stays "local" (in-process) until the PR 3 cutover.
+        from .backends.subprocess_kernel import SubprocessKernelBackend
+        subprocess_backend = SubprocessKernelBackend()
+        subprocess_backend.initialize(config)
+        self._backends["subprocess"] = subprocess_backend
+
         # Kaggle backend is initialized lazily when first requested (gpu=true)
         # This avoids stalling during plugin init if kaggle auth is missing/slow
         if not _KAGGLE_AVAILABLE:
             self._trace("Kaggle backend not available: kaggle package not installed")
 
-        # Set default backend (only local is available at init time)
-        self._active_backend_name = "local"
+        # Set default backend.  "subprocess" opts into the 1c kernel; otherwise
+        # the in-process local backend (kaggle is chosen per-call via gpu).
+        requested = config.get("default_backend") or config.get("backend") or "local"
+        self._active_backend_name = (
+            "subprocess" if requested == "subprocess" else "local")
 
         self._initialized = True
         self._trace(f"Initialized with backend={self._active_backend_name}")
@@ -280,6 +292,12 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         """
         self._workspace_root = path
         self._rebuild_code_analyzer()
+        # Propagate to the subprocess-kernel backend so its kernels spawn with
+        # cwd=workspace — the workspace can be set AFTER initialize() (the #344
+        # set_workspace_path flow), and kernels spawn lazily on first execute.
+        sub = self._backends.get("subprocess")
+        if sub is not None:
+            sub.initialize({"workspace_root": path})
         self._trace(f"Workspace path set to: {path}")
 
     def set_plugin_registry(self, registry) -> None:
