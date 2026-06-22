@@ -173,6 +173,16 @@ def validate_profile(
         knobs = cfg_provider.knobs
         if not isinstance(cfg, dict):
             continue
+        # Credential keys declared via an ``api_key_param`` AuthSource (api_key /
+        # api_token / …) ARE valid top-level knobs honored at runtime (mapped to
+        # ProviderConfig), even though they live in PROVIDER_AUTH_RESOLUTION
+        # rather than the knob layers — so ``knobs.accepts("top_level", …)``
+        # alone would miss them and falsely flag a working credential knob
+        # (notably for providers with no ``top_level`` KnobLayer, e.g. zhipuai).
+        auth_param_keys = {
+            a.name for a in (getattr(cfg_provider, "auth", None) or ())
+            if a.kind == "api_key_param" and a.name
+        }
         for key, val in cfg.items():
             if key in _NESTING_LAYERS and isinstance(val, dict):
                 # a layer sub-dict — check each knob inside it
@@ -193,8 +203,8 @@ def validate_profile(
             elif key == "quirks" and isinstance(val, dict):
                 _check_quirks(val, cfg_provider, cfg_name, add)
             else:
-                # a top_level knob
-                if not knobs.accepts("top_level", key):
+                # a top_level knob (or an api_key_param credential key)
+                if key not in auth_param_keys and not knobs.accepts("top_level", key):
                     add("error", "unknown_knob",
                         f"'{key}' is not a valid {cfg_name} top-level knob "
                         "(silently ignored at runtime)",
