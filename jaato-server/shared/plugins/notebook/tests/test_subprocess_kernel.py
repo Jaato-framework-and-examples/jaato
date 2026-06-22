@@ -113,3 +113,21 @@ def test_tools_bridge_no_executor_errors(tmp_path):
         assert r.status == ExecutionStatus.FAILED
     finally:
         be.shutdown()
+
+
+def test_plugin_defaults_to_subprocess_and_local_opts_out(tmp_path):
+    # PR 3 cutover: the plugin defaults to the subprocess kernel; "local" opts
+    # back to the in-process backend (the CWD-escape fallback).
+    from shared.plugins.notebook.plugin import NotebookPlugin
+    p = NotebookPlugin()
+    p.initialize({"workspace_root": str(tmp_path)})
+    try:
+        assert p._active_backend_name == "subprocess"
+    finally:
+        p.shutdown()
+    p2 = NotebookPlugin()
+    p2.initialize({"workspace_root": str(tmp_path), "backend": "local"})
+    try:
+        assert p2._active_backend_name == "local"
+    finally:
+        p2.shutdown()

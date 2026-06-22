@@ -150,6 +150,14 @@ class SubprocessKernelBackend(NotebookBackend):
                 try:
                     frame = proto.read_frame(kernel.rstream)
                 except EOFError:
+                    # Kernel died mid-execution — reap it (avoid a zombie) and
+                    # drop it so the next execute spawns a fresh one.
+                    try:
+                        kernel.proc.wait(timeout=2)
+                    except Exception:
+                        kernel.proc.kill()
+                    with self._lock:
+                        self._kernels.pop(notebook_id, None)
                     return ExecutionResult(
                         status=ExecutionStatus.FAILED, outputs=outputs,
                         error_name="KernelDied",
