@@ -119,6 +119,22 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("quirks", "dict", None,
                  "model-quirk toggles (see PROVIDER_QUIRKS)"),
     ), description="vLLM server connection + generation knobs"),
+    # vLLM subclasses the OpenAI-compat base, whose `_read_api_params` reads
+    # `plugin_configs.vllm.api_params` and forwards the allow-listed keys
+    # (`_FORWARDED_API_PARAMS`) on every request.  Declared so explain/validate
+    # see the layer the provider actually honors (without this, validate warned
+    # `unknown_layer` on a working `api_params` — e.g. temperature=0).
+    KnobLayer("api_params", (
+        KnobSpec("temperature", "float"),
+        KnobSpec("top_p", "float"),
+        KnobSpec("max_tokens", "int"),
+        KnobSpec("tool_choice", "str"),
+        KnobSpec("parallel_tool_calls", "bool"),
+        KnobSpec("frequency_penalty", "float"),
+        KnobSpec("presence_penalty", "float"),
+        KnobSpec("seed", "int"),
+        KnobSpec("stop", "list"),
+    ), description="OpenAI Chat Completions params (filtered allow-list)"),
 ))
 # vLLM is the only provider that honors model quirks (the _KNOWN_QUIRKS
 # allow-list in provider.py).  This declaration lifts that method-local
