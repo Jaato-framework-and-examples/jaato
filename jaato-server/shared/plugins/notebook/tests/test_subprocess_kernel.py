@@ -57,12 +57,59 @@ def test_cell_error_surfaces(tmp_path):
         be.shutdown()
 
 
-def test_tools_bridge_stubbed_until_pr2(tmp_path):
+def test_tools_bridge_executes_through_runner(tmp_path):
+    # PR 2: notebook tools.X() round-trips to the runner executor cross-process.
+    be = SubprocessKernelBackend()
+    be.initialize({"workspace_root": str(tmp_path)})
+    calls = []
+    be.set_tool_executor(
+        lambda name, args: (calls.append((name, args)) or True,
+                            {"echoed": args.get("q")})[1] and (True, {"echoed": args.get("q")}))
+    try:
+        nb = be.create_notebook("t")
+        r = be.execute(nb.notebook_id,
+                       "r = tools.echo(q='hi')\nprint(r['echoed'])")
+        assert r.status == ExecutionStatus.COMPLETED, r.error_message
+        assert "hi" in _text(r)
+        assert calls == [("echo", {"q": "hi"})]
+    finally:
+        be.shutdown()
+
+
+def test_tools_bridge_runs_in_trusted_permission_scope(tmp_path):
+    from shared.ai_tool_runner import in_trusted_bridge_context
+    be = SubprocessKernelBackend()
+    be.initialize({"workspace_root": str(tmp_path)})
+    seen = []
+    be.set_tool_executor(
+        lambda name, args: (seen.append(in_trusted_bridge_context()), (True, {}))[1])
+    try:
+        nb = be.create_notebook("t")
+        be.execute(nb.notebook_id, "tools.x()")
+        assert seen == [True]   # kernel-originated tool inherits notebook approval
+    finally:
+        be.shutdown()
+
+
+def test_tools_bridge_error_raises_in_cell(tmp_path):
+    be = SubprocessKernelBackend()
+    be.initialize({"workspace_root": str(tmp_path)})
+    be.set_tool_executor(lambda name, args: (False, "boom"))
+    try:
+        nb = be.create_notebook("t")
+        r = be.execute(nb.notebook_id, "tools.x()")
+        assert r.status == ExecutionStatus.FAILED
+        assert r.error_name == "ToolExecutionError"
+    finally:
+        be.shutdown()
+
+
+def test_tools_bridge_no_executor_errors(tmp_path):
     be = SubprocessKernelBackend()
     be.initialize({"workspace_root": str(tmp_path)})
     try:
         nb = be.create_notebook("t")
-        r = be.execute(nb.notebook_id, "tools.web_search(query='x')")
-        assert r.status == ExecutionStatus.FAILED  # stub raises (PR 2 wires it)
+        r = be.execute(nb.notebook_id, "tools.x()")  # no executor wired
+        assert r.status == ExecutionStatus.FAILED
     finally:
         be.shutdown()

@@ -12,6 +12,7 @@ OPT-IN (``plugin_configs.notebook.backend: "subprocess"``); the in-process
 """
 
 import datetime
+import json
 import os
 import select
 import signal
@@ -19,7 +20,7 @@ import subprocess
 import sys
 import threading
 import uuid
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
@@ -79,6 +80,19 @@ class SubprocessKernelBackend(NotebookBackend):
         self._workspace_root: Optional[str] = None
         self._kernels: Dict[str, _Kernel] = {}
         self._lock = threading.Lock()
+        # The runner's tool executor (``ToolExecutor.execute`` shape:
+        # (name, args) -> (ok, result)).  Wired by the plugin; serves the
+        # kernel's cross-process tools.X() calls (PR 2).  None → tools.X()
+        # in the kernel reports "no executor wired".
+        self._tool_executor: Optional[
+            Callable[[str, Dict], Tuple[bool, object]]] = None
+
+    def set_tool_executor(
+        self, executor_fn: Callable[[str, Dict], Tuple[bool, object]]
+    ) -> None:
+        """Wire the runner-side tool executor that serves kernel tool_call frames
+        (mirrors LocalJupyterBackend.inject_tools_module for the in-process case)."""
+        self._tool_executor = executor_fn
 
     # ---- protocol: identity / lifecycle -------------------------------------
 
@@ -166,7 +180,18 @@ class SubprocessKernelBackend(NotebookBackend):
                         error_message=frame.get("evalue"),
                         traceback=frame.get("traceback"),
                         duration_seconds=dur)
-                # PR 2: elif ft == proto.TOOL_CALL: serve the cross-process bridge
+                elif ft == proto.TOOL_CALL:
+                    # The cell is blocked mid-exec waiting for this; run the tool
+                    # runner-side and reply.  The loop then continues reading the
+                    # cell's remaining output / further tool calls / result.
+                    ok, payload = self._run_tool(
+                        frame.get("name", ""), frame.get("args") or {})
+                    proto.write_frame(kernel.wstream, {
+                        "type": proto.TOOL_RESULT,
+                        "call_id": frame.get("call_id"),
+                        "ok": ok,
+                        ("result" if ok else "error"): payload,
+                    })
 
     def get_execution_status(self, notebook_id: str,
                              execution_id: Optional[str] = None) -> ExecutionResult:
@@ -221,6 +246,28 @@ class SubprocessKernelBackend(NotebookBackend):
                 created_at=datetime.datetime.now().isoformat())
             kernel = self._spawn(info)
         return kernel
+
+    def _run_tool(self, name: str, args: Dict) -> Tuple[bool, object]:
+        """Run a kernel-originated tool call inside the trusted-bridge permission
+        scope (so it inherits the notebook_execute approval, exactly like the
+        in-process bridge) and return a JSON-safe ``(ok, result|error)``."""
+        if self._tool_executor is None:
+            return False, "notebook tools bridge: no tool executor wired"
+        from shared.ai_tool_runner import trusted_bridge_context
+        try:
+            with trusted_bridge_context():
+                ok, result = self._tool_executor(name, args)
+        except Exception as exc:  # noqa: BLE001 — report to the cell
+            return False, f"{type(exc).__name__}: {exc}"
+        if not ok:
+            return False, result if isinstance(result, str) else repr(result)
+        # The result rides a JSON frame; non-JSON (e.g. binary tool output) →
+        # repr for now (base64 framing of binary tool results is a follow-up).
+        try:
+            json.dumps(result)
+            return True, result
+        except (TypeError, ValueError):
+            return True, repr(result)
 
     def _spawn(self, info: NotebookInfo) -> _Kernel:
         workspace = self._workspace_root or os.getcwd()
