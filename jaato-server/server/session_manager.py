@@ -5335,8 +5335,22 @@ class SessionManager:
             workspace_path=state.workspace_path,
             name=state.description or f"Session {session_id}",
             description=state.description,
-            client_id=None,  # disk-restore path; no client-driven opt-in
+            # Thread the ATTACHING client (was hardcoded None) so a restore-
+            # AFTER-UNLOAD re-attach actually spawns the runner — else
+            # _provision_ipc_apparmor_and_spawn_runner's step-1 (``client_id is
+            # None``) skips the spawn, ``_runner_rpc`` stays None, and the first
+            # message dies on the runner-readiness wait (the #370 re-attach
+            # flaky-fail, root-caused via PROVISION_ENTER client_id=None).  None
+            # on a clientless background restore preserves the old skip.
+            client_id=client_id,
             sandbox_mode=getattr(state, "sandbox_mode", None),
+            # Drive confinement from the SAVED sandbox_mode (precedence-1
+            # apparmor_override in _provision) rather than re-running the
+            # client-driven opt-in — preserves the "use saved sandbox_mode,
+            # don't re-run the opt-in" intent now that a real client_id is
+            # threaded above (config_root / env_file are likewise saved-driven
+            # overrides, so the client_config path stays fully bypassed).
+            apparmor=(getattr(state, "sandbox_mode", None) == "apparmor"),
             profile=restored_profile,
             config_root=state.config_root,
             restore_state={"loaded_state": state},
