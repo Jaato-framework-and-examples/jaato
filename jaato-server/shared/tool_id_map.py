@@ -22,10 +22,60 @@ convention rather than via shared ID prefixes.
 """
 
 import hashlib
+import re
 from typing import Any, Dict
 
 
 _reverse: Dict[str, str] = {}
+
+# A complete model-facing id: t_<8 hex> (tool) or c_<8 hex> (category), as a
+# whole token (markdown backticks / spaces / punctuation are non-word, so the
+# word boundaries match ``t_xxxxxxxx`` whether bare or wrapped).
+_ID_RE = re.compile(r"\b[tc]_[0-9a-f]{8}\b")
+
+# A trailing fragment that could be an INCOMPLETE id prefix at a stream-chunk
+# boundary (``t`` / ``t_`` / ``t_<0-7 hex>``) — held back so a split id is never
+# emitted half-scrubbed.  A COMPLETE id (8 hex) does NOT match (the {0,7} cap),
+# so it is emitted and scrubbed rather than held.
+_PARTIAL_TAIL_RE = re.compile(r"[tc](_[0-9a-f]{0,7})?$")
+
+
+def scrub_tool_ids(text: str) -> str:
+    """Replace known tool/category ids in free text with their real names.
+
+    Unknown ids (never issued / hallucinated) pass through unchanged via
+    :func:`id_to_name`, so coincidental ``t_########`` hex strings are safe.
+    This is the user-facing-surface guard for the contract in this module's
+    docstring: model NARRATION that mentions an id must show the real name.
+    """
+    return _ID_RE.sub(lambda m: id_to_name(m.group(0)), text)
+
+
+class StreamScrubber:
+    """Stateful :func:`scrub_tool_ids` for STREAMED model text.
+
+    ``feed(chunk)`` scrubs complete ids and HOLDS a trailing incomplete-id
+    fragment (so an id split across chunks — ``...t_3f2`` | ``9f306...`` — is not
+    emitted half-way); ``flush()`` returns the held remainder at turn end.  For
+    non-streaming text (the whole part in one ``feed``) the held fragment is
+    normally empty.  Cost: a chunk ending in a lone ``t``/``c`` is delayed one
+    chunk (it could begin an id) — cosmetic, and required for airtight scrubbing.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, text: str) -> str:
+        s = self._buf + text
+        m = _PARTIAL_TAIL_RE.search(s)
+        hold = len(s) - m.start() if m else 0
+        emit, self._buf = s[: len(s) - hold], s[len(s) - hold :]
+        return scrub_tool_ids(emit)
+
+    def flush(self) -> str:
+        out = scrub_tool_ids(self._buf)
+        self._buf = ""
+        return out
 
 
 def name_to_id(name: str, prefix: str = "t") -> str:
