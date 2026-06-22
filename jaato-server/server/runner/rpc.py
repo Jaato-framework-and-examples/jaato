@@ -4027,6 +4027,9 @@ class RunnerRPC:
                         description=ct.get("description", ""),
                         parameters=ct.get("parameters", {}),
                         category=ct.get("category") or None,
+                        # Default EAGER (see _register_client_tools_on_runner);
+                        # honor an explicit discoverability from the client.
+                        discoverability=ct.get("discoverability", "core"),
                     ))
         return True, {
             "registered": [
