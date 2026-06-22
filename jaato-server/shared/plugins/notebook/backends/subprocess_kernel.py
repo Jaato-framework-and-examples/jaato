@@ -22,6 +22,7 @@ import threading
 import uuid
 from typing import Callable, Dict, List, Optional, Tuple
 
+from shared.session_context import get_workspace_root
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
 from ..types import (
@@ -278,7 +279,18 @@ class SubprocessKernelBackend(NotebookBackend):
             return True, repr(result)
 
     def _spawn(self, info: NotebookInfo) -> _Kernel:
-        workspace = self._workspace_root or os.getcwd()
+        # The session workspace comes from the session_context ContextVar — the
+        # SAME deterministic per-session source file_edit uses (get_workspace_root,
+        # seeded at runner bootstrap via _set_runner_workspace_context, reliable
+        # for pool-slot runners post-#344).  The plugin-config value
+        # (set_workspace_path) is only a fallback for non-session contexts (unit
+        # tests).  NO os.getcwd() fallback — that silently chdir'd kernels to the
+        # daemon launch dir when neither was set (the bug the peer's A/B exposed).
+        workspace = get_workspace_root() or self._workspace_root
+        if not workspace:
+            raise RuntimeError(
+                "notebook subprocess kernel: no workspace_root resolved "
+                "(session_context ContextVar and plugin config both unset)")
         r2k_r, r2k_w = os.pipe()   # runner → kernel
         k2r_r, k2r_w = os.pipe()   # kernel → runner
         proc = subprocess.Popen(

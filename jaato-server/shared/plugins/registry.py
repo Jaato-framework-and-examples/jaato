@@ -1357,9 +1357,14 @@ class PluginRegistry:
         self._workspace_path = path
         _trace(f"set_workspace_path: {path}")
 
-        # Broadcast to all exposed plugins that support it
-        for name in self._exposed:
-            plugin = self._plugins.get(name)
+        # Broadcast to ALL registered plugins that support it — not just the
+        # ones exposed to the model.  A runner-tier plugin can need the per-
+        # session workspace before/without model exposure (e.g. a pool-slot
+        # runner whose plugin was initialized at template time, or the notebook
+        # subprocess backend that spawns kernels rooted at the workspace).  The
+        # exposed-only scope was a #344-class propagation gap: registered-but-
+        # unexposed plugins silently kept their init-time (launch-dir) default.
+        for name, plugin in self._plugins.items():
             if plugin and hasattr(plugin, 'set_workspace_path'):
                 try:
                     plugin.set_workspace_path(path)
@@ -1391,8 +1396,9 @@ class PluginRegistry:
         self._config_root: Optional[str] = path
         _trace(f"set_config_root: {path}")
 
-        for name in self._exposed:
-            plugin = self._plugins.get(name)
+        # Parity with set_workspace_path: broadcast to ALL registered plugins,
+        # not just exposed ones (same #344-class propagation gap).
+        for name, plugin in self._plugins.items():
             if plugin and hasattr(plugin, 'set_config_root'):
                 try:
                     plugin.set_config_root(path)

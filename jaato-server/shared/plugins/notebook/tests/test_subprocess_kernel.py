@@ -1,6 +1,7 @@
 """PR 1: the subprocess kernel runs with cwd=workspace (relative paths
 in-workspace, no process-global chdir), persists state, and reports errors."""
 import os
+import pytest
 from shared.plugins.notebook.backends.subprocess_kernel import SubprocessKernelBackend
 from shared.plugins.notebook.types import ExecutionStatus, OutputType
 
@@ -131,3 +132,32 @@ def test_plugin_defaults_to_subprocess_and_local_opts_out(tmp_path):
         assert p2._active_backend_name == "local"
     finally:
         p2.shutdown()
+
+
+def test_session_contextvar_workspace_wins_over_plugin_config(tmp_path):
+    # Fix A: _spawn reads the session_context ContextVar (get_workspace_root) —
+    # the SAME deterministic per-session source file_edit uses — in preference to
+    # the plugin-config value.  This is what makes the kernel chdir to the SESSION
+    # workspace regardless of where the daemon was launched (the peer's A/B bug).
+    from shared.session_context import set_workspace_root, reset_workspace_root
+    ctx_ws = tmp_path / "session_ws"; ctx_ws.mkdir()
+    cfg_ws = tmp_path / "config_ws"; cfg_ws.mkdir()
+    be = SubprocessKernelBackend()
+    be.initialize({"workspace_root": str(cfg_ws)})       # the fallback
+    token = set_workspace_root(str(ctx_ws))               # session ContextVar wins
+    try:
+        nb = be.create_notebook("t")
+        r = be.execute(nb.notebook_id, "import os\nprint(os.getcwd())")
+        assert _text(r).strip() == str(ctx_ws)
+    finally:
+        reset_workspace_root(token)
+        be.shutdown()
+
+
+def test_spawn_fails_loud_without_any_workspace(monkeypatch):
+    # No os.getcwd() fallback: if neither the ContextVar nor plugin config is set,
+    # spawning raises rather than silently chdir'ing to the daemon launch dir.
+    monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+    be = SubprocessKernelBackend()                        # no workspace anywhere
+    with pytest.raises(RuntimeError, match="no workspace_root"):
+        be.create_notebook("t")
