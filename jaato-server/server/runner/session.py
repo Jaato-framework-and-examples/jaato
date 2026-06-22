@@ -209,6 +209,14 @@ def _register_client_tools_on_runner(registry, client_tools) -> None:
             description=ct.get("description", ""),
             parameters=ct.get("parameters", {}),
             category=ct.get("category") or None,
+            # Client-provided tools default to 'core' (EAGER): the client
+            # explicitly provided them, so the model should see them in its
+            # initial schema and use them on INTENT — not only after a
+            # list_tools discovery or a persona that names them.  Honor an
+            # explicit "discoverability" from the dict to opt a tool back to
+            # "discoverable" (a self-extending agent with many tools that
+            # would bloat the eager surface).
+            discoverability=ct.get("discoverability", "core"),
         )
         registry.register_core_tool(
             schema, _make_client_tool_forwarder(registry, name),

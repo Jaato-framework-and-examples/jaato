@@ -34,12 +34,19 @@ def test_register_registers_schema_and_forwarder():
     reg = _FakeRegistry()
     _register_client_tools_on_runner(reg, [
         {"name": "send_to_telegram", "description": "d",
-         "parameters": {"type": "object"}},
+         "parameters": {"type": "object"}},                    # default eager
+        {"name": "deep_tool", "description": "d", "parameters": {},
+         "discoverability": "discoverable"},                   # explicit opt-out
         {"description": "no name"},            # skipped
     ])
-    assert list(reg.core) == ["send_to_telegram"]
+    assert set(reg.core) == {"send_to_telegram", "deep_tool"}
     schema, executor, auto = reg.core["send_to_telegram"]
     assert schema.name == "send_to_telegram" and auto is True and callable(executor)
+    # Client tools default to EAGER ('core') so the model uses them on INTENT
+    # (not only after list_tools or a persona that names them).
+    assert schema.discoverability == "core"
+    # An explicit "discoverability" is honored (opt back to deferred).
+    assert reg.core["deep_tool"][0].discoverability == "discoverable"
 
 
 def test_mid_session_handler_registers_and_appends_to_session_tools():
@@ -56,7 +63,8 @@ def test_mid_session_handler_registers_and_appends_to_session_tools():
             {"name": "new_tool", "description": "d", "parameters": {}}]})
     assert ok and payload["registered"] == ["new_tool"]
     assert "new_tool" in reg.core                              # forwarding executor
-    assert any(s.name == "new_tool" for s in session._tools)   # model can call it
+    appended = [s for s in session._tools if s.name == "new_tool"]
+    assert appended and appended[0].discoverability == "core"  # EAGER → callable on intent
 
 
 def test_mid_session_handler_rejects_non_list():
