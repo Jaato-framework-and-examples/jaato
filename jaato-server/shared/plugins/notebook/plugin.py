@@ -183,11 +183,14 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         if not _KAGGLE_AVAILABLE:
             self._trace("Kaggle backend not available: kaggle package not installed")
 
-        # Set default backend.  "subprocess" opts into the 1c kernel; otherwise
-        # the in-process local backend (kaggle is chosen per-call via gpu).
-        requested = config.get("default_backend") or config.get("backend") or "local"
+        # 1c cutover: the subprocess kernel (cwd=workspace, so notebook relative
+        # paths resolve in-workspace) is the DEFAULT.  "local" opts back to the
+        # in-process backend — kept one release as the CWD-escape fallback.
+        # kaggle is chosen per-call via gpu.
+        requested = (config.get("default_backend") or config.get("backend")
+                     or "subprocess")
         self._active_backend_name = (
-            "subprocess" if requested == "subprocess" else "local")
+            "local" if requested == "local" else "subprocess")
 
         self._initialized = True
         self._trace(f"Initialized with backend={self._active_backend_name}")
