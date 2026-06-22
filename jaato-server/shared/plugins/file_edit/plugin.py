@@ -722,9 +722,40 @@ class FileEditPlugin(RunnerForwardingMixin):
             return resolved
         return p
 
+    @staticmethod
+    def _is_jaato_rule(line: str) -> bool:
+        """True if a .gitignore line is ANY rule anchored at ``.jaato`` — bare,
+        ``/``-anchored, ``/*`` / ``/**`` globbed, a ``.jaato/<sub>`` path, or a
+        ``!``-negation thereof.  Used to detect that the user is already managing
+        ``.jaato`` so we never auto-append a redundant (or negation-defeating)
+        rule on top of a deliberate setup."""
+        s = line.strip()
+        if not s or s.startswith("#"):
+            return False
+        s = s.lstrip("!").lstrip("/")            # drop negation marker + anchor
+        if s.startswith(".jaato/"):
+            return True
+        return s.rstrip("*").rstrip("/") == ".jaato"
+
     def _ensure_gitignore(self) -> None:
-        """Add .jaato to .gitignore if it exists and entry is missing."""
-        gitignore = Path(".gitignore")
+        """Add a ``.jaato/`` ignore to the WORKSPACE .gitignore — but only if it
+        exists and has NO existing ``.jaato``-anchored rule.
+
+        - Anchored to the session workspace (``get_workspace_root``), not the
+          process cwd, so it never edits an unrelated repo's .gitignore when the
+          daemon was launched outside the workspace.
+        - Skips entirely when ANY ``.jaato`` rule is already present, so a
+          deliberate setup (e.g. ``.jaato/*`` + ``!.jaato/profiles/``) is not
+          fought every session (dani's principle: no auto-mods over a
+          deterministic user setup).
+        - Appends the directory form ``.jaato/``; a bare ``.jaato`` placed after a
+          ``!``-negation re-excludes the whole dir and silently un-tracks future
+          profile/agent files.
+        """
+        workspace = get_workspace_root()
+        if not workspace:
+            return
+        gitignore = Path(workspace) / ".gitignore"
         if not gitignore.exists():
             return
 
@@ -732,16 +763,17 @@ class FileEditPlugin(RunnerForwardingMixin):
             content = gitignore.read_text(encoding="utf-8")
             lines = content.splitlines()
 
-            # Check if .jaato is already present
-            if ".jaato" in lines or ".jaato/" in lines:
+            # Any existing .jaato-anchored rule → the user is managing it; leave
+            # it alone (the narrow exact-match check used to miss `.jaato/*` and
+            # re-append a bare `.jaato` every session).
+            if any(self._is_jaato_rule(l) for l in lines):
                 return
 
-            # Add .jaato to gitignore
             with gitignore.open("a", encoding="utf-8") as f:
                 # Add newline if file doesn't end with one
                 if content and not content.endswith("\n"):
                     f.write("\n")
-                f.write(".jaato\n")
+                f.write(".jaato/\n")
         except OSError as exc:
             # If we can't read/write gitignore, just log and skip
             logger.debug(f"Failed to update .gitignore: {exc}")
