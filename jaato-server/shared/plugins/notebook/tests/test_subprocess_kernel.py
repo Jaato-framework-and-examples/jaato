@@ -161,3 +161,36 @@ def test_spawn_fails_loud_without_any_workspace(monkeypatch):
     be = SubprocessKernelBackend()                        # no workspace anywhere
     with pytest.raises(RuntimeError, match="no workspace_root"):
         be.create_notebook("t")
+
+
+def test_streaming_path_propagates_workspace_contextvar(tmp_path, monkeypatch):
+    # The STREAMING path (notebook_execute) runs backend.execute in a raw thread.
+    # ContextVars don't propagate to a raw thread, so without copy_context() the
+    # kernel's get_workspace_root() misses the session workspace and chdir's to
+    # the launch dir (config) instead.  This drives execute_streaming with the
+    # session ContextVar set to a DIFFERENT dir than the plugin config and
+    # asserts the kernel landed in the ContextVar (session) dir.
+    import asyncio
+    from shared.plugins.notebook.plugin import NotebookPlugin
+    from shared.session_context import set_workspace_root, reset_workspace_root
+    monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+    cfg_dir = tmp_path / "launch"; cfg_dir.mkdir()       # plugin config (wrong)
+    ses_dir = tmp_path / "session"; ses_dir.mkdir()      # session ContextVar (right)
+    p = NotebookPlugin()
+    p.initialize({"workspace_root": str(cfg_dir)})
+    token = set_workspace_root(str(ses_dir))
+
+    async def _run():
+        out = []
+        async for ch in p.execute_streaming(
+                "notebook_execute", {"code": "import os\nprint(os.getcwd())"}):
+            out.append(ch.content)
+        return "".join(out)
+
+    try:
+        out = asyncio.run(_run())
+        assert str(ses_dir) in out                       # ContextVar reached the thread
+        assert str(cfg_dir) not in out
+    finally:
+        reset_workspace_root(token)
+        p.shutdown()

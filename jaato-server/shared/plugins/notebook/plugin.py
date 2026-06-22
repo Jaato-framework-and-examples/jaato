@@ -10,6 +10,7 @@ This plugin provides interactive Python notebook capabilities:
 """
 
 import asyncio
+import contextvars
 import io
 import os
 import queue
@@ -909,7 +910,11 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                 }
             backend = self._backends["kaggle"]
         else:
-            backend = self._backends["local"]
+            # Honor the active (non-gpu) backend — "subprocess" by default since
+            # the 1c cutover, "local" only when explicitly opted out.  Hardcoding
+            # "local" here silently bypassed the subprocess kernel entirely
+            # (notebooks ran in-process, so os.getcwd() == the daemon launch dir).
+            backend = self._active_backend
 
         try:
             info = backend.create_notebook(name, gpu_enabled=gpu)
@@ -1116,8 +1121,12 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
             yield chunk
             return
 
-        # Get current execution count (will be incremented after execution)
-        exec_count = backend._execution_counts.get(notebook_id, 0) + 1
+        # Next execution number (cosmetic "In [N]:" label).  Read it via the
+        # NotebookInfo protocol, not a backend-specific internal — the subprocess
+        # kernel backend has no `_execution_counts`.
+        prior = next((nb.execution_count for nb in backend.list_notebooks()
+                      if nb.notebook_id == notebook_id), 0)
+        exec_count = prior + 1
 
         self._trace(f"Streaming execution in {notebook_id}: {code[:50]}...")
 
@@ -1168,8 +1177,17 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
             except Exception as e:
                 error_holder[0] = e
 
-        # Start execution in background thread
-        exec_thread = threading.Thread(target=run_execution, daemon=True)
+        # Start execution in a background thread, within a COPY of the current
+        # context.  ContextVars do NOT propagate to a raw thread, and the
+        # subprocess backend's _spawn reads the session workspace from the
+        # session_context ContextVar (get_workspace_root) — without this copy it
+        # would miss the per-session value and the kernel would chdir to the
+        # daemon launch dir (the streaming-path analogue of the thread-local
+        # trusted_bridge note in run_execution; same root cause, ContextVars
+        # instead of a thread-local).
+        ctx = contextvars.copy_context()
+        exec_thread = threading.Thread(
+            target=lambda: ctx.run(run_execution), daemon=True)
         exec_thread.start()
 
         # Wait for execution to complete (with periodic checks)
