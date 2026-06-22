@@ -371,6 +371,11 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         for backend in self._backends.values():
             if isinstance(backend, LocalJupyterBackend):
                 backend.inject_tools_module(self._tool_bindings_module)
+            elif hasattr(backend, "set_tool_executor"):
+                # Subprocess-kernel backend (1c): wire the executor that serves
+                # the kernel's cross-process tool_call frames — the out-of-process
+                # analogue of inject_tools_module.
+                backend.set_tool_executor(self._tool_executor.execute)
 
     def _rebuild_code_analyzer(self) -> None:
         """Rebuild the code analyzer with current configuration.

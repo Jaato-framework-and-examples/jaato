@@ -25,6 +25,7 @@ import traceback
 from typing import Any, Dict
 
 from shared.plugins.notebook import kernel_protocol as proto
+from shared.plugins.notebook.tool_stubs import ToolExecutionError
 
 
 class _StreamWriter:
@@ -47,26 +48,49 @@ class _StreamWriter:
         pass
 
 
-class _ToolsStub:
-    """PR 1 placeholder for the notebook ``tools`` bridge — raises clearly.
+class _ToolsBridge:
+    """Cross-process notebook ``tools`` bridge (PR 2).
 
-    The cross-process tool bridge (kernel ``tool_call`` → runner executor →
-    ``tool_result``) lands in PR 2.
+    ``tools.X(**kwargs)`` emits a ``tool_call`` frame and BLOCKS reading for the
+    matching ``tool_result`` — the runner runs the tool (inside its trusted-
+    bridge permission scope) and replies.  Safe to read the protocol stream here:
+    this runs *inside* a cell's ``exec`` (called from the main loop), so the main
+    loop is not concurrently reading.  ``tools.ToolExecutionError`` is exposed so
+    notebook code can ``except tools.ToolExecutionError``.
     """
 
+    def __init__(self, rstream, wstream):
+        self._r = rstream
+        self._w = wstream
+        self._n = 0
+
     def __getattr__(self, name: str):
-        def _unavailable(*_a, **_k):
-            raise RuntimeError(
-                f"tools.{name}(): the notebook tools bridge is not available in "
-                "subprocess-kernel mode yet (lands in PR 2 of the kernel "
-                "re-architecture)."
-            )
-        return _unavailable
+        if name == "ToolExecutionError":
+            return ToolExecutionError
+
+        def _call(**kwargs):
+            self._n += 1
+            call_id = f"tc{self._n}"
+            proto.write_frame(self._w, {
+                "type": proto.TOOL_CALL, "call_id": call_id,
+                "name": name, "args": kwargs,
+            })
+            frame = proto.read_frame(self._r)
+            if (frame.get("type") != proto.TOOL_RESULT
+                    or frame.get("call_id") != call_id):
+                raise RuntimeError(
+                    f"notebook tools bridge: expected tool_result for "
+                    f"{call_id!r}, got {frame.get('type')!r}")
+            if frame.get("ok"):
+                return frame.get("result")
+            raise ToolExecutionError(name, str(frame.get("error", "tool failed")))
+
+        return _call
 
 
-def _fresh_namespace() -> Dict[str, Any]:
+def _fresh_namespace(tools: Any) -> Dict[str, Any]:
     ns: Dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__}
-    ns["tools"] = _ToolsStub()
+    ns["tools"] = tools
     return ns
 
 
@@ -145,7 +169,8 @@ def main(argv=None) -> int:
 
     proto.write_frame(wstream, {"type": proto.READY, "cwd": os.getcwd()})
 
-    namespace = _fresh_namespace()
+    tools_bridge = _ToolsBridge(rstream, wstream)
+    namespace = _fresh_namespace(tools_bridge)
     execution_count = 0
     while True:
         try:
@@ -162,7 +187,7 @@ def main(argv=None) -> int:
                 "type": proto.VARIABLES, "variables": _variables(namespace),
             })
         elif ftype == proto.RESET:
-            namespace = _fresh_namespace()
+            namespace = _fresh_namespace(tools_bridge)
             execution_count = 0
             proto.write_frame(wstream, {"type": proto.RESULT, "cell_id": "",
                                         "status": "reset", "value": None,
