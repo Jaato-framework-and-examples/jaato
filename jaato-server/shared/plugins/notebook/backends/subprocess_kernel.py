@@ -11,6 +11,8 @@ OPT-IN (``plugin_configs.notebook.backend: "subprocess"``); the in-process
 ``LocalJupyterBackend`` stays the default until the PR 3 cutover.
 """
 
+import ctypes
+import ctypes.util
 import datetime
 import json
 import os
@@ -33,16 +35,37 @@ from ..types import (
 _DEFAULT_TIMEOUT_S = 300
 
 
+_PR_SET_PDEATHSIG = 1
+
+# Resolve libc + prctl at MODULE IMPORT (before any fork).  The preexec_fn below
+# runs in the post-fork/pre-exec window of a MULTITHREADED process, where only
+# async-signal-safe work is allowed: import / dlopen / malloc there take the
+# allocator/import locks and DEADLOCK the child if a concurrent thread held one
+# at the fork instant (Python's subprocess docs warn against preexec_fn in
+# multithreaded processes).  That deadlock was the parallel-tools BrokenPipe —
+# the kernel never reached exec, so its pipe was never healthy.  Doing the
+# CDLL/dlopen here, once, leaves the preexec_fn with nothing but the resolved
+# prctl syscall.  None if libc can't be loaded → PDEATHSIG is simply skipped.
+try:
+    _LIBC = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6",
+                        use_errno=True)
+    _LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                            ctypes.c_ulong, ctypes.c_ulong]
+    _LIBC.prctl.restype = ctypes.c_int
+except Exception:
+    _LIBC = None
+
+
 def _set_pdeathsig() -> None:
-    """preexec: SIGKILL the kernel if the runner (parent) dies, so a crashed
-    runner never orphans kernels (the jdtls/LSP precedent —
-    feedback_runner_child_heavyweight_proc_needs_pdeathsig).  Best-effort."""
-    try:
-        import ctypes
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
-    except Exception:
-        pass
+    """preexec_fn: SIGKILL the kernel if the runner (parent) THREAD dies, so a
+    crashed runner never orphans kernels (the jdtls/LSP precedent —
+    feedback_runner_child_heavyweight_proc_needs_pdeathsig).
+
+    MUST stay async-signal-safe: ONLY the pre-resolved prctl syscall, NO import /
+    dlopen / malloc (those deadlock in the multithreaded post-fork window — the
+    fork-safety fix).  ``_LIBC`` is loaded at module import above."""
+    if _LIBC is not None:
+        _LIBC.prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
 
 
 class _Kernel:

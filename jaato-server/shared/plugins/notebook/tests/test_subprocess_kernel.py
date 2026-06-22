@@ -194,3 +194,43 @@ def test_streaming_path_propagates_workspace_contextvar(tmp_path, monkeypatch):
     finally:
         reset_workspace_root(token)
         p.shutdown()
+
+
+def test_pdeathsig_preexec_resolves_libc_at_module_level():
+    # Fork-safety: the kernel preexec_fn must do NO import/dlopen in the
+    # post-fork/pre-exec window (that deadlocked under parallel tools).  Guard
+    # that libc + prctl are resolved at MODULE import, so preexec only issues the
+    # bare prctl syscall.
+    from shared.plugins.notebook.backends import subprocess_kernel as sk
+    assert sk._LIBC is not None                      # resolved at import (Linux)
+    assert sk._LIBC.prctl.argtypes is not None       # signature pinned at import
+
+
+def test_concurrent_spawn_under_io_churn(tmp_path):
+    # Smoke for the parallel-tools scenario: spawn kernels while background
+    # threads churn file I/O + allocation (GIL-releasing, like a concurrent
+    # file_edit).  All kernels must spawn + execute cleanly (no BrokenPipe).
+    import threading
+    be = SubprocessKernelBackend()
+    be.initialize({"workspace_root": str(tmp_path)})
+    stop = threading.Event()
+
+    def churn(idx):
+        i = 0
+        while not stop.is_set():
+            (tmp_path / f"churn_{idx}_{i % 4}").write_bytes(bytearray(8192))
+            i += 1
+
+    churners = [threading.Thread(target=churn, args=(k,), daemon=True)
+                for k in range(4)]
+    for t in churners:
+        t.start()
+    try:
+        for i in range(5):
+            nb = be.create_notebook(f"t{i}")          # lazy kernel spawn
+            r = be.execute(nb.notebook_id, "print(1 + 1)")
+            assert r.status == ExecutionStatus.COMPLETED, r.error_message
+            assert "2" in _text(r)
+    finally:
+        stop.set()
+        be.shutdown()
