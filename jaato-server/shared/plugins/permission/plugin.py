@@ -1187,6 +1187,32 @@ class PermissionPlugin(RunnerForwardingMixin):
             "tool_name": tool_name,
         }
 
+    def _reliability_force_prompt(self, tool_name: str) -> bool:
+        """Reliability Phase-2 gate: True iff the reliability reactor flagged
+        ``tool_name`` ESCALATED for the current session AND the client is
+        interactive — so an escalated (misbehaving) tool is re-confirmed by the
+        user even when whitelisted / allow_all / suspended.
+
+        Strict no-op (False) when nothing is escalated (the common case), there
+        is no session context, or the client is headless (``ClientType.API``):
+        a cascade never synchronously blocks here — headless escalation is
+        handled by the async reliability tiers (T1→T3).  The escalated-tools set
+        is written into session-attached state by the reliability reactor under
+        the key ``reliability:escalated_tools``.
+        """
+        from shared.session_context import get_current_session
+        try:
+            sess = get_current_session()
+        except LookupError:
+            return False
+        escalated = sess.get_session_state("reliability:escalated_tools")
+        if not escalated or tool_name not in escalated:
+            return False
+        pres = getattr(sess, "_presentation_context", None)
+        client_type = getattr(pres, "client_type", None)
+        from jaato_sdk.events import ClientType
+        return client_type in (ClientType.TERMINAL, ClientType.WEB, ClientType.CHAT)
+
     def check_permission(
         self,
         tool_name: str,
@@ -1294,20 +1320,26 @@ class PermissionPlugin(RunnerForwardingMixin):
                         'method': 'evaluator',
                     }
 
+        # Reliability Phase-2 escalation gate (computed once): an escalated tool
+        # on an interactive client is re-confirmed by the user even when
+        # otherwise auto-approved (whitelist / allow_all / suspension).  False
+        # for every normal call (a strict no-op until the reactor escalates).
+        force_reescalation = self._reliability_force_prompt(tool_name)
+
         # Check suspension states in priority order:
         # 1. idle suspension (most conservative - clears on idle)
         # 2. turn suspension (clears on turn end)
         # 3. allow_all (session-wide, persists until session ends)
-        if self._idle_suspended:
+        if not force_reescalation and self._idle_suspended:
             self._log_decision(tool_name, args, "allow", "Permission suspended until idle")
             return True, {'reason': 'Permission suspended until idle', 'method': 'idle_suspension'}
 
-        if self._turn_suspended:
+        if not force_reescalation and self._turn_suspended:
             self._log_decision(tool_name, args, "allow", "Permission suspended for turn")
             return True, {'reason': 'Permission suspended for turn', 'method': 'turn_suspension'}
 
         # Check if user pre-approved all requests
-        if self._allow_all:
+        if not force_reescalation and self._allow_all:
             self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
             return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
 
@@ -1328,6 +1360,16 @@ class PermissionPlugin(RunnerForwardingMixin):
             tool_name, args,
             eval_context=None if already_evaluated else eval_context,
         )
+
+        # Reliability escalation re-gate: a whitelisted/auto-allowed tool the
+        # reactor escalated (interactive client) must be re-confirmed — turn the
+        # ALLOW into a channel prompt so the user decides whether to proceed.
+        if force_reescalation and match.decision == PermissionDecision.ALLOW:
+            import dataclasses
+            match = dataclasses.replace(
+                match, decision=PermissionDecision.ASK_CHANNEL,
+                reason="reliability escalation: tool flagged after repeated "
+                       "failures — re-confirm before running")
 
         if match.decision == PermissionDecision.ALLOW:
             # Apply scoped side effects from evaluator decisions
