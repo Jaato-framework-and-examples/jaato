@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 from .ai_tool_runner import ToolExecutor
 from .session_context import set_current_session
+from .tool_id_map import StreamScrubber
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
 from .token_accounting import TokenLedger
 from jaato_sdk.plugins.base import HelpLines, UserCommand, OutputCallback
@@ -3731,6 +3732,23 @@ NOTES
             self._gc_threshold_crossed = False
             self._gc_threshold_callback = on_gc_threshold
 
+            # Scrub provider tool-ids (t_xxxxxxxx / c_xxxxxxxx) out of user-facing
+            # MODEL text before it reaches the client.  The id exists only at the
+            # provider boundary, but the model's free-text narration can mention
+            # one — and that must not surface to the user.  Runner-side, where the
+            # _reverse map is populated at schema build.  StreamScrubber handles
+            # ids split across streaming chunks; history keeps the raw ids (the
+            # model stays on hashes), only the user-facing emission is scrubbed.
+            _id_scrubber = StreamScrubber()
+            _raw_output = on_output
+            if _raw_output is not None:
+                def on_output(source, text, mode, _raw=_raw_output, _s=_id_scrubber):
+                    if source == "model" and text:
+                        text = _s.feed(text)
+                        if not text:
+                            return
+                    _raw(source, text, mode)
+
             # Store output callback for this turn so enrichment can use it directly
             # This avoids the race condition where concurrent sessions overwrite
             # the shared registry callback
@@ -3754,6 +3772,13 @@ NOTES
                 turn_span.record_exception(e)
                 turn_span.set_status_error(str(e))
                 raise
+            finally:
+                # Emit any trailing partial-id fragment the scrubber held back at
+                # the last chunk boundary (raw output — already scrubbed by flush).
+                if _raw_output is not None:
+                    _tail = _id_scrubber.flush()
+                    if _tail:
+                        _raw_output("model", _tail, "write")
 
             # Record turn completion metadata
             turn_metadata = {}
