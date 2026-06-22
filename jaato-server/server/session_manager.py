@@ -303,6 +303,13 @@ class SessionManager:
 
         # In-memory session storage
         self._sessions: Dict[str, Session] = {}
+        # In-flight async unloads (``_do_session_unload``).  session_id → an
+        # event set when that unload completes.  An entry exists ONLY between
+        # the unload's commit point (it passed its attached-clients re-check)
+        # and its final ``_sessions.pop`` — so ``attach_session`` can detect a
+        # session being torn down and await+reload instead of attaching to a
+        # session whose runner is mid-disposal (the attach-vs-unload race).
+        self._unloading: Dict[str, threading.Event] = {}
         # Use RLock (reentrant) because initialize() may emit events during session load
         self._lock = threading.RLock()
 
@@ -5045,7 +5052,32 @@ class SessionManager:
         # Track if session was already in memory (client missed init events)
         session_was_in_memory = False
 
+        # Attach-vs-unload race guard (off-lock await): if an async unload has
+        # committed for this session, its runner is mid-disposal and the session
+        # is about to be evicted. Await the unload (it needs the lock to finish,
+        # so we must wait OUTSIDE the lock), then fall through — the session
+        # will be gone and the disk-restore path below loads fresh + re-spawns.
         with self._lock:
+            pending_unload = self._unloading.get(session_id)
+        if pending_unload is not None:
+            logger.info(
+                "attach_session: session %s is mid-unload — awaiting teardown "
+                "before re-attach", session_id,
+            )
+            pending_unload.wait(timeout=30.0)
+
+        with self._lock:
+            # Atomic with the client-add below: if the unload marker is STILL
+            # present (await timed out, or an unload committed in the gap since
+            # the await), do NOT attach to a session whose runner is being
+            # disposed — bail cleanly so the client retries (the retry takes the
+            # now-clear disk-restore path).
+            if session_id in self._unloading:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=f"Session {session_id} is being unloaded; please retry",
+                    error_type="SessionError",
+                ))
+                return False
             # Check if session is in memory
             session = self._sessions.get(session_id)
             session_was_in_memory = session is not None
@@ -6191,6 +6223,12 @@ class SessionManager:
                     session_id,
                 )
                 return
+            # Commit point: no clients, no active model → we ARE unloading.
+            # Publish the in-flight marker UNDER THE SAME LOCK as the re-check
+            # above, so a concurrent attach_session either added its client
+            # first (the re-check aborted us) or sees this marker and
+            # awaits+reloads. The lock makes the two paths mutually exclusive.
+            self._unloading[session_id] = threading.Event()
 
         # Save before unloading.  Now running on a real thread so
         # session_get_history_threadsafe + budget snapshot RPCs work
@@ -6238,6 +6276,12 @@ class SessionManager:
             )
         with self._lock:
             self._sessions.pop(session_id, None)
+            # Unload complete: signal any attach_session awaiting this teardown,
+            # then drop the in-flight marker so a fresh attach takes the
+            # disk-restore path (_load_session) and re-spawns the runner.
+            done_evt = self._unloading.pop(session_id, None)
+        if done_evt is not None:
+            done_evt.set()
         logger.info(f"Unloaded session: {session_id}")
 
     # ------------------------------------------------------------------

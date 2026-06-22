@@ -403,6 +403,13 @@ class JaatoServer:
         # (DONE / NOW / DAEMON / INTERNAL / WIRING / §7b.2 / TRUTHINESS).
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
+        # Set when ``_runner_rpc`` is live (set_runner_rpc), cleared on teardown.
+        # The send path awaits this instead of dereferencing a None
+        # ``_runner_rpc`` when a fresh attach to a restored session is still
+        # (re)spawning its runner asynchronously — attach has no synchronous
+        # ready-gate like session.new, and the §7c seat-flip forwards
+        # send_message to the runner.
+        self._runner_ready: threading.Event = threading.Event()
         # Phase 2 cascade-sharing (server 0.6.144+): pool manager
         # reference for the cascade-aware teardown path in shutdown().
         # When the runner was served from the pool AND the cascade
@@ -4585,10 +4592,24 @@ class JaatoServer:
             # slot reuse can't leak a prior session's terminal reason.
             server._terminal_reason = None
             try:
+                # A fresh attach to a restored session may still be (re)spawning
+                # its runner asynchronously (attach has no synchronous ready-gate
+                # like session.new).  Await readiness rather than deref a None
+                # ``_runner_rpc`` — the reported NoneType crash.  Bounded; raise a
+                # clean error on timeout (caught below as a terminal error)
+                # instead of a hard AttributeError.
+                if server._runner_rpc is None:
+                    server._runner_ready.wait(timeout=30.0)
+                _rpc = server._runner_rpc
+                if _rpc is None:
+                    raise RuntimeError(
+                        "session runner not ready: attach did not (re)spawn the "
+                        "runner within 30s"
+                    )
                 # Run in workspace context so file operations use client's CWD
                 # Also apply session env so provider/tools can access session-specific config
                 with server._with_session_env(), server._in_workspace():
-                    server._runner_rpc.session_send_message_threadsafe(
+                    _rpc.session_send_message_threadsafe(
                         prompt,
                         on_output=output_callback,
                         on_notification=notification_handler,
@@ -5433,6 +5454,12 @@ class JaatoServer:
         """
         self._runner_rpc = rpc_client
         self._spawned_runner = spawned
+        # Signal/clear runner readiness for the send-path await (the attach
+        # race fix): set once the RPC handle is live, cleared if it's torn down.
+        if rpc_client is not None:
+            self._runner_ready.set()
+        else:
+            self._runner_ready.clear()
         # Plumb onto the registry so plugins can consume via the
         # registry-attribute pattern (§5.4 of the Phase 2 plan).
         if self.registry is not None and rpc_client is not None:
@@ -5592,6 +5619,7 @@ class JaatoServer:
         spawned = self._spawned_runner
         pool_manager = self._pool_manager_ref
         self._runner_rpc = None
+        self._runner_ready.clear()  # runner torn down — send path must await respawn
         self._spawned_runner = None
         self._pool_manager_ref = None
 
