@@ -1187,31 +1187,42 @@ class PermissionPlugin(RunnerForwardingMixin):
             "tool_name": tool_name,
         }
 
-    def _reliability_force_prompt(self, tool_name: str) -> bool:
-        """Reliability Phase-2 gate: True iff the reliability reactor flagged
-        ``tool_name`` ESCALATED for the current session AND the client is
-        interactive — so an escalated (misbehaving) tool is re-confirmed by the
-        user even when whitelisted / allow_all / suspended.
+    def _reliability_escalation_action(self, tool_name: str) -> Optional[str]:
+        """Reliability Phase-2 enforcement action for ``tool_name`` in the
+        current session, or ``None`` for no enforcement.
 
-        Strict no-op (False) when nothing is escalated (the common case), there
-        is no session context, or the client is headless (``ClientType.API``):
-        a cascade never synchronously blocks here — headless escalation is
-        handled by the async reliability tiers (T1→T3).  The escalated-tools set
-        is written into session-attached state by the reliability reactor under
-        the key ``reliability:escalated_tools``.
+        Returns:
+            ``"ask"``  — the reactor flagged the tool ESCALATED and the client is
+                INTERACTIVE (terminal / web / chat): re-confirm with the user
+                even when whitelisted / allow_all / suspended (Phase-2 increment 1).
+            ``"deny"`` — escalated AND the client is HEADLESS (``ClientType.API``):
+                no human to prompt, so block the tool (T1).  Non-blocking — a
+                cascade never synchronously waits here (the §7c invariant); the
+                reactor's nudge tells the model why, and T2/T3 layer out-of-band
+                human approval on top.
+            ``None``   — nothing is escalated (the common case), no session
+                context, or the client type is unknown (no presentation context
+                → no enforcement, the safe default).
+
+        The escalated-tools set is written into session-attached state by the
+        reliability reactor under the key ``reliability:escalated_tools``.
         """
         from shared.session_context import get_current_session
         try:
             sess = get_current_session()
         except LookupError:
-            return False
+            return None
         escalated = sess.get_session_state("reliability:escalated_tools")
         if not escalated or tool_name not in escalated:
-            return False
+            return None
         pres = getattr(sess, "_presentation_context", None)
         client_type = getattr(pres, "client_type", None)
         from jaato_sdk.events import ClientType
-        return client_type in (ClientType.TERMINAL, ClientType.WEB, ClientType.CHAT)
+        if client_type in (ClientType.TERMINAL, ClientType.WEB, ClientType.CHAT):
+            return "ask"
+        if client_type == ClientType.API:
+            return "deny"
+        return None  # unknown presentation → no enforcement (safe default)
 
     def check_permission(
         self,
@@ -1320,11 +1331,28 @@ class PermissionPlugin(RunnerForwardingMixin):
                         'method': 'evaluator',
                     }
 
-        # Reliability Phase-2 escalation gate (computed once): an escalated tool
-        # on an interactive client is re-confirmed by the user even when
-        # otherwise auto-approved (whitelist / allow_all / suspension).  False
-        # for every normal call (a strict no-op until the reactor escalates).
-        force_reescalation = self._reliability_force_prompt(tool_name)
+        # Reliability Phase-2 escalation enforcement (computed once): for an
+        # escalated tool, interactive clients are re-confirmed by the user
+        # ("ask") even when otherwise auto-approved; headless clients are denied
+        # outright ("deny", T1) since there is no human to prompt.  None for
+        # every normal call (a strict no-op until the reactor escalates).
+        escalation_action = self._reliability_escalation_action(tool_name)
+        if escalation_action == "deny":
+            # T1 — headless escalation enforcement.  No human to prompt, so block
+            # the escalated tool.  The reactor's nudge already told the model why;
+            # T2/T3 layer out-of-band human approval on top.  Non-blocking — a
+            # cascade never synchronously waits here (the §7c invariant).
+            self._log_decision(
+                tool_name, args, "deny", "reliability escalation (headless)"
+            )
+            return False, {
+                'reason': "reliability escalation: tool flagged after repeated "
+                          "failures and denied (headless session — no interactive "
+                          "approval available). Reconsider the inputs/approach or "
+                          "try a different tool.",
+                'method': 'reliability_escalation_denied',
+            }
+        force_reescalation = (escalation_action == "ask")
 
         # Check suspension states in priority order:
         # 1. idle suspension (most conservative - clears on idle)
