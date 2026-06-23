@@ -4956,6 +4956,41 @@ class SessionManager:
             return False
         return True
 
+    def set_session_state_for_session(
+        self, target_session_id: str, key: str, value: Any,
+    ) -> bool:
+        """Write session-attached state to a loaded session by ID.
+
+        The session-state sibling of :meth:`inject_prompt_to_session` — a
+        routing primitive for daemon extensions (reactor rules, webhook
+        handlers) that must write ``key → value`` into a session OTHER than the
+        one whose event triggered them.  Generalises
+        ``JaatoSession.set_session_state`` from "self-targeting" to
+        "addressable by ID".  Used by the reliability T3 resume: the
+        ``gate.released`` handler (a global bus event) writes the approved-tools
+        set into the **parked** session, which is not the originating session.
+
+        Thread-safe.  Returns ``True`` if delivered, ``False`` if the target
+        isn't loaded or has no active runner.  ``value`` must be
+        JSON-serialisable (validated runner-side).
+        """
+        with self._lock:
+            session = self._sessions.get(target_session_id)
+        if session is None:
+            return False
+        rpc = getattr(session.server, "_runner_rpc", None)
+        if rpc is None:
+            return False
+        forwarder = getattr(rpc, "session_set_state_threadsafe", None)
+        if not callable(forwarder):
+            return False
+        try:
+            forwarder(key, value, timeout=2.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("set_session_state forward failed: %s", exc)
+            return False
+        return True
+
     def get_session_workspace(self, session_id: str) -> Optional[str]:
         """Get the workspace path of a session.
 
