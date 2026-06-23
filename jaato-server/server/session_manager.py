@@ -5249,6 +5249,42 @@ class SessionManager:
             self._load_session_impl, session_id, client_id, workspace_path,
         )
 
+    @staticmethod
+    def _resolve_restore_config_root(
+        saved_config_root: Optional[str],
+        client_config_root: Optional[str],
+        workspace_path: Optional[str],
+    ) -> Optional[str]:
+        """Resolve ``config_root`` for a disk-restore, with deterministic
+        fallbacks so a pre-persistence session can't hang the re-spawned runner.
+
+        Pre-``config_root``-persistence sessions deserialize with
+        ``state.config_root=None`` (born under an earlier daemon).  Restoring
+        with ``None`` spawns a runner that never calls ``set_config_root``
+        (runner/session.py:353) → ``file_edit`` can't resolve its backup base
+        dir, ``FilesystemQuery`` inits ``workspace=none``, and auth verification
+        hangs forever → the user's message reaches no working runner (silent).
+
+        Resolution order:
+          1. the SAVED ``config_root`` (correct for post-persistence sessions),
+          2. the ATTACHING client's ``config_root`` (the client sends it in
+             ``ClientConfigRequest`` on every (re)attach — an authoritative,
+             non-guessed value),
+          3. the framework default ``<workspace_path>/.jaato`` (workspace_path
+             is reliably persisted, so every session resolves to a working
+             config_root and the runner never hangs).
+
+        Returns ``None`` only in the degenerate case where ``workspace_path`` is
+        also unset.
+        """
+        if saved_config_root:
+            return saved_config_root
+        if client_config_root:
+            return client_config_root
+        if workspace_path:
+            return str(pathlib.Path(workspace_path) / ".jaato")
+        return None
+
     def _load_session_impl(
         self,
         session_id: str,
@@ -5337,12 +5373,23 @@ class SessionManager:
         # only succeeds if the workspace .env carries MODEL_NAME +
         # JAATO_PROVIDER — same constraint as fresh-spawn-without-
         # profile.
+        # Resolve config_root with disk-restore fallbacks (saved → attaching
+        # client → <workspace>/.jaato default) so a pre-persistence session
+        # saved with config_root=None can't hang the re-spawned runner at
+        # file_edit/auth path resolution.  Used by BOTH the profile resolution
+        # below and the BootstrapEnvelope.
+        restore_config_root = self._resolve_restore_config_root(
+            state.config_root,
+            self._client_config.get(client_id, {}).get("config_root"),
+            state.workspace_path,
+        )
+
         restored_profile = None
         if state.profile_name:
             restored_profile, profile_err = self._resolve_profile(
                 state.profile_name,
                 workspace_path=state.workspace_path or workspace_path or "",
-                config_root=state.config_root,
+                config_root=restore_config_root,
                 env_file=session_env_file,
             )
             if restored_profile is None:
@@ -5353,7 +5400,7 @@ class SessionManager:
                     "profile still exists at "
                     "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
                     state.profile_name, session_id, profile_err,
-                    state.workspace_path, state.config_root,
+                    state.workspace_path, restore_config_root,
                 )
 
         # Phase 3 §3.12 disk-restore migration: route the JaatoServer
@@ -5383,11 +5430,12 @@ class SessionManager:
             # apparmor_override in _provision) rather than re-running the
             # client-driven opt-in — preserves the "use saved sandbox_mode,
             # don't re-run the opt-in" intent now that a real client_id is
-            # threaded above (config_root / env_file are likewise saved-driven
-            # overrides, so the client_config path stays fully bypassed).
+            # threaded above.  env_file stays a saved-driven override; config_root
+            # is resolved saved→client→<workspace>/.jaato (restore_config_root
+            # above) so a pre-persistence None can't hang the runner.
             apparmor=(getattr(state, "sandbox_mode", None) == "apparmor"),
             profile=restored_profile,
-            config_root=state.config_root,
+            config_root=restore_config_root,
             restore_state={"loaded_state": state},
             env_file=session_env_file,
             instruction_token_cache=self._instruction_token_cache,
