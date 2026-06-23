@@ -62,10 +62,12 @@ def _cmd_explain(args) -> int:
         data, text = _explain.sets(ws)
     elif scope == "profile":
         data, text = _explain.profile()
+    elif scope == "paths":
+        data, text = _explain.paths()
     else:
         print(f"unknown explain scope {scope!r} — one of: plugins, plugin, "
               "providers, provider, gc, env, transports, clients, runtime, "
-              "tiers, sets, profile", file=sys.stderr)
+              "tiers, sets, profile, paths", file=sys.stderr)
         return 2
     print(json.dumps(data, indent=2, default=str) if args.json else text)
     return 0

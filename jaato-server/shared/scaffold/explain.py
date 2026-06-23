@@ -49,6 +49,8 @@ def overview() -> Rendered:
         "  jaato-scaffold explain runtime\n"
         "  jaato-scaffold explain tiers\n"
         "  jaato-scaffold explain sets [--workspace DIR]\n"
+        "  jaato-scaffold explain profile\n"
+        "  jaato-scaffold explain paths\n"
     )
     return data, text
 
@@ -562,4 +564,62 @@ def profile() -> Rendered:
         "      - my_extra_rules          search path ~/.jaato/apparmor-fragments/ and\n"
         "                                <workspace>/.jaato/apparmor-fragments/ (+ the .cache/ layer).\n"
         "    drop <name>.rules in that dir, then list <name>.  null = ALL fragments; [] = none.")
+    return data, "\n".join(lines)
+
+
+def paths() -> Rendered:
+    """The path & isolation model — daemon-global ``~/.jaato`` vs per-session
+    workspace + ``config_root``.
+
+    Authored to head off the common "override ``$HOME`` to isolate a test run"
+    mistake: jaato keeps ``~/.jaato`` deliberately daemon-global (creds + the
+    auto-installed reactors live there), and isolates PER SESSION at the
+    workspace / ``config_root`` layer — not at ``$HOME``.
+    """
+    data = {
+        "daemon_global": {
+            "root": "~/.jaato/  (HOME-based, resolved via Path.home())",
+            "holds": ["reactors/<name>.json", "scripts/<name>.py",
+                      "<provider>_auth.json", "ws.token"],
+            "scope": "shared across every session on the daemon",
+            "note": "do NOT override $HOME to isolate a run",
+        },
+        "per_session": {
+            "root": "<workspace>/  +  config_root (default <workspace>/.jaato)",
+            "holds": [".jaato/profiles/<set>/<agent>.yaml",
+                      ".jaato/agents|instructions/", ".jaato/logs/",
+                      ".jaato/sessions/"],
+            "workspace_root_env": "JAATO_WORKSPACE_ROOT",
+            "scope": "the isolation boundary — one per session",
+        },
+    }
+    lines = [
+        "paths & isolation model:",
+        "",
+        "  ~/.jaato/   — DAEMON-GLOBAL (HOME-based, resolved via Path.home()):",
+        "    reactors/<name>.json      installed reactor rule fragments (premium)",
+        "    scripts/<name>.py         installed reactor scripts",
+        "    <provider>_auth.json      provider credentials",
+        "    ws.token                  WS bearer token (auto-generated)",
+        "    -> SHARED across every session on the daemon.  Do NOT override $HOME",
+        "       to 'isolate' a run: creds + the auto-installed reactors live here",
+        "       BY DESIGN, and a $HOME override hides them from the daemon.",
+        "",
+        "  <workspace>/   — PER-SESSION (this is the isolation boundary):",
+        "    .jaato/profiles/<set>/<agent>.yaml   profiles (resolved under config_root)",
+        "    .jaato/agents | instructions/        persona + base instructions",
+        "    .jaato/logs/                         per-session logs",
+        "    .jaato/sessions/                     persisted session records",
+        "    -> Isolate a run with a FRESH workspace dir; its .jaato/ is the",
+        "       config_root.  Workspace-scoped tools (file_edit, cli cwd,",
+        "       filesystem_query) resolve against JAATO_WORKSPACE_ROOT / the",
+        "       per-session workspace, NOT $HOME.",
+        "",
+        "  config_root   = <workspace>/.jaato by default — the resolution root for",
+        "    profiles / instructions / agents.  Override per-profile (config_root:)",
+        "    or per-client (working_dir / env_file).",
+        "",
+        "  TL;DR  ~/.jaato = daemon-global (creds + reactors, shared).  Per-session",
+        "  isolation = a fresh workspace + config_root, NEVER a $HOME override.",
+    ]
     return data, "\n".join(lines)
