@@ -1443,7 +1443,24 @@ class JaatoServer:
         # can populate their output panels with the conversation content.
         # This must happen after AgentCreatedEvent (so client buffers exist)
         # and before status events (so tool trees get finalized properly).
-        self._emit_conversation_replay(emit)
+        #
+        # SKIP for chat-type clients: their conversation is already
+        # persistently on-screen (Telegram, Slack, …), so replaying it as
+        # OUTPUT events makes the client render the whole history as the answer
+        # to the user's NEXT message.  Replay is a redraw concept — it applies
+        # only to ephemeral display surfaces (terminal / web).  Gated on the
+        # session's presentation ``client_type`` (set via ClientConfigRequest);
+        # when the presentation context is unknown, default to replaying (the
+        # prior behavior, correct for the TUI).
+        from jaato_sdk.events import ClientType
+        pres = self._presentation_context
+        if pres is None or pres.client_type != ClientType.CHAT:
+            self._emit_conversation_replay(emit)
+        else:
+            logger.info(
+                "  skipping conversation replay for chat-type client "
+                "(persistent history)"
+            )
 
         # Emit agent status. For idle agents, this triggers stop_spinner() on
         # the client which finalizes any replayed tool trees. For non-idle
