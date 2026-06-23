@@ -203,6 +203,68 @@ def check_python_env() -> List[Check]:
     return checks
 
 
+def _premium_pyproject_reactors(spec) -> Optional[List[str]]:
+    """Read the ``[jaato.premium_reactors]`` entry-point names from the EDITABLE
+    jaato-premium source's ``pyproject.toml`` (the source of truth for an ``-e``
+    install), or ``None`` when not locatable / not editable."""
+    locs = list(getattr(spec, "submodule_search_locations", None) or [])
+    if not locs:
+        return None
+    # <repo>/jaato_premium/  ->  <repo>/pyproject.toml
+    pyproject = Path(locs[0]).parent / "pyproject.toml"
+    if not pyproject.is_file():
+        return None
+    try:
+        import tomllib
+        data = tomllib.loads(pyproject.read_text())
+    except Exception:  # noqa: BLE001 — best-effort diagnostic, never crash
+        return None
+    eps = (data.get("project", {})
+               .get("entry-points", {})
+               .get("jaato.premium_reactors", {}))
+    return sorted(eps.keys()) if isinstance(eps, dict) else None
+
+
+def check_premium_reactors() -> List[Check]:
+    """Catch the stale-entry-points trap: jaato-premium installed but a reactor
+    entry point present in its source ``pyproject`` is MISSING from the installed
+    dist-info metadata — because it was added to pyproject AFTER the editable
+    install.  ``discover()`` reads the *metadata*, so the reactor never installs
+    even though it is 'merged'; a reinstall regenerates the metadata.
+
+    Compares the editable source's pyproject against the installed metadata, so
+    there is no hardcoded "expected reactors" list to drift.
+    """
+    import importlib.util as _u
+    spec = _u.find_spec("jaato_premium")
+    if spec is None:
+        return [Check("premium reactors", PASS,
+                      "jaato-premium not installed — premium reactors N/A")]
+    import importlib.metadata as _md
+    GROUP = "jaato.premium_reactors"
+    try:
+        installed = sorted(e.name for e in _md.entry_points(group=GROUP))
+    except Exception as exc:  # noqa: BLE001
+        return [Check("premium reactors", WARN,
+                      f"could not read {GROUP} entry points: {exc}")]
+    src = _premium_pyproject_reactors(spec)
+    if src is None:
+        # Not an editable checkout (or no pyproject) — just surface the set.
+        return [Check("premium reactors", PASS,
+                      f"installed: {installed or '(none)'}")]
+    missing = sorted(set(src) - set(installed))
+    if missing:
+        return [Check(
+            "premium reactors", WARN,
+            f"STALE metadata: source pyproject declares {src} but installed "
+            f"entry points are {installed} (missing {missing}). The entry "
+            f"point(s) were added AFTER the editable install; discover() reads "
+            f"metadata, so the reactor(s) are INERT even though merged. Fix: "
+            f"`pip install -e <jaato-premium> --no-deps` then restart the daemon.")]
+    return [Check("premium reactors", PASS,
+                  f"entry points in sync with source: {installed}")]
+
+
 def check_socket(info: DaemonInfo, *, auto_start: bool) -> List[Check]:
     """Classify the socket state, distinguishing the stale-socket trap.
 
@@ -692,6 +754,7 @@ def run_checks(
     info = probe_daemon(socket_path, pidfile)
     checks: List[Check] = []
     checks += check_python_env()
+    checks += check_premium_reactors()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
     if web_socket:
@@ -702,6 +765,20 @@ def run_checks(
     checks += check_env_file(env_file, workspace)
     checks += check_workspace(workspace, config_root)
     return checks
+
+
+_REUSE_ADVICE = (
+    "\nreuse vs fresh — reuse a RUNNING daemon only when ALL hold (see checks above):\n"
+    "  - it's LISTENING on a socket you can reach        (the 'socket' check)\n"
+    "  - its HOME MATCHES yours                          (the 'daemon HOME' checks;\n"
+    "                                                     pass:// secrets resolve daemon-side)\n"
+    "  - it has the premium reactors you need            (the 'premium reactors' check;\n"
+    "                                                     if STALE -> reinstall + restart, do NOT reuse)\n"
+    "  - its provider/model fit your cascade\n"
+    "Otherwise START FRESH on your own --ipc-socket.  Never reuse another tenant's or the\n"
+    "coval-origin daemon.  (~/.jaato is daemon-global; per-session isolation is the workspace\n"
+    "+ config_root -- see `jaato-scaffold explain paths`.)"
+)
 
 
 def _print(checks: List[Check]) -> int:
@@ -718,6 +795,10 @@ def _print(checks: List[Check]) -> int:
     print("─" * 60)
     verdict = "FAIL" if n_fail else ("WARN" if n_warn else "OK")
     print(f"{verdict}: {n_fail} fail, {n_warn} warn, {len(checks)} checks")
+    # The reuse-vs-fresh advisory only applies to the daemon-preflight path
+    # (run_checks adds the 'premium reactors' check); skip it for `--session`.
+    if any(c.name == "premium reactors" for c in checks):
+        print(_REUSE_ADVICE)
     return 1 if n_fail else 0
 
 
