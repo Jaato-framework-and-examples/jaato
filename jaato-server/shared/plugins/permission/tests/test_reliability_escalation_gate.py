@@ -7,15 +7,19 @@ from shared.session_context import _current_session
 from jaato_sdk.events import ClientType
 
 
-def _fake_session(escalated, client_type):
-    state = {} if escalated is None else {"reliability:escalated_tools": escalated}
+def _fake_session(escalated, client_type, approved=None):
+    state = {}
+    if escalated is not None:
+        state["reliability:escalated_tools"] = escalated
+    if approved is not None:
+        state["reliability:approved_tools"] = approved
     return SimpleNamespace(
         get_session_state=lambda k, d=None: state.get(k, d),
         _presentation_context=SimpleNamespace(client_type=client_type))
 
 
-def _action(tool, escalated, client_type):
-    token = _current_session.set(_fake_session(escalated, client_type))
+def _action(tool, escalated, client_type, approved=None):
+    token = _current_session.set(_fake_session(escalated, client_type, approved))
     try:
         return PermissionPlugin()._reliability_escalation_action(tool)
     finally:
@@ -29,6 +33,15 @@ def test_escalated_interactive_asks():
 
 def test_escalated_headless_denies():            # T1
     assert _action("svc", ["svc"], ClientType.API) == "deny"
+
+
+def test_approved_overrides_escalated():         # T3 resume primitive
+    # An escalated tool that is ALSO approved → no enforcement (allowed),
+    # overriding both the headless deny and the interactive ask.
+    assert _action("svc", ["svc"], ClientType.API, approved=["svc"]) is None
+    assert _action("svc", ["svc"], ClientType.TERMINAL, approved=["svc"]) is None
+    # control: approval names a DIFFERENT tool → enforcement still applies.
+    assert _action("svc", ["svc"], ClientType.API, approved=["other"]) == "deny"
 
 
 def test_not_escalated_no_action():

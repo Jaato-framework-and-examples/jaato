@@ -1212,6 +1212,15 @@ class PermissionPlugin(RunnerForwardingMixin):
             sess = get_current_session()
         except LookupError:
             return None
+        # T3 approved-override (§9 resume primitive): a human-approved tool —
+        # written to ``reliability:approved_tools`` by the reactor's gate.released
+        # resume handler — is ALLOWED even while still flagged escalated.
+        # "approved" wins over "escalated", so the parked cascade's retried call
+        # passes once the human approves.  Read BEFORE the escalated check so
+        # approval short-circuits both the "ask" and "deny" branches.
+        approved = sess.get_session_state("reliability:approved_tools")
+        if approved and tool_name in approved:
+            return None
         escalated = sess.get_session_state("reliability:escalated_tools")
         if not escalated or tool_name not in escalated:
             return None
