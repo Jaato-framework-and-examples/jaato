@@ -749,6 +749,15 @@ def dispatch_bootstrap_envelope(
         _emit_bootstrap_terminated(
             server=server, session_id=session_id, exc=exc,
         )
+    finally:
+        # Mark the runner ready REGARDLESS of bootstrap outcome: on success it
+        # can service mid-session client-tool pushes + sends; on the
+        # daemon-authoritative failure path the daemon-side JaatoSession still
+        # handles the turn — either way, don't strand the push / send-gate on a
+        # 30s readiness timeout.  This bootstrap-settled point is what the gates
+        # now wait for, instead of racing the reused warm pool slot's
+        # live-but-not-ready rpc handle (the re-attach client-tool-push stall).
+        server.mark_runner_ready()
 
 
 def _emit_bootstrap_terminated(

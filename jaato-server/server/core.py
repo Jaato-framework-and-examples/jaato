@@ -412,12 +412,15 @@ class JaatoServer:
         # (DONE / NOW / DAEMON / INTERNAL / WIRING / §7b.2 / TRUTHINESS).
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
-        # Set when ``_runner_rpc`` is live (set_runner_rpc), cleared on teardown.
-        # The send path awaits this instead of dereferencing a None
-        # ``_runner_rpc`` when a fresh attach to a restored session is still
-        # (re)spawning its runner asynchronously — attach has no synchronous
-        # ready-gate like session.new, and the §7c seat-flip forwards
-        # send_message to the runner.
+        # Signals the runner has finished ``session.bootstrap`` and can service
+        # this session's RPCs.  CLEARED when the rpc handle is wired
+        # (set_runner_rpc) and SET by ``mark_runner_ready`` after
+        # ``dispatch_bootstrap_envelope`` — readiness is bootstrap-complete, NOT
+        # rpc-handle-live, because a reused warm pool slot's handle is live the
+        # instant it's claimed yet can't service the session until bootstrap
+        # finishes.  Both the send path AND the mid-session client-tool push gate
+        # on this (attach has no synchronous ready-gate like session.new, and the
+        # §7c seat-flip forwards both to the runner).  Cleared on teardown.
         self._runner_ready: threading.Event = threading.Event()
         # Phase 2 cascade-sharing (server 0.6.144+): pool manager
         # reference for the cascade-aware teardown path in shutdown().
@@ -4624,13 +4627,18 @@ class JaatoServer:
                 # ``_runner_rpc`` — the reported NoneType crash.  Bounded; raise a
                 # clean error on timeout (caught below as a terminal error)
                 # instead of a hard AttributeError.
-                if server._runner_rpc is None:
+                # Readiness is now bootstrap-complete (mark_runner_ready), not
+                # rpc-handle-live — so wait whenever it's unset.  Covers BOTH the
+                # attach re-spawn (rpc None) AND a reused warm pool slot whose
+                # handle is live but whose bootstrap for this session hasn't
+                # finished yet (same window the client-tool-push stall hit).
+                if not server._runner_ready.is_set():
                     server._runner_ready.wait(timeout=30.0)
                 _rpc = server._runner_rpc
-                if _rpc is None:
+                if _rpc is None or not server._runner_ready.is_set():
                     raise RuntimeError(
-                        "session runner not ready: attach did not (re)spawn the "
-                        "runner within 30s"
+                        "session runner not ready: (re)spawn + bootstrap did not "
+                        "complete within 30s"
                     )
                 # Run in workspace context so file operations use client's CWD
                 # Also apply session env so provider/tools can access session-specific config
@@ -5454,6 +5462,18 @@ class JaatoServer:
     # Confined runner (Phase 2 §4.6)
     # =========================================================================
 
+    def mark_runner_ready(self) -> None:
+        """Signal that the per-session runner has finished ``session.bootstrap``
+        and can service mid-session RPCs (the client-tool push) + the send path.
+
+        Readiness is bootstrap-complete, NOT rpc-handle-live (see
+        :meth:`set_runner_rpc`).  Called from ``dispatch_bootstrap_envelope``
+        after the bootstrap RPC settles (success OR the daemon-authoritative
+        failure path) so a reused warm pool slot doesn't strand the push/send on
+        a readiness timeout.  Idempotent.
+        """
+        self._runner_ready.set()
+
     def set_runner_rpc(
         self,
         rpc_client: Optional["RunnerRPCClient"],
@@ -5480,12 +5500,15 @@ class JaatoServer:
         """
         self._runner_rpc = rpc_client
         self._spawned_runner = spawned
-        # Signal/clear runner readiness for the send-path await (the attach
-        # race fix): set once the RPC handle is live, cleared if it's torn down.
-        if rpc_client is not None:
-            self._runner_ready.set()
-        else:
-            self._runner_ready.clear()
+        # Runner readiness is BOOTSTRAP-complete, NOT rpc-handle-live.  A reused
+        # warm pool slot's rpc handle is live the instant it's claimed, but the
+        # slot can't service THIS session until its ``session.bootstrap``
+        # completes — so wiring the handle CLEARS readiness; ``mark_runner_ready``
+        # (called from ``dispatch_bootstrap_envelope`` after the bootstrap RPC)
+        # sets it.  This closes the re-attach stall where the mid-session
+        # client-tool push and the send-path gate raced ahead of the reused
+        # slot's async bootstrap and hit a 15s push TimeoutError.
+        self._runner_ready.clear()
         # Plumb onto the registry so plugins can consume via the
         # registry-attribute pattern (§5.4 of the Phase 2 plan).
         if self.registry is not None and rpc_client is not None:

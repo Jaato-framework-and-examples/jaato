@@ -2250,9 +2250,11 @@ class JaatoWSServer:
         # runs — the daemon-runtime refresh above is daemon-side only).  For a
         # tool registered AFTER session.new, this RPC registers it on the LIVE
         # runner registry so the model's next get_tool_schemas surfaces it
-        # without a session restart.  Best-effort: bootstrap-registered tools
-        # already rode envelope.client_tools, and a just-spawned runner that
-        # isn't ready yet fails harmlessly (it already has the tools).
+        # without a session restart.  On RE-ATTACH this push is REQUIRED, not
+        # cosmetic: the re-spawned runner does NOT already hold the client tools
+        # (they don't survive in the restored envelope), so a dropped push leaves
+        # the turn unservable — which is why the push thread below waits for
+        # bootstrap-complete rather than firing best-effort into a not-ready slot.
         runner_rpc = getattr(session.server, "_runner_rpc", None)
         if runner_rpc is not None:
             # Off the daemon event loop (this runs in the async dispatch; the
@@ -2260,8 +2262,26 @@ class JaatoWSServer:
             # deadlock).  Best-effort background thread; proxy already registered.
             import threading
 
-            def _push(rpc=runner_rpc, t=tools, cid=client_id):
+            def _push(server=session.server, t=tools, cid=client_id):
                 try:
+                    # The rpc handle can be live BEFORE the runner finishes
+                    # session.bootstrap — most acutely on a reused warm pool slot
+                    # (handle reused on claim, bootstrap still running).  Pushing
+                    # into that window hit a 15s TimeoutError and the runner never
+                    # got the client tools -> unservable turn (the re-attach
+                    # stall).  Gate on bootstrap-complete (mark_runner_ready),
+                    # mirroring the send-path gate.
+                    ready = getattr(server, "_runner_ready", None)
+                    if ready is not None and not ready.wait(timeout=30.0):
+                        logger.warning(
+                            "mid-session client-tool push for %s: runner not "
+                            "ready within 30s — skipping", cid)
+                        return
+                    # Re-read the current rpc after readiness (robust to a
+                    # re-spawn during the wait).
+                    rpc = getattr(server, "_runner_rpc", None)
+                    if rpc is None:
+                        return  # runner torn down during the wait
                     rpc.session_register_client_tools_threadsafe(t)
                 except Exception:
                     logger.exception(
