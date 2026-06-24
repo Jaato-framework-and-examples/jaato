@@ -2291,25 +2291,22 @@ class JaatoWSServer:
                     # tools) that the on-loop synchronous emit below skips to
                     # avoid the daemon-side prompt_library walk.  The WS event
                     # sink is thread-safe (run_coroutine_threadsafe).
-                    server._emit_tool_id_registry_from_schemas(
-                        exclude_runner_tier=True)
+                    server._emit_tool_id_registry_from_schemas()
                 except Exception:
                     logger.exception(
                         "mid-session client-tool runner push failed for %s", cid)
 
             threading.Thread(target=_push, daemon=True).start()
 
-        # Emit updated tool ID registry so clients can resolve IDs for
-        # the newly-registered client-provided tools.  exclude_runner_tier:
-        # this runs SYNCHRONOUSLY on the event loop, so it must NOT invoke
-        # runner-tier plugins' get_tool_schemas — prompt_library's ~15s
-        # filesystem walk on a cold re-attach blocked the loop and
-        # self-blocked the register-RPC send above.  Daemon-tier names map
-        # here; runner-tier names arrive from the off-loop _push re-emit once
-        # the runner is ready.
+        # Emit updated tool ID registry so clients can resolve IDs for the
+        # newly-registered client-provided tools.  This runs SYNCHRONOUSLY on
+        # the event loop; the daemon walk in _build_tool_id_mappings ALWAYS
+        # excludes runner-tier (prompt_library's ~15s filesystem walk blocked
+        # the loop on a cold re-attach + self-blocked the register-RPC send
+        # above).  Daemon-tier names map here; runner-tier names arrive from
+        # the off-loop _push re-emit once the runner is ready.
         if session.server:
-            session.server._emit_tool_id_registry_from_schemas(
-                exclude_runner_tier=True)
+            session.server._emit_tool_id_registry_from_schemas()
 
     def _handle_tool_execute_result(self, client_id: str, event) -> None:
         """Route a tool execution result back to the waiting executor thread."""

@@ -1731,7 +1731,7 @@ class JaatoServer:
     # Tool ID Registry
     # =========================================================================
 
-    def _build_tool_id_mappings(self, exclude_runner_tier: bool = False) -> Dict[str, str]:
+    def _build_tool_id_mappings(self) -> Dict[str, str]:
         """Build the complete tool/category ID → name mapping from current schemas.
 
         Iterates session tools and the full registry to cover both active
@@ -1758,8 +1758,17 @@ class JaatoServer:
                 if schema.category:
                     mappings[name_to_id(schema.category, prefix="c")] = schema.category
         if self.registry:
+            # ALWAYS exclude runner-tier: the daemon-side registry walk must
+            # NEVER invoke a runner-tier plugin's get_tool_schemas
+            # (prompt_library's filesystem discovery) — a tier violation that,
+            # on the event-loop thread, blocked the loop ~15s on re-attach and
+            # self-blocked the register-RPC send.  Runner-tier names come from
+            # the runner (session_get_tool_schemas, above), reachable only via
+            # the OFF-loop re-emits (post-bootstrap runner-ready re-emit in
+            # runner_spawn + the client-tool _push re-emit).  On-loop emits map
+            # daemon-tier names immediately; off-loop re-emits add runner-tier.
             for schema in self.registry.get_exposed_tool_schemas(
-                exclude_runner_tier=exclude_runner_tier,
+                exclude_runner_tier=True,
             ):
                 mappings[name_to_id(schema.name)] = schema.name
                 if schema.category:
@@ -1769,23 +1778,25 @@ class JaatoServer:
     def _emit_tool_id_registry_from_schemas(
         self,
         emit_fn: Optional[EventCallback] = None,
-        exclude_runner_tier: bool = False,
     ) -> None:
         """Emit the tool ID registry to clients.
 
-        Used during ``initialize()`` (new sessions) and
-        ``emit_current_state()`` (reconnects).
+        Called from ``initialize()`` (new sessions), ``emit_current_state()``
+        (reconnect/re-attach), the mid-session client-tool push, and the
+        post-bootstrap runner-ready re-emit.
 
-        ``exclude_runner_tier=True`` (the mid-session client-tool push in
-        ``websocket._register_client_tools``) keeps the daemon-side walk
-        off runner-tier plugins so it never runs ``prompt_library``'s
-        filesystem discovery on the event-loop thread; the runner-tier
-        names arrive from the runner via the off-loop ``_push`` re-emit.
+        The daemon-side registry walk in ``_build_tool_id_mappings`` ALWAYS
+        excludes runner-tier plugins, so this never runs a runner-tier plugin's
+        filesystem discovery (``prompt_library``) on the event-loop thread —
+        the re-attach self-block.  Runner-tier names come from the runner
+        (``session_get_tool_schemas``), which only runs off-loop, so they are
+        supplied by the OFF-loop callers: the post-bootstrap runner-ready
+        re-emit (``runner_spawn.dispatch_bootstrap_envelope``) and the
+        client-tool ``_push`` re-emit.  On-loop callers map daemon-tier names
+        immediately; the off-loop re-emits add runner-tier.
         """
         from jaato_sdk.events import ToolIdRegistryEvent
-        mappings = self._build_tool_id_mappings(
-            exclude_runner_tier=exclude_runner_tier,
-        )
+        mappings = self._build_tool_id_mappings()
         if mappings:
             emit = emit_fn or self._on_event
             emit(ToolIdRegistryEvent(mappings=mappings))

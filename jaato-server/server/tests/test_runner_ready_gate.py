@@ -73,9 +73,15 @@ class _FakeServer:
     def __init__(self, rpc):
         self.runner_rpc = rpc
         self.ready_calls = 0
+        self.emit_calls = 0
 
     def mark_runner_ready(self):
         self.ready_calls += 1
+
+    def _emit_tool_id_registry_from_schemas(self):
+        # The post-bootstrap runner-ready re-emit — the off-loop source of
+        # runner-tier tool-id names (on-loop emits skip runner-tier).
+        self.emit_calls += 1
 
 
 def _dispatch(monkeypatch, rpc):
@@ -92,7 +98,9 @@ def test_dispatch_bootstrap_marks_ready_on_success(monkeypatch):
     class RPC:
         def bootstrap_session_threadsafe(self, env, timeout):
             return {"ok": True, "ready": True}
-    assert _dispatch(monkeypatch, RPC()).ready_calls == 1
+    srv = _dispatch(monkeypatch, RPC())
+    assert srv.ready_calls == 1
+    assert srv.emit_calls == 1   # runner-ready tool-id re-emit fired off-loop
 
 
 def test_dispatch_bootstrap_marks_ready_even_on_failure(monkeypatch):
@@ -113,3 +121,4 @@ def test_dispatch_bootstrap_skips_when_no_rpc(monkeypatch):
     runner_spawn.dispatch_bootstrap_envelope(
         server=srv, session_id="sid", workspace_path="/ws", profile_name="prof")
     assert srv.ready_calls == 0
+    assert srv.emit_calls == 0   # early return before the finally -> no re-emit
