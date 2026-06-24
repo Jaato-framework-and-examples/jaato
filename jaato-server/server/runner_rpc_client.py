@@ -501,6 +501,9 @@ class RunnerRPCClient:
                         )
                         continue
                     fut = self._in_flight.pop(env.id, None)
+                    logger.info(   # [RPC_DIAG] DIAG BRANCH — daemon reply match
+                        "[RPC_DIAG] daemon read_loop RESPONSE id=%s in_flight_had=%s client=%s",
+                        env.id, fut is not None, id(self))
                     self._stream_cbs.pop(env.id, None)
                     self._notification_cbs.pop(env.id, None)
                     if fut is not None and not fut.done():
@@ -712,6 +715,8 @@ class RunnerRPCClient:
 
         fut: "asyncio.Future[ResponseEnvelope]" = self._loop.create_future()
         self._in_flight[request_id] = fut
+        logger.info(   # [RPC_DIAG] DIAG BRANCH — daemon future registered
+            "[RPC_DIAG] daemon _in_flight SET id=%s client=%s", request_id, id(self))
         if on_output is not None:
             self._stream_cbs[request_id] = on_output
         if on_notification is not None:

@@ -187,8 +187,17 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         self._config_root: Optional[str] = None
         self._initialized = False
         self._agent_name: Optional[str] = None
-        # Cache of discovered prompts (refreshed on each list)
+        # Cache of discovered prompts.  mtime-gated: ``_discover_prompts``
+        # re-walks ONLY when a source directory's mtime changes (entries
+        # added/removed/renamed); otherwise it returns this cache.  Pre-fix
+        # this was re-walked on EVERY call — an uncached per-item
+        # realpath/symlink walk that, on a cold daemon-side instance during
+        # re-attach, blocked the event loop ~15s inside the synchronous
+        # tool-id-registry emit (the register-push self-block).
         self._prompt_cache: Dict[str, PromptInfo] = {}
+        # Source-mtime signature the cache was built from (None = never
+        # walked).  Compared in _discover_prompts to decide whether to re-walk.
+        self._prompt_cache_signature: Optional[tuple] = None
         # Confirmation callback for interactive prompts (set by client)
         self._confirm_callback: Optional[Callable[[str, List[str]], Optional[str]]] = None
         # Output callback for progress messages
@@ -351,7 +360,11 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         This refreshes the prompt cache and notifies subscribers.
         """
         self._trace(f"_notify_tools_changed: {new_tools}")
-        # Refresh the cache
+        # Refresh the cache.  Force a re-walk past the mtime gate: a content
+        # edit to an EXISTING prompt doesn't bump the source-dir mtime, so the
+        # gate would otherwise skip the rediscovery this explicit "prompts
+        # changed" signal exists to perform.
+        self._prompt_cache_signature = None
         self._discover_prompts()
         # Notify callback if set
         if self._on_tools_changed:
@@ -603,6 +616,23 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
 
         return None
 
+    def _prompt_sources_signature(self, sources) -> tuple:
+        """Cheap change-detector for the prompt source dirs: ``(path, mtime)``
+        per source.  A directory's mtime bumps when entries are added,
+        removed, or renamed — the cases that change the discovered set.
+        Absent/unreadable sources record ``None`` so a source appearing (or
+        becoming readable) later invalidates the cache.  Stat-only — NO
+        realpath/symlink resolution, so it stays cheap even on the slow
+        filesystem that made the full walk ~15s.
+        """
+        sig = []
+        for source in sources:
+            try:
+                sig.append((str(source.path), source.path.stat().st_mtime))
+            except (OSError, PermissionError):
+                sig.append((str(source.path), None))
+        return tuple(sig)
+
     def _discover_prompts(self) -> Dict[str, PromptInfo]:
         """Discover all available prompts from all sources.
 
@@ -611,10 +641,22 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         silently. ``.claude/skills`` and ``.claude/commands`` are
         Claude Code interop directories that may live outside the
         session sandbox.
+
+        mtime-gated: returns the cached result unless a source directory
+        has changed since the last walk (see ``_prompt_sources_signature``).
+        The per-item realpath/symlink resolve in ``_load_prompt_info`` is
+        what made this ~15s on a cold filesystem; gating it keeps the hot
+        ``get_tool_schemas`` path (and ~15 other callers) cheap and, on
+        re-attach, off the event-loop-blocking critical path.
         """
+        sources = self._get_prompt_sources()
+        signature = self._prompt_sources_signature(sources)
+        if self._prompt_cache and signature == self._prompt_cache_signature:
+            return self._prompt_cache
+
         prompts: Dict[str, PromptInfo] = {}
 
-        for source in self._get_prompt_sources():
+        for source in sources:
             try:
                 if not source.path.exists():
                     continue
@@ -648,6 +690,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                     self._trace(f"Discovered prompt: {info.name} from {info.source}")
 
         self._prompt_cache = prompts
+        self._prompt_cache_signature = signature
         return prompts
 
     def _expand_commands(self, content: str, cwd: str) -> str:

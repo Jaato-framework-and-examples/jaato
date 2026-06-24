@@ -381,6 +381,10 @@ class RunnerRPC:
         executor is caught and serialized into the error payload — the
         wire never sees a half-open call.
         """
+        import threading as _thr   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+        logger.info(
+            "[RPC_DIAG] _handle_request ENTER method=%s id=%s tid=%s",
+            env.method, env.id, _thr.get_ident())
         token = CancelToken()
         with self._active_lock:
             self._active_calls[env.id] = _ActiveCall(cancel_token=token)
@@ -424,6 +428,8 @@ class RunnerRPC:
                     env.id, ok=False, result=result, error=err,
                 )
         finally:
+            logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+                "[RPC_DIAG] _handle_request EXIT method=%s id=%s", env.method, env.id)
             _thread_local.cancel_token = None
             _thread_local.on_output = None
             with self._active_lock:
@@ -4203,6 +4209,8 @@ class RunnerRPC:
                             "runner RPC: malformed request frame: %s", exc,
                         )
                         continue
+                    logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+                        "[RPC_DIAG] serve recv method=%s id=%s", env.method, env.id)
                     if env.method == "session.bootstrap":
                         # Pool PR 5a-fix: ``session.bootstrap`` runs
                         # synchronously on the main thread (NOT via
