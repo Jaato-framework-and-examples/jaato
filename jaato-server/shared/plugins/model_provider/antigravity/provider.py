@@ -152,6 +152,15 @@ class AntigravityProvider(ModalityCapabilityMixin):
         # INPUT-modality assertion (plugin_configs.antigravity.modalities)
         # layered over MODEL_INPUT_MODALITIES in modalities().
         self._modalities_knob: Optional[List[str]] = None
+        # Sampling parameters (plugin_configs.antigravity.api_params.*).
+        # ``None`` = omit from the generationConfig and let the backend apply
+        # its server-side default.  A profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        # Threaded through _build_generation_config() → build_generation_config().
+        self._temperature: Optional[float] = None
+        self._top_p: Optional[float] = None
+        self._top_k: Optional[int] = None
+        self._seed: Optional[int] = None
 
         # Configuration
         self._endpoint: str = ANTIGRAVITY_PRIMARY_ENDPOINT
@@ -250,6 +259,31 @@ class AntigravityProvider(ModalityCapabilityMixin):
                     f"{type(modalities_override).__name__}"
                 )
             self._modalities_knob = list(modalities_override)
+
+        # Sampling parameters (plugin_configs.antigravity.api_params).  They
+        # live NESTED at config.extra["api_params"][...] — the canonical
+        # namespaced layer mirroring anthropic / openrouter.  ``None`` means
+        # "omit from the generationConfig and let the backend apply its
+        # server-side default"; a profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        api_params = config.extra.get("api_params") or {}
+        if not isinstance(api_params, dict):
+            raise TypeError(
+                "Antigravity 'api_params' config must be a dict of "
+                f"generationConfig fields, got {type(api_params).__name__}"
+            )
+        temp_extra = api_params.get("temperature")
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = api_params.get("top_p")
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = api_params.get("top_k")
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        seed_extra = api_params.get("seed")
+        if seed_extra is not None:
+            self._seed = int(seed_extra)
 
     def verify_auth(
         self,
@@ -622,8 +656,16 @@ class AntigravityProvider(ModalityCapabilityMixin):
                 # Claude thinking models use thinkingBudget
                 thinking_config = {"thinkingBudget": self._thinking_budget}
 
+        # Profile sampling knobs (plugin_configs.antigravity.api_params).
+        # ``None`` knobs are passed through and dropped by the helper's
+        # ``is not None`` guards, so ``temperature: 0.0`` (determinism) reaches
+        # the wire while unset knobs let the backend apply its defaults.
         return build_generation_config(
             max_output_tokens=output_limit,
+            temperature=self._temperature,
+            top_p=self._top_p,
+            top_k=self._top_k,
+            seed=self._seed,
             thinking_config=thinking_config,
             response_schema=response_schema,
         )

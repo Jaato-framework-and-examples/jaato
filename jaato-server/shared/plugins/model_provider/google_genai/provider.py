@@ -182,6 +182,16 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
         # INPUT-modality assertion (plugin_configs.google_genai.modalities)
         # layered over MODEL_INPUT_MODALITIES in modalities().
         self._modalities_knob: Optional[List[str]] = None
+        # Sampling parameters (plugin_configs.google_genai.api_params.*).
+        # ``None`` = omit from GenerateContentConfig and let Gemini apply its
+        # server-side default.  A profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        # Threaded into BOTH generation_config build sites in complete().
+        self._temperature: Optional[float] = None
+        self._top_p: Optional[float] = None
+        self._top_k: Optional[int] = None
+        self._seed: Optional[int] = None
+        self._max_output_tokens: Optional[int] = None
         self._project: Optional[str] = None
         self._location: Optional[str] = None
 
@@ -293,6 +303,35 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
                     f"{type(modalities_override).__name__}"
                 )
             self._modalities_knob = list(modalities_override)
+
+        # Sampling parameters (plugin_configs.google_genai.api_params).  They
+        # live NESTED at config.extra["api_params"][...] — the canonical
+        # namespaced layer mirroring anthropic / openrouter.  ``None`` means
+        # "omit from GenerateContentConfig and let Gemini apply its server-side
+        # default"; a profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        api_params = (resolved_config.extra or {}).get("api_params") or {}
+        if not isinstance(api_params, dict):
+            raise TypeError(
+                "Google GenAI 'api_params' config must be a dict of "
+                "GenerateContentConfig fields, got "
+                f"{type(api_params).__name__}"
+            )
+        temp_extra = api_params.get("temperature")
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = api_params.get("top_p")
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = api_params.get("top_k")
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        seed_extra = api_params.get("seed")
+        if seed_extra is not None:
+            self._seed = int(seed_extra)
+        max_output_extra = api_params.get("max_output_tokens")
+        if max_output_extra is not None:
+            self._max_output_tokens = int(max_output_extra)
 
         # Validate configuration before attempting connection
         self._validate_config(resolved_config)
@@ -909,6 +948,28 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
 
     # ==================== Stateless Completion ====================
 
+    def _apply_sampling_knobs(self, config_kwargs: Dict[str, Any]) -> None:
+        """Thread profile sampling knobs into a GenerateContentConfig kwargs dict.
+
+        Reads the per-profile sampling overrides resolved at ``initialize()``
+        from ``plugin_configs.google_genai.api_params`` and copies each one that
+        was set into ``config_kwargs`` so it reaches the wire.  ``None`` keys are
+        skipped (``is not None`` guards), so ``temperature: 0.0`` — the
+        determinism knob — survives while unset knobs let Gemini apply its
+        server-side defaults.  Called at BOTH config build sites in
+        ``complete()`` (cache + non-cache).
+        """
+        if self._temperature is not None:
+            config_kwargs["temperature"] = self._temperature
+        if self._top_p is not None:
+            config_kwargs["top_p"] = self._top_p
+        if self._top_k is not None:
+            config_kwargs["top_k"] = self._top_k
+        if self._seed is not None:
+            config_kwargs["seed"] = self._seed
+        if self._max_output_tokens is not None:
+            config_kwargs["max_output_tokens"] = self._max_output_tokens
+
     def complete(
         self,
         messages: List[Message],
@@ -981,6 +1042,7 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
                 if response_schema:
                     config_kwargs["response_mime_type"] = "application/json"
                     config_kwargs["response_schema"] = response_schema
+                self._apply_sampling_knobs(config_kwargs)
                 config = get_types().GenerateContentConfig(**config_kwargs)
 
         if config is None:
@@ -996,6 +1058,7 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
             if response_schema:
                 config_kwargs["response_mime_type"] = "application/json"
                 config_kwargs["response_schema"] = response_schema
+            self._apply_sampling_knobs(config_kwargs)
             config = get_types().GenerateContentConfig(**config_kwargs)
 
         if on_chunk:
