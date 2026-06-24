@@ -1748,7 +1748,22 @@ class JaatoServer:
         # Phase 3 §7c step 6.6.4.5c.5: route through runner-RPC.
         # Daemon wrapper reconstructs ToolSchema NamedTuples so
         # ``.name`` and ``.category`` attr access works unchanged.
-        if self._runner_rpc is not None:
+        # ``session_get_tool_schemas_threadsafe`` is a _threadsafe RPC
+        # (run_coroutine_threadsafe + future.result()).  Invoked ON the event
+        # loop it SELF-DEADLOCKS — the loop blocks on .result() for a coro only
+        # the loop can pump (the runner replies in ~1ms but the loop can't
+        # deliver the reply) -> 15s timeout.  SAME re-entrancy class as the
+        # register-RPC stall.  Gate it OFF-loop only: on-loop emits
+        # (emit_current_state / initialize / _register_client_tools) map
+        # daemon-tier names from the registry walk below; the OFF-loop re-emits
+        # (runner-ready + client-tool _push) invoke this RPC to add runner-tier.
+        import asyncio as _asyncio
+        try:
+            _asyncio.get_running_loop()
+            on_loop_thread = True
+        except RuntimeError:
+            on_loop_thread = False
+        if self._runner_rpc is not None and not on_loop_thread:
             try:
                 schemas = self._runner_rpc.session_get_tool_schemas_threadsafe()
             except Exception:  # noqa: BLE001 — best-effort registry build
