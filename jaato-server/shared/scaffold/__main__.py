@@ -64,6 +64,8 @@ def _cmd_explain(args) -> int:
         data, text = _explain.profile()
     elif scope == "paths":
         data, text = _explain.paths()
+    elif scope == "prefetch":
+        data, text = _explain.prefetch()
     else:
         print(f"unknown explain scope {scope!r} — one of: plugins, plugin, "
               "providers, provider, gc, env, transports, clients, runtime, "

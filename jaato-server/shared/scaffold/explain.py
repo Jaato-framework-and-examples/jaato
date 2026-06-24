@@ -51,6 +51,7 @@ def overview() -> Rendered:
         "  jaato-scaffold explain sets [--workspace DIR]\n"
         "  jaato-scaffold explain profile\n"
         "  jaato-scaffold explain paths\n"
+        "  jaato-scaffold explain prefetch\n"
     )
     return data, text
 
@@ -637,5 +638,62 @@ def paths() -> Rendered:
         "",
         "  TL;DR  ~/.jaato = daemon-global (creds + reactors, shared).  Per-session",
         "  isolation = a fresh workspace + config_root, NEVER a $HOME override.",
+    ]
+    return data, "\n".join(lines)
+
+
+def prefetch() -> Rendered:
+    """The prefetch-script capability — a DETERMINISTIC per-agent way to inject
+    computed/fetched content into the system prompt BEFORE the model's first turn.
+
+    Surfaces ``{{!py:...}}`` dynamic-instruction expansion
+    (``shared/dynamic_instructions.py``), which ``scaffold explain`` otherwise
+    never mentions — so an author/agent self-configuring via explain can
+    actually discover it.
+    """
+    data = {
+        "directive_mandatory": "{{!py:scripts/<name>.py [args]}}",
+        "directive_optional": "{{!py?:scripts/<name>.py [args]}}",
+        "lives_in": ".jaato/agents/<name>.md  (the persona)",
+        "script_at": "<config_root>/scripts/<name>.py  OR  ~/.jaato/scripts/<name>.py",
+        "entry": "def render(context, args) -> str",
+        "context_attrs": ["agent_params", "registry", "runtime", "workspace_path",
+                          "config_root", "env", "session_id", "logger", "tool_calls"],
+        "example": "shared/plugins/subagent/README.md (prefetch_kyc_aml.py)",
+    }
+    lines = [
+        "prefetch scripts — deterministic per-agent session-start behaviour",
+        "(dynamic-instruction `{{!py:...}}` expansion; shared/dynamic_instructions.py):",
+        "",
+        "  WHAT: a persona placeholder that runs a Python script at session-prep",
+        "  (configure-time) and injects the returned string into the system prompt",
+        "  BEFORE the model's first turn — a deterministic, no-model-round-trip way",
+        "  to seed per-agent session-start context (fetched data, computed config,",
+        "  mandatory pre-reads).",
+        "",
+        "  AUTHOR IT in two files:",
+        "    .jaato/agents/<name>.md          persona — write the placeholder",
+        "    <config_root>/scripts/<f>.py     the script (or ~/.jaato/scripts/<f>.py,",
+        "                                     daemon-global; same loader as reactors)",
+        "",
+        "  DIRECTIVE forms (in the persona .md):",
+        "    {{!py:scripts/<f>.py a b}}    MANDATORY — a render() failure raises",
+        "        PrefetchError + aborts session-prep (the model must NOT start",
+        "        without this content).",
+        "    {{!py?:scripts/<f>.py ...}}   OPTIONAL — best-effort: a failure DROPS",
+        "        the placeholder instead of aborting.  (A script may also return a",
+        "        string starting with '[prefetch error: ...]' for a soft failure.)",
+        "",
+        "  SCRIPT contract:",
+        "    def render(context, args) -> str",
+        "      args    = whitespace-split tokens after the script name.",
+        "      context = RenderContext: agent_params (the agent's params dict),",
+        "        registry (registry.get_plugin('<name>') to reach a plugin),",
+        "        runtime, workspace_path, config_root, env (os.environ snapshot),",
+        "        session_id, logger, tool_calls (completion-time only; [] for",
+        "        input-side prefetch).",
+        "",
+        "  WORKED EXAMPLE: shared/plugins/subagent/README.md -> prefetch_kyc_aml.py",
+        "  (a full persona placeholder + render() pulling plugin data into the prompt).",
     ]
     return data, "\n".join(lines)
