@@ -558,6 +558,7 @@ def build_generation_config(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     top_k: Optional[int] = None,
+    seed: Optional[int] = None,
     thinking_config: Optional[Dict[str, Any]] = None,
     response_schema: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -568,6 +569,7 @@ def build_generation_config(
         temperature: Sampling temperature.
         top_p: Top-p sampling parameter.
         top_k: Top-k sampling parameter.
+        seed: Deterministic-sampling seed.
         thinking_config: Thinking/reasoning configuration.
         response_schema: JSON schema for structured output.
 
@@ -587,6 +589,9 @@ def build_generation_config(
 
     if top_k is not None:
         config["topK"] = top_k
+
+    if seed is not None:
+        config["seed"] = seed
 
     if thinking_config is not None:
         config["thinkingConfig"] = thinking_config

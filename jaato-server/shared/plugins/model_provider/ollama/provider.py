@@ -144,6 +144,33 @@ class OllamaProvider(AnthropicProvider):
             env_value=resolve_context_length(),
         )
 
+        # Sampling parameters (api_params layer).  They live NESTED at
+        # plugin_configs.ollama.api_params.{temperature,top_p,top_k,max_tokens}
+        # → config.extra["api_params"][...].  ``None`` means "omit from the
+        # request and let Ollama apply its server-side default"; a profile
+        # wanting determinism sets ``api_params.temperature: 0.0`` (which is
+        # falsy, hence the ``is not None`` guards).  These reach
+        # ``messages.create()`` via the inherited AnthropicProvider.complete(),
+        # which emits self._temperature / _top_p / _top_k / _max_tokens_override.
+        api_params = config.extra.get("api_params") or {}
+        if not isinstance(api_params, dict):
+            raise TypeError(
+                "Ollama 'api_params' config must be a dict of Anthropic "
+                f"Messages API fields, got {type(api_params).__name__}"
+            )
+        temp_extra = api_params.get("temperature")
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = api_params.get("top_p")
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = api_params.get("top_k")
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        max_tokens_extra = api_params.get("max_tokens")
+        if max_tokens_extra is not None:
+            self._max_tokens_override = int(max_tokens_extra)
+
         # Ollama doesn't support thinking.
         self._enable_thinking = False
 

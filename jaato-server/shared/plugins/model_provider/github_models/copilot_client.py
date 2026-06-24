@@ -421,6 +421,8 @@ class CopilotClient:
         messages: List[Dict[str, Any]],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        seed: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         stream: bool = False,
     ) -> CopilotResponse:
@@ -431,6 +433,8 @@ class CopilotClient:
             messages: List of message dicts with role and content
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
+            top_p: Top-p (nucleus) sampling parameter
+            seed: Deterministic-sampling seed
             tools: Optional tool definitions
             stream: If True, return streaming response
 
@@ -447,6 +451,10 @@ class CopilotClient:
             payload["max_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if seed is not None:
+            payload["seed"] = seed
         if tools:
             payload["tools"] = tools
         if stream:
@@ -490,6 +498,8 @@ class CopilotClient:
         messages: List[Dict[str, Any]],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        seed: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         on_chunk: Optional[Callable[[str], None]] = None,
     ) -> Iterator[CopilotStreamChoice]:
@@ -500,6 +510,8 @@ class CopilotClient:
             messages: List of message dicts
             max_tokens: Maximum tokens
             temperature: Sampling temperature
+            top_p: Top-p (nucleus) sampling parameter
+            seed: Deterministic-sampling seed
             tools: Optional tool definitions
             on_chunk: Optional callback for each text chunk
 
@@ -516,6 +528,10 @@ class CopilotClient:
             payload["max_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if seed is not None:
+            payload["seed"] = seed
         if tools:
             payload["tools"] = tools
 
@@ -661,6 +677,8 @@ class CopilotClient:
         system_instruction: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        seed: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
     ) -> ResponsesAPIResponse:
         """Send request to Responses API (for Codex models).
@@ -671,6 +689,8 @@ class CopilotClient:
             system_instruction: Optional system instruction
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
+            top_p: Top-p (nucleus) sampling parameter
+            seed: Deterministic-sampling seed
             tools: Optional tool definitions in chat completions format
 
         Returns:
@@ -693,6 +713,10 @@ class CopilotClient:
             payload["max_output_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if seed is not None:
+            payload["seed"] = seed
 
         # Convert tools to Responses API format
         responses_tools = self._convert_tools_to_responses_format(tools)
@@ -737,6 +761,8 @@ class CopilotClient:
         system_instruction: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        seed: Optional[int] = None,
         tools: Optional[List[Dict]] = None,
         on_chunk: Optional[Callable[[str], None]] = None,
     ) -> Iterator[Dict[str, Any]]:
@@ -748,6 +774,8 @@ class CopilotClient:
             system_instruction: Optional system instruction
             max_tokens: Maximum tokens
             temperature: Sampling temperature
+            top_p: Top-p (nucleus) sampling parameter
+            seed: Deterministic-sampling seed
             tools: Optional tool definitions
             on_chunk: Optional callback for each text chunk
 
@@ -775,6 +803,10 @@ class CopilotClient:
             payload["max_output_tokens"] = max_tokens
         if temperature is not None:
             payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if seed is not None:
+            payload["seed"] = seed
 
         # Convert tools to Responses API format
         responses_tools = self._convert_tools_to_responses_format(tools)
