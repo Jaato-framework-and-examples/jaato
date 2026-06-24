@@ -2328,6 +2328,12 @@ class GateReleasedEvent(Event):
     """
     type: EventType = Field(default=EventType.GATE_RELEASED)
     gate_name: str = ""
+    session_id: str = ""                     # originating session (from the
+                                             # gate's announce intent); empty
+                                             # for a gate with no session
+                                             # association. Lets bus subscribers
+                                             # (reactors) target the parked
+                                             # session without parsing gate_name.
     tenant_id: str = ""
     owner: str = ""
     outcome: Optional[Dict[str, Any]] = None
