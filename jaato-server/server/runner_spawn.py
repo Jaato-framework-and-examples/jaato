@@ -758,6 +758,22 @@ def dispatch_bootstrap_envelope(
         # now wait for, instead of racing the reused warm pool slot's
         # live-but-not-ready rpc handle (the re-attach client-tool-push stall).
         server.mark_runner_ready()
+        # Runner is bootstrap-settled — re-emit the tool-id registry OFF the
+        # event loop so the runner-tier tool names (prompt.* etc.) reach the
+        # client.  Every ON-loop emit caller (emit_current_state / initialize /
+        # _register_client_tools) now skips runner-tier to avoid the
+        # daemon-side prompt_library filesystem walk on the loop (the re-attach
+        # self-block); those names come ONLY from the runner
+        # (session_get_tool_schemas), which can only run off-loop — here.  On a
+        # bootstrap failure the runner RPC yields [] and this maps daemon-tier
+        # only (harmless).
+        try:
+            server._emit_tool_id_registry_from_schemas()
+        except Exception:  # noqa: BLE001 — re-emit must not strand bootstrap
+            logger.debug(
+                "post-bootstrap tool-id re-emit failed for %s",
+                session_id, exc_info=True,
+            )
 
 
 def _emit_bootstrap_terminated(

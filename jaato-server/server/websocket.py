@@ -2283,14 +2283,28 @@ class JaatoWSServer:
                     if rpc is None:
                         return  # runner torn down during the wait
                     rpc.session_register_client_tools_threadsafe(t)
+                    # Runner is ready and the client tools are now registered
+                    # on it — re-emit the tool-id registry OFF the loop.  The
+                    # runner RPC session_get_tool_schemas (in
+                    # _build_tool_id_mappings) can only run off-loop, and it
+                    # supplies the runner-tier names (prompt.* + these client
+                    # tools) that the on-loop synchronous emit below skips to
+                    # avoid the daemon-side prompt_library walk.  The WS event
+                    # sink is thread-safe (run_coroutine_threadsafe).
+                    server._emit_tool_id_registry_from_schemas()
                 except Exception:
                     logger.exception(
                         "mid-session client-tool runner push failed for %s", cid)
 
             threading.Thread(target=_push, daemon=True).start()
 
-        # Emit updated tool ID registry so clients can resolve IDs for
-        # the newly-registered client-provided tools.
+        # Emit updated tool ID registry so clients can resolve IDs for the
+        # newly-registered client-provided tools.  This runs SYNCHRONOUSLY on
+        # the event loop; the daemon walk in _build_tool_id_mappings ALWAYS
+        # excludes runner-tier (prompt_library's ~15s filesystem walk blocked
+        # the loop on a cold re-attach + self-blocked the register-RPC send
+        # above).  Daemon-tier names map here; runner-tier names arrive from
+        # the off-loop _push re-emit once the runner is ready.
         if session.server:
             session.server._emit_tool_id_registry_from_schemas()
 
