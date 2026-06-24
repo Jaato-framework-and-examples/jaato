@@ -152,6 +152,15 @@ _SERVER_TO_BUS: Dict[EventType, BusEventType] = {
     # Cascade stage settled — bridged so cascade reactors can gate next-stage
     # spawn on this universal per-stage event (SlotSettledEvent, cascade only).
     EventType.SLOT_SETTLED: BusEventType.SLOT_SETTLED,
+    # HandoffGate release — bridged so reactor rules matching
+    # event_type=gate.released fire (premium reliability's T3 gate-park
+    # resume). Same bug+fix shape as SESSION_TERMINATED above: pre-bridge the
+    # event went only to client sinks via the registry's daemon-wide
+    # broadcast_event, so the reactor engine (bus subscriber) never saw it.
+    # The GateRegistry now routes gate.released through the parked session's
+    # server.emit() (premium); gate.announced stays a daemon-wide client
+    # broadcast. See jaato-premium docs/design/gate-released-bus-delivery.md.
+    EventType.GATE_RELEASED: BusEventType.GATE_RELEASED,
 }
 
 

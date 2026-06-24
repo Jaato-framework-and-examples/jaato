@@ -60,6 +60,13 @@ class EventType(Enum):
     # per-stage handoff signal; reactors gate next-stage spawn on it.
     SLOT_SETTLED = "slot.settled"
 
+    # HandoffGate release (bridged from server events) — lets reactor rules
+    # (e.g. reliability's T3 gate-park resume) fire when a parked session's
+    # gate is approved/denied/timed-out. gate.announced stays a daemon-wide
+    # client-discovery broadcast (not bridged here). See
+    # jaato-premium docs/design/gate-released-bus-delivery.md.
+    GATE_RELEASED = "gate.released"
+
     # Tool execution events (bridged from server events)
     TOOL_CALL_STARTED = "tool.call_started"
     TOOL_CALL_COMPLETED = "tool.call_completed"

@@ -11500,6 +11500,7 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type GateName1 = string;
+export type SessionId9 = string;
 export type TenantId1 = string;
 export type Owner1 = string;
 export type Outcome = {
@@ -14604,6 +14605,7 @@ export interface GateReleasedEvent {
   type?: EventType94;
   timestamp?: Timestamp94;
   gate_name?: GateName1;
+  session_id?: SessionId9;
   tenant_id?: TenantId1;
   owner?: Owner1;
   outcome?: Outcome;
