@@ -4956,6 +4956,48 @@ class SessionManager:
             return False
         return True
 
+    def send_message_to_session(
+        self,
+        target_session_id: str,
+        text: str,
+    ) -> bool:
+        """DRIVE a turn on an already-loaded session in place, keeping its id.
+
+        The turn-DRIVING counterpart to :meth:`inject_prompt_to_session`:
+        ``inject_prompt_to_session`` QUEUES a prompt into the runner's inject
+        buffer (consumed only when some OTHER driver runs the next turn), so an
+        idle headless session with no client / no poll never actually runs.
+        This DISPATCHES a ``SendMessageRequest`` through the same daemon path a
+        client send takes — it is the exact call
+        :meth:`create_headless_session` uses for its ``initial_prompt`` (only
+        that path forks a NEW session first; this targets the EXISTING id) — so
+        the session RUNS a turn.
+
+        Use for the T1 reactor-driven resume (idle-but-LOADED): keeps the SAME
+        session id, NO fork-from-history.  For an unloaded/ended session (T2)
+        reload it first (attach / ``_load_session``) or resume via
+        ``create_headless_session(initial_history=..., initial_prompt=...)`` —
+        a forked continuation with a new id.
+
+        Thread-safe.  Returns ``True`` if a turn was dispatched, ``False`` if
+        the target isn't loaded in ``self._sessions``.
+        """
+        with self._lock:
+            session = self._sessions.get(target_session_id)
+        if session is None:
+            return False
+        from jaato_sdk.events import SendMessageRequest
+        try:
+            self.handle_request(
+                self._HEADLESS_CLIENT_ID,
+                target_session_id,
+                SendMessageRequest(text=text),
+            )
+        except Exception as exc:  # noqa: BLE001 — a reactor resume must not crash the caller
+            logger.debug("send_message_to_session dispatch failed: %s", exc)
+            return False
+        return True
+
     def set_session_state_for_session(
         self, target_session_id: str, key: str, value: Any,
     ) -> bool:
