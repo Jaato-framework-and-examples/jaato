@@ -4890,6 +4890,53 @@ class SessionManager:
 
         return session_id
 
+    def get_persisted_history(
+        self,
+        session_id: str,
+        workspace_path: Optional[str] = None,
+    ) -> Optional[List[Any]]:
+        """Read a persisted session's conversation history from disk WITHOUT
+        loading the session (no JaatoServer built, no runner spawned).
+
+        The read-only counterpart to the history-restore half of
+        :meth:`_load_session_impl`: it does the same ``self._session_plugin.load``
+        record read and returns ``state.history`` — the list of ``Message``
+        objects suitable for ``create_headless_session(initial_history=...)`` —
+        but stops short of building a server or spawning a runner.
+
+        This is the jaato-server piece of the §9 fork-from-PERSISTED resume: a
+        reactor (e.g. reliability_revive) forking a continuation from an
+        UNLOADED/ended session reads the persisted history here and feeds it to
+        :meth:`create_headless_session` (the premium ActionContext wraps the two
+        as ``ctx.fork_from_persisted_session``).  Contrast
+        ``JaatoSession.get_history`` / ``fork_from_session``, which snapshot a
+        LIVE session's in-memory history and so require it loaded.
+
+        Args:
+            session_id: The persisted session to read.
+            workspace_path: Workspace whose ``.jaato/sessions/`` holds the
+                record (same contract as :meth:`_load_session`).  ``None`` falls
+                back to the session plugin's default storage location.
+
+        Returns:
+            The session's history (list of ``Message`` objects), or ``None`` if
+            no record exists on disk for ``session_id``.
+        """
+        storage_dir = (
+            self._session_storage_dir(workspace_path) if workspace_path else None
+        )
+        try:
+            state = self._session_plugin.load(session_id, storage_dir=storage_dir)
+        except FileNotFoundError:
+            logger.debug(
+                "get_persisted_history: session %s not found on disk", session_id)
+            return None
+        except Exception as exc:  # noqa: BLE001 — a missing/corrupt record must not crash the caller
+            logger.error(
+                "get_persisted_history: failed to read %s: %s", session_id, exc)
+            return None
+        return getattr(state, "history", None)
+
     def inject_prompt_to_session(
         self,
         target_session_id: str,
