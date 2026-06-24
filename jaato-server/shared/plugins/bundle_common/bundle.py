@@ -409,7 +409,23 @@ def discover_bundles(
     seen_names: Set[str] = set()
 
     for refs_dir, tier in normalized:
-        if not refs_dir.is_dir():
+        try:
+            if not refs_dir.is_dir():
+                continue
+            children = sorted(refs_dir.iterdir())
+        except (PermissionError, OSError) as exc:
+            # A confined session is CORRECTLY denied this tier — e.g.
+            # ~/.jaato/references (the USER tier) under AppArmor: is_dir() /
+            # iterdir() RAISE PermissionError for EACCES, which pathlib does NOT
+            # ignore.  Not reaching the user tier from a confined runner is BY
+            # DESIGN, not a failure — so DEBUG-skip it rather than letting a
+            # misleading ``PermissionError: ~/.jaato/references`` propagate and
+            # read like a bug to anyone bug-seeking.  Other (readable) tiers
+            # still load.
+            logger.debug(
+                "discover_bundles: tier %s root %s not scannable (%s); "
+                "skipping", tier, refs_dir, exc,
+            )
             continue
 
         root = _load_bundle_from_manifest(
@@ -428,7 +444,7 @@ def discover_bundles(
                 bundles.append(root)
                 seen_names.add(root.name)
 
-        for child in sorted(refs_dir.iterdir()):
+        for child in children:
             if not child.is_dir():
                 continue
             manifest = child / EMBEDDING_CONFIG_FILENAME
