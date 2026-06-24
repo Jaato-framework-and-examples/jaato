@@ -564,6 +564,22 @@ def profile() -> Rendered:
         "      - my_extra_rules          search path ~/.jaato/apparmor-fragments/ and\n"
         "                                <workspace>/.jaato/apparmor-fragments/ (+ the .cache/ layer).\n"
         "    drop <name>.rules in that dir, then list <name>.  null = ALL fragments; [] = none.")
+    lines.append(
+        "\n  inheritance (`inherits: [_base_<stage>]`) — how a child profile merges with its\n"
+        "  parent(s), resolved at discover_profiles() (config.py:_merge_profiles):\n"
+        "    plugins, preloaded_plugins   UNION / additive — child ADDS to the parents'; it\n"
+        "                                 CANNOT scope DOWN here (the list only grows).\n"
+        "    tool_scopes, env,            per-KEY dict-merge — child wins on keys it sets;\n"
+        "    plugin_configs               the parent's other keys survive.\n"
+        "    model, provider, gc,         child REPLACES — the child's value wins outright\n"
+        "    apparmor, apparmor_fragments (this is how a child scopes DOWN, unlike plugins).\n"
+        "\n  empty vs listed `plugins` (a REQUIRED key — authors must pick):\n"
+        "    plugins: []   → tools=[] → NONE of the registry tool plugins; only the framework\n"
+        "                   set (permission, reliability, lifecycle/signal_completion) is wired.\n"
+        "                   (Pre-2026-06-07 a falsy bug made [] silently load ALL ~30 tools.)\n"
+        "    plugins: [x]  → exactly those, UNIONed with any inherited.\n"
+        "    To scope DOWN per stage, use tool_scopes (per-plugin allow-list) or the permission\n"
+        "    plugin's whitelist — NOT the plugins list, which only ADDS to the inherited set.")
     return data, "\n".join(lines)
 
 
