@@ -313,6 +313,77 @@ def validate_env(workspace: str) -> List[Diagnostic]:
 
 # ---------------------------------------------------------------- workspace
 
+def _check_prefetch_directives(
+    ws: Path, config_root: str, out: List[Diagnostic],
+) -> None:
+    """Validate ``{{!py[?]:...}}`` prefetch directives in agent personas + base
+    instructions: the referenced script must RESOLVE and define a top-level
+    ``def render(context, args)``.  A MANDATORY directive (``{{!py:}}``) whose
+    script is missing raises PrefetchError at session-prep; an OPTIONAL one
+    (``{{!py?:}}``) silently degrades — so the model never sees the content.
+
+    AST-only — does NOT import/execute the script (validate must be side-effect
+    free); it checks the contract structurally, not by running render().
+    """
+    import ast
+    from shared.script_loader import resolve_script_path
+    from shared.dynamic_instructions import _PY_PLACEHOLDER
+
+    for sub in ("agents", "instructions"):
+        d = ws / ".jaato" / sub
+        if not d.is_dir():
+            continue
+        for md in sorted(d.rglob("*.md")):
+            try:
+                content = md.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if "{{!py" not in content:
+                continue
+            where = str(md.relative_to(ws))
+            for m in _PY_PLACEHOLDER.finditer(content):
+                is_optional = bool(m.group(1))
+                script_ref = m.group(2)
+                directive = f"{{{{!py{'?' if is_optional else ''}:{script_ref}}}}}"
+                path = resolve_script_path(
+                    script_ref, workspace_path=str(ws), config_root=config_root)
+                if path is None:
+                    out.append(Diagnostic(
+                        "warn" if is_optional else "error",
+                        "prefetch_script_missing",
+                        f"{directive} references a prefetch script that does not "
+                        f"resolve (searched <config_root>/ then ~/.jaato/)"
+                        + (" — optional, so it degrades at runtime"
+                           if is_optional else
+                           " — MANDATORY: session-prep will raise PrefetchError"),
+                        where=where))
+                    continue
+                try:
+                    tree = ast.parse(Path(path).read_text())
+                except (OSError, SyntaxError) as exc:
+                    out.append(Diagnostic(
+                        "error", "prefetch_script_syntax_error",
+                        f"{directive}: prefetch script {script_ref} fails to "
+                        f"parse: {exc}", where=where))
+                    continue
+                renders = [n for n in tree.body
+                           if isinstance(n, ast.FunctionDef) and n.name == "render"]
+                if not renders:
+                    out.append(Diagnostic(
+                        "error", "prefetch_render_missing",
+                        f"{directive}: prefetch script {script_ref} resolves but "
+                        f"defines no top-level `def render(context, args)` — it "
+                        f"will fail at session-prep", where=where))
+                    continue
+                a = renders[0].args
+                if len(a.args) < 2 and a.vararg is None:
+                    out.append(Diagnostic(
+                        "warn", "prefetch_render_signature",
+                        f"{directive}: prefetch script {script_ref} `render` takes "
+                        f"{len(a.args)} positional param(s); the contract is "
+                        f"`render(context, args)` (2)", where=where))
+
+
 def validate_workspace(
     workspace: str,
     *,
@@ -353,4 +424,9 @@ def validate_workspace(
         out.extend(validate_profile(
             profile, providers=providers, plugins=plugins, gc_names=gc_names,
         ))
+
+    # Prefetch directives in agent personas + base instructions: a {{!py:...}}
+    # pointing at a missing script (or a script without render()) raises
+    # PrefetchError at session-prep — surface it here, before runtime.
+    _check_prefetch_directives(ws, config_root, out)
     return out
