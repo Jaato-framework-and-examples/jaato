@@ -1731,7 +1731,7 @@ class JaatoServer:
     # Tool ID Registry
     # =========================================================================
 
-    def _build_tool_id_mappings(self) -> Dict[str, str]:
+    def _build_tool_id_mappings(self, exclude_runner_tier: bool = False) -> Dict[str, str]:
         """Build the complete tool/category ID → name mapping from current schemas.
 
         Iterates session tools and the full registry to cover both active
@@ -1758,7 +1758,9 @@ class JaatoServer:
                 if schema.category:
                     mappings[name_to_id(schema.category, prefix="c")] = schema.category
         if self.registry:
-            for schema in self.registry.get_exposed_tool_schemas():
+            for schema in self.registry.get_exposed_tool_schemas(
+                exclude_runner_tier=exclude_runner_tier,
+            ):
                 mappings[name_to_id(schema.name)] = schema.name
                 if schema.category:
                     mappings[name_to_id(schema.category, prefix="c")] = schema.category
@@ -1767,14 +1769,23 @@ class JaatoServer:
     def _emit_tool_id_registry_from_schemas(
         self,
         emit_fn: Optional[EventCallback] = None,
+        exclude_runner_tier: bool = False,
     ) -> None:
         """Emit the tool ID registry to clients.
 
         Used during ``initialize()`` (new sessions) and
         ``emit_current_state()`` (reconnects).
+
+        ``exclude_runner_tier=True`` (the mid-session client-tool push in
+        ``websocket._register_client_tools``) keeps the daemon-side walk
+        off runner-tier plugins so it never runs ``prompt_library``'s
+        filesystem discovery on the event-loop thread; the runner-tier
+        names arrive from the runner via the off-loop ``_push`` re-emit.
         """
         from jaato_sdk.events import ToolIdRegistryEvent
-        mappings = self._build_tool_id_mappings()
+        mappings = self._build_tool_id_mappings(
+            exclude_runner_tier=exclude_runner_tier,
+        )
         if mappings:
             emit = emit_fn or self._on_event
             emit(ToolIdRegistryEvent(mappings=mappings))

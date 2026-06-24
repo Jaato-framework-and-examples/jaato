@@ -1537,11 +1537,30 @@ class PluginRegistry:
                 result[name] = entry
         return result
 
-    def get_exposed_tool_schemas(self) -> List[ToolSchema]:
-        """Get ToolSchemas from all exposed plugins and core tools."""
+    def get_exposed_tool_schemas(
+        self, exclude_runner_tier: bool = False,
+    ) -> List[ToolSchema]:
+        """Get ToolSchemas from all exposed plugins and core tools.
+
+        ``exclude_runner_tier=True`` skips ``PLUGIN_TIER = "runner"``
+        plugins.  Used by the daemon-side tool-id-registry emit, whose
+        runner-tier tool names come from the runner via
+        ``session_get_tool_schemas`` — NOT a daemon-side walk.  Invoking a
+        runner-tier plugin's ``get_tool_schemas`` daemon-side runs its
+        filesystem discovery ON THE DAEMON (e.g. ``prompt_library``'s
+        prompt walk); on the event-loop thread during re-attach that
+        blocked the loop ~15s and self-blocked the register-RPC send.
+        """
         schemas = []
         # Add plugin tool schemas
         for name in self._exposed:
+            if exclude_runner_tier:
+                plugin = self._plugins.get(name)
+                tier = self._lookup_module_tier(
+                    getattr(type(plugin), "__module__", "")
+                ) if plugin is not None else None
+                if tier == "runner":
+                    continue
             try:
                 schemas.extend(self._plugins[name].get_tool_schemas())
             except Exception as exc:
