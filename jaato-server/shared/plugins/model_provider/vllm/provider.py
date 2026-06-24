@@ -652,6 +652,21 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
             kwargs["max_tokens"] = self._max_tokens
         if self._parallel_tool_calls is not None:
             kwargs["parallel_tool_calls"] = self._parallel_tool_calls
+        # Forward the profile's api_params SAMPLING knobs (temperature, top_p,
+        # seed, frequency_penalty, presence_penalty, stop) that the base's
+        # ``_read_api_params`` already parsed into ``self._api_params`` from the
+        # NESTED ``config.extra["api_params"]`` layer — where profiles actually
+        # put them (``plugin_configs.vllm.api_params.<knob>``).  vLLM's custom
+        # ``complete()`` builds kwargs from scratch and otherwise never emits
+        # ``self._api_params``, so a profile's ``api_params.temperature: 0.0``
+        # was silently dropped and the stage ran at vLLM's ~1.0 default.  Exclude
+        # the knobs vLLM handles itself (max_tokens / parallel_tool_calls as
+        # top_level knobs above; tool_choice via the quirk below).  The
+        # dict-membership copy is falsy-safe: ``temperature=0.0`` survives (the
+        # original determinism bug).
+        for _ak, _av in self._api_params.items():
+            if _ak not in ("max_tokens", "parallel_tool_calls", "tool_choice"):
+                kwargs[_ak] = _av
         # Path 1 quirk: forward session-supplied ``tool_choice`` to
         # vLLM only when the quirk is enabled.  vLLM 0.22 engages
         # xgrammar decoding for named-function ``tool_choice``,
