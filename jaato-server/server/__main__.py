@@ -114,13 +114,18 @@ class _ExtensionContext:
         gc_plugin_factories: Dict mapping GC plugin names to their factory
             functions.  Extensions can instantiate a GC plugin to call
             ``get_config_schema()`` for settings introspection.
+        event_bus: The daemon-wide reactor ``EventBus`` — the single bus each
+            per-session bus sinks into.  A reactor engine subscribes ONCE here
+            (instead of per-loaded-session) to receive events from all
+            sessions, including delivery that survives a session's unload.
+            See docs/design/reactor-bus-session-scope.md.
     """
 
     __slots__ = (
         "session_manager", "ws_server", "ipc_server", "web_socket",
         "ipc_socket", "server_name", "dashboard_port",
         "available_plugins", "plugin_registry",
-        "available_gc_plugins", "gc_plugin_factories",
+        "available_gc_plugins", "gc_plugin_factories", "event_bus",
     )
 
     def __init__(
@@ -136,6 +141,7 @@ class _ExtensionContext:
         available_gc_plugins: frozenset = frozenset(),
         gc_plugin_factories: dict = None,
         ipc_server=None,
+        event_bus=None,
     ):
         self.session_manager = session_manager
         self.ws_server = ws_server
@@ -148,6 +154,7 @@ class _ExtensionContext:
         self.plugin_registry = plugin_registry
         self.available_gc_plugins = available_gc_plugins
         self.gc_plugin_factories = gc_plugin_factories or {}
+        self.event_bus = event_bus
 
     def broadcast_event(self, event) -> None:
         """Broadcast a daemon-wide event to every connected IPC + WS client.
@@ -1026,6 +1033,7 @@ class JaatoDaemon:
             plugin_registry=_discovery_registry,
             available_gc_plugins=_available_gc,
             gc_plugin_factories=_gc_factories,
+            event_bus=self._session_manager.reactor_event_bus,
         )
 
         for ep in ext_eps:

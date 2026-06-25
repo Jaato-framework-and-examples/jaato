@@ -301,6 +301,18 @@ class SessionManager:
             'storage_path': self._session_config.storage_path
         })
 
+        # Daemon-wide reactor EventBus: the SINGLE bus reactors subscribe to so
+        # they receive events from ALL sessions and survive session unloads.
+        # Each per-session bus forwards into this via a "reactor_bus_sink"
+        # subscription wired when that session's server is built (below).  Per-
+        # session subscribers stay isolated on their own bus; only the sink
+        # forward crosses into this daemon-wide one.  Exposed to daemon
+        # extensions as ``_ExtensionContext.event_bus`` so the reactor engine
+        # subscribes ONCE here instead of per-loaded-session.  See
+        # docs/design/reactor-bus-session-scope.md.
+        from shared.event_bus import EventBus
+        self.reactor_event_bus = EventBus()
+
         # In-memory session storage
         self._sessions: Dict[str, Session] = {}
         # In-flight async unloads (``_do_session_unload``).  session_id → an
@@ -2896,6 +2908,25 @@ class SessionManager:
         # for a redundant SessionError here.
         if not server.initialize():
             return None, None
+
+        # Reactor-bus sink: forward every event on this session's per-session
+        # EventBus into the daemon-wide reactor bus, so a reactor that
+        # subscribes ONCE to the daemon-wide bus receives events from ALL
+        # sessions.  Per-session subscribers stay isolated on the per-session
+        # bus; only this forward crosses into the daemon-wide one.  (Events for
+        # an already-unloaded session arrive via daemon-level sources publishing
+        # straight to the reactor bus — the per-session bus is gone by then.)
+        # See docs/design/reactor-bus-session-scope.md.
+        _runtime = getattr(server, "_runtime", None)
+        _session_bus = getattr(_runtime, "event_bus", None) if _runtime else None
+        if _session_bus is not None:
+            from jaato_sdk.event_bus import EventFilter
+            _session_bus.subscribe(
+                subscriber_name="reactor_bus_sink",
+                filter=EventFilter(),
+                callback=self.reactor_event_bus.publish,
+                replay_history=False,
+            )
 
         # Resolve sandbox_mode.  Priority:
         # 1. ``envelope.sandbox_mode`` — authoritative pre-resolved

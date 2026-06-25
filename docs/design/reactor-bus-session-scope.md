@@ -107,6 +107,41 @@ per-session buses keep isolating per-session data.
 - Migration alignment: C is a **scoped** daemon-wide bus. The full migration (A)
   can later absorb/generalize it — a stepping-stone, not a throwaway.
 
+## Implemented (jaato #393): the "sink" design — Daniel's call, 2026-06-25
+
+Daniel chose a design that keeps per-session isolation **and** gives reactors true
+daemon-wide delivery — a hybrid of A and C rather than either alone:
+
+- Per-session `EventBus` instances stay (per-session subscribers keep their
+  isolation, unchanged).
+- **One daemon-wide reactor `EventBus`**, owned by `SessionManager`, is added.
+  Every per-session bus **sinks** into it via a `reactor_bus_sink` forwarding
+  subscription (`callback=reactor_bus.publish`, `replay_history=False`) wired at
+  session build, right after `server.initialize()`.  Only the forward crosses
+  into the daemon-wide bus — per-session payload stays isolated on the
+  per-session bus.
+- The daemon-wide bus is exposed on `_ExtensionContext.event_bus`.
+- The reactor engine subscribes **once** to `ctx.event_bus` (premium
+  `engine.start()`), *replacing* the per-session `on_session_ready` subscriptions,
+  so it receives events from all sessions and survives unloads.  (It keeps the
+  rule-MERGE half of `on_session_ready` — just not the per-session subscribe.)
+- For an **unloaded** session there is no per-session bus to sink from, so the
+  daemon-level source publishes straight to the daemon-wide bus: premium
+  `registry._emit_released` publishes `gate.released` to `ctx.event_bus` when the
+  parked session's `server is None` (instead of skipping), and `_dispatch`
+  tolerates `server=None`, routing off the event's `session_id`.
+
+This subsumes option **C** (the sink covers loaded sessions; daemon-level sources
+cover unloaded ones) without touching the isolation model, and is the incremental
+down-payment toward the full **A** (unified-event-bus) end-state.
+
+**jaato-server foundation: PR #393** — the daemon-wide bus + the sink +
+`_ExtensionContext.event_bus` (4 tests).  **Premium wiring** (engine subscribe,
+gate-registry publish, `_dispatch` `server=None`) layers on top.  Workspace for the
+unloaded fork rides the release **outcome** (`event['outcome']['workspace']`), not
+a framework lookup — the intent is nulled at `_release` before `_emit_released`,
+but the outcome is deepcopied onto the event.
+
 ## TL;DR
 
 - The reactor **engine** is daemon-wide; the event **bus** is **per-session**
