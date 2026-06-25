@@ -5350,6 +5350,71 @@ class SessionManager:
 
         return True
 
+    def resume_session(
+        self,
+        session_id: str,
+        workspace_path: Optional[str] = None,
+    ) -> Optional[str]:
+        """Reload a persisted session into a LIVE, SAME-id session and restore
+        its headless presentation, so a reactor can drive it in place via
+        :meth:`send_message_to_session` — the PUBLIC same-id RESUME counterpart
+        to the private :meth:`_load_session`.
+
+        Use for the reliability T2 resume (parked session unloaded to free the
+        runner, then revived on a late human approval).  Unlike fork-from-
+        persisted (:meth:`get_persisted_history` + ``create_headless_session``,
+        which mints a NEW id and a fresh, lossy headless reconstruction), this
+        reloads the record UNDER THE SAME ID with full fidelity — history,
+        session-attached state, profile, and the permission WHITELIST — then
+        re-applies the headless/API presentation context.
+
+        The presentation re-apply is the crux: the presentation is CLIENT
+        config (set at connect via :meth:`_apply_client_config_to_server`'s
+        ``_HEADLESS_CLIENT_ID`` branch); it is NOT persisted in the record and
+        NOT restored by :meth:`_load_session`.  Without it the reloaded
+        session's ``presentation_context`` is ``None`` → the permission base
+        flow takes the INTERACTIVE path → ``channel.request_permission`` blocks
+        waiting for a client response a reactor-driven session never gets.
+        Re-applying the API presentation makes permission behave as the
+        headless session it is, so the restored profile whitelist grants the
+        retried call directly (no per-call prompt).
+
+        Pairs with :meth:`send_message_to_session` for the unified resume→drive
+        shape mirroring the validated T1 path::
+
+            resume_session(sid, ws)            # reload + restore presentation
+            send_message_to_session(sid, ...)  # drive the continuation turn
+
+        Thread-safe (``_load_session`` runs in a fresh session context).
+
+        Args:
+            session_id: The persisted session to resume.
+            workspace_path: Workspace whose ``.jaato/sessions/`` holds the
+                record (same contract as :meth:`_load_session` /
+                :meth:`get_persisted_history`).
+
+        Returns:
+            ``session_id`` on success (the session is now loaded + presentation-
+            restored), or ``None`` if no record exists / the load failed.
+        """
+        session = self._load_session(
+            session_id,
+            client_id=self._HEADLESS_CLIENT_ID,
+            workspace_path=workspace_path,
+        )
+        if session is None:
+            logger.debug(
+                "resume_session: %s not found on disk / load failed", session_id)
+            return None
+        # _load_session restores history / session-state / profile / whitelist
+        # but NOT the presentation context (it's client-config, set at connect,
+        # not persisted).  Re-apply the headless/API presentation so the
+        # permission layer behaves headless — otherwise the interactive path
+        # blocks on this no-client session.  See the docstring.
+        self._apply_client_config_to_server(
+            self._HEADLESS_CLIENT_ID, session.server)
+        return session_id
+
     def _load_session(
         self,
         session_id: str,
