@@ -41,11 +41,14 @@ class Diagnostic:
     message: str
     profile: Optional[str] = None
     where: Optional[str] = None   # dotted field path, e.g. "plugin_configs.nebius.api_params.temprature"
+    tier: Optional[str] = None    # source tier of the asset: "workspace" | "user".
+                                  # None = not tier-attributable (e.g. unscoped).
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "severity": self.severity, "code": self.code,
             "message": self.message, "profile": self.profile, "where": self.where,
+            "tier": self.tier,
         }
 
 
@@ -406,12 +409,32 @@ def validate_workspace(
         force_profile_set=profile_set,
     )
 
+    # Source tier per profile.  ``discover_profiles`` merges the workspace tier
+    # AND the inherited user tier (~/.jaato/profiles) into one EFFECTIVE set (as
+    # the daemon resolves), so a workspace validation can surface findings from
+    # user-tier profiles the author doesn't own.  Tag each finding with its tier
+    # so the author can tell "mine" (workspace) from "inherited" (user): a
+    # profile is ``workspace`` iff a file with its name lives under
+    # ``<ws>/.jaato/profiles`` (the config_root tier); else it came from the user
+    # tier.  Workspace-level checks (.env, prefetch) are ``workspace``.
+    _ws_profiles = ws / ".jaato" / "profiles"
+    ws_stems = {
+        p.stem for p in _ws_profiles.rglob("*")
+        if p.is_file() and p.suffix in (".yaml", ".yml", ".json")
+    } if _ws_profiles.is_dir() else set()
+
+    def _tier(pname: Optional[str]) -> str:
+        return "workspace" if pname in ws_stems else "user"
+
     out: List[Diagnostic] = []
     for stem, err in (result.errors or {}).items():
-        out.append(Diagnostic("error", "parse_error", err, profile=stem))
+        out.append(Diagnostic("error", "parse_error", err, profile=stem,
+                              tier=_tier(stem)))
 
     # workspace-level .env cross-references (provider / profile-set)
-    out.extend(validate_env(str(ws)))
+    for d in validate_env(str(ws)):
+        d.tier = "workspace"
+        out.append(d)
 
     providers = introspect.providers()
     plugins = introspect.plugins()
@@ -421,12 +444,19 @@ def validate_workspace(
     for pname, profile in sorted(items):
         if only and pname != only:
             continue
-        out.extend(validate_profile(
+        tier = _tier(pname)
+        for d in validate_profile(
             profile, providers=providers, plugins=plugins, gc_names=gc_names,
-        ))
+        ):
+            d.tier = tier
+            out.append(d)
 
     # Prefetch directives in agent personas + base instructions: a {{!py:...}}
     # pointing at a missing script (or a script without render()) raises
-    # PrefetchError at session-prep — surface it here, before runtime.
+    # PrefetchError at session-prep — surface it here, before runtime.  These are
+    # workspace-tier assets.
+    _before = len(out)
     _check_prefetch_directives(ws, config_root, out)
+    for d in out[_before:]:
+        d.tier = "workspace"
     return out
