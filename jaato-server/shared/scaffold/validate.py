@@ -83,10 +83,18 @@ def validate_profile(
     # model present? (a resolved, runnable profile should bind one; a pure
     # base/abstract profile legitimately has neither provider nor model)
     model = getattr(profile, "model", None)
-    if provider_name and not model:
+    # A provider-set profile binds a model EITHER via a flat ``model`` OR via a
+    # ``model_tiers`` map (the active model is then selected per turn from the
+    # tiers).  Only warn when NEITHER is present: a tiers-based profile that
+    # omits ``model`` is correct, not missing one — and a flat ``model`` set
+    # alongside ``model_tiers`` is silently IGNORED at runtime, so the validator
+    # must not push authors toward adding a dead one.
+    if provider_name and not model and not (
+        getattr(profile, "model_tiers", None) or {}
+    ):
         add("warn", "missing_model",
-            f"provider '{provider_name}' set but no model — set-overlay or "
-            "inherits did not bind a model", where="model")
+            f"provider '{provider_name}' set but no model and no model_tiers — "
+            "set-overlay or inherits did not bind a model", where="model")
 
     # --- plugins ---------------------------------------------------------
     for plug in getattr(profile, "plugins", None) or []:
