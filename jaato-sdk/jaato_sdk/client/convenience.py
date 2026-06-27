@@ -23,7 +23,7 @@ See ``docs/design/sdk-convenience-layer.md``.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Collection, Dict, Optional
+from typing import Any, AsyncIterator, Collection, Dict, Optional
 
 from ..events import ClientType, EventType
 
@@ -176,6 +176,53 @@ class Session:
         self._raise_if_needed(box)
         return box.get("payload")
 
+    async def stream(self, prompt: str, *,
+                     sources: Optional[Collection[str]] = ("model",)
+                     ) -> AsyncIterator[str]:
+        """Send ``prompt`` and yield text chunks live as they arrive.
+
+        Async-iterator counterpart to :meth:`ask` — yields each
+        ``AGENT_OUTPUT`` chunk (filtered by ``sources``; ``None`` = all) the
+        moment it streams in, then stops at the terminal (first-of
+        ``{TURN_COMPLETED, SESSION_TERMINATED}``).  ``TURN_COMPLETED`` fires
+        after all of the turn's output, so no chunk is dropped.  Raises
+        :class:`AgentError` on an error terminal / :class:`PermissionUnhandled`
+        on an unanswered gated tool, after the stream drains::
+
+            async with IPCClient.session(profile=...) as s:
+                async for chunk in s.stream("Tell me a story."):
+                    print(chunk, end="", flush=True)
+        """
+        queue: "asyncio.Queue[Any]" = asyncio.Queue()
+        box: Dict[str, Any] = {}
+        sentinel = object()
+
+        def on_output(ev: Any) -> None:
+            if sources is None or getattr(ev, "source", None) in sources:
+                text = getattr(ev, "text", "")
+                if text:
+                    queue.put_nowait(text)
+
+        def on_terminal(ev: Any) -> None:
+            self._note_terminal(box, ev)
+            queue.put_nowait(sentinel)
+
+        unsub_out = self._client.subscribe(EventType.AGENT_OUTPUT, on_output)
+        unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
+        unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
+        try:
+            await self._client.send_message(prompt)
+            while True:
+                item = await queue.get()
+                if item is sentinel:
+                    break
+                yield item
+        finally:
+            unsub_out()
+            unsub_term()
+            unsub_turn()
+        self._raise_if_needed(box)
+
 
 class _SessionContext:
     """Async context manager returned by :meth:`IPCClient.session`.
@@ -215,15 +262,22 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
                  socket_path=None, env_file: str = ".env",
                  workspace_path=None, auto_start: bool = True,
                  client_type: ClientType = ClientType.API,
-                 connect_timeout: float = 120.0) -> _SessionContext:
+                 connect_timeout: float = 120.0,
+                 on_status_change=None) -> _SessionContext:
     """Build a client of ``client_cls`` and return a session context manager.
 
-    Backs :meth:`IPCClient.session`.  ``profile`` / ``agent`` / ``agent_params``
-    / ``cascade_driver_id`` are forwarded to ``create_session`` unchanged, so
-    both the declarative (named) and programmatic (inline-dict) styles work.
+    Backs :meth:`IPCClient.session` and :meth:`IPCRecoveryClient.session`.
+    ``profile`` / ``agent`` / ``agent_params`` / ``cascade_driver_id`` are
+    forwarded to ``create_session`` unchanged, so both the declarative (named)
+    and programmatic (inline-dict) styles work.  ``on_status_change`` is
+    forwarded to the constructor only when set — it is an ``IPCRecoveryClient``
+    ctor arg (reconnection-status callback); passing it with a plain
+    ``IPCClient`` is a fail-loud ctor error by design.
     """
     ctor_kwargs = dict(client_type=client_type, auto_start=auto_start,
                        env_file=env_file, workspace_path=workspace_path)
+    if on_status_change is not None:
+        ctor_kwargs["on_status_change"] = on_status_change
     client = (client_cls(socket_path, **ctor_kwargs) if socket_path is not None
               else client_cls(**ctor_kwargs))
     create_kwargs = dict(profile=profile, agent=agent, agent_params=agent_params,
