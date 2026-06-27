@@ -95,9 +95,14 @@ built from `curated.jsonl` only. A raw memory is reachable only via the
 explicit `retrieve_memories` tool, not the auto 💡 hint. So the advisor
 must run for stored summaries to surface next session.
 
-When (or if) automatic curation lands as a reactor on
-`agent.completed`, the cycle becomes hands-off. Today, callers can
-invoke the advisor on a schedule or after batches.
+Automatic curation **is available** as a reactor on `agent.completed` —
+the `jaato-knowledge-manager/.jaato.example/` memory-advisor reactor (see
+Reference implementation below) makes the cycle hands-off: wire it by
+copying the example into the workspace's (or `~/.jaato`'s) tier. Without a
+curator wired, callers must invoke the advisor explicitly (schedule,
+daemon extension, manual) — and because enrichment is curated-only, an
+unwired curator means stored summaries stay raw and never surface (the
+"fresh start" failure mode).
 
 #### 3. `agent_params` substitution
 
