@@ -169,6 +169,23 @@ and mirrors LangChain's `.invoke` contract.
           "parameters": {...}, "handler": get_weather}]) as s:
       await s.ask("What's the weather in Paris?")
   ```
+- **Per-turn `parallel_tools` + `attachments`** on `ask`/`complete`/`stream` —
+  forwarded to `send_message`. `parallel_tools=False` forces sequential tool
+  execution for a turn; `attachments=[...]` carries multimodal inputs
+  (file paths or `{mime_type, data, display_name}` dicts) through the facade.
+- **`config_root=` + `apparmor=`** on `IPCClient.session(...)` — the two
+  `IPCClient`-only ctor knobs (read-only-config root override; opt-in
+  per-session AppArmor confinement), forwarded only when set. This unblocks
+  confined / decoupled-config orchestrators (e.g. handoff-style harnesses) that
+  previously had to construct the client by hand. (Mirrors `on_status_change`,
+  the `IPCRecoveryClient`-only knob — each is fail-loud if passed to the wrong
+  client.)
+
+**Error contract clarification (G5):** `ask`/`complete`/`stream` raise
+`AgentError` ONLY on an error **terminal** (`SESSION_TERMINATED(reason="error")`).
+A tool that is denied / fails *within* a turn the agent then recovers from emits
+only `TURN_COMPLETED` — the facade returns normally. In-turn tool failures are
+the agent's to handle, not session-fatal.
 
 ### Still out of scope (Phase 3, if needed)
 

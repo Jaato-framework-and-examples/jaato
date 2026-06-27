@@ -51,8 +51,10 @@ class FakeClient:
 
     subscribe_once = subscribe
 
-    async def send_message(self, prompt):
+    async def send_message(self, prompt, parallel_tools=None, attachments=None):
         self.calls.append(("send_message", prompt))
+        self.send_kwargs = {"parallel_tools": parallel_tools,
+                            "attachments": attachments}
         for event_type, ev in self._fire:
             for h in list(self._handlers.get(event_type, [])):
                 h(ev)
@@ -139,6 +141,43 @@ async def test_stream_raises_agent_error_on_error_terminal():
     with pytest.raises(AgentError):
         async for _ in Session(c, "s").stream("hi"):
             pass
+
+
+# --------------------------------------------- send_message passthrough + ctor knobs
+
+async def test_ask_forwards_parallel_tools_and_attachments():
+    c = FakeClient(fire=[_out("model", "ok"), _TURN])
+    att = [{"mime_type": "image/png", "data": "...", "display_name": "x.png"}]
+    await Session(c, "s").ask("hi", parallel_tools=False, attachments=att)
+    assert c.send_kwargs == {"parallel_tools": False, "attachments": att}
+
+
+async def test_ask_defaults_send_kwargs_to_none():
+    c = FakeClient(fire=[_out("model", "ok"), _TURN])
+    await Session(c, "s").ask("hi")
+    assert c.send_kwargs == {"parallel_tools": None, "attachments": None}
+
+
+async def test_config_root_and_apparmor_forwarded_only_when_set():
+    with_both = open_session(FakeClient, profile="x",
+                             config_root="/cfg", apparmor=True)
+    assert with_both._client.ctor.get("config_root") == "/cfg"
+    assert with_both._client.ctor.get("apparmor") is True
+    without = open_session(FakeClient, profile="x")
+    assert "config_root" not in without._client.ctor
+    assert "apparmor" not in without._client.ctor
+
+
+async def test_tool_level_error_in_completing_turn_does_not_raise():
+    """A denied/failed tool that the turn recovers from completes normally
+    (TURN_COMPLETED) — the facade raises AgentError ONLY on an error TERMINAL,
+    not on in-turn tool failures (G5 contract)."""
+    c = FakeClient(fire=[
+        (EventType.AGENT_OUTPUT, SimpleNamespace(source="model", text="done")),
+        # a tool-level failure event the facade does not treat as terminal:
+        (EventType.TURN_COMPLETED, SimpleNamespace()),
+    ])
+    assert await Session(c, "s").ask("do the gated thing") == "done"  # no raise
 
 
 # --------------------------------------------------- host tools via facade (Phase 2.1)

@@ -107,7 +107,9 @@ class Session:
             box["error_summary"] = ev.error_summary
 
     async def ask(self, prompt: str, *,
-                  sources: Optional[Collection[str]] = ("model",)) -> str:
+                  sources: Optional[Collection[str]] = ("model",),
+                  parallel_tools: Optional[bool] = None,
+                  attachments: Optional[list] = None) -> str:
         """Send ``prompt``, wait for the turn to finish, return collected text.
 
         Waits on first-of ``{TURN_COMPLETED, SESSION_TERMINATED}`` so a plain
@@ -135,7 +137,8 @@ class Session:
         unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
         unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
         try:
-            await self._client.send_message(prompt)
+            await self._client.send_message(
+                prompt, parallel_tools=parallel_tools, attachments=attachments)
             await done.wait()
         finally:
             unsub_out()
@@ -144,7 +147,9 @@ class Session:
         self._raise_if_needed(box)
         return "".join(chunks)
 
-    async def complete(self, prompt: str) -> Optional[Dict[str, Any]]:
+    async def complete(self, prompt: str, *,
+                       parallel_tools: Optional[bool] = None,
+                       attachments: Optional[list] = None) -> Optional[Dict[str, Any]]:
         """Send ``prompt`` and return the typed completion ``payload``.
 
         For completion-gated profiles: captures ``AGENT_COMPLETED.payload``
@@ -167,7 +172,8 @@ class Session:
         unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
         unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
         try:
-            await self._client.send_message(prompt)
+            await self._client.send_message(
+                prompt, parallel_tools=parallel_tools, attachments=attachments)
             await done.wait()
         finally:
             unsub_comp()
@@ -177,7 +183,9 @@ class Session:
         return box.get("payload")
 
     async def stream(self, prompt: str, *,
-                     sources: Optional[Collection[str]] = ("model",)
+                     sources: Optional[Collection[str]] = ("model",),
+                     parallel_tools: Optional[bool] = None,
+                     attachments: Optional[list] = None
                      ) -> AsyncIterator[str]:
         """Send ``prompt`` and yield text chunks live as they arrive.
 
@@ -211,7 +219,8 @@ class Session:
         unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
         unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
         try:
-            await self._client.send_message(prompt)
+            await self._client.send_message(
+                prompt, parallel_tools=parallel_tools, attachments=attachments)
             while True:
                 item = await queue.get()
                 if item is sentinel:
@@ -272,6 +281,7 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
                  workspace_path=None, auto_start: bool = True,
                  client_type: ClientType = ClientType.API,
                  connect_timeout: float = 120.0,
+                 config_root=None, apparmor=None,
                  on_status_change=None) -> _SessionContext:
     """Build a client of ``client_cls`` and return a session context manager.
 
@@ -282,12 +292,23 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
     host-tool specs, same shape as :meth:`register_client_tools`) is registered
     after connect but before create_session, so host-tool clients can use the
     facade instead of the low-level connect/register/create dance.
-    ``on_status_change`` is forwarded to the constructor only when set — it is
-    an ``IPCRecoveryClient`` ctor arg (reconnection-status callback); passing it
-    with a plain ``IPCClient`` is a fail-loud ctor error by design.
+    ``config_root`` and ``apparmor`` are ``IPCClient``-only ctor args
+    (read-only-config root override; opt-in per-session AppArmor confinement);
+    ``on_status_change`` is an ``IPCRecoveryClient``-only ctor arg
+    (reconnection-status callback).  Each is forwarded to the constructor only
+    when set — passing an ``IPCClient``-only arg to ``IPCRecoveryClient.session``
+    (or ``on_status_change`` to a plain ``IPCClient``) is a fail-loud ctor error
+    by design.
     """
     ctor_kwargs = dict(client_type=client_type, auto_start=auto_start,
                        env_file=env_file, workspace_path=workspace_path)
+    # IPCClient-only ctor args, forwarded only when set (passing them to
+    # IPCRecoveryClient, which lacks them, is a fail-loud ctor error by design —
+    # same pattern as on_status_change, which is IPCRecoveryClient-only).
+    if config_root is not None:
+        ctor_kwargs["config_root"] = config_root
+    if apparmor is not None:
+        ctor_kwargs["apparmor"] = apparmor
     if on_status_change is not None:
         ctor_kwargs["on_status_change"] = on_status_change
     client = (client_cls(socket_path, **ctor_kwargs) if socket_path is not None
