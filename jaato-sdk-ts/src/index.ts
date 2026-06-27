@@ -33,4 +33,6 @@ export {
   type SessionOpenOptions,
   type AskOptions,
   type CompleteOptions,
+  type ClientToolSpec,
+  type ClientToolHandler,
 } from "./convenience.js";

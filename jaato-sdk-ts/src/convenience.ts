@@ -29,6 +29,25 @@ import type { ConnectionStatus, RecoveryConfig } from "./state.js";
 
 type PermissionHandler = (event: unknown) => string | Promise<string>;
 
+/** Runs client-side when the agent invokes a host tool; its return is sent
+ *  back as the result (JSON-encoded if not a string). */
+export type ClientToolHandler = (
+  args: Record<string, unknown>,
+) => unknown | Promise<unknown>;
+
+/** A host/client tool spec. ``handler`` runs in YOUR process on invocation;
+ *  the rest is the schema sent to the daemon. */
+export interface ClientToolSpec {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  handler?: ClientToolHandler;
+  /** Optional per-tool timeout (ms) / auto-approve — forwarded on the wire. */
+  timeout?: number;
+  auto_approve?: boolean;
+  [key: string]: unknown;
+}
+
 /** Options for {@link JaatoClient.session} / {@link openSession}. */
 export interface SessionOpenOptions {
   // ── connection (WebSocket) ──
@@ -87,7 +106,7 @@ export interface SessionOpenOptions {
    * AFTER connect but BEFORE createSession (the runner-tier model only sees
    * tools registered before the session exists).
    */
-  clientTools?: Array<Record<string, unknown>>;
+  clientTools?: ClientToolSpec[];
 }
 
 /** Per-call options for {@link Session.ask} / {@link Session.stream}. */
@@ -127,14 +146,28 @@ export class Session implements AsyncDisposable {
   #client: JaatoClient;
   #onPermission?: PermissionHandler;
   #unhandledPerm: string | null = null;
+  #toolHandlers?: Map<string, ClientToolHandler>;
 
-  constructor(client: JaatoClient, onPermission?: PermissionHandler) {
+  constructor(
+    client: JaatoClient,
+    onPermission?: PermissionHandler,
+    toolHandlers?: Map<string, ClientToolHandler>,
+  ) {
     this.#client = client;
     this.#onPermission = onPermission;
     // Wire permissions once for the session's lifetime — fail loud, never hang.
     client.subscribe(EventTypeValue.PERMISSION_REQUESTED, (event) => {
       void this.#onPerm(event);
     });
+    // Host-tool dispatch: the low-level client only ships the schemas + exposes
+    // respondToToolExecution; the facade owns invoking the local handler on
+    // TOOL_EXECUTE_REQUEST (mirror of Python's _on_tool_execute_request).
+    if (toolHandlers && toolHandlers.size > 0) {
+      this.#toolHandlers = toolHandlers;
+      client.subscribe(EventTypeValue.TOOL_EXECUTE_REQUEST, (event) => {
+        void this.#onToolExecute(event);
+      });
+    }
   }
 
   /** The underlying low-level client — mix facade + raw event API freely. */
@@ -158,6 +191,35 @@ export class Session implements AsyncDisposable {
       // ask/complete/stream throws PermissionUnhandled.
       this.#unhandledPerm = ev?.tool_name ?? "?";
       await this.#client.respondToPermission(requestId, "n");
+    }
+  }
+
+  async #onToolExecute(event: unknown): Promise<void> {
+    const ev = event as {
+      call_id?: string;
+      tool_name?: string;
+      tool_args?: Record<string, unknown>;
+    };
+    const callId = ev?.call_id ?? "";
+    const handler = ev?.tool_name ? this.#toolHandlers?.get(ev.tool_name) : undefined;
+    if (!handler) {
+      await this.#client.respondToToolExecution(
+        callId,
+        "",
+        `no handler for host tool ${JSON.stringify(ev?.tool_name)}`,
+      );
+      return;
+    }
+    try {
+      const out = await handler(ev?.tool_args ?? {});
+      const result = typeof out === "string" ? out : JSON.stringify(out);
+      await this.#client.respondToToolExecution(callId, result);
+    } catch (err) {
+      await this.#client.respondToToolExecution(
+        callId,
+        "",
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
@@ -357,9 +419,20 @@ export async function openSession(opts: SessionOpenOptions): Promise<Session> {
   if (opts.onStatusChange) client.onStatus(opts.onStatusChange);
 
   await client.connect(); // throws ConnectionError on failure
-  // Host tools MUST be registered after connect, before createSession.
+  // Host tools MUST be registered after connect, before createSession. The
+  // handler is local — strip it from the wire spec and keep it for the
+  // facade's TOOL_EXECUTE_REQUEST dispatcher (the low-level client only ships
+  // the schema + exposes respondToToolExecution).
+  const toolHandlers = new Map<string, ClientToolHandler>();
   if (opts.clientTools && opts.clientTools.length > 0) {
-    await client.registerClientTools(opts.clientTools);
+    const wireSpecs = opts.clientTools.map((spec) => {
+      const { handler, ...rest } = spec;
+      if (handler && typeof spec.name === "string") {
+        toolHandlers.set(spec.name, handler);
+      }
+      return rest as Record<string, unknown>;
+    });
+    await client.registerClientTools(wireSpecs);
   }
   await client.createSession({
     profile: opts.profile,
@@ -373,7 +446,7 @@ export async function openSession(opts: SessionOpenOptions): Promise<Session> {
       "session.new did not produce a session id — check provider auth / the daemon log",
     );
   }
-  return new Session(client, opts.onPermission);
+  return new Session(client, opts.onPermission, toolHandlers);
 }
 
 /**
