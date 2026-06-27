@@ -50,13 +50,21 @@ class MemoryPlugin(RunnerForwardingMixin):
 
     The plugin participates in the knowledge-curation lifecycle:
     - Working agents store memories with ``maturity="raw"``
-    - Prompt enrichment only surfaces *active* memories (raw, validated)
+    - Prompt enrichment surfaces **curated memories only** — the index is
+      built from ``curated.jsonl`` (see ``initialize``); raw memories are the
+      curator's queue and do NOT auto-surface as enrichment hints. (The
+      ``retrieve_memories`` tool can still fetch raw via its ``maturity``
+      filter — that is the tool surface, not enrichment.)  So a memory must be
+      curated (raw→validated) before it appears in the 💡 hint — which makes
+      the advisor REQUIRED for cross-session continuity, not optional.  See
+      ``docs/design/agent-continuity.md``.
     - The advisor agent uses ``get_pending_curation`` (via storage) to
       review raw memories and transition them to validated/escalated/dismissed
 
     The plugin uses a two-phase retrieval system:
-    - Phase 1: Prompt enrichment adds lightweight hints about active memories
+    - Phase 1: Prompt enrichment adds lightweight hints about CURATED memories
     - Phase 2: Model decides whether to retrieve full content via function calling
+      (``retrieve_memories`` can also reach raw memories explicitly)
     """
 
     def __init__(self):
