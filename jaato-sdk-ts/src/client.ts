@@ -29,6 +29,9 @@ import {
   type RecoveryConfig,
 } from "./state.js";
 import { openTransport, type Transport } from "./transport.js";
+// Runtime import is used only inside the static session() method body, so the
+// client.ts <-> convenience.ts cycle resolves fine under ESM (no top-level use).
+import { openSession, type Session, type SessionOpenOptions } from "./convenience.js";
 import {
   EventTypeValue,
   type EventType,
@@ -568,6 +571,13 @@ export class JaatoClient {
     profile?: string | Record<string, unknown>;
     agent?: string;
     agentParams?: Record<string, string>;
+    /**
+     * Phase 2 cascade-sharing tenant id (server 0.6.144+).  Sessions
+     * sharing the same id reuse the same pre-warm runner slot across
+     * cascade stages.  Sent as ``--cascade-driver-id`` on ``session.new``,
+     * mirroring Python ``IPCClient.create_session(cascade_driver_id=...)``.
+     */
+    cascadeDriverId?: string;
   } = {}): Promise<void> {
     const args: string[] = options.name ? [options.name] : [];
     let payload: Record<string, unknown> | undefined;
@@ -595,12 +605,38 @@ export class JaatoClient {
         args.push(`${k}=${v}`);
       }
     }
+    if (options.cascadeDriverId) {
+      args.push("--cascade-driver-id", options.cascadeDriverId);
+    }
     await this._sendEvent({
       type: EventTypeValue.COMMAND,
       command: "session.new",
       args,
       payload,
     } as CommandRequest);
+  }
+
+  /**
+   * Open a session with the high-level convenience facade.
+   *
+   * Connects, registers any host tools, and creates the session, then
+   * returns a {@link Session} that bundles the send-and-wait recipe so the
+   * common path never reproduces the ``SESSION_TERMINATED``-only hang.
+   * ``Session`` is an ``AsyncDisposable`` — use ``await using`` for
+   * automatic teardown, or call ``await s.close()`` explicitly:
+   *
+   * ```ts
+   * await using s = await JaatoClient.session({
+   *   url: "wss://host:8089", profile: "researcher",
+   * });
+   * console.log(await s.ask("Who are you?"));
+   * ```
+   *
+   * Additive — every low-level method stays; reach the underlying client
+   * via {@link Session.client}.  See ``convenience.ts``.
+   */
+  static session(options: SessionOpenOptions): Promise<Session> {
+    return openSession(options);
   }
 
   /**
