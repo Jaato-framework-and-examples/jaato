@@ -232,11 +232,12 @@ class _SessionContext:
     """
 
     def __init__(self, client: Any, create_kwargs: Dict[str, Any],
-                 on_permission, connect_timeout: float):
+                 on_permission, connect_timeout: float, client_tools=None):
         self._client = client
         self._create_kwargs = create_kwargs
         self._on_permission = on_permission
         self._connect_timeout = connect_timeout
+        self._client_tools = client_tools
 
     async def __aenter__(self) -> Session:
         if not await self._client.connect(timeout=self._connect_timeout):
@@ -244,6 +245,14 @@ class _SessionContext:
                 "could not connect to / autostart the jaato daemon — "
                 "run `python -m jaato_sdk.doctor`"
             )
+        # Host/client tools MUST be registered AFTER connect but BEFORE
+        # create_session — the runner-tier model only sees tools registered
+        # before the session exists (mid-session registration isn't picked up
+        # until a later turn).  This is the hook that lets host-tool clients use
+        # the facade instead of dropping to the low-level connect/register/create
+        # dance.  See register_client_tools().
+        if self._client_tools:
+            await self._client.register_client_tools(self._client_tools)
         sid = await self._client.create_session(**self._create_kwargs)
         if not sid:
             await self._client.disconnect()
@@ -258,7 +267,7 @@ class _SessionContext:
 
 
 def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
-                 cascade_driver_id=None, on_permission=None,
+                 cascade_driver_id=None, on_permission=None, client_tools=None,
                  socket_path=None, env_file: str = ".env",
                  workspace_path=None, auto_start: bool = True,
                  client_type: ClientType = ClientType.API,
@@ -269,10 +278,13 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
     Backs :meth:`IPCClient.session` and :meth:`IPCRecoveryClient.session`.
     ``profile`` / ``agent`` / ``agent_params`` / ``cascade_driver_id`` are
     forwarded to ``create_session`` unchanged, so both the declarative (named)
-    and programmatic (inline-dict) styles work.  ``on_status_change`` is
-    forwarded to the constructor only when set — it is an ``IPCRecoveryClient``
-    ctor arg (reconnection-status callback); passing it with a plain
-    ``IPCClient`` is a fail-loud ctor error by design.
+    and programmatic (inline-dict) styles work.  ``client_tools`` (a list of
+    host-tool specs, same shape as :meth:`register_client_tools`) is registered
+    after connect but before create_session, so host-tool clients can use the
+    facade instead of the low-level connect/register/create dance.
+    ``on_status_change`` is forwarded to the constructor only when set — it is
+    an ``IPCRecoveryClient`` ctor arg (reconnection-status callback); passing it
+    with a plain ``IPCClient`` is a fail-loud ctor error by design.
     """
     ctor_kwargs = dict(client_type=client_type, auto_start=auto_start,
                        env_file=env_file, workspace_path=workspace_path)
@@ -282,7 +294,8 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
               else client_cls(**ctor_kwargs))
     create_kwargs = dict(profile=profile, agent=agent, agent_params=agent_params,
                          cascade_driver_id=cascade_driver_id)
-    return _SessionContext(client, create_kwargs, on_permission, connect_timeout)
+    return _SessionContext(client, create_kwargs, on_permission, connect_timeout,
+                           client_tools=client_tools)
 
 
 async def ask(prompt: str, *, sources: Optional[Collection[str]] = ("model",),

@@ -157,6 +157,18 @@ and mirrors LangChain's `.invoke` contract.
   `on_status_change=` kwarg (reconnection-status callback); forwarded to the
   ctor only when set, so passing it to a plain `IPCClient` is a fail-loud ctor
   error by design.
+- **`client_tools=[...]`** on `session(...)` — host/client tool specs (same
+  shape as `register_client_tools`) registered in `__aenter__` *after* connect
+  but *before* create_session, since the runner-tier model only sees tools
+  registered before the session exists. This lets host-tool clients use the
+  facade instead of the low-level connect → register → create dance:
+
+  ```python
+  async with IPCClient.session(profile=..., client_tools=[{
+          "name": "get_weather", "description": "...",
+          "parameters": {...}, "handler": get_weather}]) as s:
+      await s.ask("What's the weather in Paris?")
+  ```
 
 ### Still out of scope (Phase 3, if needed)
 

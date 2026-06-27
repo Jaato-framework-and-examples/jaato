@@ -41,6 +41,9 @@ class FakeClient:
         self.calls.append(("create_session", kwargs))
         return self._sid
 
+    async def register_client_tools(self, tools):
+        self.calls.append(("register_client_tools", tools))
+
     def subscribe(self, event_type, handler):
         self._handlers.setdefault(event_type, []).append(handler)
         return lambda: self._handlers.get(event_type, []).remove(handler) \
@@ -136,6 +139,41 @@ async def test_stream_raises_agent_error_on_error_terminal():
     with pytest.raises(AgentError):
         async for _ in Session(c, "s").stream("hi"):
             pass
+
+
+# --------------------------------------------------- host tools via facade (Phase 2.1)
+
+async def test_client_tools_registered_before_create_session():
+    captured = {}
+    tools = [{"name": "get_weather", "description": "d",
+              "parameters": {"type": "object", "properties": {}},
+              "handler": lambda a: {}}]
+
+    class _Cls(FakeClient):
+        def __init__(self, **ctor):
+            super().__init__(fire=[_out("model", "ok"), _TURN], **ctor)
+            captured["instance"] = self
+
+    async with open_session(_Cls, profile={"model": "m"}, client_tools=tools) as s:
+        assert await s.ask("Use the tool") == "ok"
+    calls = [c[0] for c in captured["instance"].calls]
+    # ordering is load-bearing: register must precede create_session
+    assert calls.index("register_client_tools") < calls.index("create_session")
+    assert ("register_client_tools", tools) in captured["instance"].calls
+
+
+async def test_no_client_tools_means_no_registration():
+    captured = {}
+
+    class _Cls(FakeClient):
+        def __init__(self, **ctor):
+            super().__init__(fire=[_TURN], **ctor)
+            captured["instance"] = self
+
+    async with open_session(_Cls, profile={"model": "m"}) as s:
+        await s.ask("hi")
+    assert not any(c[0] == "register_client_tools"
+                   for c in captured["instance"].calls)
 
 
 # --------------------------------------------------------- recovery parity (Phase 2)
