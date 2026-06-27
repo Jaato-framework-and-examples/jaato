@@ -107,3 +107,46 @@ export class IncompatibleServerError extends Error {
     return this.minProtocol;
   }
 }
+
+/**
+ * A turn ended in an error terminal (``SessionTerminatedEvent`` with
+ * ``reason === "error"`` / ``AgentErrorEvent``).  Raised by the
+ * convenience facade's {@link Session.ask} / {@link Session.complete} /
+ * {@link Session.stream}.  Carries the daemon's ``error_type`` /
+ * ``error_summary`` so callers can branch without parsing strings.
+ *
+ * Mirror of jaato-sdk's ``AgentError``.
+ */
+export class AgentError extends Error {
+  readonly errorType?: string;
+  readonly errorSummary?: string;
+  constructor(errorType?: string, errorSummary?: string) {
+    super(`${errorType ?? "AgentError"}: ${errorSummary ?? ""}`.replace(/: $/, ""));
+    this.name = "AgentError";
+    this.errorType = errorType;
+    this.errorSummary = errorSummary;
+  }
+}
+
+/**
+ * A gated tool requested permission but no ``onPermission`` callback was
+ * supplied to {@link JaatoClient.session}.  The facade auto-denied (to
+ * unstick the daemon) and raised this rather than hang or silently
+ * degrade.  Pass ``onPermission`` to ``session(...)`` or drop to the
+ * low-level ``subscribe(EventTypeValue.PERMISSION_REQUESTED)`` API via
+ * {@link Session.client}.
+ *
+ * Mirror of jaato-sdk's ``PermissionUnhandled``.
+ */
+export class PermissionUnhandled extends Error {
+  readonly toolName: string;
+  constructor(toolName: string) {
+    super(
+      `tool ${JSON.stringify(toolName)} requested permission but no ` +
+        `onPermission callback was set — pass onPermission to session(...) ` +
+        `or use the low-level subscribe(PERMISSION_REQUESTED) API via s.client`,
+    );
+    this.name = "PermissionUnhandled";
+    this.toolName = toolName;
+  }
+}
