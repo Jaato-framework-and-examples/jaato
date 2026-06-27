@@ -168,6 +168,23 @@ async def test_config_root_and_apparmor_forwarded_only_when_set():
     assert "apparmor" not in without._client.ctor
 
 
+async def test_session_exposes_underlying_client_for_mixing():
+    """s.client gives low-level access on the SAME connection, so a builder can
+    mix facade verbs with raw subscribe/events in one implementation."""
+    captured = {}
+
+    class _Cls(FakeClient):
+        def __init__(self, **ctor):
+            super().__init__(fire=[_out("model", "ok"), _TURN], **ctor)
+            captured["instance"] = self
+
+    async with open_session(_Cls, profile="x") as s:
+        assert s.client is captured["instance"]          # same underlying client
+        # a builder can attach their own low-level listener alongside facade calls
+        s.client.subscribe(EventType.TOOL_CALL_END, lambda ev: None)
+        assert await s.ask("hi") == "ok"
+
+
 async def test_tool_level_error_in_completing_turn_does_not_raise():
     """A denied/failed tool that the turn recovers from completes normally
     (TURN_COMPLETED) — the facade raises AgentError ONLY on an error TERMINAL,

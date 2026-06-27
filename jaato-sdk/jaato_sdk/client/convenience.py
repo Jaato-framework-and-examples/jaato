@@ -74,6 +74,26 @@ class Session:
             lambda ev: asyncio.ensure_future(self._on_perm(ev)),
         )
 
+    @property
+    def client(self):
+        """The underlying low-level client (``IPCClient`` / ``IPCRecoveryClient``).
+
+        The facade is purely additive — drop to the full event API on the SAME
+        connection when you need it (custom ``subscribe``/``events`` routing,
+        ``respond_to_permission(edited_arguments=...)``, ``cascade_events``,
+        ``attach_session``, ...) while still using ``ask``/``complete``/``stream``
+        for the common turns::
+
+            async with IPCClient.session(profile=...) as s:
+                s.client.subscribe(EventType.TOOL_CALL_END, observer)  # low-level
+                print(await s.ask("..."))                              # facade
+
+        ``ask``/``complete``/``stream`` clean up only their own subscriptions, so
+        listeners you add via ``s.client`` are independent and persist across
+        turns.
+        """
+        return self._client
+
     async def _on_perm(self, ev: Any) -> None:
         request_id = getattr(ev, "request_id", "")
         if self._on_permission is not None:
