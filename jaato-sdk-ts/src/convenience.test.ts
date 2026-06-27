@@ -9,7 +9,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { JaatoClient } from "./client.js";
-import { Session } from "./convenience.js";
+import { Session, type ClientToolHandler } from "./convenience.js";
 import { AgentError, PermissionUnhandled } from "./errors.js";
 import { EventTypeValue } from "./events.js";
 
@@ -51,6 +51,9 @@ class FakeClient {
   }
   async respondToPermission(requestId: string, response: string): Promise<void> {
     this.calls.push(["respondToPermission", requestId, response]);
+  }
+  async respondToToolExecution(callId: string, result = "", error = ""): Promise<void> {
+    this.calls.push(["respondToToolExecution", callId, result, error]);
   }
   async registerClientTools(tools: unknown): Promise<void> {
     this.calls.push(["registerClientTools", tools]);
@@ -178,6 +181,73 @@ test("permission: callback (sync + async) is used for the response", async () =>
   }
   await new Promise((r) => setTimeout(r, 0));
   assert.ok(c2.calls.some((x) => x[0] === "respondToPermission" && x[2] === "a"));
+});
+
+// ── host-tool dispatch ───────────────────────────────────────────
+
+function withTools(
+  handlers: Record<string, ClientToolHandler>,
+): { s: Session; c: FakeClient } {
+  const c = new FakeClient();
+  const map = new Map(Object.entries(handlers));
+  const s = new Session(c as unknown as JaatoClient, undefined, map);
+  return { s, c };
+}
+
+function fireToolExec(c: FakeClient, ev: unknown): void {
+  for (const h of [...(c.handlers.get(EventTypeValue.TOOL_EXECUTE_REQUEST) ?? [])]) h(ev);
+}
+
+test("host tool: handler runs client-side; object result is JSON-encoded back", async () => {
+  let seen: unknown;
+  const { c } = withTools({
+    get_weather: (args) => {
+      seen = args;
+      return { weather: "sunny" };
+    },
+  });
+  fireToolExec(c, { call_id: "c1", tool_name: "get_weather", tool_args: { city: "Paris" } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(seen, { city: "Paris" });
+  assert.ok(
+    c.calls.some(
+      (x) => x[0] === "respondToToolExecution" && x[1] === "c1" && x[2] === '{"weather":"sunny"}',
+    ),
+  );
+});
+
+test("host tool: string result passed through verbatim", async () => {
+  const { c } = withTools({ echo: () => "hi" });
+  fireToolExec(c, { call_id: "c2", tool_name: "echo", tool_args: {} });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(c.calls.some((x) => x[0] === "respondToToolExecution" && x[1] === "c2" && x[2] === "hi"));
+});
+
+test("host tool: unknown tool name → error response", async () => {
+  const { c } = withTools({ known: () => "x" });
+  fireToolExec(c, { call_id: "c3", tool_name: "mystery", tool_args: {} });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(
+    c.calls.some((x) => x[0] === "respondToToolExecution" && x[1] === "c3" && x[3] !== ""),
+  );
+});
+
+test("host tool: handler throw → error response", async () => {
+  const { c } = withTools({
+    boom: () => {
+      throw new Error("kaboom");
+    },
+  });
+  fireToolExec(c, { call_id: "c4", tool_name: "boom", tool_args: {} });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(
+    c.calls.some((x) => x[0] === "respondToToolExecution" && x[1] === "c4" && x[3] === "kaboom"),
+  );
+});
+
+test("no tool handlers → no TOOL_EXECUTE_REQUEST subscription wired", () => {
+  const { c } = session();
+  assert.equal((c.handlers.get(EventTypeValue.TOOL_EXECUTE_REQUEST) ?? []).length, 0);
 });
 
 // ── lifecycle ────────────────────────────────────────────────────
