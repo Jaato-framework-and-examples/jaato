@@ -553,6 +553,32 @@ class IPCClient:
         self._registry.dispatch(event)
 
     # =========================================================================
+    # High-level convenience facade
+    # =========================================================================
+
+    @classmethod
+    def session(cls, **kwargs):
+        """Open a session with the high-level facade (additive sugar).
+
+        Returns an async context manager yielding a
+        :class:`~jaato_sdk.client.convenience.Session` that owns the
+        send-and-wait recipe — so the common path never reproduces the
+        ``SESSION_TERMINATED``-only hang (PR #399)::
+
+            async with IPCClient.session(profile="researcher", agent="pirate") as s:
+                print(await s.ask("Research tide pools."))
+
+        ``profile`` (str=named / dict=inline spec), ``agent``, ``agent_params``,
+        ``cascade_driver_id`` are forwarded to :meth:`create_session` unchanged
+        — both declarative and programmatic styles are preserved.  Connection
+        knobs (``socket_path``, ``env_file``, ``workspace_path``, ``auto_start``,
+        ``client_type``, ``connect_timeout``) and ``on_permission`` have sensible
+        defaults.  See ``docs/design/sdk-convenience-layer.md``.
+        """
+        from .convenience import open_session
+        return open_session(cls, **kwargs)
+
+    # =========================================================================
     # Connection Management
     # =========================================================================
 

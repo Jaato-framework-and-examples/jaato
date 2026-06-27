@@ -11,6 +11,12 @@ from jaato_sdk.client import (
     ConnectionState,
     RecoveryConfig,
 )
+from jaato_sdk.client.convenience import (
+    Session,
+    AgentError,
+    PermissionUnhandled,
+    ask,
+)
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -41,6 +47,11 @@ __all__ = [
     "IPCRecoveryClient",
     "ConnectionState",
     "RecoveryConfig",
+    # High-level convenience facade
+    "Session",
+    "AgentError",
+    "PermissionUnhandled",
+    "ask",
     # Events
     "Event",
     "EventType",
