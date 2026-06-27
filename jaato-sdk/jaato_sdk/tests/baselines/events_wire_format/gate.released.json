@@ -2,6 +2,7 @@
   "type": "gate.released",
   "timestamp": "<TIMESTAMP>",
   "gate_name": "",
+  "session_id": "",
   "tenant_id": "",
   "owner": "",
   "outcome": null,
