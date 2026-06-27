@@ -278,6 +278,30 @@ class IPCRecoveryClient:
         return None
 
     # =========================================================================
+    # High-level convenience facade
+    # =========================================================================
+
+    @classmethod
+    def session(cls, **kwargs):
+        """Open a session with the high-level facade (auto-reconnect variant).
+
+        Same surface and semantics as :meth:`IPCClient.session` — returns an
+        async context manager yielding a
+        :class:`~jaato_sdk.client.convenience.Session` — but backed by an
+        ``IPCRecoveryClient`` so the session survives daemon restarts.  Adds an
+        ``on_status_change=`` kwarg (the reconnection-status callback) on top of
+        the shared knobs::
+
+            async with IPCRecoveryClient.session(profile="researcher",
+                                                 on_status_change=print) as s:
+                print(await s.ask("Long task…"))
+
+        See ``docs/design/sdk-convenience-layer.md``.
+        """
+        from .convenience import open_session
+        return open_session(cls, **kwargs)
+
+    # =========================================================================
     # Connection Management
     # =========================================================================
 

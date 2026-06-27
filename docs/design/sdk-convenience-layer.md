@@ -1,6 +1,6 @@
 # SDK convenience layer
 
-**Status:** Phase 1 (this PR). **Audience:** jaato-sdk users + maintainers.
+**Status:** Phase 1 + Phase 2 shipped. **Audience:** jaato-sdk users + maintainers.
 
 ## Problem
 
@@ -56,6 +56,16 @@ async with IPCClient.session(profile="person-extractor") as s:
 
 # one-shot module function (sugar over the context manager)
 text = await ask("Who are you?", profile={"model": "gpt-4o", "provider": "openai"})
+
+# live streaming (Phase 2)
+async with IPCClient.session(profile="researcher") as s:
+    async for chunk in s.stream("Tell me a story."):
+        print(chunk, end="", flush=True)
+
+# auto-reconnect variant — survives daemon restarts (Phase 2)
+async with IPCRecoveryClient.session(profile="researcher",
+                                     on_status_change=print) as s:
+    print(await s.ask("Long task…"))
 ```
 
 ### `IPCClient.session(...)` → async context manager
@@ -135,14 +145,25 @@ turn blocks forever — the same hang class as #399. The facade keeps the
 Raising (vs returning a status object) makes failures impossible to ignore
 and mirrors LangChain's `.invoke` contract.
 
-## What's explicitly out of scope (Phase 2)
+## Phase 2 (shipped)
 
-- `Session.stream(prompt)` — async-iterator of chunks for live streaming.
-- `IPCRecoveryClient.session(...)` parity (auto-reconnect facade).
-- A synchronous wrapper for non-async callers.
+- **`Session.stream(prompt, *, sources=("model",)) -> AsyncIterator[str]`** —
+  async-iterator counterpart to `ask`: yields each `AGENT_OUTPUT` chunk live,
+  stops at first-of `{TURN_COMPLETED, SESSION_TERMINATED}` (`TURN_COMPLETED`
+  fires after all output, so no chunk is dropped), raises `AgentError` /
+  `PermissionUnhandled` after draining. `sources` filters identically to `ask`.
+- **`IPCRecoveryClient.session(...)`** — same facade backed by the
+  auto-reconnect client (session survives daemon restarts). Adds an
+  `on_status_change=` kwarg (reconnection-status callback); forwarded to the
+  ctor only when set, so passing it to a plain `IPCClient` is a fail-loud ctor
+  error by design.
 
-These are additive over the same `Session` shape; deferred to keep the first
-PR small and reviewable.
+### Still out of scope (Phase 3, if needed)
+
+- A synchronous wrapper for non-async callers — deferred deliberately:
+  sync-over-async has real event-loop pitfalls (can't be called from within a
+  running loop) and warrants its own design pass; not on any current critical
+  path.
 
 ## Implementation notes
 

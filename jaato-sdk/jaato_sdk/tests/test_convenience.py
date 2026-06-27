@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from jaato_sdk import AgentError, PermissionUnhandled, Session, ask
+from jaato_sdk import AgentError, IPCRecoveryClient, PermissionUnhandled, Session, ask
 from jaato_sdk.events import EventType
-from jaato_sdk.client.convenience import open_session
+from jaato_sdk.client.convenience import _SessionContext, open_session
 
 
 class FakeClient:
@@ -112,6 +112,49 @@ async def test_complete_returns_payload():
 async def test_complete_no_completion_returns_none_no_hang():
     # plain turn, model never called signal_completion -> only TURN_COMPLETED
     assert await Session(FakeClient(fire=[_TURN]), "s").complete("hi") is None
+
+
+# --------------------------------------------------------------- stream() (Phase 2)
+
+async def test_stream_yields_chunks_then_stops():
+    c = FakeClient(fire=[_out("model", "Hel"), _out("model", "lo"), _TURN])
+    chunks = [x async for x in Session(c, "s").stream("hi")]
+    assert chunks == ["Hel", "lo"]
+
+
+async def test_stream_filters_sources_by_default():
+    c = FakeClient(fire=[_out("model", "A"), _out("tool", "B"), _TURN])
+    assert [x async for x in Session(c, "s").stream("hi")] == ["A"]
+    c2 = FakeClient(fire=[_out("model", "A"), _out("tool", "B"), _TURN])
+    assert [x async for x in Session(c2, "s").stream("hi", sources=None)] == ["A", "B"]
+
+
+async def test_stream_raises_agent_error_on_error_terminal():
+    c = FakeClient(fire=[(EventType.SESSION_TERMINATED,
+                          SimpleNamespace(reason="error", error_type="APIError",
+                                          error_summary="boom"))])
+    with pytest.raises(AgentError):
+        async for _ in Session(c, "s").stream("hi"):
+            pass
+
+
+# --------------------------------------------------------- recovery parity (Phase 2)
+
+async def test_recovery_session_classmethod_delegates():
+    """IPCRecoveryClient.session returns a session context manager backed by an
+    IPCRecoveryClient — same facade, auto-reconnect client."""
+    cm = IPCRecoveryClient.session(profile={"model": "m", "provider": "p"},
+                                   env_file=".env")
+    assert isinstance(cm, _SessionContext)
+    assert isinstance(cm._client, IPCRecoveryClient)
+
+
+async def test_on_status_change_forwarded_only_when_set():
+    cb = lambda s: None
+    with_cb = open_session(FakeClient, profile="x", on_status_change=cb)
+    assert with_cb._client.ctor.get("on_status_change") is cb
+    without = open_session(FakeClient, profile="x")
+    assert "on_status_change" not in without._client.ctor
 
 
 # --------------------------------------------------------------- permissions
