@@ -222,6 +222,15 @@ class IPCRecoveryClient:
         # recovery wrapper keeps the same registry).
         self._registry = _HandlerRegistry()
 
+        # Fan-out plumbing (mirror of IPCClient's drain loop).  The background
+        # event PUMP — started in ``connect`` — is the SINGLE reader of the
+        # inner client's events: it dispatches every event to ``_registry``
+        # (so ``subscribe()`` handlers fire WITHOUT anyone iterating
+        # ``events()`` — the gap that hung the convenience facade over a
+        # recovery client) AND fans out to ``events()`` consumer queues.
+        self._event_subscribers: "list[asyncio.Queue]" = []
+        self._event_pump_task: Optional[asyncio.Task] = None
+
     # =========================================================================
     # Properties
     # =========================================================================
@@ -356,6 +365,13 @@ class IPCRecoveryClient:
                 self._client_id = self._client.client_id
                 async with self._state_lock:
                     self._transition_to(ConnectionState.CONNECTED)
+                # Start the background event pump (single reader → registry
+                # dispatch + events() fan-out).  It owns ``_events_running``
+                # and survives reconnections (the loop re-reads the recreated
+                # inner client), so start it once.
+                if self._event_pump_task is None or self._event_pump_task.done():
+                    self._events_running = True
+                    self._event_pump_task = asyncio.create_task(self._event_pump())
                 return True
 
             raise ConnectionError("Connection failed")
@@ -389,8 +405,9 @@ class IPCRecoveryClient:
         # Cancel any reconnection in progress
         await self._cancel_reconnection()
 
-        # Stop event loop
+        # Stop event loop + the background event pump
         self._events_running = False
+        await self._stop_event_pump()
 
         # Disconnect underlying client
         if self._client:
@@ -418,8 +435,9 @@ class IPCRecoveryClient:
         # Cancel any reconnection in progress
         await self._cancel_reconnection()
 
-        # Stop event loop
+        # Stop event loop + the background event pump
         self._events_running = False
+        await self._stop_event_pump()
 
         # Disconnect underlying client
         if self._client:
@@ -838,67 +856,100 @@ class IPCRecoveryClient:
         return self._registry.subscribe_many(handlers)
 
     async def events(self) -> AsyncIterator[Event]:
-        """Async iterator for receiving events with automatic reconnection.
+        """Async iterator for receiving events.
 
-        Yields events from the server. If the connection is lost and
-        recovery is enabled, automatically attempts to reconnect.
-        During reconnection, yields SystemMessageEvents with status updates.
-
-        Subscribed handlers are dispatched at this layer (before yielding)
-        so they continue firing across reconnections without the caller
-        having to re-register.
-
-        Yields:
-            Events from the server.
+        Fan-out model (mirror of ``IPCClient.events``): the background
+        :meth:`_event_pump` is the SINGLE reader of the inner client's events;
+        ``events()`` subscribes a queue to its fan-out and yields what arrives.
+        Multiple iterators can run concurrently, and ``subscribe()`` handlers
+        fire from the pump regardless of whether anyone iterates here — which
+        is what lets the convenience facade (``subscribe`` + ``await done``)
+        work over a recovery client instead of hanging.  On disconnect the
+        pump pushes a ``None`` sentinel and this iterator exits cleanly.
 
         Example:
             async for event in client.events():
                 if isinstance(event, AgentOutputEvent):
                     print(event.text)
         """
-        self._events_running = True
+        q = self._subscribe_events()
+        try:
+            while True:
+                event = await q.get()
+                if event is None:  # pump signalled disconnect/close
+                    break
+                yield event
+        finally:
+            self._unsubscribe_events(q)
 
-        while self._events_running and self._state != ConnectionState.CLOSED:
-            if self._state == ConnectionState.CONNECTED and self._client:
-                try:
-                    async for event in self._client.events():
-                        # Track session ID from session events
-                        if isinstance(event, SessionInfoEvent):
-                            if event.session_id:
+    async def _event_pump(self) -> None:
+        """Background single reader: drain the inner client's events, dispatch
+        to ``_registry`` (so ``subscribe()`` handlers fire without anyone
+        iterating :meth:`events`), fan out to ``events()`` consumers, and drive
+        reconnection across recreated inner clients.  Mirror of
+        ``IPCClient._drain_loop`` for the recovery wrapper.
+        """
+        try:
+            while self._events_running and self._state != ConnectionState.CLOSED:
+                if self._state == ConnectionState.CONNECTED and self._client:
+                    try:
+                        async for event in self._client.events():
+                            if isinstance(event, SessionInfoEvent) and event.session_id:
                                 self._session_id = event.session_id
+                            self._registry.dispatch(event)
+                            self._fanout(event)
 
-                        self._registry.dispatch(event)
-
-                        yield event
-
-                    # If we get here, the event stream ended (connection lost)
-                    if self._events_running and self._state == ConnectionState.CONNECTED:
-                        logger.info("Connection lost, starting recovery...")
-                        await self._start_reconnection()
-
-                except asyncio.CancelledError:
-                    logger.debug("Event stream cancelled")
-                    break
-
-                except Exception as e:
-                    logger.error(f"Error in event stream: {e}")
-                    if self._events_running and self._state == ConnectionState.CONNECTED:
-                        await self._start_reconnection()
-
-            elif self._state == ConnectionState.RECONNECTING:
-                # Wait for reconnection or yield status updates
-                try:
-                    # Check periodically for state changes
+                        # Inner stream ended → connection lost.
+                        if self._events_running and self._state == ConnectionState.CONNECTED:
+                            logger.info("Connection lost, starting recovery...")
+                            await self._start_reconnection()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:  # noqa: BLE001 — keep the pump alive
+                        logger.error(f"Error in event pump: {e}")
+                        if self._events_running and self._state == ConnectionState.CONNECTED:
+                            await self._start_reconnection()
+                else:
+                    # RECONNECTING / transient: poll for a state change.
                     await asyncio.sleep(0.1)
-                except asyncio.CancelledError:
-                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Release any events() consumers blocked on their queue.
+            self._fanout(None)
 
-            else:
-                # Not connected and not reconnecting, wait a bit
-                try:
-                    await asyncio.sleep(0.1)
-                except asyncio.CancelledError:
-                    break
+    # ---- fan-out helpers (mirror IPCClient's drain fan-out) ----
+    def _subscribe_events(self) -> "asyncio.Queue":
+        q: asyncio.Queue = asyncio.Queue()
+        self._event_subscribers.append(q)
+        return q
+
+    def _unsubscribe_events(self, q: "asyncio.Queue") -> None:
+        try:
+            self._event_subscribers.remove(q)
+        except ValueError:
+            pass
+
+    def _fanout(self, event) -> None:
+        for q in list(self._event_subscribers):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "recovery events fan-out: subscriber queue full; dropping event"
+                )
+
+    async def _stop_event_pump(self) -> None:
+        """Cancel the background pump and release ``events()`` consumers."""
+        task = self._event_pump_task
+        self._event_pump_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 — best-effort teardown
+                pass
+        self._fanout(None)
 
     # =========================================================================
     # Status

@@ -163,7 +163,9 @@ def _find_config_files(workspace_path: Optional[Path] = None) -> List[Path]:
 
     # Project-level config (higher precedence)
     if workspace_path:
-        project_config = workspace_path / ".jaato" / "client.json"
+        # Coerce: IPCClient accepts a str workspace_path; the Path op below
+        # would otherwise TypeError on a str (Bug B — recovery client crash).
+        project_config = Path(workspace_path) / ".jaato" / "client.json"
         if project_config.exists():
             files.append(project_config)
 
