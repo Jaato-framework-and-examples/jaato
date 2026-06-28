@@ -442,6 +442,16 @@ class JaatoServer:
             "PromptOperatorHandler"
         ] = None
 
+        # Clarification relay handler (symmetric with the prompt-operator
+        # handler) — relays runner-fired clarification batches to the
+        # connected client via emit(ClarificationBatchEvent) and awaits the
+        # client's answers via resolve_response (called from
+        # :meth:`respond_to_clarification_batch`).  Set in
+        # :meth:`set_runner_rpc`; torn down in :meth:`shutdown`.
+        self._clarification_relay_handler: Optional[
+            "ClarificationRelayHandler"
+        ] = None
+
         # Path E (cycle 6) §7c step 6.6.4.5b race fix: cached
         # context_limit avoids in-band ``session_get_context_limit``
         # RPCs from notification handlers + aspect callbacks that
@@ -5057,13 +5067,22 @@ class JaatoServer:
     def respond_to_clarification_batch(self, request_id: str, answers: List[str]) -> None:
         """Respond to a batch clarification request with all answers at once.
 
-        Each answer is fed into the channel input queue sequentially so the
-        QueueChannel loop picks them up one by one and completes normally.
+        Runner-tier sessions resolve the ``ClarificationRelayHandler``
+        future directly (the runner-side relay channel is awaiting it);
+        daemon-local sessions feed the legacy ``_channel_input_queue`` so
+        the QueueChannel loop picks the answers up one by one.
 
         Args:
             request_id: The clarification request ID.
             answers: Ordered list of answer strings, one per question.
         """
+        # Runner→daemon relay path (post-seat-flip runner sessions) — mirror
+        # of respond_to_permission's prompt_operator_handler.resolve_response.
+        relay = getattr(self, "_clarification_relay_handler", None)
+        if relay is not None and relay.resolve_response(request_id, answers):
+            return
+
+        # Legacy daemon-local QueueChannel path.
         if self._pending_clarification_request_id != request_id:
             self.emit(ErrorEvent(
                 error=f"Unknown clarification request: {request_id}",
@@ -5571,6 +5590,21 @@ class JaatoServer:
             register_prompt_operator(
                 rpc_client.rpc_server, self._prompt_operator_handler,
             )
+            # Clarification relay — symmetric with prompt_operator.  Lets a
+            # runner-tier (confined / pool) session deliver clarifications to
+            # the connected client (the runner-side QueueChannel has no
+            # daemon-wired input_queue).  See
+            # server/runner_rpc_handlers/clarification_relay.py.
+            from server.runner_rpc_handlers.clarification_relay import (
+                ClarificationRelayHandler,
+                register as register_clarification_relay,
+            )
+            self._clarification_relay_handler = ClarificationRelayHandler(
+                emit_event=self.emit,
+            )
+            register_clarification_relay(
+                rpc_client.rpc_server, self._clarification_relay_handler,
+            )
             # Phase 4 §4.3.2: register the
             # ``subagent.spawn_isolated_runner`` handler.  Stub body
             # for now — returns "not yet implemented" with stage=spawn
@@ -5627,6 +5661,7 @@ class JaatoServer:
             )
         else:
             self._prompt_operator_handler = None
+            self._clarification_relay_handler = None
             self._spawn_isolated_runner_handler = None
             self._daemon_plugin_execute_handler = None
 
@@ -5661,6 +5696,19 @@ class JaatoServer:
                     "shutdown raised",
                 )
             self._prompt_operator_handler = None
+        # Tear down the clarification relay handler (symmetric with the
+        # prompt-operator teardown above) — fails in-flight clarifications
+        # with a clean error so the runner-side awaiter sees a typed cancel.
+        clarif_relay = getattr(self, "_clarification_relay_handler", None)
+        if clarif_relay is not None:
+            try:
+                clarif_relay.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                logger.exception(
+                    "JaatoServer.shutdown: clarification_relay_handler "
+                    "shutdown raised",
+                )
+            self._clarification_relay_handler = None
         # Phase 4 §4.3.2: tear down the spawn_isolated_runner handler.
         # Stub body holds no in-flight state (just a closed flag) so
         # this is a no-op beyond marking the handler closed; §4.3.6
