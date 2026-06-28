@@ -180,6 +180,22 @@ def _server_event_to_bus_event(server_event: Event) -> Optional[BusEvent]:
         if k not in ("type", "timestamp")
     }
 
+    # Hoist a nested typed ``payload`` (e.g. AgentCompletedEvent's validated
+    # signal_completion payload) to the bus-event top level.  ``to_dict()``
+    # leaves the typed payload nested under a ``payload`` key, but reactor
+    # consumers read it via ``build_merged_view``'s single
+    # ``view.update(event.payload)`` hoist — one level too shallow to reach
+    # the nested fields.  Without this hoist a cascade's ``event.get("facts")``
+    # returned None despite a validated typed payload (the
+    # ``AgentCompletedEvent.payload`` contract was honoured on the raw event
+    # but lost on the bus hop the reactor actually receives).  ``setdefault``
+    # so the typed fields never clobber envelope identity (agent_id, success,
+    # ...); the nested ``payload`` key is preserved for back-compat.
+    typed_payload = payload.get("payload")
+    if isinstance(typed_payload, dict):
+        for k, v in typed_payload.items():
+            payload.setdefault(k, v)
+
     return BusEvent.create(
         event_type=bus_type,
         source_agent=payload.get("agent_id", "server"),
