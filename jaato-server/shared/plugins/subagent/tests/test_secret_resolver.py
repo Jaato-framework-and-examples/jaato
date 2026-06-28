@@ -13,6 +13,7 @@ from ..config import (
     _resolve_secret_uri,
     _SECRET_URI_RE,
     _discover_secret_resolvers,
+    looks_like_unresolved_secret_uri,
     expand_variables,
     reset_secret_resolvers,
 )
@@ -334,3 +335,38 @@ class TestSecretResolverProtocol:
 
     def test_failing_is_resolver(self):
         assert isinstance(FailingResolver(), SecretResolver)
+
+
+class TestLooksLikeUnresolvedSecretURI:
+    """looks_like_unresolved_secret_uri — the provider-boundary fail-loud gate.
+
+    True only for a non-network ``scheme://`` (an unresolved secret-URI that
+    passed through because no resolver is registered).  Resolved secrets are
+    plain strings (False); network URLs / ${VAR} / non-URIs are False.
+    """
+
+    def test_true_for_secret_scheme_uris(self):
+        assert looks_like_unresolved_secret_uri("pass://jaato/nebius/api-key")
+        assert looks_like_unresolved_secret_uri("vault://secret/x#k")
+        assert looks_like_unresolved_secret_uri("awssm://prod/db")
+        assert looks_like_unresolved_secret_uri("my-vault2://path/to/secret")
+
+    def test_false_for_plain_strings(self):
+        # A resolved credential is a plain string.
+        assert not looks_like_unresolved_secret_uri("nbk-a-real-looking-key")
+        assert not looks_like_unresolved_secret_uri("sk-ant-api03-xyz")
+        assert not looks_like_unresolved_secret_uri("")
+
+    def test_false_for_network_schemes(self):
+        # http/ws are literal URLs, not secret indirections (e.g. self-hosted
+        # base_url) — must not trip the credential gate.
+        assert not looks_like_unresolved_secret_uri("https://api.example.com/v1")
+        assert not looks_like_unresolved_secret_uri("ws://localhost:8080")
+
+    def test_false_for_pending_var_substitution(self):
+        assert not looks_like_unresolved_secret_uri("pass://${ENV}/key")
+        assert not looks_like_unresolved_secret_uri("${WHOLE_KEY}")
+
+    def test_false_for_non_str(self):
+        assert not looks_like_unresolved_secret_uri(None)
+        assert not looks_like_unresolved_secret_uri(12345)

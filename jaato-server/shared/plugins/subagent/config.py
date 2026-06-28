@@ -230,6 +230,29 @@ def _resolve_secret_uri(value: str) -> str:
         raise SecretResolutionError(value, str(exc)) from exc
 
 
+def looks_like_unresolved_secret_uri(value: Any) -> bool:
+    """Return True if *value* is a non-network ``scheme://`` secret-URI that
+    was NOT resolved (it passed through literally because no resolver is
+    registered for its scheme).
+
+    Used to FAIL LOUD at the provider credential boundary: a *resolved* secret
+    is a plain string, so a credential field still shaped like ``pass://...`` /
+    ``vault://...`` means the providing resolver plugin (e.g. jaato-premium's
+    ``secret_resolvers`` entry point) isn't installed.  ``_resolve_secret_uri``
+    intentionally passes such values through (so non-provider consumers like
+    ``service_connector`` can report "credential missing" with provenance), but
+    a provider must NOT send a literal secret URI as an API key — that produces
+    a confusing upstream 401.  Network schemes (http/ws/...), ``${VAR}``
+    placeholders, and non-URI strings return False.
+    """
+    if not isinstance(value, str) or "${" in value:
+        return False
+    m = _SECRET_URI_RE.match(value)
+    if not m:
+        return False
+    return m.group("scheme") not in _NETWORK_SCHEMES
+
+
 def reset_secret_resolvers() -> None:
     """Reset the cached secret resolvers (for testing)."""
     global _resolvers
