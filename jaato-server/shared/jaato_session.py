@@ -1234,6 +1234,40 @@ class JaatoSession:
             self._message_queue.put(text, actual_source_id, actual_source_type)
             self._trace(f"INJECT_PROMPT: queue_size_after={len(self._message_queue)}")
 
+    def try_drain_pending_user(self) -> Optional[str]:
+        """Atomically pop the first pending high-priority (USER/PARENT/SYSTEM)
+        message for the daemon's post-turn drain.
+
+        Multi-turn deadlock fix: a client send that races into the turn
+        wind-down — ``turn.completed`` reaches the client (which sends the
+        next turn) *before* the daemon clears ``_model_running`` — is
+        forwarded by the daemon gate as an :meth:`inject_prompt`.  Finding
+        the session idle with no active turn (and the per-RPC continuation
+        callback already restored to ``None``), ``inject_prompt`` takes the
+        else/queue branch, so the message sits with no drainer and the turn
+        never runs.  The daemon's model-thread ``finally`` calls this after
+        every runner-tier turn (via the ``session.try_drain_pending_user``
+        RPC); when it returns text the daemon starts a fresh turn with it.
+
+        Guarded on ``not _is_running`` so it never steals a message from an
+        active turn (which drains the queue itself mid-turn) — in that case
+        the running turn owns the message and this returns ``None``.
+
+        Returns:
+            The message text to run as the next turn, or ``None`` when no
+            high-priority message is queued or a turn is already running.
+        """
+        if self._is_running:
+            return None
+        if not self._message_queue.has_parent_messages():
+            return None
+        msg = self._message_queue.pop_first_parent_message()
+        if msg is None:
+            return None
+        if self._on_prompt_injected:
+            self._on_prompt_injected(msg.text)
+        return msg.text
+
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
 

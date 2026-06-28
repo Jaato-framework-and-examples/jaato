@@ -4810,6 +4810,46 @@ class JaatoServer:
                     clear_logging_context()
                     return  # new thread handles idle/done status
 
+                # Multi-turn deadlock fix: drain a high-priority (USER) send
+                # that raced into this turn's wind-down.  ``turn.completed``
+                # reaches the client (which sends its next turn) BEFORE this
+                # finally cleared ``_model_running`` above, so the daemon gate
+                # forwarded that send as an ``inject_prompt``; the runner-side
+                # session — idle, with its per-RPC continuation callback
+                # already restored to None — queued it with no drainer (see
+                # ``JaatoSession.inject_prompt`` / ``try_drain_pending_user``).
+                # Atomically pop it and start a fresh turn.  Mirrors the
+                # ``_pending_continuation`` drain above; runner-tier only
+                # (daemon-local sessions have no ``_runner_rpc``).
+                if server._runner_rpc is not None:
+                    drained = None
+                    try:
+                        drained = (
+                            server._runner_rpc
+                            .session_try_drain_pending_user_threadsafe()
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Best-effort — a transport error just means no drain
+                        # this turn; don't tear down the model thread.
+                        server._trace(
+                            f"DRAIN_PENDING_USER_RPC: try_drain_pending_user "
+                            f"raised {type(exc).__name__}: {exc} — skipping "
+                            f"drain this turn",
+                        )
+                    if drained:
+                        server._trace(
+                            f"DRAIN_PENDING_USER: starting fresh turn for a "
+                            f"send that raced the turn wind-down "
+                            f"({len(drained)} chars)",
+                        )
+                        server.emit(AgentStatusChangedEvent(
+                            agent_id=server._main_agent_id,
+                            status="active",
+                        ))
+                        server._start_model_thread(drained)
+                        clear_logging_context()
+                        return  # new thread handles idle/done status
+
                 # Determine whether the main agent is truly finished or just
                 # paused waiting for external input.
                 #   "idle"  – waiting for user input or subagent results
