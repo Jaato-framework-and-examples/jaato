@@ -113,6 +113,56 @@ class RunnerRPCClient:
             )
         return PromptResponse.from_dict(env.result)
 
+    # --------------------- request_clarification -----------------------
+
+    def request_clarification(
+        self,
+        payload: Dict[str, Any],
+        *,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Relay a clarification batch to the connected client; await answers.
+
+        Sibling of :meth:`prompt_operator` for clarification.  The
+        runner-side clarification plugin's ``RunnerRPCClarificationChannel``
+        calls this when its policy needs the operator to answer one or
+        more questions.
+
+        Args:
+            payload: The batch to relay — ``{request_id, agent_id,
+                tool_name, context, questions}`` (``questions`` is the
+                same per-question dict shape the daemon emits in
+                ``ClarificationBatchEvent``).
+            timeout: Optional wall-clock cap.  ``None`` means wait
+                indefinitely — the operator may legitimately take time.
+
+        Returns:
+            ``{"cancelled": bool, "answers": List[str]}`` — the ordered
+            answer strings (one per question), or ``cancelled=True``.
+
+        Raises:
+            RunnerRPCError: when the daemon-side handler reported an
+                error (envelope ``ok=False``) or the channel is closed.
+            concurrent.futures.TimeoutError: when *timeout* fires.
+        """
+        env: ResponseEnvelope = self._rpc.outgoing_call(
+            "client.request_clarification",
+            dict(payload),
+            timeout=timeout,
+        )
+        if not env.ok or env.error is not None:
+            err_type = env.error.type if env.error else "UnknownError"
+            err_msg = env.error.message if env.error else "no error message"
+            raise RunnerRPCError(
+                f"client.request_clarification failed: {err_type}: {err_msg}"
+            )
+        if not isinstance(env.result, dict):
+            raise RunnerRPCError(
+                f"client.request_clarification: unexpected result type "
+                f"{type(env.result).__name__}; expected dict"
+            )
+        return env.result
+
     # --------------------- add_reference_fragment ----------------------
 
     def add_reference_fragment(
