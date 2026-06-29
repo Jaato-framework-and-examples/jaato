@@ -237,11 +237,14 @@ class InProcessClient:
         if not self._session_id:
             self._session_id = f"in-process-{uuid.uuid4().hex[:12]}"
         registry = await asyncio.to_thread(self._build_registry)
-        self._wire_permission_channel(registry)
+        permission_plugin = self._wire_permission_channel(registry)
         await asyncio.to_thread(
             self._embedded.configure_tools,
             registry,
-            None,  # permission_plugin (the loaded plugin in the registry gates)
+            # Pass the loaded permission plugin so the session GATES tool
+            # execution with it. Without this (was None) the policy + channel
+            # were wired but never consulted — tools ran un-gated.
+            permission_plugin,
             None,  # ledger
             {
                 "plugin_configs": self._resolved_plugin_configs,
@@ -250,16 +253,21 @@ class InProcessClient:
         )
         return self._session_id
 
-    def _wire_permission_channel(self, registry: Any) -> None:
-        """Register the InProcessChannel on the loaded permission plugin so a
-        gated tool's permission request routes to the facade (and back via
-        respond_to_permission). In-process there's no runner/thread-local
-        channel, so ``_get_channel`` falls to the plugin's default ``_channel``
-        slot — which we replace here. No-op when no permission plugin is loaded
-        (e.g. the model-only ex01-ex04 path)."""
+    def _wire_permission_channel(self, registry: Any) -> Any:
+        """Register the InProcessChannel on the loaded permission plugin and
+        return it (for ``configure_tools`` to gate with).
+
+        The plugin's POLICY is applied by ``expose_all`` (it reads
+        ``plugin_configs['permission']['policy']`` at ``initialize``); this
+        method swaps its channel so a gated tool's request routes to the facade
+        (and back via ``respond_to_permission``). In-process there's no
+        runner/thread-local channel, so ``_get_channel`` falls to the plugin's
+        default ``_channel`` slot — which we replace here (after ``initialize``
+        set it to ConsoleChannel). Returns ``None`` when no permission plugin is
+        loaded (the model-only ex01-ex04 path)."""
         permission_plugin = registry.get_plugin("permission")
         if permission_plugin is None:
-            return
+            return None
         loop = self._loop
         emitter = self._emitter
 
@@ -267,6 +275,7 @@ class InProcessClient:
             loop.call_soon_threadsafe(emitter.emit, ev)
 
         permission_plugin._channel = InProcessChannel(emit_threadsafe, self._pending)
+        return permission_plugin
 
     def _build_registry(self) -> Any:
         """Replicate the daemon's per-session registry setup in-process.
