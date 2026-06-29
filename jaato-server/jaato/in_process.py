@@ -274,7 +274,7 @@ class _InProcessSessionContext:
     ``Session``), then connects, creates the session, and tears down on exit.
     """
 
-    _CREATE_KEYS = ("profile", "agent", "agent_params", "cascade_driver_id")
+    _CREATE_KEYS = ("agent", "agent_params", "cascade_driver_id")
 
     def __init__(self, client_cls: type, kwargs: Dict[str, Any]) -> None:
         self._client_cls = client_cls
@@ -283,6 +283,22 @@ class _InProcessSessionContext:
 
     async def __aenter__(self) -> Session:
         on_permission = self._kwargs.pop("on_permission", None)
+        # Inline ``profile`` dict {model, provider, plugins, plugin_configs} —
+        # the same spec shape ``IPCClient.session`` accepts — is expanded into
+        # connection kwargs so both clients take an identical spec (the
+        # transport-agnostic entry forwards ``profile`` unchanged). A named
+        # profile (str) needs disk discovery — that lands with the profile-load
+        # chain (PR3); ``plugins`` from the inline spec is likewise PR3.
+        profile = self._kwargs.pop("profile", None)
+        if isinstance(profile, dict):
+            for key in ("model", "provider", "plugin_configs"):
+                if profile.get(key) is not None and self._kwargs.get(key) is None:
+                    self._kwargs[key] = profile[key]
+        elif isinstance(profile, str):
+            raise NotImplementedError(
+                "named in-process profiles land in PR3; for now pass an inline "
+                "{model, provider, plugins, plugin_configs} profile dict"
+            )
         create_kwargs = {
             k: self._kwargs.pop(k) for k in self._CREATE_KEYS if k in self._kwargs
         }
@@ -294,3 +310,50 @@ class _InProcessSessionContext:
     async def __aexit__(self, *exc: Any) -> None:
         if self._client is not None:
             await self._client.disconnect()
+
+
+def _bundle_inline_profile(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Bundle separate ``model`` / ``provider`` / ``plugins`` /
+    ``plugin_configs`` kwargs into the inline-spec ``profile`` dict that both
+    clients accept (unless a ``profile`` is already given). Other kwargs (agent,
+    connection knobs) pass through untouched."""
+    kwargs = dict(kwargs)
+    if "profile" not in kwargs:
+        spec = {
+            key: kwargs.pop(key)
+            for key in ("model", "provider", "plugins", "plugin_configs")
+            if key in kwargs
+        }
+        if spec:
+            kwargs["profile"] = spec
+    return kwargs
+
+
+def session(mode: str = "ipc", **kwargs: Any) -> Any:
+    """Transport-agnostic session entry — the facade picks the client by ``mode``.
+
+    ``mode="in_process"`` runs the embedded :class:`InProcessClient` (no
+    daemon); ``mode="ipc"`` talks to a running daemon via ``IPCClient``. Both
+    accept the same session spec — pass ``model`` / ``provider`` / ``plugins`` /
+    ``plugin_configs`` as separate kwargs (bundled into the inline-spec
+    ``profile``) or a ``profile`` dict directly — so one example runs both ways
+    with ``mode`` the only variable::
+
+        async with jaato.session(mode=m, model=..., provider=..., plugins=[],
+                                 plugin_configs={...}) as s:
+            print(await s.ask("Hi"))
+
+    Connection knobs that apply to only one transport (``socket_path`` /
+    ``env_file`` for IPC) are optional and ignored by the other client — that's
+    per-mode connection config, not a code clone. See
+    ``docs/design/in-process-facade.md``.
+    """
+    spec_kwargs = _bundle_inline_profile(kwargs)
+    if mode == "in_process":
+        return InProcessClient.session(**spec_kwargs)
+    if mode == "ipc":
+        from jaato_sdk import IPCClient
+        return IPCClient.session(**spec_kwargs)
+    raise ValueError(
+        f"unknown session mode {mode!r}; expected 'ipc' or 'in_process'"
+    )

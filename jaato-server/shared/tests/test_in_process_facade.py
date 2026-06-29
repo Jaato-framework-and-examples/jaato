@@ -14,7 +14,12 @@ dual-mode example suite.
 
 import asyncio
 
-from jaato.in_process import InProcessClient, InProcessEventEmitter
+from jaato.in_process import (
+    InProcessClient,
+    InProcessEventEmitter,
+    _bundle_inline_profile,
+    session,
+)
 from jaato_sdk.events import AgentOutputEvent, EventType, TurnCompletedEvent
 
 
@@ -189,5 +194,80 @@ class TestRealPathWiring:
             except RuntimeError:
                 raised = True
             assert raised
+
+        asyncio.run(_run())
+
+
+class TestTransportAgnosticEntry:
+    """The ``jaato.session(mode=...)`` entry + inline-profile parity, so one
+    example runs both modes with the same kwargs (Daniel's target shape)."""
+
+    def test_bundle_inline_profile_from_separate_kwargs(self):
+        bundled = _bundle_inline_profile(
+            {"model": "m", "provider": "p", "plugins": [],
+             "plugin_configs": {"p": {"api_key": "k"}}, "agent": "pirate"}
+        )
+        # spec keys bundled into a `profile` dict; non-spec kwargs pass through.
+        assert bundled["profile"] == {
+            "model": "m", "provider": "p", "plugins": [],
+            "plugin_configs": {"p": {"api_key": "k"}},
+        }
+        assert bundled["agent"] == "pirate"
+        assert "model" not in bundled  # consumed into profile
+
+    def test_bundle_keeps_explicit_profile(self):
+        bundled = _bundle_inline_profile({"profile": {"model": "x"}, "agent": "a"})
+        assert bundled == {"profile": {"model": "x"}, "agent": "a"}
+
+    def test_unknown_mode_raises(self):
+        try:
+            session(mode="bogus")
+        except ValueError as e:
+            assert "bogus" in str(e)
+        else:  # pragma: no cover
+            raise AssertionError("expected ValueError for unknown mode")
+
+    def test_session_in_process_routes_and_answers(self):
+        """``jaato.session(mode='in_process', ...)`` routes to InProcessClient,
+        bundles the separate kwargs into the inline profile, and answers."""
+
+        async def _run():
+            holder = {}
+            async with session(
+                mode="in_process",
+                model="m",
+                provider="openrouter",
+                plugins=[],
+                plugin_configs={"openrouter": {"api_key": "sk-or-plain"}},
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                answer = await s.ask("hi")
+
+            assert answer == "Hello world"
+            # provider + plugin_configs survived the bundle -> expand round-trip.
+            assert holder["provider"] == "openrouter"
+            assert holder["client"].configure_tools_session_kwargs == {
+                "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}}
+            }
+
+        asyncio.run(_run())
+
+    def test_inline_profile_dict_expands_in_in_process_client(self):
+        """``InProcessClient.session(profile={...})`` expands the inline spec
+        into model/provider/plugin_configs (parity with IPCClient's spec)."""
+
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                profile={
+                    "model": "m", "provider": "openrouter", "plugins": [],
+                    "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}},
+                },
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                answer = await s.ask("hi")
+
+            assert answer == "Hello world"
+            assert holder["provider"] == "openrouter"
 
         asyncio.run(_run())
