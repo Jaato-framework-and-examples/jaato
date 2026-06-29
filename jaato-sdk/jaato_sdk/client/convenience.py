@@ -1,4 +1,18 @@
-"""High-level convenience facade over :class:`IPCClient`.
+"""High-level convenience facade over the SDK session clients.
+
+The facade is **client-agnostic**: the same :class:`Session` (``ask`` /
+``complete`` / ``stream``) rides on every client that implements the small
+session contract —
+
+* :class:`IPCClient` and :class:`IPCRecoveryClient` — talk to a running daemon
+  over IPC (the latter adds auto-reconnect);
+* ``jaato.InProcessClient`` — runs the runtime **embedded** in your own process,
+  no daemon / runner / socket.
+
+The transport-agnostic ``jaato.session(mode="ipc"|"in_process", ...)`` entry
+picks one, so the same facade code runs across transports with the mode the
+only variable. (No WebSocket client backs the facade yet — Python WS access is
+raw frames today; a facade-compatible WS client would slot in as another mode.)
 
 The SDK's low-level surface is event-loop primitives (``subscribe`` /
 ``send_message`` / ``events``).  The common path — open a session, ask, get
@@ -12,12 +26,13 @@ This module owns that recipe so user code can't reproduce it (or its hangs):
     async with IPCClient.session(profile="researcher", agent="pirate") as s:
         print(await s.ask("Research tide pools."))
 
-It is purely additive sugar over existing methods — every ``IPCClient`` method
-is untouched, and both config styles are preserved because ``session(...)``
+It is purely additive sugar over existing methods — every client method is
+untouched, and both config styles are preserved because ``session(...)``
 forwards ``create_session``'s parameters unchanged (``profile`` as a name =
 declarative, as a dict = programmatic; ``agent`` composes with either).
 
-See ``docs/design/sdk-convenience-layer.md``.
+See ``docs/design/sdk-convenience-layer.md`` and
+``docs/design/in-process-facade.md``.
 """
 
 from __future__ import annotations
