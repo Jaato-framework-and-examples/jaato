@@ -9,7 +9,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { JaatoClient } from "./client.js";
-import { Session, type ClientToolHandler } from "./convenience.js";
+import { Session, waitForSessionId, type ClientToolHandler } from "./convenience.js";
 import { AgentError, PermissionUnhandled } from "./errors.js";
 import { EventTypeValue } from "./events.js";
 
@@ -262,4 +262,39 @@ test("close and Symbol.asyncDispose both close the underlying client", async () 
 test("client getter exposes the underlying client for high/low mixing", () => {
   const { s, c } = session();
   assert.equal(s.client, c as unknown as JaatoClient);
+});
+
+// ── waitForSessionId (openSession's create-session race fix) ─────────
+// openSession.createSession is fire-and-forget: client.sessionId is null until
+// the server's SessionInfoEvent arrives (cold bootstrap can take seconds). The
+// facade must WAIT for it rather than check immediately (the bug that broke the
+// whole ts-sdk surface). These pin the wait helper's three cases.
+
+test("waitForSessionId: resolves immediately when sessionId already set", async () => {
+  const c = new FakeClient(); // sessionId defaults to "sid-1"
+  const sid = await waitForSessionId(c as unknown as JaatoClient, 1000);
+  assert.equal(sid, "sid-1");
+  // No SESSION_INFO subscription needed when the id is already known.
+  assert.equal(c.handlers.get(EventTypeValue.SESSION_INFO), undefined);
+});
+
+test("waitForSessionId: resolves on SESSION_INFO when initially null", async () => {
+  const c = new FakeClient();
+  c.sessionId = null;
+  const p = waitForSessionId(c as unknown as JaatoClient, 1000);
+  // Subscribed SYNCHRONOUSLY, before any event (so a fast event can't slip by).
+  assert.equal((c.handlers.get(EventTypeValue.SESSION_INFO) ?? []).length, 1);
+  // Simulate the daemon: _dispatchEvent sets sessionId, then fires handlers.
+  c.sessionId = "20260628_231718";
+  for (const h of [...(c.handlers.get(EventTypeValue.SESSION_INFO) ?? [])]) h({});
+  assert.equal(await p, "20260628_231718");
+  // Unsubscribed after resolving.
+  assert.equal((c.handlers.get(EventTypeValue.SESSION_INFO) ?? []).length, 0);
+});
+
+test("waitForSessionId: resolves null on timeout when no SESSION_INFO arrives", async () => {
+  const c = new FakeClient();
+  c.sessionId = null;
+  const sid = await waitForSessionId(c as unknown as JaatoClient, 20);
+  assert.equal(sid, null);
 });

@@ -59,6 +59,16 @@ export interface SessionOpenOptions {
   headers?: Record<string, string>;
   /** Connection open timeout in ms (default 5000). */
   openTimeoutMs?: number;
+  /**
+   * Timeout in ms to wait for the server's ``SessionInfoEvent`` (which sets
+   * {@link JaatoClient.sessionId}) after ``session.new`` (default 60000).
+   * ``createSession`` is fire-and-forget — the session id only exists once
+   * that event arrives, and a COLD runner bootstrap can take many seconds —
+   * so the facade waits for it before returning the {@link Session}.  Distinct
+   * from {@link openTimeoutMs} (the WebSocket connect timeout); the bootstrap
+   * phase is much slower than the connect.
+   */
+  sessionTimeoutMs?: number;
   /** Override the SDK's compile-time minimum protocol version. */
   minProtocolVersion?: string;
   /** Reconnection policy; pass to enable the recovery (auto-reconnect) path. */
@@ -392,6 +402,38 @@ export class Session implements AsyncDisposable {
 }
 
 /**
+ * Wait for the server's ``SessionInfoEvent`` (which sets
+ * {@link JaatoClient.sessionId}) after a fire-and-forget
+ * {@link JaatoClient.createSession}.
+ *
+ * Subscribes SYNCHRONOUSLY on call (the ``new Promise`` executor runs before
+ * this returns), so a caller can start the wait *before* issuing
+ * ``session.new`` and never miss a fast (warm) event.  ``_dispatchEvent`` sets
+ * ``client.sessionId`` before invoking typed handlers, so it's readable in the
+ * handler.  Resolves the session id, or ``null`` if no ``SessionInfoEvent``
+ * arrives within ``timeoutMs`` (a cold runner bootstrap can take many
+ * seconds — pass a generous timeout).
+ */
+export function waitForSessionId(
+  client: JaatoClient,
+  timeoutMs: number,
+): Promise<string | null> {
+  if (client.sessionId) return Promise.resolve(client.sessionId);
+  return new Promise<string | null>((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const unsub = client.subscribe(EventTypeValue.SESSION_INFO, () => {
+      clearTimeout(timer);
+      unsub();
+      resolve(client.sessionId);
+    });
+    timer = setTimeout(() => {
+      unsub();
+      resolve(null);
+    }, timeoutMs);
+  });
+}
+
+/**
  * Build a {@link JaatoClient}, connect, register host tools, create the
  * session, and return a ready {@link Session}. Backs {@link JaatoClient.session}.
  */
@@ -434,16 +476,33 @@ export async function openSession(opts: SessionOpenOptions): Promise<Session> {
     });
     await client.registerClientTools(wireSpecs);
   }
+  // ``createSession`` is fire-and-forget: it sends ``session.new`` and
+  // returns; the session id is set LATER, when the server's
+  // ``SessionInfoEvent`` arrives (a cold runner bootstrap can take many
+  // seconds).  So we must WAIT for that event before checking the id —
+  // otherwise a real (cold) session deterministically fails the
+  // ``!client.sessionId`` check.  Mirror of Python ``create_session``, which
+  // waits for the ``SessionInfoEvent`` confirmation.
+  //
+  // Start the wait BEFORE issuing ``session.new`` (``waitForSessionId``
+  // subscribes synchronously) so a fast (warm) event can't slip through
+  // between the command and the subscription.
+  const sessionTimeoutMs = opts.sessionTimeoutMs ?? 60000;
+  const sessionIdReady = waitForSessionId(client, sessionTimeoutMs);
+
   await client.createSession({
     profile: opts.profile,
     agent: opts.agent,
     agentParams: opts.agentParams,
     cascadeDriverId: opts.cascadeDriverId,
   });
-  if (!client.sessionId) {
+
+  const sessionId = await sessionIdReady;
+  if (!sessionId) {
     await client.close();
     throw new Error(
-      "session.new did not produce a session id — check provider auth / the daemon log",
+      `session.new did not produce a session id within ${sessionTimeoutMs}ms ` +
+        `— check provider auth / the daemon log`,
     );
   }
   return new Session(client, opts.onPermission, toolHandlers);
