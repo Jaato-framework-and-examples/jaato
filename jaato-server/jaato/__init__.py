@@ -9,6 +9,11 @@ This module re-exports the core components from the internal 'shared' module.
 from shared import JaatoClient
 from shared import PluginRegistry
 
+# In-process convenience facade — run the jaato_sdk ask/complete/stream facade
+# against the embedded JaatoClient (no daemon/runner/socket).
+# See docs/design/in-process-facade.md.
+from jaato.in_process import InProcessClient
+
 # Provider-agnostic types for plugin development
 from jaato_sdk.plugins.model_provider.types import (
     # Enums
@@ -47,6 +52,7 @@ __all__ = [
     # Client and registry
     "JaatoClient",
     "PluginRegistry",
+    "InProcessClient",
 
     # Enums
     "Role",
