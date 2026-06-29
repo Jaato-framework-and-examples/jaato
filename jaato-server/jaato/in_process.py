@@ -34,6 +34,8 @@ from jaato_sdk.client.convenience import Session
 from jaato_sdk.events import AgentOutputEvent, TurnCompletedEvent
 from shared.config_resolver import resolve_secret_uri
 
+from jaato._in_process_permission import PendingPermissions
+
 
 def _default_embedded_factory(provider: Optional[str]) -> Any:
     """Build the real embedded runtime for ``provider``.
@@ -169,6 +171,10 @@ class InProcessClient:
         self._emitter = InProcessEventEmitter()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._session_id: Optional[str] = None
+        # Cross-thread permission rendezvous: the InProcessChannel (registered
+        # on the session's permission plugin once plugin-loading lands) parks a
+        # request here; respond_to_permission resolves it.
+        self._pending = PendingPermissions()
 
     # ---- facade contract: events ----
     def subscribe(
@@ -263,9 +269,11 @@ class InProcessClient:
         return final_text
 
     async def respond_to_permission(self, request_id: str, response: str) -> None:
-        # The InProcessChannel permission bridge lands in PR2. With no channel
-        # wired yet, a session that requests permission can't reach here.
-        return None
+        # Resolve the parked permission request (set by the InProcessChannel on
+        # the embedded runtime's worker thread). A no-op when nothing is pending
+        # — e.g. before the channel is wired into the session (plugin-loading
+        # slice) or for a stale/duplicate response.
+        self._pending.resolve(request_id, response)
 
     async def disconnect(self) -> None:
         if self._embedded is not None and hasattr(self._embedded, "close_session"):
