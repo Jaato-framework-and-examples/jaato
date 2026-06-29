@@ -31,6 +31,7 @@ class _FakeEmbedded:
         self.connected_with = None
         self.verify_auth_plugin_configs = "<unset>"
         self.configure_tools_session_kwargs = "<unset>"
+        self.configure_tools_permission_plugin = "<unset>"
         self.closed = False
 
     def connect(self, project=None, location=None, model=None) -> None:
@@ -45,6 +46,7 @@ class _FakeEmbedded:
         session_kwargs=None, skip_model_test=False,
     ) -> None:
         self.configure_tools_session_kwargs = session_kwargs
+        self.configure_tools_permission_plugin = permission_plugin
 
     def send_message(self, prompt, on_output=None, **_kwargs) -> str:
         if on_output is not None:
@@ -353,9 +355,34 @@ class TestPluginLoading:
         client._loop = _asyncio.new_event_loop()
         try:
             registry = client._build_registry()
-            client._wire_permission_channel(registry)
+            returned = client._wire_permission_channel(registry)
             perm = registry.get_plugin("permission")  # auto-loaded core plugin
             assert perm is not None
             assert isinstance(perm._channel, InProcessChannel)
+            # The plugin is RETURNED so create_session passes it to
+            # configure_tools (the session gates with it).
+            assert returned is perm
         finally:
             client._loop.close()
+
+    def test_permission_plugin_passed_to_configure_tools(self):
+        """create_session must PASS the loaded permission plugin to
+        configure_tools so the session gates — the policy + channel are inert
+        otherwise (the ex07 un-gated bug)."""
+
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                model="m",
+                plugins=["todo"],
+                plugin_configs={
+                    "todo": {"reporter_type": "memory", "storage_type": "memory"},
+                    "permission": {"policy": {"defaultPolicy": "ask"}},
+                },
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            perm = holder["client"].configure_tools_permission_plugin
+            assert perm is not None  # the session gates with it (was None = bug)
+
+        asyncio.run(_run())
