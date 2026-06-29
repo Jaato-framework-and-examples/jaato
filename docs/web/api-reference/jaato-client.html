@@ -121,6 +121,27 @@
             configuring tools, and managing multi-turn conversations.
           </p>
 
+          <div class="callout callout-info">
+            <div class="callout-title">Which "JaatoClient"?</div>
+            This page documents the <strong>in-process</strong> Python
+            <code>JaatoClient</code> (<code>from jaato import JaatoClient</code>),
+            which runs the agent runtime inside your own process. Two other clients
+            fill the same role &mdash; don't confuse them:
+            <ul>
+              <li><code>IPCClient</code> / <code>IPCRecoveryClient</code>
+                (<code>from jaato_sdk import IPCClient</code>) &mdash; the Python
+                client that talks to a running jaato <strong>daemon</strong> over
+                IPC, through the <code>IPCClient.session(...)</code> +
+                <code>ask</code> / <code>complete</code> / <code>stream</code>
+                facade. Most applications use this.</li>
+              <li>The TypeScript SDK's <code>JaatoClient</code>
+                (<code>import { JaatoClient } from "@jaato/sdk"</code>) &mdash; the
+                <em>same name</em>, but a different package and a
+                <strong>WebSocket</strong> transport
+                (<code>JaatoClient.session(...)</code>).</li>
+            </ul>
+          </div>
+
           <div class="method-signature">
             <span class="token-keyword">from</span> jaato <span class="token-keyword">import</span> JaatoClient<br>
             <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> JaatoRuntime, JaatoSession
