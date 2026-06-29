@@ -765,16 +765,29 @@ client = IPCRecoveryClient(
           <h2 id="websocket">Web Clients (WebSocket)</h2>
           <p>
             For WebSocket clients (web UIs, remote connections), the same recovery
-            concepts apply but you'll implement them in your client language.
-            The server-side WebSocket transport supports the same session
-            reattachment protocol.
+            concepts apply, but reattachment has one extra step that the IPC
+            transport does not. Each WebSocket connection is given its <em>own</em>
+            workspace, so a new connection cannot see a session created on a
+            previous connection until it selects that session's workspace first.
+            The reconnect sequence is <code>session.list</code> &rarr;
+            <code>workspace.select</code> &rarr; <code>session.attach</code>.
           </p>
 
           <h3>Key Patterns</h3>
           <ul>
-            <li>Use a reconnecting WebSocket library</li>
-            <li>Track the session ID client-side</li>
-            <li>Send <code>session.attach</code> after reconnecting</li>
+            <li>Use a reconnecting WebSocket library (or your own backoff loop)</li>
+            <li>Wait for the unprompted <code>{"type":"connected"}</code> greeting
+              before sending any command</li>
+            <li>Track the session ID <em>and its <code>workspace_path</code></em>
+              (read from <code>session.list</code>) client-side</li>
+            <li>Reattach with <code>session.list</code> &rarr;
+              <code>workspace.select</code> &rarr; <code>session.attach</code> —
+              <code>session.attach</code> is a <code>command.execute</code> with the
+              session ID as the first positional argument</li>
+            <li>The cold restore is asynchronous: a send issued while it settles can
+              return a <em>recoverable</em> <code>SessionError</code>
+              (<code>"Session not found"</code>) — reattach and resend until output
+              arrives</li>
             <li>Handle the ping/pong keepalive mechanism</li>
           </ul>
 
@@ -790,53 +803,81 @@ client = IPCRecoveryClient(
             Omitting or sending an invalid token causes the server to close the
             connection immediately with WS close code <strong>1008</strong>
             (Policy Violation). The default token path is
-            <code>~/.jaato/ws.token</code>; it is auto-generated on first server
+            <code>$HOME/.jaato/ws.token</code>; it is auto-generated on first server
             start if not provided via <code>--ws-token</code> /
             <code>--ws-token-file</code>.
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Why the opaque "Session not found"</div>
+            Attaching a session you have not selected the workspace for returns a
+            bare <code>"Session not found"</code> rather than naming where the
+            session lives. This is deliberate: workspace isolation is a security
+            boundary, and the server will not confirm that a session exists in a
+            workspace the connection has not selected — otherwise the error could
+            be used to enumerate sessions across workspaces. <code>workspace.select</code>
+            is the legitimate way to re-target a workspace you own.
           </div>
         </div>
         <div class="panel-code">
           <div class="code-label">WebSocket reconnection (TypeScript)</div>
           <div class="code-block">
-            <pre><code class="language-typescript">// TypeScript example for web clients
+            <pre><code class="language-typescript">// Raw WebSocket reconnect (no SDK). With @jaato/sdk, `recovery: {}` does all of
+// this for you; this shows the underlying frames.
 
 class JaatoWebClient {
   private ws: WebSocket | null = null;
   private sessionId: string | null = null;
+  private workspacePath: string | null = null; // the session's own workspace
   private reconnectAttempt = 0;
   private maxAttempts = 10;
 
+  // url carries the bearer token: wss://&lt;host&gt;/?token=&lt;token&gt;
+  // For a self-signed dev wss://, trust the dev CA out-of-band
+  // (e.g. NODE_EXTRA_CA_CERTS), never by disabling verification.
   connect(url: string) {
     this.ws = new WebSocket(url);
 
-    this.ws.onopen = () => {
-      this.reconnectAttempt = 0;
-      // Reattach session if we had one
-      if (this.sessionId) {
-        this.send({
-          type: "session.attach",
-          session_id: this.sessionId,
-        });
+    this.ws.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      switch (frame.type) {
+        case "connected": // unprompted greeting — only now is it safe to send
+          this.reconnectAttempt = 0;
+          if (this.sessionId) this.reattach();
+          break;
+        case "session.list": // find the session's workspace, then select + attach
+          this.workspacePath =
+            frame.sessions.find((s) =&gt; s.id === this.sessionId)?.workspace_path;
+          this.send({ type: "workspace.select", name: this.workspacePath });
+          this.send({ type: "command.execute",
+                      command: "session.attach", args: [this.sessionId] });
+          break;
+        case "error": // recoverable "Session not found" while the ~15s cold
+          if (frame.recoverable) this.reattach(); // restore settles — resend
+          break;
       }
     };
 
-    this.ws.onclose = () => {
-      this.scheduleReconnect(url);
-    };
+    this.ws.onclose = () =&gt; this.scheduleReconnect(url);
+  }
+
+  // A fresh connection gets its own workspace, so the session created on an
+  // earlier connection isn't reachable until we select its workspace. List
+  // sessions to find its workspace_path; the handler above does select + attach.
+  private reattach() {
+    this.send({ type: "command.execute", command: "session.list", args: [] });
   }
 
   private scheduleReconnect(url: string) {
-    if (this.reconnectAttempt >= this.maxAttempts) {
-      return; // Give up
-    }
+    if (this.reconnectAttempt &gt;= this.maxAttempts) return; // give up
 
-    const delay = Math.min(
-      60_000,
-      1000 * Math.pow(2, this.reconnectAttempt)
-    );
+    const delay = Math.min(60_000, 1000 * Math.pow(2, this.reconnectAttempt));
     this.reconnectAttempt++;
+    setTimeout(() =&gt; this.connect(url), delay);
+  }
 
-    setTimeout(() => this.connect(url), delay);
+  private send(frame: unknown) {
+    this.ws?.send(JSON.stringify(frame));
   }
 }</code></pre>
           </div>
