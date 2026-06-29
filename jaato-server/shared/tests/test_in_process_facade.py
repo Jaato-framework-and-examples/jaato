@@ -326,62 +326,64 @@ class TestEnvFileBothModes:
 
 
 class TestPluginLoading:
-    """create_session replicates the daemon's session-registry setup
-    (discover -> set context -> expose_all) so tool executors wire in-process
-    (the ex06 seam). Uses the lightweight in-memory ``todo`` plugin; the real
-    tool-execution fidelity (cli executes, matches the daemon) is the dual-mode
-    example suite's job."""
+    """_build_registry replicates the daemon's per-session registry setup for
+    PLUGIN PARITY: discover(tier='runner') + expose_all with NO requested-plugin
+    filter, so the FULL runner-tier set initializes (same as a daemon session),
+    regardless of the model-gate ``plugins`` list. Model tool-visibility is gated
+    separately at create_session(plugins=...). These exercise the real build
+    (~seconds); they use a tmp workspace to stay hermetic (no cwd config reads)."""
 
-    _TODO_CFG = {"todo": {"reporter_type": "memory", "storage_type": "memory"}}
-
-    def test_no_plugins_builds_empty_registry(self):
-        client = InProcessClient(model="m")
-        registry = client._build_registry()
-        assert registry.list_exposed() == []
-
-    def test_requested_plugin_is_discovered_and_exposed(self):
-        client = InProcessClient(model="m", plugins=["todo"])
-        client._resolved_plugin_configs = self._TODO_CFG
-        registry = client._build_registry()
-        exposed = registry.list_exposed()
-        assert "todo" in exposed                       # the requested plugin
-        assert registry.get_plugin("todo") is not None  # initialized + reachable
-
-    def test_permission_channel_wired_onto_loaded_plugin(self):
+    def test_build_registry_inits_full_runner_tier_and_wires_permission(self, tmp_path):
         import asyncio as _asyncio
 
         from jaato._in_process_permission import InProcessChannel
 
-        client = InProcessClient(model="m", plugins=["todo"])
-        client._resolved_plugin_configs = self._TODO_CFG
+        # plugins=["todo"] is only the MODEL gate; _build_registry still inits
+        # the whole runner-tier set (plugin parity), not just todo.
+        client = InProcessClient(
+            model="m", plugins=["todo"], workspace_path=str(tmp_path)
+        )
         client._loop = _asyncio.new_event_loop()
         try:
             registry = client._build_registry()
+            exposed = registry.list_exposed()
+            # Full runner-tier initialized (NOT just the model-gate plugin).
+            for name in ("cli", "todo", "permission", "introspection"):
+                assert name in exposed, name
+            # Permission channel wired + returned (for create_session gating).
             returned = client._wire_permission_channel(registry)
-            perm = registry.get_plugin("permission")  # auto-loaded core plugin
+            perm = registry.get_plugin("permission")
             assert perm is not None
             assert isinstance(perm._channel, InProcessChannel)
-            # The plugin is RETURNED so create_session passes it to
-            # configure_tools (the session gates with it).
             assert returned is perm
         finally:
             client._loop.close()
 
-    def test_permission_plugin_passed_to_configure_tools(self):
+    def test_permission_plugin_passed_to_configure_tools(self, tmp_path):
         """create_session must PASS the loaded permission plugin to
         configure_tools so the session gates — the policy + channel are inert
-        otherwise (the ex07 un-gated bug)."""
+        otherwise (the ex07 un-gated bug). Uses registry_factory to inject a
+        permission-bearing registry without the full runner-tier init."""
+
+        from shared import PluginRegistry
+
+        def _reg():
+            r = PluginRegistry(model_name="m")
+            r.discover()
+            r.set_workspace_path(str(tmp_path))
+            r.set_config_root(str(tmp_path))
+            r.expose_all(
+                {"permission": {"policy": {"defaultPolicy": "ask"}}},
+                requested_plugins=[],
+            )
+            return r
 
         async def _run():
             holder = {}
             async with InProcessClient.session(
                 model="m",
-                plugins=["todo"],
-                plugin_configs={
-                    "todo": {"reporter_type": "memory", "storage_type": "memory"},
-                    "permission": {"policy": {"defaultPolicy": "ask"}},
-                },
                 embedded_factory=_factory_for(holder),
+                registry_factory=_reg,
             ) as s:
                 await s.ask("hi")
             perm = holder["client"].configure_tools_permission_plugin
