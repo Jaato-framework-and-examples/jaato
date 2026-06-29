@@ -271,3 +271,49 @@ class TestTransportAgnosticEntry:
             assert holder["provider"] == "openrouter"
 
         asyncio.run(_run())
+
+
+class TestEnvFileBothModes:
+    """``env_file`` is a both-modes kwarg (only ``socket_path`` is IPC-only):
+    the in-process client loads the ``.env`` before the embedded runtime reads
+    the process env."""
+
+    def test_env_file_loaded_into_process_env(self, tmp_path):
+        import os
+
+        env_path = tmp_path / "in_process.env"
+        env_path.write_text("JAATO_INPROC_TEST_VAR=loaded123\n")
+        os.environ.pop("JAATO_INPROC_TEST_VAR", None)
+
+        async def _run():
+            async with InProcessClient.session(
+                model="m", env_file=str(env_path),
+                embedded_factory=lambda provider: _FakeEmbedded(),
+            ) as s:
+                await s.ask("hi")
+
+        try:
+            asyncio.run(_run())
+            assert os.environ.get("JAATO_INPROC_TEST_VAR") == "loaded123"
+        finally:
+            os.environ.pop("JAATO_INPROC_TEST_VAR", None)
+
+    def test_missing_env_file_is_graceful(self, tmp_path):
+        async def _run():
+            async with InProcessClient.session(
+                model="m", env_file=str(tmp_path / "does_not_exist.env"),
+                embedded_factory=lambda provider: _FakeEmbedded(),
+            ) as s:
+                return await s.ask("hi")
+
+        assert asyncio.run(_run()) == "Hello world"
+
+    def test_env_file_none_skips_load(self):
+        async def _run():
+            async with InProcessClient.session(
+                model="m", env_file=None,
+                embedded_factory=lambda provider: _FakeEmbedded(),
+            ) as s:
+                return await s.ask("hi")
+
+        assert asyncio.run(_run()) == "Hello world"
