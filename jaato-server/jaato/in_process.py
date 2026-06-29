@@ -112,6 +112,7 @@ def _resolve_named_profile(name: str, config_root: Optional[str]) -> Dict[str, A
         "plugin_configs": profile.plugin_configs,
         "system_instructions": profile.system_instructions,
         "completion_payload_schema": profile.completion_payload_schema,
+        "suppress_base_instructions": profile.suppress_base_instructions,
     }
 
 
@@ -257,6 +258,7 @@ class InProcessClient:
         config_root: Optional[str] = None,
         system_instructions: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
+        suppress_base_instructions: bool = False,
         env_file: Optional[str] = ".env",
         project: Optional[str] = None,
         location: Optional[str] = None,
@@ -279,6 +281,13 @@ class InProcessClient:
         # embedded session matches the daemon's (ex03 persona, ex04 byte-exact).
         self._system_instructions = system_instructions
         self._completion_payload_schema = completion_payload_schema
+        # The profile knob that controls base-layer composition:
+        # ``include_base = not suppress_base_instructions`` in configure(). False
+        # (default) -> persona/system_instructions composes ON TOP of the
+        # framework base; True -> the base is dropped (the profile keeps only its
+        # own agent/plugin/framework content). Threaded so an embedded session
+        # honors the same knob the daemon does.
+        self._suppress_base_instructions = suppress_base_instructions
         # ``env_file`` is a BOTH-modes kwarg (unlike ``socket_path``, which is
         # IPC-only): the embedded runtime reads the same env the daemon loads
         # from ``.env`` (``JAATO_PROVIDER`` / ``MODEL_NAME`` / provider creds),
@@ -353,6 +362,10 @@ class InProcessClient:
         session_kwargs: Dict[str, Any] = {
             "plugin_configs": self._resolved_plugin_configs,
             "plugins": self._plugins,
+            # The base-composition knob (default False = compose persona on top
+            # of the base; True = drop the base). create_session maps it to
+            # include_base = not suppress_base_instructions.
+            "suppress_base_instructions": self._suppress_base_instructions,
         }
         # Profile-derived session instructions (ex03 persona) + the typed
         # completion gate (ex04 byte-exact) — omit when unset so create_session
@@ -536,6 +549,7 @@ class _InProcessSessionContext:
             for key in (
                 "model", "provider", "plugins", "plugin_configs",
                 "system_instructions", "completion_payload_schema",
+                "suppress_base_instructions",
             ):
                 if spec.get(key) is not None and self._kwargs.get(key) is None:
                     self._kwargs[key] = spec[key]
