@@ -270,6 +270,19 @@ asyncio.run(main())</code></pre>
               </div>
             </li>
             <li>
+              <span class="param-name">on_status_change</span>
+              <span class="param-type">callable</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback invoked when the connection status changes (e.g.
+                <code>RECONNECTING</code> &rarr; <code>CONNECTED</code>), wired
+                before connect. Most relevant with the auto-reconnect client
+                (<a href="ipc-recovery-client.html"><code>IPCRecoveryClient</code></a>);
+                see <a href="../guides/connection-recovery.html">Connection
+                Recovery</a>.
+              </div>
+            </li>
+            <li>
               <span class="param-name">socket_path</span>
               <span class="param-type">str</span>
               <span class="param-optional">optional</span>
