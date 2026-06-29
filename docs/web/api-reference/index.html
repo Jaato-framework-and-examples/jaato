@@ -62,6 +62,7 @@
           <li><a href="jaato-client.html">JaatoClient</a></li>
           <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
           <li><a href="jaato-session.html">JaatoSession</a></li>
+          <li><a href="ipc-client.html">IPCClient</a></li>
           <li><a href="ipc-recovery-client.html">IPCRecoveryClient</a></li>
           <li><a href="plugin-registry.html">PluginRegistry</a></li>
           <li><a href="tool-executor.html">ToolExecutor</a></li>
@@ -123,6 +124,16 @@
           <p>
             The main entry point for the framework. Handles connection to AI providers,
             tool configuration, message sending, and conversation history management.
+          </p>
+
+          <h3><a href="ipc-client.html">IPCClient</a></h3>
+          <p>
+            The recommended Python entry path. Facade for talking to a running
+            jaato <strong>daemon</strong> over IPC — <code>IPCClient.session(...)</code>
+            yields a <code>Session</code> whose <code>ask</code> /
+            <code>complete</code> / <code>stream</code> methods own the
+            send-and-wait recipe. The module-level <code>ask()</code> is a
+            one-shot helper.
           </p>
 
           <h3><a href="ipc-recovery-client.html">IPCRecoveryClient</a></h3>
@@ -236,6 +247,11 @@ from jaato import (
     PresentationContext,
     ClientType,
 )
+
+# Daemon facade (from jaato_sdk package) — the
+# recommended Python entry path. Talks to a running
+# jaato daemon over IPC.
+from jaato_sdk import IPCClient, ask
 
 # Internal API (from shared package)
 from shared import (
