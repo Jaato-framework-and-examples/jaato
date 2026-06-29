@@ -186,15 +186,25 @@
         <div class="panel-explanation">
           <h2 id="quick-start">Quick Start</h2>
           <p>
-            Replace <code>IPCClient</code> with <code>IPCRecoveryClient</code> to get
-            automatic reconnection. The API is the same—you just get resilience for free.
+            Swap <code>IPCClient</code> for <code>IPCRecoveryClient</code> to get
+            automatic reconnection — the same
+            <a href="../api-reference/ipc-client.html"><code>.session(...)</code> +
+            <code>ask</code>/<code>complete</code>/<code>stream</code></a> facade,
+            now resilient across daemon restarts. Pass
+            <code>on_status_change</code> to observe the connection state.
           </p>
 
           <h3>Key Differences from IPCClient</h3>
           <ul>
-            <li><code>events()</code> automatically resumes after reconnection</li>
-            <li>Operations raise <code>ReconnectingError</code> during recovery instead of crashing</li>
-            <li>Session reattachment happens automatically after reconnect</li>
+            <li>Reconnection and session reattachment happen automatically after a
+              drop</li>
+            <li>Operations raise <code>ReconnectingError</code> during recovery
+              instead of crashing</li>
+            <li>The facade dispatches events for you — no manual
+              <code>events()</code> loop is needed for
+              <code>ask</code>/<code>complete</code>/<code>stream</code> (drop to
+              the low-level <code>events()</code> API, shown further down, only for
+              custom event handling)</li>
           </ul>
 
           <div class="callout callout-info">
@@ -205,40 +215,35 @@
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Minimal recovery client</div>
+          <div class="code-label">Minimal recovery client (facade)</div>
           <div class="code-block">
             <pre><code class="language-python">import asyncio
-from jaato_sdk.client import IPCRecoveryClient
-from jaato_sdk.events import ClientType
+from jaato_sdk import IPCRecoveryClient
 
 async def main():
-    client = IPCRecoveryClient(
-        socket_path="/tmp/jaato.sock",
-        client_type=ClientType.TERMINAL,   # required
-        on_status_change=on_status,
-    )
-
-    await client.connect()
-
-    # Create a session and track it for recovery
-    # Optionally pass profile= to use an agent profile
-    session_id = await client.create_session(
-        "my-session", profile="researcher-claude"
-    )
-    client.set_session_id(session_id)
-
-    # Use normally — recovery is automatic
-    await client.send_message("Hello!")
-
-    async for event in client.events():
-        print(event)
-
-    await client.close()
-
-def on_status(status):
-    print(f"Connection: {status.state.value}")
+    # Same facade as IPCClient.session, on the auto-reconnect client.
+    # Connect, session creation, and reattachment are handled for you;
+    # ask() survives a daemon restart. Credentials resolve from the
+    # profile (e.g. a pass:// knob), never an env var.
+    async with IPCRecoveryClient.session(
+        profile={"model": "...", "provider": "...", "plugins": []},
+        on_status_change=lambda st: print(st.state),  # RECONNECTING / CONNECTED
+    ) as s:
+        print(await s.ask("Long task..."))
 
 asyncio.run(main())</code></pre>
+          </div>
+
+          <div class="callout callout-info" style="margin-top: 16px;">
+            <div class="callout-title">Need the raw event stream?</div>
+            The facade covers the common case. For custom event handling you can
+            still use the low-level client directly
+            (<code>connect()</code> / <code>create_session()</code> /
+            <code>async for event in client.events()</code>); those methods are
+            documented in the sections below and on the
+            <a href="../api-reference/ipc-recovery-client.html">IPCRecoveryClient
+            API</a> page. With the facade, iterating <code>events()</code> yourself
+            is optional.
           </div>
         </div>
       </section>
