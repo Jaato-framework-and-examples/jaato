@@ -616,3 +616,105 @@ class TestSuppressBaseInstructions:
         )
         spec = _resolve_named_profile("lean", str(tmp_path))
         assert spec["suppress_base_instructions"] is True
+
+
+class TestStream:
+    """PR4: the facade's stream() rides UNCHANGED on InProcessClient — it
+    subscribes AGENT_OUTPUT + the terminal and drives send_message, exactly the
+    contract ask() uses. Yields each model chunk; stops at TURN_COMPLETED."""
+
+    class _Streaming(_FakeEmbedded):
+        def send_message(self, prompt, on_output=None, **_kwargs):
+            for c in ("The ", "quick ", "brown ", "fox"):
+                if on_output is not None:
+                    on_output("model", c, "append")
+            return "The quick brown fox"
+
+    def test_stream_yields_chunks_in_order(self):
+        async def _run():
+            chunks = []
+            async with InProcessClient.session(
+                model="m", embedded_factory=lambda p: self._Streaming(),
+            ) as s:
+                async for chunk in s.stream("go"):
+                    chunks.append(chunk)
+            assert chunks == ["The ", "quick ", "brown ", "fox"]
+            assert "".join(chunks) == "The quick brown fox"
+
+        asyncio.run(_run())
+
+    def test_stream_filters_non_model_source(self):
+        class _Mixed(_FakeEmbedded):
+            def send_message(self, prompt, on_output=None, **_kwargs):
+                if on_output is not None:
+                    on_output("system", "[setup]", "append")  # filtered out
+                    on_output("model", "answer", "append")
+                return "answer"
+
+        async def _run():
+            chunks = []
+            async with InProcessClient.session(
+                model="m", embedded_factory=lambda p: _Mixed(),
+            ) as s:
+                async for chunk in s.stream("go"):
+                    chunks.append(chunk)
+            assert chunks == ["answer"]  # the system chunk is excluded
+
+        asyncio.run(_run())
+
+    def test_stream_empty_turn_terminates(self):
+        """A turn with no output still terminates on TURN_COMPLETED — the
+        iterator ends rather than hanging."""
+
+        class _Silent(_FakeEmbedded):
+            def send_message(self, prompt, on_output=None, **_kwargs):
+                return ""  # no chunks
+
+        async def _run():
+            chunks = []
+            async with InProcessClient.session(
+                model="m", embedded_factory=lambda p: _Silent(),
+            ) as s:
+                async for chunk in s.stream("go"):
+                    chunks.append(chunk)
+            assert chunks == []
+
+        asyncio.run(_run())
+
+
+class TestMultiTurnContinuity:
+    """PR4: multiple turns ride on ONE embedded session (conversation memory
+    lives in the embedded JaatoSession; here we prove the facade keeps driving
+    the same session across asks rather than re-creating one)."""
+
+    def test_two_asks_drive_the_same_session(self):
+        class _Counting(_FakeEmbedded):
+            def __init__(self):
+                super().__init__()
+                self.sends = 0
+
+            def send_message(self, prompt, on_output=None, **_kwargs):
+                self.sends += 1
+                if on_output is not None:
+                    on_output("model", f"turn{self.sends}", "write")
+                return f"turn{self.sends}"
+
+        async def _run():
+            holder = {}
+
+            def _make(provider):
+                c = _Counting()
+                holder["c"] = c
+                return c
+
+            async with InProcessClient.session(
+                model="m", embedded_factory=_make,
+            ) as s:
+                a1 = await s.ask("first")
+                a2 = await s.ask("second")
+            assert a1 == "turn1"
+            assert a2 == "turn2"
+            # Both turns went to the SAME embedded session (not a fresh one).
+            assert holder["c"].sends == 2
+
+        asyncio.run(_run())
