@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.client.convenience import Session
@@ -143,6 +144,7 @@ class InProcessClient:
         model: Optional[str] = None,
         provider: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Any]] = None,
+        env_file: Optional[str] = ".env",
         project: Optional[str] = None,
         location: Optional[str] = None,
         embedded_factory: Optional[Callable[[Optional[str]], Any]] = None,
@@ -152,6 +154,12 @@ class InProcessClient:
         self._provider = provider
         self._plugin_configs = plugin_configs
         self._resolved_plugin_configs: Dict[str, Any] = {}
+        # ``env_file`` is a BOTH-modes kwarg (unlike ``socket_path``, which is
+        # IPC-only): the embedded runtime reads the same env the daemon loads
+        # from ``.env`` (``JAATO_PROVIDER`` / ``MODEL_NAME`` / provider creds),
+        # so the in-process path loads it too. Defaults to ``.env`` for parity
+        # with ``IPCClient``; loaded in :meth:`connect` if the file exists.
+        self._env_file = env_file
         self._project = project
         self._location = location
         # Test seam: inject a fake embedded client factory ``(provider) ->
@@ -176,6 +184,16 @@ class InProcessClient:
     # ---- facade contract: lifecycle ----
     async def connect(self, timeout: Optional[float] = None) -> bool:
         self._loop = asyncio.get_running_loop()
+        # Load the session ``.env`` into the process env before the embedded
+        # runtime reads it — the embedded analog of the daemon loading
+        # ``env_file`` via dotenv. Graceful when the file is absent; does not
+        # override env vars already set in the process.
+        if self._env_file:
+            env_path = Path(self._env_file).expanduser()
+            if env_path.is_file():
+                from dotenv import load_dotenv
+
+                load_dotenv(str(env_path), override=False)
         # Resolve credential secret URIs before the provider is built — the
         # embedded analog of the daemon's upstream profile/spec resolution.
         self._resolved_plugin_configs = _resolve_plugin_config_secrets(
@@ -343,10 +361,11 @@ def session(mode: str = "ipc", **kwargs: Any) -> Any:
                                  plugin_configs={...}) as s:
             print(await s.ask("Hi"))
 
-    Connection knobs that apply to only one transport (``socket_path`` /
-    ``env_file`` for IPC) are optional and ignored by the other client — that's
-    per-mode connection config, not a code clone. See
-    ``docs/design/in-process-facade.md``.
+    ``env_file`` (the session ``.env``) applies to BOTH modes — the embedded
+    runtime reads the same env the daemon loads from it. Knobs that apply to
+    only one transport (``socket_path`` / ``auto_start`` for IPC) are optional
+    and ignored by the other client — per-mode connection config, not a code
+    clone. See ``docs/design/in-process-facade.md``.
     """
     spec_kwargs = _bundle_inline_profile(kwargs)
     if mode == "in_process":
