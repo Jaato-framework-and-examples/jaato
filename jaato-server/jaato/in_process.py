@@ -19,16 +19,19 @@ the daemon does for an IPC session, since there is no daemon in-process:
   loaded permission plugin (``_in_process_permission``).
 * ``AGENT_COMPLETED`` (the typed completion payload) <- the ``set_ui_hooks``
   ``on_agent_completed`` bridge.
-* tool executors, profiles, plugin policy <- ``create_session`` builds a real
-  registry (discover -> expose_all -> configure_tools) + resolves the profile.
+* tool executors, profiles, plugin policy, agent personas <- ``connect`` builds
+  the full runner-tier registry ONCE (plugin parity with a daemon session — see
+  ``_build_registry``), reused by every ``create_session``; the profile / agent
+  persona is resolved per session and ``create_session(plugins=...)`` gates the
+  model's tool view.
 
-Remaining: the no-profile ``get_system_instructions`` baseline (ex01 free-text
-exactness) + agent-persona (``.jaato/agents``) resolution; ``stream`` polish.
+Remaining: ``stream`` polish.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import uuid
 from pathlib import Path
@@ -263,6 +266,7 @@ class InProcessClient:
         project: Optional[str] = None,
         location: Optional[str] = None,
         embedded_factory: Optional[Callable[[Optional[str]], Any]] = None,
+        registry_factory: Optional[Callable[[], Any]] = None,
         **_ignored: Any,
     ) -> None:
         self._model = model
@@ -273,9 +277,20 @@ class InProcessClient:
         # non-empty, create_session builds a real registry (discover -> set
         # context -> expose_all -> configure_tools), replicating the daemon's
         # session-setup so tool EXECUTORS are wired in-process (the ex06 seam).
+        # The MODEL's tool-visibility gate (what create_session exposes to the
+        # model). NOT the set of plugins INITIALIZED — for plugin parity the
+        # registry always initializes the full runner-tier set (see
+        # _build_registry); this list only gates which tools the model sees,
+        # exactly like the daemon's create_session(plugins=...). [] (default) ->
+        # the daemon's minimal model surface; a list -> those.
         self._plugins = list(plugins) if plugins else []
-        self._workspace_path = workspace_path
-        self._config_root = config_root
+        # Default the workspace to the embedding process's cwd, and config_root
+        # to ``<workspace>/.jaato`` — the in-process analog of a daemon session's
+        # workspace (client working_dir) + ``.jaato`` config root. Needed so the
+        # full runner-tier plugin set initializes (plugin parity): config-rooted
+        # plugins like file_edit fail to init without a config_root.
+        self._workspace_path = workspace_path or os.getcwd()
+        self._config_root = config_root or str(Path(self._workspace_path) / ".jaato")
         # Profile-derived (or directly-supplied) session instructions + the
         # typed-completion gate schema — forwarded to create_session so the
         # embedded session matches the daemon's (ex03 persona, ex04 byte-exact).
@@ -299,7 +314,15 @@ class InProcessClient:
         # Test seam: inject a fake embedded client factory ``(provider) ->
         # client``. Production uses the real ``jaato.JaatoClient``.
         self._embedded_factory = embedded_factory or _default_embedded_factory
+        # Test seam: inject the connect-time registry builder. None ->
+        # _build_registry for the real embedded runtime, empty registry for an
+        # injected (test) embedded factory.
+        self._registry_factory = registry_factory
         self._embedded: Any = None
+        # The session registry — built ONCE at connect (runtime boundary), reused
+        # by every create_session. The in-process analog of the daemon's pre-warm
+        # template: init the runner-tier plugins once, share across sessions.
+        self._registry: Any = None
         self._emitter = InProcessEventEmitter()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._session_id: Optional[str] = None
@@ -352,12 +375,36 @@ class InProcessClient:
             raise RuntimeError(
                 f"Authentication not configured for provider {self._provider!r}"
             )
+        # Build the registry ONCE here, at the runtime boundary — the in-process
+        # analog of the daemon's pre-warm template initializing the runner-tier
+        # plugins a single time and sharing them across every session via fork.
+        # create_session reuses this; that amortizes the plugin init to a
+        # one-time connect cost (not per-session) and gives async-lifecycle
+        # plugins (mcp, webhook) a single stable init point instead of
+        # per-session build/teardown churn.
+        #
+        # Only the REAL embedded runtime gets the full runner-tier build; an
+        # injected embedded factory (test seam) gets an empty registry, which the
+        # fake's configure_tools ignores — keeps facade tests fast + hermetic
+        # (no 31-plugin init / no workspace-config reads). The real registry
+        # build is covered directly by the _build_registry tests.
+        if self._registry_factory is not None:
+            self._registry = await asyncio.to_thread(self._registry_factory)
+        elif self._embedded_factory is _default_embedded_factory:
+            self._registry = await asyncio.to_thread(self._build_registry)
+        else:
+            from shared import PluginRegistry
+
+            self._registry = PluginRegistry(model_name=self._model)
         return True
 
     async def create_session(self, **_kwargs: Any) -> str:
         if not self._session_id:
             self._session_id = f"in-process-{uuid.uuid4().hex[:12]}"
-        registry = await asyncio.to_thread(self._build_registry)
+        # Reuse the connect-built registry (shared, daemon-template style); stamp
+        # this session's id for plugins that key per-session state on it.
+        registry = self._registry
+        registry.set_session_id(self._session_id)
         permission_plugin = self._wire_permission_channel(registry)
         session_kwargs: Dict[str, Any] = {
             "plugin_configs": self._resolved_plugin_configs,
@@ -424,36 +471,39 @@ class InProcessClient:
         return permission_plugin
 
     def _build_registry(self) -> Any:
-        """Replicate the daemon's per-session registry setup in-process.
+        """Replicate the daemon's per-session registry setup in-process — for
+        PLUGIN PARITY: the SAME runner-tier plugins are initialized as a daemon
+        session, regardless of which tools the model ends up seeing.
 
-        Mirrors ``server/runner/session.py``: discover -> set workspace /
-        config_root / session context -> ``expose_all`` the requested plugins
-        (which runs each plugin's ``initialize`` + the auto-wiring), so the
-        session's ``get_executors`` then wires their tool EXECUTORS — closing
-        the ex06 seam (empty-registry path left tools un-executable).
-
-        No ``plugins`` -> an empty registry (the ex01-ex04 model-only path).
+        Mirrors ``server/runner/session.py`` exactly:
+        ``discover(tier_filter="runner")`` -> set workspace / config_root /
+        session context -> ``expose_all(plugin_configs)`` with **no**
+        ``requested_plugins`` filter, so EVERY runner-tier plugin's
+        ``initialize`` (+ auto-wiring, enrichment/lifecycle hooks) runs — not
+        just the model-visible subset. Model tool-VISIBILITY is gated separately
+        at ``create_session(plugins=...)`` (the ``session_kwargs['plugins']``
+        list), identical to the daemon. This makes the initialized plugin set —
+        and thus enrichment/lifecycle behavior — byte-for-byte the same in both
+        transports; gating only at expose_all (the old behavior) skipped
+        non-requested plugins' init, diverging on enrichment side-effects.
         """
         from shared import PluginRegistry
 
         registry = PluginRegistry(model_name=self._model)
-        if not self._plugins:
-            return registry
-        # All tiers: in-process is one process, no runner/daemon split.
-        registry.discover()
+        # tier_filter="runner": match the daemon SESSION's plugin tier (the
+        # daemon-tier plugins — provider, GC, formatters — are runtime-level, not
+        # session tools; the embedded JaatoClient wires the provider via connect).
+        registry.discover(tier_filter="runner")
         if self._workspace_path:
             registry.set_workspace_path(self._workspace_path)
         if self._config_root:
             registry.set_config_root(self._config_root)
-        if self._session_id:
-            registry.set_session_id(self._session_id)
-        # Initialize only the requested plugins (the daemon expose_all's ALL
-        # discovered then gates tool exposure at create_session; in-process we
-        # keep it light by initializing just the spec's plugins).
-        registry.expose_all(
-            self._resolved_plugin_configs or None,
-            requested_plugins=self._plugins,
-        )
+        # NOTE: set_session_id is NOT done here — the registry is runtime-level
+        # (built once at connect, session-agnostic, like the daemon's template);
+        # the per-session id is stamped in create_session before each session use.
+        # NO requested_plugins -> initialize the FULL runner-tier set (plugin
+        # parity). Model tool-visibility is gated at create_session, not here.
+        registry.expose_all(self._resolved_plugin_configs or None)
         if self._workspace_path:
             # Post-init refresh fires set_workspace_path hooks on plugins that
             # rebuild derived state (mirrors session.py step 6-7).
