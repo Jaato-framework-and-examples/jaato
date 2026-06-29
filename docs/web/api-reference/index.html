@@ -144,6 +144,29 @@
             client applications.
           </p>
 
+          <h3><a href="ipc-client.html">WSClient</a></h3>
+          <p>
+            The <strong>remote</strong>-daemon transport — <code>IPCClient</code>
+            with the transport swapped from a Unix socket to a WebSocket
+            (<code>ws://</code> / <code>wss://</code>), bearer-authenticated. It
+            subclasses <code>IPCClient</code>, so the same facade-client API and
+            the <code>Session</code> methods apply; construct via
+            <code>jaato.session(mode="ws", url=…, token=…)</code> or
+            <code>WSClient.session(…)</code>. Needs the <code>jaato-sdk[ws]</code>
+            extra (<code>pip install 'jaato-sdk[ws]'</code>).
+          </p>
+
+          <h3><a href="jaato-client.html">InProcessClient</a></h3>
+          <p>
+            The <strong>embedded</strong> transport — runs the agent in your own
+            process with <strong>no daemon</strong>, exposing the same
+            <code>Session</code> facade (<code>ask</code> / <code>complete</code> /
+            <code>stream</code>) as the daemon clients. Construct via
+            <code>jaato.session(mode="in_process", profile={…})</code>. It is the
+            in-process analog of an IPC session, replicating the daemon's session
+            setup (tools, profiles, agent personas, plugin parity) locally.
+          </p>
+
           <h3><a href="plugin-registry.html">PluginRegistry</a></h3>
           <p>
             Discovers and manages plugins. Controls which tools are exposed to the model
