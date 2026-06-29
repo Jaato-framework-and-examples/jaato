@@ -41,7 +41,8 @@ class TestMCPPluginFunctionDeclarations:
     """Tests for function declarations."""
 
     def test_get_tool_schemas_empty(self):
-        """Without MCP servers, should return empty list."""
+        """Without a .mcp.json, no MCP tools at all (incl. mcp_reload) — the
+        model stays unaware of MCP until the config is authored."""
         plugin = MCPToolPlugin()
         # Don't initialize - just check the cache-based behavior
         plugin._initialized = True  # Skip actual initialization
@@ -50,7 +51,7 @@ class TestMCPPluginFunctionDeclarations:
         assert schemas == []
 
     def test_get_executors_empty(self):
-        """Without MCP servers, should only return the mcp user command executor."""
+        """Without a .mcp.json, should only return the mcp user command executor."""
         plugin = MCPToolPlugin()
         plugin._initialized = True  # Skip actual initialization
         executors = plugin.get_executors()
@@ -764,3 +765,68 @@ class TestMCPPluginLogging:
         assert 'clear' in values
         assert 'Server1' in values
         assert 'Server2' in values
+
+
+class TestMCPReloadTool:
+    """The model-callable ``mcp_reload`` management tool, gated on a
+    workspace/custom ``.mcp.json`` existing (the model stays unaware of MCP
+    until the config is authored on the user's request)."""
+
+    def test_reload_absent_without_config(self, tmp_path):
+        plugin = MCPToolPlugin()
+        plugin._workspace_path = str(tmp_path)  # no .mcp.json in here
+        plugin._initialized = True
+        names = [s.name for s in plugin.get_tool_schemas()]
+        assert "mcp_reload" not in names
+        assert "mcp_reload" not in plugin.get_executors()
+        # No config + no tools -> no system instructions (model unaware of MCP).
+        assert plugin.get_system_instructions() is None
+
+    def test_reload_present_with_config(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}')
+        plugin = MCPToolPlugin()
+        plugin._workspace_path = str(tmp_path)
+        plugin._initialized = True
+
+        names = [s.name for s in plugin.get_tool_schemas()]
+        assert "mcp_reload" in names
+        assert "mcp_reload" in plugin.get_executors()
+        # Management path advertised once the config exists.
+        instr = plugin.get_system_instructions()
+        assert instr is not None
+        assert "mcp_reload" in instr
+        assert ".mcp.json" in instr
+
+    def test_reload_takes_no_params(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}')
+        plugin = MCPToolPlugin()
+        plugin._workspace_path = str(tmp_path)
+        plugin._initialized = True
+        schema = next(s for s in plugin.get_tool_schemas() if s.name == "mcp_reload")
+        assert schema.parameters.get("properties") == {}
+
+    def test_reload_not_auto_approved(self, tmp_path):
+        """mcp_reload is a MODEL tool — permission-gated, NOT auto-approved
+        (it spawns server subprocesses + connects out)."""
+        (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}')
+        plugin = MCPToolPlugin()
+        plugin._workspace_path = str(tmp_path)
+        plugin._initialized = True
+        assert "mcp_reload" not in plugin.get_auto_approved_tools()
+
+    def test_reload_executor_calls_cmd_reload(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text('{"mcpServers": {}}')
+        plugin = MCPToolPlugin()
+        plugin._workspace_path = str(tmp_path)
+        plugin._initialized = True
+        plugin._cmd_reload = lambda: "Reloaded configuration: 0 servers connected, 0 tools available."
+        result = plugin.get_executors()["mcp_reload"]({})
+        assert "Reloaded" in result
+
+    def test_custom_config_path_also_gates(self, tmp_path):
+        cfg = tmp_path / "custom-mcp.json"
+        cfg.write_text('{"mcpServers": {}}')
+        plugin = MCPToolPlugin()
+        plugin._custom_config_path = str(cfg)
+        plugin._initialized = True
+        assert "mcp_reload" in [s.name for s in plugin.get_tool_schemas()]

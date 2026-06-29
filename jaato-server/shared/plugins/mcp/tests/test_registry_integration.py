@@ -132,10 +132,12 @@ class TestRegistryMCPAutoApproval:
 
         auto_approved = registry.get_auto_approved_tools()
 
-        # MCP tools require permission - should NOT be auto-approved
-        # The plugin returns empty list for get_auto_approved_tools()
+        # MCP MODEL tools (discovered tools + mcp_reload) require permission and
+        # are NOT auto-approved.  The 'mcp' USER command IS auto-approved (it's
+        # user-invoked).  With no .mcp.json here, only the user command is
+        # present, so the auto-approved set is exactly ['mcp'].
         plugin = registry.get_plugin("mcp")
-        assert plugin.get_auto_approved_tools() == []
+        assert plugin.get_auto_approved_tools() == ['mcp']
 
         registry.unexpose_tool("mcp")
 
@@ -160,15 +162,16 @@ class TestRegistryMCPSystemInstructions:
 class TestRegistryMCPUserCommands:
     """Tests for MCP user commands via registry."""
 
-    def test_no_user_commands(self):
-        """Test that MCP plugin provides no user commands."""
+    def test_provides_mcp_user_command(self):
+        """The MCP plugin provides the 'mcp' management user command."""
         registry = PluginRegistry()
         registry.discover()
 
         registry.expose_tool("mcp")
 
         plugin = registry.get_plugin("mcp")
-        assert plugin.get_user_commands() == []
+        commands = plugin.get_user_commands()
+        assert [c.name for c in commands] == ['mcp']
 
         registry.unexpose_tool("mcp")
 
