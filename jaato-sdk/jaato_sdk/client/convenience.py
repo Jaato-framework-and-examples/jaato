@@ -82,6 +82,7 @@ class Session:
         self.session_id = session_id
         self._on_permission = on_permission
         self._unhandled_perm: Optional[str] = None
+        self._perm_callback_error: Optional[Exception] = None
         # Wire permissions once for the session's lifetime — fail loud, never
         # hang (the second hang trap after #399).
         client.subscribe(
@@ -111,18 +112,33 @@ class Session:
 
     async def _on_perm(self, ev: Any) -> None:
         request_id = getattr(ev, "request_id", "")
+        resp: Any = "n"
         if self._on_permission is not None:
-            resp = self._on_permission(ev)
-            if asyncio.iscoroutine(resp):
-                resp = await resp
-            await self._client.respond_to_permission(request_id, resp or "n")
+            try:
+                resp = self._on_permission(ev)
+                if asyncio.iscoroutine(resp):
+                    resp = await resp
+            except Exception as exc:  # never let a user callback hang the turn
+                # A raising on_permission must NOT deadlock the turn — the
+                # in-process channel blocks a worker thread on the response with
+                # no transport timeout, so a response is mandatory. Deny to
+                # unstick, and surface the callback's error on the in-flight
+                # ask()/complete() instead of hanging.
+                self._perm_callback_error = exc
+                resp = "n"
         else:
-            # No policy to apply — deny to unstick the daemon, flag so the
-            # in-flight ask()/complete() raises PermissionUnhandled.
+            # No policy to apply — deny to unstick, flag so the in-flight
+            # ask()/complete() raises PermissionUnhandled.
             self._unhandled_perm = getattr(ev, "tool_name", "?")
-            await self._client.respond_to_permission(request_id, "n")
+        # ALWAYS respond — guaranteed even on a raising callback (the unconditional
+        # await below is the no-deadlock invariant).
+        await self._client.respond_to_permission(request_id, resp or "n")
 
     def _raise_if_needed(self, box: Dict[str, Any]) -> None:
+        if self._perm_callback_error is not None:
+            exc = self._perm_callback_error
+            self._perm_callback_error = None
+            raise exc
         if self._unhandled_perm is not None:
             tool = self._unhandled_perm
             self._unhandled_perm = None
