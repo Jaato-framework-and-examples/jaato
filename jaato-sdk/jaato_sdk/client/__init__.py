@@ -1,11 +1,13 @@
 """Jaato SDK client implementations."""
 
 from jaato_sdk.client.ipc import IPCClient, IncompatibleServerError
+from jaato_sdk.client.ws import WSClient
 from jaato_sdk.client.recovery import IPCRecoveryClient, ConnectionState
 from jaato_sdk.client.config import RecoveryConfig, load_client_config, get_recovery_config
 
 __all__ = [
     "IPCClient",
+    "WSClient",
     "IncompatibleServerError",
     "IPCRecoveryClient",
     "ConnectionState",

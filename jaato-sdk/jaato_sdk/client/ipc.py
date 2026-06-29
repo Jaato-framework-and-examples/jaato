@@ -716,6 +716,18 @@ class IPCClient:
                 else:
                     raise ConnectionError(f"Connection failed: {e}")
 
+        return await self._handshake()
+
+    async def _handshake(self) -> bool:
+        """Post-transport handshake — shared by the IPC and WebSocket transports.
+
+        Once the transport is open (Unix socket / Windows pipe / WebSocket),
+        the wire protocol is identical: read the server's unprompted
+        ``ConnectedEvent``, gate on protocol compatibility, send the workspace
+        + client config, and start the single drain reader. Subclasses that
+        swap the transport (see ``WSClient``) reuse this verbatim — only the
+        ``_read_message`` / ``_write_message`` / connection setup differ.
+        """
         # Wait for connected event
         try:
             message = await self._read_message()
@@ -759,7 +771,7 @@ class IPCClient:
                     # subscribe queues to the drain loop's fan-out.
                     self._drain_task = asyncio.create_task(
                         self._drain_loop(),
-                        name=f"ipc-drain-{id(self)}",
+                        name=f"jaato-drain-{id(self)}",
                     )
                     return True
         except IncompatibleServerError:

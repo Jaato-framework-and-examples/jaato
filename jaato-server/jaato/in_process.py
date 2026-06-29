@@ -652,22 +652,35 @@ def _bundle_inline_profile(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 def session(mode: str = "ipc", **kwargs: Any) -> Any:
     """Transport-agnostic session entry — the facade picks the client by ``mode``.
 
-    ``mode="in_process"`` runs the embedded :class:`InProcessClient` (no
-    daemon); ``mode="ipc"`` talks to a running daemon via ``IPCClient``. Both
-    accept the same session spec — pass ``model`` / ``provider`` / ``plugins`` /
-    ``plugin_configs`` as separate kwargs (bundled into the inline-spec
-    ``profile``) or a ``profile`` dict directly — so one example runs both ways
-    with ``mode`` the only variable::
+    Three transports, one spec, one facade (``s.ask`` / ``.complete`` /
+    ``.stream``):
+
+    * ``mode="in_process"`` — the embedded :class:`InProcessClient` (no daemon,
+      no socket; the agent runs in your process).
+    * ``mode="ipc"`` — a *local* daemon over a Unix socket via ``IPCClient``.
+    * ``mode="ws"`` — a *remote* daemon over ``ws://`` / ``wss://`` via
+      ``WSClient`` (pass ``url=`` and optional ``token=``).
+
+    All accept the same session spec — pass ``model`` / ``provider`` /
+    ``plugins`` / ``plugin_configs`` as separate kwargs (bundled into the
+    inline-spec ``profile``) or a ``profile`` dict directly — so one example
+    runs every way with ``mode`` the only variable::
 
         async with jaato.session(mode=m, model=..., provider=..., plugins=[],
                                  plugin_configs={...}) as s:
             print(await s.ask("Hi"))
 
-    ``env_file`` (the session ``.env``) applies to BOTH modes — the embedded
-    runtime reads the same env the daemon loads from it. Knobs that apply to
-    only one transport (``socket_path`` / ``auto_start`` for IPC) are optional
-    and ignored by the other client — per-mode connection config, not a code
-    clone. See ``docs/design/in-process-facade.md``.
+        # remote daemon:
+        async with jaato.session(mode="ws", url="wss://host:8080", token="...",
+                                 profile={...}) as s:
+            print(await s.ask("Hi"))
+
+    ``env_file`` (the session ``.env``) applies to the embedded mode — the
+    embedded runtime reads the same env the daemon loads from it. Knobs that
+    apply to only one transport (``socket_path`` / ``auto_start`` for IPC;
+    ``url`` / ``token`` for WS) are optional and ignored by the others — per-mode
+    connection config, not a code clone. See
+    ``docs/design/in-process-facade.md``.
     """
     spec_kwargs = _bundle_inline_profile(kwargs)
     if mode == "in_process":
@@ -675,6 +688,12 @@ def session(mode: str = "ipc", **kwargs: Any) -> Any:
     if mode == "ipc":
         from jaato_sdk import IPCClient
         return IPCClient.session(**spec_kwargs)
+    if mode == "ws":
+        from jaato_sdk import WSClient
+        url = spec_kwargs.pop("url", None)
+        if not url:
+            raise ValueError("session(mode='ws') requires a url= (ws:// or wss://)")
+        return WSClient.session(url, **spec_kwargs)
     raise ValueError(
-        f"unknown session mode {mode!r}; expected 'ipc' or 'in_process'"
+        f"unknown session mode {mode!r}; expected 'ipc', 'in_process', or 'ws'"
     )
