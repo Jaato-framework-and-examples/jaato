@@ -465,3 +465,41 @@ class TestProfiles:
             assert "ghost" in str(e)
         else:  # pragma: no cover
             raise AssertionError("expected ValueError for missing profile")
+
+
+class TestAgentCompleted:
+    """The AGENT_COMPLETED bridge: the embedded runtime's on_agent_completed
+    (the completion-gate payload) is emitted onto the facade emitter so
+    s.complete() captures it (ex04 byte-exact). The missing half of PR3."""
+
+    def test_complete_captures_agent_completed_payload(self):
+        class _CompletingEmbedded(_FakeEmbedded):
+            def __init__(self):
+                super().__init__()
+                self._ui_hooks = None
+
+            def set_ui_hooks(self, hooks):
+                self._ui_hooks = hooks
+
+            def send_message(self, prompt, on_output=None, **_kwargs):
+                # Completion-gated: no streamed text; signal the typed payload
+                # through the lifecycle hook (as the real runtime does).
+                if self._ui_hooks is not None:
+                    self._ui_hooks.on_agent_completed(
+                        agent_id="main", completed_at=None, success=True,
+                        payload={"name": "Alice", "age": 30},
+                    )
+                return ""
+
+        async def _run():
+            async with InProcessClient.session(
+                profile={
+                    "model": "m", "provider": "p", "plugins": [],
+                    "completion_payload_schema": {"type": "object"},
+                },
+                embedded_factory=lambda provider: _CompletingEmbedded(),
+            ) as s:
+                payload = await s.complete("Extract: Alice is 30")
+            assert payload == {"name": "Alice", "age": 30}
+
+        asyncio.run(_run())
