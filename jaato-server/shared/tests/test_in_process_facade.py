@@ -169,7 +169,8 @@ class TestRealPathWiring:
             }
             # configure_tools received the resolved plugin_configs in session_kwargs.
             assert fake.configure_tools_session_kwargs == {
-                "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}}
+                "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}},
+                "plugins": [],
             }
             # A plain key passes through resolve_secret_uri unchanged; pass://
             # resolution requires jaato-premium and is exercised by the example
@@ -247,7 +248,8 @@ class TestTransportAgnosticEntry:
             # provider + plugin_configs survived the bundle -> expand round-trip.
             assert holder["provider"] == "openrouter"
             assert holder["client"].configure_tools_session_kwargs == {
-                "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}}
+                "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}},
+                "plugins": [],
             }
 
         asyncio.run(_run())
@@ -317,3 +319,43 @@ class TestEnvFileBothModes:
                 return await s.ask("hi")
 
         assert asyncio.run(_run()) == "Hello world"
+
+
+class TestPluginLoading:
+    """create_session replicates the daemon's session-registry setup
+    (discover -> set context -> expose_all) so tool executors wire in-process
+    (the ex06 seam). Uses the lightweight in-memory ``todo`` plugin; the real
+    tool-execution fidelity (cli executes, matches the daemon) is the dual-mode
+    example suite's job."""
+
+    _TODO_CFG = {"todo": {"reporter_type": "memory", "storage_type": "memory"}}
+
+    def test_no_plugins_builds_empty_registry(self):
+        client = InProcessClient(model="m")
+        registry = client._build_registry()
+        assert registry.list_exposed() == []
+
+    def test_requested_plugin_is_discovered_and_exposed(self):
+        client = InProcessClient(model="m", plugins=["todo"])
+        client._resolved_plugin_configs = self._TODO_CFG
+        registry = client._build_registry()
+        exposed = registry.list_exposed()
+        assert "todo" in exposed                       # the requested plugin
+        assert registry.get_plugin("todo") is not None  # initialized + reachable
+
+    def test_permission_channel_wired_onto_loaded_plugin(self):
+        import asyncio as _asyncio
+
+        from jaato._in_process_permission import InProcessChannel
+
+        client = InProcessClient(model="m", plugins=["todo"])
+        client._resolved_plugin_configs = self._TODO_CFG
+        client._loop = _asyncio.new_event_loop()
+        try:
+            registry = client._build_registry()
+            client._wire_permission_channel(registry)
+            perm = registry.get_plugin("permission")  # auto-loaded core plugin
+            assert perm is not None
+            assert isinstance(perm._channel, InProcessChannel)
+        finally:
+            client._loop.close()

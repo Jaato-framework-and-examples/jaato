@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -34,7 +35,7 @@ from jaato_sdk.client.convenience import Session
 from jaato_sdk.events import AgentOutputEvent, TurnCompletedEvent
 from shared.config_resolver import resolve_secret_uri
 
-from jaato._in_process_permission import PendingPermissions
+from jaato._in_process_permission import InProcessChannel, PendingPermissions
 
 
 def _default_embedded_factory(provider: Optional[str]) -> Any:
@@ -146,6 +147,9 @@ class InProcessClient:
         model: Optional[str] = None,
         provider: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Any]] = None,
+        plugins: Optional[List[str]] = None,
+        workspace_path: Optional[str] = None,
+        config_root: Optional[str] = None,
         env_file: Optional[str] = ".env",
         project: Optional[str] = None,
         location: Optional[str] = None,
@@ -156,6 +160,13 @@ class InProcessClient:
         self._provider = provider
         self._plugin_configs = plugin_configs
         self._resolved_plugin_configs: Dict[str, Any] = {}
+        # The session's tool plugins (the spec's ``plugins`` list). When
+        # non-empty, create_session builds a real registry (discover -> set
+        # context -> expose_all -> configure_tools), replicating the daemon's
+        # session-setup so tool EXECUTORS are wired in-process (the ex06 seam).
+        self._plugins = list(plugins) if plugins else []
+        self._workspace_path = workspace_path
+        self._config_root = config_root
         # ``env_file`` is a BOTH-modes kwarg (unlike ``socket_path``, which is
         # IPC-only): the embedded runtime reads the same env the daemon loads
         # from ``.env`` (``JAATO_PROVIDER`` / ``MODEL_NAME`` / provider creds),
@@ -223,21 +234,76 @@ class InProcessClient:
         return True
 
     async def create_session(self, **_kwargs: Any) -> str:
-        # PR1.5: ex01 has no tools/profile — an empty registry is enough. The
-        # profile-load chain (discover_profiles -> resolved spec ->
-        # configure_tools with the spec) lands in the profile slice (PR3).
-        from shared import PluginRegistry
-
-        registry = PluginRegistry()
+        if not self._session_id:
+            self._session_id = f"in-process-{uuid.uuid4().hex[:12]}"
+        registry = await asyncio.to_thread(self._build_registry)
+        self._wire_permission_channel(registry)
         await asyncio.to_thread(
             self._embedded.configure_tools,
             registry,
-            None,  # permission_plugin — the InProcessChannel lands in PR2
+            None,  # permission_plugin (the loaded plugin in the registry gates)
             None,  # ledger
-            {"plugin_configs": self._resolved_plugin_configs},
+            {
+                "plugin_configs": self._resolved_plugin_configs,
+                "plugins": self._plugins,
+            },
         )
-        self._session_id = "in-process"
         return self._session_id
+
+    def _wire_permission_channel(self, registry: Any) -> None:
+        """Register the InProcessChannel on the loaded permission plugin so a
+        gated tool's permission request routes to the facade (and back via
+        respond_to_permission). In-process there's no runner/thread-local
+        channel, so ``_get_channel`` falls to the plugin's default ``_channel``
+        slot — which we replace here. No-op when no permission plugin is loaded
+        (e.g. the model-only ex01-ex04 path)."""
+        permission_plugin = registry.get_plugin("permission")
+        if permission_plugin is None:
+            return
+        loop = self._loop
+        emitter = self._emitter
+
+        def emit_threadsafe(ev: Any) -> None:
+            loop.call_soon_threadsafe(emitter.emit, ev)
+
+        permission_plugin._channel = InProcessChannel(emit_threadsafe, self._pending)
+
+    def _build_registry(self) -> Any:
+        """Replicate the daemon's per-session registry setup in-process.
+
+        Mirrors ``server/runner/session.py``: discover -> set workspace /
+        config_root / session context -> ``expose_all`` the requested plugins
+        (which runs each plugin's ``initialize`` + the auto-wiring), so the
+        session's ``get_executors`` then wires their tool EXECUTORS — closing
+        the ex06 seam (empty-registry path left tools un-executable).
+
+        No ``plugins`` -> an empty registry (the ex01-ex04 model-only path).
+        """
+        from shared import PluginRegistry
+
+        registry = PluginRegistry(model_name=self._model)
+        if not self._plugins:
+            return registry
+        # All tiers: in-process is one process, no runner/daemon split.
+        registry.discover()
+        if self._workspace_path:
+            registry.set_workspace_path(self._workspace_path)
+        if self._config_root:
+            registry.set_config_root(self._config_root)
+        if self._session_id:
+            registry.set_session_id(self._session_id)
+        # Initialize only the requested plugins (the daemon expose_all's ALL
+        # discovered then gates tool exposure at create_session; in-process we
+        # keep it light by initializing just the spec's plugins).
+        registry.expose_all(
+            self._resolved_plugin_configs or None,
+            requested_plugins=self._plugins,
+        )
+        if self._workspace_path:
+            # Post-init refresh fires set_workspace_path hooks on plugins that
+            # rebuild derived state (mirrors session.py step 6-7).
+            registry.set_workspace_path(self._workspace_path)
+        return registry
 
     async def send_message(
         self,
@@ -317,7 +383,7 @@ class _InProcessSessionContext:
         # chain (PR3); ``plugins`` from the inline spec is likewise PR3.
         profile = self._kwargs.pop("profile", None)
         if isinstance(profile, dict):
-            for key in ("model", "provider", "plugin_configs"):
+            for key in ("model", "provider", "plugins", "plugin_configs"):
                 if profile.get(key) is not None and self._kwargs.get(key) is None:
                     self._kwargs[key] = profile[key]
         elif isinstance(profile, str):
