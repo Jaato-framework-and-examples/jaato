@@ -4409,6 +4409,24 @@ class SessionManager:
                 if profile.system_instructions:
                     logger.info("  Agent instructions override profile's system_instructions (deprecated)")
                 profile.system_instructions = agent_instructions
+            else:
+                # No explicit --profile: synthesize a minimal profile to CARRY
+                # the agent persona. runner_spawn reads system_instructions from
+                # ``profile.system_instructions``; with ``profile=None`` the
+                # resolved persona was extracted then DROPPED here, so an agent
+                # specified without a profile went bare. Every other field takes
+                # its default (plugins=[], model/provider=None, gc=None,
+                # spawn_payload_schema=None, suppress_base_instructions=False) —
+                # byte-identical to the ``profile=None`` path this replaces (same
+                # plugins=[]/model=None downstream, same False/None reads in the
+                # pre-spawn profile-gated branches). So it adds ONLY the persona,
+                # with zero plugin / model / provider / gating change.
+                from shared.plugins.subagent.config import SubagentProfile
+                profile = SubagentProfile(
+                    name=agent_name,
+                    description=agent_result.get("description", ""),
+                    system_instructions=agent_instructions,
+                )
 
         # ── Spawn-payload schema validation ──────────────────────────
         # Symmetric to the subagent plugin's check at the function-call
