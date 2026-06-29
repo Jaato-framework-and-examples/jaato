@@ -103,54 +103,29 @@
           <h2 id="requirements">Requirements</h2>
           <ul>
             <li>Python 3.10 or higher</li>
-            <li>Credentials for at least one AI provider (see table)</li>
+            <li>Credentials for at least one AI provider (see below)</li>
           </ul>
 
           <h2 id="auth-options">Choose a Provider</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Provider</th>
-                <th>Use Case</th>
-                <th>Setup</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><strong>Anthropic</strong></td>
-                <td>Complex reasoning, code generation</td>
-                <td><a href="../api-reference/providers/anthropic.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Google GenAI</strong></td>
-                <td>Long context, multimodal</td>
-                <td><a href="../api-reference/providers/google-genai.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>GitHub Models</strong></td>
-                <td>Multi-model access via single API</td>
-                <td><a href="../api-reference/providers/github-models.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Ollama</strong></td>
-                <td>Local models, privacy, no API costs</td>
-                <td><a href="../api-reference/providers/ollama.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Claude CLI</strong></td>
-                <td>Claude Pro/Max subscribers</td>
-                <td><a href="../api-reference/providers/claude-cli.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Zhipu AI</strong></td>
-                <td>GLM models, chain-of-thought reasoning</td>
-                <td><a href="../api-reference/providers/zhipuai.html">Setup guide</a></td>
-              </tr>
-            </tbody>
-          </table>
           <p>
-            See the <a href="../api-reference/providers/index.html">Providers Reference</a>
-            for detailed configuration options for each provider.
+            jaato reaches a wide range of model providers through one uniform
+            interface. They group by how the model runs:
+          </p>
+          <ul>
+            <li><strong>Hosted API providers</strong> &mdash; cloud services you
+              reach with an API key or OAuth (e.g. Anthropic, Google GenAI).</li>
+            <li><strong>Local runtimes</strong> &mdash; models on your own
+              hardware, no API cost (e.g. Ollama, vLLM).</li>
+            <li><strong>Unified gateways</strong> &mdash; a single endpoint
+              fronting many vendors' models (e.g. OpenRouter).</li>
+            <li><strong>Subscription-based</strong> &mdash; drive an existing
+              Claude Pro/Max or Google subscription (e.g. Claude CLI,
+              Antigravity).</li>
+          </ul>
+          <p>
+            See the <a href="../api-reference/providers/index.html">Providers
+            Reference</a> for the complete list of supported providers and
+            per-provider setup &mdash; the sidebar links each one directly.
           </p>
         </div>
         <div class="panel-code">
