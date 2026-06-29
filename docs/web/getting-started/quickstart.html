@@ -316,6 +316,72 @@ print(response)  # "4"</code></pre>
         </div>
       </section>
 
+      <!-- Talking to a daemon -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="daemon-facade">Talking to a Daemon (recommended)</h2>
+          <p>
+            The example above runs the agent runtime <strong>in-process</strong>
+            with <code>JaatoClient</code>. The <strong>recommended</strong> Python
+            entry path instead talks to a long-lived jaato
+            <strong>daemon</strong> over IPC, using the async
+            <code>IPCClient</code> facade
+            (<a href="../api-reference/ipc-client.html">full reference</a>).
+          </p>
+          <p>
+            <code>IPCClient.session(...)</code> is an async context manager: on
+            entry it connects to (or auto-starts) the daemon and creates a
+            session; on exit it disconnects. The yielded
+            <code>Session</code> owns the send-and-wait recipe, so
+            <code>await s.ask(...)</code> returns the answer without any event
+            plumbing. For a throwaway call, the module-level <code>ask()</code>
+            opens a session, asks, and tears down in one line.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">In-process vs daemon</div>
+            <code>JaatoClient</code> (<code>from jaato import JaatoClient</code>)
+            runs the runtime inside your own process. <code>IPCClient</code>
+            (<code>from jaato_sdk import IPCClient</code>) talks to a separate
+            daemon — most applications use this. An inline
+            <code>profile</code> spec <strong>requires</strong> a
+            <code>plugins</code> key (use <code>[]</code> for a tool-less
+            session); credentials resolve from a <code>pass:</code> knob, never a
+            raw key or env var.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">daemon_facade.py</div>
+          <div class="code-block">
+            <pre><code class="language-python">import asyncio
+from jaato_sdk import IPCClient, ask
+
+async def main():
+    # Open a session, ask, tear down on exit.
+    async with IPCClient.session(profile={
+        "model": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "plugins": [],
+        "plugin_configs": {
+            "anthropic": {"api_key": "pass://jaato/anthropic/api-key"},
+        },
+    }) as s:
+        print(await s.ask("What is 2 + 2?"))   # "4"
+
+    # ...or the one-shot helper, for a throwaway call.
+    print(await ask("What is 2 + 2?", profile={
+        "model": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "plugins": [],
+        "plugin_configs": {
+            "anthropic": {"api_key": "pass://jaato/anthropic/api-key"},
+        },
+    }))
+
+asyncio.run(main())</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- With tools -->
       <section class="two-panel">
         <div class="panel-explanation">
