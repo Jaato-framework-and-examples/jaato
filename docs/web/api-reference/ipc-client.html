@@ -342,6 +342,13 @@ asyncio.run(main())</code></pre>
             </li>
           </ul>
 
+          <div class="callout callout-info">
+            <div class="callout-title">Inline spec needs <code>plugins</code></div>
+            An inline <code>profile</code> dict <strong>requires</strong> a
+            <code>plugins</code> key (even <code>[]</code>); omitting it is
+            rejected with <code>InvalidSessionSpec</code>.
+          </div>
+
           <div class="returns">
             <div class="returns-label">Returns</div>
             <div class="returns-type">async context manager &mdash; yields a <a href="#session">Session</a>.</div>
@@ -569,6 +576,84 @@ async with IPCClient.session(profile={
     s.client.subscribe(EventType.TOOL_CALL_END, observer)
     # ...while still using the facade for the turn.
     print(await s.ask("List files in the workspace."))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Host (client) tools -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="host-tools">Host (client) tools</h2>
+          <p>
+            Pass <code>client_tools</code> to register tools whose
+            <code>handler</code> runs in <strong>your</strong> process: the daemon
+            calls back into the client whenever the model invokes one. Each spec is
+            a plain dict with <code>name</code>, <code>description</code>,
+            <code>parameters</code> (a JSON Schema), and <code>handler</code>.
+          </p>
+          <p>
+            Host tools must be registered <strong>before</strong> the session is
+            created so the runner-tier model sees them — the facade does this for
+            you when you pass <code>client_tools=</code> to
+            <code>IPCClient.session(...)</code>.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">client_tools — a tool handled in your process</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk import IPCClient
+
+async with IPCClient.session(
+    profile={"model": "gpt-4o", "provider": "openai", "plugins": []},
+    client_tools=[{
+        "name": "get_weather",
+        "description": "Return the weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+        # handler runs in YOUR process
+        "handler": lambda args: {"weather": f"{args['city']}: sunny, 24C"},
+    }],
+) as s:
+    print(await s.ask("Weather in Paris?"))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Typed completion gate -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="typed-completion">Typed completion gate</h2>
+          <p>
+            A profile that declares a <code>completion_payload_schema</code> forces
+            the model to call <code>signal_completion</code> with a matching
+            payload. <code>await s.complete(prompt)</code> returns the
+            server-validated <code>dict</code> — or <code>None</code> if the profile
+            declared no schema or the model didn't complete.
+          </p>
+          <p>
+            Because the daemon validates against the schema, the typed result is a
+            contract: a non-<code>None</code> return has already passed
+            server-side validation.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">complete — server-validated payload</div>
+          <div class="code-block">
+            <pre><code class="language-python">from pathlib import Path
+from jaato_sdk import IPCClient
+
+# The "person-extractor" profile declares a
+# completion_payload_schema; the model must call
+# signal_completion with a matching payload.
+async with IPCClient.session(
+    profile="person-extractor",
+    workspace_path=Path.cwd(),
+) as s:
+    person = await s.complete("Alice is 30.")   # dict | None
+    print(person["name"], person["age"])</code></pre>
           </div>
         </div>
       </section>
