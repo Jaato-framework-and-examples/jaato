@@ -59,12 +59,15 @@ class _FakeEmbedded:
 
 
 def _factory_for(holder):
-    """Build an ``embedded_factory(provider) -> client`` that stashes the
-    constructed fake in ``holder`` for post-run assertions."""
-    def _make(provider):
+    """Build an ``embedded_factory(provider, workspace_path, config_root) ->
+    client`` that stashes the constructed fake + the isolation args in
+    ``holder`` for post-run assertions."""
+    def _make(provider, workspace_path=None, config_root=None):
         client = _FakeEmbedded()
         holder["client"] = client
         holder["provider"] = provider
+        holder["workspace_path"] = workspace_path
+        holder["config_root"] = config_root
         return client
     return _make
 
@@ -140,7 +143,7 @@ class TestFacadeRidesOnInProcessClient:
         async def _run():
             async with InProcessClient.session(
                 model="fake-model",
-                embedded_factory=lambda provider: _MixedEmbedded(),
+                embedded_factory=lambda provider, *a, **k:_MixedEmbedded(),
             ) as s:
                 answer = await s.ask("hi")
             assert answer == "answer"
@@ -192,7 +195,7 @@ class TestRealPathWiring:
             try:
                 async with InProcessClient.session(
                     model="m", provider="p",
-                    embedded_factory=lambda provider: _NoAuth(),
+                    embedded_factory=lambda provider, *a, **k:_NoAuth(),
                 ):
                     pass
             except RuntimeError:
@@ -294,7 +297,7 @@ class TestEnvFileBothModes:
         async def _run():
             async with InProcessClient.session(
                 model="m", env_file=str(env_path),
-                embedded_factory=lambda provider: _FakeEmbedded(),
+                embedded_factory=lambda provider, *a, **k:_FakeEmbedded(),
             ) as s:
                 await s.ask("hi")
 
@@ -308,7 +311,7 @@ class TestEnvFileBothModes:
         async def _run():
             async with InProcessClient.session(
                 model="m", env_file=str(tmp_path / "does_not_exist.env"),
-                embedded_factory=lambda provider: _FakeEmbedded(),
+                embedded_factory=lambda provider, *a, **k:_FakeEmbedded(),
             ) as s:
                 return await s.ask("hi")
 
@@ -318,7 +321,7 @@ class TestEnvFileBothModes:
         async def _run():
             async with InProcessClient.session(
                 model="m", env_file=None,
-                embedded_factory=lambda provider: _FakeEmbedded(),
+                embedded_factory=lambda provider, *a, **k:_FakeEmbedded(),
             ) as s:
                 return await s.ask("hi")
 
@@ -501,7 +504,7 @@ class TestAgentCompleted:
                     "model": "m", "provider": "p", "plugins": [],
                     "completion_payload_schema": {"type": "object"},
                 },
-                embedded_factory=lambda provider: _CompletingEmbedded(),
+                embedded_factory=lambda provider, *a, **k:_CompletingEmbedded(),
             ) as s:
                 payload = await s.complete("Extract: Alice is 30")
             assert payload == {"name": "Alice", "age": 30}
@@ -562,7 +565,7 @@ class TestAgentPersona:
             try:
                 async with InProcessClient.session(
                     model="m", agent="ghost", config_root=str(tmp_path),
-                    embedded_factory=lambda provider: _FakeEmbedded(),
+                    embedded_factory=lambda provider, *a, **k:_FakeEmbedded(),
                 ):
                     pass
             except ValueError as e:
@@ -634,7 +637,7 @@ class TestStream:
         async def _run():
             chunks = []
             async with InProcessClient.session(
-                model="m", embedded_factory=lambda p: self._Streaming(),
+                model="m", embedded_factory=lambda p, *a, **k:self._Streaming(),
             ) as s:
                 async for chunk in s.stream("go"):
                     chunks.append(chunk)
@@ -654,7 +657,7 @@ class TestStream:
         async def _run():
             chunks = []
             async with InProcessClient.session(
-                model="m", embedded_factory=lambda p: _Mixed(),
+                model="m", embedded_factory=lambda p, *a, **k:_Mixed(),
             ) as s:
                 async for chunk in s.stream("go"):
                     chunks.append(chunk)
@@ -673,7 +676,7 @@ class TestStream:
         async def _run():
             chunks = []
             async with InProcessClient.session(
-                model="m", embedded_factory=lambda p: _Silent(),
+                model="m", embedded_factory=lambda p, *a, **k:_Silent(),
             ) as s:
                 async for chunk in s.stream("go"):
                     chunks.append(chunk)
@@ -702,7 +705,7 @@ class TestMultiTurnContinuity:
         async def _run():
             holder = {}
 
-            def _make(provider):
+            def _make(provider, *a, **k):
                 c = _Counting()
                 holder["c"] = c
                 return c
@@ -716,5 +719,42 @@ class TestMultiTurnContinuity:
             assert a2 == "turn2"
             # Both turns went to the SAME embedded session (not a fresh one).
             assert holder["c"].sends == 2
+
+        asyncio.run(_run())
+
+
+class TestConfigRootIsolation:
+    """The embedded runtime must be PINNED to <workspace>/.jaato — not left to
+    inherit the operator's home-tier ~/.jaato. Daniel caught an embedded
+    gemini session self-describing as 'Claude Code Agent' (read from the
+    operator's ~/.jaato prompt library): the daemon pins config_root; the
+    embedded path must pass it to the JaatoClient (the registry's set_config_root
+    does NOT cover prompt-library / instruction discovery)."""
+
+    def test_embedded_factory_gets_pinned_config_root(self):
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                model="m", workspace_path="/tmp/ws-x",
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            # config_root defaults to <workspace>/.jaato and is PASSED to the
+            # embedded runtime (None would inherit ~/.jaato — the contamination).
+            assert holder["config_root"] == "/tmp/ws-x/.jaato"
+            assert holder["workspace_path"] == "/tmp/ws-x"
+
+        asyncio.run(_run())
+
+    def test_explicit_config_root_passed_through(self):
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                model="m", workspace_path="/tmp/ws",
+                config_root="/etc/jaato-conf",
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            assert holder["config_root"] == "/etc/jaato-conf"
 
         asyncio.run(_run())
