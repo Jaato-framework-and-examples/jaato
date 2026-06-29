@@ -59,22 +59,31 @@ def overview() -> Rendered:
 # ------------------------------------------------------------- transports
 
 def transports() -> Rendered:
-    """The two client transports + the daemon flags / auth that gate them.
+    """The three client transports + the daemon flags / auth that gate them.
 
-    Source of truth for "how does a client connect" — IPC (Python SDK) vs
-    WebSocket (TypeScript SDK).  The Python SDK is IPC-only; WS clients are
-    authored with ``jaato-sdk-ts`` / the browser web-client.
+    Source of truth for "how does a client run an agent": in-process (embedded,
+    no daemon), IPC (local daemon), and WebSocket (remote daemon). The Python
+    SDK ships a client for ALL THREE — and the same convenience facade
+    (``jaato.session(mode=...)`` -> ``Session.ask`` / ``.complete`` /
+    ``.stream``) rides on each, so ``mode`` is the only thing that changes.
     """
     data = {
+        "in_process": {
+            "sdk": "jaato (Python) — jaato.session(mode='in_process') / jaato.InProcessClient",
+            "scope": "embedded — no daemon, no socket; the agent runs in your process",
+            "daemon_flags": [],
+            "auth": "n/a — in-process, no wire",
+        },
         "ipc": {
-            "sdk": "jaato-sdk (Python) — jaato_sdk.IPCClient",
-            "scope": "local (same host / container)",
+            "sdk": "jaato-sdk (Python) — jaato_sdk.IPCClient / jaato.session(mode='ipc')",
+            "scope": "local (same host / container) daemon",
             "daemon_flags": ["--ipc-socket PATH", "--socket-mode MODE (default 660)"],
             "auth": "none — any principal that can open the socket drives the agent",
         },
         "websocket": {
-            "sdk": "jaato-sdk-ts (TypeScript) / browser web-client — NOT the Python SDK",
-            "scope": "remote / browser",
+            "sdk": "jaato-sdk (Python) — jaato_sdk.WSClient / jaato.session(mode='ws'); "
+                   "also jaato-sdk-ts (TypeScript) / browser web-client",
+            "scope": "remote / browser daemon",
             "daemon_flags": ["--web-socket [HOST:]PORT", "--ws-token TOKEN",
                              "--ws-token-file PATH", "--ws-unsafe-no-auth"],
             "token_default": "~/.jaato/ws.token (auto-generated, 0600, on first WS start)",
@@ -83,23 +92,26 @@ def transports() -> Rendered:
                             "?token=<token>  (query param — browsers)"],
             "bad_token": "WS close code 1008",
             "preflight": "jaato-doctor --web-socket [host:]port",
+            "python_extra": "pip install 'jaato-sdk[ws]'  (the websockets dependency)",
         },
     }
     text = (
-        "client transports\n"
+        "client transports — one facade (jaato.session(mode=...)), three modes\n"
         "  ----------------------------------------------------------------\n"
-        "  IPC (Unix socket)             WebSocket\n"
-        "  - Python SDK                  - TypeScript SDK (jaato-sdk-ts)\n"
-        "    jaato_sdk.IPCClient           / browser web-client\n"
-        "  - local only                  - remote / browser\n"
-        "  - unauthenticated             - bearer-token authenticated\n"
-        "    (socket-mode 660)\n\n"
-        "daemon flags:\n"
+        "  in_process            IPC (Unix socket)        WebSocket\n"
+        "  - embedded, no daemon - local daemon           - remote daemon / browser\n"
+        "  - InProcessClient     - IPCClient              - WSClient (Python)\n"
+        "                                                   + TS SDK / web-client\n"
+        "  - n/a (no wire)       - unauthenticated        - bearer-token authenticated\n"
+        "                          (socket-mode 660)\n\n"
+        "  Python ships a client for ALL THREE; the SAME Session.ask/.complete/\n"
+        "  .stream facade rides on each.  mode is the only variable.\n\n"
+        "daemon flags (ipc / ws only — in_process needs no daemon):\n"
         "  IPC:  --ipc-socket PATH   [--socket-mode 660]\n"
         "  WS:   --web-socket [HOST:]PORT\n"
         "        --ws-token TOKEN | --ws-token-file PATH | --ws-unsafe-no-auth\n"
         "        (no token flag → daemon auto-generates ~/.jaato/ws.token, 0600)\n\n"
-        "WS auth contract — the TS client presents ONE of:\n"
+        "WS auth contract — a client presents ONE of:\n"
         "  Authorization: Bearer <token>   (header — SDK / proxies / curl)\n"
         "  ?token=<token>                  (query — browsers can't set headers on\n"
         "                                   new WebSocket())\n"
@@ -107,9 +119,11 @@ def transports() -> Rendered:
         "  compares with hmac.compare_digest.\n\n"
         "preflight the WS daemon side (port + token file + auth mode):\n"
         "  jaato-doctor --web-socket [host:]port\n\n"
-        "NOTE: the Python SDK is IPC-only.  `jaato-scaffold new client` scaffolds\n"
-        "the Python IPC client; a WebSocket client is authored with the TypeScript\n"
-        "SDK (jaato-sdk-ts) — start from the web-client.\n"
+        "scaffold any transport:\n"
+        "  jaato-scaffold new client --transport in_process ...   # embedded\n"
+        "  jaato-scaffold new client --transport ipc ...          # local daemon (default)\n"
+        "  jaato-scaffold new client --transport ws ...           # remote daemon\n"
+        "The Python WS client needs the extra:  pip install 'jaato-sdk[ws]'\n"
     )
     return data, text
 
@@ -117,22 +131,42 @@ def transports() -> Rendered:
 # --------------------------------------------------------------- clients
 
 def clients() -> Rendered:
-    """The two Python IPC client classes — when to use each.
+    """The Python SDK client classes — one per transport (+ recovery) — and when
+    to use each.
 
-    The Python SDK ships two IPC clients (WebSocket is the TS SDK — see
-    ``transports``).  ``new client`` emits ``IPCClient`` by default; pass
-    ``--recoverable`` to emit ``IPCRecoveryClient``.
+    All expose the same facade-client contract, so the convenience
+    ``Session`` (``ask`` / ``complete`` / ``stream``) and ``jaato.session(
+    mode=...)`` ride on any of them.  ``new client --transport <mode>`` emits the
+    matching one; ``--recoverable`` upgrades the ``ipc`` transport to
+    ``IPCRecoveryClient``.
     """
     data = {
+        "in_process_client": {
+            "class": "jaato.InProcessClient  (jaato.session(mode='in_process'))",
+            "transport": "embedded — no daemon, no socket",
+            "use_for": ["lowest latency / simplest deploy", "no daemon to run",
+                        "develop embedded, deploy behind a daemon later"],
+            "scaffold": "jaato-scaffold new client --transport in_process ...",
+        },
         "ipc_client": {
-            "class": "jaato_sdk.IPCClient",
+            "class": "jaato_sdk.IPCClient  (jaato.session(mode='ipc'))",
+            "transport": "local daemon (Unix socket)",
             "recovery": "none — a dropped connection ends the client",
             "use_for": ["short-lived / one-shot", "a single send_message",
                         "a scripted run that exits"],
-            "scaffold": "jaato-scaffold new client ...",
+            "scaffold": "jaato-scaffold new client --transport ipc ...",
+        },
+        "ws_client": {
+            "class": "jaato_sdk.WSClient  (jaato.session(mode='ws'))",
+            "transport": "remote daemon (ws:// / wss://)",
+            "auth": "bearer token (url= + token=)",
+            "extra": "pip install 'jaato-sdk[ws]'",
+            "use_for": ["a daemon on another host", "browser-reachable endpoint"],
+            "scaffold": "jaato-scaffold new client --transport ws ...",
         },
         "ipc_recovery_client": {
             "class": "jaato_sdk.IPCRecoveryClient",
+            "transport": "local daemon (Unix socket), auto-reconnecting",
             "recovery": ("auto-reconnect state machine "
                          "(DISCONNECTED→CONNECTING→CONNECTED→RECONNECTING→CLOSED); "
                          "on_status_change callback; IncompatibleServerError is "
@@ -141,24 +175,27 @@ def clients() -> Rendered:
                         "TUI / observer / cascade driver",
                         "must survive a daemon restart "
                         "(per-run jaato-server --stop + autostart)"],
-            "scaffold": "jaato-scaffold new client --recoverable ...",
+            "scaffold": "jaato-scaffold new client --transport ipc --recoverable ...",
         },
     }
     text = (
-        "Python IPC clients  (WebSocket is the TS SDK — see `explain transports`)\n"
+        "Python SDK clients — one facade, one client per transport\n"
         "  ----------------------------------------------------------------\n"
-        "  IPCClient                       IPCRecoveryClient\n"
-        "  - no reconnect                  - auto-reconnect (state machine)\n"
-        "  - dropped conn ends the client  - on_status_change callback\n"
-        "  - short-lived / one-shot        - long-lived / resilient\n"
-        "    (one send, a scripted run)      (TUI, observer, cascade driver;\n"
-        "                                     survives a daemon restart)\n\n"
-        "the SDK README features IPCRecoveryClient for anything long-lived — it\n"
-        "rides through a per-run `jaato-server --stop` + autostart; on a permanent\n"
-        "IncompatibleServerError it stops rather than looping.\n\n"
-        "scaffold either (the flag works for every archetype):\n"
-        "  jaato-scaffold new client ...                # IPCClient\n"
-        "  jaato-scaffold new client --recoverable ...  # IPCRecoveryClient\n"
+        "  InProcessClient     IPCClient          WSClient         IPCRecoveryClient\n"
+        "  - embedded          - local daemon     - remote daemon  - local daemon\n"
+        "    (no daemon)         (Unix socket)      (ws:// / wss://)  + auto-reconnect\n"
+        "  - lowest latency    - no reconnect     - bearer token   - on_status_change\n"
+        "  - simplest deploy   - one-shot/script  - jaato-sdk[ws]    survives restarts\n\n"
+        "  All four expose the same Session.ask/.complete/.stream facade; pick the\n"
+        "  transport with jaato.session(mode='in_process'|'ipc'|'ws').  Use\n"
+        "  IPCRecoveryClient for anything long-lived on IPC — it rides through a\n"
+        "  per-run `jaato-server --stop` + autostart; on a permanent\n"
+        "  IncompatibleServerError it stops rather than looping.\n\n"
+        "scaffold any of them (the flags work for every archetype):\n"
+        "  jaato-scaffold new client --transport in_process ...      # InProcessClient\n"
+        "  jaato-scaffold new client --transport ipc ...             # IPCClient (default)\n"
+        "  jaato-scaffold new client --transport ipc --recoverable . # IPCRecoveryClient\n"
+        "  jaato-scaffold new client --transport ws ...              # WSClient\n"
     )
     return data, text
 

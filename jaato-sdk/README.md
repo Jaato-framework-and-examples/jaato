@@ -10,6 +10,24 @@ pip install --extra-index-url https://test.pypi.org/simple/ jaato-sdk
 
 ## Quick Start
 
+The simplest path is the **convenience facade** — `jaato.session(mode=...)` + `Session.ask` / `.complete` / `.stream`. The same code runs the agent embedded in your process, against a local daemon, or against a remote one — flip `mode` (see [Transports](#transports--three-ways-to-run-the-same-agent)):
+
+```python
+import asyncio
+import jaato
+
+async def main():
+    async with jaato.session(mode="in_process",
+                             profile={"model": "...", "provider": "..."}) as s:
+        print(await s.ask("Hello!"))
+        async for chunk in s.stream("Tell me a story."):
+            print(chunk, end="", flush=True)
+
+asyncio.run(main())
+```
+
+For full control over the event stream, permissions, and the connection lifecycle, use a client directly:
+
 ```python
 import asyncio
 from jaato_sdk import IPCRecoveryClient, EventType
@@ -38,7 +56,7 @@ asyncio.run(main())
 
 ### Server-first architecture
 
-Unlike a local agent loop, the agent itself runs in a separate **jaato server** process (a daemon). The SDK is purely a transport layer — it ships JSON-encoded events to the server and yields them back to your code as Python dataclasses.
+In the daemon transports (`ipc` / `ws`), the agent runs in a separate **jaato server** process; the SDK is a transport layer that ships JSON-encoded events to the server and yields them back to your code as Python dataclasses. The `in_process` transport is the embedded alternative — the agent runs *in your process* with no daemon — and exposes the **same** facade, so you can develop embedded and deploy behind a daemon (or the reverse) without changing your agent code.
 
 ```
 your code  ──►  IPCRecoveryClient  ──►  /tmp/jaato.sock  ──►  jaato server (agent loop)
@@ -49,16 +67,35 @@ your code  ◄──  IPCRecoveryClient  ◄──  /tmp/jaato.sock  ◄──�
 
 If no server is running and `auto_start=True` (the default), the client launches `python -m server --daemon` for you.
 
-### Transports
+### Transports — three ways to run the same agent
 
-The server speaks the same wire protocol over two transports:
+The convenience facade (`Session.ask` / `.complete` / `.stream`) runs over **three transports**. Pick one with `jaato.session(mode=...)`: the session spec and the facade are identical — `mode` is the only thing that changes.
 
-| Transport | Endpoint | What's shipped in this SDK |
-|---|---|---|
-| **IPC** (Unix domain socket / Windows named pipe) | `/tmp/jaato.sock` or `\\.\pipe\jaato` | `IPCClient` and `IPCRecoveryClient` — Python async clients with auto-start, framing, and reconnection. |
-| **WebSocket** | `ws://host:port` (or `wss://`) | Just the protocol — `Event` dataclasses, `serialize_event` / `deserialize_event`. No Python WS client. |
+| Mode | Transport | Client | Use when |
+|---|---|---|---|
+| `in_process` | none — embedded in your process | `InProcessClient` | No daemon, no socket. The agent runs *in your Python process* — lowest latency, simplest deploy. |
+| `ipc` | Unix domain socket / Windows named pipe | `IPCClient` | A daemon on the **same machine** (TUI, scripts, local tooling). Auto-start, framing, multi-session. |
+| `ws` | WebSocket (`ws://` / `wss://`) | `WSClient` | A **remote** daemon (and the protocol any browser / JavaScript client speaks). Bearer-authenticated. |
 
-The IPC client is for processes living on the same machine as the daemon (TUI, scripts, in-process tooling). The WebSocket transport is meant for remote and browser clients — the reference web UI talks to the server over WS, as can any JavaScript or non-Python client.
+```python
+import jaato
+
+# Embedded — no daemon, the agent runs in your process:
+async with jaato.session(mode="in_process",
+                         profile={"model": "...", "provider": "..."}) as s:
+    print(await s.ask("Hi"))
+
+# Local daemon over a Unix socket:
+async with jaato.session(mode="ipc", profile="researcher") as s:
+    print(await s.ask("Hi"))
+
+# Remote daemon over WebSocket:
+async with jaato.session(mode="ws", url="wss://host:8080", token="...",
+                         profile="researcher") as s:
+    print(await s.ask("Hi"))
+```
+
+The wire protocol *above* the transport is identical — the same `Event` JSON frames — so `WSClient` is `IPCClient` with only the transport swapped (WS frames self-delimit; no length prefix), and `InProcessClient` is the embedded analog that replicates in-process what the daemon does for a connected session. One example runs every way by flipping `mode`.
 
 To start the server with WebSocket enabled:
 
@@ -66,18 +103,18 @@ To start the server with WebSocket enabled:
 python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
 ```
 
-WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.token` on first start) sent either as `Authorization: Bearer <token>` on the upgrade request or as `?token=<token>` for browsers that can't set headers. The server stores only the SHA-256 digest and rejects bad tokens with WS close code 1008 before any session work happens.
+WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.token` on first start) sent either as `Authorization: Bearer <token>` on the upgrade request or as `?token=<token>` for browsers that can't set headers. The server stores only the SHA-256 digest and rejects bad tokens with WS close code 1008 before any session work happens. The Python `WSClient` ships in this SDK — install the optional `websockets` dependency with `pip install 'jaato-sdk[ws]'`.
 
-**If you're writing a non-Python WS client**, the [Events vs requests](#events-vs-requests) protocol below is the same — frame each event as one WS text message containing the JSON returned by `to_json()` (no length prefix; WS already frames). Adding a Python WebSocket client to this SDK is a possible future addition; until then, point your WS client library at the same `Event` schema.
+### Clients
 
-### Two clients
+| Client | Transport | Use when |
+|---|---|---|
+| `InProcessClient` | embedded (no daemon) | Run the agent in your own process — `jaato.session(mode="in_process")`. |
+| `IPCClient` | Unix socket | A thin, transparent connection to a **local** daemon. No retries — if the server goes away, your iterator ends. |
+| `WSClient` | WebSocket | A **remote** daemon over `ws://` / `wss://`. `IPCClient` with the transport swapped; needs the `jaato-sdk[ws]` extra. |
+| `IPCRecoveryClient` | Unix socket | Automatic reconnection with exponential backoff + session reattachment. Recommended for long-running IPC apps. |
 
-| Client | Use when |
-|---|---|
-| `IPCClient` | You want a thin, transparent connection. No retries — if the server goes away, your iterator ends. |
-| `IPCRecoveryClient` | You want automatic reconnection with exponential backoff and session reattachment. Recommended for most apps. |
-
-`IPCRecoveryClient` wraps `IPCClient` with a state machine and a configurable retry policy. It exposes the same request methods plus connection-lifecycle hooks.
+All four expose the **same facade-client contract**, so the convenience `Session` (`ask` / `complete` / `stream`) and the transport-agnostic `jaato.session(mode=...)` entry ride on any of them. `IPCRecoveryClient` wraps `IPCClient` with a state machine and a configurable retry policy; it exposes the same request methods plus connection-lifecycle hooks.
 
 ### Events vs requests
 

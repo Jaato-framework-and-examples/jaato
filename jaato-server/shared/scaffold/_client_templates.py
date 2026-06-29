@@ -48,22 +48,16 @@ Preflight first:
 import asyncio
 from jaato_sdk import __CLIENT_CLASS__, ClientType, EventType
 
-SOCKET = "__SOCKET__"
 ENV_FILE = "__ENV_FILE__"
 WORKSPACE = "__WORKSPACE__"
 MODEL = "__MODEL__"
 PROVIDER = "__PROVIDER__"
+__CONN_CONSTANTS__
 
 
 __ON_STATUS_DEF__def _new_client():
     """Construct the API client with the known-good knobs."""
-    return __CLIENT_CLASS__(
-        SOCKET,
-        client_type=ClientType.API,   # load-bearing: keeps signal_completion
-        auto_start=True,
-        env_file=ENV_FILE,            # never None (handshake crashes on None)
-        workspace_path=WORKSPACE,__ON_STATUS_ARG__
-    )
+    return __NEW_CLIENT_CALL__
 '''
 
 
