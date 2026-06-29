@@ -74,6 +74,40 @@ def _resolve_plugin_config_secrets(
     return resolved
 
 
+def _resolve_named_profile(name: str, config_root: Optional[str]) -> Dict[str, Any]:
+    """Resolve a named profile from disk into a spec dict.
+
+    The embedded analog of the daemon's profile resolution (the IPC client
+    sends ``profile=name`` and the daemon resolves it; an embedded session has
+    no daemon, so it discovers the profile itself). Mirrors the daemon loader:
+    ``discover_profiles`` -> ``SubagentProfile`` -> the spec fields the session
+    needs.
+    """
+    if not config_root:
+        raise ValueError(
+            f"named profile {name!r} needs config_root (the directory whose "
+            f"'profiles/' holds the profile YAML/JSON)"
+        )
+    from shared.plugins.subagent.config import discover_profiles
+
+    profiles_dir = str(Path(config_root).expanduser() / "profiles")
+    result = discover_profiles(profiles_dir, config_root=str(config_root))
+    profile = result.profiles.get(name)
+    if profile is None:
+        raise ValueError(
+            f"profile {name!r} not found under {profiles_dir} "
+            f"(available: {sorted(result.profiles)})"
+        )
+    return {
+        "model": profile.model,
+        "provider": profile.provider,
+        "plugins": profile.plugins,
+        "plugin_configs": profile.plugin_configs,
+        "system_instructions": profile.system_instructions,
+        "completion_payload_schema": profile.completion_payload_schema,
+    }
+
+
 class InProcessEventEmitter:
     """Thread-safe in-process pub/sub matching the facade's subscribe contract.
 
@@ -150,6 +184,8 @@ class InProcessClient:
         plugins: Optional[List[str]] = None,
         workspace_path: Optional[str] = None,
         config_root: Optional[str] = None,
+        system_instructions: Optional[str] = None,
+        completion_payload_schema: Optional[Any] = None,
         env_file: Optional[str] = ".env",
         project: Optional[str] = None,
         location: Optional[str] = None,
@@ -167,6 +203,11 @@ class InProcessClient:
         self._plugins = list(plugins) if plugins else []
         self._workspace_path = workspace_path
         self._config_root = config_root
+        # Profile-derived (or directly-supplied) session instructions + the
+        # typed-completion gate schema — forwarded to create_session so the
+        # embedded session matches the daemon's (ex03 persona, ex04 byte-exact).
+        self._system_instructions = system_instructions
+        self._completion_payload_schema = completion_payload_schema
         # ``env_file`` is a BOTH-modes kwarg (unlike ``socket_path``, which is
         # IPC-only): the embedded runtime reads the same env the daemon loads
         # from ``.env`` (``JAATO_PROVIDER`` / ``MODEL_NAME`` / provider creds),
@@ -238,6 +279,19 @@ class InProcessClient:
             self._session_id = f"in-process-{uuid.uuid4().hex[:12]}"
         registry = await asyncio.to_thread(self._build_registry)
         permission_plugin = self._wire_permission_channel(registry)
+        session_kwargs: Dict[str, Any] = {
+            "plugin_configs": self._resolved_plugin_configs,
+            "plugins": self._plugins,
+        }
+        # Profile-derived session instructions (ex03 persona) + the typed
+        # completion gate (ex04 byte-exact) — omit when unset so create_session
+        # applies its own defaults.
+        if self._system_instructions is not None:
+            session_kwargs["system_instructions"] = self._system_instructions
+        if self._completion_payload_schema is not None:
+            session_kwargs["completion_payload_schema"] = (
+                self._completion_payload_schema
+            )
         await asyncio.to_thread(
             self._embedded.configure_tools,
             registry,
@@ -246,10 +300,7 @@ class InProcessClient:
             # were wired but never consulted — tools ran un-gated.
             permission_plugin,
             None,  # ledger
-            {
-                "plugin_configs": self._resolved_plugin_configs,
-                "plugins": self._plugins,
-            },
+            session_kwargs,
         )
         return self._session_id
 
@@ -384,22 +435,28 @@ class _InProcessSessionContext:
 
     async def __aenter__(self) -> Session:
         on_permission = self._kwargs.pop("on_permission", None)
-        # Inline ``profile`` dict {model, provider, plugins, plugin_configs} —
-        # the same spec shape ``IPCClient.session`` accepts — is expanded into
-        # connection kwargs so both clients take an identical spec (the
-        # transport-agnostic entry forwards ``profile`` unchanged). A named
-        # profile (str) needs disk discovery — that lands with the profile-load
-        # chain (PR3); ``plugins`` from the inline spec is likewise PR3.
+        # Resolve the session spec into connection kwargs so both clients take
+        # an identical spec (the transport-agnostic entry forwards ``profile``
+        # unchanged):
+        #   * inline ``profile`` dict {model, provider, plugins, plugin_configs,
+        #     system_instructions, completion_payload_schema} — the same shape
+        #     ``IPCClient.session`` accepts;
+        #   * named ``profile`` (str) — resolved from disk via
+        #     ``discover_profiles`` (the embedded analog of the daemon's profile
+        #     resolution, which an embedded session has no daemon to do).
         profile = self._kwargs.pop("profile", None)
+        spec: Optional[Dict[str, Any]] = None
         if isinstance(profile, dict):
-            for key in ("model", "provider", "plugins", "plugin_configs"):
-                if profile.get(key) is not None and self._kwargs.get(key) is None:
-                    self._kwargs[key] = profile[key]
+            spec = profile
         elif isinstance(profile, str):
-            raise NotImplementedError(
-                "named in-process profiles land in PR3; for now pass an inline "
-                "{model, provider, plugins, plugin_configs} profile dict"
-            )
+            spec = _resolve_named_profile(profile, self._kwargs.get("config_root"))
+        if spec:
+            for key in (
+                "model", "provider", "plugins", "plugin_configs",
+                "system_instructions", "completion_payload_schema",
+            ):
+                if spec.get(key) is not None and self._kwargs.get(key) is None:
+                    self._kwargs[key] = spec[key]
         create_kwargs = {
             k: self._kwargs.pop(k) for k in self._CREATE_KEYS if k in self._kwargs
         }

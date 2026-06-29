@@ -386,3 +386,82 @@ class TestPluginLoading:
             assert perm is not None  # the session gates with it (was None = bug)
 
         asyncio.run(_run())
+
+
+class TestProfiles:
+    """PR3: profile resolution — inline dict + named (disk) — threads
+    system_instructions (ex03 persona) and completion_payload_schema (ex04
+    byte-exact) to configure_tools, the InProcessClient daemon-replication of
+    the daemon's profile setup."""
+
+    def test_inline_profile_threads_instructions_and_schema(self):
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                profile={
+                    "model": "m", "provider": "p", "plugins": [],
+                    "system_instructions": "You are a pirate.",
+                    "completion_payload_schema": {"type": "object"},
+                },
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            sk = holder["client"].configure_tools_session_kwargs
+            assert sk["system_instructions"] == "You are a pirate."
+            assert sk["completion_payload_schema"] == {"type": "object"}
+
+        asyncio.run(_run())
+
+    def test_no_instructions_omits_keys(self):
+        """Unset instructions/schema are OMITTED (so create_session applies its
+        own defaults), not passed as None."""
+
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                model="m", embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            sk = holder["client"].configure_tools_session_kwargs
+            assert "system_instructions" not in sk
+            assert "completion_payload_schema" not in sk
+
+        asyncio.run(_run())
+
+    def test_named_profile_resolved_from_disk(self, tmp_path):
+        from jaato.in_process import _resolve_named_profile
+
+        profiles = tmp_path / "profiles"
+        profiles.mkdir()
+        (profiles / "pirate.yaml").write_text(
+            "name: pirate\n"
+            "model: some-model\n"
+            "provider: openrouter\n"
+            "plugins: []\n"
+            "system_instructions: 'Arr, ye be a pirate.'\n"
+        )
+        spec = _resolve_named_profile("pirate", str(tmp_path))
+        assert spec["model"] == "some-model"
+        assert spec["provider"] == "openrouter"
+        assert spec["system_instructions"] == "Arr, ye be a pirate."
+
+    def test_named_profile_needs_config_root(self):
+        from jaato.in_process import _resolve_named_profile
+
+        try:
+            _resolve_named_profile("pirate", None)
+        except ValueError as e:
+            assert "config_root" in str(e)
+        else:  # pragma: no cover
+            raise AssertionError("expected ValueError without config_root")
+
+    def test_named_profile_not_found(self, tmp_path):
+        from jaato.in_process import _resolve_named_profile
+
+        (tmp_path / "profiles").mkdir()
+        try:
+            _resolve_named_profile("ghost", str(tmp_path))
+        except ValueError as e:
+            assert "ghost" in str(e)
+        else:  # pragma: no cover
+            raise AssertionError("expected ValueError for missing profile")
