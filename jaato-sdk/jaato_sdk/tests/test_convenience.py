@@ -374,3 +374,40 @@ async def test_module_ask_delegates_to_session(monkeypatch):
     assert out == "answer:Who are you?"
     assert seen["sources"] == ("model",)
     assert seen["session_kwargs"]["profile"] == {"model": "m", "provider": "p"}
+
+
+async def test_raising_on_permission_responds_and_surfaces_error():
+    """A raising ``on_permission`` must NOT deadlock the turn — ``_on_perm``
+    ALWAYS responds (deny), and the callback's error surfaces on the in-flight
+    ask/complete via ``_raise_if_needed`` (the in-process channel blocks a
+    worker thread on the response with no transport timeout, so a response is
+    mandatory)."""
+    c = FakeClient()
+    boom = RuntimeError("callback blew up")
+
+    def raising(ev):
+        raise boom
+
+    s = Session(c, "s", on_permission=raising)
+    await s._on_perm(SimpleNamespace(request_id="r1", tool_name="x"))
+
+    # Guaranteed response (deny) — no deadlock.
+    assert ("respond_to_permission", "r1", "n") in c.calls
+    # The callback's real error is surfaced on the in-flight turn.
+    with pytest.raises(RuntimeError) as ei:
+        s._raise_if_needed({})
+    assert ei.value is boom
+
+
+async def test_async_raising_on_permission_also_guarded():
+    """The guard covers a coroutine on_permission that raises too."""
+    c = FakeClient()
+
+    async def raising(ev):
+        raise ValueError("async boom")
+
+    s = Session(c, "s", on_permission=raising)
+    await s._on_perm(SimpleNamespace(request_id="r2", tool_name="y"))
+    assert ("respond_to_permission", "r2", "n") in c.calls
+    with pytest.raises(ValueError):
+        s._raise_if_needed({})
