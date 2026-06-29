@@ -115,6 +115,31 @@ def _resolve_named_profile(name: str, config_root: Optional[str]) -> Dict[str, A
     }
 
 
+def _resolve_agent_persona(
+    agent_name: str,
+    agent_params: Optional[Dict[str, str]],
+    workspace_path: Optional[str],
+    config_root: Optional[str],
+) -> str:
+    """Resolve an agent persona (.jaato/agents/<name>.md) to its system
+    instructions — the embedded analog of the daemon resolving ``--agent``.
+
+    Reuses the daemon's exact loader (lifted to ``shared`` so the daemon-free
+    embedded path doesn't import ``server``), so an embedded session renders the
+    persona (frontmatter + ``{{param}}`` substitution) identically. Raises
+    ``ValueError`` when the named agent isn't found (fail loud, no silent bare).
+    """
+    from shared.plugins.subagent.config import resolve_agent
+
+    resolved = resolve_agent(agent_name, agent_params, workspace_path, config_root)
+    if resolved is None:
+        where = config_root or workspace_path or "~"
+        raise ValueError(
+            f"agent {agent_name!r} not found under {where}/agents (or .jaato/agents)"
+        )
+    return resolved["system_instructions"]
+
+
 class InProcessEventEmitter:
     """Thread-safe in-process pub/sub matching the facade's subscribe contract.
 
@@ -514,6 +539,22 @@ class _InProcessSessionContext:
             ):
                 if spec.get(key) is not None and self._kwargs.get(key) is None:
                     self._kwargs[key] = spec[key]
+        # Agent persona (.jaato/agents/<name>.md) — the embedded analog of the
+        # daemon resolving ``--agent``. Layered as ``system_instructions`` (the
+        # ``additional`` arg get_system_instructions composes onto the base, so
+        # the persona sits on top of the framework baseline, exactly like the
+        # daemon). Resolved here, before the client is built, so it reaches
+        # create_session via __init__. A profile-supplied system_instructions
+        # wins (the explicit override).
+        agent_name = self._kwargs.get("agent")
+        if agent_name and self._kwargs.get("system_instructions") is None:
+            persona = _resolve_agent_persona(
+                agent_name,
+                self._kwargs.get("agent_params"),
+                self._kwargs.get("workspace_path"),
+                self._kwargs.get("config_root"),
+            )
+            self._kwargs["system_instructions"] = persona
         create_kwargs = {
             k: self._kwargs.pop(k) for k in self._CREATE_KEYS if k in self._kwargs
         }
