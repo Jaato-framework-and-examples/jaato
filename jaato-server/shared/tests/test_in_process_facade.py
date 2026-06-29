@@ -173,6 +173,7 @@ class TestRealPathWiring:
             assert fake.configure_tools_session_kwargs == {
                 "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}},
                 "plugins": [],
+                "suppress_base_instructions": False,
             }
             # A plain key passes through resolve_secret_uri unchanged; pass://
             # resolution requires jaato-premium and is exercised by the example
@@ -252,6 +253,7 @@ class TestTransportAgnosticEntry:
             assert holder["client"].configure_tools_session_kwargs == {
                 "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}},
                 "plugins": [],
+                "suppress_base_instructions": False,
             }
 
         asyncio.run(_run())
@@ -567,3 +569,48 @@ class TestAgentPersona:
                 raise AssertionError("expected ValueError for unknown agent")
 
         asyncio.run(_run())
+
+
+class TestSuppressBaseInstructions:
+    """The profile knob suppress_base_instructions (include_base = not it) is
+    threaded so an embedded session honors the same base-composition choice the
+    daemon does. Default False (compose persona ON TOP of base)."""
+
+    def test_default_false_passed(self):
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                model="m", embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            sk = holder["client"].configure_tools_session_kwargs
+            assert sk["suppress_base_instructions"] is False
+
+        asyncio.run(_run())
+
+    def test_inline_profile_true_threaded(self):
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                profile={
+                    "model": "m", "provider": "p", "plugins": [],
+                    "suppress_base_instructions": True,
+                },
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            sk = holder["client"].configure_tools_session_kwargs
+            assert sk["suppress_base_instructions"] is True
+
+        asyncio.run(_run())
+
+    def test_named_profile_extracts_knob(self, tmp_path):
+        from jaato.in_process import _resolve_named_profile
+
+        profiles = tmp_path / "profiles"
+        profiles.mkdir()
+        (profiles / "lean.yaml").write_text(
+            "name: lean\nmodel: m\nsuppress_base_instructions: true\nplugins: []\n"
+        )
+        spec = _resolve_named_profile("lean", str(tmp_path))
+        assert spec["suppress_base_instructions"] is True
