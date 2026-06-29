@@ -1,4 +1,4 @@
-"""In-process convenience facade — Shape 1, PR1 tracer-bullet.
+"""In-process convenience facade — Shape 1 (the embedded ``InProcessClient``).
 
 Run the ``jaato_sdk`` ``ask`` / ``complete`` / ``stream`` facade against an
 *embedded* ``jaato.JaatoClient`` — no daemon, no runner, no socket. See
@@ -8,19 +8,22 @@ Run the ``jaato_sdk`` ``ask`` / ``complete`` / ``stream`` facade against an
 implements the small client contract the facade's ``Session`` rides on
 (``subscribe`` / ``subscribe_once`` / ``send_message`` /
 ``respond_to_permission`` / ``connect`` / ``create_session`` / ``disconnect``)
-by wrapping the embedded ``JaatoClient`` and translating its callbacks into the
-same typed events the daemon emits. The facade (``Session.ask`` / ``.complete``
-/ ``.stream``) is reused **unchanged** — the whole point of Shape 1.
+by wrapping the embedded ``JaatoClient``. The facade (``Session.ask`` /
+``.complete`` / ``.stream``) is reused **unchanged** — the whole point of
+Shape 1. Everything below the facade is the embedded client REPLICATING what
+the daemon does for an IPC session, since there is no daemon in-process:
 
-This slice wires the two clean seams:
+* ``AGENT_OUTPUT`` <- ``send_message(on_output=...)``; ``TURN_COMPLETED`` <- the
+  ``send_message`` return.
+* ``PERMISSION_REQUESTED`` / gating <- the ``InProcessChannel`` registered on the
+  loaded permission plugin (``_in_process_permission``).
+* ``AGENT_COMPLETED`` (the typed completion payload) <- the ``set_ui_hooks``
+  ``on_agent_completed`` bridge.
+* tool executors, profiles, plugin policy <- ``create_session`` builds a real
+  registry (discover -> expose_all -> configure_tools) + resolves the profile.
 
-* ``AGENT_OUTPUT`` — from the embedded ``send_message(on_output=...)`` callback
-  (the streaming path proven by the dual-mode examples).
-* ``TURN_COMPLETED`` — the ``send_message`` return is the turn-done signal.
-
-Deferred to later slices: the ``InProcessChannel`` permission bridge
-(``PERMISSION_REQUESTED``, PR2), the profile-load chain + ``AGENT_COMPLETED``
-(PR3, via ``AgentUIHooks.on_agent_completed``), and ``stream`` polish (PR4).
+Remaining: the no-profile ``get_system_instructions`` baseline (ex01 free-text
+exactness) + agent-persona (``.jaato/agents``) resolution; ``stream`` polish.
 """
 
 from __future__ import annotations
@@ -32,7 +35,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.client.convenience import Session
-from jaato_sdk.events import AgentOutputEvent, TurnCompletedEvent
+from jaato_sdk.events import (
+    AgentCompletedEvent,
+    AgentOutputEvent,
+    TurnCompletedEvent,
+)
 from shared.config_resolver import resolve_secret_uri
 
 from jaato._in_process_permission import InProcessChannel, PendingPermissions
@@ -159,6 +166,45 @@ class InProcessEventEmitter:
             subs = list(self._subs.get(event_type, []))
         for cb in subs:
             cb(event)
+
+
+class _InProcessUIHooks:
+    """``AgentUIHooks`` impl that emits ``AGENT_COMPLETED`` (the completion-gate
+    payload) onto the facade emitter — the in-process analog of the daemon's
+    ``on_agent_completed`` notification -> AGENT_COMPLETED.
+
+    Only ``on_agent_completed`` is mapped here: ``AGENT_OUTPUT`` already flows
+    via ``send_message(on_output=...)`` (so ``on_agent_output`` stays a no-op to
+    avoid double-emit), and the other lifecycle hooks are no-ops for now. The
+    embedded runtime calls these on its worker thread, so ``emit_threadsafe``
+    marshals onto the event loop.
+    """
+
+    def __init__(self, emit_threadsafe: Callable[[Any], None]) -> None:
+        self._emit = emit_threadsafe
+
+    def on_agent_completed(
+        self,
+        agent_id: str = "",
+        completed_at: Any = None,
+        success: bool = True,
+        token_usage: Any = None,
+        turns_used: Any = None,
+        payload: Optional[Dict[str, Any]] = None,
+        **_kw: Any,
+    ) -> None:
+        self._emit(
+            AgentCompletedEvent(
+                agent_id=agent_id or "main",
+                success=bool(success),
+                payload=payload,
+            )
+        )
+
+    def __getattr__(self, name: str) -> Callable[..., None]:
+        if name.startswith("on_"):
+            return lambda *a, **k: None
+        raise AttributeError(name)
 
 
 class InProcessClient:
@@ -302,6 +348,17 @@ class InProcessClient:
             None,  # ledger
             session_kwargs,
         )
+        # Install lifecycle hooks AFTER configure_tools (which creates the
+        # session) so set_ui_hooks reaches it — the on_agent_completed ->
+        # AGENT_COMPLETED bridge the facade's complete() waits on (ex04 payload).
+        if hasattr(self._embedded, "set_ui_hooks"):
+            loop = self._loop
+            emitter = self._emitter
+
+            def emit_threadsafe(ev: Any) -> None:
+                loop.call_soon_threadsafe(emitter.emit, ev)
+
+            self._embedded.set_ui_hooks(_InProcessUIHooks(emit_threadsafe))
         return self._session_id
 
     def _wire_permission_channel(self, registry: Any) -> Any:
