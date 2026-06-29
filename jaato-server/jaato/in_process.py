@@ -31,16 +31,43 @@ from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.client.convenience import Session
 from jaato_sdk.events import AgentOutputEvent, TurnCompletedEvent
+from shared.config_resolver import resolve_secret_uri
 
 
-def _default_embedded_factory() -> Any:
-    """Build the real embedded runtime.
+def _default_embedded_factory(provider: Optional[str]) -> Any:
+    """Build the real embedded runtime for ``provider``.
 
     Imported lazily so only embedded use pulls in the server runtime — callers
     that never embed pay nothing for importing this module.
     """
     from shared import JaatoClient
-    return JaatoClient()
+    return JaatoClient(provider_name=provider) if provider else JaatoClient()
+
+
+def _resolve_plugin_config_secrets(
+    plugin_configs: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Resolve credential secret URIs in ``plugin_configs`` before the provider
+    is built.
+
+    The daemon resolves these UPSTREAM during profile/spec resolution; the
+    embedded path has no such step, so it must resolve ``pass://``-style
+    credential URIs itself (``create_provider`` only validates, never resolves,
+    per PR #415). No-op for plain keys / env configs. See
+    ``docs/design/in-process-facade.md``.
+    """
+    if not plugin_configs:
+        return {}
+    resolved: Dict[str, Any] = {}
+    for provider, cfg in plugin_configs.items():
+        if isinstance(cfg, dict):
+            resolved[provider] = {
+                k: (resolve_secret_uri(v) if isinstance(v, str) else v)
+                for k, v in cfg.items()
+            }
+        else:
+            resolved[provider] = cfg
+    return resolved
 
 
 class InProcessEventEmitter:
@@ -114,16 +141,21 @@ class InProcessClient:
         self,
         *,
         model: Optional[str] = None,
+        provider: Optional[str] = None,
+        plugin_configs: Optional[Dict[str, Any]] = None,
         project: Optional[str] = None,
         location: Optional[str] = None,
-        embedded_factory: Optional[Callable[[], Any]] = None,
+        embedded_factory: Optional[Callable[[Optional[str]], Any]] = None,
         **_ignored: Any,
     ) -> None:
         self._model = model
+        self._provider = provider
+        self._plugin_configs = plugin_configs
+        self._resolved_plugin_configs: Dict[str, Any] = {}
         self._project = project
         self._location = location
-        # Test seam: inject a fake embedded client. Production uses the real
-        # ``jaato.JaatoClient`` via the default factory.
+        # Test seam: inject a fake embedded client factory ``(provider) ->
+        # client``. Production uses the real ``jaato.JaatoClient``.
         self._embedded_factory = embedded_factory or _default_embedded_factory
         self._embedded: Any = None
         self._emitter = InProcessEventEmitter()
@@ -144,16 +176,42 @@ class InProcessClient:
     # ---- facade contract: lifecycle ----
     async def connect(self, timeout: Optional[float] = None) -> bool:
         self._loop = asyncio.get_running_loop()
-        self._embedded = self._embedded_factory()
+        # Resolve credential secret URIs before the provider is built — the
+        # embedded analog of the daemon's upstream profile/spec resolution.
+        self._resolved_plugin_configs = _resolve_plugin_config_secrets(
+            self._plugin_configs
+        )
+        self._embedded = self._embedded_factory(self._provider)
         await asyncio.to_thread(
             self._embedded.connect, self._project, self._location, self._model
         )
+        # verify_auth AFTER connect, BEFORE configure_tools (jaato_client.py
+        # contract). Forwards plugin_configs so providers reading the cred from
+        # ``plugin_configs[provider]`` see it. Fail loud before the first turn.
+        authed = await asyncio.to_thread(
+            self._embedded.verify_auth,
+            plugin_configs=self._resolved_plugin_configs or None,
+        )
+        if not authed:
+            raise RuntimeError(
+                f"Authentication not configured for provider {self._provider!r}"
+            )
         return True
 
     async def create_session(self, **_kwargs: Any) -> str:
-        # PR1: ex01 needs no profile/tools. The profile-load chain
-        # (discover_profiles -> resolve_secret_uri -> configure_tools) lands in
-        # the profile slice (PR3).
+        # PR1.5: ex01 has no tools/profile — an empty registry is enough. The
+        # profile-load chain (discover_profiles -> resolved spec ->
+        # configure_tools with the spec) lands in the profile slice (PR3).
+        from shared import PluginRegistry
+
+        registry = PluginRegistry()
+        await asyncio.to_thread(
+            self._embedded.configure_tools,
+            registry,
+            None,  # permission_plugin — the InProcessChannel lands in PR2
+            None,  # ledger
+            {"plugin_configs": self._resolved_plugin_configs},
+        )
         self._session_id = "in-process"
         return self._session_id
 
