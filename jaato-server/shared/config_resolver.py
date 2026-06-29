@@ -200,3 +200,29 @@ def workspace_state_path(
         for ``mkdir(parents=True, exist_ok=True)`` as appropriate.
     """
     return Path(workspace_path).expanduser().resolve() / JAATO_DIRNAME / subpath
+
+
+def resolve_secret_uri(value: str) -> str:
+    """Resolve a ``scheme://path[#key]`` secret URI to its secret value.
+
+    Public entry point for secret-URI resolution. Returns *value* unchanged
+    when it is not a resolvable secret URI — a plain string, a still-present
+    ``${VAR}`` reference, or a standard network scheme (``https://``,
+    ``wss://``, ...). A secret scheme with no registered resolver raises
+    ``SecretResolutionError`` (importable from the same place this delegates
+    to). Resolvers are discovered from the ``jaato.premium`` →
+    ``secret_resolvers`` entry point and cached on first call.
+
+    **In-process / embedding hosts must call this themselves.** When the
+    daemon runs a session it resolves credential config values (e.g.
+    ``plugin_configs[provider].api_key = pass://...``) upstream during
+    profile/spec resolution. An embedded :class:`~jaato.JaatoClient` has no
+    such upstream step, so it must resolve credential URIs with this function
+    BEFORE building a provider — otherwise the raw URI reaches the provider
+    credential boundary unresolved and fails loud.
+
+    This is the public name for the resolver that previously had to be reached
+    via the private ``shared.plugins.subagent.config._resolve_secret_uri``.
+    """
+    from shared.plugins.subagent.config import _resolve_secret_uri
+    return _resolve_secret_uri(value)

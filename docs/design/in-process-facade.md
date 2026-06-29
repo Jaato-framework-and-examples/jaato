@@ -196,6 +196,30 @@ the fidelity tests (6) are the bulk; everything else is small glue.
 - **Scope creep** — keep this to the facade-in-process feature; do NOT let it
   pull in subagent/reactor/recovery (daemon-only).
 
+## Prerequisites — in-process credential resolution
+
+The daemon resolves credential config values — including
+`plugin_configs[<provider>].api_key = pass://...` — UPSTREAM, in the
+config-value resolver at `subagent/config.py:555-574` (`${VAR}` expansion +
+`_resolve_secret_uri`) during profile/spec resolution. `create_provider`
+(`jaato_runtime.py:~1201-1235`) only PROMOTES the knob to `config.api_key` and
+then **fail-loud-validates** it (`looks_like_unresolved_secret_uri`, PR #415) —
+it does NOT resolve.
+
+The embedded path has no upstream resolution step, so the adapter MUST resolve
+credential secret URIs itself before `configure_tools` / `create_provider`:
+
+```python
+from shared.config_resolver import resolve_secret_uri
+api_key = resolve_secret_uri(plugin_configs[provider]["api_key"])
+```
+
+`resolve_secret_uri` is the public entry point (added so neither the adapter nor
+examples import the private `shared.plugins.subagent.config._resolve_secret_uri`).
+It is a no-op for plain keys / env-var configs; `pass://`-style URIs additionally
+require **jaato-premium installed in the embedding venv** (the `jaato.premium` →
+`secret_resolvers` entry point; resolvers are discovered lazily on first call).
+
 ## Decision asked
 
 Build it (Shape 1, v1 first)? If yes, it's framework work with its own PRs +
