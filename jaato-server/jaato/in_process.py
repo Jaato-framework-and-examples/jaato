@@ -48,14 +48,32 @@ from shared.config_resolver import resolve_secret_uri
 from jaato._in_process_permission import InProcessChannel, PendingPermissions
 
 
-def _default_embedded_factory(provider: Optional[str]) -> Any:
+def _default_embedded_factory(
+    provider: Optional[str],
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Any:
     """Build the real embedded runtime for ``provider``.
+
+    ``workspace_path`` + ``config_root`` are LOAD-BEARING for isolation: the
+    embedded ``JaatoClient``'s runtime composes the system prompt and discovers
+    instructions / agents / the prompt library from ``config_root`` (default
+    ``<workspace>/.jaato``). When unpinned, that discovery walks up to the
+    operator's home-tier ``~/.jaato`` and bleeds the operator's personal config
+    into every embedded session — the daemon pins it; the embedded path must
+    too. (The registry's ``set_config_root`` does NOT cover this — prompt_library
+    / instruction discovery keys off the JaatoClient's config_root, not the
+    registry's.)
 
     Imported lazily so only embedded use pulls in the server runtime — callers
     that never embed pay nothing for importing this module.
     """
     from shared import JaatoClient
-    return JaatoClient(provider_name=provider) if provider else JaatoClient()
+    return JaatoClient(
+        provider_name=provider,
+        workspace_path=workspace_path,
+        config_root=config_root,
+    )
 
 
 def _resolve_plugin_config_secrets(
@@ -360,7 +378,13 @@ class InProcessClient:
         self._resolved_plugin_configs = _resolve_plugin_config_secrets(
             self._plugin_configs
         )
-        self._embedded = self._embedded_factory(self._provider)
+        # Pass workspace_path + config_root so the embedded runtime pins its
+        # framework-config root (default <workspace>/.jaato) — without this the
+        # system-prompt / instruction / prompt-library discovery inherits the
+        # operator's home-tier ~/.jaato and contaminates every session.
+        self._embedded = self._embedded_factory(
+            self._provider, self._workspace_path, self._config_root
+        )
         await asyncio.to_thread(
             self._embedded.connect, self._project, self._location, self._model
         )
