@@ -314,11 +314,18 @@ print(response)  # "4"</code></pre>
             opens a session, asks, and tears down in one line.
           </p>
           <div class="callout callout-info">
-            <div class="callout-title">In-process vs daemon</div>
-            <code>JaatoClient</code> (<code>from jaato import JaatoClient</code>)
-            runs the runtime inside your own process. <code>IPCClient</code>
-            (<code>from jaato_sdk import IPCClient</code>) talks to a separate
-            daemon — most applications use this. An inline
+            <div class="callout-title">One facade, three transports</div>
+            The same <code>Session</code> facade (<code>s.ask</code> /
+            <code>s.complete</code> / <code>s.stream</code>) runs three ways via
+            <code>jaato.session(mode=...)</code> &mdash; <code>mode</code> is the
+            only thing that changes:
+            <code>mode="in_process"</code> (embedded; the agent runs in your
+            process with no daemon &mdash; <code>InProcessClient</code>),
+            <code>mode="ipc"</code> (a <strong>local</strong> daemon over a Unix
+            socket &mdash; <code>IPCClient</code>, shown here), and
+            <code>mode="ws"</code> (a <strong>remote</strong> daemon over
+            <code>ws://</code> / <code>wss://</code> &mdash; <code>WSClient</code>,
+            needs the <code>jaato-sdk[ws]</code> extra). An inline
             <code>profile</code> spec <strong>requires</strong> a
             <code>plugins</code> key (use <code>[]</code> for a tool-less
             session); credentials resolve from a <code>pass:</code> knob, never a
@@ -352,6 +359,13 @@ async def main():
             "anthropic": {"api_key": "pass://jaato/anthropic/api-key"},
         },
     }))
+
+# Transport-agnostic entry — same spec + same s.ask/.complete/.stream,
+# flip the transport with mode:
+import jaato
+#   jaato.session(mode="in_process", profile={...})   # embedded, no daemon
+#   jaato.session(mode="ipc",        profile={...})   # local daemon (above)
+#   jaato.session(mode="ws", url="wss://host:8080", token="...", profile={...})
 
 asyncio.run(main())</code></pre>
           </div>
