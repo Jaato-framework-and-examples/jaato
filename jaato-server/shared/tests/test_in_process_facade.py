@@ -503,3 +503,67 @@ class TestAgentCompleted:
             assert payload == {"name": "Alice", "age": 30}
 
         asyncio.run(_run())
+
+
+class TestAgentPersona:
+    """ex03: agent=<name> resolves .jaato/agents/<name>.md and threads it as
+    system_instructions (the daemon-free analog of --agent). Reuses the shared
+    resolve_agent loader (lifted from SessionManager)."""
+
+    def _write_pirate(self, tmp_path):
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "pirate.md").write_text(
+            "---\ndescription: pirate\n---\n"
+            "You are Captain {{name:Redbeard}}, a fearsome pirate. Arr!\n"
+        )
+
+    def test_agent_persona_threaded_as_system_instructions(self, tmp_path):
+        self._write_pirate(tmp_path)
+
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                model="m", agent="pirate", config_root=str(tmp_path),
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            si = holder["client"].configure_tools_session_kwargs.get(
+                "system_instructions"
+            )
+            assert si is not None
+            assert "Captain Redbeard" in si  # default param substituted
+
+        asyncio.run(_run())
+
+    def test_agent_params_substituted(self, tmp_path):
+        self._write_pirate(tmp_path)
+
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                model="m", agent="pirate", agent_params={"name": "Hook"},
+                config_root=str(tmp_path), embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            si = holder["client"].configure_tools_session_kwargs["system_instructions"]
+            assert "Captain Hook" in si
+
+        asyncio.run(_run())
+
+    def test_unknown_agent_raises(self, tmp_path):
+        (tmp_path / "agents").mkdir()
+
+        async def _run():
+            try:
+                async with InProcessClient.session(
+                    model="m", agent="ghost", config_root=str(tmp_path),
+                    embedded_factory=lambda provider: _FakeEmbedded(),
+                ):
+                    pass
+            except ValueError as e:
+                assert "ghost" in str(e)
+            else:  # pragma: no cover
+                raise AssertionError("expected ValueError for unknown agent")
+
+        asyncio.run(_run())

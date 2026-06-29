@@ -2064,6 +2064,143 @@ def _scan_profiles_dir(
         )
 
 
+def resolve_agent(
+    agent_name: str,
+    params: Optional[Dict[str, str]],
+    workspace_path: Optional[str],
+    config_root: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve an agent by name from .jaato/agents/ and .jaato/prompts/.
+
+    Scans agent directories (workspace then user-level), reads the markdown
+    file, parses frontmatter, substitutes params, and returns the rendered
+    system instructions.
+
+    The single source of truth for agent-persona resolution: the daemon's
+    ``SessionManager._resolve_agent`` delegates here, and the embedded
+    in-process client (``jaato.in_process``) imports it directly — so a
+    daemon-free embedded session resolves ``agent=<name>`` the same way the
+    daemon does, without depending on ``server`` (mirrors how
+    ``shared.config_resolver.resolve_secret_uri`` was lifted out of the daemon).
+
+    Args:
+        agent_name: Agent name (filename stem).
+        params: Parameter values for ``{{param}}`` placeholders.
+        workspace_path: Workspace directory for agent resolution.
+        config_root: Optional override for the workspace tier.  When set, scans
+            ``<config_root>/agents/`` and ``<config_root>/prompts/`` instead of
+            the workspace-anchored paths.  See
+            :func:`shared.config_resolver.resolve_config_search_path`.
+
+    Returns:
+        Dict with ``system_instructions``, ``description``, ``default_profile``,
+        ``missing_params``, ``source_path``, or ``None`` if not found.
+    """
+    search_dirs = []
+    if config_root:
+        cr = Path(config_root).expanduser().resolve()
+        search_dirs.append(cr / "agents")
+        search_dirs.append(cr / "prompts")
+    elif workspace_path:
+        search_dirs.append(Path(workspace_path) / ".jaato" / "agents")
+        search_dirs.append(Path(workspace_path) / ".jaato" / "prompts")
+    search_dirs.append(Path.home() / ".jaato" / "agents")
+    search_dirs.append(Path.home() / ".jaato" / "prompts")
+
+    # Find the agent file
+    agent_path = None
+    for search_dir in search_dirs:
+        if not search_dir.is_dir():
+            continue
+        # Single file: agents/gen-references.md
+        candidate = search_dir / f"{agent_name}.md"
+        if candidate.is_file():
+            agent_path = candidate
+            break
+        # Directory: agents/gen-references/PROMPT.md
+        candidate_dir = search_dir / agent_name
+        if candidate_dir.is_dir():
+            for entry_name in ("PROMPT.md", "SKILL.md"):
+                entry = candidate_dir / entry_name
+                if entry.is_file():
+                    agent_path = entry
+                    break
+            if agent_path:
+                break
+
+    if not agent_path:
+        return None
+
+    raw = agent_path.read_text(encoding="utf-8")
+
+    # Parse YAML frontmatter
+    frontmatter: Dict[str, Any] = {}
+    body = raw
+    if raw.startswith("---"):
+        match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+        if match:
+            try:
+                import yaml
+                frontmatter = yaml.safe_load(match.group(1)) or {}
+            except Exception:
+                pass
+            body = raw[match.end():]
+
+    # Substitute params
+    effective_params = dict(params or {})
+    param_defs = frontmatter.get("params", {})
+
+    # Apply frontmatter defaults for params not provided
+    if isinstance(param_defs, dict):
+        for pname, pdef in param_defs.items():
+            if pname not in effective_params:
+                if isinstance(pdef, dict) and "default" in pdef:
+                    default = pdef["default"]
+                    if default is not None:
+                        effective_params[pname] = str(default)
+
+    # Pre-scan: collect inline ``{{name:default}}`` defaults declared anywhere
+    # in the body so a later bare ``{{name}}`` can fall back to the same
+    # default.  Without this, an agent that uses a parameter both with and
+    # without an inline default would mark it missing on the bare occurrences
+    # and leave literal ``{{name}}`` placeholders in the rendered system
+    # instructions — which then bloat every turn's prompt.
+    inline_defaults: Dict[str, str] = {}
+    inline_pattern = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
+    for m in inline_pattern.finditer(body):
+        name = m.group(1)
+        default = m.group(2)
+        if default is not None and name not in inline_defaults:
+            inline_defaults[name] = default
+
+    # Use a set for O(1) dedup; the public missing list is built once at the
+    # end so the same name never appears twice.
+    missing_set: set = set()
+
+    def replace_param(m: "re.Match") -> str:
+        name = m.group(1)
+        inline_default = m.group(2)
+
+        if name in effective_params:
+            return effective_params[name]
+        if inline_default is not None:
+            return inline_default
+        if name in inline_defaults:
+            return inline_defaults[name]
+        missing_set.add(name)
+        return m.group(0)  # Keep unresolved (debugging signal)
+
+    rendered = inline_pattern.sub(replace_param, body)
+
+    return {
+        "system_instructions": rendered,
+        "description": frontmatter.get("description", ""),
+        "default_profile": frontmatter.get("default_profile"),
+        "missing_params": sorted(missing_set),
+        "source_path": str(agent_path),
+    }
+
+
 def discover_profiles(
     profiles_dir: str,
     base_path: Optional[str] = None,
