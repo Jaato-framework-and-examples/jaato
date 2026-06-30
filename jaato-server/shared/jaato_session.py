@@ -216,8 +216,10 @@ def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
 
     True iff a discoverable (non-``core``) tool that belongs to a profile plugin
     which is NOT ``(preload)``-ed and NOT scoped-out is exposed.  When this is
-    False, every tool is already eager (core or preloaded), so introspection's
-    tools are dead weight and can be dropped from the initial schema.
+    False, nothing is pending *discovery* — but introspection is NOT necessarily
+    dead weight: a session with eager/preloaded real tools still needs it for
+    *re-inspection* after GC offloads their schemas/instructions.  The full drop
+    decision lives in :func:`_should_drop_introspection`.
 
     Pure (no session/registry deps) so it is unit-testable.  ``plugin_of(name)``
     maps a tool name to its owning plugin name (or ``None``).
@@ -238,6 +240,33 @@ def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
             continue  # scoped out — not exposed
         return True
     return False
+
+
+def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
+    """Whether to drop introspection's discovery tools from a session's wire.
+
+    Drop ONLY when the wire is genuinely empty of real tools: nothing is
+    deferred to discover AND there are no real (non-introspection) tools present.
+
+    Keeping introspection whenever real tools exist — even all-eager/preloaded
+    ones with nothing currently deferred — is deliberate: preloading a tool only
+    means its schema/instructions *start* in-context; GC can offload them under
+    context pressure, after which the model needs ``list_tools`` /
+    ``get_tool_schemas`` to RE-INSPECT the tool.  Dropping introspection there
+    would both strip that capability AND (for a no-``suppress_base`` session)
+    leave a "discover via list_tools" prose nudge with no list_tools on the wire
+    — the model then invents the call, hits no-executor, and loops (the ex08
+    lead hang).  A truly empty wire (e.g. ``plugins=[]``) has nothing to inspect,
+    so introspection is correctly dropped — keeping the ``plugins=[]`` "no tools"
+    semantic intact.
+
+    Pure, so it is unit-testable.  ``tool_names`` is the current wire's tool
+    names; ``has_deferred_to_discover`` is :func:`_has_deferred_to_discover`'s
+    result.
+    """
+    if has_deferred_to_discover:
+        return False
+    return not any(n not in _INTROSPECTION_TOOL_NAMES for n in tool_names)
 
 
 class JaatoSession:
@@ -2082,27 +2111,27 @@ class JaatoSession:
             # exposes everything and may legitimately need discovery).
             if self._tool_plugins is not None and self._tools:
                 reg = self._runtime.registry
-                if not _has_deferred_to_discover(
+                deferred = _has_deferred_to_discover(
                         reg.get_exposed_tool_schemas(), self._tool_plugins,
                         self._preloaded_plugins, self._tool_scopes,
-                        lambda n: getattr(reg.get_plugin_for_tool(n), "name", None)):
-                    # Nothing to discover -> drop introspection's tools AND flag
-                    # the session so the introspection plugin suppresses its
-                    # discovery GUIDANCE too (introspection.get_system_instructions
-                    # reads this). Without the instruction-side gate the prompt
-                    # still says "discover your dynamic tools via list_tools/
-                    # get_tool_schemas" while the wire has none -> the model
-                    # invents those calls, hits no-executor, and loops forever
-                    # (the ex08 0-tool subagent hang). The tool-gate and the
-                    # instruction-gate must stay aligned.
+                        lambda n: getattr(reg.get_plugin_for_tool(n), "name", None))
+                if _should_drop_introspection(
+                        deferred, [t.name for t in self._tools]):
+                    # Empty wire -> drop introspection's tools AND flag the
+                    # session so the introspection plugin suppresses its now-
+                    # mismatched discovery GUIDANCE (read by
+                    # introspection.get_system_instructions). See
+                    # _should_drop_introspection for the full rationale (GC
+                    # re-inspection + tool/instruction-gate alignment).
                     self._introspection_guidance_suppressed = True
                     n0 = len(self._tools)
                     self._tools = [t for t in self._tools
                                    if t.name not in _INTROSPECTION_TOOL_NAMES]
                     if len(self._tools) != n0:
                         self._trace(
-                            "configure: dropped introspection — nothing deferred "
-                            "to discover (every profile tool is core or preloaded)")
+                            "configure: dropped introspection — empty wire (no "
+                            "deferred tools to discover, no eager tools to "
+                            "re-inspect)")
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
