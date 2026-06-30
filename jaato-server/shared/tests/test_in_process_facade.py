@@ -927,3 +927,74 @@ class TestSessionContextForSpawn:
                 assert ThreadPoolExecutor(1).submit(resolve).result() == "/tmp/ws-spawn"
 
         asyncio.run(_run())
+
+
+class TestSubagentAutoContinue:
+    """Part B: an idle lead resumes when a subagent injects its result. The
+    session's continuation callback -> _schedule_lead_continuation runs a
+    follow-up lead turn (send_message with the drained text) — the embedded
+    analog of the daemon's run-loop resume. The full wiring
+    (set_continuation_callback on the real session) is verified against a real
+    embedded session; here we assert the continuation MECHANISM + coalescing."""
+
+    def test_continuation_runs_a_lead_turn_with_drained_text(self):
+        seen = []
+
+        class _Recording(_FakeEmbeddedWithSession):
+            def send_message(self, prompt, on_output=None, **k):
+                seen.append(prompt)
+                return "blurb"
+
+        holder = {}
+
+        def _factory(provider, *a, **k):
+            c = _Recording()
+            holder["client"] = c
+            return c
+
+        async def _run():
+            async with InProcessClient.session(
+                model="m", embedded_factory=_factory,
+            ) as s:
+                client = s.client
+                client._schedule_lead_continuation("[SUBAGENT COMPLETED] result=42")
+                for _ in range(200):
+                    await asyncio.sleep(0.01)
+                    if not client._continuation_busy:
+                        break
+
+        asyncio.run(_run())
+        assert seen == ["[SUBAGENT COMPLETED] result=42"]
+
+    def test_overlapping_continuations_coalesce(self):
+        seen = []
+
+        class _Recording(_FakeEmbeddedWithSession):
+            def send_message(self, prompt, on_output=None, **k):
+                seen.append(prompt)
+                return "ok"
+
+        holder = {}
+
+        def _factory(provider, *a, **k):
+            c = _Recording()
+            holder["client"] = c
+            return c
+
+        async def _run():
+            async with InProcessClient.session(
+                model="m", embedded_factory=_factory,
+            ) as s:
+                client = s.client
+                # two arrivals before the first turn settles -> the 2nd coalesces
+                # into _continuation_pending (only the latest), then runs after.
+                client._schedule_lead_continuation("first")
+                client._schedule_lead_continuation("second")
+                assert client._continuation_pending == "second"
+                for _ in range(200):
+                    await asyncio.sleep(0.01)
+                    if not client._continuation_busy and client._continuation_pending is None:
+                        break
+
+        asyncio.run(_run())
+        assert seen == ["first", "second"]
