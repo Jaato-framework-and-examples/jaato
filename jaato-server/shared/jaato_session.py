@@ -367,6 +367,11 @@ class JaatoSession:
         # ``_completion_nudges_fired`` bounds the retry budget.
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
+        # Set in configure() when introspection's tools are dropped because there
+        # is nothing deferred to discover — read by introspection's
+        # get_system_instructions to suppress the now-mismatched discovery
+        # guidance (keeps the instruction-gate aligned with the tool-gate).
+        self._introspection_guidance_suppressed: bool = False
 
         # Per-turn model-tier config.  ``_tier_config`` is the resolved
         # view (built from profile.tiers or env vars).  ``_active_tier``
@@ -2081,6 +2086,16 @@ class JaatoSession:
                         reg.get_exposed_tool_schemas(), self._tool_plugins,
                         self._preloaded_plugins, self._tool_scopes,
                         lambda n: getattr(reg.get_plugin_for_tool(n), "name", None)):
+                    # Nothing to discover -> drop introspection's tools AND flag
+                    # the session so the introspection plugin suppresses its
+                    # discovery GUIDANCE too (introspection.get_system_instructions
+                    # reads this). Without the instruction-side gate the prompt
+                    # still says "discover your dynamic tools via list_tools/
+                    # get_tool_schemas" while the wire has none -> the model
+                    # invents those calls, hits no-executor, and loops forever
+                    # (the ex08 0-tool subagent hang). The tool-gate and the
+                    # instruction-gate must stay aligned.
+                    self._introspection_guidance_suppressed = True
                     n0 = len(self._tools)
                     self._tools = [t for t in self._tools
                                    if t.name not in _INTROSPECTION_TOOL_NAMES]

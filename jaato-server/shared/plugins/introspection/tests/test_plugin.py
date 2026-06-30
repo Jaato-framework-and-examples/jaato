@@ -532,3 +532,29 @@ class TestExploreToolsGuidanceWording:
         )
         # And the conditional qualifier must still be present.
         assert "always explore" not in si.lower()
+
+
+def test_discovery_guidance_suppressed_when_session_flags_it():
+    """The introspection discovery guidance (list_tools/get_tool_schemas
+    workflow) must be suppressed when the session dropped introspection's TOOLS
+    (nothing to discover) — else the prompt nudges the model to call tools that
+    aren't on its wire, it invents them, hits no-executor, and loops (the ex08
+    0-tool subagent hang). Instruction-gate aligned with tool-gate."""
+    from shared.plugins.introspection.plugin import create_plugin
+
+    p = create_plugin()
+    # No session / flag unset -> guidance present.
+    instr = p.get_system_instructions()
+    assert instr is not None and "CAPABILITY DISCOVERY" in instr
+
+    class _FlaggedSession:
+        _introspection_guidance_suppressed = True
+
+    p.set_session(_FlaggedSession())
+    assert p.get_system_instructions() is None  # suppressed
+
+    class _NormalSession:
+        _introspection_guidance_suppressed = False
+
+    p.set_session(_NormalSession())
+    assert "CAPABILITY DISCOVERY" in (p.get_system_instructions() or "")

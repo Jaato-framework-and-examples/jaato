@@ -279,6 +279,18 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         case where the persona is the authority on tool scoping
         and the framework defers.
         """
+        # Align with the TOOL gate: when the session dropped introspection's
+        # tools because nothing is deferred to discover (jaato_session.configure
+        # -> _introspection_guidance_suppressed), suppress this discovery
+        # guidance too. Otherwise the prompt nudges the model to call list_tools
+        # / get_tool_schemas that aren't on its wire -> it invents them, hits
+        # no-executor, and loops (the ex08 0-tool subagent hang). Tool-gate and
+        # instruction-gate must stay aligned.
+        session = self._session
+        if session is not None and getattr(
+            session, "_introspection_guidance_suppressed", False
+        ):
+            return None
         return (
             "You have a DYNAMIC tool system with discoverable capabilities.\n\n"
             "CAPABILITY DISCOVERY:\n"
