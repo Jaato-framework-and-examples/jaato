@@ -1,14 +1,19 @@
-"""Introspection is gated on the presence of something to discover.
+"""Introspection's discovery tools are gated on the wire, not just on discovery.
 
-`list_tools`/`get_tool_schemas` are [core], so they're always in the initial
-schema — but they're dead weight when every profile tool is already eager (core
-or `(preload)`-ed).  `_has_deferred_to_discover` is the pure predicate that
-drives dropping them; this locks in its truth table.
+`list_tools`/`get_tool_schemas` are [core], so they start in the initial schema.
+`_has_deferred_to_discover` is the pure predicate for "is something pending
+discovery"; `_should_drop_introspection` is the actual drop decision layered on
+top — it keeps introspection whenever real tools exist (so the model can
+re-inspect them after GC offloads their schemas), and drops it ONLY for a truly
+empty wire (e.g. `plugins=[]`).  This locks in both truth tables.
 """
 
 from types import SimpleNamespace
 
-from shared.jaato_session import _has_deferred_to_discover
+from shared.jaato_session import (
+    _has_deferred_to_discover,
+    _should_drop_introspection,
+)
 
 
 def _sc(name, disc="discoverable"):
@@ -63,3 +68,32 @@ def test_mixed_keeps_when_any_discoverable_present():
     assert _has_deferred_to_discover(
         schemas, ["todo", "cli"], {"todo"}, {},
         _plugin_of({"createPlan": "todo", "cli_based_tool": "cli"})) is True
+
+
+# --- _should_drop_introspection: the drop decision (wire-aware) ---
+
+_INTRO = ["list_tools", "get_tool_schemas"]
+
+
+def test_drop_when_empty_wire_nothing_deferred():
+    # plugins=[] shape: only introspection on the wire, nothing deferred -> drop.
+    assert _should_drop_introspection(False, list(_INTRO)) is True
+
+
+def test_keep_when_real_eager_tools_even_if_nothing_deferred():
+    # Preloaded/eager lead (e.g. spawn_subagent on the wire) with nothing
+    # deferred -> KEEP introspection so the model can re-inspect after GC offload.
+    assert _should_drop_introspection(
+        False, _INTRO + ["spawn_subagent", "signal_completion"]) is False
+
+
+def test_keep_when_something_deferred_regardless_of_wire():
+    # Something pending discovery -> always keep, even with no eager real tools.
+    assert _should_drop_introspection(True, list(_INTRO)) is False
+    assert _should_drop_introspection(True, _INTRO + ["cli"]) is False
+
+
+def test_drop_when_wire_has_only_introspection_tools():
+    # No real tools at all -> empty wire -> drop.
+    assert _should_drop_introspection(False, ["list_tools"]) is True
+    assert _should_drop_introspection(False, []) is True
