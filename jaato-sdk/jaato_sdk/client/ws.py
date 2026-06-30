@@ -33,7 +33,9 @@ from typing import Any, Optional
 
 from jaato_sdk.events import ClientType
 
+from .config import RecoveryConfig
 from .ipc import IPCClient
+from .recovery import IPCRecoveryClient, StatusCallback
 
 
 def _ws_module() -> Any:
@@ -203,3 +205,120 @@ class WSClient(IPCClient):
             except Exception:
                 pass
             self._ws = None
+
+
+class WSRecoveryClient(IPCRecoveryClient):
+    """:class:`IPCRecoveryClient` over a WebSocket transport — auto-reconnect
+    for a *remote* daemon.
+
+    The recovery state machine, exponential-backoff reconnect loop, session
+    reattachment, and event pump are all inherited from
+    :class:`IPCRecoveryClient`; only the inner-client factory
+    (:meth:`_make_client`) is overridden to build a :class:`WSClient`
+    (``url`` / ``token``) instead of an ``IPCClient`` (``socket_path`` /
+    ``auto_start``).  Reattachment works identically because the server's
+    replay-on-attach is transport-agnostic (``emit_current_state`` /
+    ``_emit_conversation_replay`` live on the server core, not the IPC sink).
+
+    Construct via :meth:`session` (the facade entry point) rather than directly.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        token: Optional[str] = None,
+        client_type: ClientType = ClientType.API,
+        config: Optional[RecoveryConfig] = None,
+        env_file: str = ".env",
+        workspace_path: Optional[Any] = None,
+        config_root: Optional[str] = None,
+        on_status_change: Optional[StatusCallback] = None,
+        min_protocol_version: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            socket_path="",  # unused — a WebSocket has no socket file / pipe
+            client_type=client_type,
+            config=config,
+            auto_start=False,  # a remote WS daemon is never auto-started
+            env_file=env_file,
+            workspace_path=workspace_path,
+            on_status_change=on_status_change,
+            min_protocol_version=min_protocol_version,
+        )
+        self._url = url
+        self._token = token
+        self._config_root = config_root
+
+    def _make_client(self, *, auto_start: bool) -> IPCClient:
+        """Build the inner :class:`WSClient`. ``auto_start`` is meaningless for
+        WS (a remote daemon is never auto-started) and is ignored; everything
+        else mirrors the inherited IPC factory."""
+        return WSClient(
+            self._url,
+            token=self._token,
+            client_type=self._client_type,
+            env_file=self._env_file,
+            workspace_path=str(self._workspace_path) if self._workspace_path else None,
+            config_root=self._config_root,
+            min_protocol_version=self._min_protocol_version,
+        )
+
+    @classmethod
+    def session(
+        cls,
+        url: str,
+        *,
+        token: Optional[str] = None,
+        client_type: ClientType = ClientType.API,
+        profile: Any = None,
+        agent: Optional[str] = None,
+        agent_params: Any = None,
+        cascade_driver_id: Optional[str] = None,
+        on_permission: Any = None,
+        client_tools: Any = None,
+        workspace_path: Optional[str] = None,
+        config_root: Optional[str] = None,
+        env_file: str = ".env",
+        connect_timeout: float = 120.0,
+        on_status_change: Optional[StatusCallback] = None,
+        min_protocol_version: Optional[str] = None,
+        **_ignored: Any,
+    ) -> Any:
+        """Auto-reconnect WS analog of :meth:`IPCRecoveryClient.session`: the
+        convenience facade (``Session.ask`` / ``.complete`` / ``.stream``)
+        backed by a ``WSRecoveryClient`` so the session survives daemon
+        restarts over a WebSocket.  Adds ``on_status_change=`` (the
+        reconnection-status callback) on top of :meth:`WSClient.session`'s
+        knobs::
+
+            async with WSRecoveryClient.session("wss://host:8080", token="...",
+                                                profile="researcher",
+                                                on_status_change=print) as s:
+                print(await s.ask("Long task…"))
+        """
+        from .convenience import _SessionContext
+
+        client = cls(
+            url,
+            token=token,
+            client_type=client_type,
+            env_file=env_file,
+            workspace_path=workspace_path,
+            config_root=config_root,
+            on_status_change=on_status_change,
+            min_protocol_version=min_protocol_version,
+        )
+        create_kwargs = dict(
+            profile=profile,
+            agent=agent,
+            agent_params=agent_params,
+            cascade_driver_id=cascade_driver_id,
+        )
+        return _SessionContext(
+            client,
+            create_kwargs,
+            on_permission,
+            connect_timeout,
+            client_tools=client_tools,
+        )
