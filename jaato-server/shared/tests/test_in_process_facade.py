@@ -791,6 +791,25 @@ class TestPluginsIPCParity:
     def test_explicit_list_passes_through(self):
         assert self._session_plugins(plugins=["cli"]) == ["cli"]
 
+    def test_preload_and_scope_modifiers_parsed(self):
+        # (preload) / ([tools]) modifiers are parsed like the daemon
+        # (parse_plugin_list): clean names -> plugins, force-eager set ->
+        # preloaded_plugins. Pre-fix the raw "cli(preload)" matched no plugin
+        # (dropped) — an IPC-parity gap.
+        holder = {}
+
+        async def _run():
+            async with InProcessClient.session(
+                model="m", embedded_factory=_factory_for(holder),
+                plugins=["cli(preload)", "web_search"],
+            ) as s:
+                await s.ask("hi")
+
+        asyncio.run(_run())
+        sk = holder["client"].configure_tools_session_kwargs
+        assert sk["plugins"] == ["cli", "web_search"]   # clean names
+        assert sk["preloaded_plugins"] == {"cli"}       # force-eager set
+
 
 class _FakeExecutor:
     def __init__(self) -> None:
