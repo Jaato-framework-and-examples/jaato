@@ -790,3 +790,77 @@ class TestPluginsIPCParity:
 
     def test_explicit_list_passes_through(self):
         assert self._session_plugins(plugins=["cli"]) == ["cli"]
+
+
+class _FakeExecutor:
+    def __init__(self) -> None:
+        self._map = {}
+
+    def register(self, name, fn) -> None:
+        self._map[name] = fn
+
+
+class _FakeSession:
+    """Minimal stand-in exposing the two attributes the in-process client-tool
+    registration touches: ``_tools`` (the wire schema list) and ``_executor``."""
+    def __init__(self) -> None:
+        self._tools = []
+        self._executor = _FakeExecutor()
+
+
+class _FakeEmbeddedWithSession(_FakeEmbedded):
+    def __init__(self) -> None:
+        super().__init__()
+        self._session = _FakeSession()
+
+    def get_session(self):
+        return self._session
+
+
+class TestClientToolsForwarding:
+    """Host/client tools forwarded through the facade — the ex05 gap. The
+    _SessionContext pops ``client_tools``, registers them BEFORE create_session
+    (IPC ordering), and create_session appends each schema to the session wire +
+    its handler to the executor so the model SEES and CALLS them in-process."""
+
+    def test_client_tools_land_on_session_wire_and_executor(self):
+        holder = {}
+
+        def _factory(provider, *a, **k):
+            c = _FakeEmbeddedWithSession()
+            holder["client"] = c
+            return c
+
+        tools = [{
+            "name": "host_weather",
+            "description": "Get weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            "handler": lambda args: {"temp": "24C", "echo": args.get("city")},
+            "auto_approve": True,
+        }]
+
+        async def _run():
+            async with InProcessClient.session(
+                model="m", embedded_factory=_factory, client_tools=tools,
+            ) as s:
+                await s.ask("hi")
+
+        asyncio.run(_run())
+        sess = holder["client"]._session
+        assert "host_weather" in [t.name for t in sess._tools]   # model SEES it
+        assert "host_weather" in sess._executor._map             # model can CALL it
+        # the registered handler is the one we supplied (runs in-process)
+        assert sess._executor._map["host_weather"]({"city": "Paris"}) == {
+            "temp": "24C", "echo": "Paris"}
+
+    def test_no_client_tools_is_noop(self):
+        # Without client_tools the embedded fake (no get_session) is never
+        # touched — registration is gated on self._client_tools.
+        holder = {}
+        async def _run():
+            async with InProcessClient.session(
+                model="m", embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+        asyncio.run(_run())
+        assert holder["client"].closed
