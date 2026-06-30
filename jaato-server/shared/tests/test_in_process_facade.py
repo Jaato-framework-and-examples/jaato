@@ -1051,3 +1051,34 @@ class TestOutstandingSubagentGate:
         c._on_lead_inject("[SUBAGENT agent_id=subagent_1 event=COMPLETED]\nFound 3 facts")
         assert "subagent_1" in c._completed_subagent_ids
         assert c._has_outstanding_subagents() is False
+
+
+class TestFacadeRecoveryMode:
+    """`recovery=True` (daemon modes only) swaps the client for its auto-reconnect
+    variant — IPCRecoveryClient (ipc) / WSRecoveryClient (ws); in_process+recovery
+    is an error (no daemon to reconnect to)."""
+
+    def test_recovery_routing_picks_the_reconnect_client(self):
+        import jaato.in_process as ip
+        from jaato_sdk import (
+            WSRecoveryClient,
+            IPCRecoveryClient,
+            WSClient,
+            IPCClient,
+        )
+
+        assert isinstance(
+            ip.session(mode="ws", recovery=True, url="ws://x:1")._client,
+            WSRecoveryClient,
+        )
+        assert isinstance(ip.session(mode="ws", url="ws://x:1")._client, WSClient)
+        assert isinstance(
+            ip.session(mode="ipc", recovery=True)._client, IPCRecoveryClient
+        )
+        assert isinstance(ip.session(mode="ipc")._client, IPCClient)
+
+    def test_in_process_recovery_is_an_error(self):
+        import jaato.in_process as ip
+
+        with pytest.raises(ValueError, match="daemon transport"):
+            ip.session(mode="in_process", recovery=True)
