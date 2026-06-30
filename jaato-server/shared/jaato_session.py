@@ -2198,7 +2198,7 @@ class JaatoSession:
             self._system_instruction = system_instruction_override
         else:
             self._system_instruction = self._runtime.get_system_instructions(
-                plugin_names=tools,
+                plugin_names=plugins,
                 additional=system_instructions,
                 presentation_context=self._presentation_context,
                 include_base=not suppress_base_instructions,
