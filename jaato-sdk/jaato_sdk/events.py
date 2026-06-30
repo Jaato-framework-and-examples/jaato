@@ -2384,6 +2384,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
     EventType.AGENT_ERROR.value: AgentErrorEvent,
     EventType.SESSION_TERMINATED.value: SessionTerminatedEvent,
+    EventType.SESSION_RESTORED.value: SessionRestoredEvent,
     EventType.SLOT_SETTLED.value: SlotSettledEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
