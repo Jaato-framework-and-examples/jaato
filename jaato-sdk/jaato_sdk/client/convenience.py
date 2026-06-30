@@ -333,7 +333,7 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
                  client_type: ClientType = ClientType.API,
                  connect_timeout: float = 120.0,
                  config_root=None, apparmor=None,
-                 on_status_change=None) -> _SessionContext:
+                 on_status_change=None, presentation=None) -> _SessionContext:
     """Build a client of ``client_cls`` and return a session context manager.
 
     Backs :meth:`IPCClient.session` and :meth:`IPCRecoveryClient.session`.
@@ -352,7 +352,8 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
     by design.
     """
     ctor_kwargs = dict(client_type=client_type, auto_start=auto_start,
-                       env_file=env_file, workspace_path=workspace_path)
+                       env_file=env_file, workspace_path=workspace_path,
+                       presentation=presentation)
     # IPCClient-only ctor args, forwarded only when set (passing them to
     # IPCRecoveryClient, which lacks them, is a fail-loud ctor error by design —
     # same pattern as on_status_change, which is IPCRecoveryClient-only).

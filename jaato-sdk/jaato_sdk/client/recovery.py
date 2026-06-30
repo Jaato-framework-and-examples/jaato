@@ -39,7 +39,7 @@ import random
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Optional, Union
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
 from jaato_sdk.client._handler_registry import (
     EventHandler,
@@ -162,6 +162,7 @@ class IPCRecoveryClient:
         workspace_path: Optional[Path] = None,
         on_status_change: Optional[StatusCallback] = None,
         min_protocol_version: Optional[str] = None,
+        presentation: Optional[Any] = None,
     ):
         """Initialize the recovery client.
 
@@ -181,6 +182,11 @@ class IPCRecoveryClient:
             min_protocol_version: Override the inner IPCClient's
                 ``MIN_PROTOCOL_VERSION``. Forwarded verbatim — see
                 ``IPCClient.__init__`` for semantics.
+            presentation: Display-capability override forwarded verbatim to
+                each inner IPCClient the recovery client constructs (initial
+                connect + every reconnect), so a non-terminal (chat/web)
+                presentation survives reconnection.  See
+                ``IPCClient.__init__`` for semantics.
         """
         self._socket_path = socket_path
         self._client_type = client_type
@@ -189,6 +195,7 @@ class IPCRecoveryClient:
         self._workspace_path = workspace_path
         self._on_status_change = on_status_change
         self._min_protocol_version = min_protocol_version
+        self._presentation = presentation
 
         # Load config if not provided
         if config is None:
@@ -206,6 +213,9 @@ class IPCRecoveryClient:
         # Session tracking (for reattachment)
         self._session_id: Optional[str] = None
         self._client_id: Optional[str] = None
+        # Host ("client") tools remembered so they're re-registered on the
+        # fresh inner client after a reconnect (see register_client_tools).
+        self._registered_client_tools: List[Dict[str, Any]] = []
 
         # Reconnection state
         self._reconnect_attempt = 0
@@ -332,6 +342,7 @@ class IPCRecoveryClient:
             env_file=self._env_file,
             workspace_path=str(self._workspace_path) if self._workspace_path else None,
             min_protocol_version=self._min_protocol_version,
+            presentation=self._presentation,
         )
 
     async def connect(self, timeout: float = 5.0) -> bool:
@@ -626,6 +637,41 @@ class IPCRecoveryClient:
 
         if self._client:
             await self._client.respond_to_clarification(request_id, response)
+
+    async def respond_to_clarification_batch(
+        self,
+        request_id: str,
+        answers: List[str],
+    ) -> None:
+        """Respond to a batched clarification (all answers at once) — proxied
+        to the inner client (see ``IPCClient.respond_to_clarification_batch``)."""
+        self._check_can_send()
+
+        if self._client:
+            await self._client.respond_to_clarification_batch(request_id, answers)
+
+    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+        """Register client-provided ("host") tools — proxied to the inner client.
+
+        The tool set is REMEMBERED so it is re-registered automatically after a
+        reconnect: a reconnect builds a fresh inner client (``_make_client``)
+        that would otherwise lose the host-tool handlers, breaking a recoverable
+        host-tool client on the first daemon restart.  See
+        ``IPCClient.register_client_tools`` for the entry contract (register
+        before ``create_session``).
+        """
+        self._check_can_send()
+        self._registered_client_tools = list(tools)
+
+        if self._client:
+            await self._client.register_client_tools(tools)
+
+    async def list_sessions(self) -> None:
+        """Request the session list — proxied to the inner client."""
+        self._check_can_send()
+
+        if self._client:
+            await self._client.list_sessions()
 
     async def respond_to_reference_selection(
         self,
@@ -1206,6 +1252,17 @@ class IPCRecoveryClient:
             raise ConnectionError("Connection failed")
 
         self._client_id = self._client.client_id
+
+        # Re-register host ("client") tools on the fresh inner client BEFORE
+        # reattaching.  The reconnect built a new inner client with no host-tool
+        # handlers; the reattached session still exposes those tools, so without
+        # this the agent's next host-tool call would dangle.  Calls the inner
+        # client directly (not the guarded proxy) since we're mid-reconnect.
+        if self._registered_client_tools:
+            try:
+                await self._client.register_client_tools(self._registered_client_tools)
+            except Exception as e:
+                logger.warning(f"Failed to re-register client tools on reconnect: {e}")
 
         # Reattach to session if configured and we have a session ID
         if self._config.reattach_session and self._session_id:

@@ -76,6 +76,7 @@ class WSClient(IPCClient):
         min_protocol_version: Optional[str] = None,
         ssl: Any = None,
         ca: Optional[str] = None,
+        presentation: Optional[Any] = None,
     ) -> None:
         super().__init__(
             socket_path="",  # unused — a WebSocket has no socket file / pipe
@@ -85,6 +86,7 @@ class WSClient(IPCClient):
             workspace_path=workspace_path,
             config_root=config_root,
             min_protocol_version=min_protocol_version,
+            presentation=presentation,
         )
         self._url = url
         self._token = token
@@ -119,6 +121,7 @@ class WSClient(IPCClient):
         min_protocol_version: Optional[str] = None,
         ssl: Any = None,
         ca: Optional[str] = None,
+        presentation: Optional[Any] = None,
         **_ignored: Any,
     ) -> Any:
         """Async context manager that connects + creates a session over a
@@ -147,6 +150,7 @@ class WSClient(IPCClient):
             min_protocol_version=min_protocol_version,
             ssl=ssl,
             ca=ca,
+            presentation=presentation,
         )
         create_kwargs = dict(
             profile=profile,
@@ -275,6 +279,7 @@ class WSRecoveryClient(IPCRecoveryClient):
         min_protocol_version: Optional[str] = None,
         ssl: Any = None,
         ca: Optional[str] = None,
+        presentation: Optional[Any] = None,
     ) -> None:
         super().__init__(
             socket_path="",  # unused — a WebSocket has no socket file / pipe
@@ -285,6 +290,7 @@ class WSRecoveryClient(IPCRecoveryClient):
             workspace_path=workspace_path,
             on_status_change=on_status_change,
             min_protocol_version=min_protocol_version,
+            presentation=presentation,
         )
         self._url = url
         self._token = token
@@ -307,6 +313,7 @@ class WSRecoveryClient(IPCRecoveryClient):
             min_protocol_version=self._min_protocol_version,
             ssl=self._ssl,
             ca=self._ca,
+            presentation=self._presentation,
         )
 
     @classmethod
@@ -330,6 +337,7 @@ class WSRecoveryClient(IPCRecoveryClient):
         min_protocol_version: Optional[str] = None,
         ssl: Any = None,
         ca: Optional[str] = None,
+        presentation: Optional[Any] = None,
         **_ignored: Any,
     ) -> Any:
         """Auto-reconnect WS analog of :meth:`IPCRecoveryClient.session`: the
@@ -357,6 +365,7 @@ class WSRecoveryClient(IPCRecoveryClient):
             min_protocol_version=min_protocol_version,
             ssl=ssl,
             ca=ca,
+            presentation=presentation,
         )
         create_kwargs = dict(
             profile=profile,
