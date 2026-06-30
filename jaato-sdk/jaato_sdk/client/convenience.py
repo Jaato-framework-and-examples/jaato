@@ -6,13 +6,20 @@ session contract —
 
 * :class:`IPCClient` and :class:`IPCRecoveryClient` — talk to a running daemon
   over IPC (the latter adds auto-reconnect);
+* :class:`WSClient` and :class:`WSRecoveryClient` — talk to a (typically
+  **remote**) daemon over WebSocket (``ws://`` / ``wss://``); the recovery
+  variant adds auto-reconnect, mirroring the IPC pair. Needs the
+  ``jaato-sdk[ws]`` extra;
 * ``jaato.InProcessClient`` — runs the runtime **embedded** in your own process,
   no daemon / runner / socket.
 
-The transport-agnostic ``jaato.session(mode="ipc"|"in_process", ...)`` entry
-picks one, so the same facade code runs across transports with the mode the
-only variable. (No WebSocket client backs the facade yet — Python WS access is
-raw frames today; a facade-compatible WS client would slot in as another mode.)
+The transport-agnostic ``jaato.session(mode="in_process"|"ipc"|"ws", ...)``
+entry picks one, so the same facade code runs across transports with the mode
+the only variable. The daemon transports (``ipc`` / ``ws``) also accept
+``recovery=True`` to return the auto-reconnect client, plus ``ssl=`` / ``ca=``
+on ``mode="ws"`` for self-signed / dev ``wss://`` certificates. The Python
+``WSClient`` / ``WSRecoveryClient`` back the WS mode directly — Python WS access
+is no longer raw frames.
 
 The SDK's low-level surface is event-loop primitives (``subscribe`` /
 ``send_message`` / ``events``).  The common path — open a session, ask, get

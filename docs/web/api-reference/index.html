@@ -152,8 +152,26 @@
             subclasses <code>IPCClient</code>, so the same facade-client API and
             the <code>Session</code> methods apply; construct via
             <code>jaato.session(mode="ws", url=…, token=…)</code> or
-            <code>WSClient.session(…)</code>. Needs the <code>jaato-sdk[ws]</code>
-            extra (<code>pip install 'jaato-sdk[ws]'</code>).
+            <code>WSClient.session(…)</code>. For a self-signed / dev
+            <code>wss://</code> cert, pass <code>ssl=</code> (an
+            <code>ssl.SSLContext</code>, or <code>True</code>/<code>False</code>)
+            or <code>ca=</code> (a CA-bundle path) — scoped per connection, never
+            <code>os.environ</code>. Needs the <code>jaato-sdk[ws]</code> extra
+            (<code>pip install 'jaato-sdk[ws]'</code>).
+          </p>
+
+          <h3><a href="ipc-recovery-client.html">WSRecoveryClient</a></h3>
+          <p>
+            WebSocket client with automatic connection recovery — the
+            <code>WSClient</code> counterpart to
+            <a href="ipc-recovery-client.html"><code>IPCRecoveryClient</code></a>,
+            offering identical reconnection, session reattachment, exponential
+            backoff, and <code>on_status_change</code> callbacks over
+            <code>ws://</code> / <code>wss://</code> (with the same
+            <code>ssl=</code> / <code>ca=</code> TLS knobs as <code>WSClient</code>).
+            Reach for it via <code>jaato.session(mode="ws", recovery=True, …)</code>
+            or <code>WSRecoveryClient.session(…)</code>. Needs the
+            <code>jaato-sdk[ws]</code> extra.
           </p>
 
           <h3><a href="jaato-client.html">InProcessClient</a></h3>

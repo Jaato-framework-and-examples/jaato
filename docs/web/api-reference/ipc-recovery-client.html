@@ -135,6 +135,20 @@
           </div>
 
           <div class="callout callout-info">
+            <div class="callout-title">Same recovery over WebSocket — <code>WSRecoveryClient</code></div>
+            For a <strong>remote</strong> daemon, <code>WSRecoveryClient</code>
+            offers identical recovery over <code>ws://</code> / <code>wss://</code>:
+            the same state machine, session reattachment, backoff, and
+            <code>on_status_change</code> callback, just on a WebSocket transport
+            (plus <code>ssl=</code> / <code>ca=</code> for self-signed
+            <code>wss://</code> TLS). Reach for it via
+            <code>jaato.session(mode="ws", recovery=True, …)</code> or
+            <code>WSRecoveryClient.session(…)</code>; it needs the
+            <code>jaato-sdk[ws]</code> extra. Everything documented below applies to
+            both clients.
+          </div>
+
+          <div class="callout callout-info">
             <div class="callout-title">Guide</div>
             For a walkthrough of connection recovery concepts, state transitions,
             and UI patterns, see the
@@ -454,7 +468,8 @@ print(client.is_closed)       # True</code></pre>
             &nbsp;&nbsp;<span class="param">profile</span>: <span class="type">Optional[Union[str, Dict]]</span> = <span class="type">None</span>,<br>
             &nbsp;&nbsp;<span class="param">agent</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
             &nbsp;&nbsp;<span class="param">agent_params</span>: <span class="type">Optional[Dict[str, str]]</span> = <span class="type">None</span>,<br>
-            &nbsp;&nbsp;<span class="param">cascade_driver_id</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            &nbsp;&nbsp;<span class="param">cascade_driver_id</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">timeout</span>: <span class="type">float</span> = <span class="type">60.0</span><br>
             ) -> <span class="type">Optional[str]</span>
           </div>
 
@@ -513,6 +528,19 @@ print(client.is_closed)       # True</code></pre>
                 across cascade stages. Pass the same UUID across every session of one
                 cascade; subagent sessions inherit automatically via the shared runner.
                 <code>None</code> (default) = standalone session, no slot reuse.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">timeout</span>
+              <span class="param-type">float</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Seconds to wait for the server's <code>SessionInfoEvent</code>
+                confirmation. Mirrors <code>IPCClient.create_session(timeout=…)</code>
+                so a plain&rarr;recovery swap is drop-in (forwarded to the inner
+                client). Default <code>60.0</code>. The recovery client's own
+                reconnect timing is governed separately (recovery config +
+                <code>connect(timeout=)</code>).
               </div>
             </li>
           </ul>

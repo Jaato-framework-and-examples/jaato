@@ -766,18 +766,116 @@ client = IPCRecoveryClient(
         </div>
       </section>
 
+      <!-- Python WebSocket Recovery -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="ws-recovery-client">Python WebSocket Recovery (<code>WSRecoveryClient</code>)</h2>
+          <p>
+            For a <strong>remote</strong> daemon over WebSocket, the Python SDK
+            ships <code>WSRecoveryClient</code> — a first-class,
+            <code>IPCRecoveryClient</code>-equivalent implementation. It is a
+            subclass of <code>WSClient</code> with the <em>same</em> recovery
+            machinery as the IPC client: the same six-state
+            <a href="#connection-states">connection state machine</a>, exponential
+            backoff with jitter, automatic session reattachment, and the
+            <code>on_status_change</code> callback. You get IPC-grade resilience
+            over <code>ws://</code> / <code>wss://</code> without dropping to raw
+            frames.
+          </p>
+          <p>
+            Through the facade, the same
+            <a href="../api-reference/ipc-client.html"><code>.session(...)</code> +
+            <code>ask</code>/<code>complete</code>/<code>stream</code></a> code runs
+            over WS recovery — either via <code>WSRecoveryClient.session(...)</code>
+            or the transport-agnostic
+            <code>jaato.session(mode="ws", recovery=True, ...)</code> flag. The
+            <code>recovery=True</code> flag works on both daemon transports
+            (<code>mode="ipc"</code> and <code>mode="ws"</code>); it raises
+            <code>ValueError</code> for <code>mode="in_process"</code>, which has no
+            daemon to reconnect to.
+          </p>
+
+          <h3 id="ws-recovery-tls">TLS for self-signed <code>wss://</code></h3>
+          <p>
+            For a development or internal <code>wss://</code> endpoint with a
+            self-signed certificate, pass <code>ssl=</code> (an
+            <code>ssl.SSLContext</code>, or <code>True</code>/<code>False</code>) or
+            <code>ca=</code> (a CA-bundle path) — accepted on
+            <code>WSClient</code> / <code>WSRecoveryClient</code> and on
+            <code>jaato.session(mode="ws", ca=...)</code>. A <code>ca</code> path is
+            loaded into a default verifying context; <code>ssl</code> wins if both
+            are set. These are scoped <strong>per connection</strong> — loaded into
+            the connection's <code>SSLContext</code>, never into
+            <code>os.environ</code> — so, unlike an <code>SSL_CERT_FILE</code> env
+            hack, they cannot leak into a subprocess-restarted daemon's outbound
+            HTTPS (the Python analog of Node's <code>NODE_EXTRA_CA_CERTS</code>).
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Needs the <code>jaato-sdk[ws]</code> extra</div>
+            The WS transport lazily imports the <code>websockets</code> package.
+            <code>WSRecoveryClient</code> <em>imports</em> without it, but
+            connecting raises <code>ImportError</code> with an install hint. Install
+            with <code>pip install 'jaato-sdk[ws]'</code>.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Minimal WS recovery client (facade)</div>
+          <div class="code-block">
+            <pre><code class="language-python">import asyncio
+import jaato
+
+async def main():
+    # Same facade as IPCRecoveryClient, over WebSocket. Reconnection,
+    # session creation, and reattachment are handled for you; ask()
+    # survives a daemon restart or a dropped socket.
+    async with jaato.session(
+        mode="ws",
+        url="wss://host:8080",
+        token="...",                 # bearer token (or ?token= in the url)
+        recovery=True,               # → WSRecoveryClient
+        ca="/etc/jaato/dev-ca.pem",  # trust a self-signed wss:// cert
+        on_status_change=lambda st: print(st.state),  # RECONNECTING / CONNECTED
+    ) as s:
+        print(await s.ask("Long task..."))
+
+asyncio.run(main())</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Constructing the client directly</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk import WSRecoveryClient
+from jaato_sdk.events import ClientType
+
+client = WSRecoveryClient(
+    url="wss://host:8080",
+    token="...",
+    client_type=ClientType.API,
+    ca="/etc/jaato/dev-ca.pem",   # or ssl=&lt;ssl.SSLContext&gt;
+    on_status_change=lambda st: print(st.state),
+)
+# Same connection-lifecycle API as IPCRecoveryClient:
+# connect() / create_session() / send_message() / events().</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- Web Clients (WebSocket) -->
       <section class="two-panel">
         <div class="panel-explanation">
-          <h2 id="websocket">Web Clients (WebSocket)</h2>
+          <h2 id="websocket">Browser &amp; Raw-Frame Clients (WebSocket)</h2>
           <p>
-            For WebSocket clients (web UIs, remote connections), the same recovery
-            concepts apply, but reattachment has one extra step that the IPC
-            transport does not. Each WebSocket connection is given its <em>own</em>
-            workspace, so a new connection cannot see a session created on a
-            previous connection until it selects that session's workspace first.
-            The reconnect sequence is <code>session.list</code> &rarr;
-            <code>workspace.select</code> &rarr; <code>session.attach</code>.
+            Python clients should reach for <code>WSRecoveryClient</code> above.
+            This section documents the underlying <strong>raw WS frame</strong>
+            protocol for browsers / JavaScript and other non-Python clients (the
+            TypeScript <code>@jaato/sdk</code> <code>recovery: {}</code> wraps these
+            frames for you). The same recovery concepts apply, but reattachment has
+            one extra step that the IPC transport does not. Each WebSocket
+            connection is given its <em>own</em> workspace, so a new connection
+            cannot see a session created on a previous connection until it selects
+            that session's workspace first. The reconnect sequence is
+            <code>session.list</code> &rarr; <code>workspace.select</code> &rarr;
+            <code>session.attach</code>.
           </p>
 
           <h3>Key Patterns</h3>
