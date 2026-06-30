@@ -160,6 +160,7 @@ def _new_client_archetype(args, archetype: str) -> int:
         else:
             subs["__CLIENT_CLASS__"] = "WSClient"
         client_class = subs["__CLIENT_CLASS__"]
+        subs["__CLIENT_IMPORT__"] = f"from jaato_sdk import {client_class}, ClientType, EventType"
         # --ca: CA-bundle path for wss:// with a self-signed / dev cert, threaded
         # as the SCOPED ca= knob — loaded into a per-connection SSLContext, NEVER
         # os.environ (unlike an SSL_CERT_FILE env hack, which leaks into a
@@ -175,6 +176,33 @@ def _new_client_archetype(args, archetype: str) -> int:
             "        client_type=ClientType.API,   # load-bearing: keeps signal_completion\n"
             "        env_file=ENV_FILE,            # never None (handshake crashes on None)\n"
             f"        workspace_path=WORKSPACE,{ca_arg}{on_status_arg}\n"
+            "    )"
+        )
+    elif transport == "in_process":
+        # in_process (embedded) is facade-native — the InProcessClient runs the
+        # runtime + session IN-PROCESS, no daemon / socket / url. It shares the
+        # low-level client contract (connect/create_session/send_message/
+        # subscribe/disconnect), so it rides the same template — only the import
+        # (from `jaato`, not `jaato_sdk`) and the constructor differ. There is no
+        # recovery client: nothing to reconnect to (the session lives in THIS
+        # process), so --recoverable is rejected, mirroring the facade's
+        # session(mode="in_process", recovery=True) -> ValueError.
+        if getattr(args, "recoverable", False):
+            print("new --transport in_process does not support --recoverable "
+                  "(no daemon to reconnect to — the session is embedded)")
+            return 2
+        subs["__CLIENT_CLASS__"] = "InProcessClient"
+        subs["__CLIENT_IMPORT__"] = (
+            "from jaato import InProcessClient\n"
+            "from jaato_sdk import EventType"
+        )
+        subs["__CONN_CONSTANTS__"] = ""  # no socket/url — model/provider/workspace/env are in the header
+        subs["__NEW_CLIENT_CALL__"] = (
+            "InProcessClient(\n"
+            "        model=MODEL,\n"
+            "        provider=PROVIDER,\n"
+            "        env_file=ENV_FILE,            # embedded runtime reads the workspace .env\n"
+            "        workspace_path=WORKSPACE,     # embedded session workspace (no daemon, no socket)\n"
             "    )"
         )
     else:  # ipc (default)
@@ -193,6 +221,7 @@ def _new_client_archetype(args, archetype: str) -> int:
         else:
             subs["__CLIENT_CLASS__"] = "IPCClient"
         client_class = subs["__CLIENT_CLASS__"]
+        subs["__CLIENT_IMPORT__"] = f"from jaato_sdk import {client_class}, ClientType, EventType"
         subs["__CONN_CONSTANTS__"] = f'SOCKET = "{socket}"'
         subs["__NEW_CLIENT_CALL__"] = (
             f"{client_class}(\n"
@@ -203,6 +232,26 @@ def _new_client_archetype(args, archetype: str) -> int:
             f"        workspace_path=WORKSPACE,{on_status_arg}\n"
             "    )"
         )
+
+    # Provenance: the FULL resolved invocation that produced this file, stamped
+    # into the docstring so it's copy-paste reproducible (not just the bare
+    # archetype). Resolved flags only; --token is omitted (it's a secret).
+    prov = [f"jaato-scaffold new {archetype}",
+            f"--workspace {args.workspace}",
+            f"--provider {provider}",
+            f"--model {args.model}",
+            f"--transport {transport}"]
+    if getattr(args, "recoverable", False):
+        prov.append("--recoverable")
+    if getattr(args, "url", None):
+        prov.append(f"--url {args.url}")
+    if getattr(args, "ca", None):
+        prov.append(f"--ca {args.ca}")
+    if getattr(args, "set", None):
+        prov.append(f"--set {args.set}")
+    if getattr(args, "agents", None):
+        prov.append(f"--agents {args.agents}")
+    subs["__PROVENANCE__"] = " ".join(prov)
 
     def _fill(text: str) -> str:
         for k, v in subs.items():
