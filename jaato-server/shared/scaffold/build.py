@@ -160,14 +160,21 @@ def _new_client_archetype(args, archetype: str) -> int:
         else:
             subs["__CLIENT_CLASS__"] = "WSClient"
         client_class = subs["__CLIENT_CLASS__"]
-        subs["__CONN_CONSTANTS__"] = f'URL = "{url}"\nTOKEN = "{token}"'
+        # --ca: CA-bundle path for wss:// with a self-signed / dev cert, threaded
+        # as the SCOPED ca= knob — loaded into a per-connection SSLContext, NEVER
+        # os.environ (unlike an SSL_CERT_FILE env hack, which leaks into a
+        # subprocess-restarted daemon's OUTBOUND HTTPS and breaks it).
+        ca = getattr(args, "ca", None)
+        ca_const = f'\nCA = "{ca}"' if ca else ""
+        ca_arg = "\n        ca=CA," if ca else ""
+        subs["__CONN_CONSTANTS__"] = f'URL = "{url}"\nTOKEN = "{token}"{ca_const}'
         subs["__NEW_CLIENT_CALL__"] = (
             f"{client_class}(\n"
             "        URL,\n"
             "        token=TOKEN or None,\n"
             "        client_type=ClientType.API,   # load-bearing: keeps signal_completion\n"
             "        env_file=ENV_FILE,            # never None (handshake crashes on None)\n"
-            f"        workspace_path=WORKSPACE,{on_status_arg}\n"
+            f"        workspace_path=WORKSPACE,{ca_arg}{on_status_arg}\n"
             "    )"
         )
     else:  # ipc (default)

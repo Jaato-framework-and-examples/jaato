@@ -167,6 +167,8 @@ def main(argv=None) -> int:
                          "facade-native — see `jaato-scaffold explain transports`.")
     pn.add_argument("--url", help="WebSocket URL for --transport ws (ws:// or wss://)")
     pn.add_argument("--token", help="bearer token for --transport ws (optional)")
+    pn.add_argument("--ca", help="CA-bundle path for --transport ws wss:// with a "
+                                 "self-signed / dev cert (scoped ca=, never os.environ)")
     pn.add_argument("--json", action="store_true")
     pn.set_defaults(func=_cmd_new)
 
