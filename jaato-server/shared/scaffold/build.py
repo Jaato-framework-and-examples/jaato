@@ -138,24 +138,36 @@ def _new_client_archetype(args, archetype: str) -> int:
     if transport == "ws" and not getattr(args, "url", None):
         print("new --transport ws requires --url (ws:// or wss://)")
         return 2
-    if transport == "ws" and getattr(args, "recoverable", False):
-        print("new --recoverable applies to --transport ipc only "
-              "(IPCRecoveryClient); ws has no recovery client")
-        return 2
     subs["__ON_STATUS_DEF__"] = ""
     on_status_arg = ""
     if transport == "ws":
         url = getattr(args, "url", None)
         token = getattr(args, "token", None) or ""
-        subs["__CLIENT_CLASS__"] = "WSClient"
+        # --recoverable: emit WSRecoveryClient (auto-reconnect over WS, survives
+        # daemon restarts / dropped WebSockets) instead of the plain WSClient.
+        # Mirrors the IPC branch — WS now has a recovery client at parity
+        # (reattaches via the same transport-agnostic server replay).
+        if getattr(args, "recoverable", False):
+            subs["__CLIENT_CLASS__"] = "WSRecoveryClient"
+            subs["__ON_STATUS_DEF__"] = (
+                "def _on_status(status):\n"
+                "    # Reconnection lifecycle — WSRecoveryClient auto-reconnects and\n"
+                "    # survives daemon restarts / dropped WebSockets;\n"
+                "    # IncompatibleServerError is treated as permanent.\n"
+                "    print(f\"[connection] {getattr(status, 'state', status)}\")\n\n\n"
+            )
+            on_status_arg = "\n        on_status_change=_on_status,"
+        else:
+            subs["__CLIENT_CLASS__"] = "WSClient"
+        client_class = subs["__CLIENT_CLASS__"]
         subs["__CONN_CONSTANTS__"] = f'URL = "{url}"\nTOKEN = "{token}"'
         subs["__NEW_CLIENT_CALL__"] = (
-            "WSClient(\n"
+            f"{client_class}(\n"
             "        URL,\n"
             "        token=TOKEN or None,\n"
             "        client_type=ClientType.API,   # load-bearing: keeps signal_completion\n"
             "        env_file=ENV_FILE,            # never None (handshake crashes on None)\n"
-            "        workspace_path=WORKSPACE,\n"
+            f"        workspace_path=WORKSPACE,{on_status_arg}\n"
             "    )"
         )
     else:  # ipc (default)
