@@ -6,6 +6,7 @@ validated knowledge or promotes them to reference entries.
 """
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -79,6 +80,11 @@ class MemoryPlugin(RunnerForwardingMixin):
         self._indexer: Optional[MemoryIndexer] = None
         self._global_storage: Optional[MemoryStorage] = None
         self._global_indexer: Optional[MemoryIndexer] = None
+        # Deployment write-side gate: which memory scopes the model may store.
+        # Default permissive (all valid scopes); restrict per-deployment via the
+        # ``allowed_scopes`` config (e.g. ``["project"]`` keeps a deployment off
+        # the HOME/global tier entirely). Resolved from config in initialize().
+        self._allowed_scopes: frozenset = VALID_SCOPES
         self._agent_name: Optional[str] = None
         self._session_id: Optional[str] = None
         # Server 0.6.168+: stashed by ``set_plugin_registry`` so
@@ -96,6 +102,34 @@ class MemoryPlugin(RunnerForwardingMixin):
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         _trace_write("MEMORY", msg)
+
+    @staticmethod
+    def _resolve_allowed_scopes(raw: Optional[List[str]]) -> frozenset:
+        """Resolve the ``allowed_scopes`` write-side gate from config.
+
+        Default (key absent / ``None``) is permissive — all ``VALID_SCOPES``.
+        When set, it is the deployment policy for which scopes ``store_memory``
+        may write (e.g. ``["project"]`` keeps a deployment off the HOME/global
+        tier entirely). The parse is deterministic and LOUD, never a silent
+        fallback: unknown scope strings are dropped with a WARNING, and an empty
+        resolved set (all entries invalid, or an explicit ``[]``) is honored —
+        it rejects every write — but logged at WARNING so a typo isn't mistaken
+        for "allow all".
+        """
+        if raw is None:
+            return VALID_SCOPES
+        requested = [str(s).strip().lower() for s in raw]
+        unknown = [s for s in requested if s not in VALID_SCOPES]
+        if unknown:
+            logging.getLogger(__name__).warning(
+                "memory: allowed_scopes contains unknown scope(s) %s "
+                "(valid: %s) — ignoring them", unknown, sorted(VALID_SCOPES))
+        resolved = frozenset(s for s in requested if s in VALID_SCOPES)
+        if not resolved:
+            logging.getLogger(__name__).warning(
+                "memory: allowed_scopes=%r resolved to EMPTY — every "
+                "store_memory write will be rejected", raw)
+        return resolved
 
     def _get_session_id(self) -> Optional[str]:
         """Return the current session's daemon ID, per-execution.
@@ -227,6 +261,8 @@ class MemoryPlugin(RunnerForwardingMixin):
         """
         config = config or {}
         self._agent_name = config.get("agent_name")
+        self._allowed_scopes = self._resolve_allowed_scopes(config.get("allowed_scopes"))
+        self._trace(f"initialize: allowed_scopes={sorted(self._allowed_scopes)}")
         # Server 0.6.168+ (real Bug B-class fix): read session_id
         # from config.  The registry's _augment_plugin_config
         # (registry.py:1337-1386) injects session_id via setdefault
@@ -350,6 +386,17 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "type": "string",
                     "default": ".jaato/memories.jsonl",
                     "description": "Path to JSONL memory storage file",
+                },
+                "allowed_scopes": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(VALID_SCOPES)},
+                    "default": sorted(VALID_SCOPES),
+                    "description": (
+                        "Write-side gate: which memory scopes the model may "
+                        "store. Default permissive (all). Set e.g. [\"project\"] "
+                        "to keep a deployment off the HOME/global tier entirely; "
+                        "a disallowed scope is hard-rejected back to the model."
+                    ),
                 },
             },
         }
@@ -999,6 +1046,28 @@ class MemoryPlugin(RunnerForwardingMixin):
         description = args.get("description", "")
         tags = args.get("tags", [])
         self._trace(f"store_memory: description={description!r}, tags={tags}")
+
+        # Validate + normalize scope, then apply the deployment write-side gate
+        # (allowed_scopes) FIRST — before per-request content checks. A disallowed
+        # scope is HARD-REJECTED back to the model (so it re-stores with an
+        # allowed scope) rather than silently down-scoped (which would hide the
+        # policy and make the model believe it stored a wider scope than it did).
+        # A deployment with allowed_scopes=["project"] thus never writes to the
+        # HOME/global tier at all.
+        scope = args.get("scope", SCOPE_PROJECT)
+        if scope not in VALID_SCOPES:
+            scope = SCOPE_PROJECT
+        if scope not in self._allowed_scopes:
+            return {
+                "status": "rejected",
+                "error": (
+                    f"scope '{scope}' is not allowed for this deployment "
+                    f"(allowed scopes: {sorted(self._allowed_scopes)}). "
+                    f"Re-store this memory with an allowed scope."
+                ),
+                "allowed_scopes": sorted(self._allowed_scopes),
+            }
+
         if not self._storage or not self._indexer:
             return {
                 "status": "error",
@@ -1027,11 +1096,6 @@ class MemoryPlugin(RunnerForwardingMixin):
             confidence = max(0.0, min(1.0, float(confidence)))
         except (TypeError, ValueError):
             confidence = 0.5
-
-        # Validate scope
-        scope = args.get("scope", SCOPE_PROJECT)
-        if scope not in VALID_SCOPES:
-            scope = SCOPE_PROJECT
 
         # Create memory object — always starts as raw
         memory = Memory(
