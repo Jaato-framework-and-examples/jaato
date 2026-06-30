@@ -127,23 +127,75 @@ def _new_client_archetype(args, archetype: str) -> int:
         "__KEY_ENV__": f"JAATO_{provider.upper()}_API_KEY",
         "__CASCADE_ID__": "REPLACE_WITH_THE_CASCADE_DRIVER_ID",
     }
-    # --recoverable: emit IPCRecoveryClient (auto-reconnect, survives daemon
-    # restarts) instead of the plain IPCClient.  Applies to every archetype —
-    # the long-lived ones (cascade/observer) benefit most.
-    if getattr(args, "recoverable", False):
-        subs["__CLIENT_CLASS__"] = "IPCRecoveryClient"
-        subs["__ON_STATUS_DEF__"] = (
-            "def _on_status(status):\n"
-            "    # Reconnection lifecycle — IPCRecoveryClient auto-reconnects and\n"
-            "    # survives daemon restarts (a per-run jaato-server --stop +\n"
-            "    # autostart); IncompatibleServerError is treated as permanent.\n"
-            "    print(f\"[connection] {getattr(status, 'state', status)}\")\n\n\n"
+    # --transport selects the client. ipc (default) + ws are daemon clients that
+    # share the low-level template (WSClient is IPCClient with the transport
+    # swapped, same facade-client API); the connection constants + the
+    # _new_client() construction differ. in_process (embedded) is facade-native
+    # — `jaato.session(mode="in_process")` — and is documented by
+    # `jaato-scaffold explain transports`; scaffold it from the README facade
+    # snippet rather than this low-level client template.
+    transport = getattr(args, "transport", None) or "ipc"
+    if transport == "ws" and not getattr(args, "url", None):
+        print("new --transport ws requires --url (ws:// or wss://)")
+        return 2
+    subs["__ON_STATUS_DEF__"] = ""
+    on_status_arg = ""
+    if transport == "ws":
+        url = getattr(args, "url", None)
+        token = getattr(args, "token", None) or ""
+        # --recoverable: emit WSRecoveryClient (auto-reconnect over WS, survives
+        # daemon restarts / dropped WebSockets) instead of the plain WSClient.
+        # Mirrors the IPC branch — WS now has a recovery client at parity
+        # (reattaches via the same transport-agnostic server replay).
+        if getattr(args, "recoverable", False):
+            subs["__CLIENT_CLASS__"] = "WSRecoveryClient"
+            subs["__ON_STATUS_DEF__"] = (
+                "def _on_status(status):\n"
+                "    # Reconnection lifecycle — WSRecoveryClient auto-reconnects and\n"
+                "    # survives daemon restarts / dropped WebSockets;\n"
+                "    # IncompatibleServerError is treated as permanent.\n"
+                "    print(f\"[connection] {getattr(status, 'state', status)}\")\n\n\n"
+            )
+            on_status_arg = "\n        on_status_change=_on_status,"
+        else:
+            subs["__CLIENT_CLASS__"] = "WSClient"
+        client_class = subs["__CLIENT_CLASS__"]
+        subs["__CONN_CONSTANTS__"] = f'URL = "{url}"\nTOKEN = "{token}"'
+        subs["__NEW_CLIENT_CALL__"] = (
+            f"{client_class}(\n"
+            "        URL,\n"
+            "        token=TOKEN or None,\n"
+            "        client_type=ClientType.API,   # load-bearing: keeps signal_completion\n"
+            "        env_file=ENV_FILE,            # never None (handshake crashes on None)\n"
+            f"        workspace_path=WORKSPACE,{on_status_arg}\n"
+            "    )"
         )
-        subs["__ON_STATUS_ARG__"] = "\n        on_status_change=_on_status,"
-    else:
-        subs["__CLIENT_CLASS__"] = "IPCClient"
-        subs["__ON_STATUS_DEF__"] = ""
-        subs["__ON_STATUS_ARG__"] = ""
+    else:  # ipc (default)
+        # --recoverable: emit IPCRecoveryClient (auto-reconnect, survives daemon
+        # restarts) instead of the plain IPCClient.
+        if getattr(args, "recoverable", False):
+            subs["__CLIENT_CLASS__"] = "IPCRecoveryClient"
+            subs["__ON_STATUS_DEF__"] = (
+                "def _on_status(status):\n"
+                "    # Reconnection lifecycle — IPCRecoveryClient auto-reconnects and\n"
+                "    # survives daemon restarts (a per-run jaato-server --stop +\n"
+                "    # autostart); IncompatibleServerError is treated as permanent.\n"
+                "    print(f\"[connection] {getattr(status, 'state', status)}\")\n\n\n"
+            )
+            on_status_arg = "\n        on_status_change=_on_status,"
+        else:
+            subs["__CLIENT_CLASS__"] = "IPCClient"
+        client_class = subs["__CLIENT_CLASS__"]
+        subs["__CONN_CONSTANTS__"] = f'SOCKET = "{socket}"'
+        subs["__NEW_CLIENT_CALL__"] = (
+            f"{client_class}(\n"
+            "        SOCKET,\n"
+            "        client_type=ClientType.API,   # load-bearing: keeps signal_completion\n"
+            "        auto_start=True,\n"
+            "        env_file=ENV_FILE,            # never None (handshake crashes on None)\n"
+            f"        workspace_path=WORKSPACE,{on_status_arg}\n"
+            "    )"
+        )
 
     def _fill(text: str) -> str:
         for k, v in subs.items():

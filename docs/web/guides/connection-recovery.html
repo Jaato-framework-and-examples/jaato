@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -60,6 +61,7 @@
         <ul class="sidebar-nav">
           <li><a href="../api-reference/index.html">Overview</a></li>
           <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/ipc-client.html">IPCClient</a></li>
           <li><a href="../api-reference/ipc-recovery-client.html">IPCRecoveryClient</a></li>
           <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
           <li><a href="../api-reference/types.html">Types</a></li>
@@ -185,15 +187,25 @@
         <div class="panel-explanation">
           <h2 id="quick-start">Quick Start</h2>
           <p>
-            Replace <code>IPCClient</code> with <code>IPCRecoveryClient</code> to get
-            automatic reconnection. The API is the same—you just get resilience for free.
+            Swap <code>IPCClient</code> for <code>IPCRecoveryClient</code> to get
+            automatic reconnection — the same
+            <a href="../api-reference/ipc-client.html"><code>.session(...)</code> +
+            <code>ask</code>/<code>complete</code>/<code>stream</code></a> facade,
+            now resilient across daemon restarts. Pass
+            <code>on_status_change</code> to observe the connection state.
           </p>
 
           <h3>Key Differences from IPCClient</h3>
           <ul>
-            <li><code>events()</code> automatically resumes after reconnection</li>
-            <li>Operations raise <code>ReconnectingError</code> during recovery instead of crashing</li>
-            <li>Session reattachment happens automatically after reconnect</li>
+            <li>Reconnection and session reattachment happen automatically after a
+              drop</li>
+            <li>Operations raise <code>ReconnectingError</code> during recovery
+              instead of crashing</li>
+            <li>The facade dispatches events for you — no manual
+              <code>events()</code> loop is needed for
+              <code>ask</code>/<code>complete</code>/<code>stream</code> (drop to
+              the low-level <code>events()</code> API, shown further down, only for
+              custom event handling)</li>
           </ul>
 
           <div class="callout callout-info">
@@ -204,40 +216,35 @@
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Minimal recovery client</div>
+          <div class="code-label">Minimal recovery client (facade)</div>
           <div class="code-block">
             <pre><code class="language-python">import asyncio
-from jaato_sdk.client import IPCRecoveryClient
-from jaato_sdk.events import ClientType
+from jaato_sdk import IPCRecoveryClient
 
 async def main():
-    client = IPCRecoveryClient(
-        socket_path="/tmp/jaato.sock",
-        client_type=ClientType.TERMINAL,   # required
-        on_status_change=on_status,
-    )
-
-    await client.connect()
-
-    # Create a session and track it for recovery
-    # Optionally pass profile= to use an agent profile
-    session_id = await client.create_session(
-        "my-session", profile="researcher-claude"
-    )
-    client.set_session_id(session_id)
-
-    # Use normally — recovery is automatic
-    await client.send_message("Hello!")
-
-    async for event in client.events():
-        print(event)
-
-    await client.close()
-
-def on_status(status):
-    print(f"Connection: {status.state.value}")
+    # Same facade as IPCClient.session, on the auto-reconnect client.
+    # Connect, session creation, and reattachment are handled for you;
+    # ask() survives a daemon restart. Credentials resolve from the
+    # profile (e.g. a pass:// knob), never an env var.
+    async with IPCRecoveryClient.session(
+        profile={"model": "...", "provider": "...", "plugins": []},
+        on_status_change=lambda st: print(st.state),  # RECONNECTING / CONNECTED
+    ) as s:
+        print(await s.ask("Long task..."))
 
 asyncio.run(main())</code></pre>
+          </div>
+
+          <div class="callout callout-info" style="margin-top: 16px;">
+            <div class="callout-title">Need the raw event stream?</div>
+            The facade covers the common case. For custom event handling you can
+            still use the low-level client directly
+            (<code>connect()</code> / <code>create_session()</code> /
+            <code>async for event in client.events()</code>); those methods are
+            documented in the sections below and on the
+            <a href="../api-reference/ipc-recovery-client.html">IPCRecoveryClient
+            API</a> page. With the facade, iterating <code>events()</code> yourself
+            is optional.
           </div>
         </div>
       </section>
@@ -765,16 +772,29 @@ client = IPCRecoveryClient(
           <h2 id="websocket">Web Clients (WebSocket)</h2>
           <p>
             For WebSocket clients (web UIs, remote connections), the same recovery
-            concepts apply but you'll implement them in your client language.
-            The server-side WebSocket transport supports the same session
-            reattachment protocol.
+            concepts apply, but reattachment has one extra step that the IPC
+            transport does not. Each WebSocket connection is given its <em>own</em>
+            workspace, so a new connection cannot see a session created on a
+            previous connection until it selects that session's workspace first.
+            The reconnect sequence is <code>session.list</code> &rarr;
+            <code>workspace.select</code> &rarr; <code>session.attach</code>.
           </p>
 
           <h3>Key Patterns</h3>
           <ul>
-            <li>Use a reconnecting WebSocket library</li>
-            <li>Track the session ID client-side</li>
-            <li>Send <code>session.attach</code> after reconnecting</li>
+            <li>Use a reconnecting WebSocket library (or your own backoff loop)</li>
+            <li>Wait for the unprompted <code>{"type":"connected"}</code> greeting
+              before sending any command</li>
+            <li>Track the session ID <em>and its <code>workspace_path</code></em>
+              (read from <code>session.list</code>) client-side</li>
+            <li>Reattach with <code>session.list</code> &rarr;
+              <code>workspace.select</code> &rarr; <code>session.attach</code> —
+              <code>session.attach</code> is a <code>command.execute</code> with the
+              session ID as the first positional argument</li>
+            <li>The cold restore is asynchronous: a send issued while it settles can
+              return a <em>recoverable</em> <code>SessionError</code>
+              (<code>"Session not found"</code>) — reattach and resend until output
+              arrives</li>
             <li>Handle the ping/pong keepalive mechanism</li>
           </ul>
 
@@ -790,53 +810,81 @@ client = IPCRecoveryClient(
             Omitting or sending an invalid token causes the server to close the
             connection immediately with WS close code <strong>1008</strong>
             (Policy Violation). The default token path is
-            <code>~/.jaato/ws.token</code>; it is auto-generated on first server
+            <code>$HOME/.jaato/ws.token</code>; it is auto-generated on first server
             start if not provided via <code>--ws-token</code> /
             <code>--ws-token-file</code>.
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Why the opaque "Session not found"</div>
+            Attaching a session you have not selected the workspace for returns a
+            bare <code>"Session not found"</code> rather than naming where the
+            session lives. This is deliberate: workspace isolation is a security
+            boundary, and the server will not confirm that a session exists in a
+            workspace the connection has not selected — otherwise the error could
+            be used to enumerate sessions across workspaces. <code>workspace.select</code>
+            is the legitimate way to re-target a workspace you own.
           </div>
         </div>
         <div class="panel-code">
           <div class="code-label">WebSocket reconnection (TypeScript)</div>
           <div class="code-block">
-            <pre><code class="language-typescript">// TypeScript example for web clients
+            <pre><code class="language-typescript">// Raw WebSocket reconnect (no SDK). With @jaato/sdk, `recovery: {}` does all of
+// this for you; this shows the underlying frames.
 
 class JaatoWebClient {
   private ws: WebSocket | null = null;
   private sessionId: string | null = null;
+  private workspacePath: string | null = null; // the session's own workspace
   private reconnectAttempt = 0;
   private maxAttempts = 10;
 
+  // url carries the bearer token: wss://&lt;host&gt;/?token=&lt;token&gt;
+  // For a self-signed dev wss://, trust the dev CA out-of-band
+  // (e.g. NODE_EXTRA_CA_CERTS), never by disabling verification.
   connect(url: string) {
     this.ws = new WebSocket(url);
 
-    this.ws.onopen = () => {
-      this.reconnectAttempt = 0;
-      // Reattach session if we had one
-      if (this.sessionId) {
-        this.send({
-          type: "session.attach",
-          session_id: this.sessionId,
-        });
+    this.ws.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      switch (frame.type) {
+        case "connected": // unprompted greeting — only now is it safe to send
+          this.reconnectAttempt = 0;
+          if (this.sessionId) this.reattach();
+          break;
+        case "session.list": // find the session's workspace, then select + attach
+          this.workspacePath =
+            frame.sessions.find((s) =&gt; s.id === this.sessionId)?.workspace_path;
+          this.send({ type: "workspace.select", name: this.workspacePath });
+          this.send({ type: "command.execute",
+                      command: "session.attach", args: [this.sessionId] });
+          break;
+        case "error": // recoverable "Session not found" while the ~15s cold
+          if (frame.recoverable) this.reattach(); // restore settles — resend
+          break;
       }
     };
 
-    this.ws.onclose = () => {
-      this.scheduleReconnect(url);
-    };
+    this.ws.onclose = () =&gt; this.scheduleReconnect(url);
+  }
+
+  // A fresh connection gets its own workspace, so the session created on an
+  // earlier connection isn't reachable until we select its workspace. List
+  // sessions to find its workspace_path; the handler above does select + attach.
+  private reattach() {
+    this.send({ type: "command.execute", command: "session.list", args: [] });
   }
 
   private scheduleReconnect(url: string) {
-    if (this.reconnectAttempt >= this.maxAttempts) {
-      return; // Give up
-    }
+    if (this.reconnectAttempt &gt;= this.maxAttempts) return; // give up
 
-    const delay = Math.min(
-      60_000,
-      1000 * Math.pow(2, this.reconnectAttempt)
-    );
+    const delay = Math.min(60_000, 1000 * Math.pow(2, this.reconnectAttempt));
     this.reconnectAttempt++;
+    setTimeout(() =&gt; this.connect(url), delay);
+  }
 
-    setTimeout(() => this.connect(url), delay);
+  private send(frame: unknown) {
+    this.ws?.send(JSON.stringify(frame));
   }
 }</code></pre>
           </div>

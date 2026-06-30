@@ -528,3 +528,49 @@ class TestJaatoRuntimeGetSystemInstructions:
         instructions = runtime.get_system_instructions(additional="Be concise.")
         assert "Be concise." in instructions
         assert "Be helpful." in instructions
+
+
+class TestCreateProviderUnresolvedSecret:
+    """create_provider fails loud on an unresolved secret-URI api_key.
+
+    Multi-cause cascade-of-bugs sibling: the nebius regression was a
+    ``pass://`` api_key passed through literally (no resolver registered — the
+    providing plugin wasn't installed) and sent to the provider as the literal
+    credential → a confusing upstream 401.  ``_resolve_secret_uri`` stays
+    lenient (so service_connector keeps its graceful credential-missing
+    reporting); the strict refusal lives at the provider boundary.
+    """
+
+    @patch('shared.jaato_runtime.load_provider')
+    def test_rejects_unresolved_secret_uri_api_key(self, mock_load_provider):
+        from ..plugins.subagent.config import SecretResolutionError
+
+        runtime = JaatoRuntime(provider_name="nebius")
+        runtime.connect("p", "us-central1")
+
+        with pytest.raises(SecretResolutionError, match="unresolved secret"):
+            runtime.create_provider(
+                model="some-model",
+                provider_name="nebius",
+                plugin_configs={
+                    "nebius": {"api_key": "pass://jaato/nebius/api-key"},
+                },
+            )
+        # Refused BEFORE constructing/connecting the provider.
+        mock_load_provider.assert_not_called()
+
+    @patch('shared.jaato_runtime.load_provider')
+    def test_allows_plain_string_api_key(self, mock_load_provider):
+        """A normal (resolved) api_key is a plain string — not a secret URI —
+        so the boundary check is a no-op and provider construction proceeds."""
+        mock_load_provider.return_value = MagicMock()
+
+        runtime = JaatoRuntime(provider_name="nebius")
+        runtime.connect("p", "us-central1")
+
+        runtime.create_provider(
+            model="some-model",
+            provider_name="nebius",
+            plugin_configs={"nebius": {"api_key": "nbk-a-real-looking-key"}},
+        )
+        mock_load_provider.assert_called_once()

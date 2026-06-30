@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -62,6 +63,7 @@
           <li><a href="jaato-client.html">JaatoClient</a></li>
           <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
           <li><a href="jaato-session.html">JaatoSession</a></li>
+          <li><a href="ipc-client.html">IPCClient</a></li>
           <li><a href="ipc-recovery-client.html" class="active">IPCRecoveryClient</a></li>
           <li><a href="plugin-registry.html">PluginRegistry</a></li>
           <li><a href="tool-executor.html">ToolExecutor</a></li>
@@ -118,7 +120,12 @@
             An IPC client with automatic connection recovery. Wraps
             <code>IPCClient</code> to provide automatic reconnection when the
             server becomes unavailable, with session reattachment, exponential
-            backoff, and status callbacks for UI updates.
+            backoff, and status callbacks for UI updates. Like
+            <a href="ipc-client.html"><code>IPCClient</code></a>, it exposes the
+            <code>.session(...)</code> +
+            <code>ask</code>/<code>complete</code>/<code>stream</code> facade
+            (recommended); the methods documented below are the low-level building
+            blocks the facade uses.
           </p>
 
           <div class="method-signature">
@@ -135,38 +142,30 @@
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Quick example</div>
+          <div class="code-label">Quick example (facade)</div>
           <div class="code-block">
             <pre><code class="language-python">import asyncio
-from jaato_sdk.client import IPCRecoveryClient, ConnectionState
-from jaato_sdk.client.recovery import ConnectionStatus
-
-def on_status(status: ConnectionStatus):
-    if status.state == ConnectionState.RECONNECTING:
-        print(f"Reconnecting... attempt "
-              f"{status.attempt}/{status.max_attempts}")
+from jaato_sdk import IPCRecoveryClient
 
 async def main():
-    client = IPCRecoveryClient(
-        socket_path="/tmp/jaato.sock",
-        client_type=ClientType.TERMINAL,
-        on_status_change=on_status,
-    )
-    await client.connect()
-
-    # Create session with an agent profile
-    session_id = await client.create_session(
-        "work", profile="researcher-claude"
-    )
-    client.set_session_id(session_id)
-
-    await client.send_message("Hello!")
-    async for event in client.events():
-        handle_event(event)
-
-    await client.close()
+    # The .session() facade + ask/complete/stream, with auto-reconnect.
+    # Connection, session creation, and reattachment are handled for you.
+    async with IPCRecoveryClient.session(
+        profile={"model": "...", "provider": "...", "plugins": []},
+        on_status_change=lambda st: print(st.state),  # RECONNECTING / CONNECTED
+    ) as s:
+        print(await s.ask("Long task..."))
 
 asyncio.run(main())</code></pre>
+          </div>
+
+          <div class="callout callout-info" style="margin-top: 16px;">
+            <div class="callout-title">Low-level API</div>
+            The methods below (<code>connect()</code>, <code>create_session()</code>,
+            <code>send_message()</code>, <code>events()</code>, ...) are the building
+            blocks the facade is built on. Use them directly for custom event
+            handling; with the facade, iterating <code>events()</code> yourself is
+            optional.
           </div>
         </div>
       </section>

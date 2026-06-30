@@ -1136,6 +1136,34 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_try_drain_pending_user(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        """Atomically pop a pending high-priority (USER/PARENT/SYSTEM)
+        message for the daemon's post-turn drain (multi-turn deadlock fix).
+
+        See :meth:`JaatoSession.try_drain_pending_user`.  Returns the message
+        text to run as the next turn, or ``None`` when nothing is queued (or
+        a turn is already running runner-side).
+
+        Raises:
+            RunnerCallError on transport failure or runner-side exception.
+        """
+        result = await self._call_named(
+            "session.try_drain_pending_user",
+            {},
+            timeout=timeout,
+        )
+        return result.get("text")
+
+    def session_try_drain_pending_user_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        return self._run_threadsafe(
+            self.session_try_drain_pending_user(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_auth_info(
         self, *, timeout: Optional[float] = 5.0,
     ) -> str:

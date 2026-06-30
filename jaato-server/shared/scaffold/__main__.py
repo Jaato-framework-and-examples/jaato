@@ -157,8 +157,16 @@ def main(argv=None) -> int:
     pn.add_argument("--agents", help="comma-separated agent names for a set")
     pn.add_argument("--force", action="store_true", help="overwrite existing")
     pn.add_argument("--recoverable", action="store_true",
-                    help="emit IPCRecoveryClient (auto-reconnect, survives daemon "
-                         "restarts) instead of the plain IPCClient")
+                    help="emit the auto-reconnect client (IPCRecoveryClient for "
+                         "--transport ipc, WSRecoveryClient for ws) — survives "
+                         "daemon restarts — instead of the plain client")
+    pn.add_argument("--transport", choices=["ipc", "ws"], default="ipc",
+                    help="client transport: 'ipc' (local daemon over a Unix socket, "
+                         "default) or 'ws' (remote daemon over ws:// / wss:// — "
+                         "requires --url). The embedded 'in_process' transport is "
+                         "facade-native — see `jaato-scaffold explain transports`.")
+    pn.add_argument("--url", help="WebSocket URL for --transport ws (ws:// or wss://)")
+    pn.add_argument("--token", help="bearer token for --transport ws (optional)")
     pn.add_argument("--json", action="store_true")
     pn.set_defaults(func=_cmd_new)
 

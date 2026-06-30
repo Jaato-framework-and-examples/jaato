@@ -216,8 +216,10 @@ def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
 
     True iff a discoverable (non-``core``) tool that belongs to a profile plugin
     which is NOT ``(preload)``-ed and NOT scoped-out is exposed.  When this is
-    False, every tool is already eager (core or preloaded), so introspection's
-    tools are dead weight and can be dropped from the initial schema.
+    False, nothing is pending *discovery* — but introspection is NOT necessarily
+    dead weight: a session with eager/preloaded real tools still needs it for
+    *re-inspection* after GC offloads their schemas/instructions.  The full drop
+    decision lives in :func:`_should_drop_introspection`.
 
     Pure (no session/registry deps) so it is unit-testable.  ``plugin_of(name)``
     maps a tool name to its owning plugin name (or ``None``).
@@ -238,6 +240,33 @@ def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
             continue  # scoped out — not exposed
         return True
     return False
+
+
+def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
+    """Whether to drop introspection's discovery tools from a session's wire.
+
+    Drop ONLY when the wire is genuinely empty of real tools: nothing is
+    deferred to discover AND there are no real (non-introspection) tools present.
+
+    Keeping introspection whenever real tools exist — even all-eager/preloaded
+    ones with nothing currently deferred — is deliberate: preloading a tool only
+    means its schema/instructions *start* in-context; GC can offload them under
+    context pressure, after which the model needs ``list_tools`` /
+    ``get_tool_schemas`` to RE-INSPECT the tool.  Dropping introspection there
+    would both strip that capability AND (for a no-``suppress_base`` session)
+    leave a "discover via list_tools" prose nudge with no list_tools on the wire
+    — the model then invents the call, hits no-executor, and loops (the ex08
+    lead hang).  A truly empty wire (e.g. ``plugins=[]``) has nothing to inspect,
+    so introspection is correctly dropped — keeping the ``plugins=[]`` "no tools"
+    semantic intact.
+
+    Pure, so it is unit-testable.  ``tool_names`` is the current wire's tool
+    names; ``has_deferred_to_discover`` is :func:`_has_deferred_to_discover`'s
+    result.
+    """
+    if has_deferred_to_discover:
+        return False
+    return not any(n not in _INTROSPECTION_TOOL_NAMES for n in tool_names)
 
 
 class JaatoSession:
@@ -367,6 +396,11 @@ class JaatoSession:
         # ``_completion_nudges_fired`` bounds the retry budget.
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
+        # Set in configure() when introspection's tools are dropped because there
+        # is nothing deferred to discover — read by introspection's
+        # get_system_instructions to suppress the now-mismatched discovery
+        # guidance (keeps the instruction-gate aligned with the tool-gate).
+        self._introspection_guidance_suppressed: bool = False
 
         # Per-turn model-tier config.  ``_tier_config`` is the resolved
         # view (built from profile.tiers or env vars).  ``_active_tier``
@@ -1234,6 +1268,40 @@ class JaatoSession:
             self._message_queue.put(text, actual_source_id, actual_source_type)
             self._trace(f"INJECT_PROMPT: queue_size_after={len(self._message_queue)}")
 
+    def try_drain_pending_user(self) -> Optional[str]:
+        """Atomically pop the first pending high-priority (USER/PARENT/SYSTEM)
+        message for the daemon's post-turn drain.
+
+        Multi-turn deadlock fix: a client send that races into the turn
+        wind-down — ``turn.completed`` reaches the client (which sends the
+        next turn) *before* the daemon clears ``_model_running`` — is
+        forwarded by the daemon gate as an :meth:`inject_prompt`.  Finding
+        the session idle with no active turn (and the per-RPC continuation
+        callback already restored to ``None``), ``inject_prompt`` takes the
+        else/queue branch, so the message sits with no drainer and the turn
+        never runs.  The daemon's model-thread ``finally`` calls this after
+        every runner-tier turn (via the ``session.try_drain_pending_user``
+        RPC); when it returns text the daemon starts a fresh turn with it.
+
+        Guarded on ``not _is_running`` so it never steals a message from an
+        active turn (which drains the queue itself mid-turn) — in that case
+        the running turn owns the message and this returns ``None``.
+
+        Returns:
+            The message text to run as the next turn, or ``None`` when no
+            high-priority message is queued or a turn is already running.
+        """
+        if self._is_running:
+            return None
+        if not self._message_queue.has_parent_messages():
+            return None
+        msg = self._message_queue.pop_first_parent_message()
+        if msg is None:
+            return None
+        if self._on_prompt_injected:
+            self._on_prompt_injected(msg.text)
+        return msg.text
+
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
 
@@ -2043,17 +2111,27 @@ class JaatoSession:
             # exposes everything and may legitimately need discovery).
             if self._tool_plugins is not None and self._tools:
                 reg = self._runtime.registry
-                if not _has_deferred_to_discover(
+                deferred = _has_deferred_to_discover(
                         reg.get_exposed_tool_schemas(), self._tool_plugins,
                         self._preloaded_plugins, self._tool_scopes,
-                        lambda n: getattr(reg.get_plugin_for_tool(n), "name", None)):
+                        lambda n: getattr(reg.get_plugin_for_tool(n), "name", None))
+                if _should_drop_introspection(
+                        deferred, [t.name for t in self._tools]):
+                    # Empty wire -> drop introspection's tools AND flag the
+                    # session so the introspection plugin suppresses its now-
+                    # mismatched discovery GUIDANCE (read by
+                    # introspection.get_system_instructions). See
+                    # _should_drop_introspection for the full rationale (GC
+                    # re-inspection + tool/instruction-gate alignment).
+                    self._introspection_guidance_suppressed = True
                     n0 = len(self._tools)
                     self._tools = [t for t in self._tools
                                    if t.name not in _INTROSPECTION_TOOL_NAMES]
                     if len(self._tools) != n0:
                         self._trace(
-                            "configure: dropped introspection — nothing deferred "
-                            "to discover (every profile tool is core or preloaded)")
+                            "configure: dropped introspection — empty wire (no "
+                            "deferred tools to discover, no eager tools to "
+                            "re-inspect)")
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
@@ -2164,7 +2242,7 @@ class JaatoSession:
             self._system_instruction = system_instruction_override
         else:
             self._system_instruction = self._runtime.get_system_instructions(
-                plugin_names=tools,
+                plugin_names=plugins,
                 additional=system_instructions,
                 presentation_context=self._presentation_context,
                 include_base=not suppress_base_instructions,

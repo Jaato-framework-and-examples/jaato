@@ -1214,6 +1214,29 @@ class JaatoRuntime:
                     replace_kwargs["api_key"] = promoted_api_key
                 config = replace(config, **replace_kwargs)
 
+        # Fail loud at the provider credential boundary: if api_key is still
+        # shaped like an unresolved secret URI (e.g. ``pass://...`` that passed
+        # through because no resolver is registered — the providing plugin isn't
+        # installed), refuse rather than send the literal URI as a credential
+        # (which produced a confusing upstream 401 — the nebius regression).
+        # ``_resolve_secret_uri`` stays lenient/pass-through so non-provider
+        # consumers (service_connector) keep reporting "credential missing"
+        # gracefully; the strict check lives here, where a literal secret URI
+        # is unambiguously wrong.
+        from .plugins.subagent.config import (
+            looks_like_unresolved_secret_uri,
+            SecretResolutionError,
+        )
+        if looks_like_unresolved_secret_uri(config.api_key):
+            raise SecretResolutionError(
+                config.api_key,
+                f"provider '{effective_provider}' received an unresolved secret "
+                f"URI as its api_key — no resolver is registered for its scheme "
+                f"(is the plugin that provides it, e.g. jaato-premium, "
+                f"installed?). Refusing to send a literal secret URI as a "
+                f"credential.",
+            )
+
         t0 = time.perf_counter()
         provider = load_provider(effective_provider, config)
         load_ms = (time.perf_counter() - t0) * 1000

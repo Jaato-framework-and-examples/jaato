@@ -11,10 +11,18 @@ hour of trial-and-error:
   default (5s) is too low.
 - ``env_file`` is always a real path — ``env_file=None`` crashes the IPC
   handshake with an opaque ``os.PathLike`` TypeError.
-- completion via ``subscribe_once(EventType.SESSION_TERMINATED)`` then wait —
-  the canonical signal (``reason`` ``natural``/``error``; ``error_summary`` /
-  ``error_type`` populated on error).  NOT ``set_event_callback`` (which does
-  not exist — the phantom method that ate the peer's tracing).
+- completion via first-of ``{TURN_COMPLETED, SESSION_TERMINATED}`` then wait —
+  a completion-gated session (its persona calls ``signal_completion``) emits
+  ``SESSION_TERMINATED`` carrying the rich ``reason`` (``natural``/``error``;
+  ``error_summary`` / ``error_type`` on error).  A PLAIN turn that just answers
+  emits only ``TURN_COMPLETED`` and the session then goes IDLE — a headless
+  session does NOT self-terminate after its prompt, so ``SESSION_TERMINATED``
+  never fires on that happy path.  Waiting on ``SESSION_TERMINATED`` alone
+  would block forever; subscribing to BOTH (mirrors the framework's own
+  ``run_ephemeral`` terminal detection — jaato PR #316) fixes the plain-turn
+  hang while still surfacing errors via ``SESSION_TERMINATED(reason="error")``.
+  NOT ``set_event_callback`` (which does not exist — the phantom method that
+  ate the peer's tracing).
 
 Templates use ``__TOKEN__`` placeholders filled by ``str.replace`` so the
 embedded Python (dict literals, async braces) needs no escaping.
@@ -40,22 +48,16 @@ Preflight first:
 import asyncio
 from jaato_sdk import __CLIENT_CLASS__, ClientType, EventType
 
-SOCKET = "__SOCKET__"
 ENV_FILE = "__ENV_FILE__"
 WORKSPACE = "__WORKSPACE__"
 MODEL = "__MODEL__"
 PROVIDER = "__PROVIDER__"
+__CONN_CONSTANTS__
 
 
 __ON_STATUS_DEF__def _new_client():
     """Construct the API client with the known-good knobs."""
-    return __CLIENT_CLASS__(
-        SOCKET,
-        client_type=ClientType.API,   # load-bearing: keeps signal_completion
-        auto_start=True,
-        env_file=ENV_FILE,            # never None (handshake crashes on None)
-        workspace_path=WORKSPACE,__ON_STATUS_ARG__
-    )
+    return __NEW_CLIENT_CALL__
 '''
 
 
@@ -71,9 +73,19 @@ async def main() -> int:
     outcome = {}
 
     def on_done(ev):
-        outcome["reason"] = getattr(ev, "reason", None)
-        outcome["error_type"] = getattr(ev, "error_type", None)
-        outcome["error_summary"] = getattr(ev, "error_summary", None)
+        # Wake on whichever terminal lands first.  A completion-gated session
+        # (profile/persona calls signal_completion) emits SESSION_TERMINATED
+        # with a rich reason/error.  A PLAIN turn that just answers emits only
+        # TURN_COMPLETED and the session then goes IDLE — it never self-
+        # terminates, so SESSION_TERMINATED never fires on that happy path.
+        # Subscribing to BOTH means a plain turn doesn't hang here; setdefault
+        # lets a real SESSION_TERMINATED error reason win even if TURN_COMPLETED
+        # raced in first.  (Mirrors run_ephemeral terminal detection, PR #316.)
+        outcome.setdefault("reason", getattr(ev, "reason", None) or "natural")
+        if getattr(ev, "error_type", None):
+            outcome["error_type"] = ev.error_type
+        if getattr(ev, "error_summary", None):
+            outcome["error_summary"] = ev.error_summary
         done.set()
 
     def on_output(ev):
@@ -83,6 +95,7 @@ async def main() -> int:
 
     client.subscribe(EventType.AGENT_OUTPUT, on_output)
     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
+    client.subscribe_once(EventType.TURN_COMPLETED, on_done)
 
     # Inline spec — swap for profile="<name>", agent="<name>" to use a set.
     sid = await client.create_session(
@@ -146,7 +159,16 @@ WORKLIST = [
 
 
 async def _run_stage(client, cascade_id, profile, agent, prompt) -> str:
-    """Run one stage to terminal completion; return its reason."""
+    """Run one stage to terminal completion; return its reason.
+
+    Each stage MUST be completion-gated — its persona calls
+    ``signal_completion`` as its last action.  That is what emits
+    ``SESSION_TERMINATED`` (the signal we wait on here) AND releases the
+    shared warm slot so the NEXT stage can reuse it.  A non-gated stage
+    would emit only ``TURN_COMPLETED``, never terminate, and stall the
+    cascade — so unlike the single-shot ``client`` archetype, this stage
+    intentionally waits on ``SESSION_TERMINATED`` only.
+    """
     done = asyncio.Event()
     outcome = {}
 
@@ -254,6 +276,10 @@ async def main() -> int:
     done = asyncio.Event()
 
     def on_done(ev):
+        # Wake on whichever terminal lands first — a plain turn emits only
+        # TURN_COMPLETED (then goes IDLE), a completion-gated one emits
+        # SESSION_TERMINATED.  Subscribing to both avoids a hang on the plain
+        # path.  (Mirrors run_ephemeral terminal detection, jaato PR #316.)
         done.set()
 
     def on_output(ev):
@@ -263,6 +289,7 @@ async def main() -> int:
 
     client.subscribe(EventType.AGENT_OUTPUT, on_output)
     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
+    client.subscribe_once(EventType.TURN_COMPLETED, on_done)
 
     sid = await client.create_session(
         profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)

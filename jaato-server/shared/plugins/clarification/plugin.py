@@ -52,6 +52,8 @@ class ClarificationPlugin(RunnerForwardingMixin):
         self._on_question_answered: Optional[Callable[[str, int, str], None]] = None
         # Batch hook for WS clients: receives full parsed request before channel loop
         self._on_batch_requested: Optional[Callable] = None
+        # Plugin registry ref (for runner_rpc_client lookup — runner-tier relay)
+        self._plugin_registry = None
 
     def _get_channel(self) -> Optional[ClarificationChannel]:
         """Get the channel for the current thread.
@@ -90,7 +92,31 @@ class ClarificationPlugin(RunnerForwardingMixin):
 
     def set_plugin_registry(self, registry) -> None:
         """Called during expose_tool(). Registers the communication category."""
+        self._plugin_registry = registry
         registry.register_category("communication", "Ask user questions, request clarification, get input")
+
+    def _get_runner_rpc_channel(self) -> Optional[ClarificationChannel]:
+        """Resolve a runner→daemon relay channel when running runner-tier.
+
+        Returns a ``RunnerRPCClarificationChannel`` when the registry has
+        a ``runner_rpc_client`` (post-seat-flip runner session — confined
+        / pool), else ``None`` (daemon-local sessions keep the configured
+        channel).  Resolved PER-CALL (no caching) so a re-attach /
+        warm-slot rebind of ``runner_rpc_client`` is always picked up —
+        deliberately avoiding the stale-bound-channel risk that a cached
+        relay would carry.
+        """
+        registry = self._plugin_registry
+        if registry is None:
+            return None
+        rpc_client = getattr(registry, "runner_rpc_client", None)
+        if rpc_client is None:
+            return None
+        fn = getattr(rpc_client, "request_clarification", None)
+        if fn is None:
+            return None
+        from .channels import RunnerRPCClarificationChannel
+        return RunnerRPCClarificationChannel(fn, agent_id=self._agent_name or "")
 
     def shutdown(self) -> None:
         """Clean up plugin resources."""
@@ -394,6 +420,15 @@ The tool returns responses keyed by question number (1-based):
 
         # Get channel for current thread (may be thread-local for subagents)
         channel = self._get_channel()
+        # Prefer the runner→daemon relay for the MAIN runner session so a
+        # confined / pool (runner-tier) session can actually deliver the
+        # clarification to the connected client.  Without it the runner-side
+        # QueueChannel has no input_queue (that wiring is daemon-side only)
+        # and cancels immediately.  Subagents keep their thread-local channel.
+        if getattr(self._thread_local, 'channel', None) is None:
+            relay = self._get_runner_rpc_channel()
+            if relay is not None:
+                channel = relay
         if not self._initialized or not channel:
             return {"error": "Plugin not initialized"}
 

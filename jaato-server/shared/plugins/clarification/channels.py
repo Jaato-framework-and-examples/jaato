@@ -1,7 +1,9 @@
 """Channels for handling user interaction in the clarification plugin."""
 
+import logging
 import os
 import sys
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Callable, List, Optional
 
@@ -29,6 +31,8 @@ from .models import (
 )
 from ...message_queue import SourceType
 
+logger = logging.getLogger(__name__)
+
 
 class ClarificationChannel(ABC):
     """Base class for channels that handle user interaction for clarifications."""
@@ -54,6 +58,76 @@ class ClarificationChannel(ABC):
             ClarificationResponse with user's answers
         """
         pass
+
+    # ----------------------------------------------------------------
+    # Shared answer parsing / formatting helpers.
+    #
+    # Lifted to the base class so both ``QueueChannel`` (legacy
+    # daemon-local input-queue flow) and ``RunnerRPCClarificationChannel``
+    # (runner→daemon batch relay) parse answer strings identically.
+    # ----------------------------------------------------------------
+    def _format_answer_summary(self, answer: "Answer", question: "Question") -> str:
+        """Format a brief summary of the answer for display."""
+        if answer.skipped:
+            return "skipped"
+        if answer.free_text is not None:
+            text = answer.free_text
+            if len(text) > 30:
+                text = text[:27] + "..."
+            return f'"{text}"'
+        if answer.selected_choices:
+            if len(answer.selected_choices) == 1:
+                idx = answer.selected_choices[0]
+                if question.choices and idx <= len(question.choices):
+                    return question.choices[idx - 1].text
+                return f"choice {idx}"
+            else:
+                return f"{len(answer.selected_choices)} choices"
+        return "answered"
+
+    def _parse_answer(self, question_index: int, question: "Question", response: str) -> "Answer":
+        """Parse user response into an Answer."""
+        response = response.strip()
+
+        if question.question_type == QuestionType.FREE_TEXT:
+            if not response and not question.required:
+                return Answer(question_index=question_index, skipped=True)
+            return Answer(question_index=question_index, free_text=response)
+
+        elif question.question_type == QuestionType.SINGLE_CHOICE:
+            if not response and question.default_choice:
+                return Answer(question_index=question_index, selected_choices=[question.default_choice])
+            if not response and not question.required:
+                return Answer(question_index=question_index, skipped=True)
+            try:
+                choice_num = int(response)
+                if 1 <= choice_num <= len(question.choices):
+                    return Answer(question_index=question_index, selected_choices=[choice_num])
+            except ValueError:
+                pass
+            # Invalid - return first choice as fallback
+            return Answer(question_index=question_index, selected_choices=[1])
+
+        elif question.question_type == QuestionType.MULTIPLE_CHOICE:
+            if not response and not question.required:
+                return Answer(question_index=question_index, skipped=True)
+            selected = []
+            for part in response.split(','):
+                part = part.strip()
+                if part:
+                    try:
+                        num = int(part)
+                        if 1 <= num <= len(question.choices) and num not in selected:
+                            selected.append(num)
+                    except ValueError:
+                        pass
+            if selected:
+                return Answer(question_index=question_index, selected_choices=selected)
+            # Fallback
+            return Answer(question_index=question_index, selected_choices=[1])
+
+        # Unknown type - treat as free text
+        return Answer(question_index=question_index, free_text=response)
 
 
 class ConsoleChannel(ClarificationChannel):
@@ -509,68 +583,9 @@ class QueueChannel(ClarificationChannel):
 
         return ClarificationResponse(answers=answers)
 
-    def _format_answer_summary(self, answer: Answer, question: Question) -> str:
-        """Format a brief summary of the answer for display."""
-        if answer.skipped:
-            return "skipped"
-        if answer.free_text is not None:
-            text = answer.free_text
-            if len(text) > 30:
-                text = text[:27] + "..."
-            return f'"{text}"'
-        if answer.selected_choices:
-            if len(answer.selected_choices) == 1:
-                idx = answer.selected_choices[0]
-                if question.choices and idx <= len(question.choices):
-                    return question.choices[idx - 1].text
-                return f"choice {idx}"
-            else:
-                return f"{len(answer.selected_choices)} choices"
-        return "answered"
-
-    def _parse_answer(self, question_index: int, question: Question, response: str) -> Answer:
-        """Parse user response into an Answer."""
-        response = response.strip()
-
-        if question.question_type == QuestionType.FREE_TEXT:
-            if not response and not question.required:
-                return Answer(question_index=question_index, skipped=True)
-            return Answer(question_index=question_index, free_text=response)
-
-        elif question.question_type == QuestionType.SINGLE_CHOICE:
-            if not response and question.default_choice:
-                return Answer(question_index=question_index, selected_choices=[question.default_choice])
-            if not response and not question.required:
-                return Answer(question_index=question_index, skipped=True)
-            try:
-                choice_num = int(response)
-                if 1 <= choice_num <= len(question.choices):
-                    return Answer(question_index=question_index, selected_choices=[choice_num])
-            except ValueError:
-                pass
-            # Invalid - return first choice as fallback
-            return Answer(question_index=question_index, selected_choices=[1])
-
-        elif question.question_type == QuestionType.MULTIPLE_CHOICE:
-            if not response and not question.required:
-                return Answer(question_index=question_index, skipped=True)
-            selected = []
-            for part in response.split(','):
-                part = part.strip()
-                if part:
-                    try:
-                        num = int(part)
-                        if 1 <= num <= len(question.choices) and num not in selected:
-                            selected.append(num)
-                    except ValueError:
-                        pass
-            if selected:
-                return Answer(question_index=question_index, selected_choices=selected)
-            # Fallback
-            return Answer(question_index=question_index, selected_choices=[1])
-
-        # Unknown type - treat as free text
-        return Answer(question_index=question_index, free_text=response)
+    # ``_format_answer_summary`` / ``_parse_answer`` moved to the base
+    # ``ClarificationChannel`` so the runner→daemon relay channel shares
+    # identical answer parsing.
 
 
 class ParentBridgedChannel(ClarificationChannel):
@@ -897,3 +912,113 @@ def create_channel(channel_type: str = "console", **kwargs) -> ClarificationChan
         return ParentBridgedChannel(**kwargs)
     else:
         raise ValueError(f"Unknown channel type: {channel_type}")
+
+
+class RunnerRPCClarificationChannel(ClarificationChannel):
+    """Runner→daemon batch relay for clarification (mirror of the
+    permission plugin's ``RunnerRPCChannel``).
+
+    Post-seat-flip the clarification plugin runs runner-side; a plain
+    ``QueueChannel`` there has no daemon connection (its ``input_queue``
+    is only wired daemon-side), so ``request_clarification`` cancelled
+    immediately.  This channel relays the whole batch to the daemon via
+    the ``client.request_clarification`` RPC, which emits a
+    ``ClarificationBatchEvent`` to the connected client and awaits the
+    answers.
+
+    Stateless beyond the captured RPC callable + agent id.  Fail-closed:
+    any RPC/transport error returns ``cancelled`` (the runner channel
+    must really relay — there is no local fallback that would silently
+    auto-answer).
+    """
+
+    def __init__(
+        self,
+        request_clarification_fn: Callable[[dict], dict],
+        *,
+        agent_id: str = "",
+        tool_name: str = "request_clarification",
+    ) -> None:
+        """Construct the relay channel.
+
+        Args:
+            request_clarification_fn: Callable taking the batch payload
+                dict and returning ``{"cancelled": bool,
+                "answers": List[str]}``.  In production this is
+                ``registry.runner_rpc_client.request_clarification``.
+            agent_id: Agent id stamped on the emitted
+                ``ClarificationBatchEvent`` (for client-side routing).
+            tool_name: Tool name stamped on the event (default
+                ``"request_clarification"``).
+        """
+        self._request_clarification = request_clarification_fn
+        self._agent_id = agent_id or ""
+        self._tool_name = tool_name
+
+    @property
+    def channel_type(self) -> str:
+        return "runner_rpc"
+
+    def request_clarification(
+        self,
+        request: ClarificationRequest,
+        on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
+        on_question_answered: Optional[Callable[[str, int, str], None]] = None,
+    ) -> ClarificationResponse:
+        """Relay the batch to the daemon and collect the answers."""
+        # Build the per-question payload — same shape the daemon emits in
+        # ``ClarificationBatchEvent`` (see core.py's batch-emit hook), so
+        # the connected client's ClarificationHandler renders it as-is.
+        questions_payload: List[dict] = []
+        for i, q in enumerate(request.questions, 1):
+            q_data: dict = {
+                "index": i,
+                "text": q.text,
+                "question_type": q.question_type.value,
+                "required": q.required,
+            }
+            if q.choices:
+                choices_list = []
+                for j, c in enumerate(q.choices, 1):
+                    choice_entry = {"text": c.text}
+                    if q.default_choice == j:
+                        choice_entry["default"] = True
+                    choices_list.append(choice_entry)
+                q_data["choices"] = choices_list
+            if q.default_choice:
+                q_data["default_choice"] = q.default_choice
+            questions_payload.append(q_data)
+
+        payload = {
+            "request_id": uuid.uuid4().hex,
+            "agent_id": self._agent_id,
+            "tool_name": self._tool_name,
+            "context": request.context or "",
+            "questions": questions_payload,
+        }
+
+        try:
+            result = self._request_clarification(payload)
+        except Exception as exc:  # noqa: BLE001 — RPC transport boundary
+            logger.warning(
+                "RunnerRPCClarificationChannel: request_clarification relay "
+                "raised %s — cancelling clarification request %s",
+                type(exc).__name__, payload["request_id"],
+            )
+            return ClarificationResponse(cancelled=True)
+
+        if not isinstance(result, dict) or result.get("cancelled"):
+            return ClarificationResponse(cancelled=True)
+
+        answer_strings = result.get("answers") or []
+        answers = []
+        for i, question in enumerate(request.questions, 1):
+            raw = answer_strings[i - 1] if (i - 1) < len(answer_strings) else ""
+            answer = self._parse_answer(i, question, raw)
+            answers.append(answer)
+            if on_question_answered:
+                on_question_answered(
+                    self._tool_name, i,
+                    self._format_answer_summary(answer, question),
+                )
+        return ClarificationResponse(answers=answers)

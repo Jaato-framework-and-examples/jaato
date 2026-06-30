@@ -545,6 +545,13 @@ class RunnerRPC:
             # ``{"should_nudge": bool, "nudges_fired": int}``.
             return self._handle_session_try_completion_nudge(env.args)
 
+        if env.method == "session.try_drain_pending_user":
+            # Multi-turn deadlock fix: after a turn ends, atomically pop a
+            # pending high-priority (USER/PARENT/SYSTEM) message that raced
+            # into the turn wind-down and was queued with no active turn to
+            # drain it.  args = ``{}``.  Returns ``{"text": str | None}``.
+            return self._handle_session_try_drain_pending_user()
+
         if env.method == "session.get_auth_info":
             # Phase 3 §7c step 6.6.4.5c.1: read provider-credential
             # source string from the runner-side session.  Replaces
@@ -3684,6 +3691,38 @@ class RunnerRPC:
             "should_nudge": bool(should_nudge),
             "nudges_fired": int(nudges_fired),
         }
+
+    def _handle_session_try_drain_pending_user(self) -> "tuple[bool, Any]":
+        """Atomically pop a pending high-priority message for the daemon's
+        post-turn drain (multi-turn deadlock fix).
+
+        Delegates to ``JaatoSession.try_drain_pending_user`` on the runner-
+        side session.  Returns ``{"text": str | None}`` — the message text to
+        run as a fresh turn, or ``None`` when nothing is queued.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try_method = getattr(session, "try_drain_pending_user", None)
+        if not callable(try_method):
+            return False, {
+                "error": (
+                    "session.try_drain_pending_user: session class lacks "
+                    "public try_drain_pending_user() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            text = try_method()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.try_drain_pending_user: try_drain_pending_user "
+                    f"raised {type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        return True, {"text": text}
 
     def _handle_session_get_auth_info(self) -> "tuple[bool, Any]":
         """Read the credential-source description string from the

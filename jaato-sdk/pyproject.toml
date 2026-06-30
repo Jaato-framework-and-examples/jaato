@@ -41,6 +41,11 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
+# WebSocket transport (WSClient) — drive a remote daemon over ws:// / wss://.
+# Optional so the IPC / in-process paths don't require it.
+ws = [
+    "websockets>=12.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

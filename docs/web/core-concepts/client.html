@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -98,6 +99,20 @@
             connections to AI providers, coordinates tool execution, and maintains
             conversation state.
           </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">In-process vs. daemon vs. TypeScript</div>
+            This page describes the <strong>in-process</strong> Python
+            <code>JaatoClient</code> (<code>from jaato import JaatoClient</code>),
+            which runs the runtime inside your process. To talk to a running jaato
+            <strong>daemon</strong> instead, use the Python IPC client
+            (<code>from jaato_sdk import IPCClient</code>;
+            <code>IPCClient.session(...)</code> + <code>ask</code>/<code>complete</code>/<code>stream</code>)
+            &mdash; what most applications use. The
+            <a href="../getting-started/typescript-sdk.html">TypeScript SDK</a>
+            ships a <em>separate</em> <code>JaatoClient</code>
+            (<code>@jaato/sdk</code>, WebSocket transport) that shares the name only.
+          </div>
 
           <h2 id="overview">Overview</h2>
           <p>

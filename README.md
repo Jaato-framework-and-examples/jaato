@@ -239,6 +239,28 @@ python3 -m venv .venv
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock --cmd "What time is it?"
 ```
 
+### Running an agent from Python — one facade, three transports
+
+The SDK ships a convenience facade (`Session.ask` / `.complete` / `.stream`) that runs the **same** agent three ways — pick one with `jaato.session(mode=...)`; the session spec and the facade are identical, `mode` is the only variable:
+
+```python
+import jaato
+
+# in_process — embedded, no daemon (the agent runs in your process):
+async with jaato.session(mode="in_process", profile={"model": "...", "provider": "..."}) as s:
+    print(await s.ask("Hi"))
+
+# ipc — a local daemon over a Unix socket:
+async with jaato.session(mode="ipc", profile="researcher") as s:
+    print(await s.ask("Hi"))
+
+# ws — a remote daemon over WebSocket:
+async with jaato.session(mode="ws", url="wss://host:8080", token="...", profile="researcher") as s:
+    print(await s.ask("Hi"))
+```
+
+`in_process` (`InProcessClient`) needs no daemon; `ipc` (`IPCClient`) and `ws` (`WSClient`) talk to a daemon locally / remotely. All three expose the same facade, so you can develop embedded and deploy behind a daemon (or the reverse) without changing agent code. See [jaato-sdk/README.md](jaato-sdk/README.md#transports--three-ways-to-run-the-same-agent).
+
 ### Developer Tooling — `jaato-doctor` & `jaato-scaffold`
 
 Two console scripts (installed with the SDK / server) help you build and debug

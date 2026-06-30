@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -427,6 +428,120 @@ response = client.send_message(
     on_output=handler
 )
 # User will be prompted before delete executes</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- IPC / Daemon Permissions -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="ipc-permissions">IPC / Daemon Permissions</h2>
+          <p>
+            Everything above describes the <strong>in-process</strong> plugin
+            API (<code>PermissionPolicy(pattern, action)</code>, the
+            <code>default_action</code> config field,
+            <code>configure_tools(..., permission_plugin=...)</code>), where your
+            own code owns the runtime. When you instead talk to a running
+            <strong>daemon</strong> through the
+            <a href="../api-reference/ipc-client.html"><code>IPCClient</code></a>
+            facade, the gate moves server-side: the policy lives in the session
+            <strong>profile</strong>, and approvals flow back to your process over
+            a single callback.
+          </p>
+
+          <h3>Policy in the profile</h3>
+          <p>
+            Set the policy in the session profile under
+            <code>plugin_configs.permission.policy.defaultPolicy</code>:
+          </p>
+          <ul>
+            <li><code>"ask"</code> &mdash; every gated tool
+              (<code>cli</code>, <code>file_edit</code>, &hellip;) is held for
+              approval before it runs.</li>
+            <li><code>"allow"</code> &mdash; gated tools auto-allow, for an
+              unattended loop.</li>
+          </ul>
+
+          <h3>Approving with on_permission</h3>
+          <p>
+            Pass an <code>on_permission</code> callback to
+            <code>IPCClient.session(...)</code>. It receives the permission
+            <strong>event</strong> and returns <code>"y"</code> /
+            <code>"n"</code> (it may be a coroutine). Read the requested tool off
+            <code>ev.tool_name</code> — for example
+            <code>on_permission=lambda ev: "y" if approve(ev.tool_name) else "n"</code>.
+          </p>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Fail-closed by design</div>
+            If a gated tool is requested and no <code>on_permission</code> is set
+            (or it never answers), the daemon <strong>auto-denies</strong> the
+            tool and the in-flight <code>ask()</code> / <code>complete()</code>
+            raises <code>PermissionUnhandled</code>. This is an intentional
+            fail-closed boundary, not a bypass — an unattended client can never
+            silently run a gated tool.
+          </div>
+
+          <h3>Two surfaces, two names</h3>
+          <p>
+            The names rhyme but scope to different surfaces, so keep them apart:
+          </p>
+          <ul>
+            <li><strong>In-process plugin</strong> &mdash;
+              <code>default_action</code> (the config field documented above).</li>
+            <li><strong>Daemon / profile</strong> &mdash;
+              <code>plugin_configs.permission.policy.defaultPolicy</code> (the
+              facade path in this section).</li>
+          </ul>
+          <p>
+            See <a href="../api-reference/ipc-client.html"><code>IPCClient</code></a>
+            for the full <code>session(...)</code> surface and the
+            <code>PermissionUnhandled</code> error.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ask — approve each gated tool</div>
+          <div class="code-block">
+            <pre><code class="language-python">import asyncio
+from jaato_sdk import IPCClient
+
+def approve(tool_name: str) -> bool:
+    # In a TUI this would prompt; here, auto-approve.
+    return True
+
+async def main():
+    async with IPCClient.session(
+        profile={
+            "model": "gpt-4o",
+            "provider": "openai",
+            "plugins": ["cli"],
+            "plugin_configs": {
+                "permission": {"policy": {"defaultPolicy": "ask"}},
+            },
+        },
+        on_permission=lambda ev: "y" if approve(ev.tool_name) else "n",
+    ) as s:
+        print(await s.ask("What is the current date? Run `date`."))
+
+asyncio.run(main())</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">allow — unattended loop</div>
+          <div class="code-block">
+            <pre><code class="language-python"># defaultPolicy "allow": gated tools run without prompting,
+# so no on_permission is needed for a headless loop.
+async with IPCClient.session(profile={
+    "model": "gpt-4o",
+    "provider": "openai",
+    "plugins": ["cli", "web_search", "todo"],
+    "plugin_configs": {
+        "permission": {"policy": {"defaultPolicy": "allow"}},
+    },
+}) as s:
+    print(await s.ask(
+        "Get the date with `date` and the listing with `ls`, "
+        "then write both into a file called report.txt."
+    ))</code></pre>
           </div>
         </div>
       </section>

@@ -25,3 +25,14 @@ export {
   isProtocolCompatible,
   type JaatoClientOptions,
 } from "./client.js";
+// High-level convenience facade (mirror of jaato-sdk's convenience.py).
+export {
+  Session,
+  openSession,
+  ask,
+  type SessionOpenOptions,
+  type AskOptions,
+  type CompleteOptions,
+  type ClientToolSpec,
+  type ClientToolHandler,
+} from "./convenience.js";

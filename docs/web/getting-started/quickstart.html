@@ -33,6 +33,7 @@
         <ul class="sidebar-nav">
           <li><a href="quickstart.html" class="active">Quickstart</a></li>
           <li><a href="quickstart.html#developer-tooling">Developer Tooling</a></li>
+          <li><a href="typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -102,54 +103,29 @@
           <h2 id="requirements">Requirements</h2>
           <ul>
             <li>Python 3.10 or higher</li>
-            <li>Credentials for at least one AI provider (see table)</li>
+            <li>Credentials for at least one AI provider (see below)</li>
           </ul>
 
           <h2 id="auth-options">Choose a Provider</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Provider</th>
-                <th>Use Case</th>
-                <th>Setup</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><strong>Anthropic</strong></td>
-                <td>Complex reasoning, code generation</td>
-                <td><a href="../api-reference/providers/anthropic.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Google GenAI</strong></td>
-                <td>Long context, multimodal</td>
-                <td><a href="../api-reference/providers/google-genai.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>GitHub Models</strong></td>
-                <td>Multi-model access via single API</td>
-                <td><a href="../api-reference/providers/github-models.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Ollama</strong></td>
-                <td>Local models, privacy, no API costs</td>
-                <td><a href="../api-reference/providers/ollama.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Claude CLI</strong></td>
-                <td>Claude Pro/Max subscribers</td>
-                <td><a href="../api-reference/providers/claude-cli.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Zhipu AI</strong></td>
-                <td>GLM models, chain-of-thought reasoning</td>
-                <td><a href="../api-reference/providers/zhipuai.html">Setup guide</a></td>
-              </tr>
-            </tbody>
-          </table>
           <p>
-            See the <a href="../api-reference/providers/index.html">Providers Reference</a>
-            for detailed configuration options for each provider.
+            jaato reaches a wide range of model providers through one uniform
+            interface. They group by how the model runs:
+          </p>
+          <ul>
+            <li><strong>Hosted API providers</strong> &mdash; cloud services you
+              reach with an API key or OAuth (e.g. Anthropic, Google GenAI).</li>
+            <li><strong>Local runtimes</strong> &mdash; models on your own
+              hardware, no API cost (e.g. Ollama, vLLM).</li>
+            <li><strong>Unified gateways</strong> &mdash; a single endpoint
+              fronting many vendors' models (e.g. OpenRouter).</li>
+            <li><strong>Subscription-based</strong> &mdash; drive an existing
+              Claude Pro/Max or Google subscription (e.g. Claude CLI,
+              Antigravity).</li>
+          </ul>
+          <p>
+            See the <a href="../api-reference/providers/index.html">Providers
+            Reference</a> for the complete list of supported providers and
+            per-provider setup &mdash; the sidebar links each one directly.
           </p>
         </div>
         <div class="panel-code">
@@ -312,6 +288,86 @@ client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 response = client.generate("What is 2 + 2?")
 print(response)  # "4"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Talking to a daemon -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="daemon-facade">Talking to a Daemon (recommended)</h2>
+          <p>
+            The example above runs the agent runtime <strong>in-process</strong>
+            with <code>JaatoClient</code>. The <strong>recommended</strong> Python
+            entry path instead talks to a long-lived jaato
+            <strong>daemon</strong> over IPC, using the async
+            <code>IPCClient</code> facade
+            (<a href="../api-reference/ipc-client.html">full reference</a>).
+          </p>
+          <p>
+            <code>IPCClient.session(...)</code> is an async context manager: on
+            entry it connects to (or auto-starts) the daemon and creates a
+            session; on exit it disconnects. The yielded
+            <code>Session</code> owns the send-and-wait recipe, so
+            <code>await s.ask(...)</code> returns the answer without any event
+            plumbing. For a throwaway call, the module-level <code>ask()</code>
+            opens a session, asks, and tears down in one line.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">One facade, three transports</div>
+            The same <code>Session</code> facade (<code>s.ask</code> /
+            <code>s.complete</code> / <code>s.stream</code>) runs three ways via
+            <code>jaato.session(mode=...)</code> &mdash; <code>mode</code> is the
+            only thing that changes:
+            <code>mode="in_process"</code> (embedded; the agent runs in your
+            process with no daemon &mdash; <code>InProcessClient</code>),
+            <code>mode="ipc"</code> (a <strong>local</strong> daemon over a Unix
+            socket &mdash; <code>IPCClient</code>, shown here), and
+            <code>mode="ws"</code> (a <strong>remote</strong> daemon over
+            <code>ws://</code> / <code>wss://</code> &mdash; <code>WSClient</code>,
+            needs the <code>jaato-sdk[ws]</code> extra). An inline
+            <code>profile</code> spec <strong>requires</strong> a
+            <code>plugins</code> key (use <code>[]</code> for a tool-less
+            session); credentials resolve from a <code>pass:</code> knob, never a
+            raw key or env var.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">daemon_facade.py</div>
+          <div class="code-block">
+            <pre><code class="language-python">import asyncio
+from jaato_sdk import IPCClient, ask
+
+async def main():
+    # Open a session, ask, tear down on exit.
+    async with IPCClient.session(profile={
+        "model": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "plugins": [],
+        "plugin_configs": {
+            "anthropic": {"api_key": "pass://jaato/anthropic/api-key"},
+        },
+    }) as s:
+        print(await s.ask("What is 2 + 2?"))   # "4"
+
+    # ...or the one-shot helper, for a throwaway call.
+    print(await ask("What is 2 + 2?", profile={
+        "model": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "plugins": [],
+        "plugin_configs": {
+            "anthropic": {"api_key": "pass://jaato/anthropic/api-key"},
+        },
+    }))
+
+# Transport-agnostic entry — same spec + same s.ask/.complete/.stream,
+# flip the transport with mode:
+import jaato
+#   jaato.session(mode="in_process", profile={...})   # embedded, no daemon
+#   jaato.session(mode="ipc",        profile={...})   # local daemon (above)
+#   jaato.session(mode="ws", url="wss://host:8080", token="...", profile={...})
+
+asyncio.run(main())</code></pre>
           </div>
         </div>
       </section>
