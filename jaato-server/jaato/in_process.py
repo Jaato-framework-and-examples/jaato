@@ -359,6 +359,14 @@ class InProcessClient:
         # runs in-process directly (registered on the embedded session's
         # executor), so there is no daemon round-trip.
         self._client_tools: Optional[List[Dict[str, Any]]] = None
+        # Auto-continue (subagent delegation): the embedded analog of the
+        # daemon's run-loop resume. When the IDLE lead receives an injected
+        # child/parent message (a subagent posting its result), the session calls
+        # its continuation callback; _schedule_lead_continuation runs a follow-up
+        # lead turn. These two fields serialize + coalesce continuations on the
+        # (single-threaded) facade loop so overlapping injects don't double-run.
+        self._continuation_busy = False
+        self._continuation_pending: Optional[str] = None
 
     async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
         """Register client-provided ("host") tools the embedded agent can call.
@@ -542,6 +550,28 @@ class InProcessClient:
                 subagent_plugin, "set_ui_hooks"
             ):
                 subagent_plugin.set_ui_hooks(_InProcessUIHooks(emit_threadsafe))
+            # Auto-continue: drive the lead's continuation callback so an IDLE
+            # lead resumes when a subagent injects its result — the embedded
+            # analog of the daemon's "continuation_needed" handler
+            # (server/core.py:4258), which the facade must drive itself (no daemon
+            # run loop). The session calls this callback (from inject_prompt /
+            # _drain_child_messages) with the drained text; it fires on whatever
+            # thread called inject_prompt (a subagent worker), so marshal onto the
+            # facade loop. Without it the lead never resumes after delegating, so
+            # signal_completion (-> SESSION_TERMINATED) never fires.
+            lead_session = (
+                self._embedded.get_session()
+                if hasattr(self._embedded, "get_session")
+                else None
+            )
+            if lead_session is not None and hasattr(
+                lead_session, "set_continuation_callback"
+            ):
+                lead_session.set_continuation_callback(
+                    lambda text: loop.call_soon_threadsafe(
+                        self._schedule_lead_continuation, text
+                    )
+                )
         # Register client/host tools on the now-built session: append their
         # schemas to the wire (so the model SEES them turn 1) and their handlers
         # to the executor (so the model can CALL them in-process). Must run
@@ -673,6 +703,51 @@ class InProcessClient:
         await asyncio.sleep(0)
         emitter.emit(TurnCompletedEvent(agent_id="main"))
         return final_text
+
+    def _schedule_lead_continuation(self, text: str) -> None:
+        """Schedule a follow-up lead turn for a drained subagent result.
+
+        Runs on the facade loop (via call_soon_threadsafe from the continuation
+        callback), so the busy/pending flags need no lock. Serializes
+        continuations: while one runs, a newer arrival is coalesced into
+        ``_continuation_pending`` and picked up when the current one settles —
+        so overlapping injects never double-run a turn.
+        """
+        if self._continuation_busy:
+            self._continuation_pending = text
+            return
+        self._continuation_busy = True
+        asyncio.ensure_future(self._run_lead_continuation(text))
+
+    async def _run_lead_continuation(self, text: str) -> None:
+        """Run one continuation lead turn with the drained subagent result.
+
+        Mirrors :meth:`send_message`'s output bridge (AGENT_OUTPUT marshalled
+        onto the loop) + terminal TURN_COMPLETED. The embedded session's own
+        ``send_message`` finally-drains any messages queued during this turn and
+        re-fires the continuation callback, so the loop chains until the lead is
+        idle with an empty queue (the lead's ``signal_completion`` ->
+        AGENT_COMPLETED / SESSION_TERMINATED arrives via the wired ui_hooks).
+        """
+        emitter = self._emitter
+        loop = self._loop
+
+        def on_output(source: str, t: str, mode: str) -> None:
+            loop.call_soon_threadsafe(
+                emitter.emit,
+                AgentOutputEvent(agent_id="main", source=source, text=t, mode=mode),
+            )
+
+        try:
+            await asyncio.to_thread(self._embedded.send_message, text, on_output)
+            await asyncio.sleep(0)
+            emitter.emit(TurnCompletedEvent(agent_id="main"))
+        finally:
+            self._continuation_busy = False
+            pending = self._continuation_pending
+            self._continuation_pending = None
+            if pending is not None:
+                self._schedule_lead_continuation(pending)
 
     async def respond_to_permission(self, request_id: str, response: str) -> None:
         # Resolve the parked permission request (set by the InProcessChannel on
