@@ -459,14 +459,31 @@ class InProcessClient:
         registry = self._registry
         registry.set_session_id(self._session_id)
         permission_plugin = self._wire_permission_channel(registry)
+        # Parse plugin entries exactly like the daemon (parse_plugin_list):
+        # split the raw list into clean names + the PRELOAD set (force-eager,
+        # bypassing lazy tool-discovery so the plugin's tools are in the initial
+        # wire) + per-plugin tool allow-lists. Pre-fix the facade passed the raw
+        # list, so "cli(preload)" matched no plugin (silently dropped) and both
+        # preload and tool-scoping were ignored — an IPC-parity gap. None stays
+        # None (inherit); [] -> ([], no preload, no scopes).
+        plugins = self._plugins
+        preloaded_plugins = None
+        tool_scopes = None
+        if plugins is not None:
+            from shared.plugins.subagent.config import parse_plugin_list
+            plugins, preloaded_plugins, tool_scopes = parse_plugin_list(plugins)
         session_kwargs: Dict[str, Any] = {
             "plugin_configs": self._resolved_plugin_configs,
-            "plugins": self._plugins,
+            "plugins": plugins,
             # The base-composition knob (default False = compose persona on top
             # of the base; True = drop the base). create_session maps it to
             # include_base = not suppress_base_instructions.
             "suppress_base_instructions": self._suppress_base_instructions,
         }
+        if preloaded_plugins:
+            session_kwargs["preloaded_plugins"] = preloaded_plugins
+        if tool_scopes:
+            session_kwargs["tool_scopes"] = tool_scopes
         # Profile-derived session instructions (ex03 persona) + the typed
         # completion gate (ex04 byte-exact) — omit when unset so create_session
         # applies its own defaults.
