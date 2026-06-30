@@ -162,6 +162,8 @@ def clients() -> Rendered:
             "transport": "remote daemon (ws:// / wss://)",
             "recovery": "none — use --recoverable (WSRecoveryClient) to survive drops",
             "auth": "bearer token (url= + token=)",
+            "tls": "wss:// self-signed/dev cert -> --ca <bundle> (scoped ca=, "
+                   "loaded into a per-connection SSLContext, never os.environ)",
             "extra": "pip install 'jaato-sdk[ws]'",
             "use_for": ["a daemon on another host", "browser-reachable endpoint"],
             "scaffold": "jaato-scaffold new client --transport ws ...",
@@ -184,6 +186,8 @@ def clients() -> Rendered:
                      "(jaato.session(mode='ws', recovery=True))",
             "transport": "remote daemon (ws:// / wss://), auto-reconnecting",
             "auth": "bearer token (url= + token=)",
+            "tls": "wss:// self-signed/dev cert -> --ca <bundle> (scoped ca=, "
+                   "never os.environ — so it can't leak into a restarted daemon)",
             "recovery": ("same auto-reconnect state machine as IPCRecoveryClient, "
                          "over the WebSocket; reattaches via the transport-agnostic "
                          "server replay; on_status_change callback"),
