@@ -506,6 +506,7 @@ class IPCRecoveryClient:
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
         cascade_driver_id: Optional[str] = None,
+        timeout: float = 60.0,
     ) -> Optional[str]:
         """Create a new session.
 
@@ -523,6 +524,11 @@ class IPCRecoveryClient:
             cascade_driver_id: Phase 2 cascade-sharing tenant ID; see
                 ``IPCClient.create_session`` for the contract.  Pass
                 the same opaque ID across every session of one cascade.
+            timeout: Seconds to wait for the ``SessionInfoEvent`` — mirrors
+                ``IPCClient.create_session`` so a plain→recovery swap is
+                drop-in (forwarded to the underlying client).  The recovery
+                client's own reconnect timing is governed separately (recovery
+                config + ``connect(timeout=)``).
 
         Returns:
             Session ID if created, None otherwise.
@@ -539,6 +545,7 @@ class IPCRecoveryClient:
                 name, profile=profile, agent=agent,
                 agent_params=agent_params,
                 cascade_driver_id=cascade_driver_id,
+                timeout=timeout,
             )
             if session_id:
                 self._session_id = session_id
