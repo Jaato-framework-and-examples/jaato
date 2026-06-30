@@ -137,8 +137,9 @@ def clients() -> Rendered:
     All expose the same facade-client contract, so the convenience
     ``Session`` (``ask`` / ``complete`` / ``stream``) and ``jaato.session(
     mode=...)`` ride on any of them.  ``new client --transport <mode>`` emits the
-    matching one; ``--recoverable`` upgrades the ``ipc`` transport to
-    ``IPCRecoveryClient``.
+    matching one; ``--recoverable`` upgrades a daemon transport to its
+    auto-reconnect client (``ipc`` → ``IPCRecoveryClient``, ``ws`` →
+    ``WSRecoveryClient``).
     """
     data = {
         "in_process_client": {
@@ -159,6 +160,7 @@ def clients() -> Rendered:
         "ws_client": {
             "class": "jaato_sdk.WSClient  (jaato.session(mode='ws'))",
             "transport": "remote daemon (ws:// / wss://)",
+            "recovery": "none — use --recoverable (WSRecoveryClient) to survive drops",
             "auth": "bearer token (url= + token=)",
             "extra": "pip install 'jaato-sdk[ws]'",
             "use_for": ["a daemon on another host", "browser-reachable endpoint"],
@@ -177,6 +179,18 @@ def clients() -> Rendered:
                         "(per-run jaato-server --stop + autostart)"],
             "scaffold": "jaato-scaffold new client --transport ipc --recoverable ...",
         },
+        "ws_recovery_client": {
+            "class": "jaato_sdk.WSRecoveryClient  "
+                     "(jaato.session(mode='ws', recovery=True))",
+            "transport": "remote daemon (ws:// / wss://), auto-reconnecting",
+            "auth": "bearer token (url= + token=)",
+            "recovery": ("same auto-reconnect state machine as IPCRecoveryClient, "
+                         "over the WebSocket; reattaches via the transport-agnostic "
+                         "server replay; on_status_change callback"),
+            "use_for": ["long-lived / resilient over a REMOTE daemon",
+                        "must survive a daemon restart or a dropped WebSocket"],
+            "scaffold": "jaato-scaffold new client --transport ws --recoverable ...",
+        },
     }
     text = (
         "Python SDK clients — one facade, one client per transport\n"
@@ -186,16 +200,18 @@ def clients() -> Rendered:
         "    (no daemon)         (Unix socket)      (ws:// / wss://)  + auto-reconnect\n"
         "  - lowest latency    - no reconnect     - bearer token   - on_status_change\n"
         "  - simplest deploy   - one-shot/script  - jaato-sdk[ws]    survives restarts\n\n"
-        "  All four expose the same Session.ask/.complete/.stream facade; pick the\n"
-        "  transport with jaato.session(mode='in_process'|'ipc'|'ws').  Use\n"
-        "  IPCRecoveryClient for anything long-lived on IPC — it rides through a\n"
-        "  per-run `jaato-server --stop` + autostart; on a permanent\n"
-        "  IncompatibleServerError it stops rather than looping.\n\n"
+        "  All expose the same Session.ask/.complete/.stream facade; pick the\n"
+        "  transport with jaato.session(mode='in_process'|'ipc'|'ws') and add\n"
+        "  recovery=True on a daemon mode for auto-reconnect.  Use --recoverable\n"
+        "  for anything long-lived (IPCRecoveryClient on ipc, WSRecoveryClient on\n"
+        "  ws) — it rides through a per-run `jaato-server --stop` + autostart; on a\n"
+        "  permanent IncompatibleServerError it stops rather than looping.\n\n"
         "scaffold any of them (the flags work for every archetype):\n"
         "  jaato-scaffold new client --transport in_process ...      # InProcessClient\n"
         "  jaato-scaffold new client --transport ipc ...             # IPCClient (default)\n"
         "  jaato-scaffold new client --transport ipc --recoverable . # IPCRecoveryClient\n"
         "  jaato-scaffold new client --transport ws ...              # WSClient\n"
+        "  jaato-scaffold new client --transport ws --recoverable .  # WSRecoveryClient\n"
     )
     return data, text
 
