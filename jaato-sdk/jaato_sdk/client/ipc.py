@@ -56,6 +56,7 @@ from jaato_sdk.events import (
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
+    ClarificationBatchResponseEvent,
     ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
@@ -233,6 +234,7 @@ class IPCClient:
         apparmor: bool = False,
         min_protocol_version: Optional[str] = None,
         autostart_timeout: float = 120.0,
+        presentation: Optional[Any] = None,
     ):
         """Initialize the IPC client.
 
@@ -296,6 +298,16 @@ class IPCClient:
                 for development against unreleased daemons; production
                 deployments should pin a real minimum at the class
                 level so the SDK refuses to talk to incompatible servers.
+            presentation: Override the display-capability context sent to
+                the server at connect (``ClientConfigRequest.presentation``).
+                Accepts a ``PresentationContext`` or a plain ``dict``.  When
+                ``None`` (default) the client auto-derives a TUI-shaped
+                context from the terminal width + ``client_type``.  Pass an
+                explicit context for non-terminal clients (chat / web) whose
+                capabilities differ from a terminal's — e.g. a chat client
+                with ``supports_tables=False`` / ``supports_images=True`` /
+                ``supports_expandable_content=True`` and a fixed narrow
+                ``content_width`` — so the model adapts its output format.
         """
         if env_file is None:
             raise ValueError(
@@ -317,6 +329,10 @@ class IPCClient:
         self.config_root = config_root
         self.apparmor = apparmor
         self.client_type = client_type
+        # Optional caller-supplied presentation override (PresentationContext
+        # or dict).  When set, it REPLACES the auto-derived terminal context at
+        # config-send — the SDK hook for non-terminal (chat/web) clients.
+        self._presentation = presentation
         self._min_protocol_version: str = (
             min_protocol_version or self.MIN_PROTOCOL_VERSION
         )
@@ -962,13 +978,23 @@ class IPCClient:
         if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
             content_width -= 6  # debug line number gutter (4-digit num + "│ ")
 
-        # Build presentation context describing TUI terminal capabilities.
-        # This is transmitted to the server so the model can adapt its output
-        # (e.g. avoid wide tables on narrow terminals).
-        presentation = PresentationContext(
-            content_width=content_width,
-            client_type=self.client_type,
-        )
+        # Build the presentation context transmitted to the server so the model
+        # can adapt its output (e.g. avoid wide tables on narrow terminals).
+        # A caller-supplied override (the ``presentation=`` ctor param) wins —
+        # the hook for non-terminal clients (chat/web) whose capabilities differ
+        # from a TUI's.  Accepts a PresentationContext or a plain dict; falls
+        # back to the auto-derived terminal context otherwise.
+        if self._presentation is not None:
+            presentation_payload = (
+                self._presentation.to_dict()
+                if isinstance(self._presentation, PresentationContext)
+                else dict(self._presentation)
+            )
+        else:
+            presentation_payload = PresentationContext(
+                content_width=content_width,
+                client_type=self.client_type,
+            ).to_dict()
 
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = self.workspace_path or os.getcwd()
@@ -989,7 +1015,7 @@ class IPCClient:
             config_root=self.config_root,
             env_file=env_file_abs,
             apparmor=self.apparmor,
-            presentation=presentation.to_dict(),
+            presentation=presentation_payload,
         ))
 
     def _endpoint_is_live(self) -> bool:
@@ -1678,6 +1704,28 @@ class IPCClient:
         await self._send_event(ClarificationResponseRequest(
             request_id=request_id,
             response=response,
+        ))
+
+    async def respond_to_clarification_batch(
+        self,
+        request_id: str,
+        answers: List[str],
+    ) -> None:
+        """Respond to a batched clarification — all answers at once.
+
+        The blessed public form for WS/chat clients that receive every
+        question in one ``ClarificationBatchRequestedEvent`` (server PR #411)
+        and answer them together, rather than calling
+        ``respond_to_clarification`` per question.  ``answers`` is an ordered
+        list, one entry per question by index.
+
+        Args:
+            request_id: The clarification request ID.
+            answers: Ordered answers, one per question (by index).
+        """
+        await self._send_event(ClarificationBatchResponseEvent(
+            request_id=request_id,
+            answers=answers,
         ))
 
     async def respond_to_reference_selection(
