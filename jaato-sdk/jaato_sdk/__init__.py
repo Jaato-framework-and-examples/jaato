@@ -8,6 +8,7 @@ Usage:
 from jaato_sdk.client import (
     IPCClient,
     WSClient,
+    WSRecoveryClient,
     IPCRecoveryClient,
     ConnectionState,
     RecoveryConfig,
@@ -46,6 +47,7 @@ __all__ = [
     # Client
     "IPCClient",
     "WSClient",
+    "WSRecoveryClient",
     "IPCRecoveryClient",
     "ConnectionState",
     "RecoveryConfig",

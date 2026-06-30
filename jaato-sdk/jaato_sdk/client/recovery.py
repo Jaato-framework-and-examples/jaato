@@ -314,6 +314,26 @@ class IPCRecoveryClient:
     # Connection Management
     # =========================================================================
 
+    def _make_client(self, *, auto_start: bool) -> IPCClient:
+        """Construct the inner transport client.
+
+        The recovery state machine, reconnect loop, session reattachment, and
+        event pump are all transport-agnostic — they only ``connect`` /
+        ``disconnect`` / read events off whatever this returns.  Override in a
+        transport subclass (e.g. ``WSRecoveryClient``) to bind a different
+        transport while reusing all of that.  ``auto_start`` is
+        ``self._auto_start`` on the initial connect and ``False`` on reconnect
+        (a restart is never auto-started).
+        """
+        return IPCClient(
+            socket_path=self._socket_path,
+            client_type=self._client_type,
+            auto_start=auto_start,
+            env_file=self._env_file,
+            workspace_path=str(self._workspace_path) if self._workspace_path else None,
+            min_protocol_version=self._min_protocol_version,
+        )
+
     async def connect(self, timeout: float = 5.0) -> bool:
         """Connect to the server.
 
@@ -333,14 +353,7 @@ class IPCRecoveryClient:
             self._transition_to(ConnectionState.CONNECTING)
 
         try:
-            self._client = IPCClient(
-                socket_path=self._socket_path,
-                client_type=self._client_type,
-                auto_start=self._auto_start,
-                env_file=self._env_file,
-                workspace_path=str(self._workspace_path) if self._workspace_path else None,
-                min_protocol_version=self._min_protocol_version,
-            )
+            self._client = self._make_client(auto_start=self._auto_start)
 
             # When auto-start is enabled, the inner connect() may need to:
             # 1. Try initial connection (timeout seconds)
@@ -1170,15 +1183,8 @@ class IPCRecoveryClient:
                 pass
             self._client = None
 
-        # Create new client
-        self._client = IPCClient(
-            socket_path=self._socket_path,
-            client_type=self._client_type,
-            auto_start=False,  # Don't auto-start during reconnection
-            env_file=self._env_file,
-            workspace_path=str(self._workspace_path) if self._workspace_path else None,
-            min_protocol_version=self._min_protocol_version,
-        )
+        # Create new client (never auto-start a restart)
+        self._client = self._make_client(auto_start=False)
 
         # Connect with timeout
         try:

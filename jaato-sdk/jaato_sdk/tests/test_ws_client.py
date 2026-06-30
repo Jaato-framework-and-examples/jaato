@@ -14,7 +14,7 @@ example suite's job; here we isolate the transport + facade wiring.
 
 import asyncio
 
-from jaato_sdk import ClientType, WSClient
+from jaato_sdk import ClientType, WSClient, WSRecoveryClient
 import jaato_sdk.client.ws as ws_mod
 from jaato_sdk.events import (
     AgentOutputEvent,
@@ -178,5 +178,46 @@ def test_read_message_returns_none_on_recv_error():
         c = WSClient("ws://x", client_type=ClientType.API)
         c._ws = _Broken()
         assert await c._read_message() is None
+
+    asyncio.run(_run())
+
+
+# --- WSRecoveryClient: IPCRecoveryClient machinery over the WS transport ---
+
+def test_ws_recovery_make_client_builds_wsclient():
+    """WSRecoveryClient reuses the IPCRecoveryClient recovery machinery, but its
+    `_make_client` factory builds a `WSClient` (url/token) — the only transport
+    seam. `auto_start` is meaningless for WS and is ignored."""
+    from jaato_sdk import IPCRecoveryClient
+
+    c = WSRecoveryClient("wss://host:8080", token="secret", config_root="/cfg")
+    assert isinstance(c, IPCRecoveryClient)
+    inner = c._make_client(auto_start=True)  # auto_start ignored for WS
+    assert isinstance(inner, WSClient)
+    assert inner._url == "wss://host:8080"
+    assert inner._token == "secret"
+    assert inner.config_root == "/cfg"
+
+
+def test_facade_ask_rides_on_ws_recovery(monkeypatch):
+    """The convenience facade (`Session.ask`) rides on `WSRecoveryClient` over
+    the WS transport exactly as on `WSClient` — now with auto-reconnect
+    underneath (the recovery state machine + event pump are inherited; only the
+    transport differs)."""
+    fake_mod = _FakeWSModule()
+    monkeypatch.setattr(ws_mod, "_ws_module", lambda: fake_mod)
+
+    async def _run():
+        async with WSRecoveryClient.session(
+            "ws://fake:8080", token="secret", client_type=ClientType.API
+        ) as s:
+            answer = await s.ask("hello")
+        assert answer == "Hi from WS"
+        # bearer token rode the Upgrade URL through the recovery wrapper
+        assert "token=secret" in fake_mod.last_url
+        # the facade drove session.new + message.send over the WS
+        cmds = [deserialize_event(m) for m in fake_mod.last_ws.sent]
+        assert any(getattr(c, "command", None) == "session.new" for c in cmds)
+        assert any(isinstance(c, SendMessageRequest) for c in cmds)
 
     asyncio.run(_run())
