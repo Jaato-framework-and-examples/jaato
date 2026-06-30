@@ -351,6 +351,32 @@ class InProcessClient:
         # on the session's permission plugin once plugin-loading lands) parks a
         # request here; respond_to_permission resolves it.
         self._pending = PendingPermissions()
+        # Client-provided ("host") tool specs, registered via
+        # register_client_tools() BEFORE create_session so they reach the
+        # session's wire (turn 1). Each: {name, description, parameters,
+        # handler} (+ optional auto_approve). The in-process analog of the
+        # daemon's ToolsRegisterClientRequest — but with NO wire: the handler
+        # runs in-process directly (registered on the embedded session's
+        # executor), so there is no daemon round-trip.
+        self._client_tools: Optional[List[Dict[str, Any]]] = None
+
+    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+        """Register client-provided ("host") tools the embedded agent can call.
+
+        Mirrors :meth:`jaato_sdk.IPCClient.register_client_tools` (same spec
+        shape — ``{name, description, parameters, handler}`` plus optional
+        ``auto_approve``) so the facade is transport-agnostic. Stored here and
+        applied to the embedded session by :meth:`create_session` AFTER
+        ``configure_tools`` builds it. Must be called before ``create_session``
+        so the schema reaches the session's initial wire (the facade's
+        ``_SessionContext`` enforces this ordering, exactly like IPC).
+
+        Unlike IPC there is no daemon to wire the schema to and no
+        ``TOOL_EXECUTE_REQUEST`` round-trip: the ``handler(args) -> Any`` is
+        registered directly on the embedded session's ``ToolExecutor``, so it
+        runs in the embedding process when the model invokes the tool.
+        """
+        self._client_tools = list(tools) if tools else None
 
     # ---- facade contract: events ----
     def subscribe(
@@ -471,7 +497,44 @@ class InProcessClient:
                 loop.call_soon_threadsafe(emitter.emit, ev)
 
             self._embedded.set_ui_hooks(_InProcessUIHooks(emit_threadsafe))
+        # Register client/host tools on the now-built session: append their
+        # schemas to the wire (so the model SEES them turn 1) and their handlers
+        # to the executor (so the model can CALL them in-process). Must run
+        # AFTER configure_tools (which creates the session) and is the embedded
+        # analog of IPC registering before create_session.
+        if self._client_tools:
+            self._register_client_tools_on_session(permission_plugin)
         return self._session_id
+
+    def _register_client_tools_on_session(self, permission_plugin: Any) -> None:
+        """Append client-tool schemas to the embedded session's wire + register
+        their handlers on its executor (+ whitelist the auto-approved ones).
+
+        Appending to ``session._tools`` after configure is the same pattern the
+        session itself uses for discovered tools (``activate_discovered_tools``),
+        so the schemas reach the provider wire; registering the handler on
+        ``session._executor`` is the same contract as
+        ``JaatoClient.configure_custom_tools``."""
+        from jaato_sdk.plugins.model_provider.types import ToolSchema
+
+        session = self._embedded.get_session()
+        if session is None:
+            return
+        approved: List[str] = []
+        for spec in self._client_tools:
+            name = spec["name"]
+            session._tools.append(ToolSchema(
+                name=name,
+                description=spec.get("description", ""),
+                parameters=spec.get("parameters", {}),
+            ))
+            handler = spec.get("handler")
+            if handler is not None:
+                session._executor.register(name, handler)
+            if spec.get("auto_approve"):
+                approved.append(name)
+        if approved and permission_plugin is not None:
+            permission_plugin.add_whitelist_tools(approved)
 
     def _wire_permission_channel(self, registry: Any) -> Any:
         """Register the InProcessChannel on the loaded permission plugin and
@@ -607,6 +670,10 @@ class _InProcessSessionContext:
 
     async def __aenter__(self) -> Session:
         on_permission = self._kwargs.pop("on_permission", None)
+        # Host/client tools — popped from the spec (not an __init__ kwarg) and
+        # registered after connect but BEFORE create_session, so the schema
+        # reaches the session's initial wire (exactly like IPC's _SessionContext).
+        client_tools = self._kwargs.pop("client_tools", None)
         # Resolve the session spec into connection kwargs so both clients take
         # an identical spec (the transport-agnostic entry forwards ``profile``
         # unchanged):
@@ -651,6 +718,8 @@ class _InProcessSessionContext:
         }
         self._client = self._client_cls(**self._kwargs)
         await self._client.connect()
+        if client_tools:
+            await self._client.register_client_tools(client_tools)
         session_id = await self._client.create_session(**create_kwargs)
         return Session(self._client, session_id, on_permission)
 
