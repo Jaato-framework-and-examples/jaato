@@ -160,11 +160,12 @@ def main(argv=None) -> int:
                     help="emit the auto-reconnect client (IPCRecoveryClient for "
                          "--transport ipc, WSRecoveryClient for ws) — survives "
                          "daemon restarts — instead of the plain client")
-    pn.add_argument("--transport", choices=["ipc", "ws"], default="ipc",
+    pn.add_argument("--transport", choices=["ipc", "ws", "in_process"], default="ipc",
                     help="client transport: 'ipc' (local daemon over a Unix socket, "
-                         "default) or 'ws' (remote daemon over ws:// / wss:// — "
-                         "requires --url). The embedded 'in_process' transport is "
-                         "facade-native — see `jaato-scaffold explain transports`.")
+                         "default), 'ws' (remote daemon over ws:// / wss:// — "
+                         "requires --url), or 'in_process' (embedded — runs the "
+                         "runtime + session in THIS process, no daemon/socket; "
+                         "incompatible with --recoverable).")
     pn.add_argument("--url", help="WebSocket URL for --transport ws (ws:// or wss://)")
     pn.add_argument("--token", help="bearer token for --transport ws (optional)")
     pn.add_argument("--ca", help="CA-bundle path for --transport ws wss:// with a "
