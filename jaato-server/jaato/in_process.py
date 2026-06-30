@@ -971,7 +971,7 @@ def _bundle_inline_profile(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return kwargs
 
 
-def session(mode: str = "ipc", **kwargs: Any) -> Any:
+def session(mode: str = "ipc", *, recovery: bool = False, **kwargs: Any) -> Any:
     """Transport-agnostic session entry — the facade picks the client by ``mode``.
 
     Three transports, one spec, one facade (``s.ask`` / ``.complete`` /
@@ -982,6 +982,13 @@ def session(mode: str = "ipc", **kwargs: Any) -> Any:
     * ``mode="ipc"`` — a *local* daemon over a Unix socket via ``IPCClient``.
     * ``mode="ws"`` — a *remote* daemon over ``ws://`` / ``wss://`` via
       ``WSClient`` (pass ``url=`` and optional ``token=``).
+
+    ``recovery=True`` (daemon modes only) swaps in the **auto-reconnect** client
+    — ``IPCRecoveryClient`` (``ipc``) / ``WSRecoveryClient`` (``ws``) — so the
+    session survives daemon restarts (exponential backoff + session
+    reattachment; pass ``on_status_change=`` for the reconnection callback).
+    ``recovery=True`` with ``mode="in_process"`` is an error: the embedded
+    runtime has no daemon to reconnect to.
 
     All accept the same session spec — pass ``model`` / ``provider`` /
     ``plugins`` / ``plugin_configs`` as separate kwargs (bundled into the
@@ -1006,15 +1013,26 @@ def session(mode: str = "ipc", **kwargs: Any) -> Any:
     """
     spec_kwargs = _bundle_inline_profile(kwargs)
     if mode == "in_process":
+        if recovery:
+            raise ValueError(
+                "session(recovery=True) needs a daemon transport (mode='ipc' or "
+                "mode='ws'); the in-process runtime has no daemon to reconnect to"
+            )
         return InProcessClient.session(**spec_kwargs)
     if mode == "ipc":
+        if recovery:
+            from jaato_sdk import IPCRecoveryClient
+            return IPCRecoveryClient.session(**spec_kwargs)
         from jaato_sdk import IPCClient
         return IPCClient.session(**spec_kwargs)
     if mode == "ws":
-        from jaato_sdk import WSClient
         url = spec_kwargs.pop("url", None)
         if not url:
             raise ValueError("session(mode='ws') requires a url= (ws:// or wss://)")
+        if recovery:
+            from jaato_sdk import WSRecoveryClient
+            return WSRecoveryClient.session(url, **spec_kwargs)
+        from jaato_sdk import WSClient
         return WSClient.session(url, **spec_kwargs)
     raise ValueError(
         f"unknown session mode {mode!r}; expected 'ipc', 'in_process', or 'ws'"
