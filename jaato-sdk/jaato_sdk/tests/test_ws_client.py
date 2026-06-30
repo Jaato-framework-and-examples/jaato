@@ -82,9 +82,11 @@ class _FakeWSModule:
     def __init__(self) -> None:
         self.last_url: str | None = None
         self.last_ws: _FakeWS | None = None
+        self.last_kwargs: dict = {}
 
     async def connect(self, url: str, *a, **k) -> _FakeWS:
         self.last_url = url
+        self.last_kwargs = dict(k)
         self.last_ws = _FakeWS()
         return self.last_ws
 
@@ -221,3 +223,66 @@ def test_facade_ask_rides_on_ws_recovery(monkeypatch):
         assert any(isinstance(c, SendMessageRequest) for c in cmds)
 
     asyncio.run(_run())
+
+
+# --- WS TLS: ssl= / ca= for wss:// (self-signed / dev CAs) ---
+
+def test_ws_ssl_passthrough_reaches_connect(monkeypatch):
+    """ssl= is passed straight to websockets.connect (SSLContext / bool)."""
+    fake_mod = _FakeWSModule()
+    monkeypatch.setattr(ws_mod, "_ws_module", lambda: fake_mod)
+    sentinel = object()
+
+    async def _run():
+        async with WSClient.session(
+            "wss://fake:8080", ssl=sentinel, client_type=ClientType.API
+        ):
+            pass
+        assert fake_mod.last_kwargs.get("ssl") is sentinel
+
+    asyncio.run(_run())
+
+
+def test_ws_no_ssl_means_no_kwarg(monkeypatch):
+    """No ssl/ca -> no ssl kwarg (websockets' default; ws:// stays plaintext)."""
+    fake_mod = _FakeWSModule()
+    monkeypatch.setattr(ws_mod, "_ws_module", lambda: fake_mod)
+
+    async def _run():
+        async with WSClient.session("ws://fake:8080", client_type=ClientType.API):
+            pass
+        assert "ssl" not in fake_mod.last_kwargs
+
+    asyncio.run(_run())
+
+
+def test_ca_loads_into_default_context(monkeypatch):
+    """ca= loads the CA bundle into a default verifying context."""
+    import ssl as _ssl
+
+    seen = {}
+
+    class _Ctx:
+        def load_verify_locations(self, path):
+            seen["ca"] = path
+
+    monkeypatch.setattr(_ssl, "create_default_context", lambda: _Ctx())
+    c = WSClient("wss://x", ca="/tmp/ca.crt", client_type=ClientType.API)
+    ctx = c._resolve_ssl()
+    assert isinstance(ctx, _Ctx)
+    assert seen["ca"] == "/tmp/ca.crt"
+
+
+def test_ssl_wins_over_ca():
+    sentinel = object()
+    c = WSClient("wss://x", ssl=sentinel, ca="/tmp/ca.crt", client_type=ClientType.API)
+    assert c._resolve_ssl() is sentinel
+
+
+def test_ws_recovery_threads_ssl_ca_to_inner_client():
+    """WSRecoveryClient carries ssl/ca into every reconnect's inner WSClient."""
+    sentinel = object()
+    c = WSRecoveryClient("wss://x", ssl=sentinel, ca="/tmp/ca.crt")
+    inner = c._make_client(auto_start=False)
+    assert inner._ssl is sentinel
+    assert inner._ca == "/tmp/ca.crt"

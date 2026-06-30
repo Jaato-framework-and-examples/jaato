@@ -74,6 +74,8 @@ class WSClient(IPCClient):
         workspace_path: Optional[str] = None,
         config_root: Optional[str] = None,
         min_protocol_version: Optional[str] = None,
+        ssl: Any = None,
+        ca: Optional[str] = None,
     ) -> None:
         super().__init__(
             socket_path="",  # unused — a WebSocket has no socket file / pipe
@@ -86,6 +88,15 @@ class WSClient(IPCClient):
         )
         self._url = url
         self._token = token
+        # TLS for wss://. ``ssl`` is passed straight to ``websockets.connect``
+        # (an ``ssl.SSLContext``, or ``True``/``False``); ``ca`` is a
+        # convenience — a CA-bundle path we load into a default context (the
+        # Python analog of Node's ``NODE_EXTRA_CA_CERTS`` for self-signed / dev
+        # certs). ``ssl`` wins if both are given. Both unset → ``websockets``
+        # uses its default verifying context for ``wss://`` (and no TLS for
+        # ``ws://``).
+        self._ssl = ssl
+        self._ca = ca
         self._ws: Any = None
 
     @classmethod
@@ -106,6 +117,8 @@ class WSClient(IPCClient):
         env_file: str = ".env",
         connect_timeout: float = 120.0,
         min_protocol_version: Optional[str] = None,
+        ssl: Any = None,
+        ca: Optional[str] = None,
         **_ignored: Any,
     ) -> Any:
         """Async context manager that connects + creates a session over a
@@ -114,9 +127,11 @@ class WSClient(IPCClient):
         ``IPCClient.session`` routes through ``open_session`` (hardwired for the
         IPC ctor: ``socket_path`` / ``auto_start`` / ``apparmor``), so the WS
         transport supplies its own entry that wires the WS ctor knobs (``url`` /
-        ``token``) and reuses the transport-agnostic ``_SessionContext``::
+        ``token`` / ``ssl`` / ``ca``) and reuses the transport-agnostic
+        ``_SessionContext``::
 
             async with WSClient.session("wss://host:8080", token="...",
+                                        ca="~/.jaato/certs/ca.crt",
                                         profile="researcher") as s:
                 print(await s.ask("Research X"))
         """
@@ -130,6 +145,8 @@ class WSClient(IPCClient):
             workspace_path=workspace_path,
             config_root=config_root,
             min_protocol_version=min_protocol_version,
+            ssl=ssl,
+            ca=ca,
         )
         create_kwargs = dict(
             profile=profile,
@@ -147,6 +164,22 @@ class WSClient(IPCClient):
 
     # ---- transport overrides (the only IPC-vs-WS difference) ----
 
+    def _resolve_ssl(self) -> Any:
+        """Resolve the TLS arg for ``websockets.connect``.
+
+        ``ssl`` passes through verbatim (an ``ssl.SSLContext`` or ``True`` /
+        ``False``); else ``ca`` is loaded into a default verifying context;
+        else ``None`` (websockets' default — verifying for ``wss://``, no TLS
+        for ``ws://``)."""
+        if self._ssl is not None:
+            return self._ssl
+        if self._ca:
+            import ssl as _ssl
+            ctx = _ssl.create_default_context()
+            ctx.load_verify_locations(self._ca)
+            return ctx
+        return None
+
     async def connect(self, timeout: float = 5.0) -> bool:
         """Open the WebSocket and run the shared post-transport handshake."""
         websockets = _ws_module()
@@ -154,8 +187,13 @@ class WSClient(IPCClient):
         if self._token:
             sep = "&" if "?" in url else "?"
             url = f"{url}{sep}token={self._token}"
+        connect_kwargs: dict = {}
+        ssl_arg = self._resolve_ssl()
+        if ssl_arg is not None:
+            connect_kwargs["ssl"] = ssl_arg
         try:
-            self._ws = await asyncio.wait_for(websockets.connect(url), timeout=timeout)
+            self._ws = await asyncio.wait_for(
+                websockets.connect(url, **connect_kwargs), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise ConnectionError(
                 f"WebSocket connect timed out after {timeout}s ({self._url})"
@@ -235,6 +273,8 @@ class WSRecoveryClient(IPCRecoveryClient):
         config_root: Optional[str] = None,
         on_status_change: Optional[StatusCallback] = None,
         min_protocol_version: Optional[str] = None,
+        ssl: Any = None,
+        ca: Optional[str] = None,
     ) -> None:
         super().__init__(
             socket_path="",  # unused — a WebSocket has no socket file / pipe
@@ -249,11 +289,14 @@ class WSRecoveryClient(IPCRecoveryClient):
         self._url = url
         self._token = token
         self._config_root = config_root
+        self._ssl = ssl
+        self._ca = ca
 
     def _make_client(self, *, auto_start: bool) -> IPCClient:
         """Build the inner :class:`WSClient`. ``auto_start`` is meaningless for
         WS (a remote daemon is never auto-started) and is ignored; everything
-        else mirrors the inherited IPC factory."""
+        else (incl. the TLS ``ssl`` / ``ca`` knobs) mirrors the inherited IPC
+        factory — so every reconnect uses the same CA / context."""
         return WSClient(
             self._url,
             token=self._token,
@@ -262,6 +305,8 @@ class WSRecoveryClient(IPCRecoveryClient):
             workspace_path=str(self._workspace_path) if self._workspace_path else None,
             config_root=self._config_root,
             min_protocol_version=self._min_protocol_version,
+            ssl=self._ssl,
+            ca=self._ca,
         )
 
     @classmethod
@@ -283,6 +328,8 @@ class WSRecoveryClient(IPCRecoveryClient):
         connect_timeout: float = 120.0,
         on_status_change: Optional[StatusCallback] = None,
         min_protocol_version: Optional[str] = None,
+        ssl: Any = None,
+        ca: Optional[str] = None,
         **_ignored: Any,
     ) -> Any:
         """Auto-reconnect WS analog of :meth:`IPCRecoveryClient.session`: the
@@ -308,6 +355,8 @@ class WSRecoveryClient(IPCRecoveryClient):
             config_root=config_root,
             on_status_change=on_status_change,
             min_protocol_version=min_protocol_version,
+            ssl=ssl,
+            ca=ca,
         )
         create_kwargs = dict(
             profile=profile,
