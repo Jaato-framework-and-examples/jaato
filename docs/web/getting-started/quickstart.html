@@ -330,6 +330,16 @@ print(response)  # "4"</code></pre>
             <code>plugins</code> key (use <code>[]</code> for a tool-less
             session); credentials resolve from a <code>pass:</code> knob, never a
             raw key or env var.
+            <br><br>
+            On the daemon transports, add <code>recovery=True</code> for the
+            auto-reconnect client
+            (<a href="../guides/connection-recovery.html"><code>IPCRecoveryClient</code>
+            / <code>WSRecoveryClient</code></a>; <code>mode="in_process"</code>
+            rejects it). For a self-signed <code>wss://</code> cert, pass
+            <code>ca=</code> (a CA-bundle path) on <code>mode="ws"</code>. A
+            non-terminal client (chat / web) can pass <code>presentation=</code>
+            (a <code>PresentationContext</code> or <code>dict</code>) to replace
+            the default terminal display context so the model adapts its output.
           </div>
         </div>
         <div class="panel-code">
@@ -366,6 +376,8 @@ import jaato
 #   jaato.session(mode="in_process", profile={...})   # embedded, no daemon
 #   jaato.session(mode="ipc",        profile={...})   # local daemon (above)
 #   jaato.session(mode="ws", url="wss://host:8080", token="...", profile={...})
+# Add recovery=True (mode ipc/ws) for the auto-reconnect client; ca="ca.pem"
+# (mode ws) to trust a self-signed wss:// cert.
 
 asyncio.run(main())</code></pre>
           </div>

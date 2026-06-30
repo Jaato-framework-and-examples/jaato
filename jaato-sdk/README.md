@@ -113,8 +113,31 @@ WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.toke
 | `IPCClient` | Unix socket | A thin, transparent connection to a **local** daemon. No retries — if the server goes away, your iterator ends. |
 | `WSClient` | WebSocket | A **remote** daemon over `ws://` / `wss://`. `IPCClient` with the transport swapped; needs the `jaato-sdk[ws]` extra. |
 | `IPCRecoveryClient` | Unix socket | Automatic reconnection with exponential backoff + session reattachment. Recommended for long-running IPC apps. |
+| `WSRecoveryClient` | WebSocket | Automatic reconnection + session reattachment over WebSocket — a `WSClient` subclass with the same recovery machinery (and `on_status_change`) as `IPCRecoveryClient`. Recommended for long-running remote apps; needs the `jaato-sdk[ws]` extra. |
 
-All four expose the **same facade-client contract**, so the convenience `Session` (`ask` / `complete` / `stream`) and the transport-agnostic `jaato.session(mode=...)` entry ride on any of them. `IPCRecoveryClient` wraps `IPCClient` with a state machine and a configurable retry policy; it exposes the same request methods plus connection-lifecycle hooks.
+All five expose the **same facade-client contract**, so the convenience `Session` (`ask` / `complete` / `stream`) and the transport-agnostic `jaato.session(mode=...)` entry ride on any of them. The recovery clients wrap their base transport with a state machine and a configurable retry policy; they expose the same request methods plus connection-lifecycle hooks. With the facade, pass `recovery=True` on a daemon transport to get the recovery client:
+
+```python
+import jaato
+
+# IPCRecoveryClient — auto-reconnect over the local socket:
+async with jaato.session(mode="ipc", recovery=True, profile="researcher",
+                         on_status_change=lambda st: print(st.state)) as s:
+    print(await s.ask("Long task..."))
+
+# WSRecoveryClient — auto-reconnect over WebSocket, trusting a self-signed
+# wss:// cert via a per-connection CA bundle:
+async with jaato.session(mode="ws", url="wss://host:8080", token="...",
+                         recovery=True, ca="/etc/jaato/dev-ca.pem",
+                         on_status_change=lambda st: print(st.state)) as s:
+    print(await s.ask("Long task..."))
+```
+
+`recovery=True` works on the two daemon transports (`ipc` / `ws`); `mode="in_process", recovery=True` raises `ValueError` (no daemon to reconnect to). `IPCRecoveryClient.create_session(timeout=...)` mirrors `IPCClient.create_session` for drop-in parity.
+
+### WS TLS (`ssl=` / `ca=`)
+
+For a self-signed or internal `wss://` endpoint, `WSClient` / `WSRecoveryClient` (and `jaato.session(mode="ws", ...)`) accept `ssl=` (an `ssl.SSLContext`, or `True`/`False`) and `ca=` (a CA-bundle path). A `ca` path is loaded into a default verifying context; `ssl` wins if both are set. They are scoped **per connection** — loaded into the connection's `SSLContext`, never `os.environ` — so, unlike an `SSL_CERT_FILE` env hack, they cannot leak into a subprocess-restarted daemon's outbound HTTPS (the Python analog of Node's `NODE_EXTRA_CA_CERTS`).
 
 ### Events vs requests
 
@@ -339,9 +362,12 @@ await client.send_message("Build the README", attachments=[...])
 await client.respond_to_permission(request_id, "y")
 await client.respond_to_permission(request_id, "e", edited_arguments={"path": "..."})
 await client.respond_to_clarification(request_id, "use json")
+await client.respond_to_clarification_batch(request_id, answers)   # one frame for a multi-question batch
 await client.respond_to_reference_selection(request_id, "1,3,4")
 await client.stop()
 ```
+
+`respond_to_clarification_batch(request_id, answers)` emits a `ClarificationBatchResponseEvent` — the blessed batch form for WS / chat clients answering a whole question set at once, versus the per-question `respond_to_clarification`. `IPCRecoveryClient` also proxies `register_client_tools` (it remembers the registered tool set and re-registers on reconnect, so host tools survive a daemon restart) and `list_sessions`.
 
 ### Commands and metadata
 
@@ -495,6 +521,16 @@ presentation = PresentationContext(
 ```
 
 `ClientType` describes the kind of surface, not a specific app. Telegram, Slack and WhatsApp bots are all `CHAT`. `CommunicationStyle.CONVERSATIONAL` tells the model to send short, frequent updates; `NARRATIVE` tells it to deliver one well-structured response at the end. When `communication_style` is left `None`, `CHAT` defaults to conversational and everything else to narrative.
+
+Pass a `PresentationContext` (or a plain `dict`) as `presentation=` to the client constructor — `IPCClient` / `WSClient` / `IPCRecoveryClient` / `WSRecoveryClient`, their `.session(...)`, or `jaato.session(mode="ipc"|"ws", presentation=...)`. It **replaces** the auto-derived terminal context at connect-time config-send, so a chat / web client whose capabilities differ from a TUI's (e.g. narrow `content_width`, `supports_tables=False`, `supports_images=True`, `supports_expandable_content=True`, `client_type=CHAT`) declares them once. A recovery client threads `presentation=` through every inner client it rebuilds, so it survives reconnection. (`presentation=` is not yet wired for `mode="in_process"`.)
+
+```python
+async with jaato.session(mode="ws", url="wss://host:8080", token="...",
+                         presentation={"client_type": "chat",
+                                       "content_width": 72,
+                                       "supports_tables": False}) as s:
+    print(await s.ask("Summarize the incident."))
+```
 
 ## Building a Custom Client
 

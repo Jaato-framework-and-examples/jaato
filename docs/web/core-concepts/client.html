@@ -108,7 +108,17 @@
             <strong>daemon</strong> instead, use the Python IPC client
             (<code>from jaato_sdk import IPCClient</code>;
             <code>IPCClient.session(...)</code> + <code>ask</code>/<code>complete</code>/<code>stream</code>)
-            &mdash; what most applications use. The
+            &mdash; what most applications use. For a <strong>remote</strong>
+            daemon, <code>mode="ws"</code> selects the Python <code>WSClient</code>
+            (a WebSocket subclass of <code>IPCClient</code>, with
+            <code>ssl=</code> / <code>ca=</code> for self-signed <code>wss://</code>
+            TLS) &mdash; distinct from the TypeScript SDK's WebSocket
+            <code>JaatoClient</code> below. For resilient long-running clients, the
+            recovery variants
+            <a href="../api-reference/ipc-recovery-client.html"><code>IPCRecoveryClient</code></a>
+            / <code>WSRecoveryClient</code> add auto-reconnect + session
+            reattachment (or pass <code>recovery=True</code> to
+            <code>jaato.session(mode="ipc"|"ws", ...)</code>). The
             <a href="../getting-started/typescript-sdk.html">TypeScript SDK</a>
             ships a <em>separate</em> <code>JaatoClient</code>
             (<code>@jaato/sdk</code>, WebSocket transport) that shares the name only.
