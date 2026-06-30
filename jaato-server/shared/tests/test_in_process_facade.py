@@ -998,3 +998,23 @@ class TestSubagentAutoContinue:
 
         asyncio.run(_run())
         assert seen == ["first", "second"]
+
+
+class TestSessionTerminatedEmission:
+    """#5D: on_session_quiescent (fired by JaatoSession after signal_completion +
+    turn wrap-up, jaato_session.py:5204) must emit SESSION_TERMINATED to the
+    facade — the event a delegation example awaits. _InProcessUIHooks.__getattr__
+    no-ops every on_*, so this needs to be an EXPLICIT method or the terminal
+    event is silently swallowed."""
+
+    def test_on_session_quiescent_emits_session_terminated(self):
+        from jaato.in_process import _InProcessUIHooks
+        from jaato_sdk.events import SessionTerminatedEvent
+
+        seen = []
+        hooks = _InProcessUIHooks(seen.append)
+        hooks.on_session_quiescent(agent_id="main", reason="natural")
+        assert len(seen) == 1
+        assert isinstance(seen[0], SessionTerminatedEvent)
+        assert seen[0].agent_id == "main"
+        assert seen[0].reason == "natural"
