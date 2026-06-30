@@ -173,9 +173,11 @@ class TestRealPathWiring:
                 "openrouter": {"api_key": "sk-or-plain"}
             }
             # configure_tools received the resolved plugin_configs in session_kwargs.
+            # No ``plugins`` was passed -> None (INHERIT / drag-all), preserved
+            # NOT collapsed to [] — full IPC parity (None=inherit, []=override-none).
             assert fake.configure_tools_session_kwargs == {
                 "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}},
-                "plugins": [],
+                "plugins": None,
                 "suppress_base_instructions": False,
             }
             # A plain key passes through resolve_secret_uri unchanged; pass://
@@ -758,3 +760,33 @@ class TestConfigRootIsolation:
             assert holder["config_root"] == "/etc/jaato-conf"
 
         asyncio.run(_run())
+
+
+class TestPluginsIPCParity:
+    """Full IPC parity for the plugins gate: None (missing) is INHERIT/drag-all,
+    [] is an explicit override to NONE, [list] is exactly those. None must be
+    PRESERVED through to create_session (NOT collapsed to []) — else a base
+    profile that omits plugins would wrongly drag nothing instead of all,
+    diverging from the daemon/runner's create_session(plugins=...) semantics."""
+
+    def _session_plugins(self, **session_kw):
+        holder = {}
+
+        async def _run():
+            async with InProcessClient.session(
+                model="m", embedded_factory=_factory_for(holder), **session_kw,
+            ) as s:
+                await s.ask("hi")
+
+        asyncio.run(_run())
+        return holder["client"].configure_tools_session_kwargs["plugins"]
+
+    def test_missing_plugins_is_none_inherit(self):
+        # No plugins kwarg -> None (inherit / drag-all), NOT [].
+        assert self._session_plugins() is None
+
+    def test_explicit_empty_is_override_none(self):
+        assert self._session_plugins(plugins=[]) == []
+
+    def test_explicit_list_passes_through(self):
+        assert self._session_plugins(plugins=["cli"]) == ["cli"]

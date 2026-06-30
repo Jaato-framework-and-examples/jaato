@@ -291,17 +291,20 @@ class InProcessClient:
         self._provider = provider
         self._plugin_configs = plugin_configs
         self._resolved_plugin_configs: Dict[str, Any] = {}
-        # The session's tool plugins (the spec's ``plugins`` list). When
-        # non-empty, create_session builds a real registry (discover -> set
-        # context -> expose_all -> configure_tools), replicating the daemon's
-        # session-setup so tool EXECUTORS are wired in-process (the ex06 seam).
-        # The MODEL's tool-visibility gate (what create_session exposes to the
-        # model). NOT the set of plugins INITIALIZED — for plugin parity the
-        # registry always initializes the full runner-tier set (see
-        # _build_registry); this list only gates which tools the model sees,
-        # exactly like the daemon's create_session(plugins=...). [] (default) ->
-        # the daemon's minimal model surface; a list -> those.
-        self._plugins = list(plugins) if plugins else []
+        # The session's tool plugins (the spec's ``plugins`` list) — the MODEL's
+        # tool-visibility gate, NOT the set of plugins INITIALIZED (for plugin
+        # parity the registry always initializes the full runner-tier set; see
+        # _build_registry). Gates which tools the model sees, exactly like the
+        # daemon's create_session(plugins=...). Full IPC parity on the three
+        # cases — so None must be PRESERVED, never collapsed to []:
+        #   * None  -> INHERIT. In a base (non-derived) profile this drags ALL
+        #     plugins (core + discoverable); in a derived profile it inherits the
+        #     base's plugin set. The downstream create_session(plugins=None)
+        #     applies the inherit/drag-all semantics.
+        #   * []    -> explicit OVERRIDE: drag NONE (minimal essential surface
+        #     only — introspection/permission). NOT the same as None.
+        #   * [..]  -> exactly those plugins.
+        self._plugins = list(plugins) if plugins is not None else None
         # Default the workspace to the embedding process's cwd, and config_root
         # to ``<workspace>/.jaato`` — the in-process analog of a daemon session's
         # workspace (client working_dir) + ``.jaato`` config root. Needed so the
