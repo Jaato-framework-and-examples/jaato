@@ -2784,12 +2784,20 @@ class SubagentPlugin:
         # to build profile_payload for the RPC).  See the branch
         # near self._executor.submit below.
 
-        # Resolve workspace path early — needed for tech stack detection on inline profiles
+        # Resolve workspace path early — needed for tech stack detection on inline
+        # profiles.  Import get_workspace_root UNCONDITIONALLY here, NOT inside the
+        # ``workspace_path is None`` branch: a conditional import binds the name
+        # function-local, so when the workspace resolves early (self._workspace_path
+        # or registry.get_workspace_path() non-None — the common case, ALWAYS true
+        # for an embedded session) the branch is skipped and the later uses (the
+        # spawn-schema workspace fallback at ``or get_workspace_root()`` and the
+        # debug line) raise UnboundLocalError. Binding it once up-front keeps the
+        # name a proper local for every path.
+        from shared.session_context import get_workspace_root
         workspace_path = self._workspace_path
         if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
         if workspace_path is None:
-            from shared.session_context import get_workspace_root
             workspace_path = get_workspace_root()
         parent_cwd = workspace_path or os.getcwd()
 

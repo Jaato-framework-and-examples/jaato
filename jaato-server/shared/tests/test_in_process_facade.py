@@ -13,6 +13,9 @@ dual-mode example suite.
 """
 
 import asyncio
+import os as _os
+
+import pytest
 
 from jaato.in_process import (
     InProcessClient,
@@ -21,6 +24,19 @@ from jaato.in_process import (
     session,
 )
 from jaato_sdk.events import AgentOutputEvent, EventType, TurnCompletedEvent
+
+
+@pytest.fixture(autouse=True)
+def _restore_os_environ():
+    """InProcessClient.connect sets workspace/config-root os.environ keys with no
+    reset (mirroring the daemon's one-session-per-process runner — see #451).
+    Snapshot + restore around each test so these tests don't leak workspace env
+    into others — notably the subagent suite's find_workspace_root / cwd /
+    profile-discovery tests, which read os.environ['workspaceRoot']."""
+    snapshot = dict(_os.environ)
+    yield
+    _os.environ.clear()
+    _os.environ.update(snapshot)
 
 
 class _FakeEmbedded:
