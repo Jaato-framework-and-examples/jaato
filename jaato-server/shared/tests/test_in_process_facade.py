@@ -1018,3 +1018,36 @@ class TestSessionTerminatedEmission:
         assert isinstance(seen[0], SessionTerminatedEvent)
         assert seen[0].agent_id == "main"
         assert seen[0].reason == "natural"
+
+
+class TestOutstandingSubagentGate:
+    """#5C gate hardening: the completion nudge must NOT fire while a subagent is
+    still working. The original gate keyed on session.is_running, which flickers
+    (False pre-spawn + between turns) -> the lead nudged + signaled prematurely.
+    The fix keys on terminal injects (_on_lead_inject parses
+    [SUBAGENT ... event=COMPLETED|ERROR|CANCELLED]) vs _active_sessions
+    membership -> a stable 'still outstanding' signal."""
+
+    def test_gate_keys_on_terminal_injects_not_is_running(self):
+        from jaato.in_process import InProcessClient
+
+        c = InProcessClient(model="m")
+        c._schedule_lead_continuation = lambda text: None  # decouple from the loop
+
+        class _Sub:
+            _active_sessions = {"subagent_1": {}}
+
+        class _Reg:
+            def get_plugin(self, n):
+                return _Sub() if n == "subagent" else None
+
+        c._registry = _Reg()
+        # spawned, no terminal inject -> outstanding (gate closed, no premature nudge)
+        assert c._has_outstanding_subagents() is True
+        # a mid-run STATUS inject (IDLE) is NOT terminal -> still outstanding
+        c._on_lead_inject("[SUBAGENT agent_id=subagent_1 event=IDLE]\nstill working")
+        assert c._has_outstanding_subagents() is True
+        # the terminal COMPLETED inject clears it -> gate opens
+        c._on_lead_inject("[SUBAGENT agent_id=subagent_1 event=COMPLETED]\nFound 3 facts")
+        assert "subagent_1" in c._completed_subagent_ids
+        assert c._has_outstanding_subagents() is False

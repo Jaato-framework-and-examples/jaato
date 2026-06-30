@@ -382,6 +382,13 @@ class InProcessClient:
         # (single-threaded) facade loop so overlapping injects don't double-run.
         self._continuation_busy = False
         self._continuation_pending: Optional[str] = None
+        # agent_ids of subagents that have posted a TERMINAL inject
+        # ([SUBAGENT ... event=COMPLETED|ERROR|CANCELLED]). The completion-nudge
+        # gate keys on this — NOT session.is_running, which flickers mid-turn and
+        # reads False both pre-spawn (the subagent isn't in _active_sessions yet)
+        # and between the subagent's turns, opening the gate prematurely so the
+        # lead nudges + signals before the subagent delivers its result.
+        self._completed_subagent_ids: set = set()
 
     async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
         """Register client-provided ("host") tools the embedded agent can call.
@@ -584,7 +591,7 @@ class InProcessClient:
             ):
                 lead_session.set_continuation_callback(
                     lambda text: loop.call_soon_threadsafe(
-                        self._schedule_lead_continuation, text
+                        self._on_lead_inject, text
                     )
                 )
         # Register client/host tools on the now-built session: append their
@@ -719,6 +726,24 @@ class InProcessClient:
         emitter.emit(TurnCompletedEvent(agent_id="main"))
         return final_text
 
+    def _on_lead_inject(self, text: str) -> None:
+        """Continuation-callback entry (runs on the facade loop). Records any
+        TERMINAL subagent inject so the completion-nudge gate has a stable
+        'subagent done' signal, then schedules the follow-up lead turn.
+
+        The subagent posts ``[SUBAGENT agent_id=<id> event=COMPLETED|ERROR|
+        CANCELLED]`` when its task ends (vs ``event=IDLE`` / status mid-run).
+        Marking the id here means a continuation triggered by a mid-run STATUS
+        inject keeps the gate closed (subagent still outstanding), so the lead
+        only completes after the subagent actually finishes."""
+        import re
+
+        for m in re.finditer(
+            r"\[SUBAGENT agent_id=(\S+) event=(?:COMPLETED|ERROR|CANCELLED)\]", text
+        ):
+            self._completed_subagent_ids.add(m.group(1))
+        self._schedule_lead_continuation(text)
+
     def _schedule_lead_continuation(self, text: str) -> None:
         """Schedule a follow-up lead turn for a drained subagent result.
 
@@ -771,24 +796,23 @@ class InProcessClient:
             if pending is not None:
                 self._schedule_lead_continuation(pending)
 
-    def _has_running_subagents(self) -> bool:
-        """True if any spawned subagent is still running.
+    def _has_outstanding_subagents(self) -> bool:
+        """True if any spawned subagent has NOT yet posted a terminal inject.
 
         Gates the lead completion nudge so it never fires while the lead is
-        legitimately waiting for a delegated result — the embedded stand-in for
-        the daemon's ``status == "done"`` gating. Reads the subagent plugin's
-        ``_active_sessions`` registry + each entry's ``session.is_running``
-        (the same signal ``list_active_subagents`` reports)."""
+        legitimately waiting for a delegated result. Keys on _active_sessions
+        membership vs ``_completed_subagent_ids`` (terminal injects recorded in
+        :meth:`_on_lead_inject`) — a STABLE 'still working' signal, unlike
+        ``session.is_running`` which flickers mid-turn and reads False both
+        pre-spawn and between the subagent's turns (the premature-completion
+        bug). A subagent stays outstanding from spawn until its
+        COMPLETED/ERROR/CANCELLED inject lands."""
         registry = self._registry
         sub = registry.get_plugin("subagent") if registry is not None else None
         active = getattr(sub, "_active_sessions", None) if sub is not None else None
         if not active:
             return False
-        for info in active.values():
-            sess = info.get("session") if isinstance(info, dict) else None
-            if sess is not None and getattr(sess, "is_running", False):
-                return True
-        return False
+        return any(aid not in self._completed_subagent_ids for aid in active)
 
     def _maybe_completion_nudge(self) -> Optional[str]:
         """Return the completion-nudge prompt when the lead has SETTLED without
@@ -815,7 +839,7 @@ class InProcessClient:
         tools = getattr(lead, "_tools", None) or []
         if not any(getattr(t, "name", None) == "signal_completion" for t in tools):
             return None
-        if self._has_running_subagents():
+        if self._has_outstanding_subagents():
             return None
         try_nudge = getattr(lead, "try_completion_nudge", None)
         if try_nudge is None:
