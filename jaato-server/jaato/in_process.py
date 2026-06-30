@@ -41,6 +41,7 @@ from jaato_sdk.client.convenience import Session
 from jaato_sdk.events import (
     AgentCompletedEvent,
     AgentOutputEvent,
+    SessionTerminatedEvent,
     TurnCompletedEvent,
 )
 from shared.config_resolver import resolve_secret_uri
@@ -246,6 +247,20 @@ class _InProcessUIHooks:
                 success=bool(success),
                 payload=payload,
             )
+        )
+
+    def on_session_quiescent(
+        self, agent_id: str = "", reason: str = "natural", **_kw: Any,
+    ) -> None:
+        """Emit SESSION_TERMINATED when the session winds down quiescent — fired
+        by ``JaatoSession`` after ``signal_completion`` + the turn wraps up
+        (jaato_session.py:5204). The daemon's adapter emits it to attached
+        clients; the embedded path emits it onto the facade emitter. Explicit
+        (not the ``__getattr__`` no-op) so a delegation lead that signals
+        completion actually surfaces SESSION_TERMINATED to the facade — the
+        event ex08 awaits."""
+        self._emit(
+            SessionTerminatedEvent(agent_id=agent_id or "main", reason=reason)
         )
 
     def __getattr__(self, name: str) -> Callable[..., None]:
@@ -746,8 +761,75 @@ class InProcessClient:
             self._continuation_busy = False
             pending = self._continuation_pending
             self._continuation_pending = None
+            if pending is None:
+                # No queued inject left. If the lead has SETTLED (delegation
+                # done, no subagent still running) but never called
+                # signal_completion, drive the completion nudge — the embedded
+                # analog of the daemon's lead nudge (server/core.py:4939) — so
+                # the lead actually signals and SESSION_TERMINATED fires.
+                pending = self._maybe_completion_nudge()
             if pending is not None:
                 self._schedule_lead_continuation(pending)
+
+    def _has_running_subagents(self) -> bool:
+        """True if any spawned subagent is still running.
+
+        Gates the lead completion nudge so it never fires while the lead is
+        legitimately waiting for a delegated result — the embedded stand-in for
+        the daemon's ``status == "done"`` gating. Reads the subagent plugin's
+        ``_active_sessions`` registry + each entry's ``session.is_running``
+        (the same signal ``list_active_subagents`` reports)."""
+        registry = self._registry
+        sub = registry.get_plugin("subagent") if registry is not None else None
+        active = getattr(sub, "_active_sessions", None) if sub is not None else None
+        if not active:
+            return False
+        for info in active.values():
+            sess = info.get("session") if isinstance(info, dict) else None
+            if sess is not None and getattr(sess, "is_running", False):
+                return True
+        return False
+
+    def _maybe_completion_nudge(self) -> Optional[str]:
+        """Return the completion-nudge prompt when the lead has SETTLED without
+        calling ``signal_completion`` — else None.
+
+        The embedded analog of the daemon's lead completion nudge
+        (server/core.py:4939). Nudge only when: signal_completion is on the
+        lead's wire (a completion/delegation session — a plain chat session never
+        has it, so this is a no-op there), the lead hasn't signaled, no subagent
+        is still running, and the per-session nudge budget (bounded by
+        ``try_completion_nudge``) isn't spent. Without this an embedded
+        delegation lead resumes + produces its result but never calls
+        signal_completion, so SESSION_TERMINATED never fires."""
+        MAX_COMPLETION_NUDGES = 2
+        lead = (
+            self._embedded.get_session()
+            if hasattr(self._embedded, "get_session")
+            else None
+        )
+        if lead is None:
+            return None
+        if getattr(lead, "_signal_completion_called", False):
+            return None
+        tools = getattr(lead, "_tools", None) or []
+        if not any(getattr(t, "name", None) == "signal_completion" for t in tools):
+            return None
+        if self._has_running_subagents():
+            return None
+        try_nudge = getattr(lead, "try_completion_nudge", None)
+        if try_nudge is None:
+            return None
+        should, _ = try_nudge(MAX_COMPLETION_NUDGES)
+        if not should:
+            return None
+        return (
+            "Your session is about to end without calling `signal_completion`. "
+            "The loop cannot close cleanly until you either continue the work "
+            "with another tool call, or call `signal_completion` per your "
+            "profile's payload schema with the appropriate decision and "
+            "evidence. Please proceed with one of those two paths."
+        )
 
     async def respond_to_permission(self, request_id: str, response: str) -> None:
         # Resolve the parked permission request (set by the InProcessChannel on
