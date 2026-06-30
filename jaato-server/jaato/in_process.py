@@ -531,6 +531,17 @@ class InProcessClient:
                 loop.call_soon_threadsafe(emitter.emit, ev)
 
             self._embedded.set_ui_hooks(_InProcessUIHooks(emit_threadsafe))
+            # The subagent plugin emits the SUBAGENT's events (on_agent_output /
+            # on_agent_completed) through its OWN _ui_hooks slot — the daemon
+            # wires it in _setup_agent_hooks (server/core.py); the embedded path
+            # must too, with the SAME cross-thread bridge. Without it a spawned
+            # subagent runs ISOLATED in its thread pool: it executes model turns
+            # but the facade loop sees zero subagent events (the gap #5 symptom).
+            subagent_plugin = registry.get_plugin("subagent")
+            if subagent_plugin is not None and hasattr(
+                subagent_plugin, "set_ui_hooks"
+            ):
+                subagent_plugin.set_ui_hooks(_InProcessUIHooks(emit_threadsafe))
         # Register client/host tools on the now-built session: append their
         # schemas to the wire (so the model SEES them turn 1) and their handlers
         # to the executor (so the model can CALL them in-process). Must run
