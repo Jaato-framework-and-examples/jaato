@@ -883,3 +883,31 @@ class TestClientToolsForwarding:
                 await s.ask("hi")
         asyncio.run(_run())
         assert holder["client"].closed
+
+
+class TestSessionContextForSpawn:
+    """The embedded path must populate the session-context workspace_root
+    (ContextVar + os.environ) like the daemon's runner — else the subagent
+    spawn path's get_workspace_root() returns None and spawn_subagent fails.
+    The ContextVar covers context-inheriting threads; os.environ covers the
+    subagent ThreadPoolExecutor, which does not inherit it."""
+
+    def test_workspace_root_populated_main_and_pool(self):
+        import os as _os
+        from concurrent.futures import ThreadPoolExecutor
+        from shared.session_context import get_workspace_root
+        holder = {}
+
+        async def _run():
+            async with InProcessClient.session(
+                model="m", workspace_path="/tmp/ws-spawn",
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                # ContextVar set (inheriting context)
+                assert get_workspace_root() == "/tmp/ws-spawn"
+                # subagent pool: no ContextVar inheritance -> os.environ fallback
+                # (mirrors jaato_runtime.py's `get_workspace_root() or os.environ`)
+                resolve = lambda: get_workspace_root() or _os.environ.get("workspaceRoot")
+                assert ThreadPoolExecutor(1).submit(resolve).result() == "/tmp/ws-spawn"
+
+        asyncio.run(_run())

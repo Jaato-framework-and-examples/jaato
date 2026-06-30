@@ -402,6 +402,23 @@ class InProcessClient:
                 from dotenv import load_dotenv
 
                 load_dotenv(str(env_path), override=False)
+        # Populate the session-context workspace_root / config_root the SAME way
+        # the daemon's runner does at bootstrap (server/runner/session.py): set
+        # the ContextVar AND os.environ, BEFORE _build_registry's expose_all.
+        # The subagent spawn path (and config-rooted plugins) read
+        # ``get_workspace_root()``; in-process nothing populated it, so it
+        # returned None and spawn_subagent failed. The ContextVar covers
+        # context-inheriting threads (the turn's ``to_thread`` worker); os.environ
+        # covers the subagent ``ThreadPoolExecutor``, which does NOT inherit the
+        # ContextVar. Like the runner (one session per process) there is no reset.
+        from shared.session_context import set_workspace_root, set_config_root
+        if self._workspace_path:
+            set_workspace_root(self._workspace_path)
+            os.environ["JAATO_WORKSPACE_ROOT"] = self._workspace_path
+            os.environ["workspaceRoot"] = self._workspace_path
+        if self._config_root:
+            set_config_root(self._config_root)
+            os.environ["JAATO_CONFIG_ROOT"] = self._config_root
         # Resolve credential secret URIs before the provider is built — the
         # embedded analog of the daemon's upstream profile/spec resolution.
         self._resolved_plugin_configs = _resolve_plugin_config_secrets(
