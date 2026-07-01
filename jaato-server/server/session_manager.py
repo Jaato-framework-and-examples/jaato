@@ -5506,6 +5506,33 @@ class SessionManager:
                     state.workspace_path, restore_config_root,
                 )
 
+        # Rebind the agent PERSONA on restore.  Persisting + restoring
+        # ``agent_name`` (below, on the envelope) restores the agent IDENTITY
+        # but NOT the persona prose: the create path composes the persona via
+        # ``_resolve_agent`` → ``profile.system_instructions`` (which
+        # ``build_session_envelope`` forwards to the runner), and disk-restore
+        # must do the same.  Without this, a revived session had its agent id
+        # but a profile whose ``system_instructions`` lacked the persona, so
+        # persona-only guidance (e.g. "call ``enter_tier('vision')`` on user
+        # images") was silently dropped and multimodal revives confabulated.
+        # agent_params are not persisted, so ``{{param}}`` personas restore
+        # unsubstituted — a separate, pre-existing limitation.
+        if state.profile_name and restored_profile is not None and state.agent_name:
+            agent_result = self._resolve_agent(
+                state.agent_name, None,
+                state.workspace_path or workspace_path or "",
+                config_root=restore_config_root,
+            )
+            if agent_result is not None:
+                restored_profile.system_instructions = agent_result["system_instructions"]
+            else:
+                logger.warning(
+                    "_load_session: agent %r for session %s not resolvable — "
+                    "persona (e.g. enter_tier guidance) missing on restore "
+                    "(config_root=%s)",
+                    state.agent_name, session_id, restore_config_root,
+                )
+
         # Phase 3 §3.12 disk-restore migration: route the JaatoServer
         # construction + pre-init hooks + initialize through the
         # unified ``_construct_and_initialize_server`` sub-helper that
