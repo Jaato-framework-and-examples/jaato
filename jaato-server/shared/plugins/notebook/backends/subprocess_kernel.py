@@ -326,10 +326,12 @@ class SubprocessKernelBackend(NotebookBackend):
                 "(session_context ContextVar and plugin config both unset)")
         # Kernel interpreter: the runner base python by default, or the
         # workspace venv's python when configured (so the model's in-notebook
-        # pip installs persist and later imports resolve).  With
-        # --system-site-packages + the inherited PYTHONPATH the venv python
-        # still imports ``shared.plugins.notebook.kernel_main`` from the runner
-        # source tree.
+        # pip installs persist and later imports resolve).  ensure_workspace_venv
+        # drops a runner-import bridge (.pth -> site.addsitedir) into the venv,
+        # so the venv python can still import ``shared.plugins.notebook.
+        # kernel_main`` from the runner env — for BOTH editable and wheel
+        # installs (see shared/plugins/workspace_venv.py; --system-site-packages
+        # alone can't, since a venv-from-venv resolves its base to /usr).
         kernel_python = sys.executable
         kernel_env: Optional[Dict[str, str]] = None
         venv_path = resolve_venv_path(self._workspace_venv, workspace)

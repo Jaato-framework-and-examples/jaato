@@ -5,8 +5,7 @@ configured with a ``workspace_venv`` path, its subprocesses run with that
 venv **activated** so the model's in-tool ``pip install X`` persists to the
 venv and a later ``import X`` resolves.  The venv lives INSIDE the workspace
 (the confined runner has rw there; the runner's own base environment stays
-read-only), and is built with ``--system-site-packages`` so the runner's base
-dependencies remain importable without duplication.
+read-only).
 
 Why activation and not a bare ``PYTHONPATH`` prepend
 ----------------------------------------------------
@@ -22,21 +21,43 @@ symmetric half of the in-process host-tool import contract (the client
 prepends the SAME site-packages to its own ``sys.path`` so a host tool imports
 the dep the runner installed).
 
+Importing jaato's own code from the tool-venv (the runner-import bridge)
+------------------------------------------------------------------------
+The notebook kernel is *jaato's own* module (``shared.plugins.notebook.
+kernel_main``) run under the tool-venv interpreter, so that interpreter must
+be able to ``import shared.*``.  ``--system-site-packages`` can NOT provide
+this: a venv created from the runner venv resolves its base to the system
+prefix (``/usr``), not the runner venv where jaato is installed; and for an
+**editable** install ``shared`` is wired through a meta-path finder registered
+by a ``.pth`` that only runs when its dir is processed as a *site* dir (never
+for ``PYTHONPATH``).  The deployment-agnostic fix is ``_write_runner_bridge``:
+a ``.pth`` dropped into the tool-venv's own site-packages runs
+``site.addsitedir(<runner site dir>)`` at interpreter start — processing the
+runner site dir's ``.pth`` files (editable finder) OR adding the plain package
+dir (wheel install).  This is runner-side only; ``cli`` / ``interactive_shell``
+run the *model's* commands (which need only the tool-venv), but the bridge is
+harmless there and keeps a single ``ensure`` path.
+
 Contract
 --------
 - Empty / unset path = feature OFF.  There is no implicit default venv — the
   path is the explicit agreement between the tool subprocess and the client's
   in-process import path.
-- Create-if-absent is idempotent: an existing ``pyvenv.cfg`` short-circuits.
+- Create-if-absent is idempotent, but the runner-import bridge is refreshed on
+  every ``ensure`` (so a venv created elsewhere without it is fixed up).
 - Relative paths resolve against the session workspace root; a relative path
   with no workspace root is a configuration error (raised, not defaulted).
 """
 
 import glob
 import os
+import site
 import subprocess
 import sys
-from typing import MutableMapping, Optional
+from typing import List, MutableMapping, Optional
+
+
+_BRIDGE_PTH = "_jaato_runner_bridge.pth"
 
 
 def resolve_venv_path(raw: Optional[str], workspace_root: Optional[str]) -> Optional[str]:
@@ -92,12 +113,67 @@ def venv_site_packages(venv_path: str) -> Optional[str]:
     return matches[0] if matches else None
 
 
-def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> str:
-    """Create the workspace venv if absent; return its path (idempotent).
+def runner_site_dirs() -> List[str]:
+    """The current (runner) interpreter's site-package directories.
 
-    An existing ``pyvenv.cfg`` short-circuits creation.  The venv is built with
-    ``--system-site-packages`` against ``base_python`` (default: the current
-    runner interpreter) so base deps stay importable and read-only.
+    These are the dirs where jaato itself is installed — either as a normal
+    package (wheel install) or via a PEP 660 editable ``.pth`` that registers
+    an import finder.  Bridging them into a tool-venv (see
+    ``ensure_workspace_venv``) is what lets the tool-venv interpreter import
+    ``shared.*`` regardless of install style.
+    """
+    dirs: List[str] = list(site.getsitepackages())
+    user = site.getusersitepackages()
+    if user:
+        dirs.append(user)
+    seen = set()
+    out: List[str] = []
+    for d in dirs:
+        if d and d not in seen and os.path.isdir(d):
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _write_runner_bridge(venv_path: str) -> None:
+    """(Re)write the ``.pth`` that bridges the runner's site dirs into the venv.
+
+    A tool-venv created *from* the runner venv resolves its ``base`` to the
+    system prefix (``/usr``), NOT the runner venv — so ``--system-site-packages``
+    can never surface jaato's own packages.  Worse, an **editable** install
+    wires ``shared.*`` through a meta-path *finder* registered by a ``.pth``,
+    and ``.pth`` files execute ONLY when their dir is processed as a *site*
+    dir (never for ``PYTHONPATH`` entries).  So the deployment-agnostic bridge
+    is to make the tool-venv interpreter run ``site.addsitedir(<runner site
+    dir>)`` at startup: that processes the runner site dir's ``.pth`` files
+    (registering the editable finder) OR adds the plain package dir (wheel
+    install).  Written into the tool-venv's own site-packages as a ``.pth`` so
+    it runs on every interpreter start.  Refreshed unconditionally so a venv
+    created by another party (e.g. the client, without this bridge) is fixed
+    up on the next ``ensure_workspace_venv``.
+
+    The bridge is *appended* to ``sys.path`` (that's ``addsitedir`` semantics),
+    so the tool-venv's own site-packages — where the model's ``pip install``
+    lands — keeps priority over the runner's for any shared package name.
+    """
+    site_dir = venv_site_packages(venv_path)
+    if site_dir is None:
+        raise RuntimeError(
+            f"workspace venv at {venv_path} has no site-packages directory; "
+            "cannot bridge runner imports")
+    dirs = runner_site_dirs()
+    line = "import site; " + "; ".join(f"site.addsitedir({d!r})" for d in dirs)
+    with open(os.path.join(site_dir, _BRIDGE_PTH), "w", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> str:
+    """Create the workspace venv if absent + bridge runner imports; return path.
+
+    Creation is idempotent (an existing ``pyvenv.cfg`` short-circuits it), but
+    the runner-import bridge (see ``_write_runner_bridge``) is (re)written
+    **every** call — so a venv created by another party without the bridge is
+    fixed up here, and the bridge tracks the runner's current site dirs.
 
     Args:
         venv_path: Absolute path where the venv lives (see ``resolve_venv_path``).
@@ -108,17 +184,18 @@ def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> 
 
     Raises:
         subprocess.CalledProcessError: If ``python -m venv`` fails.
+        RuntimeError: If the venv has no resolvable site-packages dir.
     """
-    if os.path.exists(os.path.join(venv_path, "pyvenv.cfg")):
-        return venv_path
-    os.makedirs(os.path.dirname(venv_path) or ".", exist_ok=True)
-    subprocess.run(
-        [base_python or sys.executable, "-m", "venv",
-         "--system-site-packages", venv_path],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    if not os.path.exists(os.path.join(venv_path, "pyvenv.cfg")):
+        os.makedirs(os.path.dirname(venv_path) or ".", exist_ok=True)
+        subprocess.run(
+            [base_python or sys.executable, "-m", "venv",
+             "--system-site-packages", venv_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    _write_runner_bridge(venv_path)
     return venv_path
 
 
