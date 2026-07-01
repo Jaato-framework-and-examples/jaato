@@ -89,6 +89,18 @@ class SessionState:
     without a config_root override (default workspace-only layout).
     """
 
+    sandbox_mode: Optional[str] = None
+    """Confinement mode at session-creation time (e.g. ``"apparmor"``).
+
+    Persisted so disk-restore / orphan-revive re-applies the SAME
+    confinement on runner re-spawn.  Without it a revived session's
+    ``_load_session`` read of ``state.sandbox_mode`` was always None
+    (the field didn't exist) → the re-spawned runner ran UNCONFINED
+    after any idle detach — a security regression.  Mirrors the
+    ``BootstrapEnvelope.sandbox_mode`` the restore path consumes;
+    None on old records / never-confined sessions (unchanged behavior).
+    """
+
     budget_state: Optional[Dict[str, Any]] = None
     """Serialized conversation budget for restoration."""
 

@@ -6198,6 +6198,10 @@ class SessionManager:
                 profile_name=profile_name,
                 workspace_path=session.workspace_path,
                 config_root=session.config_root,
+                # Persist confinement so orphan-revive / disk-restore re-applies
+                # the SAME AppArmor mode on runner re-spawn (else the revive read
+                # of state.sandbox_mode was always None → unconfined revive).
+                sandbox_mode=session.sandbox_mode,
                 metadata=subagent_metadata,
                 budget_state=budget_state,
                 interrupted_turn=session.interrupted_turn,  # For recovery on restart
