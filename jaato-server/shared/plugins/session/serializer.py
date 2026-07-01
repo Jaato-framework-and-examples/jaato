@@ -227,7 +227,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         JSON-compatible dictionary.
     """
     return {
-        'version': '2.5',  # Bumped for sandbox_mode (orphan-revive re-confinement)
+        'version': '2.6',  # Bumped for agent_name (orphan-revive persona restore)
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -240,6 +240,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'workspace_path': state.workspace_path,
         'config_root': state.config_root,
         'sandbox_mode': state.sandbox_mode,
+        'agent_name': state.agent_name,
         'history': serialize_history(state.history),
         'budget_state': state.budget_state,
         'interrupted_turn': state.interrupted_turn,
@@ -282,6 +283,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         workspace_path=data.get('workspace_path'),
         config_root=data.get('config_root'),
         sandbox_mode=data.get('sandbox_mode'),
+        agent_name=data.get('agent_name'),
         budget_state=data.get('budget_state'),
         interrupted_turn=data.get('interrupted_turn'),
         session_state=data.get('session_state'),

@@ -174,7 +174,7 @@ class TestJournalRoundTrip:
         data = serialize_session_state(original)
         # Current serializer schema version (bumped 2.2 -> 2.3 -> 2.4 for
         # profile_name/config_root disk-restore; serializer.py:230).
-        assert data["version"] == "2.5"
+        assert data["version"] == "2.6"
         assert data["session_state"] == {"audit_chain_head": "deadbeef", "n": 3}
         restored = deserialize_session_state(data)
         assert restored.session_state == {"audit_chain_head": "deadbeef", "n": 3}

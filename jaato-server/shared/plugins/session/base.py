@@ -101,6 +101,22 @@ class SessionState:
     None on old records / never-confined sessions (unchanged behavior).
     """
 
+    agent_name: Optional[str] = None
+    """Agent/persona identity (``--agent <name>``) the session was
+    spawned with.
+
+    Persisted so disk-restore / orphan-revive rebinds the SAME persona
+    (``.jaato/agents/<name>.md`` layered on the base instructions).
+    Without it a revived session's ``_load_session`` built
+    ``JaatoServer(agent_name=None)`` → no persona → persona-only
+    guidance (e.g. "call ``enter_tier('vision')`` on user images") was
+    silently dropped, so a revived multimodal session kept its
+    ``enter_tier`` tool but never the instruction to use it → images
+    hit the text tier and confabulated.  Mirrors
+    ``BootstrapEnvelope.agent_name``; None on old records / no-persona
+    sessions (unchanged behavior — the agent id falls back to "main").
+    """
+
     budget_state: Optional[Dict[str, Any]] = None
     """Serialized conversation budget for restoration."""
 
