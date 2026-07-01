@@ -5532,6 +5532,19 @@ class SessionManager:
                     "(config_root=%s)",
                     state.agent_name, session_id, restore_config_root,
                 )
+            logger.info(
+                "REVIVEDBG restore_persona agent=%s resolved=%s sysinstr_len=%d "
+                "ws=%s cfgroot=%s profile_id=%s",
+                state.agent_name, agent_result is not None,
+                len(restored_profile.system_instructions or ""),
+                state.workspace_path or workspace_path, restore_config_root,
+                id(restored_profile),
+            )
+        else:
+            logger.info(
+                "REVIVEDBG restore_persona SKIPPED pname=%s restored_profile=%s agent=%s",
+                state.profile_name, restored_profile is not None, state.agent_name,
+            )
 
         # Phase 3 §3.12 disk-restore migration: route the JaatoServer
         # construction + pre-init hooks + initialize through the
