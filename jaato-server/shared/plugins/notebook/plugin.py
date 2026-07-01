@@ -1354,7 +1354,9 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
     def _format_input_cell(self, code: str, exec_count: int) -> str:
         """Format code as an input cell with nb-row markers.
 
-        Uses 'ipython' language to skip LSP validation (supports !shell, %magic).
+        Uses 'ipython' language to skip LSP validation.  Cells support
+        per-line ``!shell`` escapes (see cell_transform.py); ``%magic`` is
+        NOT implemented.
         """
         label = f"In [{exec_count}]:"
         return f'<nb-row type="input" label="{label}">\n```ipython\n{code}\n```\n</nb-row>'
