@@ -25,18 +25,23 @@ Importing jaato's own code from the tool-venv (the runner-import bridge)
 ------------------------------------------------------------------------
 The notebook kernel is *jaato's own* module (``shared.plugins.notebook.
 kernel_main``) run under the tool-venv interpreter, so that interpreter must
-be able to ``import shared.*``.  ``--system-site-packages`` can NOT provide
-this: a venv created from the runner venv resolves its base to the system
-prefix (``/usr``), not the runner venv where jaato is installed; and for an
-**editable** install ``shared`` is wired through a meta-path finder registered
-by a ``.pth`` that only runs when its dir is processed as a *site* dir (never
-for ``PYTHONPATH``).  The deployment-agnostic fix is ``_write_runner_bridge``:
-a ``.pth`` dropped into the tool-venv's own site-packages runs
-``site.addsitedir(<runner site dir>)`` at interpreter start — processing the
-runner site dir's ``.pth`` files (editable finder) OR adding the plain package
-dir (wheel install).  This is runner-side only; ``cli`` / ``interactive_shell``
-run the *model's* commands (which need only the tool-venv), but the bridge is
-harmless there and keeps a single ``ensure`` path.
+be able to ``import shared.*`` (and ``jaato_sdk``, which the kernel's
+``tool_stubs`` needs).  ``--system-site-packages`` can NOT provide this: a venv
+created from the runner venv resolves its base to the system prefix (``/usr``),
+not the runner venv where jaato is installed; and for an **editable** install
+``shared`` is wired through a meta-path finder registered by a ``.pth`` that
+only runs when its dir is processed as a *site* dir (never for ``PYTHONPATH``).
+The deployment-agnostic, least-privilege fix is ``_write_runner_bridge``: a
+``.pth`` of **plain directory lines** (appended to ``sys.path`` verbatim,
+without executing any ``.pth`` finder) listing the base site-packages
+(installed third-party deps) plus the explicit jaato source roots
+(``jaato_source_dirs`` → ``shared`` + ``jaato_sdk``).  This surfaces exactly
+those packages — NOT the whole base venv's other editable installs (which a
+naive ``addsitedir`` would drag in, leaking unrelated src dirs the model could
+target with ``pip install --target``).  Runner-side only; ``cli`` /
+``interactive_shell`` run the *model's* commands (which need only the
+tool-venv), but the bridge is harmless there and keeps a single ``ensure``
+path.
 
 Contract
 --------
@@ -50,6 +55,7 @@ Contract
 """
 
 import glob
+import importlib
 import os
 import site
 import subprocess
@@ -152,36 +158,73 @@ def runner_site_dirs() -> List[str]:
     return out
 
 
+def jaato_source_dirs() -> List[str]:
+    """Source roots of the jaato packages the notebook kernel imports.
+
+    The subprocess kernel (``shared.plugins.notebook.kernel_main``) imports
+    ``shared`` (jaato-server) and ``jaato_sdk`` (its ``tool_stubs`` needs
+    ``ToolSchema``, which pulls in ``pydantic``).  For an **editable** install
+    these are the external src dirs (e.g. ``.../jaato-server``,
+    ``.../jaato-sdk``); for a **wheel** install they resolve into the base
+    site-packages (deduped by the caller).  Deliberately NOT the whole base
+    site-packages — that would surface UNRELATED editable installs
+    (jaato_premium, a client's own editable package).
+    """
+    dirs: List[str] = []
+    for mod_name in ("shared", "jaato_sdk"):
+        mod = importlib.import_module(mod_name)
+        dirs.append(os.path.dirname(mod.__path__[0]))
+    return dirs
+
+
+def _bridge_dirs() -> List[str]:
+    """Dirs to append to the tool-venv ``sys.path`` (order-preserving, existing).
+
+    Base site-packages (installed third-party deps) + the jaato source roots.
+    """
+    seen = set()
+    out: List[str] = []
+    for d in runner_site_dirs() + jaato_source_dirs():
+        if d and d not in seen and os.path.isdir(d):
+            seen.add(d)
+            out.append(d)
+    return out
+
+
 def _write_runner_bridge(venv_path: str) -> None:
-    """(Re)write the ``.pth`` that bridges the runner's site dirs into the venv.
+    """(Re)write the ``.pth`` that lets the tool-venv import jaato's own code.
 
     A tool-venv created *from* the runner venv resolves its ``base`` to the
     system prefix (``/usr``), NOT the runner venv — so ``--system-site-packages``
-    can never surface jaato's own packages.  Worse, an **editable** install
-    wires ``shared.*`` through a meta-path *finder* registered by a ``.pth``,
-    and ``.pth`` files execute ONLY when their dir is processed as a *site*
-    dir (never for ``PYTHONPATH`` entries).  So the deployment-agnostic bridge
-    is to make the tool-venv interpreter run ``site.addsitedir(<runner site
-    dir>)`` at startup: that processes the runner site dir's ``.pth`` files
-    (registering the editable finder) OR adds the plain package dir (wheel
-    install).  Written into the tool-venv's own site-packages as a ``.pth`` so
-    it runs on every interpreter start.  Refreshed unconditionally so a venv
-    created by another party (e.g. the client, without this bridge) is fixed
-    up on the next ``ensure_workspace_venv``.
+    can never surface jaato's packages.  And for an **editable** install
+    ``shared.*`` is wired through a meta-path finder registered by a ``.pth``
+    that runs only when its dir is processed as a *site* dir (never for
+    ``PYTHONPATH``).
 
-    The bridge is *appended* to ``sys.path`` (that's ``addsitedir`` semantics),
-    so the tool-venv's own site-packages — where the model's ``pip install``
-    lands — keeps priority over the runner's for any shared package name.
+    Rather than ``site.addsitedir(<base site-packages>)`` — which runs ALL of
+    the base dir's editable ``.pth`` finders and so drags UNRELATED editable
+    src dirs (jaato_premium, a client's own package) onto the tool-venv
+    ``sys.path`` (least-privilege leak + a path the model can wrongly target
+    with ``pip install --target``) — the bridge writes **plain directory
+    lines**: a ``.pth`` line that is not an ``import`` statement is appended to
+    ``sys.path`` verbatim, WITHOUT executing any ``.pth`` finder.  It lists the
+    base site-packages (installed third-party deps like ``pydantic``) plus the
+    explicit jaato source roots (``jaato_source_dirs``).  So the tool-venv can
+    import exactly ``shared`` + ``jaato_sdk`` + installed deps — nothing else.
+
+    Written into the tool-venv's own site-packages and refreshed on every
+    ``ensure`` (so a venv created elsewhere is fixed up).  Entries are appended
+    AFTER the tool-venv's own site-packages, so the model's ``pip install``
+    there keeps priority for any shared package name.
     """
     site_dir = venv_site_packages(venv_path)
     if site_dir is None:
         raise RuntimeError(
             f"workspace venv at {venv_path} has no site-packages directory; "
             "cannot bridge runner imports")
-    dirs = runner_site_dirs()
-    line = "import site; " + "; ".join(f"site.addsitedir({d!r})" for d in dirs)
+    body = "\n".join(_bridge_dirs())
     with open(os.path.join(site_dir, _BRIDGE_PTH), "w", encoding="utf-8") as f:
-        f.write(line + "\n")
+        f.write(body + "\n")
 
 
 def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> str:
