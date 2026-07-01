@@ -1288,6 +1288,11 @@ class PermissionPlugin(RunnerForwardingMixin):
             workspace_path=getattr(self, '_workspace_path', None),
             turn_index=context.get("turn_index") if context else None,
             model_preamble=context.get("model_preamble") if context else None,
+            # Snapshot (not the live list) of PRIOR decisions this session, so
+            # an evaluator can reason over earlier behavior.  The current call's
+            # decision isn't appended until after evaluation, so the log holds
+            # exactly calls 1..N-1 here.
+            execution_log=list(self._execution_log),
         )
 
         # Run evaluators before pre-approval short-circuits.
