@@ -26,6 +26,9 @@ from typing import Any, Dict
 
 from shared.plugins.notebook import kernel_protocol as proto
 from shared.plugins.notebook.tool_stubs import ToolExecutionError
+from shared.plugins.notebook.cell_transform import (
+    transform_cell_source, inject_shell_helper,
+)
 
 
 class _StreamWriter:
@@ -105,6 +108,10 @@ def _execute(namespace: Dict[str, Any], out, cell_id: str, code: str,
     sys.stdout = _StreamWriter(out, cell_id, "stdout")
     sys.stderr = _StreamWriter(out, cell_id, "stderr")
     try:
+        # IPython-style `!shell` lines -> a helper call that streams output
+        # (the helper inherits this kernel's env, incl. any activated venv).
+        code = transform_cell_source(code)
+        inject_shell_helper(namespace)
         try:
             tree = ast.parse(code, filename="<cell>", mode="exec")
         except SyntaxError as exc:
