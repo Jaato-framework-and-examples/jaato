@@ -14,6 +14,7 @@ from shared.plugins.workspace_venv import (
     venv_site_packages,
     runner_site_dirs,
     _BRIDGE_PTH,
+    PIP_APPARMOR_RULES,
 )
 
 
@@ -121,3 +122,76 @@ def test_bridged_venv_python_can_import_shared(tmp_path):
     )
     assert out.returncode == 0, f"import shared failed: {out.stderr}"
     assert "shared" in out.stdout
+
+
+# ---- pip AppArmor contribution (least-privilege, per-tool) ------------------
+
+def test_pip_apparmor_rules_cover_distro_reads():
+    body = "\n".join(PIP_APPARMOR_RULES)
+    assert "/etc/debian_version" in body   # the file the peer's pip UA crashed on
+    assert "/etc/os-release" in body
+    assert all(r.rstrip().endswith("r,") for r in PIP_APPARMOR_RULES)  # read-only
+
+
+def test_pip_tools_contribute_rules_others_dont():
+    from shared.plugins.cli.plugin import create_plugin as mk_cli
+    from shared.plugins.notebook.plugin import create_plugin as mk_nb
+    from shared.plugins.interactive_shell.plugin import create_plugin as mk_sh
+
+    kw = dict(workspace_path="/ws", session_id="s", config_root=None, plugin_config={})
+    for mk in (mk_cli, mk_nb, mk_sh):
+        assert mk().get_apparmor_rules(**kw) == list(PIP_APPARMOR_RULES)
+
+
+def test_resolver_dedups_identical_tool_contributions():
+    # cli + notebook + interactive_shell all contribute the SAME reads; the
+    # resolver must collapse them (one copy in the rendered profile).
+    from server.apparmor import resolve_plugin_apparmor_rules
+    from shared.plugins.cli.plugin import create_plugin as mk_cli
+    from shared.plugins.notebook.plugin import create_plugin as mk_nb
+    from shared.plugins.interactive_shell.plugin import create_plugin as mk_sh
+
+    plugins = {"cli": mk_cli(), "notebook": mk_nb(),
+               "interactive_shell": mk_sh(), "todo": object()}
+
+    class Reg:
+        def get_plugin(self, n): return plugins.get(n)
+
+    class Server:
+        registry = Reg()
+
+    class Profile:
+        plugins = ["cli(preload)", "notebook", "interactive_shell", "todo"]
+        plugin_configs = {}
+
+    rules = resolve_plugin_apparmor_rules(Server(), Profile(), "s", "/ws", None)
+    assert rules.count("/etc/debian_version  r,") == 1   # deduped, not 3
+    assert set(PIP_APPARMOR_RULES).issubset(set(rules))
+
+
+def test_cli_foreground_path_activates_workspace_venv(tmp_path, monkeypatch):
+    # Regression for the foreground gap: _execute -> run_command must carry the
+    # venv activation (previously only the streaming path did).
+    from shared.plugins.cli import plugin as cli_mod
+    venv = str(tmp_path / "tool-venv")
+    ensure_workspace_venv(venv)
+    p = cli_mod.create_plugin()
+    p.initialize({"workspace_root": str(tmp_path), "workspace_venv": venv})
+
+    captured = {}
+
+    class _R:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run_command(command, **kw):
+        captured["extra_env"] = kw.get("extra_env")
+        return _R()
+
+    monkeypatch.setattr(cli_mod, "run_command", fake_run_command)
+    p._execute({"command": "python3 --version"})
+
+    ee = captured["extra_env"]
+    assert ee and ee.get("VIRTUAL_ENV") == venv
+    assert ee["PATH"].split(os.pathsep)[0] == os.path.join(venv, "bin")

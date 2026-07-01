@@ -60,6 +60,23 @@ from typing import List, MutableMapping, Optional
 _BRIDGE_PTH = "_jaato_runner_bridge.pth"
 
 
+# AppArmor rules that let a confined tool run ``pip`` at all: pip builds its
+# HTTP User-Agent via the ``distro`` module, which reads the OS-identification
+# files below.  Without these reads EVERY ``pip install`` in a confined runner
+# crashes constructing the UA header (PermissionError on /etc/debian_version)
+# before any network I/O.  Contributed via ``get_apparmor_rules`` by the tools
+# that can run pip (cli / interactive_shell / notebook), so the grant is scoped
+# to sessions that load one of them — least-privilege vs the core template.
+# The files are world-readable OS metadata (distro name / version / codename).
+PIP_APPARMOR_RULES: List[str] = [
+    "/etc/os-release      r,",
+    "/usr/lib/os-release  r,",
+    "/etc/lsb-release     r,",
+    "/etc/debian_version  r,",
+    "/etc/*-release       r,",
+]
+
+
 def resolve_venv_path(raw: Optional[str], workspace_root: Optional[str]) -> Optional[str]:
     """Resolve a configured ``workspace_venv`` value to an absolute path.
 

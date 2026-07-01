@@ -23,7 +23,7 @@ from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
-from ..workspace_venv import resolve_venv_path, ensure_workspace_venv
+from ..workspace_venv import resolve_venv_path, ensure_workspace_venv, PIP_APPARMOR_RULES
 
 
 # Maximum concurrent interactive sessions
@@ -265,6 +265,23 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                 },
             },
         }
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute the pip/distro OS-identification reads to the profile.
+
+        Interactive shells can run ``pip``, which crashes under confinement
+        building its User-Agent without these reads.  Scoped to sessions that
+        load ``interactive_shell`` — least-privilege.  See ``PIP_APPARMOR_RULES``.
+        """
+        return list(PIP_APPARMOR_RULES)
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.
