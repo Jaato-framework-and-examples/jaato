@@ -185,7 +185,7 @@ class TestSessionStateSerialization:
 
         data = serialize_session_state(state)
 
-        assert data["version"] == "2.4"
+        assert data["version"] == "2.6"
         assert data["session_id"] == "20251207_143022"
         assert data["description"] == "Test session"
         assert data["turn_count"] == 1
@@ -240,13 +240,40 @@ class TestSessionStateSerialization:
         )
 
         data = serialize_session_state(state)
-        assert data["version"] == "2.4"
+        assert data["version"] == "2.6"
         assert data["config_root"] == "/repo/.jaato"
         assert data["profile_name"] == "discovery"
 
         restored = deserialize_session_state(data)
         assert restored.config_root == "/repo/.jaato"
         assert restored.profile_name == "discovery"
+
+    def test_sandbox_mode_round_trip(self):
+        """2.5: ``sandbox_mode`` persisted so orphan-revive / disk-restore
+        re-applies the SAME confinement on runner re-spawn (else the revive
+        ran unconfined after any idle detach — a security regression)."""
+        state = SessionState(
+            session_id="sandbox_test",
+            history=[],
+            created_at=datetime(2026, 7, 1, 16, 22, 28),
+            updated_at=datetime(2026, 7, 1, 16, 22, 28),
+            sandbox_mode="apparmor",
+        )
+        data = serialize_session_state(state)
+        assert data["sandbox_mode"] == "apparmor"
+        assert deserialize_session_state(data).sandbox_mode == "apparmor"
+
+    def test_pre_2_5_record_deserializes_sandbox_mode_none(self):
+        """Pre-2.5 JSONs lack ``sandbox_mode`` — deserialize to None
+        (unchanged behavior; the revive apparmor= computation reads None)."""
+        data = {
+            "version": "2.4",
+            "session_id": "old",
+            "created_at": "2026-06-30T12:00:00",
+            "updated_at": "2026-06-30T12:00:00",
+            "history": [],
+        }
+        assert deserialize_session_state(data).sandbox_mode is None
 
     def test_deserialize_pre_2_4_no_config_root(self):
         """Pre-2.4 session JSONs lack ``config_root``.  Deserialize
@@ -451,3 +478,30 @@ class TestMessageProvenanceSerialization:
         # Model message preserves provenance
         assert restored.history[1].model == "gemini-2.5-flash"
         assert restored.history[1].provider == "google_genai"
+
+    def test_agent_name_round_trip(self):
+        """2.6: ``agent_name`` (persona/--agent) persisted so orphan-revive
+        rebinds the persona — else revived multimodal sessions lose their
+        enter_tier guidance and confabulate on images."""
+        state = SessionState(
+            session_id="agent_test",
+            history=[],
+            created_at=datetime(2026, 7, 1, 16, 22, 28),
+            updated_at=datetime(2026, 7, 1, 16, 22, 28),
+            agent_name="telegram_chat",
+        )
+        data = serialize_session_state(state)
+        assert data["agent_name"] == "telegram_chat"
+        assert deserialize_session_state(data).agent_name == "telegram_chat"
+
+    def test_pre_2_6_record_deserializes_agent_name_none(self):
+        """Pre-2.6 JSONs lack ``agent_name`` — deserialize to None (unchanged;
+        JaatoServer falls back agent id to 'main')."""
+        data = {
+            "version": "2.5",
+            "session_id": "old",
+            "created_at": "2026-06-30T12:00:00",
+            "updated_at": "2026-06-30T12:00:00",
+            "history": [],
+        }
+        assert deserialize_session_state(data).agent_name is None

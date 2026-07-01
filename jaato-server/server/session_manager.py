@@ -5506,6 +5506,33 @@ class SessionManager:
                     state.workspace_path, restore_config_root,
                 )
 
+        # Rebind the agent PERSONA on restore.  Persisting + restoring
+        # ``agent_name`` (below, on the envelope) restores the agent IDENTITY
+        # but NOT the persona prose: the create path composes the persona via
+        # ``_resolve_agent`` → ``profile.system_instructions`` (which
+        # ``build_session_envelope`` forwards to the runner), and disk-restore
+        # must do the same.  Without this, a revived session had its agent id
+        # but a profile whose ``system_instructions`` lacked the persona, so
+        # persona-only guidance (e.g. "call ``enter_tier('vision')`` on user
+        # images") was silently dropped and multimodal revives confabulated.
+        # agent_params are not persisted, so ``{{param}}`` personas restore
+        # unsubstituted — a separate, pre-existing limitation.
+        if state.profile_name and restored_profile is not None and state.agent_name:
+            agent_result = self._resolve_agent(
+                state.agent_name, None,
+                state.workspace_path or workspace_path or "",
+                config_root=restore_config_root,
+            )
+            if agent_result is not None:
+                restored_profile.system_instructions = agent_result["system_instructions"]
+            else:
+                logger.warning(
+                    "_load_session: agent %r for session %s not resolvable — "
+                    "persona (e.g. enter_tier guidance) missing on restore "
+                    "(config_root=%s)",
+                    state.agent_name, session_id, restore_config_root,
+                )
+
         # Phase 3 §3.12 disk-restore migration: route the JaatoServer
         # construction + pre-init hooks + initialize through the
         # unified ``_construct_and_initialize_server`` sub-helper that
@@ -5539,6 +5566,10 @@ class SessionManager:
             apparmor=(getattr(state, "sandbox_mode", None) == "apparmor"),
             profile=restored_profile,
             config_root=restore_config_root,
+            # Rebind the persona (--agent) on revive so persona-only guidance
+            # (e.g. enter_tier on images) survives — else JaatoServer(agent_name
+            # =None) drops it and multimodal revives confabulate.
+            agent_name=getattr(state, "agent_name", None),
             restore_state={"loaded_state": state},
             env_file=session_env_file,
             instruction_token_cache=self._instruction_token_cache,
@@ -6186,6 +6217,13 @@ class SessionManager:
             # connection scaffolding.
             server_profile = getattr(session.server, "_profile", None) if session.server else None
             profile_name = getattr(server_profile, "name", None) if server_profile else None
+            # Persona identity (``--agent``), so orphan-revive rebinds the same
+            # persona (see SessionState.agent_name) — else a revived multimodal
+            # session loses its enter_tier guidance and confabulates on images.
+            agent_name = (
+                getattr(session.server, "_main_agent_display_name", None)
+                if session.server else None
+            )
             state = SessionState(
                 session_id=session.session_id,
                 history=history,
@@ -6198,6 +6236,11 @@ class SessionManager:
                 profile_name=profile_name,
                 workspace_path=session.workspace_path,
                 config_root=session.config_root,
+                # Persist confinement so orphan-revive / disk-restore re-applies
+                # the SAME AppArmor mode on runner re-spawn (else the revive read
+                # of state.sandbox_mode was always None → unconfined revive).
+                sandbox_mode=session.sandbox_mode,
+                agent_name=agent_name,
                 metadata=subagent_metadata,
                 budget_state=budget_state,
                 interrupted_turn=session.interrupted_turn,  # For recovery on restart
