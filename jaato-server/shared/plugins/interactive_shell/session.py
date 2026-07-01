@@ -22,6 +22,7 @@ import threading
 from typing import Callable, Optional, Dict, Any
 
 from .ansi import strip_ansi
+from ..workspace_venv import apply_venv_to_env
 from shared.ai_tool_runner import get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 
@@ -227,6 +228,7 @@ class ShellSession:
         env: Optional[Dict[str, str]] = None,
         cwd: Optional[str] = None,
         preexec_fn: Optional[Callable[[], None]] = None,
+        workspace_venv: Optional[str] = None,
     ):
         """Spawn an interactive process and prepare idle-based I/O.
 
@@ -241,6 +243,11 @@ class ShellSession:
             max_lifetime: Session lifetime ceiling (seconds).
             env: Extra environment variables merged into ``os.environ``.
             cwd: Working directory for the spawned process.
+            workspace_venv: Absolute path to a pre-created workspace venv to
+                activate for this session (venv ``bin`` prepended to ``PATH``,
+                ``VIRTUAL_ENV`` set, site-packages prepended to ``PYTHONPATH``).
+                ``None`` = no venv activation.  The caller (plugin) is
+                responsible for resolving the path and creating the venv.
             preexec_fn: Optional zero-arg callable run between fork() and
                 exec() in the child.  Used by the cgroups runtime to
                 attach the spawned PTY child to a per-session cgroup
@@ -276,6 +283,10 @@ class ShellSession:
         spawn_env['fish_history'] = ''
         if env:
             spawn_env.update(env)
+        # Activate the workspace venv last so its PATH/PYTHONPATH prepend wins
+        # over any caller-supplied env.
+        if workspace_venv:
+            apply_venv_to_env(spawn_env, workspace_venv)
 
         if _BACKEND == 'popen_spawn':
             # PopenSpawn: subprocess.Popen with piped stdin/stdout.

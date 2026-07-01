@@ -19,6 +19,7 @@ from ..background import BackgroundCapableMixin
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
+from ..workspace_venv import resolve_venv_path, ensure_workspace_venv, apply_venv_to_env
 from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
@@ -142,6 +143,11 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         # (self._bg_tool_output_callback) via set_tool_output_callback()
         # Workspace root for path sandboxing (None = no sandboxing)
         self._workspace_root: Optional[str] = None
+        # Workspace-scoped venv path for tool subprocesses (None/empty = off).
+        # When set, commands run with this venv activated so the model's
+        # ``pip install`` persists there and later imports resolve.  See
+        # shared/plugins/workspace_venv.py.
+        self._workspace_venv: Optional[str] = None
         # Plugin registry for checking authorized external paths
         self._plugin_registry = None
 
@@ -212,6 +218,8 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                 workspace = config['workspace_root']
                 if workspace:
                     self._workspace_root = os.path.realpath(os.path.abspath(workspace))
+            if 'workspace_venv' in config:
+                self._workspace_venv = config['workspace_venv']
 
         # Auto-detect workspace_root from environment if not explicitly provided
         if not self._workspace_root:
@@ -426,6 +434,17 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     "type": "integer",
                     "default": 4,
                     "description": "Maximum concurrent background workers",
+                },
+                "workspace_venv": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped venv to activate for "
+                        "commands (empty = off). Relative paths resolve "
+                        "against the workspace root. Created if absent with "
+                        "--system-site-packages; the model's pip installs "
+                        "persist there. Recommended: .jaato/tool-venv"
+                    ),
                 },
             },
         }
@@ -731,6 +750,14 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             if extra_paths:
                 path_sep = os.pathsep
                 env['PATH'] = env.get('PATH', '') + path_sep + path_sep.join(extra_paths)
+
+            # Activate the workspace venv (if configured) so ``pip install``
+            # persists to it and later imports resolve.  Prepends the venv
+            # bin ahead of extra_paths so the venv's python/pip win.
+            venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+            if venv_path:
+                ensure_workspace_venv(venv_path)
+                apply_venv_to_env(env, venv_path)
 
             # Check if shell interpretation is needed
             use_shell = self._requires_shell(command)

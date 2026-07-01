@@ -282,6 +282,18 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "description": "Sandbox mode",
                     "enum": ["disabled", "warn", "block_critical", "strict"],
                 },
+                "workspace_venv": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped venv to run the "
+                        "subprocess kernel from (empty = off; subprocess "
+                        "backend only). Relative paths resolve against the "
+                        "workspace root. Created if absent with "
+                        "--system-site-packages; the model's in-notebook pip "
+                        "installs persist there. Recommended: .jaato/tool-venv"
+                    ),
+                },
             },
         }
 
