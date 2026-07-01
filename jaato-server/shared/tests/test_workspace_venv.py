@@ -1,6 +1,7 @@
 """Tests for shared.plugins.workspace_venv — workspace-scoped tool venvs."""
 
 import os
+import subprocess
 import sys
 
 import pytest
@@ -11,6 +12,8 @@ from shared.plugins.workspace_venv import (
     apply_venv_to_env,
     venv_python,
     venv_site_packages,
+    runner_site_dirs,
+    _BRIDGE_PTH,
 )
 
 
@@ -63,12 +66,27 @@ def test_apply_venv_empty_env_ok():
 
 # ---- ensure_workspace_venv (idempotency + real creation) --------------------
 
-def test_ensure_fastpath_when_pyvenv_cfg_exists(tmp_path):
-    # Pre-existing pyvenv.cfg short-circuits: no subprocess, returns the path.
+def test_ensure_fastpath_skips_create_but_refreshes_bridge(tmp_path):
+    # Pre-existing pyvenv.cfg short-circuits CREATION (no subprocess), but the
+    # runner-import bridge is (re)written even for a venv made elsewhere.
     venv = tmp_path / "v"
-    venv.mkdir()
+    site = venv / "lib" / "python3.99" / "site-packages"
+    site.mkdir(parents=True)
     (venv / "pyvenv.cfg").write_text("home = /x\n")
     assert ensure_workspace_venv(str(venv)) == str(venv)
+    bridge = site / _BRIDGE_PTH
+    assert bridge.exists()
+    body = bridge.read_text()
+    assert body.startswith("import site;")
+    assert "addsitedir" in body
+
+
+# ---- runner-import bridge ---------------------------------------------------
+
+def test_runner_site_dirs_nonempty_and_existing():
+    dirs = runner_site_dirs()
+    assert dirs, "runner must have at least one site-packages dir"
+    assert all(os.path.isdir(d) for d in dirs)
 
 
 def test_ensure_creates_real_venv_and_resolves(tmp_path):
@@ -78,9 +96,28 @@ def test_ensure_creates_real_venv_and_resolves(tmp_path):
     assert os.path.exists(venv_python(venv))
     site = venv_site_packages(venv)
     assert site and os.path.isdir(site)
-    # Second call is a no-op fast-path (idempotent).
+    # Bridge .pth written into the venv, targeting the runner's site dirs.
+    bridge = os.path.join(site, _BRIDGE_PTH)
+    assert os.path.exists(bridge)
+    for d in runner_site_dirs():
+        assert repr(d) in open(bridge).read()
+    # Second call is idempotent (create short-circuits; bridge refreshed).
     assert ensure_workspace_venv(venv) == venv
     # An activated env prepends the resolved site-packages.
     env = {"PATH": "/usr/bin"}
     apply_venv_to_env(env, venv)
     assert env["PYTHONPATH"].split(os.pathsep)[0] == site
+
+
+def test_bridged_venv_python_can_import_shared(tmp_path):
+    # The authoritative e2e (mirrors the peer's notebook failure): a tool-venv
+    # created from the runner venv, once bridged, lets its OWN interpreter
+    # import jaato's `shared` — for the editable install this repo uses.
+    venv = str(tmp_path / "tool-venv")
+    ensure_workspace_venv(venv)
+    out = subprocess.run(
+        [venv_python(venv), "-c", "import shared; print(shared.__file__)"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, f"import shared failed: {out.stderr}"
+    assert "shared" in out.stdout
