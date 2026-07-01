@@ -19,7 +19,9 @@ from ..background import BackgroundCapableMixin
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
-from ..workspace_venv import resolve_venv_path, ensure_workspace_venv, apply_venv_to_env
+from ..workspace_venv import (
+    resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, PIP_APPARMOR_RULES,
+)
 from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
@@ -448,6 +450,24 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                 },
             },
         }
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute the pip/distro OS-identification reads to the profile.
+
+        The cli tool can run ``pip`` (directly or via the model's shell
+        commands), which crashes under confinement building its User-Agent
+        without these reads.  Scoped to sessions that load ``cli`` (vs the
+        core template) — least-privilege.  See ``PIP_APPARMOR_RULES``.
+        """
+        return list(PIP_APPARMOR_RULES)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ToolSchema for the CLI tool."""
@@ -1312,6 +1332,24 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     'PATH': os.environ.get('PATH', '')
                     + path_sep + path_sep.join(extra_paths)
                 }
+
+            # Activate the workspace venv (if configured) on the FOREGROUND path
+            # too — run_command starts from os.environ + extra_env, so seed a
+            # full env, activate, and carry the venv-touched keys back into
+            # extra_env.  Without this, foreground `python`/`pip` resolve to the
+            # runner base venv instead of the tool-venv (parity with the
+            # streaming path in _execute_streaming).
+            venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+            if venv_path:
+                ensure_workspace_venv(venv_path)
+                seed = dict(os.environ)
+                if extra_env:
+                    seed.update(extra_env)
+                apply_venv_to_env(seed, venv_path)
+                extra_env = extra_env or {}
+                for _k in ('PATH', 'VIRTUAL_ENV', 'PYTHONPATH'):
+                    if _k in seed:
+                        extra_env[_k] = seed[_k]
 
             # Resolve streaming callback
             effective_callback = self._get_effective_output_callback()

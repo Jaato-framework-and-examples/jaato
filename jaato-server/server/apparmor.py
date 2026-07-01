@@ -2597,6 +2597,20 @@ def resolve_plugin_apparmor_rules(
                 session_id,
             )
 
+    # Dedup identical rule lines while preserving first-seen order.  Distinct
+    # plugins can contribute the same literal grant (e.g. cli + notebook +
+    # interactive_shell all contribute the pip/distro OS-id reads); a rule line
+    # is idempotent, so collapsing keeps rendered profiles readable without any
+    # change in AppArmor semantics.
+    if rules:
+        seen = set()
+        deduped = []
+        for r in rules:
+            if r not in seen:
+                seen.add(r)
+                deduped.append(r)
+        rules = deduped
+
     return rules if rules else None
 
 
