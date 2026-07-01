@@ -237,32 +237,84 @@ def _venv_pip(venv_path: str) -> str:
 
 
 def _ensure_venv_pip(venv_path: str) -> None:
-    """Materialize the venv's own ``pip`` console script if absent.
+    """Write a ``bin/pip`` (+ ``pip3``) shim if absent, so a bare ``pip`` /
+    notebook ``!pip`` installs into the tool-venv.
 
-    A venv created with ``--without-pip`` (or by a caller that pre-creates it
-    minimally — e.g. the client materializing the shared tool-venv) has no
-    ``<venv>/bin/pip`` script, so a bare ``pip`` / notebook ``!pip`` resolves to
-    the SYSTEM pip on ``PATH`` — which, under confinement, is denied (it can't
-    write the system site-packages).  ``ensurepip`` installs pip INTO the venv
-    (offline — a wheel bundled in the stdlib); the resulting ``<venv>/bin/pip``
-    is first on the activated ``PATH`` and, via its ``<venv>/bin/python``
-    shebang, installs into the tool-venv.  Idempotent: skipped once the script
-    exists.
+    A venv with no ``<venv>/bin/pip`` script (created ``--without-pip``, incl.
+    by us — see ``ensure_workspace_venv``) makes a bare ``pip`` resolve to the
+    SYSTEM pip on ``PATH``, which the confined runner denies.
 
-    Non-fatal on failure — ``python -m pip`` still works via the runner-import
-    bridge, so only the bare ``pip`` convenience is lost.
+    NOT ``ensurepip``: (1) the runner-import bridge makes ``import pip`` succeed,
+    so ensurepip no-ops ("already satisfied") and never writes ``bin/pip``;
+    (2) ensurepip extracts its wheel to ``/tmp`` (denied under confinement) and
+    would pin an OLD bundled pip.  Instead the shim is a 2-line ``sh`` wrapper
+    that execs ``<venv>/bin/python -m pip "$@"`` — running the BRIDGED pip (a
+    real, current pip) and installing into the tool-venv (``sys.prefix``=venv),
+    the exact path proven to work under confinement.  The interpreter path is an
+    ``exec`` argument (no shebang-length limit).
+
+    Executing the shim ALSO needs an AppArmor ``ix`` grant on the venv bin —
+    ``{workspace}/** rwkl`` has no exec bit, and ``bin/python`` runs only
+    because it symlinks to the exec-allowed base python.  See
+    ``workspace_venv_bin_exec_rule`` (contributed by the tool plugins'
+    ``get_apparmor_rules``).
+
+    POSIX only (the confinement target); on Windows this is a no-op and callers
+    use ``python -m pip``.  Non-fatal on failure.
     """
-    if os.path.exists(_venv_pip(venv_path)):
+    if os.name == "nt" or os.path.exists(_venv_pip(venv_path)):
         return
+    bin_dir = _bin_dir(venv_path)
+    pip_path = _venv_pip(venv_path)
     try:
-        subprocess.run(
-            [venv_python(venv_path), "-m", "ensurepip", "--default-pip"],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-    except (subprocess.CalledProcessError, OSError) as exc:
+        with open(pip_path, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\nexec "{venv_python(venv_path)}" -m pip "$@"\n')
+        os.chmod(pip_path, 0o755)
+        pip3 = os.path.join(bin_dir, "pip3")
+        if not os.path.exists(pip3):
+            os.symlink("pip", pip3)   # relative, within bin/
+    except OSError as exc:
         logger.warning(
-            "workspace_venv: could not materialize pip in %s (%s); bare "
+            "workspace_venv: could not write pip shim in %s (%s); bare "
             "`pip`/`!pip` unavailable — use `python -m pip`", venv_path, exc)
+
+
+def workspace_venv_bin_exec_rule(
+    raw: Optional[str], workspace_root: Optional[str],
+) -> Optional[str]:
+    """AppArmor rule granting exec (``ix``) on the tool-venv's ``bin/`` scripts.
+
+    The broad ``{workspace}/** rwkl`` grant has NO exec bit, so a real
+    ``bin/pip`` (or any installed package's console script) in the tool-venv
+    can't be exec'd — ``bin/python`` works only because it symlinks to the
+    exec-allowed base python.  ``ix`` (inherit-exec) keeps the script in the
+    SAME confined profile — no escalation beyond the arbitrary-code exec the
+    venv python already permits.  Returns ``None`` when no venv is configured.
+    """
+    try:
+        venv_path = resolve_venv_path(raw, workspace_root)
+    except ValueError:
+        return None
+    if not venv_path:
+        return None
+    return f"{os.path.join(venv_path, 'bin')}/* ix,"
+
+
+def pip_apparmor_rules(
+    workspace_venv_raw: Optional[str], workspace_path: Optional[str],
+) -> List[str]:
+    """AppArmor rules for a pip-capable tool (cli / notebook / interactive_shell).
+
+    The distro/UA reads pip needs (``PIP_APPARMOR_RULES``) plus, when a
+    ``workspace_venv`` is configured, an ``ix`` grant on the venv bin so a bare
+    ``pip`` / notebook ``!pip`` / installed console script can be exec'd.
+    Contributed from each tool's ``get_apparmor_rules``.
+    """
+    rules = list(PIP_APPARMOR_RULES)
+    exec_rule = workspace_venv_bin_exec_rule(workspace_venv_raw, workspace_path)
+    if exec_rule:
+        rules.append(exec_rule)
+    return rules
 
 
 def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> str:
@@ -270,8 +322,9 @@ def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> 
 
     Creation is idempotent (an existing ``pyvenv.cfg`` short-circuits it), but
     two fix-ups run **every** call so a venv created by another party is brought
-    up to spec: (1) ``_ensure_venv_pip`` materializes ``<venv>/bin/pip`` if
-    missing (so a bare ``pip`` / ``!pip`` uses the tool-venv, not system pip);
+    up to spec: (1) ``_ensure_venv_pip`` writes the ``<venv>/bin/pip`` shim if
+    missing (so a bare ``pip`` / ``!pip`` uses the tool-venv, not system pip —
+    also needs the AppArmor ``ix`` grant, see ``workspace_venv_bin_exec_rule``);
     (2) the runner-import bridge (see ``_write_runner_bridge``) is (re)written,
     tracking the runner's current site dirs.
 
@@ -289,8 +342,12 @@ def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> 
     if not os.path.exists(os.path.join(venv_path, "pyvenv.cfg")):
         os.makedirs(os.path.dirname(venv_path) or ".", exist_ok=True)
         subprocess.run(
+            # --without-pip: venv creation runs ensurepip internally, which
+            # extracts a wheel to /tmp — denied in the confined runner.  We
+            # provide pip via the bridge (import) + a `bin/pip` shim instead
+            # (_ensure_venv_pip), so the venv needs no pip of its own.
             [base_python or sys.executable, "-m", "venv",
-             "--system-site-packages", venv_path],
+             "--system-site-packages", "--without-pip", venv_path],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

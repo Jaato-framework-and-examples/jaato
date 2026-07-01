@@ -16,6 +16,8 @@ from shared.plugins.workspace_venv import (
     jaato_source_dirs,
     _BRIDGE_PTH,
     PIP_APPARMOR_RULES,
+    workspace_venv_bin_exec_rule,
+    pip_apparmor_rules,
 )
 
 
@@ -227,23 +229,52 @@ def test_bridge_does_not_leak_unrelated_editable_src(tmp_path):
     assert "addsitedir" not in body       # no finder execution
 
 
-# ---- pip materialization (bare `!pip` / `pip` -> tool-venv) ------------------
+# ---- pip shim + venv-bin exec grant (bare `!pip` / `pip` -> tool-venv) -------
 
-def test_ensure_materializes_pip_when_venv_created_without_it(tmp_path):
-    # Simulate a client-created venv WITHOUT pip (the bot's case): ensure must
-    # materialize <venv>/bin/pip so bare `pip`/`!pip` resolves to the tool-venv.
+def test_ensure_writes_pip_shim_when_missing(tmp_path):
+    # Simulate a client-created venv WITHOUT pip (the bot's case): ensure writes
+    # the shim so bare `pip`/`!pip` resolves to the tool-venv.
     venv = str(tmp_path / "v")
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", venv], check=True)
     pip = os.path.join(venv, "bin", "pip")
     assert not os.path.exists(pip)          # precondition: no pip
     ensure_workspace_venv(venv)
-    assert os.path.exists(pip)              # ensurepip materialized it
+    assert os.path.exists(pip) and os.access(pip, os.X_OK)   # executable shim
+    assert os.path.islink(os.path.join(venv, "bin", "pip3"))  # pip3 alias
 
 
-def test_real_venv_has_pip_and_it_targets_the_venv(tmp_path):
+def test_pip_shim_is_sh_wrapper_delegating_to_venv_python_m_pip(tmp_path):
+    # Shim = `sh` wrapper -> `<venv>/bin/python -m pip` (bridged pip, no ensurepip,
+    # no /tmp, venv python path is an exec arg -> no shebang-length limit).
     venv = str(tmp_path / "tool-venv")
-    ensure_workspace_venv(venv)
-    pip = os.path.join(venv, "bin", "pip")
-    assert os.path.exists(pip)
-    # the pip console script's shebang points at the venv python -> installs here
-    assert venv in open(pip).readline()
+    ensure_workspace_venv(venv)              # ensure creates --without-pip + shims
+    body = open(os.path.join(venv, "bin", "pip")).read()
+    assert body.startswith("#!/bin/sh")
+    assert os.path.join(venv, "bin", "python") in body
+    assert "-m pip" in body
+
+
+def test_venv_bin_exec_rule_present_only_when_configured(tmp_path):
+    venv = str(tmp_path / "tool-venv")
+    rule = workspace_venv_bin_exec_rule(venv, str(tmp_path))
+    assert rule == f"{os.path.join(venv, 'bin')}/* ix,"
+    assert workspace_venv_bin_exec_rule("", str(tmp_path)) is None
+
+
+def test_pip_apparmor_rules_add_exec_grant_when_venv_set(tmp_path):
+    venv = str(tmp_path / "tool-venv")
+    with_venv = pip_apparmor_rules(venv, str(tmp_path))
+    assert any(r.endswith("/bin/* ix,") for r in with_venv)
+    # distro reads always present; exec grant only with a venv
+    without = pip_apparmor_rules("", str(tmp_path))
+    assert not any(" ix," in r for r in without)
+    assert set(PIP_APPARMOR_RULES).issubset(set(without))
+
+
+def test_pip_tools_contribute_exec_grant_when_workspace_venv_configured(tmp_path):
+    from shared.plugins.notebook.plugin import create_plugin as mk_nb
+    venv = str(tmp_path / "tool-venv")
+    kw = dict(workspace_path=str(tmp_path), session_id="s", config_root=None,
+              plugin_config={"workspace_venv": venv})
+    rules = mk_nb().get_apparmor_rules(**kw)
+    assert any(r == f"{os.path.join(venv, 'bin')}/* ix," for r in rules)

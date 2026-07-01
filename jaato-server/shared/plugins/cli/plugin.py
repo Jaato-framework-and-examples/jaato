@@ -20,7 +20,7 @@ from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from ..workspace_venv import (
-    resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, PIP_APPARMOR_RULES,
+    resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, pip_apparmor_rules,
 )
 from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
@@ -460,14 +460,15 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         config_root: Optional[str],
         plugin_config: Dict[str, Any],
     ) -> List[str]:
-        """Contribute the pip/distro OS-identification reads to the profile.
+        """Contribute pip's AppArmor rules to the profile.
 
         The cli tool can run ``pip`` (directly or via the model's shell
-        commands), which crashes under confinement building its User-Agent
-        without these reads.  Scoped to sessions that load ``cli`` (vs the
-        core template) — least-privilege.  See ``PIP_APPARMOR_RULES``.
+        commands): the distro/UA OS-id reads (crashes without them under
+        confinement) plus, when a ``workspace_venv`` is set, an ``ix`` grant on
+        the venv bin so a bare ``pip`` / console script runs.  Scoped to
+        sessions that load ``cli`` — least-privilege.  See ``pip_apparmor_rules``.
         """
-        return list(PIP_APPARMOR_RULES)
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ToolSchema for the CLI tool."""

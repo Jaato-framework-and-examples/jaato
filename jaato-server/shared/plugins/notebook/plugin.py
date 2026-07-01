@@ -30,7 +30,7 @@ from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
 from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
 from shared.ai_tool_runner import get_current_tool_output_callback
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
-from ..workspace_venv import PIP_APPARMOR_RULES
+from ..workspace_venv import pip_apparmor_rules
 from shared.trace import trace as _trace_write
 
 # Thread-local storage for per-session tool bindings state.
@@ -307,14 +307,15 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         config_root: Optional[str],
         plugin_config: Dict[str, Any],
     ) -> List[str]:
-        """Contribute the pip/distro OS-identification reads to the profile.
+        """Contribute pip's AppArmor rules to the profile.
 
-        In-notebook ``pip install`` (subprocess kernel) crashes under
-        confinement building its User-Agent without these reads.  Scoped to
-        sessions that load ``notebook`` — least-privilege.  See
-        ``PIP_APPARMOR_RULES``.
+        In-notebook ``pip install`` / ``!pip`` needs the distro/UA OS-id reads
+        (crashes without them under confinement) plus, when a ``workspace_venv``
+        is set, an ``ix`` grant on the venv bin so a bare ``!pip`` / console
+        script runs.  Scoped to sessions that load ``notebook`` —
+        least-privilege.  See ``pip_apparmor_rules``.
         """
-        return list(PIP_APPARMOR_RULES)
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
 
     def set_workspace_path(self, path: str) -> None:
         """Set workspace root path (auto-wired by PluginRegistry).
