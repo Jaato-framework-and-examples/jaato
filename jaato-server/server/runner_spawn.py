@@ -455,10 +455,6 @@ def build_session_envelope(
                 spec["tools"] = list(scope)
             plugin_specs.append(spec)
         system_instructions = getattr(profile, "system_instructions", None)
-        logger.info(
-            "REVIVEDBG build_persona profile_id=%s sysinstr_len=%d",
-            id(profile), len(system_instructions or ""),
-        )
         gc_obj = getattr(profile, "gc", None)
         if gc_obj is not None:
             # GCProfileConfig has ``type`` + ``config`` (dict).  Flatten
