@@ -166,9 +166,15 @@ def validate_profile(
     # --- plugin_configs knobs (the silent-ignore class) ------------------
     plugin_configs = getattr(profile, "plugin_configs", None) or {}
     for cfg_name, cfg in plugin_configs.items():
-        # only provider-named config blocks have a knob contract today
         cfg_provider = introspect.resolve_provider(cfg_name)
         if cfg_provider is None or cfg_provider.knobs is None:
+            # Non-provider plugin config (permission / cli / notebook / …):
+            # validate top-level knob NAMES against the plugin's declared
+            # get_config_schema (a mistyped knob is silently ignored at
+            # runtime otherwise).  Nested / free-form sub-structures — e.g.
+            # ``permission.policy`` tree, ``permission.evaluators`` map — are
+            # NOT descended; only the top-level knob names are checked.
+            _validate_plugin_knobs(cfg_name, cfg, plugins, add)
             continue
         knobs = cfg_provider.knobs
         if not isinstance(cfg, dict):
@@ -226,6 +232,31 @@ def validate_profile(
                 f"gc type '{gc_type}' not among {gc_names}", where="gc.type")
 
     return out
+
+
+def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
+    """Flag top-level knob names a non-provider plugin does not declare.
+
+    Uses the plugin's introspected ``get_config_schema`` (``config_keys``).
+    Only validates when the plugin declares a schema — a plugin that declares
+    none opts out (we cannot tell a typo from an accepted free-form key).
+    Emits ``warn`` (not ``error``): a plugin's schema may be incomplete, so a
+    hard failure would risk false positives; the signal still surfaces likely
+    typos (e.g. ``evaluatorss``) which are silently ignored at runtime.
+    """
+    if not isinstance(cfg, dict):
+        return
+    pinfo = plugins.get(cfg_name)
+    if pinfo is None or not pinfo.config_keys:
+        return
+    known = set(pinfo.config_keys)
+    for key in cfg:
+        if key not in known:
+            valid = ", ".join(sorted(known))
+            add("warn", "unknown_knob",
+                f"'{key}' is not a declared {cfg_name} config knob "
+                f"(silently ignored at runtime; known: {valid})",
+                where=f"plugin_configs.{cfg_name}.{key}")
 
 
 def _check_quirks(quirks_dict, pinfo, provider_name, add, where_prefix=None):

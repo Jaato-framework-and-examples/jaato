@@ -316,22 +316,39 @@ def plugins() -> Dict[str, PluginInfo]:
         # plugin-level description (class docstring, first line)
         doc = (type(plugin).__doc__ or "").strip()
         info.description = doc.split("\n", 1)[0].strip() if doc else ""
-        # config schema (best-effort) — names + descriptions / types / defaults
+        # config schema (best-effort) — names + descriptions / types / defaults.
+        # Two shapes exist in the wild; normalize BOTH into ConfigSetting so
+        # explain/validate see the knobs either way:
+        #   - a list of ``PluginSetting`` objects (``.name`` / ``.type`` / …),
+        #   - a raw JSON-schema dict ``{"type":"object","properties":{k:{…}}}``
+        #     (permission, cli, interactive_shell, notebook).  Previously the
+        #     dict form yielded NO knobs (iterating a dict gives key strings,
+        #     which have no ``.name``), so those plugins' knobs were invisible.
         try:
             schema = reg.get_plugin_config_schema(name) or []
-            # Only real PluginSetting objects (some plugins return a raw
-            # JSON-schema dict, whose iteration would yield bogus key strings).
-            settings = [s for s in schema if hasattr(s, "name")]
+            settings: List[ConfigSetting] = []
+            if isinstance(schema, dict):
+                props = schema.get("properties")
+                if isinstance(props, dict):
+                    for knob, spec in props.items():
+                        spec = spec if isinstance(spec, dict) else {}
+                        settings.append(ConfigSetting(
+                            name=str(knob),
+                            type=str(spec.get("type", "") or ""),
+                            default=spec.get("default", None),
+                            description=str(spec.get("description", "") or ""),
+                        ))
+            else:
+                for s in schema:
+                    if hasattr(s, "name"):
+                        settings.append(ConfigSetting(
+                            name=s.name,
+                            type=str(getattr(s, "type", "") or ""),
+                            default=getattr(s, "default", None),
+                            description=getattr(s, "description", "") or "",
+                        ))
             info.config_keys = [s.name for s in settings]
-            info.config_settings = [
-                ConfigSetting(
-                    name=s.name,
-                    type=str(getattr(s, "type", "") or ""),
-                    default=getattr(s, "default", None),
-                    description=getattr(s, "description", "") or "",
-                )
-                for s in settings
-            ]
+            info.config_settings = settings
         except Exception:
             pass
         out[name] = info
