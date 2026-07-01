@@ -13,6 +13,7 @@ from shared.plugins.workspace_venv import (
     venv_python,
     venv_site_packages,
     runner_site_dirs,
+    jaato_source_dirs,
     _BRIDGE_PTH,
     PIP_APPARMOR_RULES,
 )
@@ -78,8 +79,11 @@ def test_ensure_fastpath_skips_create_but_refreshes_bridge(tmp_path):
     bridge = site / _BRIDGE_PTH
     assert bridge.exists()
     body = bridge.read_text()
-    assert body.startswith("import site;")
-    assert "addsitedir" in body
+    # Plain directory lines only — NO ``import``/``addsitedir`` (that would run
+    # the base dir's editable .pth finders and leak unrelated src dirs).
+    assert "import" not in body
+    assert "addsitedir" not in body
+    assert all(os.path.isdir(ln) for ln in body.split() if ln)
 
 
 # ---- runner-import bridge ---------------------------------------------------
@@ -97,11 +101,15 @@ def test_ensure_creates_real_venv_and_resolves(tmp_path):
     assert os.path.exists(venv_python(venv))
     site = venv_site_packages(venv)
     assert site and os.path.isdir(site)
-    # Bridge .pth written into the venv, targeting the runner's site dirs.
+    # Bridge .pth written into the venv: plain path lines for the base
+    # site-packages + the explicit jaato source roots (no addsitedir, so no
+    # editable-finder execution / unrelated-src leak).
     bridge = os.path.join(site, _BRIDGE_PTH)
     assert os.path.exists(bridge)
-    for d in runner_site_dirs():
-        assert repr(d) in open(bridge).read()
+    body = open(bridge).read()
+    assert "addsitedir" not in body
+    for d in runner_site_dirs() + jaato_source_dirs():
+        assert d in body
     # Second call is idempotent (create short-circuits; bridge refreshed).
     assert ensure_workspace_venv(venv) == venv
     # An activated env prepends the resolved site-packages.
@@ -195,3 +203,25 @@ def test_cli_foreground_path_activates_workspace_venv(tmp_path, monkeypatch):
     ee = captured["extra_env"]
     assert ee and ee.get("VIRTUAL_ENV") == venv
     assert ee["PATH"].split(os.pathsep)[0] == os.path.join(venv, "bin")
+
+
+def test_jaato_source_dirs_are_shared_and_sdk_roots():
+    dirs = jaato_source_dirs()
+    assert len(dirs) == 2 and all(os.path.isdir(d) for d in dirs)
+    import shared, jaato_sdk
+    assert os.path.dirname(shared.__path__[0]) in dirs
+    assert os.path.dirname(jaato_sdk.__path__[0]) in dirs
+
+
+def test_bridge_does_not_leak_unrelated_editable_src(tmp_path):
+    # The scoped bridge must NOT surface an unrelated editable install's src
+    # dir on the tool-venv sys.path (the over-share the peer hit: the client's
+    # own package). Structural guarantee: no addsitedir -> no .pth finder runs,
+    # and only base-site-packages + jaato source roots are listed.
+    venv = str(tmp_path / "tool-venv")
+    ensure_workspace_venv(venv)
+    body = open(os.path.join(venv_site_packages(venv), _BRIDGE_PTH)).read()
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    allowed = set(runner_site_dirs() + jaato_source_dirs())
+    assert set(lines) == allowed          # nothing beyond the scoped set
+    assert "addsitedir" not in body       # no finder execution
