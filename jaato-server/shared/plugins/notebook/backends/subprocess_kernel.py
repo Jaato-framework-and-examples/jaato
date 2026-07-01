@@ -25,6 +25,9 @@ import uuid
 from typing import Callable, Dict, List, Optional, Tuple
 
 from shared.session_context import get_workspace_root
+from ...workspace_venv import (
+    resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, venv_python,
+)
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
 from ..types import (
@@ -102,6 +105,11 @@ class SubprocessKernelBackend(NotebookBackend):
 
     def __init__(self) -> None:
         self._workspace_root: Optional[str] = None
+        # Workspace-scoped venv path for the kernel interpreter (None/empty =
+        # off).  When set, the kernel runs from this venv's python so the
+        # model's in-notebook pip installs persist and imports resolve.
+        # See shared/plugins/workspace_venv.py.
+        self._workspace_venv: Optional[str] = None
         self._kernels: Dict[str, _Kernel] = {}
         self._lock = threading.Lock()
         # The runner's tool executor (``ToolExecutor.execute`` shape:
@@ -129,6 +137,8 @@ class SubprocessKernelBackend(NotebookBackend):
     def initialize(self, config: Optional[Dict] = None) -> None:
         if config:
             self._workspace_root = config.get("workspace_root") or self._workspace_root
+            if "workspace_venv" in config:
+                self._workspace_venv = config.get("workspace_venv")
 
     def is_available(self) -> bool:
         return True
@@ -314,14 +324,30 @@ class SubprocessKernelBackend(NotebookBackend):
             raise RuntimeError(
                 "notebook subprocess kernel: no workspace_root resolved "
                 "(session_context ContextVar and plugin config both unset)")
+        # Kernel interpreter: the runner base python by default, or the
+        # workspace venv's python when configured (so the model's in-notebook
+        # pip installs persist and later imports resolve).  With
+        # --system-site-packages + the inherited PYTHONPATH the venv python
+        # still imports ``shared.plugins.notebook.kernel_main`` from the runner
+        # source tree.
+        kernel_python = sys.executable
+        kernel_env: Optional[Dict[str, str]] = None
+        venv_path = resolve_venv_path(self._workspace_venv, workspace)
+        if venv_path:
+            ensure_workspace_venv(venv_path)
+            kernel_python = venv_python(venv_path)
+            kernel_env = os.environ.copy()
+            apply_venv_to_env(kernel_env, venv_path)
+
         r2k_r, r2k_w = os.pipe()   # runner → kernel
         k2r_r, k2r_w = os.pipe()   # kernel → runner
         proc = subprocess.Popen(
-            [sys.executable, "-m", "shared.plugins.notebook.kernel_main",
+            [kernel_python, "-m", "shared.plugins.notebook.kernel_main",
              "--workspace-root", workspace,
              "--read-fd", str(r2k_r), "--write-fd", str(k2r_w)],
             pass_fds=(r2k_r, k2r_w),
             cwd=workspace,
+            env=kernel_env,
             preexec_fn=_set_pdeathsig,
         )
         os.close(r2k_r)
