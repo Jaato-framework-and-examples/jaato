@@ -56,11 +56,14 @@ Contract
 
 import glob
 import importlib
+import logging
 import os
 import site
 import subprocess
 import sys
 from typing import List, MutableMapping, Optional
+
+logger = logging.getLogger(__name__)
 
 
 _BRIDGE_PTH = "_jaato_runner_bridge.pth"
@@ -227,13 +230,50 @@ def _write_runner_bridge(venv_path: str) -> None:
         f.write(body + "\n")
 
 
+def _venv_pip(venv_path: str) -> str:
+    """Absolute path to the venv's ``pip`` console script."""
+    exe = "pip.exe" if os.name == "nt" else "pip"
+    return os.path.join(_bin_dir(venv_path), exe)
+
+
+def _ensure_venv_pip(venv_path: str) -> None:
+    """Materialize the venv's own ``pip`` console script if absent.
+
+    A venv created with ``--without-pip`` (or by a caller that pre-creates it
+    minimally — e.g. the client materializing the shared tool-venv) has no
+    ``<venv>/bin/pip`` script, so a bare ``pip`` / notebook ``!pip`` resolves to
+    the SYSTEM pip on ``PATH`` — which, under confinement, is denied (it can't
+    write the system site-packages).  ``ensurepip`` installs pip INTO the venv
+    (offline — a wheel bundled in the stdlib); the resulting ``<venv>/bin/pip``
+    is first on the activated ``PATH`` and, via its ``<venv>/bin/python``
+    shebang, installs into the tool-venv.  Idempotent: skipped once the script
+    exists.
+
+    Non-fatal on failure — ``python -m pip`` still works via the runner-import
+    bridge, so only the bare ``pip`` convenience is lost.
+    """
+    if os.path.exists(_venv_pip(venv_path)):
+        return
+    try:
+        subprocess.run(
+            [venv_python(venv_path), "-m", "ensurepip", "--default-pip"],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        logger.warning(
+            "workspace_venv: could not materialize pip in %s (%s); bare "
+            "`pip`/`!pip` unavailable — use `python -m pip`", venv_path, exc)
+
+
 def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> str:
-    """Create the workspace venv if absent + bridge runner imports; return path.
+    """Create the workspace venv if absent + materialize pip + bridge imports.
 
     Creation is idempotent (an existing ``pyvenv.cfg`` short-circuits it), but
-    the runner-import bridge (see ``_write_runner_bridge``) is (re)written
-    **every** call — so a venv created by another party without the bridge is
-    fixed up here, and the bridge tracks the runner's current site dirs.
+    two fix-ups run **every** call so a venv created by another party is brought
+    up to spec: (1) ``_ensure_venv_pip`` materializes ``<venv>/bin/pip`` if
+    missing (so a bare ``pip`` / ``!pip`` uses the tool-venv, not system pip);
+    (2) the runner-import bridge (see ``_write_runner_bridge``) is (re)written,
+    tracking the runner's current site dirs.
 
     Args:
         venv_path: Absolute path where the venv lives (see ``resolve_venv_path``).
@@ -255,6 +295,7 @@ def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> 
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+    _ensure_venv_pip(venv_path)
     _write_runner_bridge(venv_path)
     return venv_path
 

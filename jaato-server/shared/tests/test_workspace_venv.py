@@ -225,3 +225,25 @@ def test_bridge_does_not_leak_unrelated_editable_src(tmp_path):
     allowed = set(runner_site_dirs() + jaato_source_dirs())
     assert set(lines) == allowed          # nothing beyond the scoped set
     assert "addsitedir" not in body       # no finder execution
+
+
+# ---- pip materialization (bare `!pip` / `pip` -> tool-venv) ------------------
+
+def test_ensure_materializes_pip_when_venv_created_without_it(tmp_path):
+    # Simulate a client-created venv WITHOUT pip (the bot's case): ensure must
+    # materialize <venv>/bin/pip so bare `pip`/`!pip` resolves to the tool-venv.
+    venv = str(tmp_path / "v")
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", venv], check=True)
+    pip = os.path.join(venv, "bin", "pip")
+    assert not os.path.exists(pip)          # precondition: no pip
+    ensure_workspace_venv(venv)
+    assert os.path.exists(pip)              # ensurepip materialized it
+
+
+def test_real_venv_has_pip_and_it_targets_the_venv(tmp_path):
+    venv = str(tmp_path / "tool-venv")
+    ensure_workspace_venv(venv)
+    pip = os.path.join(venv, "bin", "pip")
+    assert os.path.exists(pip)
+    # the pip console script's shebang points at the venv python -> installs here
+    assert venv in open(pip).readline()
