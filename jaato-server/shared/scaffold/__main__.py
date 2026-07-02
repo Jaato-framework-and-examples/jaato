@@ -1,5 +1,5 @@
 """``jaato-scaffold`` — interrogate the installed framework, validate
-hand-authored assets, and scaffold new ones.  Three verbs, one
+hand-authored assets, and scaffold new ones.  Three built-in verbs, one
 introspection core (see :mod:`introspect`):
 
     jaato-scaffold explain [scope] [name] [--workspace DIR] [--json]
@@ -12,6 +12,16 @@ asset against it; ``new`` emits an asset and runs it straight back through
 ``jaato-scaffold`` console script.  It introspects whatever framework build is
 installed in the current Python env — run it in the SAME env as the daemon you
 target.
+
+**Extension verbs.**  External packages can contribute additional verbs by
+registering a :class:`api.ScaffoldVerb` under the ``jaato.scaffold_verbs``
+entry-point group; the CLI discovers and mounts them at startup, and they reuse
+the framework internals via :mod:`shared.scaffold.api` (introspection, the
+validator, and the emit-then-validate plumbing).  A verb whose package is not
+installed simply does not appear — the same convention as ``jaato.premium`` /
+``jaato.premium_reactors`` elsewhere in the framework.  The premium ``compile``
+verb (the Daruma invariant compiler) mounts this way, with no compiler code in
+this repo.
 """
 
 from __future__ import annotations
@@ -122,6 +132,43 @@ def _cmd_new(args) -> int:
     return build.run(args)
 
 
+# ----------------------------------------------------- external verbs (plugins)
+
+def _discover_external_verbs() -> list:
+    """Load verbs contributed by external packages via entry points.
+
+    Scans the ``jaato.scaffold_verbs`` group (see :mod:`api`).  Each entry point
+    loads to a :class:`api.ScaffoldVerb` — an instance, or a zero-arg
+    class/factory producing one.  A verb whose package is not installed simply is
+    not discovered; a verb that fails to load is skipped with a warning rather
+    than breaking the whole CLI.  This is how the premium ``compile`` verb (the
+    Daruma invariant compiler) mounts without any compiler code living here.
+    """
+    import logging
+    from importlib.metadata import entry_points
+
+    log = logging.getLogger(__name__)
+    from .api import VERB_ENTRY_POINT_GROUP
+
+    try:  # entry_points(group=) is 3.10+; guard for older interpreters.
+        eps = entry_points(group=VERB_ENTRY_POINT_GROUP)
+    except TypeError:  # pragma: no cover - py<3.10
+        eps = entry_points().get(VERB_ENTRY_POINT_GROUP, [])
+
+    verbs = []
+    for ep in eps:
+        try:
+            obj = ep.load()
+            verb = obj() if isinstance(obj, type) else obj
+            if not getattr(verb, "name", None) or not callable(getattr(verb, "run", None)):
+                log.warning("scaffold verb %r does not satisfy ScaffoldVerb; skipped", ep.name)
+                continue
+            verbs.append(verb)
+        except Exception:
+            log.warning("failed to load scaffold verb %r", ep.name, exc_info=True)
+    return verbs
+
+
 # ------------------------------------------------------------------ main
 
 def main(argv=None) -> int:
@@ -172,6 +219,16 @@ def main(argv=None) -> int:
                                  "self-signed / dev cert (scoped ca=, never os.environ)")
     pn.add_argument("--json", action="store_true")
     pn.set_defaults(func=_cmd_new)
+
+    # External verbs (e.g. the premium `compile` verb) — discovered via the
+    # `jaato.scaffold_verbs` entry-point group.  Built-in names win on collision.
+    _builtin = {"explain", "validate", "new"}
+    for verb in _discover_external_verbs():
+        if verb.name in _builtin:
+            continue
+        pv_ext = sub.add_parser(verb.name, help=getattr(verb, "help", None))
+        verb.configure(pv_ext)
+        pv_ext.set_defaults(func=verb.run)
 
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):
