@@ -122,7 +122,7 @@ class NebiusProvider(OpenAICompatProvider):
         # proxy (see is_self_hosted).
         if not self._api_key and not is_self_hosted(self._base_url):
             raise APIKeyNotFoundError(
-                checked_locations=get_checked_credential_locations(),
+                checked_locations=get_checked_credential_locations(config=config),
             )
 
     def _resolve_context(self, config: ProviderConfig) -> None:
@@ -339,7 +339,7 @@ class NebiusProvider(OpenAICompatProvider):
                 )
             if not allow_interactive:
                 raise APIKeyNotFoundError(
-                    checked_locations=get_checked_credential_locations()
+                    checked_locations=get_checked_credential_locations(config=config)
                 )
             return False
 
@@ -350,7 +350,7 @@ class NebiusProvider(OpenAICompatProvider):
 
         if not allow_interactive:
             raise APIKeyNotFoundError(
-                checked_locations=get_checked_credential_locations()
+                checked_locations=get_checked_credential_locations(config=config)
             )
 
         return False
