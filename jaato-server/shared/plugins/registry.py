@@ -98,17 +98,24 @@ def _tier_filter_matches(
     return plugin_tier in accepted
 
 
-def _trace(msg: str, include_traceback: bool = False) -> None:
+def _trace(msg: str, include_traceback: bool = False, warning: bool = False) -> None:
     """Write trace message to log file for debugging.
 
     Args:
         msg: The message to log.
-        include_traceback: If True, append the current exception traceback.
+        include_traceback: If True, log at ERROR with the current exception
+            traceback attached (for genuine plugin bugs / unexpected failures).
+        warning: If True (and ``include_traceback`` is False), log at WARNING
+            for a concise, user-visible one-liner — used for expected,
+            actionable skips (e.g. a plugin's optional backend dependency is
+            not installed) where a full traceback would read as a crash.
     """
     _trace_write("PluginRegistry", msg, include_traceback=include_traceback)
     # Also log to standard logger for visibility
     if include_traceback:
         logger.error(msg, exc_info=True)
+    elif warning:
+        logger.warning(msg)
     else:
         logger.debug(msg)
 
@@ -793,6 +800,19 @@ class PluginRegistry:
                         "create_ms": round(create_ms, 2),
                     }
 
+            except ModuleNotFoundError as exc:
+                # A plugin's (declared) dependency is not installed in this
+                # environment — e.g. interactive_shell needs pexpect on Unix.
+                # The plugin correctly does NOT load; this is an environment-
+                # provisioning issue, not a plugin bug, so emit a concise,
+                # actionable one-line WARNING naming the missing module rather
+                # than dumping a full traceback that reads as a crash mid-scan.
+                missing = exc.name or str(exc)
+                _trace(
+                    f" Plugin '{name}' skipped: missing dependency "
+                    f"'{missing}' — install it to enable this plugin.",
+                    warning=True,
+                )
             except Exception as exc:
                 _trace(f" Error loading plugin '{name}': {exc}", include_traceback=True)
 
