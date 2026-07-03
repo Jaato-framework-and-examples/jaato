@@ -132,15 +132,21 @@ def is_self_hosted(base_url: str) -> bool:
     )
 
 
-def get_checked_credential_locations() -> List[str]:
+def get_checked_credential_locations(config=None) -> List[str]:
     """Get the list of locations checked for credentials.
 
     Used for error messages to help users understand what was checked.
 
+    ``config`` (optional ``ProviderConfig``) surfaces the highest-precedence
+    source — the profile ``plugin_configs.nebius.api_key`` knob — which the
+    env-only checks below cannot see.
+
     Returns:
         List of location descriptions.
     """
-    locations = []
+    from ..base import profile_api_key_location
+
+    locations = [profile_api_key_location(config, "nebius")]
 
     jaato_key = os.environ.get(ENV_NEBIUS_API_KEY)
     if jaato_key:

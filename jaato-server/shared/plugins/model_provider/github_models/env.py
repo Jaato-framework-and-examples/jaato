@@ -151,18 +151,25 @@ def resolve_endpoint() -> str:
     return os.environ.get(ENV_GITHUB_ENDPOINT, DEFAULT_ENDPOINT)
 
 
-def get_checked_credential_locations(auth_method: AuthMethod = "auto") -> List[str]:
+def get_checked_credential_locations(
+    auth_method: AuthMethod = "auto", config=None
+) -> List[str]:
     """Get list of locations checked for credentials.
 
     Used for error messages to help users understand what was checked.
 
     Args:
         auth_method: The authentication method being used.
+        config: Optional ``ProviderConfig`` — surfaces the highest-precedence
+            source, the profile ``plugin_configs.github_models.api_key`` knob,
+            which the env/OAuth checks below cannot see.
 
     Returns:
         List of location descriptions.
     """
-    locations = []
+    from ..base import profile_api_key_location
+
+    locations = [profile_api_key_location(config, "github_models")]
 
     # Check stored OAuth token
     try:

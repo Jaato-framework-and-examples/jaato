@@ -760,7 +760,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
 
         if not self._api_key:
             raise APIKeyNotFoundError(
-                checked_locations=get_checked_credential_locations(),
+                checked_locations=get_checked_credential_locations(config=config),
             )
 
         self._client = self._create_client()
@@ -856,13 +856,13 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                 )
             if not allow_interactive:
                 raise APIKeyNotFoundError(
-                    checked_locations=get_checked_credential_locations()
+                    checked_locations=get_checked_credential_locations(config=config)
                 )
             return False
 
         if not allow_interactive:
             raise APIKeyNotFoundError(
-                checked_locations=get_checked_credential_locations()
+                checked_locations=get_checked_credential_locations(config=config)
             )
 
         return False

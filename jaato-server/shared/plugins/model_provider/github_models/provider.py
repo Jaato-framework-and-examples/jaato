@@ -393,7 +393,8 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         if not raw_token:
             raise TokenNotFoundError(
                 auth_method=resolve_auth_method(),
-                checked_locations=get_checked_credential_locations(resolve_auth_method()),
+                checked_locations=get_checked_credential_locations(
+                    resolve_auth_method(), config=config),
             )
 
         # If using OAuth, exchange for Copilot token and use Copilot API
@@ -529,7 +530,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # No token found
         if not allow_interactive:
             raise TokenNotFoundError(
-                checked_locations=get_checked_credential_locations()
+                checked_locations=get_checked_credential_locations(config=config)
             )
 
         # Try interactive device code flow

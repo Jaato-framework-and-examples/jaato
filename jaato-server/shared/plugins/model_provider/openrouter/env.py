@@ -119,13 +119,19 @@ def resolve_app_categories() -> List[str]:
     return [c for c in parts if c]
 
 
-def get_checked_credential_locations() -> List[str]:
+def get_checked_credential_locations(config=None) -> List[str]:
     """Describe which credential locations were checked.
 
     Returned by errors so users see exactly what the provider looked at
     before giving up on credentials.
+
+    ``config`` (optional ``ProviderConfig``) surfaces the highest-precedence
+    source — the profile ``plugin_configs.openrouter.api_key`` knob — which
+    the env-only checks below cannot see.
     """
-    locations: List[str] = []
+    from ..base import profile_api_key_location
+
+    locations: List[str] = [profile_api_key_location(config, "openrouter")]
 
     api_key = os.environ.get(ENV_OPENROUTER_API_KEY)
     if api_key:

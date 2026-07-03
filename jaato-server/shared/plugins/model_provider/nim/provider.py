@@ -96,7 +96,7 @@ class NIMProvider(OpenAICompatProvider):
         # Required for hosted, optional for self-hosted NIM containers.
         if not self._api_key and not is_self_hosted(self._base_url):
             raise APIKeyNotFoundError(
-                checked_locations=get_checked_credential_locations(),
+                checked_locations=get_checked_credential_locations(config=config),
             )
 
     def _detect_context(self, config: ProviderConfig) -> Optional[int]:
@@ -189,7 +189,7 @@ class NIMProvider(OpenAICompatProvider):
                 )
             if not allow_interactive:
                 raise APIKeyNotFoundError(
-                    checked_locations=get_checked_credential_locations()
+                    checked_locations=get_checked_credential_locations(config=config)
                 )
             return False
 
@@ -200,7 +200,7 @@ class NIMProvider(OpenAICompatProvider):
 
         if not allow_interactive:
             raise APIKeyNotFoundError(
-                checked_locations=get_checked_credential_locations()
+                checked_locations=get_checked_credential_locations(config=config)
             )
 
         return False

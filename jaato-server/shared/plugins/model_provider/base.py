@@ -116,6 +116,39 @@ class ProviderConfig:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
+def profile_api_key_location(
+    config: Optional["ProviderConfig"], provider_name: str
+) -> str:
+    """Describe the profile ``plugin_configs.<provider>.api_key`` knob for a
+    provider's ``get_checked_credential_locations()`` list.
+
+    The runtime promotes ``plugin_configs.<provider>.api_key`` to
+    ``config.api_key`` (``jaato_runtime.py``) — the HIGHEST-precedence key
+    source, consulted before env vars and stored credentials
+    (``self._api_key = config.api_key or resolve_...``).  Env-only
+    checked-locations helpers cannot see it, so an ``APIKeyNotFoundError``
+    omitted the very first source it checked.  This returns a single
+    precedence-ordered line (masked when set) so the profile knob is always
+    surfaced.  ``config`` may be the initialize-time config (key promoted to
+    ``config.api_key``) or the verify-time config (key still under
+    ``config.extra['api_key']``) — both are inspected.
+
+    Returns a ``"... : not set"`` line when ``config`` is None or carries no
+    key, so callers can unconditionally prepend it.
+    """
+    key: Optional[str] = None
+    if config is not None:
+        key = getattr(config, "api_key", None)
+        if not key:
+            extra = getattr(config, "extra", None) or {}
+            key = extra.get("api_key")
+    label = f"plugin_configs.{provider_name}.api_key (profile)"
+    if key:
+        masked = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+        return f"{label}: set ({masked})"
+    return f"{label}: not set"
+
+
 def resolve_context_window(
     *,
     detect_capacity: Optional[Callable[[], Optional[int]]] = None,

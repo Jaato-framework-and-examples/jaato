@@ -118,15 +118,21 @@ def is_self_hosted(base_url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "0.0.0.0") or host.startswith("192.168.") or host.startswith("10.")
 
 
-def get_checked_credential_locations() -> List[str]:
+def get_checked_credential_locations(config=None) -> List[str]:
     """Get list of locations checked for credentials.
 
     Used for error messages to help users understand what was checked.
 
+    ``config`` (optional ``ProviderConfig``) surfaces the highest-precedence
+    source — the profile ``plugin_configs.nim.api_key`` knob — which the
+    env-only checks below cannot see.
+
     Returns:
         List of location descriptions.
     """
-    locations = []
+    from ..base import profile_api_key_location
+
+    locations = [profile_api_key_location(config, "nim")]
 
     api_key = os.environ.get(ENV_NIM_API_KEY)
     if api_key:
