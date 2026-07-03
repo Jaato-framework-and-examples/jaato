@@ -111,7 +111,7 @@ def write_files(
     for f in files:
         dest = out / f.path
         if dest.exists() and not force:
-            raise FileExistsError(f"{dest} exists (use force=True to overwrite)")
+            raise FileExistsError(f"{dest} exists")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f.content, encoding="utf-8")
         written.append(f.path)
