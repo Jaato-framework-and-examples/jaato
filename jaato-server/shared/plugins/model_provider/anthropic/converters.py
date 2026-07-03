@@ -26,6 +26,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ToolResult,
     ToolSchema,
+    render_result_for_model,
 )
 
 from shared.tool_id_map import id_to_name, name_to_id
@@ -95,12 +96,10 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
 
     if part.function_response is not None:
         fr = part.function_response
-        # Result can be string or dict - Anthropic expects string or list of blocks
-        content: Any
-        if isinstance(fr.result, str):
-            content = fr.result
-        else:
-            content = json.dumps(fr.result)
+        # Result can be string or dict - Anthropic expects string or list of blocks.
+        # render_result_for_model serializes the STRUCTURED result and appends
+        # the model-facing steering suffix (see ToolResult.model_suffix).
+        content: Any = render_result_for_model(fr.result, fr.model_suffix)
 
         block: Dict[str, Any] = {
             "type": "tool_result",
@@ -396,11 +395,8 @@ def message_from_anthropic(msg: Dict[str, Any]) -> Message:
 
 def tool_result_to_anthropic(result: ToolResult) -> Dict[str, Any]:
     """Convert ToolResult to Anthropic tool_result content block."""
-    content: Any
-    if isinstance(result.result, str):
-        content = result.result
-    else:
-        content = json.dumps(result.result)
+    # Serialize the STRUCTURED result + append the model-facing steering suffix.
+    content: Any = render_result_for_model(result.result, result.model_suffix)
 
     block: Dict[str, Any] = {
         "type": "tool_result",

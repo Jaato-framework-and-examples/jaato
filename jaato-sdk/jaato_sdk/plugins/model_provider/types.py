@@ -7,6 +7,7 @@ These types are used throughout the plugin system and JaatoClient to enable
 support for multiple AI providers (Google GenAI, Anthropic, etc.).
 """
 
+import json
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -285,6 +286,37 @@ class ToolResult:
     is_error: bool = False
     attachments: Optional[List['Attachment']] = None
     enrichment_metadata: Optional[Dict[str, Any]] = None
+    model_suffix: Optional[str] = None
+    """Model-facing-ONLY text appended to the serialized result at
+    provider-serialization time (via :func:`render_result_for_model`).
+
+    Carries transient steering the framework wants the model to see on the
+    NEXT turn — the task-completion spur, a mid-turn user-message piggyback, a
+    withheld-attachment note — WITHOUT destroying the structured ``result``.
+    Historically that steering was ``str()``-folded into ``result`` itself,
+    which turned a structured dict into a Python-repr string and broke every
+    consumer that reads the result structurally (the tool-call ledger /
+    completion-processor provenance, enrichment, result_grep, GC token counts).
+    Keeping it here leaves ``result`` the structured source of truth for those
+    consumers while the model still receives the nudge.  NOT persisted /
+    ledgered / sent to enrichment — purely a serialization-time suffix."""
+
+
+def render_result_for_model(result: Any, model_suffix: Optional[str] = None) -> str:
+    """Serialize a tool ``result`` to model-facing TEXT, appending the
+    model-only ``model_suffix`` when present.
+
+    Text-content provider converters call this instead of inlining
+    ``str``/``json.dumps`` so the STRUCTURED ``result`` stays on
+    ``ToolResult.result`` (for the ledger / GC / enrichment) while the model
+    still receives any steering suffix.  A dict result is ``json.dumps``-ed
+    (clean JSON — not a single-quoted ``str(dict)`` repr), which is also
+    strictly better model-facing than the old fold-into-result path.
+    """
+    content = result if isinstance(result, str) else json.dumps(result)
+    if model_suffix:
+        content = f"{content}\n\n{model_suffix}"
+    return content
 
 
 def tool_result_is_error(result: Any) -> bool:

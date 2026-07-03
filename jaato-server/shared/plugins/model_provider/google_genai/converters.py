@@ -243,6 +243,11 @@ def tool_result_to_sdk_part(result: ToolResult) -> get_types().Part:
     response = result.result if isinstance(result.result, dict) else {"result": result.result}
     if result.is_error:
         response = {"error": str(result.result)}
+    # Dict-response provider: deliver the model-facing steering suffix as a
+    # reserved key (model still sees it; the structured result + ledger stay
+    # clean — the ledger reads history, not this converter output).
+    if result.model_suffix:
+        response = {**response, "_agent_guidance": result.model_suffix}
 
     # Names must be id-mapped to match the function_call name emitted at
     # part_to_sdk (``name_to_id(fc.name)``) — otherwise google can't pair the

@@ -95,6 +95,12 @@ def part_to_api(part: Part) -> Optional[Dict[str, Any]]:
     if part.function_response is not None:
         fr = part.function_response
         response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
+        # Dict-response provider: deliver the model-facing steering suffix as a
+        # reserved key so the model still sees it, while the structured result
+        # (and the ledger, which reads history not this converter output) stays
+        # clean.  See ToolResult.model_suffix.
+        if fr.model_suffix:
+            response = {**response, "_agent_guidance": fr.model_suffix}
         return {
             "functionResponse": {
                 "name": name_to_id(fr.name),
