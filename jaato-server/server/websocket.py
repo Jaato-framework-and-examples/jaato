@@ -2197,7 +2197,11 @@ class JaatoWSServer:
                     if waiter.wait(timeout=remaining):
                         if result_holder['error']:
                             return {'error': result_holder['error']}
-                        return {'result': result_holder['result']}
+                        # Success: the client's DECODED result verbatim (a
+                        # native dict), symmetric with an in-process tool — NOT
+                        # wrapped under a "result" envelope (which buried the
+                        # real fields from the ledger / enrichment).
+                        return result_holder['result']
                     else:
                         return {'error': f'Client tool {tname} timed out after {tout}s'}
                 return executor
@@ -2318,7 +2322,11 @@ class JaatoWSServer:
             logger.warning("No waiter for tool result call_id=%s", call_id)
             return
         waiter, result_holder = entry
-        result_holder['result'] = event.result
+        # Decode the JSON-encoded host-tool result to its native value
+        # (symmetric with the SDK's encode) so it records like an in-process
+        # tool result — see decode_client_tool_result.
+        from server.client_tools import decode_client_tool_result
+        result_holder['result'] = decode_client_tool_result(event.result)
         result_holder['error'] = event.error
         waiter.set()
 

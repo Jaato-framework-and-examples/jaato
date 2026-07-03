@@ -644,7 +644,11 @@ class JaatoIPCServer:
             entry = self._client_tool_waiters.pop(event.call_id, None)
             if entry is not None:
                 waiter, holder = entry
-                holder["result"] = event.result
+                # Decode the JSON-encoded host-tool result to its native value
+                # (symmetric with the SDK's encode) so it records like an
+                # in-process tool result — see decode_client_tool_result.
+                from server.client_tools import decode_client_tool_result
+                holder["result"] = decode_client_tool_result(event.result)
                 holder["error"] = event.error
                 waiter.set()
             return
