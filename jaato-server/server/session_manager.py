@@ -3315,11 +3315,21 @@ class SessionManager:
         for direct-attached cascade observers.
         """
         cid = getattr(session, "cascade_driver_id", None)
-        self._dispatch_to_cascade_clients_by_cid(cid, event)
+        # Dedup owner==observer: every attached client already received this
+        # event via the direct ``_emit_to_client`` fan-out at the caller
+        # (session_manager.py ~3750), so skip any cascade entry delivering to
+        # that same raw connection — otherwise post-bootstrap turn events
+        # (ToolCallStart/End, AgentOutput, AgentCompleted) double on the wire
+        # for a client that is BOTH attached AND a cascade observer.  Parallels
+        # the bootstrap-path skip in :meth:`_route_bootstrap_event`.
+        self._dispatch_to_cascade_clients_by_cid(
+            cid, event, skip_client_ids=set(session.attached_clients),
+        )
 
     def _dispatch_to_cascade_clients_by_cid(
         self, cid: Optional[str], event: Event,
         skip_client_id: Optional[str] = None,
+        skip_client_ids: Optional[Set[str]] = None,
     ) -> None:
         """Phase 1 dispatch core — fan out an event to cascade-clients
         registered for ``cid``.
@@ -3373,12 +3383,33 @@ class SessionManager:
         (extensions wiring callbacks not tied to IPC) get None →
         skip never matches → existing behavior preserved.
 
+        ``skip_client_ids`` (server 0.6.196+): the POST-bootstrap
+        analogue of the single ``skip_client_id``.  The post-bootstrap
+        caller (:meth:`_dispatch_to_cascade_clients`) direct-emits the
+        event to EVERY ``session.attached_clients`` before this
+        cascade fan-out, so a cascade entry whose
+        ``delivery_target_id`` is any of those attached clients would
+        double-deliver on the same raw connection (owner==observer:
+        the client that fired the session AND registered as a cascade
+        observer on the same IPC connection).  Passing the
+        attached-clients set here dedups all such overlaps; a cascade
+        observer on a SEPARATE connection (not attached) is not in the
+        set and still receives the event.
+
         ``last_event_ts`` is NOT updated for skipped entries because
         they didn't actually fire; their next real delivery resets
         the timer.
         """
         if cid is None:
             return
+        # Combined skip set: bootstrap passes a single ``skip_client_id``
+        # (the direct-attach client); the post-bootstrap path passes
+        # ``skip_client_ids`` = the session's ``attached_clients``.
+        skip: Set[str] = set()
+        if skip_client_id is not None:
+            skip.add(skip_client_id)
+        if skip_client_ids:
+            skip.update(skip_client_ids)
         # Snapshot under lock to avoid mutation-during-iteration if
         # a callback unregisters concurrently.
         with self._cascade_clients_lock:
@@ -3387,9 +3418,8 @@ class SessionManager:
         # Owners first, observers second — see docstring.
         for entry in sorted(entries, key=lambda e: 0 if e.role == "owner" else 1):
             if (
-                skip_client_id is not None
-                and entry.delivery_target_id is not None
-                and entry.delivery_target_id == skip_client_id
+                entry.delivery_target_id is not None
+                and entry.delivery_target_id in skip
             ):
                 # Dedup branch (server 0.6.177+, fixed comparand
                 # 0.6.178+): this entry's callback delivers to the
