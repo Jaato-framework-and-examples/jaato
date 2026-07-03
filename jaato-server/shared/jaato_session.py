@@ -2081,6 +2081,22 @@ class JaatoSession:
                 ]
                 if approved:
                     self._runtime.permission_plugin.add_whitelist_tools(approved)
+                # Framework-reserved: lifecycle terminals (signal_completion —
+                # session-level, NOT a registry core tool) PLUS the registry's
+                # core tools (stream / event_bus / introspection / client host
+                # tools) are exempt from a business catch-all "default"
+                # evaluator, so a locked-down default-deny agent can still
+                # complete.  Re-populated here every configure() so it survives
+                # PermissionPlugin.shutdown() nulling _registry between sessions.
+                reserved = set(exposed_lifecycle_names)
+                if self._runtime.registry:
+                    reserved.update(
+                        s.name
+                        for s in self._runtime.registry.get_core_tool_schemas()
+                    )
+                self._runtime.permission_plugin.add_framework_reserved_tools(
+                    reserved
+                )
 
             # Apply per-plugin tool allow-lists (profile ``tools:[...]``)
             # to the assembled ``self._tools`` so scoped-out tools are

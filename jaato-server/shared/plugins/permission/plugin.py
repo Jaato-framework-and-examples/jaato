@@ -9,7 +9,7 @@ import os
 import tempfile
 import threading
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
@@ -71,6 +71,17 @@ class PermissionPlugin(RunnerForwardingMixin):
         self._wrapped_executors: Dict[str, Callable] = {}
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
+        # Framework-reserved tool names: framework machinery (core infra +
+        # lifecycle terminals like ``signal_completion``) that a business
+        # catch-all ``"default"`` evaluator must NOT be able to deny — else a
+        # locked-down agent can do its work but never complete.  Populated at
+        # session configure() from BOTH the registry's core tools AND the
+        # session's lifecycle tools (which are NOT registry core tools — they
+        # register session-level via ``executor.register``, so ``is_core_tool``
+        # alone misses them).  Deliberately a self-contained set (no registry
+        # lookup at check time) so it survives ``shutdown()`` nulling
+        # ``_registry`` and is simply re-populated every configure.
+        self._framework_reserved: Set[str] = set()
         self._allow_all: bool = False  # When True, auto-approve all requests
         # Suspension state flags for temporary permission bypasses
         self._turn_suspended: bool = False  # Allow all remaining tools this turn
@@ -520,6 +531,28 @@ class PermissionPlugin(RunnerForwardingMixin):
             with self._policy_lock:
                 for tool in tools:
                     self._policy.whitelist_tools.add(tool)
+
+    def add_framework_reserved_tools(self, tools: List[str]) -> None:
+        """Record framework-machinery tool names exempt from the catch-all
+        ``"default"`` permission evaluator.
+
+        Framework machinery = core infra (introspection, stream, event-bus,
+        registered via ``register_core_tool``) + lifecycle terminals
+        (``signal_completion``, registered session-level via
+        ``executor.register`` — NOT a registry core tool, so ``is_core_tool``
+        alone misses it).  A business default-deny evaluator (``DENY any tool
+        not in my whitelist``) must not be able to veto these — else a
+        locked-down agent does its work but can never complete.  A
+        tool-SPECIFIC evaluator keyed to the name STILL governs (only the
+        catch-all collateral is prevented).
+
+        Called from :meth:`JaatoSession.configure` every session, so the set
+        is re-populated even after :meth:`shutdown` nulls other state.
+
+        Args:
+            tools: Framework-reserved tool names to exempt.
+        """
+        self._framework_reserved.update(tools)
 
     # Suspension management methods
 
@@ -1300,24 +1333,25 @@ class PermissionPlugin(RunnerForwardingMixin):
         # but FALLBACK preserves the pre-approval.
         run_evaluators = bool(self._policy and self._policy._evaluators)
         if run_evaluators:
-            # Framework core tools (introspection + lifecycle terminals such as
-            # ``signal_completion``, registered via ``register_core_tool``) are
-            # EXEMPT from the catch-all ``"default"`` evaluator: a business
-            # default-deny (``DENY any tool not in my whitelist``) must not be
-            # able to brick the framework machinery the agent needs to complete
-            # its own lifecycle.  A tool-SPECIFIC evaluator keyed to the tool
-            # name STILL runs — explicitly governing a core tool is honored;
-            # only the accidental catch-all collateral is prevented.
+            # Framework-reserved tools (core infra + lifecycle terminals such
+            # as ``signal_completion``) are EXEMPT from the catch-all
+            # ``"default"`` evaluator: a business default-deny (``DENY any tool
+            # not in my whitelist``) must not be able to brick the framework
+            # machinery the agent needs to complete its own lifecycle.  A
+            # tool-SPECIFIC evaluator keyed to the tool name STILL runs —
+            # explicitly governing a reserved tool is honored; only the
+            # accidental catch-all collateral is prevented.  Keyed on the
+            # self-contained ``_framework_reserved`` set (populated at
+            # configure from BOTH registry core tools AND the session's
+            # lifecycle tools) — NOT ``registry.is_core_tool``: signal_completion
+            # is session-level (not a registry core tool), and the set survives
+            # ``shutdown()`` nulling ``_registry`` between sessions.
             has_specific_evaluator = tool_name in self._policy._evaluators
-            if (
-                not has_specific_evaluator
-                and self._registry is not None
-                and self._registry.is_core_tool(tool_name)
-            ):
+            if not has_specific_evaluator and tool_name in self._framework_reserved:
                 run_evaluators = False
                 self._trace(
-                    f"check_permission: core tool '{tool_name}' exempt from "
-                    f"the default evaluator (no tool-specific evaluator)"
+                    f"check_permission: framework-reserved tool '{tool_name}' "
+                    f"exempt from the default evaluator (no tool-specific evaluator)"
                 )
         if run_evaluators:
             from .evaluator import run_evaluator

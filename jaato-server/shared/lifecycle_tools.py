@@ -201,8 +201,18 @@ logger = logging.getLogger(__name__)
 class LifecycleTools:
     """Agent lifecycle signaling tools.
 
-    Instantiated per-session in ``JaatoSession.configure()`` and
-    registered via ``registry.register_core_tool()``.
+    Instantiated per-session in ``JaatoSession.configure()`` and registered
+    SESSION-LEVEL — the schemas are appended to ``session._tools`` and the
+    executors to ``session._executor`` (``JaatoSession.configure`` ~line 2050),
+    NOT via ``registry.register_core_tool()``.  This is deliberate (see the
+    "unlike core tools" comment there): lifecycle tools must be visible in the
+    model's schema regardless of the profile's plugin list, and must be
+    filterable per-presentation (hidden for interactive roots), which the
+    registry core-tool surface does not support.  Consequence:
+    ``registry.is_core_tool('signal_completion')`` is ``False`` — code that
+    needs to treat lifecycle terminals as framework machinery must use the
+    permission plugin's ``_framework_reserved`` set (populated at configure),
+    not ``is_core_tool``.
 
     On construction, resolves the session's
     ``_completion_payload_schema`` (inline dict or path under
