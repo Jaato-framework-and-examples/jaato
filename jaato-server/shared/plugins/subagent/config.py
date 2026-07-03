@@ -253,6 +253,46 @@ def looks_like_unresolved_secret_uri(value: Any) -> bool:
     return m.group("scheme") not in _NETWORK_SCHEMES
 
 
+# Regex for a MALFORMED single-colon secret reference: ``scheme:path`` with
+# the ``//`` dropped (``pass:x`` instead of ``pass://x`` — the #1 secret-URI
+# typo).  The ``(?!//)`` lookahead excludes the well-formed ``scheme://`` form
+# (that's :data:`_SECRET_URI_RE`), so this matches ONLY the ``//``-less shape.
+_MALFORMED_SECRET_URI_RE = re.compile(
+    r'^(?P<scheme>[a-z][a-z0-9_+-]*):(?!//)(?P<rest>\S+)$'
+)
+
+
+def looks_like_malformed_secret_uri(value: Any) -> Optional[str]:
+    """Return the scheme name if *value* is a MALFORMED single-colon secret
+    reference for a REGISTERED resolver — e.g. ``pass:jaato/x`` when the user
+    meant ``pass://jaato/x`` — else ``None``.
+
+    The well-formed ``scheme://`` form is handled by
+    :func:`looks_like_unresolved_secret_uri`.  This catches the common
+    ``//``-dropped typo, which is invisible to the resolver machinery: a single
+    colon fails :data:`_SECRET_URI_RE`, so the value is passed through
+    literally and reaches the provider as a bearer token — producing exactly
+    the confusing upstream 401 the ``//`` guard exists to prevent.
+
+    Only a scheme that is an ACTIVELY REGISTERED resolver
+    (:func:`_discover_secret_resolvers`) is flagged, so on a host without that
+    resolver a literal ``word:word`` value is left untouched and there is no
+    hardcoded scheme list.  Network schemes (http/ws/...) and ``${VAR}``
+    placeholders return ``None``.
+    """
+    if not isinstance(value, str) or "${" in value:
+        return None
+    m = _MALFORMED_SECRET_URI_RE.match(value)
+    if not m:
+        return None
+    scheme = m.group("scheme")
+    if scheme in _NETWORK_SCHEMES:
+        return None
+    if scheme in _discover_secret_resolvers():
+        return scheme
+    return None
+
+
 def reset_secret_resolvers() -> None:
     """Reset the cached secret resolvers (for testing)."""
     global _resolvers
