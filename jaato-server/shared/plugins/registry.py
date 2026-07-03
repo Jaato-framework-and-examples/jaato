@@ -975,6 +975,21 @@ class PluginRegistry:
             self._core_auto_approved.add(schema.name)
         _trace(f"Registered core tool: {schema.name} (auto_approved={auto_approved})")
 
+    def is_core_tool(self, tool_name: str) -> bool:
+        """Return True if ``tool_name`` is a framework core tool.
+
+        Core tools are framework machinery registered via
+        :meth:`register_core_tool` — the lifecycle terminal
+        ``signal_completion``, introspection/event-bus tools, etc. — as
+        opposed to a plugin-provided tool (``cli``, ``file_edit``, business
+        tools).  Consumers use this to give framework machinery different
+        treatment from the business tool surface (e.g. the permission
+        pipeline exempts core tools from a catch-all ``"default"`` evaluator
+        so a business default-deny can't brick the agent's ability to
+        complete).
+        """
+        return tool_name in self._core_tools
+
     def get_core_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Get executors for all registered core framework tools.
 
