@@ -1298,7 +1298,28 @@ class PermissionPlugin(RunnerForwardingMixin):
         # Run evaluators before pre-approval short-circuits.
         # Evaluators can override pre-approvals (DENY overrides allow_all),
         # but FALLBACK preserves the pre-approval.
-        if self._policy and self._policy._evaluators:
+        run_evaluators = bool(self._policy and self._policy._evaluators)
+        if run_evaluators:
+            # Framework core tools (introspection + lifecycle terminals such as
+            # ``signal_completion``, registered via ``register_core_tool``) are
+            # EXEMPT from the catch-all ``"default"`` evaluator: a business
+            # default-deny (``DENY any tool not in my whitelist``) must not be
+            # able to brick the framework machinery the agent needs to complete
+            # its own lifecycle.  A tool-SPECIFIC evaluator keyed to the tool
+            # name STILL runs — explicitly governing a core tool is honored;
+            # only the accidental catch-all collateral is prevented.
+            has_specific_evaluator = tool_name in self._policy._evaluators
+            if (
+                not has_specific_evaluator
+                and self._registry is not None
+                and self._registry.is_core_tool(tool_name)
+            ):
+                run_evaluators = False
+                self._trace(
+                    f"check_permission: core tool '{tool_name}' exempt from "
+                    f"the default evaluator (no tool-specific evaluator)"
+                )
+        if run_evaluators:
             from .evaluator import run_evaluator
             eval_result = run_evaluator(
                 self._policy._evaluators, tool_name, args, eval_context
