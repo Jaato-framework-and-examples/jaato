@@ -576,8 +576,12 @@ class AnthropicProvider(ModalityCapabilityMixin):
         # branch name calls out.
         # Pull workspace_path / config_root from config.extra so
         # verify_auth surfaces credentials from the same path the
-        # runtime configured the provider with.
-        extra = getattr(self._config, 'extra', None) or {}
+        # runtime configured the provider with.  Read the ``config``
+        # PARAMETER (not ``self._config``): per the base contract
+        # verify_auth runs BEFORE initialize(), so ``self._config`` is
+        # unset here — reading it raised AttributeError on the
+        # in-process runtime path, which does not initialize() first.
+        extra = getattr(config, 'extra', None) or {}
         ws_path = extra.get('workspace_path')
         cr = extra.get('config_root')
 
