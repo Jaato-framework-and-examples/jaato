@@ -1225,8 +1225,23 @@ class JaatoRuntime:
         # is unambiguously wrong.
         from .plugins.subagent.config import (
             looks_like_unresolved_secret_uri,
+            looks_like_malformed_secret_uri,
             SecretResolutionError,
         )
+        # Near-miss FIRST: a single-colon ``pass:...`` (the ``//``-dropped typo)
+        # is invisible to the resolver (regex miss → passed through literally),
+        # so it would otherwise leak to the provider as a bearer token and
+        # produce a confusing upstream 401.  Fail loud with a did-you-mean.
+        malformed_scheme = looks_like_malformed_secret_uri(config.api_key)
+        if malformed_scheme:
+            raise SecretResolutionError(
+                config.api_key,
+                f"provider '{effective_provider}' received a MALFORMED secret "
+                f"URI as its api_key — a single-colon '{malformed_scheme}:...'. "
+                f"Secret URIs require '//': did you mean "
+                f"'{malformed_scheme}://<path>'?  (A resolver for "
+                f"'{malformed_scheme}' IS registered; only the '//' is missing.)",
+            )
         if looks_like_unresolved_secret_uri(config.api_key):
             raise SecretResolutionError(
                 config.api_key,
