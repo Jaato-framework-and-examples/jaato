@@ -12,7 +12,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
@@ -6148,20 +6148,16 @@ NOTES
         """Send tool results back to the model and get the continuation response."""
         # with_retry is already imported at module level from .retry_utils
 
-        # Inject task completion spur into last tool result
+        # Inject task-completion spur as a MODEL-FACING suffix on the last tool
+        # result — NOT folded into ``result`` (that str()'d the structured dict
+        # into a repr-string and broke the ledger / provenance / enrichment).
+        # ``result`` stays structured; the converter appends ``model_suffix`` at
+        # serialization time (render_result_for_model).
         if tool_results:
             last = tool_results[-1]
-            result_text = str(last.result) if last.result is not None else ""
-            spurred_result = f"{result_text}\n\n<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
-            tool_results = tool_results[:-1] + [
-                ToolResult(
-                    call_id=last.call_id,
-                    name=last.name,
-                    result=spurred_result,
-                    is_error=last.is_error,
-                    attachments=last.attachments
-                )
-            ]
+            hidden = f"<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
+            combined = f"{last.model_suffix}\n\n{hidden}" if last.model_suffix else hidden
+            tool_results = tool_results[:-1] + [_dc_replace(last, model_suffix=combined)]
 
         # Check for queued mid-turn prompts to inject between tool executions.
         # This ensures user prompts are processed during tool-calling chains,
@@ -6189,21 +6185,17 @@ NOTES
         if injected_prompts and tool_results:
             combined_prompt = "\n\n".join(injected_prompts)
             last = tool_results[-1]
-            result_text = str(last.result) if last.result is not None else ""
-            tool_results = tool_results[:-1] + [
-                ToolResult(
-                    call_id=last.call_id,
-                    name=last.name,
-                    result=(
-                        f"{result_text}\n\n"
-                        f"<user_message>{combined_prompt}</user_message>\n"
-                        f"The user has sent a new message during your tool execution. "
-                        f"Please address their input in your next response."
-                    ),
-                    is_error=last.is_error,
-                    attachments=last.attachments
-                )
-            ]
+            # Model-facing suffix (keep ``result`` structured — see above).
+            piggyback = (
+                f"<user_message>{combined_prompt}</user_message>\n"
+                f"The user has sent a new message during your tool execution. "
+                f"Please address their input in your next response."
+            )
+            combined = (
+                f"{last.model_suffix}\n\n{piggyback}"
+                if last.model_suffix else piggyback
+            )
+            tool_results = tool_results[:-1] + [_dc_replace(last, model_suffix=combined)]
             self._trace(
                 f"MID_TURN_PROMPT_PIGGYBACK: Injected {len(injected_prompts)} prompt(s) "
                 f"into last tool result"
@@ -6539,20 +6531,16 @@ NOTES
         if not withheld:
             return result
         note = self._build_withheld_attachment_note(withheld)
-        base = "" if result.result is None else str(result.result)
-        new_result = f"{base}\n\n{note}" if base else note
         self._trace(
             f"MODALITY_GATE: withheld {dict(withheld)} from tool "
             f"{result.name!r} (active model {self._model_name!r} lacks them)"
         )
-        return ToolResult(
-            call_id=result.call_id,
-            name=result.name,
-            result=new_result,
-            is_error=result.is_error,
-            attachments=(kept or None),
-            enrichment_metadata=result.enrichment_metadata,
+        # Keep ``result`` structured; the withheld-attachment note is
+        # model-facing only (append to model_suffix, appended at serialization).
+        combined = (
+            f"{result.model_suffix}\n\n{note}" if result.model_suffix else note
         )
+        return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
 
     def _build_withheld_attachment_note(self, withheld: Dict[str, int]) -> str:
         """Build the actionable note appended to a gated tool result.

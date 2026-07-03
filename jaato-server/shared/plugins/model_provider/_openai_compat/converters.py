@@ -24,6 +24,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     TokenUsage,
     ToolResult,
+    render_result_for_model,
     ToolSchema,
 )
 
@@ -148,7 +149,7 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
         tool_msgs: List[Dict[str, Any]] = []
         image_followups: List[Dict[str, Any]] = []
         for fr in function_responses:
-            result_str = json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
+            result_str = render_result_for_model(fr.result, fr.model_suffix)
             tool_msgs.append({
                 "role": "tool",
                 "tool_call_id": fr.call_id,
