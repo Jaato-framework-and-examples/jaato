@@ -507,7 +507,11 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # used to produce the same generic "no credentials found"
         # message, hiding the actual fixable problem (corrupt JSON,
         # missing field, permission error) from the user.
-        extra = getattr(self._config, 'extra', None) or {}
+        # Read the ``config`` PARAMETER (not ``self._config``): per the
+        # base contract verify_auth runs BEFORE initialize(), so
+        # ``self._config`` is unset here (AttributeError on the
+        # in-process runtime path, which does not initialize() first).
+        extra = getattr(config, 'extra', None) or {}
         _, load_error = try_load_tokens_with_reason(
             workspace_path=extra.get('workspace_path'),
             config_root=extra.get('config_root'),

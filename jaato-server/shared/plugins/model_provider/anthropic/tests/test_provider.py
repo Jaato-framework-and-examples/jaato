@@ -88,6 +88,29 @@ class TestAuthentication:
 
         assert "ANTHROPIC_API_KEY" in str(exc_info.value)
 
+    def test_verify_auth_reads_config_param_before_initialize(self):
+        """verify_auth must read the ``config`` PARAMETER, not
+        ``self._config``, so it works BEFORE initialize().
+
+        Regression for the in-process runtime path
+        (``JaatoRuntime.verify_auth``) which creates a FRESH provider with
+        ``config=None`` and does NOT call ``initialize()`` — so
+        ``self._config`` is unset.  The provider previously read
+        ``getattr(self._config, 'extra', ...)`` at verify time and raised
+        ``AttributeError: 'AnthropicProvider' object has no attribute
+        '_config'``.  After the fix it reaches the normal credential check
+        and raises ``APIKeyNotFoundError`` (no creds), NOT AttributeError.
+        """
+        provider = AnthropicProvider()  # fresh — no initialize()
+        cfg = ProviderConfig(extra={"workspace_path": "/ws", "config_root": "/cr"})
+        with patch.dict('os.environ', {}, clear=True), \
+                patch('shared.plugins.model_provider.anthropic.provider.'
+                      'try_load_tokens_with_reason', return_value=(None, None)), \
+                patch('shared.plugins.model_provider.anthropic.provider.'
+                      'get_valid_access_token', return_value=None):
+            with pytest.raises(APIKeyNotFoundError):
+                provider.verify_auth(allow_interactive=False, config=cfg)
+
     @patch('anthropic.Anthropic')
     def test_initialize_with_api_key(self, mock_client_class):
         """Should initialize with API key from config."""
