@@ -302,6 +302,38 @@ class TestDispatch:
         sm._dispatch_to_cascade_clients(session, event)
         cb.assert_called_once_with(event)
 
+    def test_owner_equals_observer_deduped_post_bootstrap(self):
+        # owner==observer on one connection: the client is BOTH attached (so it
+        # already received the direct _emit_to_client fan-out) AND a cascade
+        # observer.  The post-bootstrap cascade dispatch must SKIP its entry
+        # (delivery_target_id in session.attached_clients) so post-bootstrap turn
+        # events don't double-deliver on the same raw connection.
+        sm = _make_sm()
+        cb = MagicMock()
+        sm.register_in_process_client(
+            client_id="obs", callback=cb,
+            cascade_driver_id="abc", role="observer",
+            delivery_target_id="conn1",           # raw connection id
+        )
+        session = _make_session("s1", cid="abc", attached_clients={"conn1"})
+        sm._dispatch_to_cascade_clients(session, _FakeEvent())
+        cb.assert_not_called()                    # deduped — already got direct emit
+
+    def test_observer_on_separate_connection_still_delivered(self):
+        # A cascade observer on a DIFFERENT connection (NOT attached to the
+        # session) did not get the direct emit → must still receive via cascade.
+        sm = _make_sm()
+        cb = MagicMock()
+        sm.register_in_process_client(
+            client_id="obs", callback=cb,
+            cascade_driver_id="abc", role="observer",
+            delivery_target_id="conn2",           # not attached
+        )
+        session = _make_session("s1", cid="abc", attached_clients={"conn1"})
+        event = _FakeEvent()
+        sm._dispatch_to_cascade_clients(session, event)
+        cb.assert_called_once_with(event)         # delivered (not deduped)
+
     def test_event_type_filter_drops_non_matches(self):
         sm = _make_sm()
         cb = MagicMock()
