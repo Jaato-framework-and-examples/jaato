@@ -6,8 +6,6 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-import pytest
-
 from shared.plugins.webhook.config import (
     RouteConfig,
     TLSConfig,
@@ -53,8 +51,10 @@ class TestWebhookConfig:
         assert config.port == 9100
         assert config.host == "127.0.0.1"
         assert config.secret is None
-        assert "generic" in config.routes
-        assert config.routes["generic"].path == "/webhook"
+        # No auto-created default route: a zero-config route would be an open,
+        # unauthenticated ingestion endpoint. Empty means the listener 404s
+        # everything until the operator declares routes.
+        assert config.routes == {}
         assert config.max_body_size == 1048576
         assert config.response_timeout == 5.0
 
@@ -77,9 +77,35 @@ class TestWebhookConfig:
         assert config.max_body_size == 2097152
         assert config.response_timeout == 10.0
 
-    def test_from_dict_empty_routes_gets_default(self):
+    def test_from_dict_empty_routes_stays_empty(self):
+        # Fail-closed: no auto default route (was the fail-open bug).
         config = WebhookConfig.from_dict({})
-        assert "generic" in config.routes
+        assert config.routes == {}
+
+    def test_route_allow_unauthenticated_parses(self):
+        config = WebhookConfig.from_dict({
+            "routes": {"open": {"path": "/hook", "allow_unauthenticated": True}},
+        })
+        assert config.routes["open"].allow_unauthenticated is True
+        # Defaults to False (fail-closed) when omitted.
+        config2 = WebhookConfig.from_dict({
+            "routes": {"g": {"path": "/g"}},
+        })
+        assert config2.routes["g"].allow_unauthenticated is False
+
+    def test_allow_unauthenticated_string_false_fails_closed(self):
+        # A quoted/expanded string must NOT enable via Python truthiness
+        # (bool("false") is True). Only affirmative tokens count.
+        for falsey in ("false", "False", "", "0", "no", "off", "nope"):
+            config = WebhookConfig.from_dict({
+                "routes": {"g": {"path": "/g", "allow_unauthenticated": falsey}},
+            })
+            assert config.routes["g"].allow_unauthenticated is False, falsey
+        for truthy in ("true", "True", "1", "yes", "on"):
+            config = WebhookConfig.from_dict({
+                "routes": {"g": {"path": "/g", "allow_unauthenticated": truthy}},
+            })
+            assert config.routes["g"].allow_unauthenticated is True, truthy
 
 
 class TestDeepMerge:

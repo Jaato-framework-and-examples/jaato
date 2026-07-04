@@ -117,6 +117,7 @@ gives you the plumbing; premium gives you the recipes.
     },
     "generic": {
       "path": "/webhook",
+      "allow_unauthenticated": true,
       "metadata": { "source": "generic" }
     }
   },
@@ -144,7 +145,7 @@ inheriting routes from the workspace config.
 | `port` | `9100` | HTTP listener port |
 | `host` | `127.0.0.1` | Bind address (localhost only by default) |
 | `secret` | `null` | Global shared secret for HMAC verification |
-| `routes` | `{"generic": {"path": "/webhook"}}` | Single catch-all route |
+| `routes` | `{}` | No default route (fail-closed — a zero-config open endpoint was removed; empty ⇒ all paths 404). Each unsigned route needs `allow_unauthenticated: true` or mTLS / an IP allowlist. |
 | `max_body_size` | `1048576` (1 MB) | Maximum request body size |
 | `response_timeout` | `5.0` | Seconds before responding to webhook sender |
 | `tls` | `{"enabled": false}` | TLS/SSL config (`enabled`, `certfile`, `keyfile`, `ca_certfile`) |

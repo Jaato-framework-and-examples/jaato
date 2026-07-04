@@ -86,6 +86,7 @@ def parse_webhook_request(
     route_name: str,
     route: RouteConfig,
     global_secret: Optional[str] = None,
+    transport_authenticated: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[int], Optional[str]]:
     """Parse and validate a webhook request against a matched route.
 
@@ -99,6 +100,11 @@ def parse_webhook_request(
         route: RouteConfig for the matched route.
         global_secret: Global secret from WebhookConfig (used if route
             has secret_header but no per-route secret in metadata).
+        transport_authenticated: True when the deployment authenticates callers
+            below the HMAC layer (mutual TLS or a configured IP allowlist). The
+            caller (``WebhookHTTPServer``) decides this. It lets a route without
+            an HMAC secret still accept requests without an explicit
+            ``allow_unauthenticated`` opt-in.
 
     Returns:
         Tuple of (parsed_event_dict, None, None) on success, or
@@ -112,8 +118,28 @@ def parse_webhook_request(
     if 'application/json' not in content_type:
         return None, 415, "Content-Type must be application/json"
 
-    # Secret verification
-    if route.secret_header and route.secret_algo:
+    # Secret verification.  A route is authenticated by ONE of: an HMAC secret
+    # (verified here), mutual TLS / an IP allowlist (transport_authenticated,
+    # decided by the caller), or an explicit allow_unauthenticated opt-in.  A
+    # route with none of these is REFUSED (fail-closed) so an operator cannot
+    # accidentally expose an open endpoint that dispatches into agent sessions.
+    #
+    # A route that declares EITHER secret_header or secret_algo is treated as
+    # "intends HMAC": an incomplete pair is a misconfiguration and is refused
+    # (500), never silently downgraded to unsigned — otherwise a typo would
+    # skip verification while transport auth quietly let the request through.
+    intends_hmac = bool(route.secret_header or route.secret_algo)
+    if intends_hmac:
+        if not (route.secret_header and route.secret_algo):
+            logger.warning(
+                "Route '%s' has an incomplete signature config — it sets "
+                "secret_header or secret_algo but not both; refusing (fail-closed).",
+                route_name,
+            )
+            return None, 500, (
+                "Server misconfigured: route sets secret_header or secret_algo but "
+                "not both, so signature verification cannot run."
+            )
         secret = route.metadata.get('secret') or global_secret
         if not secret:
             logger.warning(
@@ -126,6 +152,18 @@ def parse_webhook_request(
         if not verify_signature(body, secret, sig_value, route.secret_algo):
             logger.warning("HMAC verification failed for route '%s'", route_name)
             return None, 403, "Signature verification failed"
+    elif not (transport_authenticated or route.allow_unauthenticated):
+        logger.warning(
+            "Route '%s' has no signature verification and the deployment "
+            "provides no mutual-TLS / IP-allowlist auth — refusing the request.",
+            route_name,
+        )
+        return None, 401, (
+            "Route has no signature verification configured. Set secret_header + "
+            "secret_algo, front the listener with mutual TLS or an allowed_ips "
+            "allowlist, or set allow_unauthenticated: true to deliberately accept "
+            "unsigned requests."
+        )
 
     # Parse JSON body
     try:
