@@ -73,6 +73,7 @@ from typing import Callable, Dict, Optional, Tuple
 # statically.  We re-export it here so callers that already import from
 # server.cgroups don't need to reach into shared.
 from shared.runtime_limits import RuntimeLimits
+from shared.session_id import validate_session_id
 
 __all__ = ["RuntimeLimits", "CgroupsManager"]
 
@@ -171,7 +172,12 @@ class CgroupsManager:
     # ------------------------------------------------------------------
 
     def get_cgroup_name(self, session_id: str) -> str:
-        """Return the per-session cgroup directory name."""
+        """Return the per-session cgroup directory name.
+
+        Fail-closed on an unsafe id: the name becomes a directory under the
+        cgroup root, so a traversal id must never reach it.
+        """
+        validate_session_id(session_id)
         return f"jaato-ws-{session_id}"
 
     def get_cgroup_path(self, session_id: str) -> Path:
