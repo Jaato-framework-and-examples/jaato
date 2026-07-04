@@ -2088,11 +2088,19 @@ class JaatoSession:
                 # evaluator, so a locked-down default-deny agent can still
                 # complete.  Re-populated here every configure() so it survives
                 # PermissionPlugin.shutdown() nulling _registry between sessions.
+                #
+                # Source is ``get_registered_core_tool_names()`` (the
+                # ``register_core_tool`` set, == ``is_core_tool``) — NOT
+                # ``get_core_tool_schemas()``, which also returns exposed
+                # *plugin* tools flagged ``discoverability='core'`` (readFile,
+                # the todo tools, ...).  Using the broad schema set would
+                # silently exempt those powerful business tools from a
+                # catch-all default evaluator — the exact "never
+                # cli/file_edit/business tools" case #487/#488 prohibit.
                 reserved = set(exposed_lifecycle_names)
                 if self._runtime.registry:
                     reserved.update(
-                        s.name
-                        for s in self._runtime.registry.get_core_tool_schemas()
+                        self._runtime.registry.get_registered_core_tool_names()
                     )
                 self._runtime.permission_plugin.add_framework_reserved_tools(
                     reserved
