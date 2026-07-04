@@ -209,6 +209,10 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._config_path: Optional[str] = None  # Path config was loaded from
         self._custom_config_path: Optional[str] = None  # User-specified path via plugin_configs
         self._workspace_path: Optional[str] = None  # Client's working directory
+        # Operator-declared secret name globs stripped from every MCP server
+        # subprocess's inherited environment (secrets-broker scrub, #10). Off by
+        # default; opt-in via the 'scrub_secret_env' plugin config knob.
+        self._scrub_secret_env: List[str] = []
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
@@ -311,6 +315,9 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 - workspace_path: Client's working directory for finding .mcp.json
                 - session_id: Session identifier for log disambiguation
                 - agent_name: Name for trace logging
+                - scrub_secret_env: List of env-var name globs to strip from
+                  every MCP server subprocess's inherited environment
+                  (secrets-broker scrub; default []/off)
         """
         if self._initialized:
             return
@@ -321,10 +328,42 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._session_id = config.get("session_id")
         self._custom_config_path = config.get("config_path")
         self._workspace_path = config.get("workspace_path")
+        scrub = config.get("scrub_secret_env", [])
+        self._scrub_secret_env = list(scrub) if isinstance(scrub, (list, tuple)) else []
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
+
+    def get_config_schema(self) -> dict:
+        """Return JSON Schema for this plugin's operator-facing configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "config_path": {
+                    "type": "string",
+                    "description": (
+                        "Explicit path to a .mcp.json (overrides the default "
+                        "workspace/user search)."
+                    ),
+                },
+                "scrub_secret_env": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": (
+                        "Env-var name globs (case-insensitive fnmatch) to strip "
+                        "from the INHERITED environment of every MCP server "
+                        "subprocess, so a model-invokable / third-party MCP server "
+                        "named in .mcp.json cannot read raw credentials the runner "
+                        "itself holds (provider key, tokens). A secret listed in a "
+                        "server's own 'env' is an explicit grant and is NOT "
+                        "scrubbed. Empty = off (default). Recommended starting set: "
+                        "['*_API_KEY','*_TOKEN','*_SECRET','ANTHROPIC_AUTH_TOKEN']."
+                    ),
+                },
+            },
+        }
 
     def set_workspace_path(self, path: str) -> None:
         """Set the workspace path for finding config files.
@@ -1667,7 +1706,9 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
             # Create stderr capture that routes to internal log buffer
             errlog = LogCapture(self._log_event)
-            manager = MCPClientManager(errlog=errlog)
+            manager = MCPClientManager(
+                errlog=errlog, scrub_secret_env=self._scrub_secret_env,
+            )
             async with manager:
                 # Connect to all configured servers in parallel for faster bootstrap
                 server_list = list(servers.items())
