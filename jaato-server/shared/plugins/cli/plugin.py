@@ -123,6 +123,9 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         super().__init__(max_workers=4)
 
         self._extra_paths: List[str] = []
+        # Secrets-broker (feature #10): env-var name globs to strip from the
+        # environment handed to model-driven subprocesses.  Empty = off.
+        self._scrub_secret_env: List[str] = []
         self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
         self._auto_background_threshold: float = DEFAULT_AUTO_BACKGROUND_THRESHOLD
         self._initialized = False
@@ -226,6 +229,12 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     self._workspace_root = os.path.realpath(os.path.abspath(workspace))
             if 'workspace_venv' in config:
                 self._workspace_venv = config['workspace_venv']
+            if 'scrub_secret_env' in config:
+                scrub = config['scrub_secret_env']
+                if isinstance(scrub, str):
+                    scrub = [scrub]
+                if isinstance(scrub, (list, tuple)):
+                    self._scrub_secret_env = [str(s) for s in scrub]
 
         # Auto-detect workspace_root from environment if not explicitly provided
         if not self._workspace_root:
@@ -440,6 +449,19 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     "type": "integer",
                     "default": 4,
                     "description": "Maximum concurrent background workers",
+                },
+                "scrub_secret_env": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": (
+                        "Env-var name globs (case-insensitive fnmatch) to strip "
+                        "from the environment of commands run by this tool, so a "
+                        "model-driven command cannot read raw credentials the "
+                        "runner itself holds (e.g. echo $GITHUB_TOKEN). Empty = "
+                        "off (default). Recommended starting set: "
+                        "['*_API_KEY','*_TOKEN','*_SECRET','ANTHROPIC_AUTH_TOKEN']."
+                    ),
                 },
                 "workspace_venv": {
                     "type": "string",
@@ -783,6 +805,13 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             if venv_path:
                 ensure_workspace_venv(venv_path)
                 apply_venv_to_env(env, venv_path)
+
+            # Secrets-broker scrub (feature #10): strip declared secret vars
+            # from the subprocess env so a model-driven command can't read raw
+            # credentials the runner itself holds.  No-op when unconfigured.
+            if self._scrub_secret_env:
+                from shared.secret_scrub import scrub_env as _scrub_secret_env
+                env = _scrub_secret_env(env, self._scrub_secret_env)
 
             # Check if shell interpretation is needed
             use_shell = self._requires_shell(command)
@@ -1383,6 +1412,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 on_stdout_line=effective_callback,
                 check_cancel=True,
                 preexec_fn=self._build_subprocess_preexec_fn(),
+                scrub_env=self._scrub_secret_env or None,
             )
 
             # Executable-not-found is surfaced as an error dict so the

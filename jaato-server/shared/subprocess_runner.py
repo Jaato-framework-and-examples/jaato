@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 from shared.ai_tool_runner import get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
@@ -130,6 +130,7 @@ def run_command(
     on_stdout_line: Optional[Callable[[str], None]] = None,
     check_cancel: bool = True,
     preexec_fn: Optional[Callable[[], None]] = None,
+    scrub_env: Optional[Sequence[str]] = None,
 ) -> RunResult:
     """Execute *command* and return a :class:`RunResult`.
 
@@ -172,6 +173,12 @@ def run_command(
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    # Secrets-broker scrub (feature #10): remove declared secret vars from the
+    # env handed to this model-driven subprocess, so a shell command can't read
+    # raw credentials the runner itself legitimately holds.  No-op when unset.
+    if scrub_env:
+        from shared.secret_scrub import scrub_env as _scrub_secret_env
+        env = _scrub_secret_env(env, scrub_env)
 
     # ---- shell vs argv ----
     use_shell = requires_shell(command)
