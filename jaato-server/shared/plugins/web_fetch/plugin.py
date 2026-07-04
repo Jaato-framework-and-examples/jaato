@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlparse
 
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_UNTRUSTED_CONTENT
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 from .security import (
@@ -335,6 +335,10 @@ class WebFetchPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                 "required": ["url"]
             },
             category="web",
+            # Fetched web content is untrusted external input — the session
+            # wraps the result in the untrusted-content boundary so injected
+            # instructions in a page can't hijack the agent.
+            traits=frozenset({TRAIT_UNTRUSTED_CONTENT}),
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:

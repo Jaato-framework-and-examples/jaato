@@ -17,7 +17,8 @@ from typing import AsyncIterator, Dict, List, Any, Callable, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import UserCommand, CommandParameter, CommandCompletion, HelpLines
-from jaato_sdk.plugins.model_provider.types import ToolSchema, CancelledException
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema, CancelledException, TRAIT_UNTRUSTED_CONTENT)
 from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
 from shared.ai_tool_runner import get_current_cancel_token
@@ -433,6 +434,10 @@ class MCPToolPlugin(RunnerForwardingMixin):
                         description=tool.description,
                         parameters=cleaned_schema,
                         category="MCP",
+                        # MCP server output is untrusted third-party content —
+                        # wrap it in the untrusted-content boundary so injected
+                        # instructions in a payload can't hijack the agent.
+                        traits=frozenset({TRAIT_UNTRUSTED_CONTENT}),
                     )
                     schemas.append(schema)
                 except Exception as exc:
