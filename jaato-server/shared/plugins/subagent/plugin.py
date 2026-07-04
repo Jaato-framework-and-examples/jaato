@@ -3255,6 +3255,15 @@ class SubagentPlugin:
             parent_session = self._parent_session
             logger.debug(f"SUBAGENT_DEBUG: Saved parent_session={parent_session} (is None={parent_session is None})")
 
+            # Fail closed: this is the IN-PROCESS spawn path (shared runtime,
+            # no runner subprocess — the isolated-runner opt-in routes
+            # elsewhere).  A profile declaring kernel runtime_limits cannot be
+            # confined here, and silently ignoring them would run the subagent
+            # unconfined while the author believes it is bounded.  Reject
+            # instead — spawn as an isolated runner, or drop runtime_limits.
+            from shared.runtime_limits import assert_inprocess_can_honor
+            assert_inprocess_can_honor(profile)
+
             # Create session.  Pass ``agent_params`` through so the
             # spawned subagent's dynamic-instructions render scripts
             # (the ``{{!py:scripts/X.py}}`` placeholders) can read the

@@ -1184,6 +1184,50 @@ class SessionManager:
                 spawn_session_runner,
                 dispatch_bootstrap_envelope,
             )
+
+            # Profile-driven cgroup confinement (parity with the WS path,
+            # websocket.py:661).  Historically only the WS + isolated-runner
+            # paths provisioned a per-session cgroup, so a main IPC session got
+            # AppArmor confinement (opt-in) but no cgroup — and the cgroup-nft
+            # egress layer (§5.11d-v2) rides on the cgroup.  Here we make
+            # confinement follow the PROFILE, not the transport: if the
+            # session's profile declares runtime_limits and cgroups are
+            # available, provision a per-session cgroup and pass the attach
+            # callback so the runner migrates into it at fork().
+            #
+            # Tradeoff: passing a non-None cgroup_attach bypasses the pre-warm
+            # pool (spawn_session_runner routes to cold-spawn when
+            # cgroup_attach is not None — pool slots are forked from a shared
+            # template and can't be migrated mid-life yet).  So only profiles
+            # that declare runtime_limits pay the cold-spawn cost; profiles
+            # without limits are unchanged (cgroup_attach stays None -> pool).
+            cgroup_attach = None
+            cgroup_profile = getattr(server, "_profile", None)
+            cgroup_limits = (
+                getattr(cgroup_profile, "runtime_limits", None)
+                if cgroup_profile else None
+            )
+            if cgroup_limits is not None:
+                cgroups_manager = self._resolve_cgroups_manager()
+                if cgroups_manager is not None and cgroups_manager.is_available():
+                    try:
+                        if cgroups_manager.provision_cgroup(session_id, cgroup_limits):
+                            cgroup_attach = cgroups_manager.make_attach_callback(
+                                session_id)
+                            if cgroup_limits.has_kernel_limits():
+                                logger.info(
+                                    "Cgroup limits applied to IPC session %s "
+                                    "(memory=%s pids=%s cpu_weight=%s)",
+                                    session_id, cgroup_limits.memory_max_mb,
+                                    cgroup_limits.pids_max, cgroup_limits.cpu_weight,
+                                )
+                    except Exception as exc:  # noqa: BLE001 — best-effort
+                        logger.warning(
+                            "Cgroup provisioning failed for IPC session %s "
+                            "(%s: %s) — runner spawns in the daemon's cgroup",
+                            session_id, type(exc).__name__, exc,
+                        )
+
             spawn_session_runner(
                 server=server,
                 session_id=session_id,
@@ -1191,6 +1235,7 @@ class SessionManager:
                 profile_name=profile_name,
                 daemon_loop=getattr(self, "_daemon_loop", None),
                 disable_confine=(profile_name == ""),
+                cgroup_attach=cgroup_attach,
                 pool_manager=getattr(self, "_pool_manager_ref", None),
                 cascade_driver_id=cascade_driver_id,
             )
