@@ -35,6 +35,16 @@ plugin_configs:
     # link-local (169.254.169.254 cloud metadata), private, or reserved ranges.
     block_private_networks: true
 
+    # The two dangerous per-request knobs are operator-gated (default false):
+    # they are honored ONLY when enabled here. This is a code-enforced hard
+    # boundary — a fetched (untrusted) page cannot make the model turn them on.
+    #   insecure=true  -> skip TLS certificate verification
+    #   no_proxy=true  -> bypass the configured egress proxy (defeats the
+    #                     per-session egress allowlist)
+    # Leave both false unless you specifically need them for a trusted host.
+    allow_insecure: false
+    allow_no_proxy: false
+
     # Bind each secret env var to the host(s) it may be sent to. A ${VAR} in a
     # header is expanded ONLY when VAR is listed here AND the request's host
     # matches one of its patterns ('*.' wildcard allowed). Any other case —
