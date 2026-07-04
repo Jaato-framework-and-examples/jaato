@@ -121,6 +121,84 @@ def test_ssrf_can_be_disabled(monkeypatch):
     assert "error" not in out, out
 
 
+# ---- dangerous-knob gate (insecure / no_proxy operator opt-in) --------------
+
+def test_insecure_flag_refused_by_default():
+    # A fetched page cannot make the model disable TLS verification.
+    p = _plugin(allowed_internal_hosts=["example.com"])
+    out = p._execute({"url": "https://example.com", "insecure": True})
+    assert "error" in out
+    assert "insecure=true" in out["error"] and "disabled" in out["error"].lower()
+
+
+def test_no_proxy_flag_refused_by_default():
+    # A fetched page cannot make the request bypass the egress proxy.
+    p = _plugin(allowed_internal_hosts=["example.com"])
+    out = p._execute({"url": "https://example.com", "no_proxy": True})
+    assert "error" in out
+    assert "no_proxy=true" in out["error"] and "disabled" in out["error"].lower()
+
+
+def test_insecure_gate_refuses_before_ssrf_and_fetch(monkeypatch):
+    # The gate fires before any network work — even an SSRF-allowed host is
+    # refused when insecure is requested but not operator-enabled.
+    p = _plugin(allowed_internal_hosts=["10.0.0.5"])
+    called = {"fetched": False}
+
+    def fake_fetch(url, headers, verify_ssl=True, use_proxy=True):
+        called["fetched"] = True
+        return "ok", url, None, {"response_content_type": "text/html"}
+
+    monkeypatch.setattr(p, "_fetch_url", fake_fetch)
+    out = p._execute({"url": "http://10.0.0.5/x", "insecure": True})
+    assert "error" in out
+    assert called["fetched"] is False
+
+
+def test_insecure_honored_when_operator_opts_in(monkeypatch):
+    p = _plugin(allow_insecure=True, allowed_internal_hosts=["example.com"])
+    seen = {}
+
+    def fake_fetch(url, headers, verify_ssl=True, use_proxy=True):
+        seen["verify_ssl"] = verify_ssl
+        return "ok", url, None, {"response_content_type": "text/html"}
+
+    monkeypatch.setattr(p, "_fetch_url", fake_fetch)
+    out = p._execute({"url": "https://example.com", "insecure": True})
+    assert "error" not in out, out
+    assert seen["verify_ssl"] is False  # verification actually skipped
+
+
+def test_no_proxy_honored_when_operator_opts_in(monkeypatch):
+    p = _plugin(allow_no_proxy=True, allowed_internal_hosts=["example.com"])
+    seen = {}
+
+    def fake_fetch(url, headers, verify_ssl=True, use_proxy=True):
+        seen["use_proxy"] = use_proxy
+        return "ok", url, None, {"response_content_type": "text/html"}
+
+    monkeypatch.setattr(p, "_fetch_url", fake_fetch)
+    out = p._execute({"url": "https://example.com", "no_proxy": True})
+    assert "error" not in out, out
+    assert seen["use_proxy"] is False  # proxy actually bypassed
+
+
+def test_plain_fetch_unaffected_by_gate(monkeypatch):
+    # No dangerous flags → normal auto-approved read-only fetch, secure defaults.
+    p = _plugin(allowed_internal_hosts=["example.com"])
+    seen = {}
+
+    def fake_fetch(url, headers, verify_ssl=True, use_proxy=True):
+        seen["verify_ssl"] = verify_ssl
+        seen["use_proxy"] = use_proxy
+        return "ok", url, None, {"response_content_type": "text/html"}
+
+    monkeypatch.setattr(p, "_fetch_url", fake_fetch)
+    out = p._execute({"url": "https://example.com"})
+    assert "error" not in out, out
+    assert seen == {"verify_ssl": True, "use_proxy": True}
+
+
 def test_redirect_to_internal_is_blocked(monkeypatch):
     # A fetch that redirects from a public host to an internal one must not
     # return the body (blocks redirect-based metadata read).

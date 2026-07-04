@@ -123,8 +123,11 @@ Settings with `env_var` can be overridden by environment variables.
 **Security knobs.** `web_fetch` also exposes guards against credential
 exfiltration and SSRF. A `${VAR}` in a request header is expanded only when the
 var is bound to the request's host; `${VAR}` in the URL is refused; and fetches
-to loopback / link-local (cloud metadata) / private addresses are blocked. In
-YAML:
+to loopback / link-local (cloud metadata) / private addresses are blocked. The
+two dangerous per-request flags — `insecure` (skip TLS verify) and `no_proxy`
+(bypass the egress proxy) — are operator-gated: they are refused unless the
+matching `allow_insecure` / `allow_no_proxy` config is enabled, so an untrusted
+fetched page cannot make the model turn them on. In YAML:
 
 ```yaml
 plugin_configs:
@@ -141,6 +144,12 @@ plugin_configs:
     # Extra hosts exempt from the SSRF private-address block (internal APIs on
     # private IPs). Binding hosts are already exempt automatically.
     allowed_internal_hosts: ["api.internal.company.com"]
+    # Operator-gated dangerous knobs (default false, code-enforced): a request
+    # setting insecure=true (skip TLS verify) or no_proxy=true (bypass the
+    # egress proxy) is REFUSED unless enabled here. A fetched (untrusted) page
+    # cannot make the model turn them on — this is a hard boundary, not prose.
+    allow_insecure: false
+    allow_no_proxy: false
 ```
 
 A complete, validatable profile lives at
