@@ -4179,7 +4179,7 @@ class RunnerRPC:
                 ),
                 "discoverability": str(
                     getattr(s, "discoverability", DISCOVERABILITY_DEFERRED)
-                    or "discoverable",
+                    or DISCOVERABILITY_DEFERRED,
                 ),
                 "editable": editable_serialized,
                 # FrozenSet → list for wire safety (JSON has no set type).

@@ -25,7 +25,10 @@ Contract pinned here:
   governance honored — only the catch-all collateral is prevented);
 - the exemption needs NO registry (survives shutdown()/_registry=None).
 """
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+)
 from shared.plugins.registry import PluginRegistry
 from shared.plugins.permission.plugin import PermissionPlugin
 from shared.plugins.permission.policy import PermissionPolicy
@@ -134,14 +137,14 @@ def _registry_with_core_and_plugin_tools():
     # isolating readFile as the ONE tool the two accessors disagree on.
     reg.register_core_tool(
         ToolSchema(name="stream_dismiss", description="", parameters={},
-                   discoverability="core"),
+                   discoverability=DISCOVERABILITY_EAGER),
         lambda args: None,
     )
     # A business/plugin tool that is merely eager-loaded (discoverability=core),
     # NOT framework machinery — must NOT be exempt.
     reg._plugins["file_edit"] = _FakePlugin(
         [ToolSchema(name="readFile", description="", parameters={},
-                    discoverability="core")]
+                    discoverability=DISCOVERABILITY_EAGER)]
     )
     reg._exposed.add("file_edit")
     return reg

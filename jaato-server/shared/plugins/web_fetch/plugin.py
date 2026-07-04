@@ -1278,6 +1278,12 @@ user will then set the variable.
         # secret is never sent to an unauthorized host).  Fail-closed.
         raw_headers = args.get('headers')
         if raw_headers:
+            if not isinstance(raw_headers, dict):
+                return {'error': (
+                    "web_fetch: 'headers' must be an object mapping header "
+                    "name to value (e.g. {\"Authorization\": \"Bearer "
+                    "${TOKEN}\"}), got " + type(raw_headers).__name__
+                ), 'url': url}
             custom_headers, header_err = expand_headers_bound(
                 raw_headers, target_host, self._secret_host_bindings, os.environ,
             )
