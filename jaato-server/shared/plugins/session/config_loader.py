@@ -56,7 +56,7 @@ def load_session_config(
         file_path = Path(config_path)
         if not file_path.is_absolute():
             file_path = Path(base_path) / file_path
-    elif os.environ.get("JAATO_SESSION_CONFIG"):
+    elif os.environ.get("JAATO_SESSION_CONFIG"):  # env: path to the session config file (default .jaato/.sessions.json)
         file_path = Path(os.environ["JAATO_SESSION_CONFIG"])
         if not file_path.is_absolute():
             file_path = Path(base_path) / file_path

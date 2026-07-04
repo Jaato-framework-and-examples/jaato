@@ -183,7 +183,7 @@ class SessionRoutingHandler(logging.Handler):
             log_dir = session_env.get(SESSION_LOG_DIR_ENV)
 
         if not log_dir:
-            log_dir = os.environ.get(SESSION_LOG_DIR_ENV)
+            log_dir = os.environ.get(SESSION_LOG_DIR_ENV)  # env: per-session log directory; relative paths resolve against the workspace (default .jaato/logs)
 
         if not log_dir:
             log_dir = DEFAULT_SESSION_LOG_DIR

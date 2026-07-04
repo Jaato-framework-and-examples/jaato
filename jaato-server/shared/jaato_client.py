@@ -35,7 +35,7 @@ def get_default_provider() -> Optional[str]:
 
     Checks JAATO_PROVIDER env var, returns None if not set.
     """
-    return os.environ.get("JAATO_PROVIDER")
+    return os.environ.get("JAATO_PROVIDER")  # env: default model provider when no profile/CLI override (e.g. anthropic, google_genai)
 
 
 def get_default_model() -> Optional[str]:
@@ -43,7 +43,7 @@ def get_default_model() -> Optional[str]:
 
     Checks MODEL_NAME env var, returns None if not set.
     """
-    return os.environ.get("MODEL_NAME")
+    return os.environ.get("MODEL_NAME")  # env: default model when no profile/CLI override (e.g. gemini-2.5-flash)
 
 if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry

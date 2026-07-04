@@ -265,7 +265,7 @@ def _get_timeout(config_value: int) -> int:
     JAATO_PERMISSION_TIMEOUT env var overrides config.
     A value of 0 or negative means no timeout (wait forever).
     """
-    env_timeout = os.environ.get("JAATO_PERMISSION_TIMEOUT")
+    env_timeout = os.environ.get("JAATO_PERMISSION_TIMEOUT")  # env: seconds to wait for a permission decision; 0 or negative waits forever
     if env_timeout is not None:
         try:
             return int(env_timeout)

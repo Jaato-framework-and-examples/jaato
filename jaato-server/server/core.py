@@ -2542,7 +2542,7 @@ class JaatoServer:
 
         # Emit bootstrap timing report to session trace log
         _timer.finish()
-        if os.environ.get("JAATO_BOOTSTRAP_TIMING", "").lower() in ("1", "true", "yes"):
+        if os.environ.get("JAATO_BOOTSTRAP_TIMING", "").lower() in ("1", "true", "yes"):  # env: print a session bootstrap timing report (with per-plugin breakdown) to the trace log
             import io as _io
             _buf = _io.StringIO()
             _timer.report(file=_buf)

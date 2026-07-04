@@ -51,7 +51,7 @@ MAX_CATEGORY_LENGTH = 30
 
 def resolve_api_key() -> Optional[str]:
     """Resolve the OpenRouter API key from env or stored credentials."""
-    env_key = os.environ.get(ENV_OPENROUTER_API_KEY)
+    env_key = os.environ.get(ENV_OPENROUTER_API_KEY)  # env: OpenRouter API key (sk-or-... from openrouter.ai/settings/keys)
     if env_key:
         return env_key
     try:
@@ -63,12 +63,12 @@ def resolve_api_key() -> Optional[str]:
 
 def resolve_base_url() -> str:
     """Resolve the OpenRouter base URL from env."""
-    return os.environ.get(ENV_OPENROUTER_BASE_URL, DEFAULT_BASE_URL)
+    return os.environ.get(ENV_OPENROUTER_BASE_URL, DEFAULT_BASE_URL)  # env: endpoint (default https://openrouter.ai/api/v1)
 
 
 def resolve_model() -> Optional[str]:
     """Resolve a default model name from env, if set."""
-    return os.environ.get(ENV_OPENROUTER_MODEL)
+    return os.environ.get(ENV_OPENROUTER_MODEL)  # env: default model (vendor/model form; openrouter/auto lets OpenRouter pick)
 
 
 def resolve_context_length() -> Optional[int]:
@@ -79,7 +79,7 @@ def resolve_context_length() -> Optional[int]:
     only a fallback (no hardcoded default per the project's no-fallback
     rule).
     """
-    value = os.environ.get(ENV_OPENROUTER_CONTEXT_LENGTH)
+    value = os.environ.get(ENV_OPENROUTER_CONTEXT_LENGTH)  # env: override the catalog-reported context window
     if value:
         try:
             return int(value)
@@ -90,12 +90,12 @@ def resolve_context_length() -> Optional[int]:
 
 def resolve_http_referer() -> str:
     """Resolve the HTTP-Referer header for OpenRouter app rankings."""
-    return os.environ.get(ENV_OPENROUTER_HTTP_REFERER, DEFAULT_HTTP_REFERER)
+    return os.environ.get(ENV_OPENROUTER_HTTP_REFERER, DEFAULT_HTTP_REFERER)  # env: app-attribution HTTP-Referer header (required for OpenRouter app rankings)
 
 
 def resolve_app_title() -> str:
     """Resolve the X-Title header for OpenRouter app rankings."""
-    return os.environ.get(ENV_OPENROUTER_APP_TITLE, DEFAULT_APP_TITLE)
+    return os.environ.get(ENV_OPENROUTER_APP_TITLE, DEFAULT_APP_TITLE)  # env: app-attribution X-OpenRouter-Title header (display name)
 
 
 def resolve_app_categories() -> List[str]:
@@ -112,7 +112,7 @@ def resolve_app_categories() -> List[str]:
     https://openrouter.ai/docs/app-attribution, so the failure mode is
     "no category attached" rather than a request error.
     """
-    raw = os.environ.get(ENV_OPENROUTER_APP_CATEGORIES)
+    raw = os.environ.get(ENV_OPENROUTER_APP_CATEGORIES)  # env: comma-separated X-OpenRouter-Categories header (default cli-agent)
     if raw is None:
         return list(DEFAULT_APP_CATEGORIES)
     parts = [c.strip() for c in raw.split(",")]

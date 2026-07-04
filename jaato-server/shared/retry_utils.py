@@ -137,10 +137,10 @@ T = TypeVar('T')
 @dataclass
 class RetryConfig:
     """Configuration for retry behavior."""
-    max_attempts: int = field(default_factory=lambda: int(os.environ.get("AI_RETRY_ATTEMPTS", "5")))
-    base_delay: float = field(default_factory=lambda: float(os.environ.get("AI_RETRY_BASE_DELAY", "1.0")))
-    max_delay: float = field(default_factory=lambda: float(os.environ.get("AI_RETRY_MAX_DELAY", "30.0")))
-    silent: bool = field(default_factory=lambda: os.environ.get("AI_RETRY_LOG_SILENT", "").lower() in ("1", "true", "yes"))
+    max_attempts: int = field(default_factory=lambda: int(os.environ.get("AI_RETRY_ATTEMPTS", "5")))  # env: max retry attempts on rate-limit/transient errors (default 5)
+    base_delay: float = field(default_factory=lambda: float(os.environ.get("AI_RETRY_BASE_DELAY", "1.0")))  # env: initial retry backoff delay in seconds (default 1.0)
+    max_delay: float = field(default_factory=lambda: float(os.environ.get("AI_RETRY_MAX_DELAY", "30.0")))  # env: maximum retry backoff delay in seconds (default 30.0)
+    silent: bool = field(default_factory=lambda: os.environ.get("AI_RETRY_LOG_SILENT", "").lower() in ("1", "true", "yes"))  # env: suppress retry/backoff log chatter
     jitter_factor: float = 0.5  # Random jitter range: [1-jitter, 1+jitter]
 
 
@@ -518,7 +518,7 @@ class RequestPacer:
         if min_interval is not None:
             self._min_interval = min_interval
         else:
-            self._min_interval = float(os.environ.get("AI_REQUEST_INTERVAL", "0"))
+            self._min_interval = float(os.environ.get("AI_REQUEST_INTERVAL", "0"))  # env: minimum seconds between model requests (default 0 = no throttle)
         self._last_request_time: Optional[float] = None
 
     @property

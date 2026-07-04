@@ -516,10 +516,10 @@ def main() -> None:
         sys.exit(0)
 
     # ----- 1. Read env -----
-    profile_name = os.environ.get("JAATO_RUNNER_PROFILE", "").strip()
-    session_id = os.environ.get("JAATO_RUNNER_SESSION_ID", "").strip()
-    workspace_root = os.environ.get("JAATO_RUNNER_WORKSPACE", "").strip() or None
-    log_path = os.environ.get("JAATO_RUNNER_LOG_PATH", "").strip() or None
+    profile_name = os.environ.get("JAATO_RUNNER_PROFILE", "").strip()  # env: internal — set by the daemon per runner: profile to bootstrap the session with
+    session_id = os.environ.get("JAATO_RUNNER_SESSION_ID", "").strip()  # env: internal — set by the daemon per runner: session id this runner serves
+    workspace_root = os.environ.get("JAATO_RUNNER_WORKSPACE", "").strip() or None  # env: internal — set by the daemon per runner: session workspace root
+    log_path = os.environ.get("JAATO_RUNNER_LOG_PATH", "").strip() or None  # env: internal — set by the daemon per runner: runner log file path
     max_output_chars = _parse_int_env("JAATO_RUNNER_MAX_OUTPUT_CHARS")
     tool_timeout_seconds = _parse_float_env("JAATO_RUNNER_TOOL_TIMEOUT_SECONDS")
 
@@ -528,7 +528,7 @@ def main() -> None:
     # the local-debug loop and is gated to a clear "this is not a
     # supported deployment" warning.
     disable_confine = (
-        os.environ.get("JAATO_RUNNER_DISABLE_CONFINE", "").lower()
+        os.environ.get("JAATO_RUNNER_DISABLE_CONFINE", "").lower()  # env: unsupported debug escape hatch: skip AppArmor self-confinement in the runner
         in ("1", "true", "yes")
     )
 

@@ -166,7 +166,7 @@ def _get_sandbox_guidance() -> Optional[str]:
     informing the model about path restrictions.
     """
     from shared.session_context import get_workspace_root
-    workspace = get_workspace_root() or os.environ.get('workspaceRoot')
+    workspace = get_workspace_root() or os.environ.get('workspaceRoot')  # env: workspace root hint (VS Code-style) fallback when session context has none
     if not workspace:
         return None
 
@@ -181,7 +181,7 @@ def _get_sandbox_guidance() -> Optional[str]:
 
 def _is_parallel_tools_enabled() -> bool:
     """Check if parallel tool execution is enabled."""
-    return os.environ.get(
+    return os.environ.get(  # env: run multiple tool calls per turn in a thread pool (default true; max 8 concurrent)
         'JAATO_PARALLEL_TOOLS', 'true'
     ).lower() not in ('false', '0', 'no')
 
@@ -196,7 +196,7 @@ def _is_deferred_tools_enabled() -> bool:
     Default is 'true' for token economy. Set JAATO_DEFERRED_TOOLS=false
     to disable and load all tools upfront.
     """
-    return os.environ.get(
+    return os.environ.get(  # env: load only core tools upfront, others discovered on demand (default true); false loads all
         'JAATO_DEFERRED_TOOLS', 'true'
     ).lower() not in ('false', '0', 'no')
 

@@ -2733,7 +2733,7 @@ class ReliabilityPlugin(RunnerForwardingMixin):
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(generate_default_config_safe(), encoding="utf-8")
 
-        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"  # env: external editor for interactive edits (EDITOR, then VISUAL, else vi)
 
         try:
             result = subprocess.run([editor, str(config_path)], check=False)

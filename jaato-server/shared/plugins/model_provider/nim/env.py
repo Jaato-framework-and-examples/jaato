@@ -51,7 +51,7 @@ def resolve_api_key(
     Returns:
         API key if found, None otherwise.
     """
-    env_key = os.environ.get(ENV_NIM_API_KEY)
+    env_key = os.environ.get(ENV_NIM_API_KEY)  # env: API key for hosted NIM (nvapi-... from build.nvidia.com)
     if env_key:
         return env_key
     try:
@@ -69,7 +69,7 @@ def resolve_base_url() -> str:
     Returns:
         The API base URL.
     """
-    return os.environ.get(ENV_NIM_BASE_URL, DEFAULT_BASE_URL)
+    return os.environ.get(ENV_NIM_BASE_URL, DEFAULT_BASE_URL)  # env: endpoint (default https://integrate.api.nvidia.com/v1); point at self-hosted NIM
 
 
 def resolve_model() -> Optional[str]:
@@ -78,7 +78,7 @@ def resolve_model() -> Optional[str]:
     Returns:
         Model name if found, None otherwise.
     """
-    return os.environ.get(ENV_NIM_MODEL)
+    return os.environ.get(ENV_NIM_MODEL)  # env: default model name
 
 
 def resolve_context_length() -> Optional[int]:
@@ -91,7 +91,7 @@ def resolve_context_length() -> Optional[int]:
     OpenAI-compatible ``/v1/models`` does not surface a per-model context
     window, so there is no auto-detect tier for this provider.
     """
-    value = os.environ.get(ENV_NIM_CONTEXT_LENGTH)
+    value = os.environ.get(ENV_NIM_CONTEXT_LENGTH)  # env: override context window size
     if value:
         try:
             return int(value)
