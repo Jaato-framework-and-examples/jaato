@@ -111,6 +111,11 @@ class SessionWorkspaceIndex:
             return
         with self._lock:
             existing = self._map.get(session_id)
+            # Unchanged mapping — no state change, so skip the disk write.
+            # ``record`` runs from ``_save_session`` on every turn, so for a
+            # stable session this would otherwise rewrite the file each save.
+            if existing == workspace_path:
+                return
             if existing is not None and existing != workspace_path:
                 if session_id not in self._ambiguous:
                     logger.warning(

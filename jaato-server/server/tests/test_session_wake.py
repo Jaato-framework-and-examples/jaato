@@ -129,6 +129,32 @@ def test_distinct_event_ids_both_run(tmp_path):
     assert len(calls.drive) == 2
 
 
+def test_failed_wake_releases_event_id_for_retry(tmp_path):
+    # dedup-on-SUCCESS / retry-on-failure: a transient failure must NOT consume
+    # the event_id, or the sender's retry (GitHub redelivering after a 5xx)
+    # would be swallowed as a duplicate and the wake would never happen.
+    m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
+    calls.drive_ok = False
+    o1, _ = m.wake_session("s1", "hi", event_id="evt_x")
+    assert o1 == WakeOutcome.NOT_DRIVABLE
+    # retry with the SAME event_id — the first never dispatched, so it must run.
+    calls.drive_ok = True
+    o2, _ = m.wake_session("s1", "hi", event_id="evt_x")
+    assert o2 == WakeOutcome.OK
+    assert len(calls.drive) == 2
+
+
+def test_cold_revive_failure_releases_event_id(tmp_path):
+    m, calls = _make_manager(tmp_path)
+    m._session_workspace_index.record("s_cold", "/ws/bot")
+    calls.resume_ok = False
+    o1, _ = m.wake_session("s_cold", "hi", event_id="evt_y")
+    assert o1 == WakeOutcome.REVIVE_FAILED
+    calls.resume_ok = True
+    o2, _ = m.wake_session("s_cold", "hi", event_id="evt_y")   # retry after fix
+    assert o2 == WakeOutcome.OK
+
+
 # ---- validation ---------------------------------------------------------------
 
 def test_invalid_session_id_refused(tmp_path):

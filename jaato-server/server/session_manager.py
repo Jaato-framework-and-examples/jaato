@@ -5500,8 +5500,14 @@ class SessionManager:
         if not text:
             return (WakeOutcome.INVALID, "empty wake text")
 
-        # Dedup by event_id (bounded LRU).  A redelivery is the at-least-once
-        # sender working as designed → idempotent no-op, a SUCCESS not an error.
+        # Dedup CLAIM (up-front): claim the event_id so a concurrent duplicate
+        # dedups immediately.  The claim is RELEASED on any failure below, so a
+        # legitimate retry — e.g. an at-least-once sender redelivering after a
+        # 5xx transient failure — can re-drive: dedup-on-SUCCESS,
+        # retry-on-failure.  A redelivery of an already-SUCCEEDED wake stays
+        # claimed → benign DUPLICATE.  (Marking before dispatch would wrongly
+        # swallow the retry of a failed wake as a no-op.)
+        claimed = False
         if event_id:
             with self._lock:
                 if event_id in self._wake_seen_event_ids:
@@ -5511,6 +5517,14 @@ class SessionManager:
                 self._wake_seen_event_ids[event_id] = None
                 while len(self._wake_seen_event_ids) > self._WAKE_DEDUP_CAP:
                     self._wake_seen_event_ids.popitem(last=False)
+                claimed = True
+
+        def _release_claim() -> None:
+            """Release the event_id claim so a retry of THIS (failed) wake is
+            not deduped away.  No-op when there was no claim."""
+            if claimed:
+                with self._lock:
+                    self._wake_seen_event_ids.pop(event_id, None)
 
         # Revive if cold.  Workspace is resolved server-side, never from the
         # caller (the security invariant above).
@@ -5519,11 +5533,13 @@ class SessionManager:
         if loaded is None:
             workspace = self._session_workspace_index.resolve(session_id)
             if workspace is None:
+                _release_claim()
                 return (WakeOutcome.UNRESOLVED,
                         f"cannot resolve workspace for cold session "
                         f"{session_id!r} (unknown or ambiguous in the "
                         f"session-workspace index)")
             if self.resume_session(session_id, workspace_path=workspace) is None:
+                _release_claim()
                 return (WakeOutcome.REVIVE_FAILED,
                         f"revive failed for session {session_id!r}")
 
@@ -5531,6 +5547,7 @@ class SessionManager:
         from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
         wrapped = wrap_untrusted_content(text, source=f"wake:{source}")
         if not self.send_message_to_session(session_id, wrapped):
+            _release_claim()
             return (WakeOutcome.NOT_DRIVABLE,
                     f"session {session_id!r} not drivable after wake")
         return (WakeOutcome.OK, "woken")

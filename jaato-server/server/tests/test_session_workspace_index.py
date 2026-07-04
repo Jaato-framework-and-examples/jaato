@@ -71,6 +71,23 @@ def test_corrupt_file_starts_empty_not_crash(tmp_path):
     assert idx.resolve("s1") == "/ws/a"
 
 
+def test_record_unchanged_skips_disk_write(tmp_path):
+    # record() runs on every _save_session; an unchanged mapping must not
+    # rewrite the file (avoid pointless I/O on the hot save path).
+    idx = SessionWorkspaceIndex(path=tmp_path / "index.json")
+    idx.record("s1", "/ws/a")
+    writes = {"n": 0}
+    orig = idx._save_locked
+    def _counting():
+        writes["n"] += 1
+        return orig()
+    idx._save_locked = _counting
+    idx.record("s1", "/ws/a")   # identical mapping — no write
+    assert writes["n"] == 0
+    idx.record("s1", "/ws/b")   # changed (→ ambiguous) — writes once
+    assert writes["n"] == 1
+
+
 def test_atomic_write_produces_valid_json(tmp_path):
     p = tmp_path / "index.json"
     idx = SessionWorkspaceIndex(path=p)
