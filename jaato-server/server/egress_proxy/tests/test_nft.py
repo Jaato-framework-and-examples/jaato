@@ -7,7 +7,6 @@ netfilter. The *enforcement* proof lives in scripts/verify_egress_nft.sh
 """
 
 import subprocess
-import types
 
 from server.egress_proxy import nft
 from server.egress_proxy.nft import (

@@ -63,3 +63,66 @@ def test_teardown_stops_proxy():
 def test_teardown_before_any_start_is_noop():
     _reset()
     wireup.egress_teardown("never")  # must not raise
+
+
+# ---- nft hard-enforcement wire-up (opt-in) -------------------------------
+
+class _CaptureNft:
+    def __init__(self):
+        self.installed = []
+        self.removed = []
+    def install(self, sid, cg, port, **kw):
+        self.installed.append((sid, cg, port)); return True
+    def remove(self, sid):
+        self.removed.append(sid)
+    def shutdown(self):
+        pass
+
+
+def _reset_nft():
+    _reset()
+    wireup._nft_manager = None
+
+
+def test_nft_not_touched_when_flag_off(monkeypatch):
+    _reset_nft()
+    monkeypatch.delenv("JAATO_EGRESS_NFT_ENFORCE", raising=False)
+    cap = _CaptureNft()
+    monkeypatch.setattr(wireup, "_nft_manager", cap)
+    try:
+        wireup.egress_env_for_session("s1", {"allowed_hosts": ["x.com"]})
+        assert cap.installed == []          # flag off -> no enforcement
+    finally:
+        _reset_nft()
+
+
+def test_nft_installed_when_flag_on_and_cgroup_present(monkeypatch):
+    _reset_nft()
+    monkeypatch.setenv("JAATO_EGRESS_NFT_ENFORCE", "1")
+    monkeypatch.setenv("JAATO_CGROUPS_ROOT", "/sys/fs/cgroup/jaato")
+    monkeypatch.setattr(wireup.EgressNftManager, "nft_available", staticmethod(lambda: True))
+    cap = _CaptureNft()
+    monkeypatch.setattr(wireup, "get_nft_manager", lambda: cap)
+    try:
+        env, _ = wireup.egress_env_for_session("s1", {"allowed_hosts": ["x.com"]})
+        assert len(cap.installed) == 1
+        sid, cg, port = cap.installed[0]
+        assert sid == "s1"
+        assert cg == "/sys/fs/cgroup/jaato/jaato-ws-s1"
+        assert port == int(env["HTTPS_PROXY"].rsplit(":", 1)[1])
+    finally:
+        _reset_nft()
+
+
+def test_nft_flag_on_but_nft_missing_degrades(monkeypatch):
+    _reset_nft()
+    monkeypatch.setenv("JAATO_EGRESS_NFT_ENFORCE", "1")
+    monkeypatch.setattr(wireup.EgressNftManager, "nft_available", staticmethod(lambda: False))
+    cap = _CaptureNft()
+    monkeypatch.setattr(wireup, "get_nft_manager", lambda: cap)
+    try:
+        # must not raise, and no install attempted
+        wireup.egress_env_for_session("s1", {"allowed_hosts": ["x.com"]})
+        assert cap.installed == []
+    finally:
+        _reset_nft()
