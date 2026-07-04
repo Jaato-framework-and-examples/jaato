@@ -79,6 +79,7 @@ class TestParseWebhookRequest:
         route = RouteConfig(
             path="/webhook/github",
             event_type_header="X-GitHub-Event",
+            allow_unauthenticated=True,  # this test covers parsing, not auth
         )
 
         event, status, msg = parse_webhook_request(
@@ -104,7 +105,7 @@ class TestParseWebhookRequest:
     def test_invalid_json(self):
         body = b"not valid json"
         headers = {"Content-Type": "application/json"}
-        route = RouteConfig(path="/webhook")
+        route = RouteConfig(path="/webhook", allow_unauthenticated=True)
 
         event, status, msg = parse_webhook_request(
             body, headers, "generic", route
@@ -169,7 +170,7 @@ class TestParseWebhookRequest:
     def test_event_type_defaults_to_unknown(self):
         body = self._make_body({"data": 1})
         headers = {"Content-Type": "application/json"}
-        route = RouteConfig(path="/webhook")
+        route = RouteConfig(path="/webhook", allow_unauthenticated=True)
 
         event, status, msg = parse_webhook_request(
             body, headers, "generic", route
@@ -183,6 +184,7 @@ class TestParseWebhookRequest:
         route = RouteConfig(
             path="/webhook",
             metadata={"source": "test", "env": "staging"},
+            allow_unauthenticated=True,
         )
 
         event, status, msg = parse_webhook_request(
@@ -190,3 +192,55 @@ class TestParseWebhookRequest:
         )
         assert event is not None
         assert event["metadata"] == {"source": "test", "env": "staging"}
+
+
+class TestUnsignedRouteFailClosed:
+    """A route without an HMAC secret is refused unless auth is provided."""
+
+    @staticmethod
+    def _body():
+        return json.dumps({"x": 1}).encode()
+
+    _HEADERS = {"Content-Type": "application/json"}
+
+    def test_unsigned_route_refused_by_default(self):
+        # No secret, no transport auth, no opt-in → 401 (fail-closed).
+        route = RouteConfig(path="/webhook")
+        event, status, msg = parse_webhook_request(
+            self._body(), self._HEADERS, "generic", route
+        )
+        assert event is None
+        assert status == 401
+        assert "no signature verification" in msg.lower()
+
+    def test_unsigned_route_allowed_with_explicit_optin(self):
+        route = RouteConfig(path="/webhook", allow_unauthenticated=True)
+        event, status, msg = parse_webhook_request(
+            self._body(), self._HEADERS, "generic", route
+        )
+        assert event is not None
+        assert status is None
+
+    def test_unsigned_route_allowed_when_transport_authenticated(self):
+        # mTLS / IP-allowlist deployment: caller passes transport_authenticated.
+        route = RouteConfig(path="/webhook")
+        event, status, msg = parse_webhook_request(
+            self._body(), self._HEADERS, "generic", route,
+            transport_authenticated=True,
+        )
+        assert event is not None
+        assert status is None
+
+    def test_signed_route_still_enforced_even_with_transport_auth(self):
+        # A declared secret is verified regardless of transport auth: a bad
+        # signature is 403 even when the deployment has mTLS/allowlist.
+        route = RouteConfig(
+            path="/webhook", secret_header="X-Sig", secret_algo="hmac-sha256",
+        )
+        event, status, msg = parse_webhook_request(
+            self._body(), {**self._HEADERS, "X-Sig": "sha256=deadbeef"},
+            "generic", route, global_secret="s3cr3t",
+            transport_authenticated=True,
+        )
+        assert event is None
+        assert status == 403
