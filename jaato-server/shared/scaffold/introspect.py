@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import io
+import re
+import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -131,6 +134,7 @@ class EnvVar:
     category: str = "framework"         # provider:<x> | plugin:<x> | daemon | framework | rate_limit | telemetry | proxy
     tier: str = "daemon"                # daemon | runner | daemon_callable | unknown (PLUGIN_TIER of the reader)
     sources: List[str] = field(default_factory=list)  # relative file paths
+    description: Optional[str] = None   # one-line goal, from an `# env: ...` comment on the read line
 
 
 # ---------------------------------------------------------------- providers
@@ -399,12 +403,34 @@ def _key_of(node: ast.expr, const_map: Dict[str, str]) -> Optional[str]:
     return None
 
 
+# An ``# env: <one-line goal>`` comment on (or just above) an env-read line
+# documents that var.  Deliberately code-co-located so the description can't
+# drift from the reader; undocumented vars simply have ``description=None``.
+_ENV_DOC_RE = re.compile(r"#\s*env:\s*(.+?)\s*$")
+
+
+def _env_doc_comments(source: str) -> Dict[int, str]:
+    """Map line-number -> description for every ``# env: ...`` comment."""
+    out: Dict[int, str] = {}
+    try:
+        toks = tokenize.generate_tokens(io.StringIO(source).readline)
+        for tok in toks:
+            if tok.type == tokenize.COMMENT:
+                m = _ENV_DOC_RE.match(tok.string.strip())
+                if m:
+                    out[tok.start[0]] = m.group(1).strip()
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+    return out
+
+
 def _env_reads(node: ast.AST, const_map: Dict[str, str]):
-    """Yield (name, default_node_or_None) for each os.environ read in ``node``.
+    """Yield (name, default_node_or_None, lineno) for each os.environ read.
 
     Matches ``os.getenv``/``os.environ.get``/``environ.get`` (call) and
     ``os.environ[...]``/``environ[...]`` (subscript).  Keys may be string
     literals OR same-file string constants (resolved via ``const_map``).
+    ``lineno`` is the read site's line, for `# env:` doc-comment lookup.
     """
     for n in ast.walk(node):
         # Call forms: os.getenv / os.environ.get / environ.get
@@ -422,7 +448,7 @@ def _env_reads(node: ast.AST, const_map: Dict[str, str]):
                 key = _key_of(n.args[0], const_map)
                 if key is not None:
                     default = n.args[1] if len(n.args) >= 2 else None
-                    yield key, default
+                    yield key, default, getattr(n, "lineno", 0)
         # Subscript form: os.environ["X"] / environ["X"]
         elif isinstance(n, ast.Subscript):
             v = n.value
@@ -430,7 +456,7 @@ def _env_reads(node: ast.AST, const_map: Dict[str, str]):
                (isinstance(v, ast.Name) and v.id == "environ"):
                 key = _key_of(n.slice, const_map)
                 if key is not None:
-                    yield key, None
+                    yield key, None, getattr(n, "lineno", 0)
 
 
 def _categorize(name: str, rel_path: str) -> str:
@@ -505,12 +531,14 @@ def env_vars() -> Dict[str, EnvVar]:
             if "__pycache__" in py.parts or "/tests/" in str(py):
                 continue
             try:
-                tree = ast.parse(py.read_text(encoding="utf-8"))
+                source = py.read_text(encoding="utf-8")
+                tree = ast.parse(source)
             except (SyntaxError, OSError, UnicodeDecodeError):
                 continue
             rel = str(py.relative_to(_SERVER_ROOT))
             const_map = _const_str_map(tree)
-            for name, default_node in _env_reads(tree, const_map):
+            doc_comments = _env_doc_comments(source)
+            for name, default_node, lineno in _env_reads(tree, const_map):
                 ev = out.get(name)
                 if ev is None:
                     cat = _categorize(name, rel)
@@ -520,5 +548,10 @@ def env_vars() -> Dict[str, EnvVar]:
                     ev.sources.append(rel)
                 if ev.default is None and default_node is not None:
                     ev.default = _literal(default_node)
+                # First `# env:` comment found for this var wins (like default).
+                if ev.description is None:
+                    desc = doc_comments.get(lineno)
+                    if desc:
+                        ev.description = desc
     return out
 

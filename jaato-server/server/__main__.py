@@ -374,7 +374,7 @@ class JaatoDaemon:
         # configurable via ``JAATO_RUNNER_POOL_SIZE`` env var (default
         # 2).  Pool-empty fallback path = today's cold-spawn session-
         # mode (preserved through PR 4's flag-gated rollout).
-        _pool_size_raw = os.environ.get("JAATO_RUNNER_POOL_SIZE", "2")
+        _pool_size_raw = os.environ.get("JAATO_RUNNER_POOL_SIZE", "2")  # env: number of idle pre-warm runner slots to keep (raise for concurrent cascade fan-out)
         try:
             _pool_size = int(_pool_size_raw)
         except ValueError:

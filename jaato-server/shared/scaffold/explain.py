@@ -532,19 +532,26 @@ def env(filter_: str = None) -> Rendered:
         groups.setdefault(v.category, []).append(v)
 
     data = {
-        cat: {v.name: {"default": v.default, "sources": v.sources[:2]}
+        cat: {v.name: {"default": v.default, "description": v.description,
+                       "sources": v.sources[:2]}
               for v in vs}
         for cat, vs in groups.items()
     }
-    head = f"env vars read by the installed daemon + plugins ({len(EV)} total)"
+    documented = sum(1 for v in EV.values() if v.description)
+    head = (f"env vars read by the installed daemon + plugins "
+            f"({len(EV)} total, {documented} documented)")
     if filter_:
         head += f" — filter '{filter_}'"
-    lines = [head, "  (set these in the workspace .env; commented = optional)"]
+    lines = [head,
+             "  (set these in the workspace .env; commented = optional; "
+             "descriptions come from `# env: ...` comments at the read site)"]
     for cat in sorted(groups):
         lines.append(f"\n  [{cat}]")
+        w = max((len(v.name) for v in groups[cat]), default=0)
         for v in groups[cat]:
             d = f" = {v.default}" if v.default not in (None, "") else ""
-            lines.append(f"    {v.name}{d}")
+            desc = f"   — {v.description}" if v.description else ""
+            lines.append(f"    {v.name:<{w}}{d}{desc}")
     return data, "\n".join(lines)
 
 

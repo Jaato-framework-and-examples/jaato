@@ -645,7 +645,7 @@ class EnvironmentPlugin(RunnerForwardingMixin):
         result["proxy_auth"] = auth_info
 
         # --- SSL / TLS ---
-        ssl_verify_raw = os.environ.get("JAATO_SSL_VERIFY")
+        ssl_verify_raw = os.environ.get("JAATO_SSL_VERIFY")  # env: verify TLS certs (default true); false only as an escape hatch for SSL-intercepting proxies
         if ssl_verify_raw is not None:
             ssl_verify = ssl_verify_raw.lower() not in ("false", "0", "no")
         else:
