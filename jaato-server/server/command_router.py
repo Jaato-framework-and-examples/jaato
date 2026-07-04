@@ -215,6 +215,10 @@ class CommandRouter:
                 self._handle_snapshot_workspace(client_id, event.args, workspace_path)
                 return
 
+            elif cmd == "session.wake":
+                self._handle_session_wake(client_id, event.args, event.payload)
+                return
+
             elif cmd == "cascade.register":
                 self._handle_cascade_register(client_id, event.args)
                 return
@@ -465,6 +469,44 @@ class CommandRouter:
                     session_env=attached.server.get_all_session_env(),
                 )
             self._event_sink.set_client_session(client_id, target_session_id)
+
+    def _handle_session_wake(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.wake`` — start a USER turn on a session, reviving it
+        if cold, for the client-agnostic wake primitive.
+
+        Accepts a structured ``payload`` (SDK callers) —
+        ``{session_id, text, source?, event_id?}`` — or positional ``args``
+        ``[session_id, text, source?, event_id?]``.  Authentication is the
+        transport's boundary (IPC socket-mode / WS bearer token / the HTTP
+        shim's #498 fail-closed check); this handler runs only for callers
+        already past that gate.  On refusal it emits an ``ErrorEvent`` with the
+        reason; on success the woken turn's output flows to the session's
+        attached clients (the caller need not be one).
+        """
+        from jaato_sdk.events import ErrorEvent
+        p = payload or {}
+        session_id = p.get("session_id") or (args[0] if len(args) > 0 else None)
+        text = p.get("text") or (args[1] if len(args) > 1 else None)
+        source = p.get("source") or (args[2] if len(args) > 2 else "user")
+        event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
+        if not session_id or not text:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="session.wake requires session_id and text",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+        ok, reason = self._session_manager.wake_session(
+            session_id, text, source=source, event_id=event_id,
+        )
+        if not ok:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=f"session.wake refused: {reason}",
+                error_type="WakeError",
+                recoverable=True,
+            ))
 
     def _handle_session_list(self, client_id: str, session_id: str) -> None:
         """Handle ``session.list`` command."""
@@ -1330,6 +1372,7 @@ class CommandRouter:
             {"name": "session list", "description": "List all sessions"},
             {"name": "session new", "description": "Create a new session"},
             {"name": "session attach", "description": "Attach to an existing session"},
+            {"name": "session wake", "description": "Wake a session by id (revive if cold) and start a turn"},
             {"name": "session delete", "description": "Delete a session"},
             {"name": "session help", "description": "Show detailed help for session command"},
         ]
