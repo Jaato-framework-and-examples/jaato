@@ -170,6 +170,32 @@ MCP tool schemas may contain JSON Schema fields not supported by Vertex AI. The 
 2. **Environment variable isolation**: Server credentials are passed via environment variables
 3. **Connection timeouts**: Background thread has a 10-second timeout for tool discovery
 
+### Secret scrubbing (`scrub_secret_env`)
+
+An MCP server is model-invokable, possibly third-party code named in `.mcp.json`.
+By default a stdio server subprocess inherits the runner's **full environment**,
+including framework secrets it was never granted (the model-provider API key, and
+tokens the framework itself uses). Set `scrub_secret_env` in the mcp plugin config
+to strip declared secrets from that **inherited** environment:
+
+```yaml
+plugin_configs:
+  mcp:
+    scrub_secret_env:
+      - "*_API_KEY"
+      - "*_TOKEN"
+      - "*_SECRET"
+      - "ANTHROPIC_AUTH_TOKEN"
+```
+
+- Case-insensitive `fnmatch` globs over env-var **names**. Empty/omitted = off.
+- A secret listed in a **server's own `env`** (in `.mcp.json`) is an explicit
+  operator grant and is **not** scrubbed — that server still receives it. Only
+  the inherited `os.environ` is filtered.
+- Pairs with the egress proxy (feature #1): egress limits *where* a server can
+  connect; this limits *what secrets* it can read to send. Introspect with
+  `jaato-scaffold explain plugin mcp`.
+
 ### Recommended: Use with Permission Plugin
 
 ```python

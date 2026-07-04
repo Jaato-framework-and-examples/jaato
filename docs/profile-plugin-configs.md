@@ -90,10 +90,34 @@ Settings with `env_var` can be overridden by environment variables.
     "extra_paths": ["/opt/tools/bin"],
     "max_output_chars": 100000,
     "auto_background_threshold": 30.0,
-    "background_max_workers": 2
+    "background_max_workers": 2,
+    "scrub_secret_env": ["*_API_KEY", "*_TOKEN", "*_SECRET", "ANTHROPIC_AUTH_TOKEN"]
   }
 }
 ```
+
+`scrub_secret_env` (secrets broker, #10) strips declared env-var names (case-insensitive
+`fnmatch` globs) from the environment of commands this tool runs, so a model-driven
+command can't read raw credentials the runner holds (`echo $GITHUB_TOKEN`). Empty/omitted
+= off.
+
+### mcp
+
+```json
+"plugin_configs": {
+  "mcp": {
+    "config_path": "/path/to/.mcp.json",
+    "scrub_secret_env": ["*_API_KEY", "*_TOKEN", "*_SECRET", "ANTHROPIC_AUTH_TOKEN"]
+  }
+}
+```
+
+An MCP server is model-invokable, possibly third-party code named in `.mcp.json`, and a
+stdio server subprocess otherwise inherits the runner's **full** environment.
+`scrub_secret_env` strips declared secrets from that **inherited** environment. A secret
+listed in a server's own `env` (in `.mcp.json`) is an explicit operator grant and is **not**
+scrubbed. Empty/omitted = off. Pairs with the egress proxy (#1: *where* a server connects)
+— this limits *what secrets* it can read to send.
 
 ### web_search
 
