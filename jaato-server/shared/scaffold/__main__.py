@@ -104,18 +104,44 @@ def _resolve_target(target: str) -> Tuple[str, Optional[str], Optional[str]]:
     return str(parent.parent.parent.parent), parent.name, name
 
 
+def _is_canonical_profile_layout(p: Path) -> bool:
+    """True if ``p`` lives under a real ``<ws>/.jaato/profiles[/<set>]/`` tree.
+
+    Only such files can be resolved via ``validate_workspace`` (inherits + set
+    overlay).  A file outside this layout (a docs example, an ad-hoc path) must
+    be validated directly, or it silently resolves to a bogus workspace where
+    ``discover_profiles`` finds nothing and reports a false "valid".
+    """
+    par = p.parent
+    if par.name == "profiles" and par.parent.name == ".jaato":
+        return True  # <ws>/.jaato/profiles/<name>.yaml
+    if par.parent.name == "profiles" and par.parent.parent.name == ".jaato":
+        return True  # <ws>/.jaato/profiles/<set>/<name>.yaml
+    return False
+
+
 def _cmd_validate(args) -> int:
-    workspace, derived_set, derived_name = _resolve_target(args.target)
-    profile_set = args.set or derived_set
-    only = args.profile or derived_name
-    diags = _validate.validate_workspace(
-        workspace, profile_set=profile_set, only=only)
+    target = Path(args.target)
+    profile_set = args.set
+    only = args.profile
+    if target.is_file() and not _is_canonical_profile_layout(target.resolve()):
+        # Standalone profile file — validate it directly (see
+        # ``validate_profile_file``); the workspace path would find nothing and
+        # falsely report "valid".
+        diags = _validate.validate_profile_file(str(target))
+        scope = f"profile file '{target.name}'"
+    else:
+        workspace, derived_set, derived_name = _resolve_target(args.target)
+        profile_set = args.set or derived_set
+        only = args.profile or derived_name
+        diags = _validate.validate_workspace(
+            workspace, profile_set=profile_set, only=only)
+        scope = f"profile '{only}'" if only else "all profiles"
 
     if args.json:
         print(json.dumps([d.as_dict() for d in diags], indent=2))
     else:
         if not diags:
-            scope = f"profile '{only}'" if only else "all profiles"
             sset = f" (set {profile_set})" if profile_set else ""
             print(f"✓ {scope}{sset} valid — no findings")
         for d in diags:
