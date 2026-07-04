@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+)
 from shared.session_context import get_current_session
 
 if TYPE_CHECKING:
@@ -169,7 +172,7 @@ class TelepathyPlugin:
                     },
                     "required": []
                 },
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
         ]
 

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shared.plugins.model_provider import base as _pbase
+from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_DEFERRED
 
 # Same exclusions as the contract guards — test stubs / non-providers.
 _EXCLUDE = {"tests", "__pycache__", "bundle_common", "echo"}
@@ -78,7 +79,7 @@ class ProviderInfo:
 @dataclass
 class ToolInfo:
     name: str
-    discoverability: str = "discoverable"
+    discoverability: str = DISCOVERABILITY_DEFERRED
     description: str = ""
 
 
@@ -308,7 +309,7 @@ def plugins() -> Dict[str, PluginInfo]:
             for schema in plugin.get_tool_schemas() or []:
                 info.tools.append(ToolInfo(
                     name=getattr(schema, "name", "?"),
-                    discoverability=getattr(schema, "discoverability", "discoverable"),
+                    discoverability=getattr(schema, "discoverability", DISCOVERABILITY_DEFERRED),
                     description=(getattr(schema, "description", "") or "").split("\n")[0],
                 ))
         except Exception:

@@ -22,7 +22,7 @@ from jaato_sdk.plugins.base import (
     ToolResultEnrichmentResult,
     UserCommand,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER, DISCOVERABILITY_DEFERRED
 from .indexer import MemoryIndexer
 from .models import (
     ACTIVE_MATURITIES,
@@ -493,7 +493,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": ["content", "description", "tags"]
                 },
                 category="memory",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name='retrieve_memories',
@@ -554,7 +554,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="memory",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name='list_memory_tags',
@@ -568,7 +568,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="memory",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name='update_memory',
@@ -609,7 +609,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": ["id"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='delete_memory',
@@ -628,7 +628,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": ["id"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

@@ -18,7 +18,10 @@ from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
@@ -427,7 +430,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["command"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_input',
@@ -458,7 +461,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["session_id", "input"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_read',
@@ -485,7 +488,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["session_id"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_control',
@@ -517,7 +520,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["session_id", "key"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_close',
@@ -537,7 +540,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["session_id"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_list',
@@ -551,7 +554,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "properties": {},
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

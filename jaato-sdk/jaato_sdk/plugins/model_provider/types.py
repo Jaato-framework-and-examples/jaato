@@ -161,10 +161,26 @@ TOOL_CATEGORIES = [
 ]
 
 
-# Standard discoverability modes for tool loading behavior
+# Standard discoverability modes for tool loading behavior.
+#
+# NB: the WIRE VALUES ("core" / "discoverable") are intentionally left
+# unchanged for cross-version compatibility (a tool schema's
+# ``discoverability`` is serialized over the daemon<->runner RPC and
+# client-tool injection payloads).  Always reference these CONSTANTS in
+# code rather than the bare string literals: the literal "core" is easily
+# confused with a completely unrelated concept — framework-machinery tools
+# registered via ``PluginRegistry.register_core_tool`` (``is_core_tool``).
+# That overload caused a real permission bug (see #487/#488 and the
+# ``framework-reserved`` evaluator exemption).  The constant name makes the
+# intended meaning — EAGER vs DEFERRED *context loading* — unambiguous at
+# every read site.  When the wire value is eventually renamed too, it
+# changes here in one place.
+DISCOVERABILITY_EAGER = "core"          # Always loaded in initial context
+DISCOVERABILITY_DEFERRED = "discoverable"  # Loaded on-demand via introspection tools
+
 TOOL_DISCOVERABILITY = [
-    "core",          # Always loaded in initial context
-    "discoverable",  # Loaded on-demand via introspection tools
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
 ]
 
 
@@ -221,7 +237,7 @@ class ToolSchema:
     description: str
     parameters: Dict[str, Any] = field(default_factory=dict)
     category: Optional[str] = None
-    discoverability: str = "discoverable"
+    discoverability: str = DISCOVERABILITY_DEFERRED
     editable: Optional[EditableContent] = None
     traits: FrozenSet[str] = field(default_factory=frozenset)
 

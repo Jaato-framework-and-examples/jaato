@@ -92,7 +92,10 @@ def tokenize_prompt_args(text: str) -> List[str]:
         # than failing the whole prompt expansion.
         return text.split()
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, HelpLines
 from .validation import PromptValidator, format_validation_error
 from shared.http import get_httpx_client
@@ -1748,7 +1751,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
             description=info.description or f"Prompt: {info.name}",
             parameters=self._params_to_json_schema(info.params),
             category="prompt",
-            discoverability="discoverable",
+            discoverability=DISCOVERABILITY_DEFERRED,
         )
 
     # ==================== Model Tools ====================
@@ -1804,7 +1807,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                     "required": ["name", "content", "description"]
                 },
                 category="prompt",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             # deletePrompt - remove prompts
             ToolSchema(
@@ -1829,7 +1832,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                     "required": ["name"]
                 },
                 category="prompt",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

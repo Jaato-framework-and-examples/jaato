@@ -1433,7 +1433,7 @@ class RunnerRPCClient:
                 call).
         """
         from jaato_sdk.plugins.model_provider.types import (
-            EditableContent, ToolSchema,
+            EditableContent, ToolSchema, DISCOVERABILITY_DEFERRED,
         )
 
         result = await self._call_named(
@@ -1473,8 +1473,8 @@ class RunnerRPCClient:
                     else None
                 ),
                 discoverability=str(
-                    entry.get("discoverability", "discoverable")
-                    or "discoverable",
+                    entry.get("discoverability", DISCOVERABILITY_DEFERRED)
+                    or DISCOVERABILITY_DEFERRED,
                 ),
                 editable=editable,
                 traits=traits,

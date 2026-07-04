@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shared.plugins.model_provider.base import KNOB_LAYERS
+from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
 from . import introspect
 
 # Layer names that nest under plugin_configs.<provider> as sub-dicts.
@@ -149,7 +150,7 @@ def validate_profile(
             continue
         scope = (getattr(profile, "tool_scopes", None) or {}).get(plug)
         for t in pi.tools:
-            if t.discoverability == "core":
+            if t.discoverability == DISCOVERABILITY_EAGER:
                 continue
             if scope is not None and t.name not in scope:
                 continue  # scoped out entirely — not exposed at all
@@ -339,6 +340,74 @@ def validate_env(workspace: str) -> List[Diagnostic]:
                 f"or an app-level var your own scripts read "
                 f"(see `jaato-scaffold explain env`)",
                 profile=".env", where=key))
+    return out
+
+
+# ------------------------------------------------------------- single file
+
+def validate_profile_file(file_path: str) -> List[Diagnostic]:
+    """Validate a STANDALONE profile file directly against the live registry.
+
+    ``validate_workspace`` only sees profiles under the canonical
+    ``<ws>/.jaato/profiles[/<set>]/`` layout (it goes through
+    ``discover_profiles``).  A profile file *outside* that layout — a docs
+    example, an ad-hoc ``/tmp/foo.yaml`` — previously resolved to a bogus
+    workspace where ``discover_profiles`` found nothing, so the per-profile
+    checks never ran and the file was silently reported "valid — no findings"
+    (a false pass; the exact ``plugin_configs`` typo the tool exists to catch
+    slipped through).
+
+    This loads the file itself, reusing the framework scanner + inheritance
+    resolver so the built profile matches what the runtime would construct
+    (``plugins`` modifiers, ``plugin_configs``, ``gc``, …), then runs the full
+    :func:`validate_profile` checks on it.  Inheritance is resolved within the
+    file's own directory (sibling base profiles are picked up); a sibling that
+    fails to parse does not affect the target — only the target profile's
+    diagnostics are returned.
+    """
+    from shared.plugins.subagent.config import (
+        SubagentProfile,
+        _parse_profile_file,
+        _scan_profiles_dir,
+        resolve_profiles,
+    )
+
+    fp = Path(file_path).resolve()
+    name, data, err = _parse_profile_file(fp)
+    if err:
+        return [Diagnostic("error", "parse_error", err, profile=fp.stem)]
+    if not data:
+        return [Diagnostic(
+            "error", "parse_error",
+            f"'{fp.name}' is not a profile file (expected a YAML/JSON object)",
+            profile=fp.stem)]
+
+    # Build via the framework scanner so the profile object matches runtime.
+    scanned: Dict[str, SubagentProfile] = {}
+    scan_errors: Dict[str, str] = {}
+    _scan_profiles_dir(fp.parent, scanned, scan_errors)
+    resolved, resolve_errors = resolve_profiles(scanned)
+
+    out: List[Diagnostic] = []
+    if name in resolve_errors:
+        out.append(Diagnostic(
+            "error", "inherit_error", resolve_errors[name], profile=name))
+
+    target = (resolved.get(name) or scanned.get(name)
+              or resolved.get(fp.stem) or scanned.get(fp.stem))
+    if target is None:
+        se = scan_errors.get(fp.stem) or scan_errors.get(name)
+        return [Diagnostic(
+            "error", "parse_error",
+            se or f"could not load profile from '{fp.name}'",
+            profile=name or fp.stem)]
+
+    out.extend(validate_profile(
+        target,
+        providers=introspect.providers(),
+        plugins=introspect.plugins(),
+        gc_names=list(introspect.gc_strategies().keys()),
+    ))
     return out
 
 

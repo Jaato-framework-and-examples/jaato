@@ -78,6 +78,8 @@ from jaato_sdk.plugins.model_provider.types import (
     Attachment,
     CancelledException,
     CancelToken,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
     FinishReason,
     FunctionCall,
     Message,
@@ -230,7 +232,7 @@ def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
     for sc in exposed_schemas:
         if sc.name in _INTROSPECTION_TOOL_NAMES:
             continue
-        if getattr(sc, "discoverability", "discoverable") == "core":
+        if getattr(sc, "discoverability", DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
             continue  # eager — not something to "discover"
         pname = plugin_of(sc.name)
         if pname is None or pname not in profile or pname in pre:
@@ -2088,11 +2090,19 @@ class JaatoSession:
                 # evaluator, so a locked-down default-deny agent can still
                 # complete.  Re-populated here every configure() so it survives
                 # PermissionPlugin.shutdown() nulling _registry between sessions.
+                #
+                # Source is ``get_registered_core_tool_names()`` (the
+                # ``register_core_tool`` set, == ``is_core_tool``) — NOT
+                # ``get_core_tool_schemas()``, which also returns exposed
+                # *plugin* tools flagged ``discoverability='core'`` (readFile,
+                # the todo tools, ...).  Using the broad schema set would
+                # silently exempt those powerful business tools from a
+                # catch-all default evaluator — the exact "never
+                # cli/file_edit/business tools" case #487/#488 prohibit.
                 reserved = set(exposed_lifecycle_names)
                 if self._runtime.registry:
                     reserved.update(
-                        s.name
-                        for s in self._runtime.registry.get_core_tool_schemas()
+                        self._runtime.registry.get_registered_core_tool_names()
                     )
                 self._runtime.permission_plugin.add_framework_reserved_tools(
                     reserved

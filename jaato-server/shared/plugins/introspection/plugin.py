@@ -12,7 +12,12 @@ The plugin supports deferred tool loading for token economy:
 import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_REPLAY_SAFE,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.tool_id_map import name_to_id
 from ..streaming import StreamingCapable
@@ -145,7 +150,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="system",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -166,7 +171,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                     "required": ["tool_ids"]
                 },
                 category="system",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
@@ -681,7 +686,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                 self._accessed_tools.add(tool_name)
 
                 # Check if this is a discoverable tool that needs activation
-                if getattr(target_schema, 'discoverability', 'discoverable') == 'discoverable':
+                if getattr(target_schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_DEFERRED:
                     tools_to_activate.append(tool_name)
 
                 # Find plugin source

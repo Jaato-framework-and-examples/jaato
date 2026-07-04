@@ -443,3 +443,168 @@ operator-driven gate as §5.10c/d.  Recommended order:
 At each sub-commit the deployment can be rolled back independently
 (the proxy is opt-in until §5.11d; §5.11d is the irreversible
 network-policy change but lands with the real-host gate).
+
+## 11. Real-host verification — §5.11d approach REJECTED (2026-07-04)
+
+The §6/§9 open question ("does AppArmor `peer=(ip=...)` enforce per-host
+egress?") was verified on the real gate host and the answer is **no** —
+the AppArmor approach for §5.11d is not viable and is replaced.
+
+**Host:** Ubuntu, kernel `6.8.0-85-generic`, `apparmor_parser 4.0.1`,
+AppArmor enabled.  (`sudo NOPASSWD` is scoped to `apparmor_parser` only,
+matching the daemon's assumption — profiles can be loaded, so enforcement
+was tested directly with `aa-exec`.)
+
+**Findings (empirical, `apparmor_parser -Q` + load + `aa-exec` enforcement):**
+
+1. `network inet stream peer=(ip=127.0.0.1),` **parses**, but a bare-IP peer
+   only — **CIDR is rejected** at parse: `network invalid ip='0.0.0.0/0'`
+   (and `127.0.0.0/8`).  So the doc's `peer=(ip=10.0.0.0/8)` (§4.4) can never
+   have worked.
+2. **`peer=(ip=...)` is NOT ENFORCED by this kernel.**  A profile allowing
+   only `peer=(ip=127.0.0.1)` (no other allow, `deny raw/dgram`) let a
+   confined process connect to **8.8.8.8:53** anyway.  Cross-checks: deny at
+   family level (`deny network inet stream,`) blocks *everything* incl.
+   loopback; a profile with no network rule at all denies everything; a
+   `deny ... peer=(ip=8.8.8.8),` denies *all* inet stream.  Consistent
+   conclusion: the userspace parser accepts `peer=(ip=)` but the kernel
+   silently drops the qualifier and mediates only at
+   `network <family> <type>` granularity.
+3. **Kernel capability confirms it:** the *active* feature set
+   `/sys/kernel/security/apparmor/features/network/` exposes only `af_mask`
+   + `af_unix` — **no `af_inet`**.  A `network_v8/af_inet=yes` dir exists, but
+   recompiling the profile with **no `abi` pin, `-M /sys/kernel/security/
+   apparmor/features`** (compile against the kernel's own live feature set)
+   STILL let the confined process reach 8.8.8.8 — so it is NOT a parser
+   abi-pin / feature-selection artifact.  The kernel *advertises*
+   `network_v8/af_inet` but the `connect()`-time check is a no-op.  (The
+   installed ABIs even include `kernel-5.4-outoftree-network` — AppArmor
+   fine-grained networking was an Ubuntu *out-of-tree* patch; it is not
+   effective on 6.8.)  This is a genuine kernel enforcement gap, not
+   fixable from userspace.
+
+   **What a kernel WOULD need** to make the clean AppArmor §5.11d path work:
+   AppArmor's fine-grained/extended network mediation actually wired to the
+   AF_INET/AF_INET6 socket LSM hooks so `peer=(ip=,port=)` is *evaluated* at
+   connect/bind — not merely advertised.  That is a distro-kernel property
+   jaato cannot depend on portably, so the design does not.
+
+**Consequence:** there is no way to express "outbound TCP to loopback only"
+via the AppArmor network template on stock Ubuntu 24.04.  Writing it as an
+allow grants all TCP; writing it as a deny blocks the proxy too.  **§5.11d as
+designed is dead on this class of host.**  The proxy (§5.11a/b/c/e) still
+*confines cooperative clients* (everything honoring `HTTPS_PROXY`), but is not
+a hard, non-bypassable boundary without a different enforcement layer.
+
+**Replacement — cgroup-v2-scoped netfilter egress (verified feasible):**
+- `nftables v1.0.9` present; cgroup v2 mounted; **jaato already creates a
+  per-session cgroup** (`server/cgroups.py`) — so an `nft` rule matching
+  `socket cgroupv2` can allow OUTPUT only to `127.0.0.1` (the proxy) and drop
+  the rest, per session, at the netfilter layer — independent of AppArmor's
+  network-mediation version.  This is the doc's §6.1/§6.4 fallback, now the
+  primary path.
+- eBPF `cgroup/connect4` is the alternative but is blocked here
+  (`kernel.unprivileged_bpf_disabled=2` → needs root/CAP_BPF).
+- **New gate:** the cgroup-nft approach needs `nft` added to the daemon's
+  sudo NOPASSWD scope (today only `apparmor_parser` is granted), plus a
+  per-session install/teardown of the cgroup-matched rule wired alongside the
+  existing egress proxy lifecycle.  This is §5.11d-v2 and needs its own design
+  pass + the sudo-scope change before implementation.
+
+**Net:** §5.11a/b/c/e stand.  §5.11d pivots from AppArmor to cgroup-nft.  The
+"teleport" turned the doc's biggest open question into an observed fact:
+per-IP AppArmor egress is not portable on current Ubuntu, so the boundary
+must live at netfilter/cgroup, not in the AppArmor profile.
+
+### §5.11d-v2 cgroup-nft — PROVEN on the gate host (2026-07-04)
+
+The replacement mechanism was enforcement-tested on the same host
+(`scripts/verify_egress_nft.sh`, self-cleaning; run as root):
+
+- **Test A** — a process moved INTO a per-session cgroup:
+  `loopback 127.0.0.1: CONNECTED`, **`external 8.8.8.8: BLOCKED (refused)`**.
+  The non-bypassability proof AppArmor could not give — enforced at netfilter
+  regardless of whether the process honours `HTTPS_PROXY`.
+- **Test B** — a process OUTSIDE the cgroup: both CONNECTED.  The rule is
+  correctly cgroup-scoped; the host and other processes are untouched.
+
+`socket cgroupv2 level N` loaded cleanly on kernel 6.8.0-85 / nftables 1.0.9.
+
+**The working ruleset** (per session; `<cg>` is the session's cgroup path
+relative to the cgroup2 root, `<port>` the egress proxy's loopback port):
+
+```
+table inet jaato_egress_<session_id> {
+  chain out {
+    type filter hook output priority 0; policy accept;
+    socket cgroupv2 level <N> "<cg>" jump gate
+  }
+  chain gate {
+    ip  daddr 127.0.0.1 tcp dport <port> accept   # the egress proxy
+    ip6 daddr ::1        accept
+    # (optional) ip daddr 127.0.0.53 accept        # local stub resolver, if DNS wanted
+    counter reject
+  }
+}
+```
+
+Non-matching host traffic falls through `policy accept`, so only the session's
+cgroup is constrained.  Deleting the table on teardown removes the rule.
+
+**Daemon integration surface (§5.11d-v2 implementation):**
+1. `EgressNftManager` (mirrors `EgressProxyManager`): `install(session_id,
+   cgroup_path, proxy_port)` renders + loads the table via `sudo nft -f -`;
+   `remove(session_id)` deletes it.  Idempotent.
+2. Wire into the egress-proxy lifecycle: when the proxy starts for a session
+   that HAS a per-session cgroup, also install the nft rule; on teardown,
+   remove it.
+3. **Two prerequisites**: (a) `nft` added to the daemon's sudo NOPASSWD scope
+   (today only `apparmor_parser` — mirror that grant); (b) the session must
+   have a per-session cgroup (`server/cgroups.py` — present for WS/cgroup-
+   attached sessions).  Sessions without a cgroup fall back to proxy-only
+   "cooperative" confinement — document the tier.
+4. DNS: v1 does not allow the stub resolver in the gate, so the confined
+   process cannot resolve names directly — all name resolution goes through
+   the proxy's CONNECT (hostname passed to the proxy, resolved proxy-side).
+   This CLOSES direct DNS exfil (a bonus over the AppArmor plan's partial
+   mitigation).  A `allow_local_resolver` knob can re-open `127.0.0.53` if a
+   deployment needs runner-side DNS.
+
+### §5.11d-v2 — SHIPPED + live-verified on the daemon (2026-07-04)
+
+Implemented: `server/egress_proxy/nft.py` (`EgressNftManager` + pure
+`render_ruleset`), wired opt-in into `wireup.egress_env_for_session` behind
+`JAATO_EGRESS_NFT_ENFORCE` (default off).  44 egress unit tests + the
+`render_ruleset` round-trip proof.
+
+**Live-verified against a running daemon** (editable-installed from this tree,
+restarted with `JAATO_EGRESS_NFT_ENFORCE=1 JAATO_CGROUPS_ROOT=/sys/fs/cgroup/
+jaato`, `nft` granted NOPASSWD, cgroup subtree delegated).  Calling the exact
+function `build_session_envelope` uses — `egress_env_for_session("e2etest",
+{allowed_hosts:[…]})` — against a real cgroup produced:
+`errors=[]`; `HTTPS_PROXY=http://127.0.0.1:<port>` (real proxy started);
+and the daemon **installed** `table inet jaato_egress_e2etest` with
+`socket cgroupv2 level 2 "jaato/jaato-ws-e2etest"` + `ip daddr 127.0.0.1 tcp
+dport <port> accept` (dynamic proxy port + correct cgroup level), then
+**removed** it on `egress_teardown`.  Ordering confirmed by code-read:
+`provision_cgroup` (cgroups.py, the mkdir) runs before `spawn_session_runner`
+→ before `build_session_envelope`, so the cgroup exists when the nft install's
+`isdir` guard checks it.
+
+**Applicability (important):** the **main IPC session** spawn path
+(`_spawn_session_runner_unconditional`) provisions **no per-session cgroup** —
+cgroups are created only in the isolated-runner / WS path
+(`_spawn_isolated_runner` → `provision_cgroup`).  So on a plain IPC
+`session.new`, hard nft enforcement's `isdir` guard is False → it degrades to
+**proxy-only** confinement (still installs the proxy + `HTTPS_PROXY`).  Hard,
+non-bypassable enforcement engages for **cgroup-backed sessions** (WS
+deployments; isolated runners).  This is correct — nft gates a cgroup, and it
+gates exactly where one exists — but operators should know the tier a given
+session lands in.
+
+**Remaining:** a full live session where the daemon spawns a runner *inside* a
+cgroup and the model's own traffic flows through the gated proxy — needs the WS
+path (per-session cgroups) or a working isolated runner; not reproducible via a
+plain IPC session.  Sub-cgroup naming for isolated runners
+(`jaato-ws-<parent>__sub_<id>`) differs from the main `jaato-ws-<id>` the
+wire-up derives — hard enforcement for subagents needs that naming plumbed.

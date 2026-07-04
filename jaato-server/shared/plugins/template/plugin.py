@@ -74,7 +74,7 @@ from jaato_sdk.plugins.base import (
     ToolResultEnrichmentResult,
     UserCommand,
 )
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER
+from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, DISCOVERABILITY_DEFERRED
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.tool_id_map import name_to_id, id_to_name
 from shared.trace import trace as _trace_write
@@ -903,7 +903,7 @@ class TemplatePlugin(RunnerForwardingMixin):
                     "required": ["variables"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["template", "variables"],
                     format="yaml",
@@ -929,7 +929,7 @@ class TemplatePlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="validateTemplateIndex",
@@ -950,7 +950,7 @@ class TemplatePlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listTemplateVariables",
@@ -989,7 +989,7 @@ class TemplatePlugin(RunnerForwardingMixin):
                     "required": ["template_id"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

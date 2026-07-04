@@ -12,6 +12,12 @@ from ..background import BackgroundCapableMixin
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
+from .security import (
+    build_trusted_patterns,
+    contains_var,
+    expand_headers_bound,
+    validate_target_host,
+)
 
 
 DEFAULT_TIMEOUT = 30  # seconds
@@ -69,6 +75,20 @@ class WebFetchPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
 
+        # --- Security guards (see security.py) ---
+        # var -> [allowed host pattern, ...]: a secret may only be expanded
+        # into a header when the request's host matches its allowlist.
+        self._secret_host_bindings: Dict[str, List[str]] = {}
+        # Extra hosts exempt from the SSRF private-address block (internal APIs).
+        self._allowed_internal_hosts: List[str] = []
+        # Combined SSRF-trusted patterns (binding hosts + allowed_internal_hosts).
+        self._trusted_host_patterns: List[str] = []
+        # Master switch for the SSRF filter (block loopback/link-local/private).
+        self._block_private_networks: bool = True
+        # Opt-out escape hatch: re-enable legacy ${VAR} expansion in the URL.
+        # Off by default — secrets in URLs leak into logs/Referer/history.
+        self._allow_url_var_expansion: bool = False
+
     @property
     def name(self) -> str:
         return "web_fetch"
@@ -116,8 +136,33 @@ class WebFetchPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                 self._follow_redirects = config['follow_redirects']
             if 'cache_ttl' in config:
                 self._cache_ttl = config['cache_ttl']
+            # --- Security guard config ---
+            bindings = config.get('secret_host_bindings')
+            if isinstance(bindings, dict):
+                # Normalize: {var: "host"} or {var: ["host", ...]} -> {var: [..]}
+                norm: Dict[str, List[str]] = {}
+                for var, hosts in bindings.items():
+                    if isinstance(hosts, str):
+                        norm[var] = [hosts]
+                    elif isinstance(hosts, (list, tuple)):
+                        norm[var] = [str(h) for h in hosts]
+                self._secret_host_bindings = norm
+            internal = config.get('allowed_internal_hosts')
+            if isinstance(internal, (list, tuple)):
+                self._allowed_internal_hosts = [str(h) for h in internal]
+            if 'block_private_networks' in config:
+                self._block_private_networks = bool(config['block_private_networks'])
+            if 'allow_url_var_expansion' in config:
+                self._allow_url_var_expansion = bool(config['allow_url_var_expansion'])
+        self._trusted_host_patterns = build_trusted_patterns(
+            self._secret_host_bindings, self._allowed_internal_hosts,
+        )
         self._initialized = True
-        self._trace(f"initialize: timeout={self._timeout}, max_length={self._max_length}")
+        self._trace(
+            f"initialize: timeout={self._timeout}, max_length={self._max_length}, "
+            f"bound_secrets={list(self._secret_host_bindings)}, "
+            f"block_private={self._block_private_networks}"
+        )
 
     def set_plugin_registry(self, registry) -> None:
         """Called during expose_tool(). Registers the web category."""
@@ -168,6 +213,47 @@ class WebFetchPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     "default": 300,
                     "description": "Cache time-to-live in seconds",
                 },
+                "secret_host_bindings": {
+                    "type": "object",
+                    "default": {},
+                    "description": (
+                        "Maps an environment-variable name to the host(s) its "
+                        "value may be sent to in a request header. A "
+                        "${VAR} placeholder in a header is expanded ONLY when "
+                        "VAR is listed here and the request's host matches. "
+                        "Hosts support a leading '*.' wildcard. Example: "
+                        "{\"COMPANY_API_TOKEN\": [\"api.internal.company.com\"]}. "
+                        "Unlisted secrets are never sent (fail-closed)."
+                    ),
+                },
+                "allowed_internal_hosts": {
+                    "type": "array",
+                    "default": [],
+                    "description": (
+                        "Hosts exempt from the SSRF private-address block "
+                        "(for intended internal APIs on private/loopback IPs). "
+                        "Binding hosts are already exempt automatically."
+                    ),
+                },
+                "block_private_networks": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "SSRF guard: refuse fetches that resolve to loopback, "
+                        "link-local (cloud metadata), private, or reserved "
+                        "addresses. Leave enabled unless you know what you are "
+                        "doing."
+                    ),
+                },
+                "allow_url_var_expansion": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Escape hatch: re-enable legacy ${VAR} expansion inside "
+                        "the URL. Off by default because secrets in URLs leak "
+                        "into logs/Referer/history."
+                    ),
+                },
             },
         }
 
@@ -210,8 +296,16 @@ class WebFetchPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     },
                     "headers": {
                         "type": "object",
-                        "description": "Custom HTTP headers to send with the request (e.g., for authentication). "
-                                      "Example: {\"Authorization\": \"Bearer token\"}"
+                        "description": (
+                            "Custom HTTP headers to send with the request (e.g., "
+                            "for authentication). Example: {\"Authorization\": "
+                            "\"Bearer token\"}. A ${VAR} placeholder is expanded "
+                            "from the environment ONLY if VAR is declared in the "
+                            "server's web_fetch 'secret_host_bindings' and the "
+                            "target host is on that secret's allowlist; otherwise "
+                            "the request is refused. Do NOT put ${VAR} secrets in "
+                            "the url."
+                        )
                     },
                     "no_cache": {
                         "type": "boolean",
@@ -1129,27 +1223,42 @@ user will then set the variable.
         Returns:
             Dict containing fetched content or error.
         """
-        # Expand ${VAR} placeholders in URL and headers from session env
-        from ..subagent.config import expand_variables
-        url = expand_variables(args.get('url', '')).strip()
         mode = args.get('mode', 'markdown')
         selector = args.get('selector')
         extract_components = args.get('extract')
         include_links = args.get('include_links', False)
-        custom_headers = expand_variables(args.get('headers')) if args.get('headers') else None
         no_cache = args.get('no_cache', False)
         include_headers = args.get('include_headers', False)
         insecure = bool(args.get('insecure', False))
         no_proxy = bool(args.get('no_proxy', False))
 
+        # --- URL: refuse ${VAR} expansion (secrets belong in headers, not
+        # URLs, where they leak into logs/Referer/history).  Opt back in via
+        # the 'allow_url_var_expansion' config only if you understand the risk.
+        raw_url = (args.get('url', '') or '').strip()
+        if not raw_url:
+            return {'error': 'web_fetch: url must be provided'}
+        if contains_var(raw_url):
+            if self._allow_url_var_expansion:
+                from ..subagent.config import expand_variables
+                url = expand_variables(raw_url).strip()
+            else:
+                return {'error': (
+                    "web_fetch: ${VAR} expansion is not permitted in the URL "
+                    "(a secret in a URL leaks into server logs, the Referer "
+                    "header, and browser history). Put the credential in a "
+                    "header instead — e.g. headers={\"Authorization\": "
+                    "\"Bearer ${TOKEN}\"} — and declare TOKEN in the web_fetch "
+                    "'secret_host_bindings' config with the host(s) it may be "
+                    "sent to."
+                )}
+        else:
+            url = raw_url
+
         self._trace(
             f"web_fetch: url={url!r}, mode={mode}, selector={selector}, "
             f"no_cache={no_cache}, insecure={insecure}, no_proxy={no_proxy}"
         )
-
-        # Validate URL
-        if not url:
-            return {'error': 'web_fetch: url must be provided'}
 
         # Basic URL validation
         parsed = urlparse(url)
@@ -1160,6 +1269,36 @@ user will then set the variable.
             return {'error': f'web_fetch: unsupported URL scheme: {parsed.scheme}'}
         if not parsed.netloc:
             return {'error': 'web_fetch: invalid URL'}
+
+        target_host = parsed.hostname or ''
+
+        # --- Headers: host-bound secret expansion.  A ${VAR} is substituted
+        # only when VAR is declared in secret_host_bindings AND target_host is
+        # on that secret's allowlist; otherwise the fetch is refused (the
+        # secret is never sent to an unauthorized host).  Fail-closed.
+        raw_headers = args.get('headers')
+        if raw_headers:
+            if not isinstance(raw_headers, dict):
+                return {'error': (
+                    "web_fetch: 'headers' must be an object mapping header "
+                    "name to value (e.g. {\"Authorization\": \"Bearer "
+                    "${TOKEN}\"}), got " + type(raw_headers).__name__
+                ), 'url': url}
+            custom_headers, header_err = expand_headers_bound(
+                raw_headers, target_host, self._secret_host_bindings, os.environ,
+            )
+            if header_err:
+                return {'error': header_err, 'url': url}
+        else:
+            custom_headers = None
+
+        # --- SSRF pre-flight: refuse loopback / link-local (169.254.169.254) /
+        # private / reserved targets unless the host is explicitly trusted.
+        ssrf_err = validate_target_host(
+            target_host, self._trusted_host_patterns, self._block_private_networks,
+        )
+        if ssrf_err:
+            return {'error': ssrf_err, 'url': url, 'ssrf_blocked': True}
 
         # Check cache (skip if custom headers are provided, or no_cache is True)
         cache_key = f"{url}|{selector or ''}"
@@ -1196,6 +1335,28 @@ user will then set the variable.
                         "the proxy). If they confirm, retry with no_proxy=true."
                     )
                 return result
+
+            # SSRF post-flight: if a redirect landed on a different, non-public
+            # host, refuse to return the body — this blocks a redirect-based
+            # read of an internal endpoint (e.g. cloud metadata) from ever
+            # reaching the model.  (Full per-hop prevention lands with the
+            # network-layer egress proxy; this is the interim in-process guard.)
+            final_host = urlparse(str(final_url)).hostname or ''
+            if final_host and final_host != target_host:
+                redirect_err = validate_target_host(
+                    final_host, self._trusted_host_patterns,
+                    self._block_private_networks,
+                )
+                if redirect_err:
+                    return {
+                        'error': (
+                            "web_fetch: request redirected to a non-public host "
+                            f"and was blocked. {redirect_err}"
+                        ),
+                        'url': str(final_url),
+                        'original_url': url,
+                        'ssrf_blocked': True,
+                    }
 
             # Handle PDF content — convert to markdown
             if fetch_metadata and fetch_metadata.get('is_pdf'):

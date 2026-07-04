@@ -188,7 +188,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
 
 from .completion_schema_loader import resolve_completion_schema
 
@@ -338,7 +338,7 @@ class LifecycleTools:
                         "inspect accumulated state."
                     ),
                     parameters=parameters,
-                    discoverability="core",
+                    discoverability=DISCOVERABILITY_EAGER,
                 )
             )
 
@@ -419,7 +419,7 @@ class LifecycleTools:
                             "required": ["field_path", "value"],
                             "additionalProperties": False,
                         },
-                        discoverability="core",
+                        discoverability=DISCOVERABILITY_EAGER,
                     )
                 )
                 schemas.append(
@@ -442,7 +442,7 @@ class LifecycleTools:
                             "properties": {},
                             "additionalProperties": False,
                         },
-                        discoverability="core",
+                        discoverability=DISCOVERABILITY_EAGER,
                     )
                 )
 
@@ -580,7 +580,7 @@ class LifecycleTools:
                 },
                 "required": ["name"],
             },
-            discoverability="core",
+            discoverability=DISCOVERABILITY_EAGER,
         )
 
     def get_executors(self) -> Dict[str, Any]:

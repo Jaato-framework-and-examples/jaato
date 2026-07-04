@@ -26,7 +26,11 @@ from jaato_sdk.plugins.base import (
     model_matches_requirements,
     OutputCallback,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from .streaming.protocol import StreamingCapable
 from .enrichment_formatter import (
     EnrichmentNotification,
@@ -990,6 +994,23 @@ class PluginRegistry:
         """
         return tool_name in self._core_tools
 
+    def get_registered_core_tool_names(self) -> Set[str]:
+        """Return the names of tools registered via :meth:`register_core_tool`.
+
+        This is the authoritative "framework machinery" set — stream
+        controls, event-bus, introspection, client host tools — mirroring
+        :meth:`is_core_tool`.  It is DELIBERATELY narrower than
+        :meth:`get_core_tool_schemas`, which returns every exposed *plugin*
+        tool whose ``discoverability == 'core'`` (an eager-loading
+        performance flag applied to real business tools like ``readFile``
+        and the ``todo`` tools).  Consumers that must distinguish framework
+        machinery from the business tool surface — e.g. the permission
+        pipeline's catch-all ``"default"`` evaluator exemption — must use
+        THIS accessor, not ``get_core_tool_schemas()``, or they silently
+        exempt powerful plugin tools from that evaluator (see #487/#488).
+        """
+        return set(self._core_tools.keys())
+
     def get_core_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Get executors for all registered core framework tools.
 
@@ -1833,7 +1854,7 @@ class PluginRegistry:
                 core_schemas = [
                     s for s in plugin_schemas
                     if s.name not in self._disabled_tools
-                    and getattr(s, 'discoverability', 'discoverable') == 'core'
+                    and getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                 ]
                 schemas.extend(core_schemas)
 
@@ -1850,7 +1871,7 @@ class PluginRegistry:
         # Add core tool schemas that have discoverability='core' (excluding disabled)
         for name, schema in self._core_tools.items():
             if name not in self._disabled_tools:
-                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     schemas.append(schema)
 
         return schemas
@@ -1973,7 +1994,7 @@ class PluginRegistry:
             return False
         try:
             for schema in plugin.get_tool_schemas():
-                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     return True
         except Exception:
             pass

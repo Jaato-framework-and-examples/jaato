@@ -1,0 +1,54 @@
+# Example profile: web_fetch with credential-exfiltration / SSRF guards.
+#
+# Demonstrates the web_fetch security knobs (server 0.6.x+). The model may
+# authenticate to *declared* APIs by putting ${VAR} in a request header, but:
+#   - a secret is only sent to the host(s) it is bound to (fail-closed);
+#   - ${VAR} is refused in the URL (secrets in URLs leak into logs/Referer);
+#   - fetches that resolve to loopback / link-local (169.254.169.254 cloud
+#     metadata) / private / reserved addresses are refused (SSRF guard).
+#
+# Introspect these knobs live with:  jaato-scaffold explain plugin web_fetch
+# Lint this profile with:            jaato-scaffold validate <this file>
+name: web-fetch-secure
+description: >
+  Web agent whose web_fetch tool can authenticate to a small set of declared
+  APIs but cannot exfiltrate secrets to arbitrary hosts or reach internal /
+  cloud-metadata endpoints.
+
+model: claude-sonnet-4-6
+provider: anthropic
+
+plugins:
+  - cli
+  - web_fetch
+
+plugin_configs:
+  anthropic:
+    api_key: "${ANTHROPIC_API_KEY}"
+
+  web_fetch:
+    # Refuse ${VAR} expansion in the URL (this is the default). Credentials
+    # belong in headers, not URLs. Set true only for non-secret templating.
+    allow_url_var_expansion: false
+
+    # SSRF guard (default true): refuse targets that resolve to loopback,
+    # link-local (169.254.169.254 cloud metadata), private, or reserved ranges.
+    block_private_networks: true
+
+    # Bind each secret env var to the host(s) it may be sent to. A ${VAR} in a
+    # header is expanded ONLY when VAR is listed here AND the request's host
+    # matches one of its patterns ('*.' wildcard allowed). Any other case —
+    # unlisted var, wrong host, or unset env var — refuses the fetch, so the
+    # secret is never sent to an unauthorized host.
+    secret_host_bindings:
+      GITHUB_TOKEN:
+        - api.github.com
+        - "*.github.com"
+      COMPANY_API_TOKEN:
+        - api.internal.company.com
+
+    # Hosts exempt from the SSRF private-address block, for intended internal
+    # APIs served on private IPs. (Hosts appearing in secret_host_bindings are
+    # already exempt automatically — list here only extra non-secret internals.)
+    allowed_internal_hosts:
+      - api.internal.company.com
