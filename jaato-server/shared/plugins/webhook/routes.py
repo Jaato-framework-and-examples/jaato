@@ -123,7 +123,23 @@ def parse_webhook_request(
     # decided by the caller), or an explicit allow_unauthenticated opt-in.  A
     # route with none of these is REFUSED (fail-closed) so an operator cannot
     # accidentally expose an open endpoint that dispatches into agent sessions.
-    if route.secret_header and route.secret_algo:
+    #
+    # A route that declares EITHER secret_header or secret_algo is treated as
+    # "intends HMAC": an incomplete pair is a misconfiguration and is refused
+    # (500), never silently downgraded to unsigned — otherwise a typo would
+    # skip verification while transport auth quietly let the request through.
+    intends_hmac = bool(route.secret_header or route.secret_algo)
+    if intends_hmac:
+        if not (route.secret_header and route.secret_algo):
+            logger.warning(
+                "Route '%s' has an incomplete signature config — it sets "
+                "secret_header or secret_algo but not both; refusing (fail-closed).",
+                route_name,
+            )
+            return None, 500, (
+                "Server misconfigured: route sets secret_header or secret_algo but "
+                "not both, so signature verification cannot run."
+            )
         secret = route.metadata.get('secret') or global_secret
         if not secret:
             logger.warning(

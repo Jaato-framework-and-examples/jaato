@@ -4,9 +4,6 @@ import json
 import socket
 import time
 import urllib.request
-from typing import Any, Dict
-
-import pytest
 
 from shared.plugins.webhook.plugin import WebhookPlugin, create_plugin
 

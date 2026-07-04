@@ -4,8 +4,6 @@ import hashlib
 import hmac
 import json
 
-import pytest
-
 from shared.plugins.webhook.config import RouteConfig
 from shared.plugins.webhook.routes import (
     match_route,
@@ -244,3 +242,23 @@ class TestUnsignedRouteFailClosed:
         )
         assert event is None
         assert status == 403
+
+    def test_incomplete_hmac_config_fails_closed(self):
+        # secret_header without secret_algo must NOT silently downgrade to
+        # unsigned — even under transport auth it is a 500 misconfiguration.
+        route = RouteConfig(path="/webhook", secret_header="X-Sig")  # no algo
+        event, status, msg = parse_webhook_request(
+            self._body(), self._HEADERS, "generic", route,
+            global_secret="s3cr3t", transport_authenticated=True,
+        )
+        assert event is None
+        assert status == 500
+        assert "not both" in msg.lower()
+
+    def test_incomplete_hmac_config_algo_only_fails_closed(self):
+        route = RouteConfig(path="/webhook", secret_algo="hmac-sha256")  # no header
+        event, status, msg = parse_webhook_request(
+            self._body(), self._HEADERS, "generic", route,
+        )
+        assert event is None
+        assert status == 500

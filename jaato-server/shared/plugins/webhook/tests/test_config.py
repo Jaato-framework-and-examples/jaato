@@ -6,8 +6,6 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-import pytest
-
 from shared.plugins.webhook.config import (
     RouteConfig,
     TLSConfig,
@@ -94,6 +92,20 @@ class TestWebhookConfig:
             "routes": {"g": {"path": "/g"}},
         })
         assert config2.routes["g"].allow_unauthenticated is False
+
+    def test_allow_unauthenticated_string_false_fails_closed(self):
+        # A quoted/expanded string must NOT enable via Python truthiness
+        # (bool("false") is True). Only affirmative tokens count.
+        for falsey in ("false", "False", "", "0", "no", "off", "nope"):
+            config = WebhookConfig.from_dict({
+                "routes": {"g": {"path": "/g", "allow_unauthenticated": falsey}},
+            })
+            assert config.routes["g"].allow_unauthenticated is False, falsey
+        for truthy in ("true", "True", "1", "yes", "on"):
+            config = WebhookConfig.from_dict({
+                "routes": {"g": {"path": "/g", "allow_unauthenticated": truthy}},
+            })
+            assert config.routes["g"].allow_unauthenticated is True, truthy
 
 
 class TestDeepMerge:
