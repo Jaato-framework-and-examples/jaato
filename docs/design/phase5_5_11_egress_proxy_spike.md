@@ -569,3 +569,42 @@ cgroup is constrained.  Deleting the table on teardown removes the rule.
    This CLOSES direct DNS exfil (a bonus over the AppArmor plan's partial
    mitigation).  A `allow_local_resolver` knob can re-open `127.0.0.53` if a
    deployment needs runner-side DNS.
+
+### §5.11d-v2 — SHIPPED + live-verified on the daemon (2026-07-04)
+
+Implemented: `server/egress_proxy/nft.py` (`EgressNftManager` + pure
+`render_ruleset`), wired opt-in into `wireup.egress_env_for_session` behind
+`JAATO_EGRESS_NFT_ENFORCE` (default off).  44 egress unit tests + the
+`render_ruleset` round-trip proof.
+
+**Live-verified against a running daemon** (editable-installed from this tree,
+restarted with `JAATO_EGRESS_NFT_ENFORCE=1 JAATO_CGROUPS_ROOT=/sys/fs/cgroup/
+jaato`, `nft` granted NOPASSWD, cgroup subtree delegated).  Calling the exact
+function `build_session_envelope` uses — `egress_env_for_session("e2etest",
+{allowed_hosts:[…]})` — against a real cgroup produced:
+`errors=[]`; `HTTPS_PROXY=http://127.0.0.1:<port>` (real proxy started);
+and the daemon **installed** `table inet jaato_egress_e2etest` with
+`socket cgroupv2 level 2 "jaato/jaato-ws-e2etest"` + `ip daddr 127.0.0.1 tcp
+dport <port> accept` (dynamic proxy port + correct cgroup level), then
+**removed** it on `egress_teardown`.  Ordering confirmed by code-read:
+`provision_cgroup` (cgroups.py, the mkdir) runs before `spawn_session_runner`
+→ before `build_session_envelope`, so the cgroup exists when the nft install's
+`isdir` guard checks it.
+
+**Applicability (important):** the **main IPC session** spawn path
+(`_spawn_session_runner_unconditional`) provisions **no per-session cgroup** —
+cgroups are created only in the isolated-runner / WS path
+(`_spawn_isolated_runner` → `provision_cgroup`).  So on a plain IPC
+`session.new`, hard nft enforcement's `isdir` guard is False → it degrades to
+**proxy-only** confinement (still installs the proxy + `HTTPS_PROXY`).  Hard,
+non-bypassable enforcement engages for **cgroup-backed sessions** (WS
+deployments; isolated runners).  This is correct — nft gates a cgroup, and it
+gates exactly where one exists — but operators should know the tier a given
+session lands in.
+
+**Remaining:** a full live session where the daemon spawns a runner *inside* a
+cgroup and the model's own traffic flows through the gated proxy — needs the WS
+path (per-session cgroups) or a working isolated runner; not reproducible via a
+plain IPC session.  Sub-cgroup naming for isolated runners
+(`jaato-ws-<parent>__sub_<id>`) differs from the main `jaato-ws-<id>` the
+wire-up derives — hard enforcement for subagents needs that naming plumbed.
