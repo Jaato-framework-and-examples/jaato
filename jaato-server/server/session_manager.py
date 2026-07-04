@@ -24,6 +24,7 @@ import pathlib
 import threading
 import time
 from collections import OrderedDict
+from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -48,6 +49,37 @@ from shared.session_envelope import BootstrapEnvelope
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from .session_workspace_index import SessionWorkspaceIndex
+
+
+class WakeOutcome(str, Enum):
+    """Structured result of :meth:`SessionManager.wake_session`.
+
+    Callers route on this enum, not a prose reason string — notably an HTTP
+    wake shim mapping to a status code that drives a webhook sender's (e.g.
+    GitHub's) retry behavior.  Permanence guidance for a retrying ingress:
+
+    - ``OK`` / ``DUPLICATE`` → **success** (map to 2xx).  ``DUPLICATE`` is a
+      benign redelivery no-op (at-least-once senders redeliver by design) — it
+      is NOT an error and must not trigger a retry.
+    - ``INVALID`` / ``UNRESOLVED`` → **permanent** failure (bad id, or a cold
+      id that is unknown / ambiguous in the workspace index) — map to 4xx, do
+      NOT retry.
+    - ``REVIVE_FAILED`` / ``NOT_DRIVABLE`` → **transient** failure (revive or
+      dispatch failed) — map to 5xx, safe to retry.
+    """
+    OK = "ok"
+    DUPLICATE = "duplicate"
+    INVALID = "invalid"
+    UNRESOLVED = "unresolved"
+    REVIVE_FAILED = "revive_failed"
+    NOT_DRIVABLE = "not_drivable"
+
+    @property
+    def is_success(self) -> bool:
+        """True for outcomes a caller should treat as success (2xx): the turn
+        was dispatched (``OK``) or a duplicate was idempotently ignored
+        (``DUPLICATE``)."""
+        return self in (WakeOutcome.OK, WakeOutcome.DUPLICATE)
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -5428,7 +5460,7 @@ class SessionManager:
         text: str,
         source: str = "user",
         event_id: Optional[str] = None,
-    ) -> Tuple[bool, str]:
+    ) -> Tuple["WakeOutcome", str]:
         """Start a USER turn on ``session_id``, reviving it if cold/unloaded.
 
         The client-agnostic wake primitive (``session.wake``): any authenticated
@@ -5456,20 +5488,26 @@ class SessionManager:
 
         Fire-and-forget: returns once the turn is DISPATCHED (mirroring the
         reactor resume→drive shape); the turn's output flows to whatever client
-        later attaches (or persists to history).  Returns ``(ok, reason)``.
+        later attaches (or persists to history).
+
+        Returns ``(outcome, detail)`` where ``outcome`` is a :class:`WakeOutcome`
+        (route on this, not the prose ``detail``) — a redelivered ``event_id``
+        yields the benign ``DUPLICATE`` (idempotent no-op), NOT an error.
         """
         from shared.session_id import is_safe_session_id
         if not session_id or not is_safe_session_id(session_id):
-            return (False, "invalid or missing session_id")
+            return (WakeOutcome.INVALID, "invalid or missing session_id")
         if not text:
-            return (False, "empty wake text")
+            return (WakeOutcome.INVALID, "empty wake text")
 
-        # Dedup by event_id (bounded LRU).
+        # Dedup by event_id (bounded LRU).  A redelivery is the at-least-once
+        # sender working as designed → idempotent no-op, a SUCCESS not an error.
         if event_id:
             with self._lock:
                 if event_id in self._wake_seen_event_ids:
-                    return (False,
-                            f"duplicate event_id {event_id!r} (already actioned)")
+                    return (WakeOutcome.DUPLICATE,
+                            f"event_id {event_id!r} already actioned "
+                            f"(idempotent no-op)")
                 self._wake_seen_event_ids[event_id] = None
                 while len(self._wake_seen_event_ids) > self._WAKE_DEDUP_CAP:
                     self._wake_seen_event_ids.popitem(last=False)
@@ -5481,19 +5519,21 @@ class SessionManager:
         if loaded is None:
             workspace = self._session_workspace_index.resolve(session_id)
             if workspace is None:
-                return (False,
+                return (WakeOutcome.UNRESOLVED,
                         f"cannot resolve workspace for cold session "
                         f"{session_id!r} (unknown or ambiguous in the "
                         f"session-workspace index)")
             if self.resume_session(session_id, workspace_path=workspace) is None:
-                return (False, f"revive failed for session {session_id!r}")
+                return (WakeOutcome.REVIVE_FAILED,
+                        f"revive failed for session {session_id!r}")
 
         # Wrap the untrusted payload, then drive a headless USER turn.
         from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
         wrapped = wrap_untrusted_content(text, source=f"wake:{source}")
         if not self.send_message_to_session(session_id, wrapped):
-            return (False, f"session {session_id!r} not drivable after wake")
-        return (True, "woken")
+            return (WakeOutcome.NOT_DRIVABLE,
+                    f"session {session_id!r} not drivable after wake")
+        return (WakeOutcome.OK, "woken")
 
     def _load_session(
         self,

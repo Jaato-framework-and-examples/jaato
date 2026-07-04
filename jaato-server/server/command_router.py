@@ -498,12 +498,16 @@ class CommandRouter:
                 recoverable=True,
             ))
             return
-        ok, reason = self._session_manager.wake_session(
+        outcome, detail = self._session_manager.wake_session(
             session_id, text, source=source, event_id=event_id,
         )
-        if not ok:
+        # Only genuine failures surface as an error.  OK and DUPLICATE are both
+        # successes — a redelivered event_id is an idempotent no-op, not a
+        # failed delivery (an HTTP shim maps both to 2xx; erroring here would
+        # make every at-least-once redelivery look failed + trigger retries).
+        if not outcome.is_success:
             self._event_sink.send_event(client_id, ErrorEvent(
-                error=f"session.wake refused: {reason}",
+                error=f"session.wake refused ({outcome.value}): {detail}",
                 error_type="WakeError",
                 recoverable=True,
             ))

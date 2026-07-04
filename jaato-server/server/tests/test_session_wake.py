@@ -14,7 +14,7 @@ from collections import OrderedDict
 
 import pytest
 
-from server.session_manager import SessionManager
+from server.session_manager import SessionManager, WakeOutcome
 from server.session_workspace_index import SessionWorkspaceIndex
 from jaato_sdk.plugins.model_provider.types import UNTRUSTED_OPEN
 
@@ -57,8 +57,8 @@ def _make_manager(tmp_path, loaded_ids=()):
 
 def test_loaded_session_drives_without_revive(tmp_path):
     m, calls = _make_manager(tmp_path, loaded_ids=["20260704_120000"])
-    ok, reason = m.wake_session("20260704_120000", "review body")
-    assert ok, reason
+    outcome, detail = m.wake_session("20260704_120000", "review body")
+    assert outcome == WakeOutcome.OK, detail
     assert calls.resume == []                      # not revived — already loaded
     assert len(calls.drive) == 1
 
@@ -77,17 +77,17 @@ def test_payload_is_wrapped_untrusted(tmp_path):
 def test_cold_session_revived_from_index_then_driven(tmp_path):
     m, calls = _make_manager(tmp_path)                # nothing loaded
     m._session_workspace_index.record("s_cold", "/ws/bot")
-    ok, reason = m.wake_session("s_cold", "hi")
-    assert ok, reason
+    outcome, detail = m.wake_session("s_cold", "hi")
+    assert outcome == WakeOutcome.OK, detail
     assert calls.resume == [("s_cold", "/ws/bot")]    # workspace from index, server-owned
     assert len(calls.drive) == 1
 
 
 def test_cold_unknown_workspace_refused(tmp_path):
     m, calls = _make_manager(tmp_path)                # index empty
-    ok, reason = m.wake_session("s_cold", "hi")
-    assert not ok
-    assert "resolve workspace" in reason
+    outcome, detail = m.wake_session("s_cold", "hi")
+    assert outcome == WakeOutcome.UNRESOLVED          # permanent — don't retry
+    assert not outcome.is_success
     assert calls.resume == [] and calls.drive == []   # never touched
 
 
@@ -95,30 +95,31 @@ def test_cold_ambiguous_id_refused(tmp_path):
     m, calls = _make_manager(tmp_path)
     m._session_workspace_index.record("dup", "/ws/a")
     m._session_workspace_index.record("dup", "/ws/b")  # ambiguous
-    ok, reason = m.wake_session("dup", "hi")
-    assert not ok
-    assert calls.resume == []                          # fail-loud, no guess
+    outcome, _ = m.wake_session("dup", "hi")
+    assert outcome == WakeOutcome.UNRESOLVED           # fail-loud, no guess
+    assert calls.resume == []
 
 
-def test_revive_failure_surfaced(tmp_path):
+def test_revive_failure_is_transient(tmp_path):
     m, calls = _make_manager(tmp_path)
     m._session_workspace_index.record("s_cold", "/ws/bot")
     calls.resume_ok = False
-    ok, reason = m.wake_session("s_cold", "hi")
-    assert not ok
-    assert "revive failed" in reason
+    outcome, detail = m.wake_session("s_cold", "hi")
+    assert outcome == WakeOutcome.REVIVE_FAILED        # transient — retryable
+    assert not outcome.is_success
     assert calls.drive == []
 
 
-# ---- dedup + validation -------------------------------------------------------
+# ---- dedup: a redelivery is a benign SUCCESS, not an error --------------------
 
-def test_event_id_dedup(tmp_path):
+def test_event_id_dedup_is_benign_success(tmp_path):
     m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
-    ok1, _ = m.wake_session("s1", "first", event_id="evt_abc")
-    ok2, reason2 = m.wake_session("s1", "again", event_id="evt_abc")
-    assert ok1
-    assert not ok2 and "duplicate" in reason2
-    assert len(calls.drive) == 1                       # second dropped
+    o1, _ = m.wake_session("s1", "first", event_id="evt_abc")
+    o2, _ = m.wake_session("s1", "again", event_id="evt_abc")
+    assert o1 == WakeOutcome.OK
+    assert o2 == WakeOutcome.DUPLICATE
+    assert o2.is_success            # a redelivery is at-least-once by design → 2xx no-op
+    assert len(calls.drive) == 1    # the duplicate did NOT drive a second turn
 
 
 def test_distinct_event_ids_both_run(tmp_path):
@@ -128,23 +129,33 @@ def test_distinct_event_ids_both_run(tmp_path):
     assert len(calls.drive) == 2
 
 
+# ---- validation ---------------------------------------------------------------
+
 def test_invalid_session_id_refused(tmp_path):
     m, calls = _make_manager(tmp_path)
-    ok, _ = m.wake_session("../escape", "hi")
-    assert not ok
+    outcome, _ = m.wake_session("../escape", "hi")
+    assert outcome == WakeOutcome.INVALID
     assert calls.resume == [] and calls.drive == []
 
 
 def test_empty_text_refused(tmp_path):
     m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
-    ok, _ = m.wake_session("s1", "")
-    assert not ok
+    outcome, _ = m.wake_session("s1", "")
+    assert outcome == WakeOutcome.INVALID
     assert calls.drive == []
 
 
-def test_not_drivable_after_wake_surfaced(tmp_path):
+def test_not_drivable_is_transient(tmp_path):
     m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
     calls.drive_ok = False
-    ok, reason = m.wake_session("s1", "hi")
-    assert not ok
-    assert "not drivable" in reason
+    outcome, _ = m.wake_session("s1", "hi")
+    assert outcome == WakeOutcome.NOT_DRIVABLE
+    assert not outcome.is_success
+
+
+# ---- the outcome enum's success/permanence contract --------------------------
+
+def test_outcome_success_partition():
+    successes = {WakeOutcome.OK, WakeOutcome.DUPLICATE}
+    for o in WakeOutcome:
+        assert o.is_success == (o in successes)
