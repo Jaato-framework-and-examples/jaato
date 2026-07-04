@@ -58,7 +58,7 @@ def create_plugin() -> TelemetryPlugin:
     """
     import os
 
-    enabled = os.environ.get("JAATO_TELEMETRY_ENABLED", "").lower() in ("1", "true", "yes")
+    enabled = os.environ.get("JAATO_TELEMETRY_ENABLED", "").lower() in ("1", "true", "yes")  # env: enable OpenTelemetry tracing (needs requirements-telemetry.txt installed)
     if not enabled:
         return NullTelemetryPlugin()
 
@@ -67,8 +67,8 @@ def create_plugin() -> TelemetryPlugin:
         plugin = OTelPlugin()
 
         # Auto-initialize from environment variables
-        redact = os.environ.get("JAATO_TELEMETRY_REDACT_CONTENT", "true").lower() not in ("0", "false", "no")
-        exporter = os.environ.get("JAATO_TELEMETRY_EXPORTER", "otlp")
+        redact = os.environ.get("JAATO_TELEMETRY_REDACT_CONTENT", "true").lower() not in ("0", "false", "no")  # env: redact prompt/response content from spans (default true)
+        exporter = os.environ.get("JAATO_TELEMETRY_EXPORTER", "otlp")  # env: span exporter: otlp (default), file, console, or none
 
         plugin.initialize({
             "enabled": True,

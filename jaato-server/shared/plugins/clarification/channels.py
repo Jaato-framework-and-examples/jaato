@@ -14,7 +14,7 @@ def _get_timeout(default: float) -> float:
     JAATO_CLARIFICATION_TIMEOUT env var overrides default.
     A value of 0 or negative means no timeout (wait forever).
     """
-    env_timeout = os.environ.get("JAATO_CLARIFICATION_TIMEOUT")
+    env_timeout = os.environ.get("JAATO_CLARIFICATION_TIMEOUT")  # env: seconds to wait for a clarification answer; 0 or negative waits forever
     if env_timeout is not None:
         try:
             return float(env_timeout)

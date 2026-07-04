@@ -86,9 +86,9 @@ def resolve_urls() -> Tuple[Optional[str], Optional[str]]:
     ``TRITON_CONTROL_URL``) is honored — the other gets its
     ``TRITON_HOST``-derived value if HOST is set, else ``None``.
     """
-    openai = os.environ.get(ENV_OPENAI_URL)
-    control = os.environ.get(ENV_CONTROL_URL)
-    host = os.environ.get(ENV_HOST)
+    openai = os.environ.get(ENV_OPENAI_URL)  # env: Triton OpenAI-frontend URL (e.g. http://gpu-box:9000); required unless TRITON_HOST is set
+    control = os.environ.get(ENV_CONTROL_URL)  # env: Triton native HTTP URL (e.g. http://gpu-box:8000); required unless TRITON_HOST is set
+    host = os.environ.get(ENV_HOST)  # env: shorthand: derives both URLs from this host with canonical ports 9000/8000
 
     if openai is None and host:
         openai = _origin_for_host(host, DEFAULT_OPENAI_PORT)
@@ -103,12 +103,12 @@ def resolve_urls() -> Tuple[Optional[str], Optional[str]]:
 
 def resolve_model() -> Optional[str]:
     """Return the default model name, if configured."""
-    return os.environ.get(ENV_MODEL)
+    return os.environ.get(ENV_MODEL)  # env: default model name
 
 
 def resolve_context_length() -> Optional[int]:
     """Return the context length override, if configured."""
-    val = os.environ.get(ENV_CONTEXT_LENGTH)
+    val = os.environ.get(ENV_CONTEXT_LENGTH)  # env: context window (required — Triton's model config has no standard context field)
     if val:
         try:
             return int(val)
@@ -122,4 +122,4 @@ def resolve_api_token() -> Optional[str]:
 
     Returns None when Triton is running without an upstream auth proxy.
     """
-    return os.environ.get(ENV_API_TOKEN)
+    return os.environ.get(ENV_API_TOKEN)  # env: bearer token, only when fronted by an auth proxy

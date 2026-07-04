@@ -3148,11 +3148,11 @@ class SubagentPlugin:
 
         # Resolve trace paths to absolute so they work even if CWD changes later
         # (e.g., when parent's _in_workspace() context exits and restores CWD)
-        trace_log = os.environ.get("JAATO_TRACE_LOG")
+        trace_log = os.environ.get("JAATO_TRACE_LOG")  # env: debug — path of the shared trace log plugins and servers append diagnostic lines to
         if trace_log and not os.path.isabs(trace_log):
             os.environ["JAATO_TRACE_LOG"] = os.path.abspath(trace_log)
 
-        provider_trace_env = os.environ.get("JAATO_PROVIDER_TRACE")
+        provider_trace_env = os.environ.get("JAATO_PROVIDER_TRACE")  # env: debug — path of the provider request/response trace log (set via client config)
         if provider_trace_env and not os.path.isabs(provider_trace_env):
             os.environ["JAATO_PROVIDER_TRACE"] = os.path.abspath(provider_trace_env)
 

@@ -1270,7 +1270,7 @@ class AnthropicProvider(ModalityCapabilityMixin):
         # what the model receives and produces across framework changes.
         # The marker tokens PROVIDER_REQUEST_DUMP / PROVIDER_RESPONSE_DUMP
         # make this greppable in mixed daemon logs.
-        _dump_enabled = os.environ.get("JAATO_DUMP_PROVIDER_REQUEST", "").lower() in ("1", "true", "yes", "on")
+        _dump_enabled = os.environ.get("JAATO_DUMP_PROVIDER_REQUEST", "").lower() in ("1", "true", "yes", "on")  # env: debug — log full request/response dumps (greppable PROVIDER_*_DUMP markers)
         if _dump_enabled:
             try:
                 tools_in_kwargs = kwargs.get("tools") or []

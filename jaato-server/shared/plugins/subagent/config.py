@@ -535,8 +535,8 @@ def expand_variables(
         # confinement boundary, just not inside project-root subtree).
         # Operator-facing template var symmetric with workspaceRoot.
         'jdtlsStateRoot': _compute_jdtls_state_root(workspace_root),
-        'HOME': os.environ.get('HOME', ''),
-        'USER': os.environ.get('USER', ''),
+        'HOME': os.environ.get('HOME', ''),  # env: ambient — expanded as a template variable in profile/persona files
+        'USER': os.environ.get('USER', ''),  # env: ambient — expanded as a template variable in profile/persona files
     }
     # Merge with provided context (provided takes precedence)
     effective_context = {**default_context, **context}

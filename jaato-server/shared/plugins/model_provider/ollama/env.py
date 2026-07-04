@@ -21,7 +21,7 @@ def resolve_host() -> str:
     Returns:
         Ollama host URL (default: http://localhost:11434).
     """
-    return os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
+    return os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)  # env: Ollama server URL (default http://localhost:11434)
 
 
 def resolve_model() -> Optional[str]:
@@ -33,7 +33,7 @@ def resolve_model() -> Optional[str]:
     Returns:
         Model name if set, None otherwise.
     """
-    return os.environ.get("OLLAMA_MODEL")
+    return os.environ.get("OLLAMA_MODEL")  # env: default model name (e.g. qwen3:32b)
 
 
 def resolve_context_length() -> Optional[int]:
@@ -45,7 +45,7 @@ def resolve_context_length() -> Optional[int]:
     Returns:
         Context length in tokens if set, None otherwise.
     """
-    val = os.environ.get("OLLAMA_CONTEXT_LENGTH")
+    val = os.environ.get("OLLAMA_CONTEXT_LENGTH")  # env: override context length (default 32768)
     if val:
         try:
             return int(val)

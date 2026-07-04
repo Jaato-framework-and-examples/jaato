@@ -130,12 +130,12 @@ class KaggleBackend(NotebookBackend):
 
         # Method 4: Check environment directly as fallback
         import os
-        env_token = os.environ.get("KAGGLE_API_TOKEN")
+        env_token = os.environ.get("KAGGLE_API_TOKEN")  # env: Kaggle API token for the notebook kaggle backend
         if env_token:
             return {"Authorization": f"Bearer {env_token}"}
 
-        env_user = os.environ.get("KAGGLE_USERNAME")
-        env_key = os.environ.get("KAGGLE_KEY")
+        env_user = os.environ.get("KAGGLE_USERNAME")  # env: Kaggle username (paired with KAGGLE_KEY) for the notebook kaggle backend
+        env_key = os.environ.get("KAGGLE_KEY")  # env: Kaggle API key (paired with KAGGLE_USERNAME) for the notebook kaggle backend
         if env_user and env_key:
             import base64
             credentials = base64.b64encode(f"{env_user}:{env_key}".encode()).decode()

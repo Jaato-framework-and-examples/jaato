@@ -91,7 +91,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         # Cache last analysis for permission display
         self._last_analysis: Optional[AnalysisResult] = None
         # Notebook Tool Bindings state
-        self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "true").lower() not in ("0", "false", "no")
+        self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "true").lower() not in ("0", "false", "no")  # env: expose jaato tools as callable Python bindings inside notebooks (default true)
         self._tool_bindings_signatures: Optional[str] = None  # Cached for system instructions (not thread-local)
         # Tool bindings state (_tool_executor, _tool_bindings_bridge,
         # _tool_bindings_module) is stored in thread-local via properties

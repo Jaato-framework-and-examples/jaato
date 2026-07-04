@@ -1929,7 +1929,7 @@ Examples:
             pass  # Best-effort; ctypes may not be available
 
     # Daemonize if requested (skip if already daemonized on Windows)
-    if args.daemon and not os.environ.get("JAATO_DAEMONIZED"):
+    if args.daemon and not os.environ.get("JAATO_DAEMONIZED"):  # env: internal — set by the daemonizer for its re-exec'd child; not an operator knob
         print(f"Starting Jaato server as daemon...")
         print(f"  PID file: {args.pid_file}")
         print(f"  Log file: {args.log_file}")

@@ -53,7 +53,7 @@ def select_backend(max_width: int = 80) -> Optional[GraphicsBackend]:
         available (caller should fall back to source display).
     """
     # User override
-    override = os.environ.get("JAATO_MERMAID_BACKEND", "").lower()
+    override = os.environ.get("JAATO_MERMAID_BACKEND", "").lower()  # env: force mermaid render backend: kitty/iterm/sixel, or off to disable rendering
     if override == "off":
         return None
 

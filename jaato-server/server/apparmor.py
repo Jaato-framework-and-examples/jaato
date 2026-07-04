@@ -2057,7 +2057,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         # AppArmor sub-profiles do NOT inherit base rules — every allow
         # and deny must be redeclared.  We mirror the base body
         # verbatim and append the hat-specific read-denies on
-        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")
+        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")  # env: generate AppArmor profiles in complain (log-only) mode; confinement debugging aid
         profile_flags = "attach_disconnected, complain" if complain else "attach_disconnected"
         # v22 (2026-05-16): propagate complain to sub-profiles.  AppArmor
         # sub-profiles do NOT inherit the parent's flag set, so

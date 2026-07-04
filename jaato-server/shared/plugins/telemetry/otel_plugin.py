@@ -435,7 +435,7 @@ class OTelPlugin:
         # Build resource attributes starting with service name
         service_name = config.get(
             "service_name",
-            os.environ.get("OTEL_SERVICE_NAME", "jaato")
+            os.environ.get("OTEL_SERVICE_NAME", "jaato")  # env: service name stamped on spans (default jaato)
         )
         resource_attrs = {SERVICE_NAME: service_name}
 
@@ -497,7 +497,7 @@ class OTelPlugin:
             # File exporter - writes OTLP JSON to a file
             file_path = config.get(
                 "file_path",
-                os.environ.get("JAATO_TELEMETRY_FILE", "/tmp/jaato-traces.jsonl")
+                os.environ.get("JAATO_TELEMETRY_FILE", "/tmp/jaato-traces.jsonl")  # env: file-exporter output path (default /tmp/jaato-traces.jsonl)
             )
             service_name = config.get(
                 "service_name",
@@ -509,7 +509,7 @@ class OTelPlugin:
             # Get endpoint from config or environment
             endpoint = config.get(
                 "endpoint",
-                os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+                os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")  # env: OTLP collector endpoint (unset = OTLP export skipped)
             )
             if not endpoint:
                 # No endpoint configured, skip OTLP export
@@ -517,7 +517,7 @@ class OTelPlugin:
 
             # Parse headers from config or environment
             headers = config.get("headers", {})
-            env_headers = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+            env_headers = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")  # env: comma-separated key=value headers for the OTLP exporter
             if env_headers:
                 for pair in env_headers.split(","):
                     if "=" in pair:

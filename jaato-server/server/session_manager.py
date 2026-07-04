@@ -1974,8 +1974,8 @@ class SessionManager:
             provider_name = "anthropic"
 
         try:
-            project_val = os.environ.get("PROJECT_ID", "") or ""
-            location_val = os.environ.get("LOCATION", "") or ""
+            project_val = os.environ.get("PROJECT_ID", "") or ""  # env: GCP project ID for Google GenAI / Vertex AI
+            location_val = os.environ.get("LOCATION", "") or ""  # env: Vertex AI region for Google GenAI (e.g. us-central1 or global)
         except Exception:  # noqa: BLE001
             project_val = ""
             location_val = ""
@@ -8190,7 +8190,7 @@ class SessionManager:
         cid = f"ephemeral-{uuid.uuid4().hex[:12]}"
         in_process_client_id = f"_ephemeral:{cid}"
         try:
-            timeout_s = float(os.environ.get("JAATO_EPHEMERAL_TIMEOUT_S", "1800"))
+            timeout_s = float(os.environ.get("JAATO_EPHEMERAL_TIMEOUT_S", "1800"))  # env: seconds an ephemeral relay session may run before the daemon gives up (default 1800)
         except ValueError:
             timeout_s = 1800.0
 
