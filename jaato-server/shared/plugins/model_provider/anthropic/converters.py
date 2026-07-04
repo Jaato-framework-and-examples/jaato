@@ -99,7 +99,7 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
         # Result can be string or dict - Anthropic expects string or list of blocks.
         # render_result_for_model serializes the STRUCTURED result and appends
         # the model-facing steering suffix (see ToolResult.model_suffix).
-        content: Any = render_result_for_model(fr.result, fr.model_suffix)
+        content: Any = render_result_for_model(fr.result, fr.model_suffix, untrusted=fr.untrusted, untrusted_source=fr.untrusted_source)
 
         block: Dict[str, Any] = {
             "type": "tool_result",
@@ -396,7 +396,7 @@ def message_from_anthropic(msg: Dict[str, Any]) -> Message:
 def tool_result_to_anthropic(result: ToolResult) -> Dict[str, Any]:
     """Convert ToolResult to Anthropic tool_result content block."""
     # Serialize the STRUCTURED result + append the model-facing steering suffix.
-    content: Any = render_result_for_model(result.result, result.model_suffix)
+    content: Any = render_result_for_model(result.result, result.model_suffix, untrusted=result.untrusted, untrusted_source=result.untrusted_source)
 
     block: Dict[str, Any] = {
         "type": "tool_result",

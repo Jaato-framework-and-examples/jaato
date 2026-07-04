@@ -94,7 +94,15 @@ def part_to_api(part: Part) -> Optional[Dict[str, Any]]:
 
     if part.function_response is not None:
         fr = part.function_response
-        response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
+        if fr.untrusted:
+            # Untrusted external content (web_fetch/web_search/MCP): wrap in the
+            # boundary so the model treats it as data, not instructions.
+            from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+            _text = fr.result if isinstance(fr.result, str) else json.dumps(fr.result)
+            response = {"untrusted_external_content":
+                        wrap_untrusted_content(_text, fr.untrusted_source)}
+        else:
+            response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
         # Dict-response provider: deliver the model-facing steering suffix as a
         # reserved key so the model still sees it, while the structured result
         # (and the ledger, which reads history not this converter output) stays

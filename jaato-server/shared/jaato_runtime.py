@@ -1569,6 +1569,14 @@ class JaatoRuntime:
         if _TURN_SUMMARY_INSTRUCTION:
             result_parts.append(_TURN_SUMMARY_INSTRUCTION)
 
+        # 7. Untrusted-content boundary (security baseline).  Always included —
+        # web_fetch/web_search/MCP tools are deferred-loaded, so gating on tool
+        # presence would drop the instruction for a tool the model can still
+        # discover + call.  Teaches the model to treat boundary-wrapped tool
+        # results as data, not instructions (indirect-prompt-injection defense).
+        from jaato_sdk.plugins.model_provider.types import untrusted_boundary_instruction
+        result_parts.append(untrusted_boundary_instruction())
+
         return "\n\n".join(result_parts)
 
     def list_available_models(

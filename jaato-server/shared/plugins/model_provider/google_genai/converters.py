@@ -243,6 +243,14 @@ def tool_result_to_sdk_part(result: ToolResult) -> get_types().Part:
     response = result.result if isinstance(result.result, dict) else {"result": result.result}
     if result.is_error:
         response = {"error": str(result.result)}
+    elif result.untrusted:
+        # Untrusted external content (web_fetch/web_search/MCP): deliver the
+        # result as a single boundary-wrapped field so the model treats it as
+        # data, not instructions (indirect-prompt-injection mitigation).
+        from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+        _text = result.result if isinstance(result.result, str) else json.dumps(result.result)
+        response = {"untrusted_external_content":
+                    wrap_untrusted_content(_text, result.untrusted_source)}
     # Dict-response provider: deliver the model-facing steering suffix as a
     # reserved key (model still sees it; the structured result + ledger stay
     # clean — the ledger reads history, not this converter output).

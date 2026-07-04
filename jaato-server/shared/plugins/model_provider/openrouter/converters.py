@@ -282,7 +282,7 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
         tool_msgs: List[Dict[str, Any]] = []
         image_followups: List[Dict[str, Any]] = []
         for fr in function_responses:
-            result_str = render_result_for_model(fr.result, fr.model_suffix)
+            result_str = render_result_for_model(fr.result, fr.model_suffix, untrusted=fr.untrusted, untrusted_source=fr.untrusted_source)
             tool_msgs.append({
                 "role": "tool",
                 "tool_call_id": fr.call_id,

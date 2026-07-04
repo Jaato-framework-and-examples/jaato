@@ -7009,6 +7009,17 @@ NOTES
         # Executor returns (ok, result_dict) tuple, or a bare value.
         ok, result_data = _split_executor_result_impl(executor_result)
 
+        # Mark results from untrusted-content tools (web_fetch / web_search /
+        # MCP) so the provider converter wraps the model-facing text in the
+        # untrusted-content boundary — indirect-prompt-injection mitigation.
+        # See TRAIT_UNTRUSTED_CONTENT.
+        from jaato_sdk.plugins.model_provider.types import TRAIT_UNTRUSTED_CONTENT
+        _untrusted = bool(
+            self._runtime.registry
+            and TRAIT_UNTRUSTED_CONTENT in self._runtime.registry.get_tool_traits(fc.name)
+        )
+        _untrusted_source = fc.name if _untrusted else None
+
         # Check for multimodal result
         attachments: Optional[List[Attachment]] = None
         if isinstance(result_data, dict) and result_data.get('_multimodal'):
@@ -7043,6 +7054,8 @@ NOTES
                 is_error=not ok,
                 attachments=attachments,
                 enrichment_metadata=enrichment_metadata,
+                untrusted=_untrusted,
+                untrusted_source=_untrusted_source,
             )
 
         # Normalize the payload into the model-facing form: wrap non-dicts,
@@ -7069,6 +7082,8 @@ NOTES
             is_error=not ok,
             attachments=attachments,
             enrichment_metadata=enrichment_metadata,
+            untrusted=_untrusted,
+            untrusted_source=_untrusted_source,
         )
 
     def _inject_synthetic_cancelled_results(self, fcs: List[FunctionCall]) -> None:
