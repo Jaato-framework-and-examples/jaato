@@ -443,3 +443,61 @@ operator-driven gate as §5.10c/d.  Recommended order:
 At each sub-commit the deployment can be rolled back independently
 (the proxy is opt-in until §5.11d; §5.11d is the irreversible
 network-policy change but lands with the real-host gate).
+
+## 11. Real-host verification — §5.11d approach REJECTED (2026-07-04)
+
+The §6/§9 open question ("does AppArmor `peer=(ip=...)` enforce per-host
+egress?") was verified on the real gate host and the answer is **no** —
+the AppArmor approach for §5.11d is not viable and is replaced.
+
+**Host:** Ubuntu, kernel `6.8.0-85-generic`, `apparmor_parser 4.0.1`,
+AppArmor enabled.  (`sudo NOPASSWD` is scoped to `apparmor_parser` only,
+matching the daemon's assumption — profiles can be loaded, so enforcement
+was tested directly with `aa-exec`.)
+
+**Findings (empirical, `apparmor_parser -Q` + load + `aa-exec` enforcement):**
+
+1. `network inet stream peer=(ip=127.0.0.1),` **parses**, but a bare-IP peer
+   only — **CIDR is rejected** at parse: `network invalid ip='0.0.0.0/0'`
+   (and `127.0.0.0/8`).  So the doc's `peer=(ip=10.0.0.0/8)` (§4.4) can never
+   have worked.
+2. **`peer=(ip=...)` is NOT ENFORCED by this kernel.**  A profile allowing
+   only `peer=(ip=127.0.0.1)` (no other allow, `deny raw/dgram`) let a
+   confined process connect to **8.8.8.8:53** anyway.  Cross-checks: deny at
+   family level (`deny network inet stream,`) blocks *everything* incl.
+   loopback; a profile with no network rule at all denies everything; a
+   `deny ... peer=(ip=8.8.8.8),` denies *all* inet stream.  Consistent
+   conclusion: the userspace parser accepts `peer=(ip=)` but the kernel
+   silently drops the qualifier and mediates only at
+   `network <family> <type>` granularity.
+3. **Kernel capability confirms it:** the *active* feature set
+   `/sys/kernel/security/apparmor/features/network/` exposes only `af_mask`
+   + `af_unix` — **no `af_inet`**.  (A `network_v8/af_inet` dir exists but is
+   not the active mediation — enforcement proves it isn't applied.)
+
+**Consequence:** there is no way to express "outbound TCP to loopback only"
+via the AppArmor network template on stock Ubuntu 24.04.  Writing it as an
+allow grants all TCP; writing it as a deny blocks the proxy too.  **§5.11d as
+designed is dead on this class of host.**  The proxy (§5.11a/b/c/e) still
+*confines cooperative clients* (everything honoring `HTTPS_PROXY`), but is not
+a hard, non-bypassable boundary without a different enforcement layer.
+
+**Replacement — cgroup-v2-scoped netfilter egress (verified feasible):**
+- `nftables v1.0.9` present; cgroup v2 mounted; **jaato already creates a
+  per-session cgroup** (`server/cgroups.py`) — so an `nft` rule matching
+  `socket cgroupv2` can allow OUTPUT only to `127.0.0.1` (the proxy) and drop
+  the rest, per session, at the netfilter layer — independent of AppArmor's
+  network-mediation version.  This is the doc's §6.1/§6.4 fallback, now the
+  primary path.
+- eBPF `cgroup/connect4` is the alternative but is blocked here
+  (`kernel.unprivileged_bpf_disabled=2` → needs root/CAP_BPF).
+- **New gate:** the cgroup-nft approach needs `nft` added to the daemon's
+  sudo NOPASSWD scope (today only `apparmor_parser` is granted), plus a
+  per-session install/teardown of the cgroup-matched rule wired alongside the
+  existing egress proxy lifecycle.  This is §5.11d-v2 and needs its own design
+  pass + the sudo-scope change before implementation.
+
+**Net:** §5.11a/b/c/e stand.  §5.11d pivots from AppArmor to cgroup-nft.  The
+"teleport" turned the doc's biggest open question into an observed fact:
+per-IP AppArmor egress is not portable on current Ubuntu, so the boundary
+must live at netfilter/cgroup, not in the AppArmor profile.
