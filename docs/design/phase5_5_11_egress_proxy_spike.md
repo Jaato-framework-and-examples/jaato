@@ -515,3 +515,57 @@ a hard, non-bypassable boundary without a different enforcement layer.
 "teleport" turned the doc's biggest open question into an observed fact:
 per-IP AppArmor egress is not portable on current Ubuntu, so the boundary
 must live at netfilter/cgroup, not in the AppArmor profile.
+
+### §5.11d-v2 cgroup-nft — PROVEN on the gate host (2026-07-04)
+
+The replacement mechanism was enforcement-tested on the same host
+(`scripts/verify_egress_nft.sh`, self-cleaning; run as root):
+
+- **Test A** — a process moved INTO a per-session cgroup:
+  `loopback 127.0.0.1: CONNECTED`, **`external 8.8.8.8: BLOCKED (refused)`**.
+  The non-bypassability proof AppArmor could not give — enforced at netfilter
+  regardless of whether the process honours `HTTPS_PROXY`.
+- **Test B** — a process OUTSIDE the cgroup: both CONNECTED.  The rule is
+  correctly cgroup-scoped; the host and other processes are untouched.
+
+`socket cgroupv2 level N` loaded cleanly on kernel 6.8.0-85 / nftables 1.0.9.
+
+**The working ruleset** (per session; `<cg>` is the session's cgroup path
+relative to the cgroup2 root, `<port>` the egress proxy's loopback port):
+
+```
+table inet jaato_egress_<session_id> {
+  chain out {
+    type filter hook output priority 0; policy accept;
+    socket cgroupv2 level <N> "<cg>" jump gate
+  }
+  chain gate {
+    ip  daddr 127.0.0.1 tcp dport <port> accept   # the egress proxy
+    ip6 daddr ::1        accept
+    # (optional) ip daddr 127.0.0.53 accept        # local stub resolver, if DNS wanted
+    counter reject
+  }
+}
+```
+
+Non-matching host traffic falls through `policy accept`, so only the session's
+cgroup is constrained.  Deleting the table on teardown removes the rule.
+
+**Daemon integration surface (§5.11d-v2 implementation):**
+1. `EgressNftManager` (mirrors `EgressProxyManager`): `install(session_id,
+   cgroup_path, proxy_port)` renders + loads the table via `sudo nft -f -`;
+   `remove(session_id)` deletes it.  Idempotent.
+2. Wire into the egress-proxy lifecycle: when the proxy starts for a session
+   that HAS a per-session cgroup, also install the nft rule; on teardown,
+   remove it.
+3. **Two prerequisites**: (a) `nft` added to the daemon's sudo NOPASSWD scope
+   (today only `apparmor_parser` — mirror that grant); (b) the session must
+   have a per-session cgroup (`server/cgroups.py` — present for WS/cgroup-
+   attached sessions).  Sessions without a cgroup fall back to proxy-only
+   "cooperative" confinement — document the tier.
+4. DNS: v1 does not allow the stub resolver in the gate, so the confined
+   process cannot resolve names directly — all name resolution goes through
+   the proxy's CONNECT (hostname passed to the proxy, resolved proxy-side).
+   This CLOSES direct DNS exfil (a bonus over the AppArmor plan's partial
+   mitigation).  A `allow_local_resolver` knob can re-open `127.0.0.53` if a
+   deployment needs runner-side DNS.
