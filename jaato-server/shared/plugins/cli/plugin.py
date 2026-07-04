@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
-from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    EditableContent,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, pip_apparmor_rules,
@@ -507,7 +511,7 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                 "required": ["command"]
             },
             category="system",
-            discoverability="discoverable",
+            discoverability=DISCOVERABILITY_DEFERRED,
             editable=EditableContent(
                 parameters=["command"],
                 format="text",

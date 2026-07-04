@@ -21,6 +21,7 @@ from jaato_sdk.plugins.model_provider.types import (
     EditableContent,
     ToolSchema,
     TRAIT_GREPPABLE_CONTENT,
+    DISCOVERABILITY_DEFERRED,
 )
 
 from .auth import AuthError, AuthManager
@@ -305,7 +306,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["source", "alias"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="list_endpoints",
@@ -336,7 +337,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["service"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="get_endpoint_schema",
@@ -363,7 +364,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["service", "method", "path"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="call_service",
@@ -459,7 +460,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["method"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["method", "path", "url", "query", "headers", "body"],
                     format="json",
@@ -517,7 +518,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["method"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="save_schema",
@@ -554,7 +555,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["service", "name", "schema"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="list_schemas",
@@ -572,7 +573,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="import_bruno_collection",
@@ -599,7 +600,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["path", "service_name"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="configure_service_auth",
@@ -639,7 +640,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["service", "auth"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

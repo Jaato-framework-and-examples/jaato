@@ -19,7 +19,11 @@ from jaato_sdk.plugins.base import (
     UserCommand, CommandParameter, CommandCompletion,
     ToolResultEnrichmentResult, HelpLines, PluginSetting
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_FILE_WRITER,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..subagent.config import expand_variables
 from .lsp_client import (
     LSPClient, ServerConfig, Location, Diagnostic, Hover,
@@ -1433,7 +1437,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["symbol"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_find_references",
@@ -1462,7 +1466,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["symbol"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_hover",
@@ -1486,7 +1490,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["symbol"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_get_diagnostics",
@@ -1508,7 +1512,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["file_path"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_document_symbols",
@@ -1524,7 +1528,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["file_path"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_workspace_symbols",
@@ -1540,7 +1544,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["query"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_rename_symbol",
@@ -1573,7 +1577,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["symbol", "new_name"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_FILE_WRITER}),
             ),
             ToolSchema(
@@ -1615,7 +1619,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["file_path", "start_line", "start_column", "end_line", "end_column"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_apply_code_action",
@@ -1656,7 +1660,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["file_path", "start_line", "start_column", "end_line", "end_column", "action_title"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_FILE_WRITER}),
             ),
         ]

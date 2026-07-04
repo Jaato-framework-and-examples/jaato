@@ -199,7 +199,7 @@ def _register_client_tools_on_runner(registry, client_tools) -> None:
     executor.  Entries are schema dicts (name/description/parameters/category)
     ferried in ``envelope.client_tools``.
     """
-    from jaato_sdk.plugins.model_provider.types import ToolSchema
+    from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
     for ct in client_tools:
         name = ct.get("name")
         if not name:
@@ -216,7 +216,7 @@ def _register_client_tools_on_runner(registry, client_tools) -> None:
             # explicit "discoverability" from the dict to opt a tool back to
             # "discoverable" (a self-extending agent with many tools that
             # would bloat the eager surface).
-            discoverability=ct.get("discoverability", "core"),
+            discoverability=ct.get("discoverability", DISCOVERABILITY_EAGER),
         )
         registry.register_core_tool(
             schema, _make_client_tool_forwarder(registry, name),

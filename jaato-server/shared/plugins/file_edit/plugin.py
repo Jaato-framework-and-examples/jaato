@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from shared.ui_utils import ellipsize_path, ellipsize_path_pair
 from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE, DISCOVERABILITY_EAGER, DISCOVERABILITY_DEFERRED
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from .backup import BackupManager
 from .diff_utils import (
@@ -863,7 +863,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -935,7 +935,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["old", "new", "new_content"],
                     format="diff",
@@ -972,7 +972,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path", "content"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["content"],
                     format="text",
@@ -995,7 +995,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1022,7 +1022,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["source_path", "destination_path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1049,7 +1049,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["source_path", "destination_path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1067,7 +1067,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1130,7 +1130,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["operations"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1165,7 +1165,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["pattern", "replacement", "paths"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1187,7 +1187,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1204,7 +1204,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]

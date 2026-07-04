@@ -15,7 +15,11 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .token_accounting import TokenLedger
 from .instruction_token_cache import InstructionTokenCache
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from .plugins.model_provider.base import ProviderConfig
 from .plugins.model_provider import load_provider
 from .plugins.telemetry import TelemetryPlugin, create_plugin as create_telemetry_plugin
@@ -1291,7 +1295,7 @@ class JaatoRuntime:
             try:
                 schemas = plugin.get_tool_schemas()
                 for schema in schemas:
-                    if getattr(schema, 'discoverability', None) == 'core':
+                    if getattr(schema, 'discoverability', None) == DISCOVERABILITY_EAGER:
                         core_plugins.append(plugin_name)
                         break  # Found one core tool, plugin qualifies
             except Exception:
@@ -1379,7 +1383,7 @@ class JaatoRuntime:
                     # Filter to core tools only - others discovered via introspection
                     plugin_schemas = [
                         s for s in plugin_schemas
-                        if getattr(s, 'discoverability', 'discoverable') == 'core'
+                        if getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                     ]
                 schemas.extend(plugin_schemas)
 
@@ -1390,7 +1394,7 @@ class JaatoRuntime:
                 # Permission tools should be core (always available)
                 permission_schemas = [
                     s for s in permission_schemas
-                    if getattr(s, 'discoverability', 'discoverable') == 'core'
+                    if getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                 ]
             schemas.extend(permission_schemas)
 

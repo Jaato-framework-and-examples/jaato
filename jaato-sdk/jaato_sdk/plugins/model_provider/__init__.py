@@ -21,10 +21,14 @@ from .types import (
     ToolSchema,
     TOOL_CATEGORIES,
     TOOL_DISCOVERABILITY,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
 )
 
 __all__ = [
     "TRAIT_FILE_WRITER",
+    "DISCOVERABILITY_EAGER",
+    "DISCOVERABILITY_DEFERRED",
     "Attachment",
     "CancelledException",
     "CancelToken",
@@ -41,4 +45,6 @@ __all__ = [
     "ToolSchema",
     "TOOL_CATEGORIES",
     "TOOL_DISCOVERABILITY",
+    "DISCOVERABILITY_EAGER",
+    "DISCOVERABILITY_DEFERRED",
 ]

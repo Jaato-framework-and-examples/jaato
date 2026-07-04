@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
 from . import introspect
 
 Rendered = Tuple[Dict[str, Any], str]
@@ -357,7 +358,7 @@ def plugins() -> Rendered:
     data = {}
     for name in sorted(PL):
         pi = PL[name]
-        core = sum(1 for t in pi.tools if t.discoverability == "core")
+        core = sum(1 for t in pi.tools if t.discoverability == DISCOVERABILITY_EAGER)
         disc = len(pi.tools) - core
         data[name] = {
             "kind": pi.kind, "tier": pi.tier,
@@ -387,9 +388,9 @@ def plugin(name: str) -> Rendered:
     if pi.tools:
         lines.append("  tools:")
         for t in pi.tools:
-            badge = "core" if t.discoverability == "core" else "disc"
+            badge = "core" if t.discoverability == DISCOVERABILITY_EAGER else "disc"
             lines.append(f"    [{badge}] {t.name:28} {t.description}")
-        if any(t.discoverability != "core" for t in pi.tools):
+        if any(t.discoverability != DISCOVERABILITY_EAGER for t in pi.tools):
             lines.append(
                 f"  note: [core] tools are in the model's INITIAL schema; [disc] "
                 f"are DEFERRED — the model reaches them by calling list_tools / "

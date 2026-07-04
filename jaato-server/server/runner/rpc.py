@@ -63,7 +63,11 @@ from shared.framing import (
     write_frame_sync,
 )
 
-from jaato_sdk.plugins.model_provider.types import CancelToken
+from jaato_sdk.plugins.model_provider.types import (
+    CancelToken,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 
 from .envelope import (
     KIND_CANCEL,
@@ -4074,7 +4078,7 @@ class RunnerRPC:
                         category=ct.get("category") or None,
                         # Default EAGER (see _register_client_tools_on_runner);
                         # honor an explicit discoverability from the client.
-                        discoverability=ct.get("discoverability", "core"),
+                        discoverability=ct.get("discoverability", DISCOVERABILITY_EAGER),
                     ))
         return True, {
             "registered": [
@@ -4174,7 +4178,7 @@ class RunnerRPC:
                     else None
                 ),
                 "discoverability": str(
-                    getattr(s, "discoverability", "discoverable")
+                    getattr(s, "discoverability", DISCOVERABILITY_DEFERRED)
                     or "discoverable",
                 ),
                 "editable": editable_serialized,

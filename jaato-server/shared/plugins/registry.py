@@ -26,7 +26,11 @@ from jaato_sdk.plugins.base import (
     model_matches_requirements,
     OutputCallback,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from .streaming.protocol import StreamingCapable
 from .enrichment_formatter import (
     EnrichmentNotification,
@@ -1850,7 +1854,7 @@ class PluginRegistry:
                 core_schemas = [
                     s for s in plugin_schemas
                     if s.name not in self._disabled_tools
-                    and getattr(s, 'discoverability', 'discoverable') == 'core'
+                    and getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                 ]
                 schemas.extend(core_schemas)
 
@@ -1867,7 +1871,7 @@ class PluginRegistry:
         # Add core tool schemas that have discoverability='core' (excluding disabled)
         for name, schema in self._core_tools.items():
             if name not in self._disabled_tools:
-                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     schemas.append(schema)
 
         return schemas
@@ -1990,7 +1994,7 @@ class PluginRegistry:
             return False
         try:
             for schema in plugin.get_tool_schemas():
-                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     return True
         except Exception:
             pass

@@ -22,7 +22,11 @@ from .config import (
     validate_profile,
 )
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_FRAMEWORK_LEVEL,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..gc import load_gc_plugin, GCConfig
 from ...message_queue import SourceType
 
@@ -792,7 +796,7 @@ class SubagentPlugin:
                     "required": ["task"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 # Subagent initialization needs broad filesystem read
                 # access (plugin discovery, agent definitions, skill
                 # files) that the workspace AppArmor profile doesn't
@@ -832,7 +836,7 @@ class SubagentPlugin:
                     "required": ["subagent_id", "message"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='close_subagent',
@@ -859,7 +863,7 @@ class SubagentPlugin:
                     "required": ["subagent_id"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='cancel_subagent',
@@ -888,7 +892,7 @@ class SubagentPlugin:
                     "required": ["subagent_id"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='list_active_subagents',
@@ -920,7 +924,7 @@ class SubagentPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='list_subagent_profiles',
@@ -934,7 +938,7 @@ class SubagentPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='validateProfile',
@@ -954,7 +958,7 @@ class SubagentPlugin:
                     "required": ["path"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
         return declarations

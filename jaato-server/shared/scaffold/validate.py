@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shared.plugins.model_provider.base import KNOB_LAYERS
+from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
 from . import introspect
 
 # Layer names that nest under plugin_configs.<provider> as sub-dicts.
@@ -149,7 +150,7 @@ def validate_profile(
             continue
         scope = (getattr(profile, "tool_scopes", None) or {}).get(plug)
         for t in pi.tools:
-            if t.discoverability == "core":
+            if t.discoverability == DISCOVERABILITY_EAGER:
                 continue
             if scope is not None and t.name not in scope:
                 continue  # scoped out entirely — not exposed at all

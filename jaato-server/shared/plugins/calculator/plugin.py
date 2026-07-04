@@ -8,6 +8,9 @@ import tempfile
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable
 from jaato import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    DISCOVERABILITY_DEFERRED,
+)
 from shared.trace import trace as _trace_write
 
 
@@ -91,7 +94,7 @@ class CalculatorPlugin:
                     "required": ["a", "b"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="subtract",
@@ -111,7 +114,7 @@ class CalculatorPlugin:
                     "required": ["a", "b"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="multiply",
@@ -131,7 +134,7 @@ class CalculatorPlugin:
                     "required": ["a", "b"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="divide",
@@ -151,7 +154,7 @@ class CalculatorPlugin:
                     "required": ["a", "b"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="calculate",
@@ -167,7 +170,7 @@ class CalculatorPlugin:
                     "required": ["expression"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             )
         ]
 

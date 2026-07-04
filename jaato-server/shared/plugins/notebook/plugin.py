@@ -22,7 +22,7 @@ from enum import Enum
 from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
 from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .types import ExecutionStatus, OutputType
 from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
@@ -489,7 +489,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "required": ["code"]
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_create",
@@ -513,7 +513,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "required": ["name"]
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_variables",
@@ -528,7 +528,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     },
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_reset",
@@ -543,7 +543,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     },
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_list",
@@ -553,7 +553,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "properties": {},
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_backends",
@@ -563,7 +563,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "properties": {},
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
         ]
 

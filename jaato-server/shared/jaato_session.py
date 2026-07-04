@@ -78,6 +78,8 @@ from jaato_sdk.plugins.model_provider.types import (
     Attachment,
     CancelledException,
     CancelToken,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
     FinishReason,
     FunctionCall,
     Message,
@@ -230,7 +232,7 @@ def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
     for sc in exposed_schemas:
         if sc.name in _INTROSPECTION_TOOL_NAMES:
             continue
-        if getattr(sc, "discoverability", "discoverable") == "core":
+        if getattr(sc, "discoverability", DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
             continue  # eager — not something to "discover"
         pname = plugin_of(sc.name)
         if pname is None or pname not in profile or pname in pre:

@@ -41,6 +41,7 @@ from typing import Any, Callable, Dict, List, Optional
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TRAIT_GREPPABLE_CONTENT,
+    DISCOVERABILITY_DEFERRED,
 )
 from jaato_sdk.plugins.base import ToolResultEnrichmentResult
 
@@ -232,7 +233,7 @@ class ResultGrepPlugin:
                     "required": ["pattern"],
                 },
                 category="search",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="grep_mode_stop",
@@ -242,7 +243,7 @@ class ResultGrepPlugin:
                 ),
                 parameters={"type": "object", "properties": {}},
                 category="search",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="grep_mode_status",
@@ -253,7 +254,7 @@ class ResultGrepPlugin:
                 ),
                 parameters={"type": "object", "properties": {}},
                 category="search",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
