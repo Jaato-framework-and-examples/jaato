@@ -1832,6 +1832,12 @@ Examples:
             # Show socket info
             if os.path.exists(DEFAULT_SOCKET_PATH):
                 print(f"  IPC socket: {DEFAULT_SOCKET_PATH}")
+            # Surface the RUNNING daemon's active JAATO_* overrides (read from
+            # its own /proc/<pid>/environ, not this shell's), secrets redacted.
+            from server.env_report import format_overrides, read_proc_environ
+            daemon_env = read_proc_environ(pid)
+            if daemon_env:
+                print(f"  {format_overrides(daemon_env)}")
             sys.exit(0)
         else:
             print("Jaato server is not running")
@@ -1933,6 +1939,12 @@ Examples:
             print(f"  WebSocket: {args.web_socket}")
         if args.dashboard_port:
             print(f"  Dashboard: :{args.dashboard_port}")
+        # Surface the operator's active JAATO_* env overrides at startup so a
+        # feature flag set in a previous session isn't silently forgotten.
+        # (Full catalog of every framework env var lives in
+        # ``jaato-scaffold explain env``.)
+        from server.env_report import format_overrides
+        print(f"  {format_overrides(dict(os.environ))}")
         daemonize(args.log_file)
 
     # Reconfigure logging for daemon/background mode with rotating file handler
