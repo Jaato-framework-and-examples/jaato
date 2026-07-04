@@ -6820,6 +6820,15 @@ class SessionManager:
                 # Shutdown the server
                 session.server.shutdown()
 
+        # Stop the session's egress proxy if one was started (Phase 5 §5.11).
+        # Idempotent + guarded — a no-op for sessions without an allowlist.
+        try:
+            from server.egress_proxy import wireup as _egress_wireup
+            _egress_wireup.egress_teardown(session_id)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("egress proxy teardown failed for %s", session_id,
+                           exc_info=True)
+
         # Delete from disk
         storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
         deleted = self._session_plugin.delete(session_id, storage_dir=storage_dir)
@@ -8344,6 +8353,13 @@ class SessionManager:
         handler = get_session_handler()
         if handler:
             handler.close()
+
+        # Stop every per-session egress proxy (Phase 5 §5.11).
+        try:
+            from server.egress_proxy import wireup as _egress_wireup
+            _egress_wireup.shutdown_all()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("egress proxy shutdown_all failed", exc_info=True)
 
         self._session_plugin.shutdown()
         logger.info("SessionManager shutdown complete")
