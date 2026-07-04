@@ -120,6 +120,35 @@ Settings with `env_var` can be overridden by environment variables.
 }
 ```
 
+**Security knobs.** `web_fetch` also exposes guards against credential
+exfiltration and SSRF. A `${VAR}` in a request header is expanded only when the
+var is bound to the request's host; `${VAR}` in the URL is refused; and fetches
+to loopback / link-local (cloud metadata) / private addresses are blocked. In
+YAML:
+
+```yaml
+plugin_configs:
+  web_fetch:
+    # Refuse ${VAR} in the URL (default). Credentials belong in headers.
+    allow_url_var_expansion: false
+    # SSRF guard (default true): block loopback / 169.254.169.254 / private.
+    block_private_networks: true
+    # Bind each secret to the host(s) it may be sent to. Fail-closed: an
+    # unlisted var, a wrong host, or an unset env var refuses the fetch.
+    secret_host_bindings:
+      GITHUB_TOKEN: ["api.github.com", "*.github.com"]
+      COMPANY_API_TOKEN: ["api.internal.company.com"]
+    # Extra hosts exempt from the SSRF private-address block (internal APIs on
+    # private IPs). Binding hosts are already exempt automatically.
+    allowed_internal_hosts: ["api.internal.company.com"]
+```
+
+A complete, validatable profile lives at
+[`docs/examples/profiles/web-fetch-secure.yaml`](examples/profiles/web-fetch-secure.yaml).
+Introspect the knobs against the live registry with
+`jaato-scaffold explain plugin web_fetch` (add `--json` for the machine-readable
+schema), and lint the profile with `jaato-scaffold validate <file>`.
+
 ### references
 
 ```json
