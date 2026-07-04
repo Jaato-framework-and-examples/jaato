@@ -176,7 +176,14 @@ class MCPClientManager:
         self._errlog = errlog if errlog is not None else sys.stderr
         # Operator-declared secret name globs stripped from every server
         # subprocess's inherited environment (see ServerConfig.to_stdio_params).
-        self._scrub_secret_env: Sequence[str] = tuple(scrub_secret_env or ())
+        # Defensively normalize the public knob: a lone string is a 1-item tuple
+        # (NOT split into characters, which would disable scrubbing), and every
+        # entry is coerced to str (a non-str would raise in fnmatch).
+        if isinstance(scrub_secret_env, str):
+            scrub_secret_env = (scrub_secret_env,)
+        self._scrub_secret_env: Sequence[str] = tuple(
+            str(p) for p in (scrub_secret_env or ())
+        )
 
     @property
     def servers(self) -> list[str]:

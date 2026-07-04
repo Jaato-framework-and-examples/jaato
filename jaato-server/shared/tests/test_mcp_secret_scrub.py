@@ -65,3 +65,25 @@ def test_manager_threads_patterns_into_serverconfig():
 def test_manager_default_is_empty():
     mgr = MCPClientManager()
     assert mgr._scrub_secret_env == ()
+
+
+def test_manager_single_string_is_one_pattern_not_chars():
+    # A lone string (common YAML mistake) must become a 1-item tuple, NOT be
+    # split into characters — otherwise scrubbing is silently disabled.
+    mgr = MCPClientManager(scrub_secret_env="*_TOKEN")
+    assert mgr._scrub_secret_env == ("*_TOKEN",)
+
+
+def test_manager_coerces_entries_to_str():
+    mgr = MCPClientManager(scrub_secret_env=["*_TOKEN", 123])
+    assert mgr._scrub_secret_env == ("*_TOKEN", "123")
+
+
+def test_single_string_actually_scrubs(monkeypatch):
+    # End-to-end: a lone-string knob still strips the matching secret (proves it
+    # became a real pattern, not a disabled/char-split no-op).
+    monkeypatch.setenv("GITHUB_TOKEN", "s3cret")
+    mgr = MCPClientManager(scrub_secret_env="*_TOKEN")
+    cfg = ServerConfig(name="s", command="x",
+                       scrub_secret_env=mgr._scrub_secret_env)
+    assert "GITHUB_TOKEN" not in _env(cfg.to_stdio_params())

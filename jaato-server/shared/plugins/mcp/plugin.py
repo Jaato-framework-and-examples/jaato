@@ -328,8 +328,16 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._session_id = config.get("session_id")
         self._custom_config_path = config.get("config_path")
         self._workspace_path = config.get("workspace_path")
+        # Normalize like the cli plugin: a single string (common YAML mistake,
+        # e.g. `scrub_secret_env: "*_TOKEN"`) is coerced to a 1-item list rather
+        # than silently disabling scrubbing (which would fail OPEN and reintroduce
+        # the secret leak). Entries are coerced to str.
         scrub = config.get("scrub_secret_env", [])
-        self._scrub_secret_env = list(scrub) if isinstance(scrub, (list, tuple)) else []
+        if isinstance(scrub, str):
+            scrub = [scrub]
+        self._scrub_secret_env = (
+            [str(s) for s in scrub] if isinstance(scrub, (list, tuple)) else []
+        )
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
