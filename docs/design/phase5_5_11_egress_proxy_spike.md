@@ -472,8 +472,22 @@ was tested directly with `aa-exec`.)
    `network <family> <type>` granularity.
 3. **Kernel capability confirms it:** the *active* feature set
    `/sys/kernel/security/apparmor/features/network/` exposes only `af_mask`
-   + `af_unix` — **no `af_inet`**.  (A `network_v8/af_inet` dir exists but is
-   not the active mediation — enforcement proves it isn't applied.)
+   + `af_unix` — **no `af_inet`**.  A `network_v8/af_inet=yes` dir exists, but
+   recompiling the profile with **no `abi` pin, `-M /sys/kernel/security/
+   apparmor/features`** (compile against the kernel's own live feature set)
+   STILL let the confined process reach 8.8.8.8 — so it is NOT a parser
+   abi-pin / feature-selection artifact.  The kernel *advertises*
+   `network_v8/af_inet` but the `connect()`-time check is a no-op.  (The
+   installed ABIs even include `kernel-5.4-outoftree-network` — AppArmor
+   fine-grained networking was an Ubuntu *out-of-tree* patch; it is not
+   effective on 6.8.)  This is a genuine kernel enforcement gap, not
+   fixable from userspace.
+
+   **What a kernel WOULD need** to make the clean AppArmor §5.11d path work:
+   AppArmor's fine-grained/extended network mediation actually wired to the
+   AF_INET/AF_INET6 socket LSM hooks so `peer=(ip=,port=)` is *evaluated* at
+   connect/bind — not merely advertised.  That is a distro-kernel property
+   jaato cannot depend on portably, so the design does not.
 
 **Consequence:** there is no way to express "outbound TCP to loopback only"
 via the AppArmor network template on stock Ubuntu 24.04.  Writing it as an
