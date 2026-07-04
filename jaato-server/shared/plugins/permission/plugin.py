@@ -1290,25 +1290,19 @@ class PermissionPlugin(RunnerForwardingMixin):
         """
         self._trace(f"check_permission: tool={tool_name} call_id={call_id}")
 
-        # Trusted bridge fast-path: when a plugin-provided interpreter
-        # (today only the notebook plugin's Python tool bindings) wraps
-        # dispatch in trusted_bridge_context(), the outer tool call was
-        # already permission-approved by the user and the user saw every
-        # inner ``tools.X(...)`` call in the approved code.  Re-prompting
-        # for each inner call is redundant noise that trains users to
-        # rubber-stamp without reading.  Short-circuit with ALLOW; no
-        # evaluators, no PermissionRequestedEvent, no ledger entry beyond
-        # the trace line above.
+        # Trusted bridge: when a plugin-provided interpreter (today only the
+        # notebook plugin's Python tool bindings) wraps dispatch in
+        # trusted_bridge_context(), the outer tool call was already approved and
+        # the user saw every inner ``tools.X(...)`` call in the approved code, so
+        # re-prompting each inner call is redundant noise.  The bridge therefore
+        # suppresses only the interactive PROMPT — it does NOT bypass the
+        # operator's hard boundaries.  The short-circuit lives at the
+        # ASK_CHANNEL branch below, AFTER evaluators, the blacklist, and
+        # reliability escalation have run, so a blacklisted / evaluator-denied /
+        # escalated tool is still refused even inside the bridge.  (A user
+        # approving a cell cannot grant themselves override of the operator's
+        # policy.)
         from shared.ai_tool_runner import in_trusted_bridge_context
-        if in_trusted_bridge_context():
-            self._trace(
-                f"check_permission: trusted bridge context active, "
-                f"auto-allowing {tool_name}"
-            )
-            return True, {
-                'reason': 'Allowed via trusted bridge context (outer tool already approved)',
-                'method': 'trusted_bridge',
-            }
 
         # Build evaluator context early — evaluators run even for
         # pre-approved tools so they can override approvals.
@@ -1449,6 +1443,11 @@ class PermissionPlugin(RunnerForwardingMixin):
         from .channels import ParentBridgedChannel
         channel = self._get_channel()
         is_subagent_mode = isinstance(channel, ParentBridgedChannel)
+        # Trusted-bridge inner call (see the note at the top of this method):
+        # deny-layers still apply, but a resolved ALLOW is kept quiet — the
+        # user already approved the outer cell, so per-inner-call UI events
+        # would be redundant noise (mirrors the is_subagent_mode skip).
+        is_trusted_bridge = in_trusted_bridge_context()
 
         # Evaluate against policy. Pass eval_context=None if evaluators
         # already ran above (for pre-approved tools) to avoid double execution.
@@ -1498,7 +1497,7 @@ class PermissionPlugin(RunnerForwardingMixin):
                     and match.eval_result.decision == EvalDecision.ALLOW_WITH_COMMENT
                     and match.eval_result.comment):
                 eval_comment = match.eval_result.comment
-            if self._on_permission_resolved and not is_subagent_mode:
+            if self._on_permission_resolved and not is_subagent_mode and not is_trusted_bridge:
                 self._on_permission_resolved(tool_name, "", True, method, comment=eval_comment)
             result = {'reason': match.reason, 'method': method}
             # Inject advisory comment for ALLOW_WITH_COMMENT
@@ -1526,6 +1525,25 @@ class PermissionPlugin(RunnerForwardingMixin):
             return False, {'reason': match.reason, 'method': method, 'comment': match.eval_result.comment if match.eval_result else None}
 
         elif match.decision == PermissionDecision.ASK_CHANNEL:
+            # Trusted bridge suppresses the redundant interactive prompt — but
+            # only a NORMAL ask (rule-miss → default). We reach here only after
+            # the blacklist / evaluators / reliability-escalation-deny have all
+            # passed (those return DENY earlier), so allowing here does not
+            # bypass any hard boundary. A reliability-escalation re-confirm
+            # (force_reescalation) is NOT suppressed: the reactor raised that
+            # signal AFTER the cell was approved, so the user must still see it.
+            if is_trusted_bridge and not force_reescalation:
+                self._log_decision(
+                    tool_name, args, "allow",
+                    "trusted bridge (outer tool approved; prompt suppressed)",
+                )
+                return True, {
+                    'reason': 'Allowed via trusted bridge context (outer tool '
+                              'already approved); blacklist and evaluators still '
+                              'enforced',
+                    'method': 'trusted_bridge',
+                }
+
             # Need to ask the channel (already retrieved above for subagent check)
             if not channel:
                 self._log_decision(tool_name, args, "deny", "No channel configured")
