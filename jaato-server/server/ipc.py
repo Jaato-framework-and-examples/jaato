@@ -44,6 +44,7 @@ from shared.framing import (
     read_frame,
     write_frame,
 )
+from shared.session_id import is_safe_session_id
 
 
 # Windows named pipe prefix (\\.\pipe\)
@@ -660,6 +661,18 @@ class JaatoIPCServer:
 
         # Handle session selection
         if hasattr(event, 'session_id') and event.session_id:
+            # Client-supplied id — reject a traversal / injection id at the
+            # boundary before it reaches persistence / cgroup / apparmor sinks.
+            if not is_safe_session_id(event.session_id):
+                await self._send_to_client(
+                    client_id,
+                    ErrorEvent(
+                        error="invalid session_id: must match [A-Za-z0-9._-] "
+                              "(1-256 chars) with no '..'",
+                        error_type="RequestError",
+                    ),
+                )
+                return
             session_id = event.session_id
             async with self._lock:
                 if client:

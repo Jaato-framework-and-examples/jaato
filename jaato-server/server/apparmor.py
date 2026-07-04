@@ -42,6 +42,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple
 
+from shared.session_id import validate_session_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -1853,7 +1855,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # ------------------------------------------------------------------
 
     def get_profile_name(self, session_id: str) -> str:
-        """Return the AppArmor profile name for a session."""
+        """Return the AppArmor profile name for a session.
+
+        Fail-closed on an unsafe id: the name is interpolated into the profile
+        grammar and the on-disk profile filename, so a traversal / injection id
+        must never reach it.
+        """
+        validate_session_id(session_id)
         return f"jaato-ws-{session_id}"
 
     @staticmethod

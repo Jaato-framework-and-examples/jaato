@@ -18,6 +18,7 @@ from jaato_sdk.events import Event
 from server.event_sink import EventSink
 from server.session_manager import SessionManager
 from server.session_logging import set_logging_context, clear_logging_context
+from shared.session_id import is_safe_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +398,18 @@ class CommandRouter:
             return
 
         target_session_id = args[0]
+        # Client-supplied id — reject a traversal / injection id before it
+        # reaches the persistence / cgroup / apparmor sinks (defense in depth
+        # with the sink-side validation; this gives a clean early error).
+        if not is_safe_session_id(target_session_id):
+            from jaato_sdk.events import ErrorEvent
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="invalid session_id: must match [A-Za-z0-9._-] "
+                      "(1-256 chars) with no '..'",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
         # Check for workspace mismatch
         mismatch = self._session_manager.check_workspace_mismatch(
             target_session_id, workspace_path
