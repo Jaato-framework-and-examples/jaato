@@ -169,6 +169,16 @@ UNTRUSTED_OPEN = "⟦UNTRUSTED-EXTERNAL-CONTENT"     # ⟦UNTRUSTED-EXTERNAL-CON
 UNTRUSTED_CLOSE = "⟦/UNTRUSTED-EXTERNAL-CONTENT⟧"  # ⟦/UNTRUSTED-EXTERNAL-CONTENT⟧
 
 
+def _sanitize_source(source: str) -> str:
+    """Strip marker/bracket chars, newlines, and control chars from a source
+    label and cap its length.  ``source`` can be a third-party MCP tool name,
+    so an unsanitized value could itself contain ``⟧``/newlines and break out
+    of the opening marker — defeating the boundary."""
+    cleaned = (source or "").replace("⟦", "").replace("⟧", "")
+    cleaned = "".join(c for c in cleaned if ord(c) >= 0x20)  # drop \r \n \t + ctrls
+    return cleaned.strip()[:64]
+
+
 def wrap_untrusted_content(text: str, source: Optional[str] = None) -> str:
     """Wrap ``text`` in the untrusted-content boundary, neutralizing any
     embedded marker so injected content can't break out of the block."""
@@ -177,7 +187,8 @@ def wrap_untrusted_content(text: str, source: Optional[str] = None) -> str:
     zwsp = "⟦​"
     safe = text.replace(UNTRUSTED_OPEN, zwsp + "UNTRUSTED-EXTERNAL-CONTENT") \
                .replace(UNTRUSTED_CLOSE, zwsp + "/UNTRUSTED-EXTERNAL-CONTENT⟧")
-    src = f" source={source}" if source else ""
+    clean_source = _sanitize_source(source) if source else ""
+    src = f" source={clean_source}" if clean_source else ""
     return f"{UNTRUSTED_OPEN}{src}⟧\n{safe}\n{UNTRUSTED_CLOSE}"
 
 
