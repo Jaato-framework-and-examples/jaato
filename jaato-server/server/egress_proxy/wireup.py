@@ -39,12 +39,12 @@ def _nft_enforce_enabled() -> bool:
     """Hard cgroup-nft egress enforcement is opt-in (needs `nft` in the daemon's
     sudo NOPASSWD scope + a per-session cgroup).  Off by default → proxy-only
     ("cooperative") confinement, unchanged behavior."""
-    return os.environ.get("JAATO_EGRESS_NFT_ENFORCE", "").strip().lower() in (
+    return os.environ.get("JAATO_EGRESS_NFT_ENFORCE", "").strip().lower() in (  # env: opt-in hard cgroup-nft egress enforcement (§5.11d-v2); needs a per-session cgroup + nft
         "1", "true", "yes", "on")
 
 
 def _session_cgroup_path(session_id: str) -> str:
-    root = os.environ.get("JAATO_CGROUPS_ROOT", "/sys/fs/cgroup/jaato")
+    root = os.environ.get("JAATO_CGROUPS_ROOT", "/sys/fs/cgroup/jaato")  # env: parent cgroup-v2 dir for per-session cgroups (must exist + be delegated)
     return os.path.join(root, f"jaato-ws-{session_id}")
 
 

@@ -77,7 +77,7 @@ def _pool_enabled() -> bool:
     by the flip.  Operators who never set the var get the pool
     automatically post-PR-5e.
     """
-    raw = os.environ.get("JAATO_RUNNER_POOL_ENABLED", "").strip().lower()
+    raw = os.environ.get("JAATO_RUNNER_POOL_ENABLED", "").strip().lower()  # env: use the pre-warm runner pool (faster session bootstrap); false to always cold-spawn
     # Empty (unset) → enabled.  Explicit-falsy → disabled.  Anything
     # else (truthy or unrecognised) → enabled.
     return raw not in ("0", "false", "no", "off")
