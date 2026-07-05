@@ -12570,6 +12570,7 @@ export type WakeRef = string;
 export type Outcome1 = string;
 export type Detail = string;
 export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -15123,6 +15124,7 @@ export interface WakeBindResultEvent {
   outcome?: Outcome1;
   detail?: Detail;
   expires_at?: ExpiresAt1;
+  endpoint?: Endpoint;
 }
 /**
  * Add tools / patterns to the session's permission whitelist.

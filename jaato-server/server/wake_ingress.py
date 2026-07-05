@@ -61,6 +61,12 @@ class WakeIngressConfig:
     host: str = "127.0.0.1"
     port: int = 9110
     path: str = "/wake"
+    # Operator-declared PUBLIC URL where this daemon's ingress is reachable
+    # (through the reverse proxy / tunnel the operator runs).  ``host``/``port``
+    # are the local bind; ``public_url`` is what an external relay must POST to.
+    # Surfaced to a binding session via WakeBindResultEvent.endpoint so the bot
+    # can embed it as the relay's routing marker WITHOUT any bot-side config.
+    public_url: str = ""
     allowed_ips: List[str] = field(default_factory=list)
     rate_limit_per_second: int = 0
     replay_window_seconds: int = 300
@@ -89,6 +95,7 @@ class WakeIngressConfig:
         c.host = str(d.get("host", c.host))
         c.port = _int("port", c.port)
         c.path = str(d.get("path", c.path))
+        c.public_url = str(d.get("public_url", c.public_url) or "")
         ips = d.get("allowed_ips", [])
         c.allowed_ips = [str(x) for x in ips] if isinstance(ips, list) else []
         c.rate_limit_per_second = _int("rate_limit_per_second",

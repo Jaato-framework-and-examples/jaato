@@ -586,6 +586,10 @@ class JaatoDaemon:
             from server.wake_ingress import WakeIngressConfig, WakeIngressServer
             wake_cfg = WakeIngressConfig.from_file(
                 pathlib.Path.home() / ".jaato" / "wake.json")
+            # Advertise the operator's public endpoint via bind_wake results even
+            # if the local listener can't bind — the URL is the operator's
+            # routing declaration, independent of the local bind.
+            self._session_manager.set_wake_public_url(wake_cfg.public_url)
             if wake_cfg.enabled:
                 ingress = WakeIngressServer(
                     wake_cfg,

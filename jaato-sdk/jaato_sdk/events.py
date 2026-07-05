@@ -1521,6 +1521,11 @@ class WakeBindResultEvent(Event):
     outcome: str = ""
     detail: str = ""
     expires_at: float = 0.0
+    # The daemon's operator-declared PUBLIC wake endpoint (wake.json
+    # ``public_url``), so a binding session can embed it as the relay's routing
+    # marker WITHOUT any bot-side URL config.  Empty when the operator hasn't
+    # declared one (the ingress may still be reachable by other means).
+    endpoint: str = ""
 
 
 class HistoryRequest(Event):
