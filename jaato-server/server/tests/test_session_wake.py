@@ -269,3 +269,73 @@ def test_reemit_pending_wakes_for_cid_scoped(tmp_path):
     m._pending_wakes["sX"] = _PendingWake("t", "gh", "pr#X", "cid-A", 1.0)  # expired
     m._reemit_pending_wakes_for_cid("cid-A")
     assert emitted == [("sA", "pr#A", "gh")]  # only cid-A, not-expired
+
+
+# ---- delete_session releases wake bindings + index entry (orphan fix) ---------
+
+class _DelSession:
+    """Minimal Session surface delete_session touches."""
+    def __init__(self, workspace_path):
+        self.workspace_path = workspace_path
+        self.attached_clients = set()
+        self.name = "sess"
+        self.server = type("S", (), {"shutdown": lambda self: None})()
+
+
+def _make_delete_manager(tmp_path):
+    """A SessionManager wired for delete_session over a real binding registry +
+    workspace index + a stub session plugin."""
+    import pathlib
+    from server.wake_binding_registry import WakeBindingRegistry
+    from server.session_workspace_index import SessionWorkspaceIndex as _Idx
+
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir()
+
+    m = object.__new__(SessionManager)
+    m._lock = threading.RLock()
+    m._sessions = {}
+    m._client_to_session = {}
+    m._session_workspace_index = _Idx(path=tmp_path / "idx.json")
+    m._wake_binding_registry = WakeBindingRegistry(
+        path=tmp_path / "wb.json", owner_exists=m._owner_session_record_exists)
+    m._session_storage_dir = lambda wp: pathlib.Path(wp) / ".jaato" / "sessions"
+    m._session_plugin = type("P", (), {"delete": lambda self, sid, storage_dir=None: True})()
+    return m, ws
+
+
+def test_delete_session_releases_binding_and_index(tmp_path):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from server.wake_binding_registry import BindOutcome
+
+    pub = Ed25519PrivateKey.generate().public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+
+    m, ws = _make_delete_manager(tmp_path)
+    sid = "20260705_120000"
+    m._sessions[sid] = _DelSession(ws)
+    m._session_workspace_index.record(sid, ws)
+    assert m._wake_binding_registry.bind("pr#7", sid, ws, [pub]) == BindOutcome.OK
+
+    assert m.delete_session(sid) is True
+
+    # binding gone + ref immediately re-bindable by a NEW session
+    assert m._wake_binding_registry.resolve("pr#7") is None
+    assert m._wake_binding_registry.bind("pr#7", "newsess", ws, [pub]) == BindOutcome.OK
+    # index entry forgotten
+    assert m._session_workspace_index.resolve(sid) is None
+
+
+def test_owner_oracle_true_for_ondisk_record(tmp_path):
+    # The cold-revive guard: an unloaded session (not in _sessions) whose JSON
+    # record exists on disk is still reported EXISTING → its ref stays guarded.
+    import pathlib
+    m, ws = _make_delete_manager(tmp_path)
+    sid = "20260705_130000"
+    storage = pathlib.Path(ws) / ".jaato" / "sessions"
+    storage.mkdir(parents=True)
+    (storage / f"{sid}.json").write_text("{}")
+    assert m._owner_session_record_exists(sid, ws) is True     # on disk
+    assert m._owner_session_record_exists("neverwas", ws) is False

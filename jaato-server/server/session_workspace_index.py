@@ -126,6 +126,24 @@ class SessionWorkspaceIndex:
             self._map[session_id] = workspace_path
             self._save_locked()
 
+    def forget(self, session_id: str) -> None:
+        """Drop any mapping (and ambiguity mark) for ``session_id``.
+
+        Called when a session is DELETED so its id→workspace entry doesn't
+        outlive the session — a stale entry is otherwise only reaped never
+        (the index has no TTL), and a later second-granularity id collision
+        would resolve against a workspace for a session that no longer exists.
+        Idempotent — a no-op for an unknown id.
+        """
+        if not session_id:
+            return
+        with self._lock:
+            present = session_id in self._map or session_id in self._ambiguous
+            self._map.pop(session_id, None)
+            self._ambiguous.discard(session_id)
+            if present:
+                self._save_locked()
+
     def resolve(self, session_id: str) -> Optional[str]:
         """Return the workspace for ``session_id``, or ``None`` if unknown or
         AMBIGUOUS.

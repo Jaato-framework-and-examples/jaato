@@ -52,7 +52,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .wake_verify import InvalidTrustKey, validate_trust_keys
 
@@ -118,10 +118,20 @@ class WakeBindingRegistry:
         path: Optional[pathlib.Path] = None,
         max_keys: int = _MAX_TRUST_KEYS,
         default_ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+        owner_exists: Optional[Callable[[str, str], bool]] = None,
     ) -> None:
+        """``owner_exists(session_id, workspace_path) -> bool`` (optional): the
+        owner-guard's liveness oracle.  When supplied, a live binding owned by a
+        DIFFERENT session is treated as re-bindable if its owner no longer
+        exists (deleted).  It MUST report on-disk-record existence, NOT
+        live-in-memory membership — a cold, UNLOADED session (revivable via its
+        binding) still exists and must keep its ref protected; only a DELETED
+        session frees it.  ``None`` → TTL-only owner-guard (a stale owner holds
+        the ref until expiry)."""
         self._path = pathlib.Path(path) if path is not None else _DEFAULT_REGISTRY_PATH
         self._max_keys = max_keys
         self._default_ttl = default_ttl_seconds
+        self._owner_exists = owner_exists
         self._lock = threading.Lock()
         self._bindings: Dict[str, WakeBinding] = {}
         self._load()
@@ -230,8 +240,21 @@ class WakeBindingRegistry:
             if (existing is not None
                     and existing.expires_at > now
                     and existing.session_id != session_id):
-                # Live binding owned by another session — refuse (hijack/squat).
-                return BindOutcome.UNAUTHORIZED
+                # Live binding owned by another session — refuse (hijack/squat)
+                # UNLESS that owner no longer exists (its session was DELETED,
+                # not merely unloaded).  A deleted owner can't hold the ref; a
+                # cold/unloaded owner (revivable, on-disk record intact) still
+                # can — the oracle checks disk-record existence, not live
+                # membership, so cold-revive stays protected.  Belt to the
+                # root fix (release-on-delete): self-heals a missed delete path.
+                if (self._owner_exists is None
+                        or self._owner_exists(existing.session_id,
+                                              existing.workspace_path)):
+                    return BindOutcome.UNAUTHORIZED
+                logger.info(
+                    "bind_wake: owner session %s of %r no longer exists — "
+                    "re-binding to %s", existing.session_id, wake_ref,
+                    session_id)
             # Coerce ttl defensively so a direct (non-command) caller passing a
             # bad type can't crash bind() on the arithmetic below.  A negative
             # ttl is intentionally allowed (immediate-expiry — the binding just
@@ -287,6 +310,27 @@ class WakeBindingRegistry:
             del self._bindings[wake_ref]
             self._save_locked()
         return BindOutcome.OK
+
+    def release_for_session(self, session_id: str) -> int:
+        """Remove ALL bindings owned by ``session_id``; return the count removed.
+
+        Called when a session is DELETED — the root fix for orphaned bindings.
+        A binding is the session's self-declaration ("wake me"); when the
+        session is gone for good, so is its invitation.  This is NOT called on
+        session UNLOAD: a binding MUST survive unload so a cold session stays
+        wakeable (the #520 cold-revive durability).  Idempotent; a no-op for a
+        session with no bindings.
+        """
+        if not session_id:
+            return 0
+        with self._lock:
+            stale = [ref for ref, b in self._bindings.items()
+                     if b.session_id == session_id]
+            for ref in stale:
+                del self._bindings[ref]
+            if stale:
+                self._save_locked()
+        return len(stale)
 
     def resolve(self, wake_ref: str) -> Optional[WakeBinding]:
         """Return the live binding for ``wake_ref``, or ``None`` if absent or

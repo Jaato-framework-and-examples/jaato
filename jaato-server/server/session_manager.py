@@ -393,7 +393,8 @@ class SessionManager:
         # contract: which key(s) a session trusts to wake it, per opaque ref).
         # Written by bind_wake/unbind_wake (owner = caller's session), read by
         # the mode-B verify shim.  See wake_binding_registry.py.
-        self._wake_binding_registry = WakeBindingRegistry()
+        self._wake_binding_registry = WakeBindingRegistry(
+            owner_exists=self._owner_session_record_exists)
         # Operator-declared public wake endpoint (wake.json public_url), set at
         # daemon boot; surfaced on bind_wake so a session can advertise it with
         # no bot-side URL config.  Empty until the daemon wires it.
@@ -5749,6 +5750,28 @@ class SessionManager:
         """The operator-declared public wake endpoint, or ``""`` if unset."""
         return self._wake_public_url
 
+    def _owner_session_record_exists(
+        self, session_id: str, workspace_path: str,
+    ) -> bool:
+        """Whether a session record for ``session_id`` still exists — live in
+        memory OR persisted on disk under ``workspace_path``.
+
+        The wake-binding owner-guard's liveness oracle (see
+        :class:`WakeBindingRegistry`).  A DELETED owner (record gone) frees its
+        ``wake_ref`` for re-binding; a merely-UNLOADED (cold, revivable) owner
+        keeps its record on disk and so keeps the ref protected — the
+        distinction that preserves #520 cold-revive.  On any error determining
+        the path it fails SAFE (owner assumed to exist → guard stays), so
+        uncertainty never opens a hijack.
+        """
+        if session_id in self._sessions:
+            return True
+        try:
+            storage_dir = self._session_storage_dir(workspace_path)
+        except (ValueError, TypeError):
+            return True
+        return (storage_dir / f"{session_id}.json").exists()
+
     def resolve_wake_binding(self, wake_ref: str):
         """Resolve a live (non-expired) binding for the mode-B verify shim, or
         ``None``.  The shim then verifies the wake signature against
@@ -7230,6 +7253,21 @@ class SessionManager:
         # Delete from disk
         storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
         deleted = self._session_plugin.delete(session_id, storage_dir=storage_dir)
+
+        # Release this session's daemon-side declarations so they don't outlive
+        # it.  A wake binding is the session's "wake me" invitation; a deleted
+        # session is gone for good, so its bindings must go too — else the
+        # owner-guard blocks a NEW session from re-binding that wake_ref until
+        # TTL (days), and any wake that resolved would target a dead session.
+        # (Distinct from UNLOAD, which keeps bindings so a cold session stays
+        # wakeable — the #520 cold-revive durability.)
+        released = self._wake_binding_registry.release_for_session(session_id)
+        if released:
+            logger.info("released %d wake binding(s) for deleted session %s",
+                        released, session_id)
+        # Drop the id→workspace index entry too (no TTL there — a stale entry
+        # would otherwise persist forever and mis-resolve a later id collision).
+        self._session_workspace_index.forget(session_id)
 
         logger.info(f"Session deleted: {session_id}")
         return deleted or session is not None
