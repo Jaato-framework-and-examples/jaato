@@ -14,6 +14,7 @@ from server.wake_binding_registry import BindOutcome
 def _router():
     r = CommandRouter.__new__(CommandRouter)
     r._session_manager = MagicMock()
+    r._session_manager.wake_public_url = ""  # str (pydantic-validated on the event)
     r._event_sink = MagicMock()
     return r
 
@@ -30,6 +31,7 @@ def test_bind_wake_binds_callers_own_session(tmp_path):
     r._session_manager.get_client_session.return_value = _session("s1", "/ws/bot")
     r._session_manager.bind_wake.return_value = BindOutcome.OK
     r._session_manager.resolve_wake_binding.return_value = MagicMock(expires_at=1234.0)
+    r._session_manager.wake_public_url = "https://bot.example.com/wake"
 
     r._handle_session_bind_wake(
         "c1", ["github-pr:o/r#1"],
@@ -42,6 +44,8 @@ def test_bind_wake_binds_callers_own_session(tmp_path):
     assert evt.wake_ref == "github-pr:o/r#1"
     assert evt.outcome == "ok"
     assert evt.expires_at == 1234.0
+    # endpoint surfaced so the bot can embed it with no bot-side URL config
+    assert evt.endpoint == "https://bot.example.com/wake"
 
 
 def test_bind_wake_normalizes_single_string_key(tmp_path):

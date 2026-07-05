@@ -578,7 +578,10 @@ class CommandRouter:
                 expires_at = b.expires_at
         self._event_sink.send_event(client_id, WakeBindResultEvent(
             wake_ref=wake_ref or "", outcome=outcome.value,
-            detail=f"bind_wake: {outcome.value}", expires_at=expires_at))
+            detail=f"bind_wake: {outcome.value}", expires_at=expires_at,
+            # Surface the daemon's public wake endpoint so the caller can embed
+            # it as the relay's routing marker (no bot-side URL config).
+            endpoint=self._session_manager.wake_public_url))
 
     def _handle_session_unbind_wake(
         self, client_id: str, args: list, payload: Optional[dict],

@@ -184,6 +184,18 @@ def test_config_defaults_and_disabled():
     c = WakeIngressConfig.from_dict({})
     assert c.enabled is False
     assert c.replay_window_seconds == 300  # server-config knob default
+    assert c.public_url == ""
+
+
+def test_config_parses_public_url():
+    c = WakeIngressConfig.from_dict({
+        "enabled": True, "public_url": "  https://bot.example.com/wake  "})
+    assert c.public_url == "https://bot.example.com/wake"  # stripped
+
+
+def test_config_whitespace_or_nonstr_public_url_is_empty():
+    assert WakeIngressConfig.from_dict({"public_url": "   "}).public_url == ""
+    assert WakeIngressConfig.from_dict({"public_url": 123}).public_url == ""
 
 
 def test_config_bad_int_field_falls_back_not_raises():

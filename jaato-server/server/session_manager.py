@@ -373,6 +373,10 @@ class SessionManager:
         # Written by bind_wake/unbind_wake (owner = caller's session), read by
         # the mode-B verify shim.  See wake_binding_registry.py.
         self._wake_binding_registry = WakeBindingRegistry()
+        # Operator-declared public wake endpoint (wake.json public_url), set at
+        # daemon boot; surfaced on bind_wake so a session can advertise it with
+        # no bot-side URL config.  Empty until the daemon wires it.
+        self._wake_public_url: str = ""
 
         # Phase 1 cascade-as-client (server 0.6.154+): registry of
         # cascade-clients keyed by cascade_driver_id.  See
@@ -5579,6 +5583,18 @@ class SessionManager:
     def unbind_wake(self, wake_ref: str, session_id: str) -> "BindOutcome":
         """Owner-guarded removal of ``wake_ref`` (the caller's session)."""
         return self._wake_binding_registry.unbind(wake_ref, session_id)
+
+    def set_wake_public_url(self, url: Optional[str]) -> None:
+        """Wire the operator-declared public wake endpoint (from wake.json
+        ``public_url``) so ``bind_wake`` can advertise it in its result.
+        Whitespace is stripped so a blank/whitespace-only value reads as unset
+        (``""``) rather than a marker that looks set but won't route."""
+        self._wake_public_url = (url or "").strip() if isinstance(url, str) else ""
+
+    @property
+    def wake_public_url(self) -> str:
+        """The operator-declared public wake endpoint, or ``""`` if unset."""
+        return self._wake_public_url
 
     def resolve_wake_binding(self, wake_ref: str):
         """Resolve a live (non-expired) binding for the mode-B verify shim, or
