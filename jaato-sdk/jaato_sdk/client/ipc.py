@@ -1840,6 +1840,28 @@ class IPCClient:
             args=args or [],
         ))
 
+    # ---- typed wake-primitive methods (see _wake_client) ----
+    async def bind_wake(self, wake_ref: str, trust_keys: list, *,
+                        timeout: float = 30.0):
+        """Declare a wake binding for this session; await the typed result.
+        See :func:`jaato_sdk.client._wake_client.bind_wake`."""
+        from ._wake_client import bind_wake
+        return await bind_wake(self, wake_ref, trust_keys, timeout=timeout)
+
+    async def unbind_wake(self, wake_ref: str, *, timeout: float = 30.0):
+        """Remove this session's wake binding; await the typed result.
+        See :func:`jaato_sdk.client._wake_client.unbind_wake`."""
+        from ._wake_client import unbind_wake
+        return await unbind_wake(self, wake_ref, timeout=timeout)
+
+    async def cascade_register(self, cascade_driver_id: str,
+                              role: str = "observer",
+                              event_types: Optional[list] = None) -> None:
+        """Register as a cascade owner/observer (event CLASSES or names).
+        See :func:`jaato_sdk.client._wake_client.cascade_register`."""
+        from ._wake_client import cascade_register
+        await cascade_register(self, cascade_driver_id, role, event_types)
+
     async def disable_tool(self, tool_name: str) -> None:
         """Disable a tool directly via registry.
 
