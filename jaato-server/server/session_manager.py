@@ -74,13 +74,17 @@ class WakeOutcome(str, Enum):
     UNRESOLVED = "unresolved"
     REVIVE_FAILED = "revive_failed"
     NOT_DRIVABLE = "not_drivable"
+    DEFERRED = "deferred"
 
     @property
     def is_success(self) -> bool:
         """True for outcomes a caller should treat as success (2xx): the turn
-        was dispatched (``OK``) or a duplicate was idempotently ignored
-        (``DUPLICATE``)."""
-        return self in (WakeOutcome.OK, WakeOutcome.DUPLICATE)
+        was dispatched (``OK``), a duplicate was idempotently ignored
+        (``DUPLICATE``), or the wake was accepted but the turn DEFERRED until a
+        client re-attaches (``DEFERRED`` — the session was revived cold with no
+        client; a SessionWokenEvent was emitted to its observers)."""
+        return self in (
+            WakeOutcome.OK, WakeOutcome.DUPLICATE, WakeOutcome.DEFERRED)
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -106,6 +110,21 @@ from .workspace_monitor import WorkspaceMonitor
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _PendingWake:
+    """A wake deferred because the (cold-revived) session had no attached client.
+
+    Held in ``SessionManager._pending_wakes`` keyed by ``session_id``; the turn
+    is driven when a client re-attaches (``attach_session`` drains it).  Expires
+    with the wake binding so a permanently-detached bot's pending wake doesn't
+    linger forever."""
+    text: str
+    source: str
+    wake_ref: str
+    cascade_driver_id: Optional[str]
+    expires_at: float
 
 
 @dataclass
@@ -377,6 +396,11 @@ class SessionManager:
         # daemon boot; surfaced on bind_wake so a session can advertise it with
         # no bot-side URL config.  Empty until the daemon wires it.
         self._wake_public_url: str = ""
+        # Deferred wakes (Option 2): session_id → _PendingWake for a session
+        # revived COLD with no attached client.  Driven when a client
+        # re-attaches (attach_session drains it); re-emitted on observer
+        # (re)register.  Guarded by _lock.
+        self._pending_wakes: Dict[str, _PendingWake] = {}
 
         # Phase 1 cascade-as-client (server 0.6.154+): registry of
         # cascade-clients keyed by cascade_driver_id.  See
@@ -3196,6 +3220,24 @@ class SessionManager:
             client_id, role, cascade_driver_id,
             sorted(event_types) if event_types else "ALL",
         )
+        # Wake re-nudge (Option 2): if an observer (re)registers for a cid that
+        # has a wake pending on one of its sessions, re-emit SessionWokenEvent so
+        # a reconnecting bot is nudged to re-attach even if it missed the first.
+        if role == "observer":
+            self._reemit_pending_wakes_for_cid(cascade_driver_id)
+
+    def _reemit_pending_wakes_for_cid(self, cascade_driver_id: str) -> None:
+        """Re-emit ``SessionWokenEvent`` for any not-yet-driven wake whose
+        session's cid matches — so an observer that (re)connects after the first
+        emit still learns it must re-attach."""
+        now = time.time()
+        with self._lock:
+            pending = [
+                (sid, p) for sid, p in self._pending_wakes.items()
+                if p.cascade_driver_id == cascade_driver_id and p.expires_at > now
+            ]
+        for sid, p in pending:
+            self._emit_session_woken(sid, p.wake_ref, p.source)
 
     def unregister_cascade_client(
         self,
@@ -3820,6 +3862,14 @@ class SessionManager:
             for cid, entries in list(self._cascade_clients.items()):
                 if cid in active_cids:
                     continue  # cascade still active; skip
+                # Wake durability (Option 2): while a LIVE wake binding carries
+                # this cid, its observer must survive the session going cold — a
+                # wake may still arrive.  Tie the observer's lifetime to the
+                # binding, NOT to session activity (else a wake-bound but idle
+                # bot loses its session.woken subscription after the idle timeout
+                # and silently misses the wake).
+                if self._wake_binding_registry.has_live_binding_for_cid(cid):
+                    continue
                 # Server 0.6.161+ (Bug B): also treat the cascade as
                 # alive if a session with this cid was created within
                 # ``timeout`` seconds, even if no session is currently
@@ -5397,6 +5447,10 @@ class SessionManager:
             style="info",
         ))
 
+        # DEFERRED-TURN drain (Option 2): a client is now present, so drive any
+        # wake that was deferred while this session was cold with no client.
+        self.drive_pending_wake(session_id)
+
         return True
 
     def resume_session(
@@ -5470,8 +5524,19 @@ class SessionManager:
         text: str,
         source: str = "user",
         event_id: Optional[str] = None,
+        wake_ref: Optional[str] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> Tuple["WakeOutcome", str]:
         """Start a USER turn on ``session_id``, reviving it if cold/unloaded.
+
+        DEFERRED-TURN (Option 2): if the session is revived COLD with no attached
+        client AND a ``cascade_driver_id`` is known (so an observer can be
+        notified), the turn is NOT driven immediately — host tools (client-side)
+        would have no client to dispatch to.  Instead a ``SessionWokenEvent`` is
+        emitted to the cid's cascade observers and the wake is held pending until
+        a client re-attaches (:meth:`attach_session` drains it).  Returns
+        ``DEFERRED`` in that case.  Without a cid (direct/reactor wake) or with a
+        client already attached, the turn drives immediately (``OK``).
 
         The client-agnostic wake primitive (``session.wake``): any authenticated
         caller — IPC, WS, an HTTP webhook shim, cron, a peer — can drive a fresh
@@ -5553,7 +5618,29 @@ class SessionManager:
                 return (WakeOutcome.REVIVE_FAILED,
                         f"revive failed for session {session_id!r}")
 
-        # Wrap the untrusted payload, then drive a headless USER turn.
+        # DEFERRED-TURN gate: a cold-revived session with NO attached client and
+        # a known cid → emit SessionWokenEvent + hold pending; do NOT drive into
+        # the void (host tools have no client to dispatch to).  The event_id
+        # claim is retained (a deferred wake is a success — a redelivery while
+        # pending is a benign DUPLICATE, not a re-defer).
+        with self._lock:
+            session = self._sessions.get(session_id)
+            has_client = bool(session and session.attached_clients)
+        if cascade_driver_id and session is not None and not has_client:
+            # Tag the revived session with its cid so _emit_to_session reaches
+            # the cid's observers and the durability sweep sees it active.
+            session.cascade_driver_id = cascade_driver_id
+            with self._lock:
+                self._pending_wakes[session_id] = _PendingWake(
+                    text=text, source=source, wake_ref=wake_ref or "",
+                    cascade_driver_id=cascade_driver_id,
+                    expires_at=self._wake_pending_expiry(wake_ref))
+            self._emit_session_woken(session_id, wake_ref or "", source)
+            return (WakeOutcome.DEFERRED,
+                    f"session {session_id!r} revived cold with no client; turn "
+                    f"deferred until re-attach (SessionWokenEvent emitted)")
+
+        # Warm (client attached) or no observer path: wrap + drive immediately.
         from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
         wrapped = wrap_untrusted_content(text, source=f"wake:{source}")
         if not self.send_message_to_session(session_id, wrapped):
@@ -5562,6 +5649,51 @@ class SessionManager:
                     f"session {session_id!r} not drivable after wake")
         return (WakeOutcome.OK, "woken")
 
+    def _wake_pending_expiry(self, wake_ref: Optional[str]) -> float:
+        """Expiry for a deferred wake — the wake binding's expiry if resolvable,
+        else a bounded default so a permanently-detached bot's pending wake
+        doesn't linger forever."""
+        if wake_ref:
+            binding = self._wake_binding_registry.resolve(wake_ref)
+            if binding is not None:
+                return binding.expires_at
+        return time.time() + 24 * 3600.0
+
+    def _emit_session_woken(
+        self, session_id: str, wake_ref: str, source: str,
+    ) -> None:
+        """Emit ``SessionWokenEvent`` to the session's cascade observers (and any
+        attached clients) via :meth:`_emit_to_session` — the same tier
+        ``SessionTerminatedEvent`` uses.  A connected-but-detached observer
+        learns it must re-attach to serve the deferred turn."""
+        from jaato_sdk.events import SessionWokenEvent
+        try:
+            self._emit_to_session(session_id, SessionWokenEvent(
+                session_id=session_id, wake_ref=wake_ref, source=source))
+        except Exception:  # noqa: BLE001 — emission must not break the wake path
+            logger.exception("failed to emit SessionWokenEvent for %s", session_id)
+
+    def drive_pending_wake(self, session_id: str) -> bool:
+        """Drive a wake that was DEFERRED for ``session_id``, if one is pending
+        and not expired.  Called by :meth:`attach_session` after a client
+        attaches (a client is now present to serve host tools).  Returns True if
+        a pending wake was driven."""
+        with self._lock:
+            pending = self._pending_wakes.pop(session_id, None)
+        if pending is None:
+            return False
+        if pending.expires_at <= time.time():
+            logger.info("drive_pending_wake: dropping expired pending wake for %s",
+                        session_id)
+            return False
+        from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+        wrapped = wrap_untrusted_content(pending.text, source=f"wake:{pending.source}")
+        driven = self.send_message_to_session(session_id, wrapped)
+        if not driven:
+            logger.warning("drive_pending_wake: %s not drivable on re-attach",
+                           session_id)
+        return driven
+
     def bind_wake(
         self,
         wake_ref: str,
@@ -5569,16 +5701,20 @@ class SessionManager:
         workspace_path: str,
         trust_keys: List[str],
         ttl_seconds: Optional[int] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> "BindOutcome":
         """Owner-guarded bind of ``wake_ref`` → ``session_id`` with ``trust_keys``.
 
         The command handler passes the CALLER'S current session as
         ``session_id`` + its workspace (so a caller can only bind ITSELF —
-        hijack-proof).  Delegates to the :class:`WakeBindingRegistry` (validation,
-        owner-guard, TTL, persistence).  See ``wake_binding_registry.py``.
+        hijack-proof) + its ``cascade_driver_id`` (so a deferred wake can reach
+        the session's cascade observers and the observer survives the session
+        going cold — see :meth:`wake_session` / the sweep exemption).  Delegates
+        to the :class:`WakeBindingRegistry`.  See ``wake_binding_registry.py``.
         """
         return self._wake_binding_registry.bind(
-            wake_ref, session_id, workspace_path, trust_keys, ttl_seconds)
+            wake_ref, session_id, workspace_path, trust_keys, ttl_seconds,
+            cascade_driver_id=cascade_driver_id)
 
     def unbind_wake(self, wake_ref: str, session_id: str) -> "BindOutcome":
         """Owner-guarded removal of ``wake_ref`` (the caller's session)."""

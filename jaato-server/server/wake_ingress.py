@@ -43,9 +43,13 @@ logger = logging.getLogger(__name__)
 SIGNATURE_HEADER = "x-jaato-wake-signature"
 KEY_ID_HEADER = "x-jaato-wake-key-id"  # untrusted hint; we OR-verify all keys
 
-# Type of the injected wake driver: (session_id, text, source, event_id) ->
+# Type of the injected wake driver:
+# (session_id, text, source, event_id, wake_ref, cascade_driver_id) ->
 # (WakeOutcome, detail).  In production this is SessionManager.wake_session.
-WakeFn = Callable[[str, str, str, Optional[str]], Tuple["WakeOutcome", str]]
+WakeFn = Callable[
+    [str, str, str, Optional[str], Optional[str], Optional[str]],
+    Tuple["WakeOutcome", str],
+]
 ResolveFn = Callable[[str], Optional[WakeBinding]]
 
 
@@ -201,9 +205,14 @@ def process_wake(
     event_id = obj.get("event_id")
     event_id = event_id if isinstance(event_id, str) and event_id else None
 
-    outcome, detail = wake_fn(binding.session_id, text, source, event_id)
-    if outcome in (WakeOutcome.OK, WakeOutcome.DUPLICATE):
-        return (200, detail)
+    # Pass wake_ref + the binding's cid so wake_fn can (Option 2) emit a
+    # SessionWokenEvent to the cid's observers and defer the turn when the
+    # session is revived cold with no client.
+    outcome, detail = wake_fn(
+        binding.session_id, text, source, event_id, wake_ref,
+        binding.cascade_driver_id)
+    if outcome in (WakeOutcome.OK, WakeOutcome.DUPLICATE, WakeOutcome.DEFERRED):
+        return (200, detail)  # accepted (DEFERRED = revived, turn on re-attach)
     if outcome in (WakeOutcome.REVIVE_FAILED, WakeOutcome.NOT_DRIVABLE):
         return (503, detail)  # transient — safe to retry
     return (400, detail)  # INVALID / UNRESOLVED — permanent

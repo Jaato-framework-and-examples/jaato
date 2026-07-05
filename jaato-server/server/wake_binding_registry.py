@@ -90,11 +90,18 @@ class BindOutcome(str, Enum):
 @dataclass
 class WakeBinding:
     """A resolved, non-expired binding.  ``trust_keys`` are PEM public keys the
-    Stage-B verifier OR-checks a wake signature against."""
+    Stage-B verifier OR-checks a wake signature against.
+
+    ``cascade_driver_id`` is the binding session's cascade cid (captured at
+    bind time), so the daemon can (a) route the deferred-wake
+    ``SessionWokenEvent`` to that cid's cascade observers, and (b) keep the
+    cid's observer alive while a live binding exists (the wake-durability
+    sweep-exemption).  ``None`` for a session with no cid (not observable)."""
     session_id: str
     workspace_path: str
     trust_keys: List[str]
     expires_at: float
+    cascade_driver_id: Optional[str] = None
 
 
 class WakeBindingRegistry:
@@ -148,12 +155,14 @@ class WakeBindingRegistry:
                     "wake-binding registry: skipping entry %r with invalid "
                     "trust_keys", wake_ref)
                 continue
+            cid = b.get("cascade_driver_id")
             try:
                 self._bindings[str(wake_ref)] = WakeBinding(
                     session_id=str(b["session_id"]),
                     workspace_path=str(b["workspace_path"]),
                     trust_keys=list(tk),
                     expires_at=float(b["expires_at"]),
+                    cascade_driver_id=str(cid) if isinstance(cid, str) else None,
                 )
             except (KeyError, TypeError, ValueError):
                 logger.warning(
@@ -169,6 +178,7 @@ class WakeBindingRegistry:
                     "workspace_path": b.workspace_path,
                     "trust_keys": b.trust_keys,
                     "expires_at": b.expires_at,
+                    "cascade_driver_id": b.cascade_driver_id,
                 }
                 for ref, b in self._bindings.items()
             }
@@ -187,6 +197,7 @@ class WakeBindingRegistry:
         workspace_path: str,
         trust_keys: List[str],
         ttl_seconds: Optional[int] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> BindOutcome:
         """Owner-guarded idempotent-upsert of ``wake_ref`` → this session.
 
@@ -237,9 +248,27 @@ class WakeBindingRegistry:
                 workspace_path=workspace_path,
                 trust_keys=list(trust_keys),
                 expires_at=now + ttl,
+                cascade_driver_id=cascade_driver_id,
             )
             self._save_locked()
         return BindOutcome.OK
+
+    def has_live_binding_for_cid(self, cascade_driver_id: str) -> bool:
+        """True if any NON-expired binding carries ``cascade_driver_id``.
+
+        The wake-durability sweep consults this: while a live binding exists for
+        a cid, that cid's cascade observer must NOT be reaped (a wake may still
+        arrive for it), so the bot's ``session.woken`` subscription survives the
+        session going cold — durability tied to the binding, not to keeping a
+        session warm."""
+        if not cascade_driver_id:
+            return False
+        now = time.time()
+        with self._lock:
+            return any(
+                b.cascade_driver_id == cascade_driver_id and b.expires_at > now
+                for b in self._bindings.values()
+            )
 
     def unbind(self, wake_ref: str, session_id: str) -> BindOutcome:
         """Remove ``wake_ref`` — owner-guarded.

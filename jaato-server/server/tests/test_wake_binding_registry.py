@@ -173,3 +173,29 @@ def test_bind_bad_ttl_type_does_not_crash(tmp_path):
     # a non-int ttl (e.g. a JSON string reaching a direct caller) must not raise
     assert r.bind("w", "s", "/ws", [_pub_pem()], ttl_seconds="60") == BindOutcome.OK
     assert r.resolve("w") is not None
+
+
+# ---- cid-in-binding + has_live_binding_for_cid (Option 2 durability) ----------
+
+def test_bind_stores_and_persists_cid(tmp_path):
+    r = _reg(tmp_path)
+    r.bind("w", "s", "/ws", [_pub_pem()], cascade_driver_id="bot-cid")
+    assert r.resolve("w").cascade_driver_id == "bot-cid"
+    # survives a reload
+    r2 = WakeBindingRegistry(path=tmp_path / "wb.json")
+    assert r2.resolve("w").cascade_driver_id == "bot-cid"
+
+
+def test_has_live_binding_for_cid(tmp_path):
+    r = _reg(tmp_path)
+    r.bind("w1", "s1", "/ws", [_pub_pem()], cascade_driver_id="cid-A")
+    assert r.has_live_binding_for_cid("cid-A") is True
+    assert r.has_live_binding_for_cid("cid-B") is False
+    assert r.has_live_binding_for_cid("") is False
+
+
+def test_has_live_binding_for_cid_ignores_expired(tmp_path):
+    r = _reg(tmp_path)
+    r.bind("w", "s", "/ws", [_pub_pem()], ttl_seconds=-1, cascade_driver_id="cid-A")
+    # expired binding does not keep the cid alive
+    assert r.has_live_binding_for_cid("cid-A") is False

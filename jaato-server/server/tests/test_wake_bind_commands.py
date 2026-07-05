@@ -19,16 +19,17 @@ def _router():
     return r
 
 
-def _session(sid="s1", ws="/ws/bot"):
+def _session(sid="s1", ws="/ws/bot", cid=None):
     s = MagicMock()
     s.session_id = sid
     s.workspace_path = ws
+    s.cascade_driver_id = cid
     return s
 
 
 def test_bind_wake_binds_callers_own_session(tmp_path):
     r = _router()
-    r._session_manager.get_client_session.return_value = _session("s1", "/ws/bot")
+    r._session_manager.get_client_session.return_value = _session("s1", "/ws/bot", cid="bot-cid")
     r._session_manager.bind_wake.return_value = BindOutcome.OK
     r._session_manager.resolve_wake_binding.return_value = MagicMock(expires_at=1234.0)
     r._session_manager.wake_public_url = "https://bot.example.com/wake"
@@ -37,9 +38,10 @@ def test_bind_wake_binds_callers_own_session(tmp_path):
         "c1", ["github-pr:o/r#1"],
         {"wake_ref": "github-pr:o/r#1", "trust_keys": ["PEMKEY"]})
 
-    # bound the CALLER's session_id + workspace (not anything caller-supplied)
+    # bound the CALLER's session_id + workspace + cid (not anything caller-supplied)
     r._session_manager.bind_wake.assert_called_once_with(
-        "github-pr:o/r#1", "s1", "/ws/bot", ["PEMKEY"], None)
+        "github-pr:o/r#1", "s1", "/ws/bot", ["PEMKEY"], None,
+        cascade_driver_id="bot-cid")
     evt = r._event_sink.send_event.call_args[0][1]
     assert evt.wake_ref == "github-pr:o/r#1"
     assert evt.outcome == "ok"
@@ -57,7 +59,8 @@ def test_bind_wake_normalizes_single_string_key(tmp_path):
 
     r._handle_session_bind_wake("c1", [], {"wake_ref": "w", "trust_keys": "PEMKEY"})
 
-    r._session_manager.bind_wake.assert_called_once_with("w", "s1", "/ws", ["PEMKEY"], None)
+    r._session_manager.bind_wake.assert_called_once_with(
+        "w", "s1", "/ws", ["PEMKEY"], None, cascade_driver_id=None)
 
 
 def test_bind_wake_non_iterable_keys_no_crash(tmp_path):
@@ -68,7 +71,8 @@ def test_bind_wake_non_iterable_keys_no_crash(tmp_path):
     # trust_keys as an int must not crash the handler — normalized to [].
     r._handle_session_bind_wake("c1", [], {"wake_ref": "w", "trust_keys": 123})
 
-    r._session_manager.bind_wake.assert_called_once_with("w", "s1", "/ws", [], None)
+    r._session_manager.bind_wake.assert_called_once_with(
+        "w", "s1", "/ws", [], None, cascade_driver_id=None)
 
 
 def test_bind_wake_bad_ttl_coerced_to_none(tmp_path):

@@ -39,14 +39,18 @@ class _Wake:
         self.calls = []
         self.outcome = outcome
 
-    def __call__(self, session_id, text, source, event_id):
+    def __call__(self, session_id, text, source, event_id,
+                 wake_ref=None, cascade_driver_id=None):
         self.calls.append((session_id, text, source, event_id))
+        self.last_wake_ref = wake_ref
+        self.last_cid = cascade_driver_id
         return (self.outcome, self.outcome.value)
 
 
-def _resolver(priv, session_id="s1", ref="github-pr:o/r#1"):
+def _resolver(priv, session_id="s1", ref="github-pr:o/r#1", cid=None):
     binding = WakeBinding(session_id=session_id, workspace_path="/ws",
-                          trust_keys=[_pub(priv)], expires_at=9e12)
+                          trust_keys=[_pub(priv)], expires_at=9e12,
+                          cascade_driver_id=cid)
     return lambda wr: binding if wr == ref else None
 
 
@@ -163,6 +167,23 @@ def test_permanent_failure_is_400():
     for oc in (WakeOutcome.INVALID, WakeOutcome.UNRESOLVED):
         status, _ = process_wake(body, headers, _resolver(priv), _Wake(oc), WINDOW, NOW)
         assert status == 400
+
+
+def test_deferred_is_200():
+    priv = Ed25519PrivateKey.generate()
+    wake = _Wake(WakeOutcome.DEFERRED)
+    body, headers = _request(priv, _payload())
+    status, _ = process_wake(body, headers, _resolver(priv), wake, WINDOW, NOW)
+    assert status == 200  # revived cold + deferred = accepted
+
+
+def test_wake_ref_and_cid_passed_to_wake_fn():
+    priv = Ed25519PrivateKey.generate()
+    wake = _Wake()
+    body, headers = _request(priv, _payload())
+    process_wake(body, headers, _resolver(priv, cid="bot-cid-9"), wake, WINDOW, NOW)
+    assert wake.last_wake_ref == "github-pr:o/r#1"
+    assert wake.last_cid == "bot-cid-9"
 
 
 # ---- config -------------------------------------------------------------------
