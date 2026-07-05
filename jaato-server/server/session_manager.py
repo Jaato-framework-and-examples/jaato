@@ -85,6 +85,8 @@ class WakeOutcome(str, Enum):
         client; a SessionWokenEvent was emitted to its observers)."""
         return self in (
             WakeOutcome.OK, WakeOutcome.DUPLICATE, WakeOutcome.DEFERRED)
+
+
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -5627,10 +5629,12 @@ class SessionManager:
             session = self._sessions.get(session_id)
             has_client = bool(session and session.attached_clients)
         if cascade_driver_id and session is not None and not has_client:
-            # Tag the revived session with its cid so _emit_to_session reaches
-            # the cid's observers and the durability sweep sees it active.
-            session.cascade_driver_id = cascade_driver_id
             with self._lock:
+                # Tag the revived session with its cid (under _lock — event
+                # routing + the sweep read cascade_driver_id concurrently) so
+                # _emit_to_session reaches the cid's observers and the
+                # durability sweep sees it active.
+                session.cascade_driver_id = cascade_driver_id
                 self._pending_wakes[session_id] = _PendingWake(
                     text=text, source=source, wake_ref=wake_ref or "",
                     cascade_driver_id=cascade_driver_id,
