@@ -67,6 +67,42 @@ def test_mid_session_handler_registers_and_appends_to_session_tools():
     assert appended and appended[0].discoverability == "core"  # EAGER → callable on intent
 
 
+def test_mid_session_handler_syncs_runner_permission_whitelist():
+    # A client tool registered mid-session is recorded ``auto_approved=True`` in
+    # ``registry._core_auto_approved`` — but ``check_permission`` gates on the
+    # permission POLICY whitelist, and the registry→whitelist bridge
+    # (``add_whitelist_tools``) runs ONCE at bootstrap.  So the mid-session
+    # handler MUST sync the new names into the runner permission whitelist
+    # itself, else a headless-driven turn (e.g. session.wake, which always
+    # registers its client tools after cold-revive) would raise an operator
+    # permission prompt for the tool and block forever with no operator to
+    # answer.  Regression for the wake headless-dispatch deadlock.
+    from server.runner.rpc import RunnerRPC
+
+    class _FakePermission:
+        def __init__(self):
+            self.whitelisted = []
+
+        def add_whitelist_tools(self, tools):
+            self.whitelisted.extend(tools)
+
+    reg = _FakeRegistry()
+    perm = _FakePermission()
+    session = SimpleNamespace(
+        _runtime=SimpleNamespace(registry=reg, permission_plugin=perm),
+        _tools=[])
+    rpc = SimpleNamespace(_require_ready_session=lambda: (True, None, session))
+    ok, payload = RunnerRPC._handle_session_register_client_tools(
+        rpc, {"client_tools": [
+            {"name": "record_note", "description": "d", "parameters": {}},
+            {"description": "no name"},          # skipped — no name to whitelist
+        ]})
+    assert ok and payload["registered"] == ["record_note"]
+    # The named tool is now on the runner permission whitelist → check_permission
+    # short-circuits ALLOW instead of prompting.
+    assert perm.whitelisted == ["record_note"]
+
+
 def test_mid_session_handler_rejects_non_list():
     from server.runner.rpc import RunnerRPC
     ok, payload = RunnerRPC._handle_session_register_client_tools(

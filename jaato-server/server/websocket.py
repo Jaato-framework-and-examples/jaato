@@ -2056,13 +2056,26 @@ class JaatoWSServer:
             # After session.new or session.attach completes, register any
             # buffered client tools that were sent before the session existed.
             if (isinstance(event, CommandRequest)
-                    and event.command.lower() in ("session.new", "session.attach")
-                    and hasattr(self, '_pending_client_tools')
-                    and client_id in self._pending_client_tools):
-                pending = self._pending_client_tools.pop(client_id)
-                pending_cats = getattr(self, '_pending_client_categories', {}).pop(client_id, None)
-                self._register_client_tools(client_id, pending, pending_cats)
-                # (runtime refresh happens inside _register_client_tools)
+                    and event.command.lower() in ("session.new", "session.attach")):
+                if (hasattr(self, '_pending_client_tools')
+                        and client_id in self._pending_client_tools):
+                    pending = self._pending_client_tools.pop(client_id)
+                    pending_cats = getattr(self, '_pending_client_categories', {}).pop(client_id, None)
+                    # Wires tools + drives any deferred wake AFTER the runner
+                    # push (see _register_client_tools._push).
+                    self._register_client_tools(client_id, pending, pending_cats)
+                else:
+                    # No buffered host tools → drive any deferred wake for the
+                    # now-attached session immediately.
+                    _sid = (self._event_sink_adapter._client_sessions.get(client_id)
+                            if self._event_sink_adapter else None)
+                    if _sid:
+                        try:
+                            self._command_router._session_manager.drive_pending_wake(_sid)
+                        except Exception:
+                            logger.exception(
+                                "deferred-wake drive on no-tools attach failed "
+                                "for %s", _sid)
 
         except Exception as exc:
             logger.error(
@@ -2266,7 +2279,8 @@ class JaatoWSServer:
             # deadlock).  Best-effort background thread; proxy already registered.
             import threading
 
-            def _push(server=session.server, t=tools, cid=client_id):
+            def _push(server=session.server, t=tools, cid=client_id,
+                      sid=session.session_id):
                 try:
                     # The rpc handle can be live BEFORE the runner finishes
                     # session.bootstrap — most acutely on a reused warm pool slot
@@ -2296,6 +2310,17 @@ class JaatoWSServer:
                     # avoid the daemon-side prompt_library walk.  The WS event
                     # sink is thread-safe (run_coroutine_threadsafe).
                     server._emit_tool_id_registry_from_schemas()
+                    # Deferred-turn (Option 2): the runner now has this client's
+                    # host tools, so drive any wake deferred while the session was
+                    # cold — the turn's schema will include these tools.  After
+                    # the push (not at attach-end) closes the drive-races-tool-
+                    # wiring gap.  Idempotent.
+                    try:
+                        self._command_router._session_manager.drive_pending_wake(sid)
+                    except Exception:
+                        logger.exception(
+                            "deferred-wake drive after client-tool push failed "
+                            "for %s", sid)
                 except Exception:
                     logger.exception(
                         "mid-session client-tool runner push failed for %s", cid)
