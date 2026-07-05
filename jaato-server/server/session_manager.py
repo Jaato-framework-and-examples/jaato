@@ -49,6 +49,7 @@ from shared.session_envelope import BootstrapEnvelope
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from .session_workspace_index import SessionWorkspaceIndex
+from .wake_binding_registry import WakeBindingRegistry, BindOutcome
 
 
 class WakeOutcome(str, Enum):
@@ -367,6 +368,11 @@ class SessionManager:
         # Bounded LRU of wake event_ids already actioned — external ingresses
         # (GitHub, etc.) redeliver; a duplicate event_id is dropped.
         self._wake_seen_event_ids: "OrderedDict[str, None]" = OrderedDict()
+        # wake_ref → binding registry (the SESSION-owned half of the wake
+        # contract: which key(s) a session trusts to wake it, per opaque ref).
+        # Written by bind_wake/unbind_wake (owner = caller's session), read by
+        # the mode-B verify shim.  See wake_binding_registry.py.
+        self._wake_binding_registry = WakeBindingRegistry()
 
         # Phase 1 cascade-as-client (server 0.6.154+): registry of
         # cascade-clients keyed by cascade_driver_id.  See
@@ -5551,6 +5557,35 @@ class SessionManager:
             return (WakeOutcome.NOT_DRIVABLE,
                     f"session {session_id!r} not drivable after wake")
         return (WakeOutcome.OK, "woken")
+
+    def bind_wake(
+        self,
+        wake_ref: str,
+        session_id: str,
+        workspace_path: str,
+        trust_keys: List[str],
+        ttl_seconds: Optional[int] = None,
+    ) -> "BindOutcome":
+        """Owner-guarded bind of ``wake_ref`` → ``session_id`` with ``trust_keys``.
+
+        The command handler passes the CALLER'S current session as
+        ``session_id`` + its workspace (so a caller can only bind ITSELF —
+        hijack-proof).  Delegates to the :class:`WakeBindingRegistry` (validation,
+        owner-guard, TTL, persistence).  See ``wake_binding_registry.py``.
+        """
+        return self._wake_binding_registry.bind(
+            wake_ref, session_id, workspace_path, trust_keys, ttl_seconds)
+
+    def unbind_wake(self, wake_ref: str, session_id: str) -> "BindOutcome":
+        """Owner-guarded removal of ``wake_ref`` (the caller's session)."""
+        return self._wake_binding_registry.unbind(wake_ref, session_id)
+
+    def resolve_wake_binding(self, wake_ref: str):
+        """Resolve a live (non-expired) binding for the mode-B verify shim, or
+        ``None``.  The shim then verifies the wake signature against
+        ``binding.trust_keys`` and drives ``binding.session_id`` via
+        :meth:`wake_session`."""
+        return self._wake_binding_registry.resolve(wake_ref)
 
     def _load_session(
         self,

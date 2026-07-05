@@ -115,6 +115,7 @@ export type JaatoEvents =
   | ReplayMessagesResultEvent
   | ResolveForkPointRequest
   | ResolveForkPointResultEvent
+  | WakeBindResultEvent
   | PermissionAddWhitelistRequest
   | PermissionAddBlacklistRequest
   | PermissionRemoveRequest
@@ -217,6 +218,7 @@ export type EventType =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -333,6 +335,7 @@ export type EventType1 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -455,6 +458,7 @@ export type EventType2 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -574,6 +578,7 @@ export type EventType3 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -692,6 +697,7 @@ export type EventType4 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -818,6 +824,7 @@ export type EventType5 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -942,6 +949,7 @@ export type EventType6 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -1062,6 +1070,7 @@ export type EventType7 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -1179,6 +1188,7 @@ export type EventType8 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -1300,6 +1310,7 @@ export type EventType9 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -1418,6 +1429,7 @@ export type EventType10 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -1544,6 +1556,7 @@ export type EventType11 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -1662,6 +1675,7 @@ export type EventType12 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -1787,6 +1801,7 @@ export type EventType13 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -1915,6 +1930,7 @@ export type EventType14 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2036,6 +2052,7 @@ export type EventType15 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2153,6 +2170,7 @@ export type EventType16 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2273,6 +2291,7 @@ export type EventType17 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2393,6 +2412,7 @@ export type EventType18 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2519,6 +2539,7 @@ export type EventType19 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2638,6 +2659,7 @@ export type EventType20 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2760,6 +2782,7 @@ export type EventType21 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2877,6 +2900,7 @@ export type EventType22 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -2996,6 +3020,7 @@ export type EventType23 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -3115,6 +3140,7 @@ export type EventType24 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -3232,6 +3258,7 @@ export type EventType25 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -3355,6 +3382,7 @@ export type EventType26 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -3474,6 +3502,7 @@ export type EventType27 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -3591,6 +3620,7 @@ export type EventType28 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -3716,6 +3746,7 @@ export type EventType29 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -3835,6 +3866,7 @@ export type EventType30 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -3955,6 +3987,7 @@ export type EventType31 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -4090,6 +4123,7 @@ export type EventType32 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -4206,6 +4240,7 @@ export type EventType33 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -4334,6 +4369,7 @@ export type EventType34 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -4454,6 +4490,7 @@ export type EventType35 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -4570,6 +4607,7 @@ export type EventType36 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -4692,6 +4730,7 @@ export type EventType37 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -4812,6 +4851,7 @@ export type EventType38 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -4929,6 +4969,7 @@ export type EventType39 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -5045,6 +5086,7 @@ export type EventType40 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -5165,6 +5207,7 @@ export type EventType41 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -5283,6 +5326,7 @@ export type EventType42 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -5403,6 +5447,7 @@ export type EventType43 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -5521,6 +5566,7 @@ export type EventType44 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -5658,6 +5704,7 @@ export type EventType45 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -5776,6 +5823,7 @@ export type EventType46 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -5894,6 +5942,7 @@ export type EventType47 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6012,6 +6061,7 @@ export type EventType48 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6129,6 +6179,7 @@ export type EventType49 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6268,6 +6319,7 @@ export type EventType50 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6388,6 +6440,7 @@ export type EventType51 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6508,6 +6561,7 @@ export type EventType52 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6626,6 +6680,7 @@ export type EventType53 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6742,6 +6797,7 @@ export type EventType54 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6858,6 +6914,7 @@ export type EventType55 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -6975,6 +7032,7 @@ export type EventType56 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -7095,6 +7153,7 @@ export type EventType57 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -7211,6 +7270,7 @@ export type EventType58 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -7326,6 +7386,7 @@ export type EventType59 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -7444,6 +7505,7 @@ export type EventType60 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -7559,6 +7621,7 @@ export type EventType61 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -7678,6 +7741,7 @@ export type EventType62 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -7793,6 +7857,7 @@ export type EventType63 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -7909,6 +7974,7 @@ export type EventType64 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8027,6 +8093,7 @@ export type EventType65 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8145,6 +8212,7 @@ export type EventType66 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8263,6 +8331,7 @@ export type EventType67 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8379,6 +8448,7 @@ export type EventType68 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8501,6 +8571,7 @@ export type EventType69 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8626,6 +8697,7 @@ export type EventType70 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8743,6 +8815,7 @@ export type EventType71 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8859,6 +8932,7 @@ export type EventType72 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -8976,6 +9050,7 @@ export type EventType73 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -9095,6 +9170,7 @@ export type EventType74 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -9210,6 +9286,7 @@ export type EventType75 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -9329,6 +9406,7 @@ export type EventType76 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -9445,6 +9523,7 @@ export type EventType77 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -9562,6 +9641,7 @@ export type EventType78 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -9678,6 +9758,7 @@ export type EventType79 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -9799,6 +9880,7 @@ export type EventType80 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -9917,6 +9999,7 @@ export type EventType81 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -10037,6 +10120,7 @@ export type EventType82 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -10155,6 +10239,7 @@ export type EventType83 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -10274,6 +10359,7 @@ export type EventType84 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -10395,6 +10481,7 @@ export type EventType85 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -10515,6 +10602,7 @@ export type EventType86 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -10644,6 +10732,7 @@ export type EventType87 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -10770,6 +10859,7 @@ export type EventType88 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -10887,6 +10977,7 @@ export type EventType89 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11004,6 +11095,7 @@ export type EventType90 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11123,6 +11215,7 @@ export type EventType91 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11244,6 +11337,7 @@ export type EventType92 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11361,6 +11455,7 @@ export type EventType93 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11478,6 +11573,7 @@ export type EventType94 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11597,6 +11693,7 @@ export type EventType95 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11721,6 +11818,7 @@ export type EventType96 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11847,6 +11945,7 @@ export type EventType97 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -11965,6 +12064,7 @@ export type EventType98 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12087,6 +12187,7 @@ export type EventType99 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12205,6 +12306,7 @@ export type EventType100 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12324,6 +12426,7 @@ export type EventType101 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12442,6 +12545,7 @@ export type EventType102 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12462,8 +12566,10 @@ export type EventType102 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp102 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail = string;
+export type ExpiresAt1 = number;
 /**
  * All event types in the protocol.
  */
@@ -12559,6 +12665,7 @@ export type EventType103 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12579,8 +12686,8 @@ export type EventType103 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp103 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -12676,6 +12783,7 @@ export type EventType104 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12696,9 +12804,8 @@ export type EventType104 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp104 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -12794,6 +12901,7 @@ export type EventType105 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12814,7 +12922,9 @@ export type EventType105 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp105 = string;
-export type Target1 = string;
+export type Target = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -12910,6 +13020,7 @@ export type EventType106 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -12930,7 +13041,7 @@ export type EventType106 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp106 = string;
-export type Policy = string;
+export type Target1 = string;
 /**
  * All event types in the protocol.
  */
@@ -13026,6 +13137,7 @@ export type EventType107 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -13046,7 +13158,7 @@ export type EventType107 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp107 = string;
-export type RequestId31 = string;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -13142,6 +13254,7 @@ export type EventType108 =
   | "replay_messages.result"
   | "resolve_fork_point.request"
   | "resolve_fork_point.result"
+  | "session.wake_bind_result"
   | "permission.add_whitelist"
   | "permission.add_blacklist"
   | "permission.remove"
@@ -13162,6 +13275,123 @@ export type EventType108 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp108 = string;
+export type RequestId31 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType109 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "gc.config"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "event.external"
+  | "inject_prompt.request"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp109 = string;
 export type RequestId32 = string;
 export type DefaultPolicy = string;
 export type SessionDefaultPolicy = string | null;
@@ -14878,6 +15108,23 @@ export interface ResolveForkPointResultEvent {
   error?: Error9;
 }
 /**
+ * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
+ *
+ * ``outcome`` is the ``BindOutcome`` value (``ok`` / ``unauthorized`` /
+ * ``malformed_key`` / ``too_many_keys`` / ``no_keys`` / ``no_session`` /
+ * ``unknown``); route on it, not ``detail``.  On a successful ``bind_wake``,
+ * ``wake_ref`` echoes the (session-supplied) ref and ``expires_at`` is the
+ * binding's Unix expiry — the values the caller's waker keys on.
+ */
+export interface WakeBindResultEvent {
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  wake_ref?: WakeRef;
+  outcome?: Outcome1;
+  detail?: Detail;
+  expires_at?: ExpiresAt1;
+}
+/**
  * Add tools / patterns to the session's permission whitelist.
  *
  * Maps to :meth:`PermissionPlugin.add_whitelist_tools` for tools
@@ -14886,8 +15133,8 @@ export interface ResolveForkPointResultEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType102;
-  timestamp?: Timestamp102;
+  type?: EventType103;
+  timestamp?: Timestamp103;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -14899,8 +15146,8 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType103;
-  timestamp?: Timestamp103;
+  type?: EventType104;
+  timestamp?: Timestamp104;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -14911,8 +15158,8 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType104;
-  timestamp?: Timestamp104;
+  type?: EventType105;
+  timestamp?: Timestamp105;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -14926,8 +15173,8 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType105;
-  timestamp?: Timestamp105;
+  type?: EventType106;
+  timestamp?: Timestamp106;
   target?: Target1;
 }
 /**
@@ -14938,16 +15185,16 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType106;
-  timestamp?: Timestamp106;
+  type?: EventType107;
+  timestamp?: Timestamp107;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType107;
-  timestamp?: Timestamp107;
+  type?: EventType108;
+  timestamp?: Timestamp108;
   request_id?: RequestId31;
 }
 /**
@@ -14959,8 +15206,8 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType108;
-  timestamp?: Timestamp108;
+  type?: EventType109;
+  timestamp?: Timestamp109;
   request_id?: RequestId32;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
@@ -15083,6 +15330,7 @@ export const EventTypeValue = {
   REPLAY_MESSAGES_RESULT: "replay_messages.result",
   RESOLVE_FORK_POINT_REQUEST: "resolve_fork_point.request",
   RESOLVE_FORK_POINT_RESULT: "resolve_fork_point.result",
+  WAKE_BIND_RESULT: "session.wake_bind_result",
   PERMISSION_ADD_WHITELIST_REQUEST: "permission.add_whitelist",
   PERMISSION_ADD_BLACKLIST_REQUEST: "permission.add_blacklist",
   PERMISSION_REMOVE_REQUEST: "permission.remove",
