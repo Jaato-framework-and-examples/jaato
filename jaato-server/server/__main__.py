@@ -345,6 +345,7 @@ class JaatoDaemon:
         self._session_manager: Optional[SessionManager] = None
         self._ipc_server = None
         self._ws_server = None
+        self._wake_ingress = None  # daemon-tier mode-B wake HTTP ingress
 
         # Daemon extensions loaded via ``jaato.extensions`` entry points.
         # See ``_load_extensions()`` for the discovery and lifecycle protocol.
@@ -576,6 +577,26 @@ class JaatoDaemon:
         for ext in self._extensions:
             await ext.start()
 
+        # Start the daemon-tier wake ingress (mode-B) if configured. It lives at
+        # the daemon tier (not the runner-bound webhook plugin) so it survives
+        # session unload — a wake can arrive long after the session detached.
+        # Opt-in via ~/.jaato/wake.json (enabled=true).
+        try:
+            import pathlib
+            from server.wake_ingress import WakeIngressConfig, WakeIngressServer
+            wake_cfg = WakeIngressConfig.from_file(
+                pathlib.Path.home() / ".jaato" / "wake.json")
+            if wake_cfg.enabled:
+                ingress = WakeIngressServer(
+                    wake_cfg,
+                    resolve_binding=self._session_manager.resolve_wake_binding,
+                    wake_fn=self._session_manager.wake_session,
+                )
+                if ingress.start():
+                    self._wake_ingress = ingress
+        except Exception:  # noqa: BLE001 — ingress must never block daemon boot
+            logger.exception("wake ingress: failed to start (continuing without it)")
+
         # Pool PR 5b: claim subreaper role for the daemon.  Pool slots
         # are template-children (forked from the template, no exec).
         # By default, when the template dies, slots get re-parented to
@@ -738,6 +759,11 @@ class JaatoDaemon:
                 await ext.stop()
             except Exception as exc:
                 logger.warning("Extension stop failed: %s", exc)
+        if self._wake_ingress:
+            try:
+                self._wake_ingress.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("wake ingress stop failed: %s", exc)
         if self._ipc_server:
             await self._ipc_server.stop()
         if self._ws_server:

@@ -24,10 +24,18 @@ step dispatches on the concrete key type.
 """
 from __future__ import annotations
 
+import base64
+import logging
 from typing import List
 
-from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidTrustKey(ValueError):
@@ -54,3 +62,55 @@ def validate_trust_keys(keys: List[str]) -> None:
     key.  Called at ``bind_wake`` time so a malformed key is refused up front."""
     for k in keys:
         load_trust_key(k)
+
+
+def verify_wake_signature(
+    trust_keys: List[str], message: bytes, signature_b64: str,
+) -> bool:
+    """Stage B: OR-verify a wake signature over the RAW request body.
+
+    Returns ``True`` iff ``signature_b64`` (base64) over ``message`` (the exact
+    bytes the relay signed and POSTed) validates against ANY key in
+    ``trust_keys``.  This is the mode-B authoritative gate — the caller resolves
+    ``wake_ref`` → binding first, then passes ``binding.trust_keys`` here.
+
+    Canonical spec (sealed 2026-07-05): the relay signs the RAW body bytes; the
+    daemon verifies over the raw bytes it received (never a re-serialization).
+    Ed25519 is the default; RSA public keys verify with **PSS / SHA-256** (the
+    documented RSA scheme — a relay using RSA must sign with the same).  A
+    malformed key or a key type we don't verify is skipped, not fatal, so one
+    bad key in a rotation set can't veto a good one.
+    """
+    if not signature_b64 or not trust_keys:
+        return False
+    try:
+        sig = base64.b64decode(signature_b64, validate=True)
+    except (ValueError, TypeError):
+        return False
+    for pem in trust_keys:
+        try:
+            key = load_trust_key(pem)
+        except InvalidTrustKey:
+            continue
+        try:
+            if isinstance(key, Ed25519PublicKey):
+                key.verify(sig, message)  # raises InvalidSignature on mismatch
+                return True
+            if isinstance(key, RSAPublicKey):
+                key.verify(
+                    sig, message,
+                    padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                                salt_length=padding.PSS.MAX_LENGTH),
+                    hashes.SHA256(),
+                )
+                return True
+            # Other key types (EC, DSA, ...) are not part of the wake spec.
+            logger.debug("wake verify: unsupported key type %s — skipping",
+                         type(key).__name__)
+        except InvalidSignature:
+            continue
+        except Exception:  # noqa: BLE001 — a broken key must not abort the OR-loop
+            logger.debug("wake verify: error checking a trust key — skipping",
+                         exc_info=True)
+            continue
+    return False
