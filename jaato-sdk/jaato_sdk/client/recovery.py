@@ -921,6 +921,31 @@ class IPCRecoveryClient:
         """Register multiple typed handlers; single unsub removes all."""
         return self._registry.subscribe_many(handlers)
 
+    def open_event_stream(self) -> "_SyncSubscribedStream":
+        """Subscribe SYNCHRONOUSLY (at call time) and return an event iterator.
+
+        The recovery-client counterpart to :meth:`IPCClient.open_event_stream`.
+        Unlike :meth:`events` (an async generator that subscribes lazily on its
+        first ``__anext__``), this registers the subscriber queue NOW, before it
+        returns — so a caller can guarantee the subscription is live BEFORE it
+        triggers server-side output (e.g. ``attach`` a session the daemon will
+        immediately drive a woken turn on).  Critical here because the recovery
+        client has NO zero-subscriber replay buffer, so a not-yet-registered
+        queue silently drops that output::
+
+            stream = client.open_event_stream()   # queue registered now
+            await client.attach(session_id)        # driven output can't be missed
+            async for ev in stream:
+                ...
+
+        Removes any need to poll ``_event_subscribers`` to prove registration.
+        Same fan-out + ``None``-sentinel semantics as :meth:`events`, and the
+        queue survives transient reconnects (the pump keeps fanning out to it).
+        Lifetime is caller-managed — ``aclose()`` at teardown.
+        """
+        from ._event_stream import _SyncSubscribedStream
+        return _SyncSubscribedStream(self, self._subscribe_events())
+
     async def events(self) -> AsyncIterator[Event]:
         """Async iterator for receiving events.
 

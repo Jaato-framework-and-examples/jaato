@@ -2064,6 +2064,29 @@ class IPCClient:
     # Event Stream
     # =========================================================================
 
+    def open_event_stream(self) -> "_SyncSubscribedStream":
+        """Subscribe SYNCHRONOUSLY (at call time) and return an event iterator.
+
+        Unlike :meth:`events` — an async generator that subscribes lazily on its
+        first ``__anext__`` — this registers the subscriber queue NOW, before it
+        returns.  Use it when the subscription must be established before an
+        action that triggers server-side output, e.g.::
+
+            stream = client.open_event_stream()   # queue registered now
+            await client.attach(session_id)        # driven output can't be missed
+            async for ev in stream:
+                ...
+
+        This removes any need to reach into ``_subscribe_events`` /
+        ``_event_subscribers`` to force + prove registration.  Same fan-out and
+        ``None``-sentinel disconnect semantics as :meth:`events` (buffered events
+        are replayed into the queue first).  Lifetime is caller-managed: the
+        stream unsubscribes on disconnect, on ``aclose()``, or on ``async with``
+        exit — a long-lived consumer should ``aclose()`` at teardown.
+        """
+        from ._event_stream import _SyncSubscribedStream
+        return _SyncSubscribedStream(self, self._subscribe_events())
+
     async def events(self) -> AsyncIterator[Event]:
         """Async iterator for receiving events.
 
