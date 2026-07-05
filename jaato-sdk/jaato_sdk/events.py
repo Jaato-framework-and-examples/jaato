@@ -252,6 +252,9 @@ class EventType(str, Enum):
     RESOLVE_FORK_POINT_REQUEST = "resolve_fork_point.request"  # Client -> Server
     RESOLVE_FORK_POINT_RESULT = "resolve_fork_point.result"    # Server -> Client
 
+    # Wake primitive: result of session.bind_wake / session.unbind_wake
+    WAKE_BIND_RESULT = "session.wake_bind_result"              # Server -> Client
+
     # SDK feature parity — typed permission-policy verbs replacing
     # stringly-typed CommandRequest("permissions", [...]) for SDK
     # consumers.  CLI command path stays for actual users.
@@ -1504,6 +1507,22 @@ class ToolExecuteResultEvent(Event):
     error: str = ""   # Error message if execution failed
 
 
+class WakeBindResultEvent(Event):
+    """Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
+
+    ``outcome`` is the ``BindOutcome`` value (``ok`` / ``unauthorized`` /
+    ``malformed_key`` / ``too_many_keys`` / ``no_keys`` / ``no_session`` /
+    ``unknown``); route on it, not ``detail``.  On a successful ``bind_wake``,
+    ``wake_ref`` echoes the (session-supplied) ref and ``expires_at`` is the
+    binding's Unix expiry — the values the caller's waker keys on.
+    """
+    type: EventType = Field(default=EventType.WAKE_BIND_RESULT)
+    wake_ref: str = ""
+    outcome: str = ""
+    detail: str = ""
+    expires_at: float = 0.0
+
+
 class HistoryRequest(Event):
     """Client request for conversation history."""
     type: EventType = Field(default=EventType.HISTORY_REQUEST)
@@ -2485,6 +2504,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.REPLAY_MESSAGES_RESULT.value: ReplayMessagesResultEvent,
     EventType.RESOLVE_FORK_POINT_REQUEST.value: ResolveForkPointRequest,
     EventType.RESOLVE_FORK_POINT_RESULT.value: ResolveForkPointResultEvent,
+    EventType.WAKE_BIND_RESULT.value: WakeBindResultEvent,
     # SDK feature parity — permission policy verbs
     EventType.PERMISSION_ADD_WHITELIST_REQUEST.value: PermissionAddWhitelistRequest,
     EventType.PERMISSION_ADD_BLACKLIST_REQUEST.value: PermissionAddBlacklistRequest,
