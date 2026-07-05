@@ -95,7 +95,8 @@ class WakeIngressConfig:
         c.host = str(d.get("host", c.host))
         c.port = _int("port", c.port)
         c.path = str(d.get("path", c.path))
-        c.public_url = str(d.get("public_url", c.public_url) or "")
+        pub = d.get("public_url", c.public_url)
+        c.public_url = str(pub).strip() if isinstance(pub, str) else ""
         ips = d.get("allowed_ips", [])
         c.allowed_ips = [str(x) for x in ips] if isinstance(ips, list) else []
         c.rate_limit_per_second = _int("rate_limit_per_second",

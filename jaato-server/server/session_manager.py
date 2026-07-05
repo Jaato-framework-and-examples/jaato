@@ -5586,8 +5586,10 @@ class SessionManager:
 
     def set_wake_public_url(self, url: Optional[str]) -> None:
         """Wire the operator-declared public wake endpoint (from wake.json
-        ``public_url``) so ``bind_wake`` can advertise it in its result."""
-        self._wake_public_url = url or ""
+        ``public_url``) so ``bind_wake`` can advertise it in its result.
+        Whitespace is stripped so a blank/whitespace-only value reads as unset
+        (``""``) rather than a marker that looks set but won't route."""
+        self._wake_public_url = (url or "").strip() if isinstance(url, str) else ""
 
     @property
     def wake_public_url(self) -> str:
