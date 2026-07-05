@@ -199,3 +199,57 @@ def test_has_live_binding_for_cid_ignores_expired(tmp_path):
     r.bind("w", "s", "/ws", [_pub_pem()], ttl_seconds=-1, cascade_driver_id="cid-A")
     # expired binding does not keep the cid alive
     assert r.has_live_binding_for_cid("cid-A") is False
+
+
+# ---- release_for_session (root fix: bindings die with a DELETED session) ------
+
+def test_release_for_session_removes_all_owned(tmp_path):
+    r = _reg(tmp_path)
+    r.bind("pr#1", "sess1", "/ws/a", [_pub_pem()])
+    r.bind("pr#2", "sess1", "/ws/a", [_pub_pem()])
+    r.bind("pr#3", "other", "/ws/b", [_pub_pem()])
+    assert r.release_for_session("sess1") == 2
+    assert r.resolve("pr#1") is None and r.resolve("pr#2") is None
+    assert r.resolve("pr#3") is not None            # other session untouched
+
+
+def test_release_for_session_is_idempotent_and_persisted(tmp_path):
+    r = _reg(tmp_path)
+    r.bind("pr#1", "sess1", "/ws/a", [_pub_pem()])
+    assert r.release_for_session("sess1") == 1
+    assert r.release_for_session("sess1") == 0       # idempotent
+    # persisted: a fresh registry over the same file sees the release
+    assert _reg(tmp_path).resolve("pr#1") is None
+
+
+def test_release_frees_ref_for_a_new_owner(tmp_path):
+    # The reported bug: after the owner is gone, a NEW session can re-bind.
+    r = _reg(tmp_path)
+    r.bind("pr#1", "sess1", "/ws/a", [_pub_pem()])
+    r.release_for_session("sess1")
+    assert r.bind("pr#1", "sess2", "/ws/a", [_pub_pem()]) == BindOutcome.OK
+    assert r.resolve("pr#1").session_id == "sess2"
+
+
+# ---- owner-guard liveness (belt: a DELETED owner frees the ref) ---------------
+
+def test_owner_guard_rebindable_when_owner_gone(tmp_path):
+    # owner_exists reports the owner's DISK record is gone → re-bindable.
+    alive = {"owner"}
+    r = _reg(tmp_path, owner_exists=lambda sid, ws: sid in alive)
+    r.bind("w", "owner", "/ws/owner", [_pub_pem()])
+    # while the owner exists, the guard still refuses a different session
+    assert r.bind("w", "attacker", "/ws/atk", [_pub_pem()]) == BindOutcome.UNAUTHORIZED
+    # owner deleted (record gone) → a new session may claim the ref
+    alive.discard("owner")
+    assert r.bind("w", "newsess", "/ws/new", [_pub_pem()]) == BindOutcome.OK
+    assert r.resolve("w").session_id == "newsess"
+
+
+def test_owner_guard_protects_cold_unloaded_owner(tmp_path):
+    # THE cold-revive invariant: an UNLOADED (not deleted) owner still has its
+    # on-disk record → owner_exists=True → its ref stays protected from hijack.
+    r = _reg(tmp_path, owner_exists=lambda sid, ws: True)  # record present on disk
+    r.bind("w", "coldsess", "/ws/cold", [_pub_pem()])
+    assert r.bind("w", "attacker", "/ws/atk", [_pub_pem()]) == BindOutcome.UNAUTHORIZED
+    assert r.resolve("w").session_id == "coldsess"

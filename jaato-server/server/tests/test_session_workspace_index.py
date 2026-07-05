@@ -95,3 +95,22 @@ def test_atomic_write_produces_valid_json(tmp_path):
     on_disk = json.loads(p.read_text(encoding="utf-8"))
     assert on_disk["map"]["s1"] == "/ws/a"
     assert on_disk["ambiguous"] == []
+
+
+def test_forget_drops_mapping(tmp_path):
+    ix = _idx(tmp_path)
+    ix.record("s1", "/ws/a")
+    ix.forget("s1")
+    assert ix.resolve("s1") is None
+    ix.forget("s1")                         # idempotent — no error on unknown id
+
+
+def test_forget_clears_ambiguous_mark(tmp_path):
+    ix = _idx(tmp_path)
+    ix.record("dup", "/ws/a")
+    ix.record("dup", "/ws/b")               # → ambiguous
+    assert ix.resolve("dup") is None        # refused while ambiguous
+    ix.forget("dup")
+    # ambiguity cleared: the id is fully forgotten and re-recordable clean
+    ix.record("dup", "/ws/c")
+    assert ix.resolve("dup") == "/ws/c"
