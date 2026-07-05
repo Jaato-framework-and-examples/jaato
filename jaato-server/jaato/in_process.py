@@ -177,6 +177,7 @@ class InProcessEventEmitter:
 
     def __init__(self) -> None:
         self._subs: Dict[Any, List[Callable[[Any], None]]] = {}
+        self._all_subs: List[Callable[[Any], None]] = []
         self._lock = threading.Lock()
 
     def subscribe(
@@ -190,6 +191,25 @@ class InProcessEventEmitter:
                 lst = self._subs.get(event_type)
                 if lst and cb in lst:
                     lst.remove(cb)
+
+        return _unsub
+
+    def subscribe_all(
+        self, cb: Callable[[Any], None]
+    ) -> Callable[[], None]:
+        """Subscribe to EVERY event (type-agnostic), returning an unsubscribe.
+
+        Backs :meth:`InProcessClient.open_event_stream` / ``events`` — the
+        no-socket analog of the IPC client's all-events fan-out.  ``cb`` fires
+        on every ``emit`` regardless of ``event.type``.
+        """
+        with self._lock:
+            self._all_subs.append(cb)
+
+        def _unsub() -> None:
+            with self._lock:
+                if cb in self._all_subs:
+                    self._all_subs.remove(cb)
 
         return _unsub
 
@@ -211,7 +231,7 @@ class InProcessEventEmitter:
     def emit(self, event: Any) -> None:
         event_type = getattr(event, "type", None)
         with self._lock:
-            subs = list(self._subs.get(event_type, []))
+            subs = list(self._subs.get(event_type, [])) + list(self._all_subs)
         for cb in subs:
             cb(event)
 
@@ -360,6 +380,11 @@ class InProcessClient:
         # template: init the runner-tier plugins once, share across sessions.
         self._registry: Any = None
         self._emitter = InProcessEventEmitter()
+        # Live open_event_stream / events queues + their emitter unsubscribes,
+        # so disconnect() can push the None sentinel to each (mirrors the IPC
+        # drain loop signalling disconnect).  Keyed by id(queue).
+        self._event_queues: List[Any] = []
+        self._event_queue_unsubs: Dict[int, Callable[[], None]] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._session_id: Optional[str] = None
         # Cross-thread permission rendezvous: the InProcessChannel (registered
@@ -418,6 +443,60 @@ class InProcessClient:
         self, event_type: Any, cb: Callable[[Any], None]
     ) -> Callable[[], None]:
         return self._emitter.subscribe_once(event_type, cb)
+
+    # ---- facade contract: iterator event surface (parity with IPCClient) ----
+    def _subscribe_events(self) -> "asyncio.Queue":
+        """Subscribe a fresh queue to the emitter's all-events fan-out.
+
+        The no-socket analog of ``IPCClient._subscribe_events``.  ``emit`` runs
+        on the event loop thread (both the ``send_message`` output path and the
+        UI-hook path marshal via ``call_soon_threadsafe`` BEFORE calling
+        ``emit``), so ``queue.put_nowait`` off it is loop-safe.
+        """
+        q: "asyncio.Queue" = asyncio.Queue()
+        unsub = self._emitter.subscribe_all(q.put_nowait)
+        self._event_queues.append(q)
+        self._event_queue_unsubs[id(q)] = unsub
+        return q
+
+    def _unsubscribe_events(self, q: "asyncio.Queue") -> None:
+        """Remove a previously-subscribed queue.  Idempotent."""
+        unsub = self._event_queue_unsubs.pop(id(q), None)
+        if unsub is not None:
+            unsub()
+        try:
+            self._event_queues.remove(q)
+        except ValueError:
+            pass
+
+    def open_event_stream(self) -> "Any":
+        """Subscribe SYNCHRONOUSLY (at call time) and return an event iterator.
+
+        The in-process transport's parity implementation of
+        :meth:`IPCClient.open_event_stream`: registers the subscriber queue NOW
+        (before returning) so the facade surface is uniform across transports.
+        Yields every emitted event; ``None``-sentinel + ``aclose()``/``async
+        with`` unsubscribe semantics match the socket clients.  (In-process
+        ``subscribe`` is already synchronous, so this exists for a UNIFORM
+        surface rather than to close a lazy-subscribe race.)
+        """
+        from jaato_sdk.client._event_stream import _SyncSubscribedStream
+        return _SyncSubscribedStream(self, self._subscribe_events())
+
+    async def events(self):
+        """Async iterator over all emitted events (parity with
+        :meth:`IPCClient.events`).  Subscribes lazily on first ``__anext__``;
+        prefer :meth:`open_event_stream` when subscribe-before-action ordering
+        matters.  Exits cleanly on the ``None`` disconnect sentinel."""
+        q = self._subscribe_events()
+        try:
+            while True:
+                event = await q.get()
+                if event is None:
+                    break
+                yield event
+        finally:
+            self._unsubscribe_events(q)
 
     # ---- facade contract: lifecycle ----
     async def connect(self, timeout: Optional[float] = None) -> bool:
@@ -863,6 +942,13 @@ class InProcessClient:
         self._pending.resolve(request_id, response)
 
     async def disconnect(self) -> None:
+        # Signal disconnect to any open event streams (mirrors the IPC drain
+        # loop pushing the None sentinel), so their `async for` exits cleanly.
+        for q in list(self._event_queues):
+            try:
+                q.put_nowait(None)
+            except Exception:  # noqa: BLE001 — a full queue must not block teardown
+                pass
         if self._embedded is not None and hasattr(self._embedded, "close_session"):
             await asyncio.to_thread(self._embedded.close_session)
 
