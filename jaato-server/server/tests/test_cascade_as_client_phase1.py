@@ -54,7 +54,16 @@ def _make_sm() -> SessionManager:
     sm._cascade_client_sweep_thread = None
     sm._cid_last_session_ts = {}  # Bug B fix, server 0.6.161+
     sm._HEADLESS_CLIENT_ID = "_headless"
+    sm._pending_wakes = {}  # wake deferred-turn store (production has it)
+    # no wake bindings in these cascade tests → the sweep's wake-durability
+    # exemption is a no-op (has_live_binding_for_cid → False).
+    sm._wake_binding_registry = _NoWakeBindings()
     return sm
+
+
+class _NoWakeBindings:
+    def has_live_binding_for_cid(self, cid):
+        return False
 
 
 def _make_session(
@@ -705,6 +714,28 @@ class TestSweep:
         # No session with cid="abc" exists → eligible for GC.
         sm._cascade_client_sweep_once()
         assert "abc" not in sm._cascade_clients
+
+    def test_sweep_exempts_cid_with_live_wake_binding(self):
+        # Wake durability (Option 2): a stale, session-less cid is normally
+        # reaped — but NOT while a live wake binding carries it (a wake may still
+        # arrive; the observer must survive the session going cold).
+        sm = _make_sm()
+        sm._cascade_client_idle_timeout = 0.05
+
+        class _HasBindingForCid:
+            def has_live_binding_for_cid(self, cid):
+                return cid == "wake-cid"
+        sm._wake_binding_registry = _HasBindingForCid()
+
+        sm.register_in_process_client(
+            client_id="bot", callback=MagicMock(),
+            cascade_driver_id="wake-cid", role="observer",
+        )
+        entry = sm._cascade_clients["wake-cid"][0]
+        entry.registered_at = time.monotonic() - 1.0  # stale, no session
+        sm._cascade_client_sweep_once()
+        # observer SURVIVES because a live wake binding keeps the cid alive
+        assert "wake-cid" in sm._cascade_clients
 
     def test_sweep_skips_entries_with_active_sessions(self):
         sm = _make_sm()

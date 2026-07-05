@@ -570,7 +570,10 @@ class CommandRouter:
 
         outcome = self._session_manager.bind_wake(
             wake_ref, session.session_id, session.workspace_path,
-            list(trust_keys), ttl_seconds)
+            list(trust_keys), ttl_seconds,
+            # Capture the caller session's cid so a deferred wake reaches its
+            # cascade observers and the observer survives the session going cold.
+            cascade_driver_id=getattr(session, "cascade_driver_id", None))
         expires_at = 0.0
         if outcome.is_ok:
             b = self._session_manager.resolve_wake_binding(wake_ref)

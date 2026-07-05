@@ -254,6 +254,9 @@ class EventType(str, Enum):
 
     # Wake primitive: result of session.bind_wake / session.unbind_wake
     WAKE_BIND_RESULT = "session.wake_bind_result"              # Server -> Client
+    # Wake primitive: a wake arrived for a session with no attached client —
+    # revived server-side; the woken turn is DEFERRED until a client re-attaches.
+    SESSION_WOKEN = "session.woken"                            # Server -> Client
 
     # SDK feature parity — typed permission-policy verbs replacing
     # stringly-typed CommandRequest("permissions", [...]) for SDK
@@ -1528,6 +1531,28 @@ class WakeBindResultEvent(Event):
     endpoint: str = ""
 
 
+class SessionWokenEvent(Event):
+    """A wake arrived for a session with NO attached client; the daemon revived
+    it and DEFERRED the turn until a client re-attaches.
+
+    Routed to the session's cascade observers (a connected-but-detached client
+    that registered ``cascade.register(cid, "observer", ["session.woken"])``),
+    so a bot whose session went cold can learn it must re-attach to serve the
+    woken turn's host tools + render.  Re-emitted whenever an observer
+    (re)registers for the cid while a wake is still pending, so a reconnecting
+    bot is re-nudged.
+
+    Filter client-side by ``session_id`` (map it to your chat / attach target).
+    ``wake_ref`` names the matter (e.g. the PR); ``source`` is the provenance
+    tag.  The wake TEXT is NOT here — it stays inside the deferred turn (the
+    notification is a signal to attach, not the untrusted payload).
+    """
+    type: EventType = Field(default=EventType.SESSION_WOKEN)
+    session_id: str = ""
+    wake_ref: str = ""
+    source: str = ""
+
+
 class HistoryRequest(Event):
     """Client request for conversation history."""
     type: EventType = Field(default=EventType.HISTORY_REQUEST)
@@ -2510,6 +2535,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.RESOLVE_FORK_POINT_REQUEST.value: ResolveForkPointRequest,
     EventType.RESOLVE_FORK_POINT_RESULT.value: ResolveForkPointResultEvent,
     EventType.WAKE_BIND_RESULT.value: WakeBindResultEvent,
+    EventType.SESSION_WOKEN.value: SessionWokenEvent,
     # SDK feature parity — permission policy verbs
     EventType.PERMISSION_ADD_WHITELIST_REQUEST.value: PermissionAddWhitelistRequest,
     EventType.PERMISSION_ADD_BLACKLIST_REQUEST.value: PermissionAddBlacklistRequest,

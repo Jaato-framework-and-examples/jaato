@@ -14,7 +14,7 @@ from collections import OrderedDict
 
 import pytest
 
-from server.session_manager import SessionManager, WakeOutcome
+from server.session_manager import SessionManager, WakeOutcome, _PendingWake
 from server.session_workspace_index import SessionWorkspaceIndex
 from jaato_sdk.plugins.model_provider.types import UNTRUSTED_OPEN
 
@@ -27,12 +27,21 @@ class _Calls:
         self.resume_ok = True
 
 
-def _make_manager(tmp_path, loaded_ids=()):
+class _FakeSession:
+    """Mirrors the production Session's wake-relevant surface."""
+    def __init__(self, attached=()):
+        self.attached_clients = set(attached)
+        self.cascade_driver_id = None
+
+
+def _make_manager(tmp_path, loaded_ids=(), attached=False):
     """A SessionManager with just the wake surface wired; collaborators stubbed."""
     m = object.__new__(SessionManager)
     m._lock = threading.RLock()
-    m._sessions = {sid: object() for sid in loaded_ids}
+    client = ["c1"] if attached else []
+    m._sessions = {sid: _FakeSession(attached=client) for sid in loaded_ids}
     m._wake_seen_event_ids = OrderedDict()
+    m._pending_wakes = {}
     m._session_workspace_index = SessionWorkspaceIndex(path=tmp_path / "idx.json")
 
     calls = _Calls()
@@ -41,7 +50,7 @@ def _make_manager(tmp_path, loaded_ids=()):
         calls.resume.append((session_id, workspace_path))
         if not calls.resume_ok:
             return None
-        m._sessions[session_id] = object()  # now "loaded"
+        m._sessions[session_id] = _FakeSession()  # revived, no client attached
         return session_id
 
     def _drive(session_id, text):
@@ -182,6 +191,81 @@ def test_not_drivable_is_transient(tmp_path):
 # ---- the outcome enum's success/permanence contract --------------------------
 
 def test_outcome_success_partition():
-    successes = {WakeOutcome.OK, WakeOutcome.DUPLICATE}
+    successes = {WakeOutcome.OK, WakeOutcome.DUPLICATE, WakeOutcome.DEFERRED}
     for o in WakeOutcome:
         assert o.is_success == (o in successes)
+
+
+# ---- Option 2: deferred-turn (cold-revive with no client + a cid) -------------
+
+def test_cold_revive_no_client_with_cid_defers(tmp_path):
+    m, calls = _make_manager(tmp_path)  # nothing loaded → revived cold
+    m._session_workspace_index.record("s_cold", "/ws")
+    emitted = []
+    m._emit_session_woken = lambda sid, wr, src: emitted.append((sid, wr, src))
+    m._wake_pending_expiry = lambda wr: 9e12
+    outcome, _ = m.wake_session("s_cold", "review", source="gh",
+                                wake_ref="pr#1", cascade_driver_id="bot-cid")
+    assert outcome == WakeOutcome.DEFERRED
+    assert calls.drive == []                         # NOT driven into the void
+    assert emitted == [("s_cold", "pr#1", "gh")]     # SessionWokenEvent emitted
+    assert "s_cold" in m._pending_wakes              # held pending
+    # revived session tagged with its cid (for observer routing + sweep-liveness)
+    assert m._sessions["s_cold"].cascade_driver_id == "bot-cid"
+
+
+def test_warm_session_with_cid_drives_not_defers(tmp_path):
+    # a client IS attached → drive immediately even with a cid (no defer)
+    m, calls = _make_manager(tmp_path, loaded_ids=["s1"], attached=True)
+    outcome, _ = m.wake_session("s1", "x", wake_ref="pr#1", cascade_driver_id="c")
+    assert outcome == WakeOutcome.OK
+    assert len(calls.drive) == 1
+
+
+def test_no_cid_drives_headless_not_defers(tmp_path):
+    # no cid (direct/reactor wake) → drive even with no client (no observer path)
+    m, calls = _make_manager(tmp_path)
+    m._session_workspace_index.record("s_cold", "/ws")
+    outcome, _ = m.wake_session("s_cold", "x")   # no wake_ref / cid
+    assert outcome == WakeOutcome.OK
+    assert len(calls.drive) == 1
+
+
+def test_drive_pending_wake_on_attach_drains(tmp_path):
+    m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
+    m._pending_wakes["s1"] = _PendingWake(
+        text="review", source="gh", wake_ref="pr#1",
+        cascade_driver_id="c", expires_at=9e12)
+    assert m.drive_pending_wake("s1") is True
+    assert len(calls.drive) == 1                     # driven on re-attach
+    assert "s1" not in m._pending_wakes              # drained
+    # the driven text is the wrapped untrusted review
+    assert calls.drive[0][1].startswith(UNTRUSTED_OPEN)
+
+
+def test_drive_pending_wake_none_pending(tmp_path):
+    m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
+    assert m.drive_pending_wake("s1") is False
+    assert calls.drive == []
+
+
+def test_drive_pending_wake_expired_dropped(tmp_path):
+    m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
+    m._pending_wakes["s1"] = _PendingWake(
+        text="review", source="gh", wake_ref="pr#1",
+        cascade_driver_id="c", expires_at=1.0)  # long expired
+    assert m.drive_pending_wake("s1") is False
+    assert calls.drive == []
+    assert "s1" not in m._pending_wakes
+
+
+def test_reemit_pending_wakes_for_cid_scoped(tmp_path):
+    # an observer (re)registering for a cid re-emits only THAT cid's pending
+    m, _ = _make_manager(tmp_path)
+    emitted = []
+    m._emit_session_woken = lambda sid, wr, src: emitted.append((sid, wr, src))
+    m._pending_wakes["sA"] = _PendingWake("t", "gh", "pr#A", "cid-A", 9e12)
+    m._pending_wakes["sB"] = _PendingWake("t", "gh", "pr#B", "cid-B", 9e12)
+    m._pending_wakes["sX"] = _PendingWake("t", "gh", "pr#X", "cid-A", 1.0)  # expired
+    m._reemit_pending_wakes_for_cid("cid-A")
+    assert emitted == [("sA", "pr#A", "gh")]  # only cid-A, not-expired
