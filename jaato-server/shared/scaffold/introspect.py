@@ -120,6 +120,34 @@ class ProfileField:
 
 
 @dataclass
+class EventField:
+    """One field on an event class (name + rendered type annotation)."""
+    name: str
+    type: str = ""
+
+
+@dataclass
+class EventInfo:
+    """One event in the client/server protocol (from the SDK's ``EventType``).
+
+    Sourced by AST-scanning ``jaato_sdk/events.py`` — the ``EventType`` enum is
+    the authoritative catalog, and its section headers + trailing comments carry
+    the DIRECTION (``Server -> Client`` etc.) that runtime reflection can't see.
+    ``event_class``/``doc``/``fields`` are filled from the matching
+    ``class …Event(Event)`` whose ``type:`` field defaults to this member.
+    """
+
+    name: str                           # enum member (e.g. AGENT_OUTPUT)
+    wire: str = ""                       # wire value (e.g. "agent.output")
+    direction: str = ""                 # "Server → Client" | "Client → Server" | "Server ↔ Client"
+    domain: str = ""                    # section label (e.g. "Agent lifecycle")
+    note: str = ""                      # trailing-comment remainder after the direction
+    event_class: Optional[str] = None   # matching Event subclass name, if any
+    doc: str = ""                       # event class docstring, first line
+    fields: List["EventField"] = field(default_factory=list)
+
+
+@dataclass
 class EnvVar:
     """A process-level env var the daemon/plugins actually read (from code).
 
@@ -555,3 +583,217 @@ def env_vars() -> Dict[str, EnvVar]:
                         ev.description = desc
     return out
 
+
+
+# ----------------------------------------------------------------- events
+
+import importlib.util as _ilu  # noqa: E402  (co-located with its sole use)
+
+# Direction arrow in a section header ``(Server -> Client)`` or a trailing
+# member comment ``# Client -> Server``.  ``<->`` (or ``<=>``) is bidirectional.
+_EVENT_DIR_RE = re.compile(
+    r"(Server|Client)\s*(<->|<=>|->|→|↔)\s*(Client|Server)")
+
+
+def _events_file() -> Optional[Path]:
+    """Locate the SDK's ``events.py`` WITHOUT importing/executing it.
+
+    ``find_spec`` resolves the module's origin (importing only the parent
+    ``jaato_sdk`` package, never ``events`` itself), so the catalog stays a
+    pure source-of-truth read — mirrors the module docstring's no-import rule.
+    """
+    try:
+        spec = _ilu.find_spec("jaato_sdk.events")
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    p = Path(spec.origin)
+    return p if p.is_file() else None
+
+
+def _parse_direction(text: str) -> str:
+    """Normalize a ``Server -> Client`` style token to a display string.
+
+    Returns ``""`` when no direction token is present.
+    """
+    m = _EVENT_DIR_RE.search(text)
+    if not m:
+        return ""
+    left, arrow, right = m.group(1), m.group(2), m.group(3)
+    if arrow in ("<->", "<=>", "↔"):
+        # Order-independent for bidirectional; present Server-first for stability.
+        return "Server ↔ Client"
+    return f"{left} → {right}"
+
+
+def _event_class_map(tree: ast.AST) -> Dict[str, tuple]:
+    """Map ``EventType`` member name → (class_name, doc, [EventField]).
+
+    Reads every ``class …(Event)`` whose ``type: EventType`` field defaults to
+    ``Field(default=EventType.<MEMBER>)``; the field's member is the join key.
+    """
+    out: Dict[str, tuple] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if not any(isinstance(b, ast.Name) and b.id == "Event" for b in node.bases):
+            continue
+        member: Optional[str] = None
+        fields: List[EventField] = []
+        for stmt in node.body:
+            if not isinstance(stmt, ast.AnnAssign) or not isinstance(stmt.target, ast.Name):
+                continue
+            fname = stmt.target.id
+            if fname == "type":
+                # type: EventType = Field(default=EventType.XXX)
+                member = _member_of_type_default(stmt.value)
+                continue
+            try:
+                ftype = ast.unparse(stmt.annotation)
+            except Exception:  # noqa: BLE001
+                ftype = ""
+            fields.append(EventField(name=fname, type=ftype))
+        if member is not None:
+            doc = (ast.get_docstring(node) or "").strip().splitlines()
+            out[member] = (node.name, doc[0] if doc else "", fields)
+    return out
+
+
+def _member_of_type_default(value: Optional[ast.expr]) -> Optional[str]:
+    """Extract ``XXX`` from ``Field(default=EventType.XXX)`` (or a bare
+    ``EventType.XXX`` default)."""
+    if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) \
+            and value.value.id == "EventType":
+        return value.attr
+    if isinstance(value, ast.Call):
+        for kw in value.keywords:
+            if kw.arg == "default":
+                return _member_of_type_default(kw.value)
+    return None
+
+
+def events() -> Dict[str, EventInfo]:
+    """The client/server event protocol, keyed by ``EventType`` member name.
+
+    AST-scans ``jaato_sdk/events.py``: enumerates the ``EventType`` members
+    (wire value from the assignment, DOMAIN from the nearest preceding section
+    comment, DIRECTION from that section header or a trailing per-member comment
+    which wins), then joins each to its ``…Event`` class (docstring + fields).
+    Reflects the INSTALLED SDK source — no import side-effects, no prose.
+    """
+    out: Dict[str, EventInfo] = {}
+    path = _events_file()
+    if path is None:
+        return out
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return out
+
+    # Trailing comment per line + standalone (section-header) comment lines.
+    trailing: Dict[int, str] = {}       # lineno -> comment text (comment shares a code line)
+    standalone: Dict[int, str] = {}     # lineno -> comment text (comment is alone on its line)
+    try:
+        prev_code_row = -1
+        toks = list(tokenize.generate_tokens(io.StringIO(source).readline))
+        code_rows = {t.start[0] for t in toks
+                     if t.type not in (tokenize.COMMENT, tokenize.NL,
+                                       tokenize.NEWLINE, tokenize.INDENT,
+                                       tokenize.DEDENT, tokenize.ENCODING)}
+        for tok in toks:
+            if tok.type != tokenize.COMMENT:
+                continue
+            row = tok.start[0]
+            text = tok.string.lstrip("#").strip()
+            if row in code_rows:
+                trailing[row] = text
+            else:
+                standalone[row] = text
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+
+    # Locate the EventType enum class and walk its members in source order.
+    enum_node = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.ClassDef) and n.name == "EventType"), None)
+    if enum_node is None:
+        return out
+
+    # A SECTION HEADER is a standalone comment whose preceding physical line is
+    # BLANK (the file's convention: blank line → one-line topical header → the
+    # members).  A comment block that directly follows a MEMBER (no blank line)
+    # is that member's own doc-comment, NOT a section header — so it must not
+    # reset the domain (e.g. AGENT_ERROR's multi-line doc keeps it under "Agent
+    # lifecycle").  The header is the FIRST line of each blank-delimited block;
+    # continuation lines (prev line is itself a comment) are not headers.
+    comment_rows = set(standalone) | set(trailing)
+    section: Dict[int, str] = {}
+    for ln in sorted(standalone):
+        prev = ln - 1
+        if prev in code_rows or prev in comment_rows:
+            continue                    # mid-block, or a member's own doc-comment
+        section[ln] = standalone[ln]    # blank (or class top) above → section header
+
+    class_map = _event_class_map(tree)
+    section_lines = sorted(section)
+
+    for stmt in enum_node.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if not (isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)):
+            continue
+        targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+        if not targets:
+            continue
+        member = targets[0]
+        lineno = stmt.lineno
+
+        # DOMAIN + section direction: nearest standalone comment above.
+        sec_line = None
+        for sl in section_lines:
+            if sl < lineno:
+                sec_line = sl
+            else:
+                break
+        domain, sec_dir = "", ""
+        if sec_line is not None:
+            raw = section[sec_line]
+            sec_dir = _parse_direction(raw)
+            # Drop any ``(...)`` group carrying the direction, wherever it sits
+            # (``Agent lifecycle (Server -> Client)``, ``... (Client <-> Server,
+            # WS only)``) — a non-direction parenthetical
+            # (``(server-to-server gossip)``) is part of the label and kept.
+            cleaned = re.sub(
+                r"\s*\(([^()]*)\)",
+                lambda m: "" if _EVENT_DIR_RE.search(m.group(1)) else m.group(0),
+                raw)
+            # Headers authored as ``Short label: long explanation`` or ``Short
+            # label — explanation`` collapse to the short label (also groups
+            # sibling headers, e.g. both wake blocks → "Wake primitive").
+            domain = re.split(r"\s*[:—]\s*|\s+-\s+", cleaned, maxsplit=1)[0].strip(" .")
+
+        # DIRECTION: a trailing per-member comment overrides the section.
+        note = ""
+        direction = sec_dir
+        tc = trailing.get(lineno)
+        if tc:
+            td = _parse_direction(tc)
+            if td:
+                direction = td
+            note = _EVENT_DIR_RE.sub("", tc).strip(" ()-")
+
+        cls = class_map.get(member)
+        out[member] = EventInfo(
+            name=member,
+            wire=stmt.value.value,
+            direction=direction,
+            domain=domain,
+            note=note,
+            event_class=cls[0] if cls else None,
+            doc=cls[1] if cls else "",
+            fields=list(cls[2]) if cls else [],
+        )
+    return out

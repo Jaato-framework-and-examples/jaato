@@ -555,6 +555,112 @@ def env(filter_: str = None) -> Rendered:
     return data, "\n".join(lines)
 
 
+# ------------------------------------------------------------------ events
+
+# Compact direction glyphs for the overview table (full words in detail view).
+_DIR_GLYPH = {
+    "Server → Client": "S→C",
+    "Client → Server": "C→S",
+    "Server ↔ Client": "S↔C",
+}
+
+
+def events(filter_: str = None) -> Rendered:
+    """The client/server event protocol, grouped by domain.
+
+    ``filter_`` matches a domain substring, an event-member substring, or a
+    wire-value substring — ``explain events permission`` → the permission-flow
+    events, ``explain events tool`` → the tool-exec/status events.  Each row is
+    ``MEMBER  wire.value  [direction]``; drill into one with ``explain event
+    <NAME>`` (member OR wire value) for its fields + docstring.
+    """
+    EV = introspect.events()
+    groups: Dict[str, list] = {}
+    for name in sorted(EV):
+        e = EV[name]
+        if filter_ and filter_.lower() not in (
+                e.domain.lower() + " " + e.name.lower() + " " + e.wire.lower()):
+            continue
+        groups.setdefault(e.domain or "(ungrouped)", []).append(e)
+
+    data = {
+        dom: {e.name: {"wire": e.wire, "direction": e.direction,
+                       "event_class": e.event_class,
+                       "fields": [f.name for f in e.fields]}
+              for e in es}
+        for dom, es in groups.items()
+    }
+    shown = sum(len(v) for v in groups.values())
+    head = (f"event protocol — {len(EV)} typed events across "
+            f"{len({e.domain for e in EV.values()})} domains"
+            + (f"; {shown} match '{filter_}'" if filter_ else ""))
+    lines = [head,
+             "  (S→C server→client, C→S client→server, S↔C bidirectional; "
+             "wire value is the on-the-wire `type`. `explain event <NAME>` for detail)"]
+    for dom in sorted(groups):
+        lines.append(f"\n  [{dom}]")
+        w = max((len(e.name) for e in groups[dom]), default=0)
+        ww = max((len(e.wire) for e in groups[dom]), default=0)
+        for e in groups[dom]:
+            g = _DIR_GLYPH.get(e.direction, e.direction or "?")
+            cls = "" if e.event_class else "   (no class — command/marker)"
+            lines.append(f"    {e.name:<{w}}  {e.wire:<{ww}}  [{g}]{cls}")
+    return data, "\n".join(lines)
+
+
+def event(name: str) -> Rendered:
+    """One event's direction, domain, fields, and docstring.
+
+    ``name`` matches the ``EventType`` member (``AGENT_OUTPUT``) or the wire
+    value (``agent.output``), case-insensitively.
+    """
+    EV = introspect.events()
+    key = name.strip()
+    e = EV.get(key) or EV.get(key.upper())
+    if e is None:
+        low = key.lower()
+        e = next((x for x in EV.values()
+                  if x.name.lower() == low or x.wire.lower() == low), None)
+    if e is None:
+        # Separator-insensitive substring match so ``sessionwoke`` still finds
+        # ``SESSION_WOKEN`` / ``session.woken``.
+        def _norm(s: str) -> str:
+            return s.lower().replace("_", "").replace(".", "").replace("-", "")
+        nkey = _norm(key)
+        near = sorted(x.name for x in EV.values()
+                      if nkey in _norm(x.name) or nkey in _norm(x.wire))
+        hint = f" — did you mean: {', '.join(near[:8])}" if near else ""
+        return ({"error": f"unknown event {name!r}"},
+                f"unknown event {name!r}{hint}")
+
+    data = {
+        "name": e.name, "wire": e.wire, "direction": e.direction,
+        "domain": e.domain, "event_class": e.event_class,
+        "note": e.note, "doc": e.doc,
+        "fields": [{"name": f.name, "type": f.type} for f in e.fields],
+    }
+    lines = [f"{e.name}   ({e.wire})",
+             f"  direction : {e.direction or '(unspecified)'}",
+             f"  domain    : {e.domain or '(ungrouped)'}"]
+    if e.event_class:
+        lines.append(f"  class     : {e.event_class}")
+    else:
+        lines.append("  class     : (none — a wire marker / command, no payload class)")
+    if e.note:
+        lines.append(f"  note      : {e.note}")
+    if e.doc:
+        lines.append(f"  purpose   : {e.doc}")
+    if e.fields:
+        lines.append("  fields    :")
+        w = max(len(f.name) for f in e.fields)
+        for f in e.fields:
+            lines.append(f"    {f.name:<{w}} : {f.type}")
+    elif e.event_class:
+        lines.append("  fields    : (none declared beyond the base Event)")
+    return data, "\n".join(lines)
+
+
+
 # -------------------------------------------------------------------- sets
 
 def sets(workspace: str) -> Rendered:
