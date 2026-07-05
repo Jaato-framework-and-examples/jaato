@@ -5449,10 +5449,14 @@ class SessionManager:
             style="info",
         ))
 
-        # DEFERRED-TURN drain (Option 2): a client is now present, so drive any
-        # wake that was deferred while this session was cold with no client.
-        self.drive_pending_wake(session_id)
-
+        # DEFERRED-TURN drain (Option 2) is NOT done here: attach_session
+        # completes BEFORE the re-attaching client's buffered host tools are
+        # flushed to the runner (that flush happens transport-side, post-attach).
+        # Driving here would build the turn's tool schema before the client's
+        # host tools are wired, so the woken turn couldn't call them.  The
+        # transport layer drives the pending wake AFTER wiring the client's
+        # tools (or immediately when the client has none) — see
+        # ipc.py / websocket.py client-tool flush.
         return True
 
     def resume_session(
@@ -5640,6 +5644,10 @@ class SessionManager:
                     cascade_driver_id=cascade_driver_id,
                     expires_at=self._wake_pending_expiry(wake_ref))
             self._emit_session_woken(session_id, wake_ref or "", source)
+            logger.info(
+                "wake: session %s revived cold, no client — DEFERRED; "
+                "SessionWokenEvent emitted to cid=%s observers, turn pends re-attach",
+                session_id, cascade_driver_id)
             return (WakeOutcome.DEFERRED,
                     f"session {session_id!r} revived cold with no client; turn "
                     f"deferred until re-attach (SessionWokenEvent emitted)")
@@ -5693,7 +5701,12 @@ class SessionManager:
         from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
         wrapped = wrap_untrusted_content(pending.text, source=f"wake:{pending.source}")
         driven = self.send_message_to_session(session_id, wrapped)
-        if not driven:
+        if driven:
+            logger.info(
+                "wake: drove DEFERRED turn for session %s on re-attach "
+                "(wake_ref=%s) — host tools now available", session_id,
+                pending.wake_ref)
+        else:
             logger.warning("drive_pending_wake: %s not drivable on re-attach",
                            session_id)
         return driven

@@ -4060,6 +4060,26 @@ class RunnerRPC:
             }
         from server.runner.session import _register_client_tools_on_runner
         _register_client_tools_on_runner(registry, client_tools)
+        # ``_register_client_tools_on_runner`` records each tool as
+        # ``auto_approved=True`` in ``registry._core_auto_approved`` — but
+        # ``check_permission`` gates on the permission POLICY whitelist, not
+        # that registry set.  The bridge (``add_whitelist_tools``) runs ONCE at
+        # bootstrap (``jaato_runtime`` after ``envelope.client_tools``
+        # registration), so tools registered HERE — mid-session, after that
+        # one-time sync — are auto-approved in the registry yet absent from the
+        # policy whitelist.  A cold-revived session driven headlessly (e.g. a
+        # ``session.wake``) always registers its client tools mid-session (the
+        # client attaches after revive), so the tool would prompt for operator
+        # permission and block forever (no operator on a headless turn).  Sync
+        # the newly-auto-approved names into the runner permission whitelist
+        # now — mirrors the bootstrap sync and the daemon-side handler for
+        # ``PermissionAddWhitelistRequest``.
+        permission_plugin = getattr(
+            getattr(session, "_runtime", None), "permission_plugin", None)
+        if permission_plugin is not None:
+            names = [ct.get("name") for ct in client_tools if ct.get("name")]
+            if names:
+                permission_plugin.add_whitelist_tools(names)
         # The registry registration above wires the forwarding EXECUTOR, but the
         # model's per-turn tool list is the cached ``session._tools`` (built at
         # configure()).  Append the new schemas so the model both SEES and can

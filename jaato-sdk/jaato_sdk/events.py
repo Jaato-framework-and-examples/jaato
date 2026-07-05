@@ -1536,8 +1536,11 @@ class SessionWokenEvent(Event):
     it and DEFERRED the turn until a client re-attaches.
 
     Routed to the session's cascade observers (a connected-but-detached client
-    that registered ``cascade.register(cid, "observer", ["session.woken"])``),
-    so a bot whose session went cold can learn it must re-attach to serve the
+    that registered ``cascade.register(cid, "observer", ["SessionWokenEvent"])``
+    — the cascade filter matches on the event's CLASS NAME
+    (``type(event).__name__``), NOT the ``EventType`` value ``"session.woken"``;
+    registering the value string silently never matches), so a bot whose session
+    went cold can learn it must re-attach to serve the
     woken turn's host tools + render.  Re-emitted whenever an observer
     (re)registers for the cid while a wake is still pending, so a reconnecting
     bot is re-nudged.

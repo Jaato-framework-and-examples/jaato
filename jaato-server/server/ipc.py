@@ -705,10 +705,24 @@ class JaatoIPCServer:
                     # in the session.new flow); this wires the daemon-side proxy
                     # executors for execution.  Mirrors websocket's post-apply.
                     if (isinstance(event, CommandRequest)
-                            and event.command.lower() in ("session.new", "session.attach")
-                            and client_id in self._pending_client_tools_ipc):
-                        pending = self._pending_client_tools_ipc.pop(client_id)
-                        self._register_client_tools_ipc(client_id, pending)
+                            and event.command.lower() in ("session.new", "session.attach")):
+                        if client_id in self._pending_client_tools_ipc:
+                            pending = self._pending_client_tools_ipc.pop(client_id)
+                            # Wires tools + drives any deferred wake AFTER the
+                            # runner push (see _register_client_tools_ipc._push).
+                            self._register_client_tools_ipc(client_id, pending)
+                        else:
+                            # No buffered host tools to wire → drive any deferred
+                            # wake for the now-attached session immediately.
+                            _c = self._clients.get(client_id)
+                            _sid = _c.session_id if _c else None
+                            if _sid and self._session_manager is not None:
+                                try:
+                                    self._session_manager.drive_pending_wake(_sid)
+                                except Exception:
+                                    logger.exception(
+                                        "deferred-wake drive on no-tools attach "
+                                        "failed for %s", _sid)
             else:
                 await self._send_error(
                     client_id,
@@ -794,7 +808,7 @@ class JaatoIPCServer:
             # Best-effort background thread; the proxy is already registered.
             import threading
 
-            def _push(rpc=runner_rpc, t=tools, cid=client_id):
+            def _push(rpc=runner_rpc, t=tools, cid=client_id, sid=session_id):
                 try:
                     res = rpc.session_register_client_tools_threadsafe(t)
                     logger.info(
@@ -802,6 +816,16 @@ class JaatoIPCServer:
                 except Exception:
                     logger.exception(
                         "mid-session client-tool runner push failed for %s", cid)
+                # Deferred-turn (Option 2): the runner now has this client's host
+                # tools, so it's safe to drive any wake deferred while the session
+                # was cold — the turn's schema will include these tools.  Driving
+                # here (after the push) rather than at attach-end closes the
+                # drive-races-tool-wiring gap.  drive_pending_wake is idempotent.
+                try:
+                    self._session_manager.drive_pending_wake(sid)
+                except Exception:
+                    logger.exception(
+                        "deferred-wake drive after client-tool push failed for %s", sid)
 
             threading.Thread(target=_push, daemon=True).start()
         logger.info("Registered %d IPC client tools for %s: %s",
