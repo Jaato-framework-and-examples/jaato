@@ -60,6 +60,12 @@ def _cmd_explain(args) -> int:
         data, text = _explain.gc()
     elif scope == "env":
         data, text = _explain.env(name)
+    elif scope == "events":
+        data, text = _explain.events(name)
+    elif scope == "event":
+        if not name:
+            print("usage: explain event <NAME|wire.value>", file=sys.stderr); return 2
+        data, text = _explain.event(name)
     elif scope == "transports":
         data, text = _explain.transports()
     elif scope == "clients":
@@ -78,8 +84,8 @@ def _cmd_explain(args) -> int:
         data, text = _explain.prefetch()
     else:
         print(f"unknown explain scope {scope!r} — one of: plugins, plugin, "
-              "providers, provider, gc, env, transports, clients, runtime, "
-              "tiers, sets, profile, paths", file=sys.stderr)
+              "providers, provider, gc, env, events, event, transports, "
+              "clients, runtime, tiers, sets, profile, paths", file=sys.stderr)
         return 2
     print(json.dumps(data, indent=2, default=str) if args.json else text)
     return 0
@@ -207,8 +213,11 @@ def main(argv=None) -> int:
     pe = sub.add_parser("explain", help="interrogate the installed framework")
     pe.add_argument("scope", nargs="?",
                     help="plugins | plugin | providers | provider | gc | env "
-                         "| transports | clients | runtime | tiers | sets | profile")
-    pe.add_argument("name", nargs="?", help="name for plugin/provider scope")
+                         "| events | event | transports | clients | runtime | "
+                         "tiers | sets | profile")
+    pe.add_argument("name", nargs="?",
+                    help="name for plugin/provider/event scope, or a filter "
+                         "for env/events")
     pe.add_argument("--workspace", help="workspace dir (for `sets`)")
     pe.add_argument("--json", action="store_true")
     pe.set_defaults(func=_cmd_explain)
