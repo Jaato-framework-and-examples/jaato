@@ -70,24 +70,44 @@ class WakeIngressConfig:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "WakeIngressConfig":
+        """Build from a dict, coercing defensively — a bad field type falls
+        back to that field's default rather than raising (mirrors
+        :meth:`from_file`'s "malformed config never crashes" contract)."""
         c = cls()
         if not isinstance(d, Mapping):
             return c
+
+        def _int(key: str, default: int) -> int:
+            try:
+                return int(d.get(key, default))
+            except (TypeError, ValueError):
+                logger.warning("wake ingress: bad %s %r — using default %d",
+                               key, d.get(key), default)
+                return default
+
         c.enabled = bool(d.get("enabled", c.enabled))
         c.host = str(d.get("host", c.host))
-        c.port = int(d.get("port", c.port))
+        c.port = _int("port", c.port)
         c.path = str(d.get("path", c.path))
         ips = d.get("allowed_ips", [])
         c.allowed_ips = [str(x) for x in ips] if isinstance(ips, list) else []
-        c.rate_limit_per_second = int(d.get("rate_limit_per_second",
-                                            c.rate_limit_per_second))
-        c.replay_window_seconds = int(d.get("replay_window_seconds",
-                                            c.replay_window_seconds))
-        c.max_body_size = int(d.get("max_body_size", c.max_body_size))
+        c.rate_limit_per_second = _int("rate_limit_per_second",
+                                       c.rate_limit_per_second)
+        c.replay_window_seconds = _int("replay_window_seconds",
+                                       c.replay_window_seconds)
+        c.max_body_size = _int("max_body_size", c.max_body_size)
         tls = d.get("tls", {})
         if isinstance(tls, Mapping) and tls.get("enabled"):
-            c.tls_certfile = tls.get("certfile")
-            c.tls_keyfile = tls.get("keyfile")
+            cert, key = tls.get("certfile"), tls.get("keyfile")
+            if cert and key:
+                c.tls_certfile, c.tls_keyfile = str(cert), str(key)
+            else:
+                # Fail closed: TLS was requested but is incomplete — refuse to
+                # serve the ingress in plaintext.  Disable rather than downgrade.
+                logger.error(
+                    "wake ingress: tls.enabled but certfile/keyfile missing — "
+                    "disabling ingress (refusing to serve plaintext)")
+                c.enabled = False
         return c
 
     @classmethod

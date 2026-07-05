@@ -184,3 +184,17 @@ def test_config_defaults_and_disabled():
     c = WakeIngressConfig.from_dict({})
     assert c.enabled is False
     assert c.replay_window_seconds == 300  # server-config knob default
+
+
+def test_config_bad_int_field_falls_back_not_raises():
+    # a non-int port must not raise — falls back to the default
+    c = WakeIngressConfig.from_dict({"enabled": True, "port": "not-a-number"})
+    assert c.port == 9110  # default, no exception
+
+
+def test_config_tls_incomplete_fails_closed():
+    # tls.enabled but no certfile/keyfile → ingress DISABLED (no plaintext)
+    c = WakeIngressConfig.from_dict({
+        "enabled": True, "tls": {"enabled": True, "certfile": "/c.pem"}})
+    assert c.enabled is False
+    assert c.tls_certfile is None
