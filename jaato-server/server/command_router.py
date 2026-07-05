@@ -538,10 +538,28 @@ class CommandRouter:
         from jaato_sdk.events import WakeBindResultEvent
         p = payload or {}
         wake_ref = p.get("wake_ref") or (args[0] if len(args) > 0 else "")
-        trust_keys = p.get("trust_keys")
-        if trust_keys is None:
-            trust_keys = list(args[1:]) if len(args) > 1 else []
-        ttl_seconds = p.get("ttl_seconds")
+        raw_keys = p.get("trust_keys")
+        if raw_keys is None:
+            raw_keys = list(args[1:]) if len(args) > 1 else []
+        # Normalize trust_keys so a malformed payload never crashes the handler
+        # or silently splits a key: a lone PEM string → one-element list; a
+        # list → keep only str items; anything else → empty (the registry then
+        # returns NO_KEYS / MALFORMED_KEY, a clean outcome).
+        if isinstance(raw_keys, str):
+            trust_keys = [raw_keys]
+        elif isinstance(raw_keys, (list, tuple)):
+            trust_keys = [k for k in raw_keys if isinstance(k, str)]
+        else:
+            trust_keys = []
+        # Coerce ttl to int-or-None so a bad type (e.g. a JSON string) never
+        # reaches the registry's arithmetic; on failure fall back to the default.
+        raw_ttl = p.get("ttl_seconds")
+        ttl_seconds: Optional[int] = None
+        if raw_ttl is not None:
+            try:
+                ttl_seconds = int(raw_ttl)
+            except (TypeError, ValueError):
+                ttl_seconds = None
 
         session = self._session_manager.get_client_session(client_id)
         if session is None or not session.session_id:

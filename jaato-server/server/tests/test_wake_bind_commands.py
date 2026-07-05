@@ -44,6 +44,42 @@ def test_bind_wake_binds_callers_own_session(tmp_path):
     assert evt.expires_at == 1234.0
 
 
+def test_bind_wake_normalizes_single_string_key(tmp_path):
+    # A lone PEM string must NOT be split into single-char "keys".
+    r = _router()
+    r._session_manager.get_client_session.return_value = _session("s1", "/ws")
+    r._session_manager.bind_wake.return_value = BindOutcome.OK
+    r._session_manager.resolve_wake_binding.return_value = MagicMock(expires_at=1.0)
+
+    r._handle_session_bind_wake("c1", [], {"wake_ref": "w", "trust_keys": "PEMKEY"})
+
+    r._session_manager.bind_wake.assert_called_once_with("w", "s1", "/ws", ["PEMKEY"], None)
+
+
+def test_bind_wake_non_iterable_keys_no_crash(tmp_path):
+    r = _router()
+    r._session_manager.get_client_session.return_value = _session("s1", "/ws")
+    r._session_manager.bind_wake.return_value = BindOutcome.NO_KEYS
+
+    # trust_keys as an int must not crash the handler — normalized to [].
+    r._handle_session_bind_wake("c1", [], {"wake_ref": "w", "trust_keys": 123})
+
+    r._session_manager.bind_wake.assert_called_once_with("w", "s1", "/ws", [], None)
+
+
+def test_bind_wake_bad_ttl_coerced_to_none(tmp_path):
+    r = _router()
+    r._session_manager.get_client_session.return_value = _session("s1", "/ws")
+    r._session_manager.bind_wake.return_value = BindOutcome.OK
+    r._session_manager.resolve_wake_binding.return_value = MagicMock(expires_at=1.0)
+
+    r._handle_session_bind_wake(
+        "c1", [], {"wake_ref": "w", "trust_keys": ["k"], "ttl_seconds": "not-an-int"})
+
+    # bad ttl → None (registry falls back to its default), never propagated raw
+    assert r._session_manager.bind_wake.call_args[0][4] is None
+
+
 def test_bind_wake_no_session_refused(tmp_path):
     r = _router()
     r._session_manager.get_client_session.return_value = None

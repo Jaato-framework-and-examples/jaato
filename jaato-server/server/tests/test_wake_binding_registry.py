@@ -6,6 +6,8 @@ UNAUTHORIZED), TTL expiry (resolve→None, expired ref re-bindable by a new
 owner), unbind (owner/non-owner/unknown), and persistence round-trip.
 """
 
+import json
+
 import pytest
 
 from cryptography.hazmat.primitives import serialization
@@ -139,3 +141,35 @@ def test_corrupt_file_starts_empty(tmp_path):
     r = WakeBindingRegistry(path=p)  # must not raise
     assert r.resolve("w") is None
     assert r.bind("w", "s", "/ws", [_pub_pem()]) == BindOutcome.OK
+
+
+# ---- persistence-boundary hardening (corrupt/hand-edited files) ---------------
+
+def test_load_skips_string_trust_keys(tmp_path):
+    # trust_keys as a bare string on disk would iterate into single-char keys;
+    # the loader must reject the entry instead.
+    p = tmp_path / "wb.json"
+    p.write_text(json.dumps({
+        "w": {"session_id": "s", "workspace_path": "/ws",
+              "trust_keys": "PEMKEY", "expires_at": 9e12},
+    }), encoding="utf-8")
+    r = WakeBindingRegistry(path=p)
+    assert r.resolve("w") is None
+
+
+def test_load_skips_over_cap_trust_keys(tmp_path):
+    p = tmp_path / "wb.json"
+    p.write_text(json.dumps({
+        "w": {"session_id": "s", "workspace_path": "/ws",
+              "trust_keys": [f"k{i}" for i in range(_MAX_TRUST_KEYS + 1)],
+              "expires_at": 9e12},
+    }), encoding="utf-8")
+    r = WakeBindingRegistry(path=p)
+    assert r.resolve("w") is None
+
+
+def test_bind_bad_ttl_type_does_not_crash(tmp_path):
+    r = _reg(tmp_path)
+    # a non-int ttl (e.g. a JSON string reaching a direct caller) must not raise
+    assert r.bind("w", "s", "/ws", [_pub_pem()], ttl_seconds="60") == BindOutcome.OK
+    assert r.resolve("w") is not None

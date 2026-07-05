@@ -136,11 +136,23 @@ class WakeBindingRegistry:
         for wake_ref, b in raw.items():
             if not isinstance(b, dict):
                 continue
+            # Validate the on-disk shape at the persistence boundary — a
+            # corrupt/hand-edited file must not load an invalid binding.
+            # trust_keys must be a NON-EMPTY LIST within the cap (a bare string
+            # would otherwise iterate into single-char "keys"); every key a str.
+            tk = b.get("trust_keys")
+            if (not isinstance(tk, list) or not tk
+                    or len(tk) > self._max_keys
+                    or not all(isinstance(k, str) for k in tk)):
+                logger.warning(
+                    "wake-binding registry: skipping entry %r with invalid "
+                    "trust_keys", wake_ref)
+                continue
             try:
                 self._bindings[str(wake_ref)] = WakeBinding(
                     session_id=str(b["session_id"]),
                     workspace_path=str(b["workspace_path"]),
-                    trust_keys=[str(k) for k in b["trust_keys"]],
+                    trust_keys=list(tk),
                     expires_at=float(b["expires_at"]),
                 )
             except (KeyError, TypeError, ValueError):
@@ -209,7 +221,17 @@ class WakeBindingRegistry:
                     and existing.session_id != session_id):
                 # Live binding owned by another session — refuse (hijack/squat).
                 return BindOutcome.UNAUTHORIZED
-            ttl = self._default_ttl if ttl_seconds is None else ttl_seconds
+            # Coerce ttl defensively so a direct (non-command) caller passing a
+            # bad type can't crash bind() on the arithmetic below.  A negative
+            # ttl is intentionally allowed (immediate-expiry — the binding just
+            # resolves to None), so it is NOT clamped.
+            if ttl_seconds is None:
+                ttl = self._default_ttl
+            else:
+                try:
+                    ttl = int(ttl_seconds)
+                except (TypeError, ValueError):
+                    ttl = self._default_ttl
             self._bindings[wake_ref] = WakeBinding(
                 session_id=session_id,
                 workspace_path=workspace_path,
