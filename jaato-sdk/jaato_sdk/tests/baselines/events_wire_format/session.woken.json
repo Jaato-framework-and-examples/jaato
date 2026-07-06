@@ -1,0 +1,7 @@
+{
+  "type": "session.woken",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "wake_ref": "",
+  "source": ""
+}
