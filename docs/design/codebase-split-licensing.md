@@ -140,8 +140,20 @@ multi-server clustering.
 - Base plugin interfaces
 - Event types (including peer event dataclasses — harmless without gossip)
 - Model provider types, `CancelToken`, streaming types
+- The top-level **`jaato` convenience facade** — `import jaato` /
+  `jaato.session(mode="ipc"|"ws"|"in_process")`. Owned by jaato-sdk so a thin
+  client (the daemon may be remote) needs only the SDK. `ipc`/`ws` are pure sdk;
+  `in_process` lazily imports the server-side backend `jaato_embedded` and fails
+  loud if jaato-server is absent. `JaatoClient`/`PluginRegistry`/`InProcessClient`
+  are lazy PEP-562 re-exports (server-only). See
+  [in-process-facade.md](in-process-facade.md#packaging--ownership-2026-07--sdk-only-facade).
 
 #### jaato-server — core
+
+- **`jaato_embedded/`** — the embedded (in-process) runtime backend behind the
+  sdk-owned `jaato.session(mode="in_process")` facade (`client.py`,
+  `permission.py`). jaato-server owns `jaato_embedded`; jaato-sdk owns `jaato`
+  (two dists cannot both ship a regular `jaato` package).
 
 - `shared/jaato_client.py`, `jaato_runtime.py`, `jaato_session.py`
 - `shared/instruction_budget.py`, `shared/token_accounting.py`

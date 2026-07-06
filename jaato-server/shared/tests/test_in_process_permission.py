@@ -8,7 +8,7 @@ rides on the plugin-loading slice + the dual-mode example suite.
 import threading
 import time
 
-from jaato._in_process_permission import (
+from jaato_embedded.permission import (
     InProcessChannel,
     PendingPermissions,
     decision_for,

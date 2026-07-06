@@ -10,7 +10,7 @@ eager subscribe + None-sentinel on disconnect).
 import asyncio
 import pytest
 
-from jaato.in_process import InProcessClient, InProcessEventEmitter
+from jaato_embedded import InProcessClient, InProcessEventEmitter
 from jaato_sdk.events import AgentOutputEvent, SystemMessageEvent, TurnCompletedEvent
 
 

@@ -17,12 +17,8 @@ import os as _os
 
 import pytest
 
-from jaato.in_process import (
-    InProcessClient,
-    InProcessEventEmitter,
-    _bundle_inline_profile,
-    session,
-)
+from jaato import session, _bundle_inline_profile
+from jaato_embedded import InProcessClient, InProcessEventEmitter
 from jaato_sdk.events import AgentOutputEvent, EventType, TurnCompletedEvent
 
 
@@ -357,7 +353,7 @@ class TestPluginLoading:
     def test_build_registry_inits_full_runner_tier_and_wires_permission(self, tmp_path):
         import asyncio as _asyncio
 
-        from jaato._in_process_permission import InProcessChannel
+        from jaato_embedded.permission import InProcessChannel
 
         # plugins=["todo"] is only the MODEL gate; _build_registry still inits
         # the whole runner-tier set (plugin parity), not just todo.
@@ -454,7 +450,7 @@ class TestProfiles:
         asyncio.run(_run())
 
     def test_named_profile_resolved_from_disk(self, tmp_path):
-        from jaato.in_process import _resolve_named_profile
+        from jaato_embedded.client import _resolve_named_profile
 
         profiles = tmp_path / "profiles"
         profiles.mkdir()
@@ -471,7 +467,7 @@ class TestProfiles:
         assert spec["system_instructions"] == "Arr, ye be a pirate."
 
     def test_named_profile_needs_config_root(self):
-        from jaato.in_process import _resolve_named_profile
+        from jaato_embedded.client import _resolve_named_profile
 
         try:
             _resolve_named_profile("pirate", None)
@@ -481,7 +477,7 @@ class TestProfiles:
             raise AssertionError("expected ValueError without config_root")
 
     def test_named_profile_not_found(self, tmp_path):
-        from jaato.in_process import _resolve_named_profile
+        from jaato_embedded.client import _resolve_named_profile
 
         (tmp_path / "profiles").mkdir()
         try:
@@ -628,7 +624,7 @@ class TestSuppressBaseInstructions:
         asyncio.run(_run())
 
     def test_named_profile_extracts_knob(self, tmp_path):
-        from jaato.in_process import _resolve_named_profile
+        from jaato_embedded.client import _resolve_named_profile
 
         profiles = tmp_path / "profiles"
         profiles.mkdir()
@@ -1008,7 +1004,7 @@ class TestSessionTerminatedEmission:
     event is silently swallowed."""
 
     def test_on_session_quiescent_emits_session_terminated(self):
-        from jaato.in_process import _InProcessUIHooks
+        from jaato_embedded.client import _InProcessUIHooks
         from jaato_sdk.events import SessionTerminatedEvent
 
         seen = []
@@ -1029,7 +1025,7 @@ class TestOutstandingSubagentGate:
     membership -> a stable 'still outstanding' signal."""
 
     def test_gate_keys_on_terminal_injects_not_is_running(self):
-        from jaato.in_process import InProcessClient
+        from jaato_embedded import InProcessClient
 
         c = InProcessClient(model="m")
         c._schedule_lead_continuation = lambda text: None  # decouple from the loop
@@ -1059,7 +1055,7 @@ class TestFacadeRecoveryMode:
     is an error (no daemon to reconnect to)."""
 
     def test_recovery_routing_picks_the_reconnect_client(self):
-        import jaato.in_process as ip
+        import jaato as ip
         from jaato_sdk import (
             WSRecoveryClient,
             IPCRecoveryClient,
@@ -1078,7 +1074,7 @@ class TestFacadeRecoveryMode:
         assert isinstance(ip.session(mode="ipc")._client, IPCClient)
 
     def test_in_process_recovery_is_an_error(self):
-        import jaato.in_process as ip
+        import jaato as ip
 
         with pytest.raises(ValueError, match="daemon transport"):
             ip.session(mode="in_process", recovery=True)
