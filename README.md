@@ -38,7 +38,7 @@ jaato is a framework for building agentic AI applications with LLM function call
 
 **Core capabilities:**
 
-- **15 Model Providers** - hosted APIs (Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, ZhipuAI), local & self-hosted engines (Ollama, LM Studio, vLLM, TensorRT-LLM, Triton, NVIDIA NIM), and unified gateways (OpenRouter, Nebius) — all behind one provider abstraction, switchable by configuration
+- **16 Model Providers** - hosted APIs (Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, ZhipuAI), local & self-hosted engines (Ollama, LM Studio, vLLM, TensorRT-LLM, Triton, NVIDIA NIM), and unified gateways (OpenRouter, Nebius, OVHcloud) — all behind one provider abstraction, switchable by configuration
 - **40+ Plugins** - file editing, shell execution, interactive PTY sessions, MCP servers, subagent delegation, AST search, LSP diagnostics, memory, web search, inbound webhooks, and more — auto-discovered and auto-wired
 - **Server-First Architecture** - daemon mode with IPC (Unix socket) and WebSocket (bearer-authenticated) transports, multi-session orchestration, and disk persistence
 - **Agent Profiles & Subagents** - YAML/JSON profiles configure model, provider, plugins, and GC per agent; subagents spawn as lightweight sessions that share the parent's runtime (provider config, plugin registry, permissions, token ledger)
@@ -87,8 +87,9 @@ jaato abstracts model providers behind a unified interface. Switch providers by 
 | **NVIDIA NIM** | Gateway / self-hosted | Llama, DeepSeek-R1, Nemotron, … | API key (hosted) or self-hosted (no auth) |
 | **OpenRouter** | Gateway | 300+ models across vendors (`vendor/model`) | API key |
 | **Nebius Token Factory** | Gateway | Serverless open models (Llama, Qwen, DeepSeek-R1, …) | API key |
+| **OVHcloud AI Endpoints** | Gateway | Serverless open models on EU cloud (Llama, Mistral, Qwen, gpt-oss, …) | API key (or opt-in anonymous free tier) |
 
-ZhipuAI ships as two registry entries — `zhipuai` (native API) and `zhipuai_openai` (OpenAI-compatible surface) — for **15 providers** total. Run `jaato-scaffold explain providers` for the live capability matrix: per-provider vision, PDF input, tool-choice forwarding, thinking, prompt caching, and streaming/cancellation support.
+ZhipuAI ships as two registry entries — `zhipuai` (native API) and `zhipuai_openai` (OpenAI-compatible surface) — for **16 providers** total. Run `jaato-scaffold explain providers` for the live capability matrix: per-provider vision, PDF input, tool-choice forwarding, thinking, prompt caching, and streaming/cancellation support.
 
 ## Plugin Ecosystem
 

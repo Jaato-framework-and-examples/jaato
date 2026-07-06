@@ -137,6 +137,7 @@ Four plugin types:
 - `model_provider/vllm/`: vLLM via `vllm.entrypoints.openai.api_server` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
+- `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
 
 ### Tool Execution Flow
 
@@ -866,6 +867,48 @@ this provider.
 > implements the **serverless** path only (including serverless custom/
 > fine-tuned models); dedicated-endpoint provisioning is out of scope (it
 > incurs GPU cost and is managed out-of-band via the Nebius dashboard/CLI).
+
+### OVHcloud AI Endpoints
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_OVHCLOUD_API_KEY` | API key (jaato namespace, highest priority) |
+| `OVH_AI_ENDPOINTS_ACCESS_TOKEN` | API key (the vendor's own documented variable; honored so users who already set it for OVHcloud's OpenAI SDK examples work with no extra config) |
+| `JAATO_OVHCLOUD_BASE_URL` | Endpoint (default: `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1`) |
+| `JAATO_OVHCLOUD_MODEL` | Default model name (e.g. `gpt-oss-120b`, `Meta-Llama-3_3-70B-Instruct`) |
+| `JAATO_OVHCLOUD_CONTEXT_LENGTH` | Override / supply the context window when the catalog doesn't report it |
+| `JAATO_OVHCLOUD_ALLOW_ANONYMOUS` | Opt into the keyless rate-limited free tier (`1`/`true`/`yes`/`on`; evaluation only — never a silent fallback) |
+
+**Authentication Options (in priority order):**
+1. **Environment variable**: `JAATO_OVHCLOUD_API_KEY`, then the vendor's `OVH_AI_ENDPOINTS_ACCESS_TOKEN`
+2. **Stored credentials**: `ovhcloud-auth` (validates against the OpenAI-compatible `/chat/completions` endpoint and stores securely)
+3. **Anonymous free tier**: explicit opt-in via `JAATO_OVHCLOUD_ALLOW_ANONYMOUS` / the `allow_anonymous` knob (heavily rate-limited)
+
+OVHcloud AI Endpoints is a hosted **serverless** inference service for open
+models (Llama, Mistral, Qwen, gpt-oss, DeepSeek distills, ...) running in
+OVHcloud's European data centers, behind a single OpenAI-compatible unified
+gateway (`https://oai.endpoints.kepler.ai.cloud.ovh.net/v1`). Model IDs are
+**case-sensitive** catalog names, e.g. `gpt-oss-120b`,
+`Meta-Llama-3_3-70B-Instruct`, `Qwen2.5-Coder-32B-Instruct` — browse them at
+https://endpoints.ai.cloud.ovh.net/catalog or via `list_models()`.
+
+`list_models()` queries `GET /v1/models`. At `connect()` the provider
+bootstraps the active model's context window from that catalog when it
+reports one (the lookup tolerates the common key spellings:
+`context_length`, `max_model_len`, `max_context_length`), then falls back to
+the profile knob `plugin_configs.ovhcloud.context_length` / env, else
+fail-loud. Input modalities resolve catalog → `plugin_configs.ovhcloud.
+modalities` knob → text floor (assert vision models the catalog doesn't
+classify, e.g. `Qwen2.5-VL-72B-Instruct`, via the knob). No hardcoded
+fallback.
+
+Profile knobs under `plugin_configs.ovhcloud`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `base_url` | str | Override `JAATO_OVHCLOUD_BASE_URL` (e.g. a local proxy, or a legacy per-model `*.endpoints.kepler.ai.cloud.ovh.net` endpoint) |
+| `context_length` | int | Manual context-window override (used when the catalog doesn't report the model's window) |
+| `modalities` | list[str] | Assert/correct input modalities (e.g. `["text","image"]`) for a model the catalog doesn't classify |
+| `allow_anonymous` | bool | Opt into the keyless rate-limited free tier (evaluation only) |
 
 ### Claude CLI Provider
 | Variable | Purpose |

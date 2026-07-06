@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nebius Token Factory Provider - jaato docs</title>
+  <title>OVHcloud AI Endpoints Provider - jaato docs</title>
   <link rel="stylesheet" href="../../assets/css/style.css">
   <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
 </head>
@@ -72,8 +72,8 @@
           <li><a href="vllm.html">vLLM</a></li>
           <li><a href="tensorrt-llm.html">TensorRT-LLM</a></li>
           <li><a href="openrouter.html">OpenRouter</a></li>
-          <li><a href="nebius.html" class="active">Nebius</a></li>
-          <li><a href="ovhcloud.html">OVHcloud</a></li>
+          <li><a href="nebius.html">Nebius</a></li>
+          <li><a href="ovhcloud.html" class="active">OVHcloud</a></li>
           <li><a href="triton.html">Triton</a></li>
         </ul>
       </div>
@@ -100,39 +100,39 @@
       <!-- Overview -->
       <section class="two-panel">
         <div class="panel-explanation">
-          <h1>Nebius Token Factory Provider</h1>
+          <h1>OVHcloud AI Endpoints Provider</h1>
           <p class="lead">
-            Hosted <strong>serverless</strong> inference for open models (Llama, Qwen,
-            DeepSeek-R1, Mistral, &hellip;) behind a single OpenAI-compatible API. Models
-            use the <code>vendor/model</code> form; your own registered fine-tunes run on
-            the same endpoint, addressed by name.
+            Hosted <strong>serverless</strong> inference for open models (Llama, Mistral,
+            Qwen, gpt-oss, DeepSeek, &hellip;) on OVHcloud's European cloud, behind a
+            single OpenAI-compatible gateway. Includes an explicit opt-in for the
+            keyless, rate-limited free tier.
           </p>
 
           <table>
             <tbody>
-              <tr><td><strong>Provider Name</strong></td><td><code>nebius</code></td></tr>
-              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.nebius</code></td></tr>
+              <tr><td><strong>Provider Name</strong></td><td><code>ovhcloud</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.ovhcloud</code></td></tr>
               <tr><td><strong>SDK</strong></td><td><code>openai</code> (OpenAI-compatible API)</td></tr>
-              <tr><td><strong>Auth</strong></td><td>API key (from the <a href="https://tokenfactory.nebius.com" target="_blank">Nebius Token Factory</a> dashboard)</td></tr>
-              <tr><td><strong>Default endpoint</strong></td><td><code>https://api.tokenfactory.nebius.com/v1</code></td></tr>
+              <tr><td><strong>Auth</strong></td><td>API key (OVHcloud Manager &rarr; Public Cloud &rarr; AI Endpoints &rarr; API keys), or anonymous free tier (explicit opt-in)</td></tr>
+              <tr><td><strong>Default endpoint</strong></td><td><code>https://oai.endpoints.kepler.ai.cloud.ovh.net/v1</code></td></tr>
             </tbody>
           </table>
 
           <h2 id="highlights">Highlights</h2>
           <ul>
-            <li><strong>Serverless open models</strong> &mdash; Llama, Qwen, DeepSeek-R1, Mistral and more, with no GPU provisioning</li>
-            <li><strong>OpenAI-compatible</strong> &mdash; standard <code>/v1/chat/completions</code> surface</li>
-            <li><strong>Catalog auto-detect</strong> &mdash; the <code>RichModel</code> catalog (<code>GET /v1/models</code>) drives per-model context window <em>and</em> input modalities at <code>connect()</code></li>
-            <li><strong>Fine-tunes supported</strong> &mdash; registered custom models run on the <em>same</em> serverless endpoint; just point the profile at the model name</li>
-            <li><strong>Extended thinking</strong> &mdash; reasoning extraction for models that emit it (e.g. DeepSeek-R1)</li>
-            <li><strong>Cache reporting</strong> &mdash; <code>cached_tokens</code> parsed from the usage object when the upstream reports it</li>
+            <li><strong>Serverless open models</strong> &mdash; Llama, Mistral, Qwen, gpt-oss, DeepSeek distills and more, with no GPU provisioning</li>
+            <li><strong>OpenAI-compatible</strong> &mdash; standard <code>/v1/chat/completions</code> surface through one unified gateway</li>
+            <li><strong>European hosting</strong> &mdash; inference runs in OVHcloud's EU data centers (GDPR-friendly data locality)</li>
+            <li><strong>Catalog auto-detect</strong> &mdash; per-model context window (and modality, when reported) from <code>GET /v1/models</code> at <code>connect()</code>, with manual override knobs</li>
+            <li><strong>Anonymous free tier</strong> &mdash; evaluate without a key via an explicit opt-in (<code>JAATO_OVHCLOUD_ALLOW_ANONYMOUS</code>); never a silent fallback</li>
+            <li><strong>Extended thinking</strong> &mdash; reasoning extraction for models that emit it (e.g. DeepSeek-R1 distills, gpt-oss)</li>
           </ul>
         </div>
         <div class="panel-code">
           <div class="code-label">Quick start</div>
           <div class="code-block">
             <pre><code class="language-bash"># Discover the config + verify your setup (source of truth — never drifts):
-jaato-scaffold explain provider nebius        # typed knobs, modalities, context
+jaato-scaffold explain provider ovhcloud      # typed knobs, modalities, context
 jaato-doctor --workspace . --env-file .env    # confirm creds + endpoint resolve</code></pre>
           </div>
 
@@ -140,25 +140,24 @@ jaato-doctor --workspace . --env-file .env    # confirm creds + endpoint resolve
           <div class="code-block">
             <pre><code class="language-python">from jaato import JaatoClient
 
-client = JaatoClient(provider_name="nebius")
+client = JaatoClient(provider_name="ovhcloud")
 client.connect(
     project=None,
     location=None,
-    model="deepseek-ai/DeepSeek-R1"
+    model="gpt-oss-120b"
 )
 client.configure_tools(registry)
 
 response = client.send_message(
-    "Hello from Nebius!",
+    "Hello from OVHcloud!",
     on_output=on_output
 )</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Use your own fine-tune</div>
+          <div class="code-label" style="margin-top: 24px;">Evaluate keyless (rate-limited)</div>
           <div class="code-block">
-            <pre><code class="language-python"># A registered Token Factory fine-tune is addressed by name —
-# same serverless endpoint, catalog-detected context + modality.
-client.connect(None, None, "legislation-qa-private")</code></pre>
+            <pre><code class="language-bash"># Explicit opt-in — the free tier is for evaluation only
+export JAATO_OVHCLOUD_ALLOW_ANONYMOUS=true</code></pre>
           </div>
         </div>
       </section>
@@ -170,24 +169,30 @@ client.connect(None, None, "legislation-qa-private")</code></pre>
 
           <h3>Get Your API Key</h3>
           <ol>
-            <li>Create a key in the <a href="https://tokenfactory.nebius.com" target="_blank">Nebius Token Factory</a> dashboard</li>
-            <li>Store it with <code>nebius-auth</code> (validates against <code>/chat/completions</code> and stores securely)</li>
+            <li>Create a key in the <a href="https://www.ovhcloud.com/en/public-cloud/ai-endpoints/" target="_blank">OVHcloud Manager</a>: Public Cloud &rarr; AI &amp; Machine Learning &rarr; AI Endpoints &rarr; API keys</li>
+            <li>Set <code>JAATO_OVHCLOUD_API_KEY</code> (the vendor's own <code>OVH_AI_ENDPOINTS_ACCESS_TOKEN</code> also works)</li>
           </ol>
           <p>
             For the exact credential variables and their precedence, run
-            <code>jaato-scaffold explain provider nebius</code> &mdash; the live registry is
+            <code>jaato-scaffold explain provider ovhcloud</code> &mdash; the live registry is
             the source of truth, so it never drifts from the code. Then
             <code>jaato-doctor</code> confirms the credential resolves and the endpoint is
             reachable before your client calls <code>connect()</code>.
+          </p>
+          <p>
+            Without a key, the provider fails loud &mdash; unless you explicitly opt into
+            OVHcloud's anonymous free tier, which is heavily rate-limited and intended
+            for evaluation only.
           </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Authenticate + verify</div>
           <div class="code-block">
-            <pre><code class="language-bash"># Store credentials (validates against /chat/completions)
-nebius-auth
-nebius-auth status      # check
-nebius-auth logout      # clear
+            <pre><code class="language-bash"># Environment variable (jaato namespace, highest priority)
+export JAATO_OVHCLOUD_API_KEY=&lt;your-key&gt;
+
+# ...or the vendor's own variable (honored as-is)
+export OVH_AI_ENDPOINTS_ACCESS_TOKEN=&lt;your-key&gt;
 
 # Confirm the daemon will resolve them
 jaato-doctor --workspace . --env-file .env</code></pre>
@@ -202,27 +207,30 @@ jaato-doctor --workspace . --env-file .env</code></pre>
           <p>
             jaato doesn't duplicate the provider's environment variables here &mdash; they
             drift. The installed framework is the source of truth: run
-            <code>jaato-scaffold explain provider nebius</code> for the full typed
+            <code>jaato-scaffold explain provider ovhcloud</code> for the full typed
             configuration (credential variables, <code>base_url</code> /
-            <code>context_length</code> / <code>modalities</code> knobs and their defaults),
-            and <code>jaato-doctor</code> to verify your environment resolves them.
+            <code>context_length</code> / <code>modalities</code> / <code>allow_anonymous</code>
+            knobs and their defaults), and <code>jaato-doctor</code> to verify your
+            environment resolves them.
           </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Inspect config + verify</div>
           <div class="code-block">
-            <pre><code class="language-bash">jaato-scaffold explain provider nebius        # typed knobs + env, from the live registry
+            <pre><code class="language-bash">jaato-scaffold explain provider ovhcloud      # typed knobs + env, from the live registry
 jaato-doctor --workspace . --env-file .env</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Popular model names</div>
           <div class="code-block">
-            <pre><code class="language-text">deepseek-ai/DeepSeek-R1
-meta-llama/Llama-3.3-70B-Instruct
-Qwen/Qwen2.5-72B-Instruct
-mistralai/Mistral-Nemo-Instruct-2407
-# your own registered fine-tune, addressed by name:
-legislation-qa-private</code></pre>
+            <pre><code class="language-text">gpt-oss-120b
+gpt-oss-20b
+Meta-Llama-3_3-70B-Instruct
+Mistral-Small-3.2-24B-Instruct-2506
+Qwen2.5-Coder-32B-Instruct
+DeepSeek-R1-Distill-Llama-70B
+# IDs are case-sensitive — browse the catalog:
+# https://endpoints.ai.cloud.ovh.net/catalog</code></pre>
           </div>
         </div>
       </section>
@@ -232,9 +240,9 @@ legislation-qa-private</code></pre>
         <div class="panel-explanation">
           <h2 id="profile-config">Profile Configuration</h2>
           <p>
-            Nebius has a small set of profile knobs under
-            <code>plugin_configs.nebius</code> &mdash; the catalog auto-detects most
-            settings, so overrides are rarely needed.
+            OVHcloud has a small set of profile knobs under
+            <code>plugin_configs.ovhcloud</code> &mdash; the catalog auto-detects the
+            context window when it reports one, and the manual knobs cover the rest.
           </p>
 
           <table>
@@ -242,44 +250,38 @@ legislation-qa-private</code></pre>
               <tr><th>Key</th><th>Type</th><th>Description</th></tr>
             </thead>
             <tbody>
-              <tr><td><code>base_url</code></td><td>str</td><td>Override the default base URL (e.g. a local proxy)</td></tr>
-              <tr><td><code>context_length</code></td><td>int</td><td>Manual context-window override, used when the catalog lacks the model</td></tr>
-              <tr><td><code>modalities</code></td><td>list[str]</td><td>Assert / correct input modalities (e.g. <code>["text","image"]</code>) for a model the catalog doesn't classify</td></tr>
+              <tr><td><code>base_url</code></td><td>str</td><td>Override the default gateway URL (e.g. a local proxy, or a legacy per-model endpoint)</td></tr>
+              <tr><td><code>context_length</code></td><td>int</td><td>Manual context-window override, used when the catalog doesn't report the model's window</td></tr>
+              <tr><td><code>modalities</code></td><td>list[str]</td><td>Assert / correct input modalities (e.g. <code>["text","image"]</code> for vision models like <code>Qwen2.5-VL-72B-Instruct</code>)</td></tr>
+              <tr><td><code>allow_anonymous</code></td><td>bool</td><td>Opt into the keyless rate-limited free tier (evaluation only)</td></tr>
             </tbody>
           </table>
-
-          <h3>Self-deployed &amp; fine-tuned models</h3>
-          <p>
-            Fine-tunes run on the <em>same</em> serverless endpoint, addressed by name.
-            After you register one with Token Factory (a custom <code>name</code> such as
-            <code>legislation-qa-private</code>), point the profile at it. The provider's
-            authenticated <code>GET /v1/models</code> is account-scoped, so your fine-tunes
-            appear in the catalog and their context window (inherited from the base model)
-            is detected automatically.
-          </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Profile config example (YAML)</div>
           <div class="code-block">
-            <pre><code class="language-yaml">name: nebius-reasoning
-model: deepseek-ai/DeepSeek-R1
-provider: nebius
+            <pre><code class="language-yaml">name: ovhcloud-coder
+model: Qwen2.5-Coder-32B-Instruct
+provider: ovhcloud
 
 plugins:
   - cli
   - file_edit
 
 plugin_configs:
-  nebius:
-    # Usually unnecessary — the catalog auto-detects context + modality.
-    context_length: 131072
-    modalities: ["text"]</code></pre>
+  ovhcloud:
+    # Needed when the catalog doesn't report the window.
+    context_length: 32768</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Point a profile at your fine-tune</div>
+          <div class="code-label" style="margin-top: 24px;">Vision model (assert modalities)</div>
           <div class="code-block">
-            <pre><code class="language-yaml">provider: nebius
-model: legislation-qa-private   # your deployed fine-tune's name</code></pre>
+            <pre><code class="language-yaml">provider: ovhcloud
+model: Qwen2.5-VL-72B-Instruct
+plugin_configs:
+  ovhcloud:
+    context_length: 32768
+    modalities: ["text", "image"]</code></pre>
           </div>
         </div>
       </section>
@@ -289,36 +291,36 @@ model: legislation-qa-private   # your deployed fine-tune's name</code></pre>
         <div class="panel-explanation">
           <h2 id="models">Model Catalog</h2>
           <p>
-            <code>list_models()</code> queries the <code>RichModel</code> catalog at
-            <code>GET /v1/models</code>. The fetch is <strong>authenticated</strong> (sends
-            your key), so the listing is account-scoped &mdash; your deployed fine-tunes
-            appear alongside the public catalog.
+            <code>list_models()</code> queries <code>GET /v1/models</code> on the unified
+            gateway (authenticated when a key is available; the public catalog is also
+            served anonymously).
           </p>
           <p>
-            At <code>connect()</code> the provider bootstraps the active model's metadata
-            from that catalog: the per-model <code>context_length</code> is the primary
-            context-window tier, and <code>architecture.modality</code> (OpenRouter-style
-            <code>input-&gt;output</code>) drives input-modality detection. There is no
-            hardcoded fallback &mdash; if a model isn't listed, set <code>context_length</code>
-            and the provider fails loud telling you so.
+            At <code>connect()</code> the provider bootstraps the active model's context
+            window from that catalog when it reports one (the lookup tolerates the common
+            key spellings &mdash; <code>context_length</code>, <code>max_model_len</code>,
+            <code>max_context_length</code>). There is no hardcoded fallback &mdash; if the
+            catalog doesn't report a window, set <code>context_length</code> and the
+            provider fails loud telling you so. Per-model context sizes are listed on the
+            <a href="https://endpoints.ai.cloud.ovh.net/catalog" target="_blank">catalog page</a>.
           </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Browse the catalog</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.model_provider.nebius.provider import (
-    NebiusProvider
+            <pre><code class="language-python">from shared.plugins.model_provider.ovhcloud.provider import (
+    OVHcloudProvider
 )
 from shared.plugins.model_provider.base import ProviderConfig
 
-provider = NebiusProvider()
+provider = OVHcloudProvider()
 provider.initialize(ProviderConfig())
 
-# List models (authenticated → includes your fine-tunes)
+# List models from the unified gateway
 models = provider.list_models()
 
-# Connect and check the catalog-detected context limit
-provider.connect("deepseek-ai/DeepSeek-R1")
+# Connect and check the resolved context limit
+provider.connect("gpt-oss-120b")
 print(provider.get_context_limit())</code></pre>
           </div>
         </div>
@@ -336,7 +338,7 @@ print(provider.get_context_limit())</code></pre>
             <tbody>
               <tr>
                 <td><code>APIKeyNotFoundError</code></td>
-                <td>No API key in env or stored credentials</td>
+                <td>No API key in env or stored credentials, and anonymous access not opted in</td>
               </tr>
               <tr>
                 <td><code>AuthenticationError</code></td>
@@ -344,11 +346,11 @@ print(provider.get_context_limit())</code></pre>
               </tr>
               <tr>
                 <td><code>RateLimitError</code></td>
-                <td>Rate limit or credits exhausted (429)</td>
+                <td>Rate limit exceeded (429) &mdash; constant on the anonymous tier</td>
               </tr>
               <tr>
                 <td><code>ModelNotFoundError</code></td>
-                <td>Model not in the Nebius catalog</td>
+                <td>Model not in the AI Endpoints catalog (IDs are case-sensitive)</td>
               </tr>
               <tr>
                 <td><code>ContextLimitError</code></td>
@@ -364,7 +366,7 @@ print(provider.get_context_limit())</code></pre>
         <div class="panel-code">
           <div class="code-label">Handle errors</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.model_provider.nebius.errors import (
+            <pre><code class="language-python">from shared.plugins.model_provider.ovhcloud.errors import (
     APIKeyNotFoundError,
     AuthenticationError,
     RateLimitError,
@@ -373,10 +375,10 @@ print(provider.get_context_limit())</code></pre>
 
 try:
     provider.initialize(config)
-    provider.connect("deepseek-ai/DeepSeek-R1")
+    provider.connect("gpt-oss-120b")
     result = provider.complete(messages, tools=tools)
 except APIKeyNotFoundError:
-    print("Run: nebius-auth  (jaato-doctor confirms it resolves)")
+    print("Set JAATO_OVHCLOUD_API_KEY (jaato-doctor confirms it resolves)")
 except AuthenticationError:
     print("Invalid API key")
 except RateLimitError as e:
