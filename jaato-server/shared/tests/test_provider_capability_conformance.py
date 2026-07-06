@@ -59,6 +59,7 @@ _CONVERTERS: Dict[str, Tuple[str, str]] = {
     "tensorrt_llm":   ("_openai_compat/converters.py",        "message_to_openai"),
     "zhipuai_openai": ("_openai_compat/converters.py",        "message_to_openai"),
     "triton":         ("_openai_compat/converters.py",        "message_to_openai"),
+    "ovhcloud":       ("_openai_compat/converters.py",        "message_to_openai"),
     "anthropic":      ("anthropic/converters.py",  "message_to_anthropic"),
     "ollama":         ("anthropic/converters.py",  "message_to_anthropic"),
     "zhipuai":        ("anthropic/converters.py",  "message_to_anthropic"),

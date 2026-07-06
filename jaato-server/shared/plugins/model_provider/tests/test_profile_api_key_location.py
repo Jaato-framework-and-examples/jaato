@@ -61,6 +61,7 @@ def test_empty_config_reports_not_set():
 @pytest.mark.parametrize("provider_name, import_path, extra_kwargs", [
     ("openrouter", "shared.plugins.model_provider.openrouter.env", {}),
     ("nebius", "shared.plugins.model_provider.nebius.env", {}),
+    ("ovhcloud", "shared.plugins.model_provider.ovhcloud.env", {}),
     ("nim", "shared.plugins.model_provider.nim.env", {}),
     # github_models' helper also takes an auth_method positional arg.
     ("github_models", "shared.plugins.model_provider.github_models.env",
