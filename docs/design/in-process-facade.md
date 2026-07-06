@@ -226,3 +226,34 @@ Build it (Shape 1, v1 first)? If yes, it's framework work with its own PRs +
 the fidelity bar — separate from the dual-mode examples (those ship now on the
 direct `send_message` API regardless). If no, document in-process as the
 embedded sync API and the examples frame it as a different approach.
+
+## Packaging & ownership (2026-07 — sdk-only facade)
+
+The public convenience surface is split so a **thin client needs only jaato-sdk**
+(the daemon may be on another host):
+
+| Package | Ships | Import |
+|---|---|---|
+| **jaato-sdk** | the top-level `jaato` facade — `session(mode=…)` dispatcher + eager sdk-only re-exports (types/events/plugin bases) + PEP 562 lazy names | `import jaato`, `from jaato import Message, session, …` |
+| **jaato-server** | the embedded runtime backend `jaato_embedded` (`client.py` = `InProcessClient` + helpers; `permission.py` = the in-process permission channel) | `from jaato_embedded import InProcessClient` |
+
+Rules that make this work:
+
+- `import jaato` must never import `shared`/`jaato_embedded` eagerly. The
+  `session()` dispatcher's `ipc`/`ws` branches lazily `from jaato_sdk import …`;
+  the `in_process` branch lazily `from jaato_embedded import InProcessClient` and
+  **fails loud** with a `pip install jaato-server` hint if absent.
+- `JaatoClient` / `PluginRegistry` / `InProcessClient` are exposed off `jaato` via
+  module `__getattr__` (PEP 562), imported from jaato-server on first access. They
+  are intentionally **not** in `jaato.__all__` (so `from jaato import *` stays
+  sdk-only-safe).
+- **Two dists cannot both ship a regular `jaato` package** — the setuptools
+  editable finders map top-level names in a `MAPPING` baked at install time and
+  return single-location specs (no namespace merge). jaato-sdk owns `jaato`;
+  jaato-server owns `jaato_embedded`; `packages.find` in each enforces it. Changing
+  `packages.find` requires `pip install -e` to regenerate the finders.
+- Module path change: the embedded backend moved `jaato.in_process` →
+  `jaato_embedded.client`, `jaato._in_process_permission` →
+  `jaato_embedded.permission`. Regression guards live in
+  `jaato-sdk/jaato_sdk/tests/test_facade_sdk_only.py` (import purity, in-process
+  fail-loud, `__all__` correctness).

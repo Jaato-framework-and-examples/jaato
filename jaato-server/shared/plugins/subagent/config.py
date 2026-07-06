@@ -2118,7 +2118,7 @@ def resolve_agent(
 
     The single source of truth for agent-persona resolution: the daemon's
     ``SessionManager._resolve_agent`` delegates here, and the embedded
-    in-process client (``jaato.in_process``) imports it directly — so a
+    in-process client (``jaato_embedded.client``) imports it directly — so a
     daemon-free embedded session resolves ``agent=<name>`` the same way the
     daemon does, without depending on ``server`` (mirrors how
     ``shared.config_resolver.resolve_secret_uri`` was lifted out of the daemon).

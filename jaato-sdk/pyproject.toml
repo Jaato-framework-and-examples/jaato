@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-sdk"
-version = "0.14.6"
+version = "0.15.0"
 description = "Jaato SDK - Protocol and client library for jaato server"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -49,7 +49,7 @@ ws = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["jaato_sdk*"]
+include = ["jaato_sdk*", "jaato*"]
 
 [tool.pytest.ini_options]
 markers = [
