@@ -217,8 +217,20 @@ class OVHcloudProvider(OpenAICompatProvider):
 
         Returns the cached list on subsequent calls; an empty list is
         returned and *not* cached on failure, so the next call retries.
-        The GET is authenticated when a key is available (anonymous also
-        works — the endpoint serves the public catalog).
+
+        The GET is **anonymous** — deliberately no ``Authorization`` header.
+        OVHcloud's ``/v1/models`` is a *public* catalog (the same fixed model
+        list + pricing regardless of account; there is no OVHcloud private-
+        model / fine-tune surface like Nebius's account-scoped catalog), and
+        it serves that catalog with ``200`` to unauthenticated callers.
+        Attaching a Bearer token buys nothing and can only hurt: a token that
+        is valid for chat but not entitled on the models endpoint answers the
+        keyed catalog GET with ``401`` ("token is not allowed to perform the
+        required actions on any tenant"), which would silently break the
+        context-window auto-detect even though the public catalog holds the
+        answer.  Verified live 2026-07: anon → 200 (22 models, each with a
+        ``context_length``); the same token keyed → 401.  So the catalog is
+        always fetched without the key.
         """
         if self._catalog_cache is not None:
             return self._catalog_cache
@@ -226,11 +238,8 @@ class OVHcloudProvider(OpenAICompatProvider):
         import httpx
 
         url = f"{self._base_url.rstrip('/')}/models"
-        headers = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
         try:
-            response = httpx.get(url, headers=headers, timeout=15)
+            response = httpx.get(url, timeout=15)
             response.raise_for_status()
         except Exception as exc:
             self._trace(f"[CATALOG] fetch failed: {type(exc).__name__}: {exc}")

@@ -677,21 +677,26 @@ class TestCatalogAndModalities:
         assert first == [{"id": "x", "context_length": 1}]
         assert second is first
         assert mock_get.call_count == 1
-        # Bearer auth header carried on the catalog GET.
         args, kwargs = mock_get.call_args
-        assert kwargs["headers"]["Authorization"] == "Bearer ovh-test-key"
         assert args[0] == f"{DEFAULT_BASE_URL}/models"
 
-    def test_fetch_catalog_anonymous_sends_no_auth_header(self):
-        """The keyless free tier fetches the public catalog with no header."""
+    def test_fetch_catalog_is_always_anonymous_even_with_key(self):
+        """The catalog GET carries NO auth header even when a key is set.
+
+        OVHcloud's ``/v1/models`` is a public catalog; a token not entitled
+        on the models endpoint answers a keyed GET with 401, which would
+        silently break context auto-detect.  Verified live 2026-07 — so the
+        provider always fetches the catalog anonymously.  Regression guard.
+        """
         p = OVHcloudProvider()
+        p._api_key = "ovh-test-key"  # key present, but must NOT be sent
         fake_resp = MagicMock()
         fake_resp.json.return_value = {"data": []}
         fake_resp.raise_for_status.return_value = None
         with patch("httpx.get", return_value=fake_resp) as mock_get:
             p._fetch_catalog()
         _, kwargs = mock_get.call_args
-        assert "Authorization" not in kwargs["headers"]
+        assert "headers" not in kwargs or "Authorization" not in kwargs.get("headers", {})
 
     def test_fetch_catalog_network_failure_returns_empty_not_cached(self):
         p = OVHcloudProvider()
