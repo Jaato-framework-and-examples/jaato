@@ -626,7 +626,22 @@ Profile knobs under `plugin_configs.chrome_ai`:
 | `auto_download` | bool | Trigger the model component download at connect (default false) |
 | `download_timeout` / `connect_timeout` / `turn_timeout` | int | Seconds: model download / launch+attach / mid-turn silence before abort |
 | `context_length` | int | Manual context-window override |
+| `warmup` | bool | Run one throwaway generation at `connect()` to absorb the model cold-start (default true; see below). Set false for fastest connect. |
 | `api_params.temperature`, `api_params.top_k` | float / int | `LanguageModel.create()` sampling options (unset = browser defaults) |
+
+Performance (measured on real Gemini Nano, Chrome 149, consumer GPU;
+fully on-device, zero network/token cost):
+- **Cold start dominates the first turn.** The first inference after the
+  model is provisioned pays a one-time compile/load cost — **~11s to first
+  token** — and can return an empty completion. The `warmup` knob (default
+  **on**) runs one throwaway generation at the end of `connect()` so that
+  cost lands in setup, not on the caller's first real turn; it's
+  best-effort (a warmup failure never fails `connect()`) and skipped under
+  `warmup: false` or `skip_model_test`.
+- **Warm steady-state is sub-second:** `connect()` ~180ms; a tool-call
+  turn ~930ms (ttft ~155ms, ~22 tok/s); a plain-prose turn ~480ms
+  (ttft ~135ms, ~42 tok/s). Structured/`tool_call` decoding is ~2× costlier
+  per token than free prose — budget for it in tool-heavy loops.
 
 ### LM Studio (Local Models)
 | Variable | Purpose |

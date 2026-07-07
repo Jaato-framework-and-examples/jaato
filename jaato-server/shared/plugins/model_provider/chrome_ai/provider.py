@@ -151,6 +151,12 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         self._context_length_knob: Optional[int] = None
         self._temperature: Optional[float] = None
         self._top_k: Optional[int] = None
+        # Warmup knob (default ON): run one throwaway generation at the end
+        # of connect() so the on-device model's cold-start compile/load
+        # (~11s to first token, measured on Chrome 149 / Gemini Nano) lands
+        # in setup rather than on the caller's first real turn — which also
+        # eliminates the empty first-response the cold window produces.
+        self._warmup: bool = True
 
     @property
     def name(self) -> str:
@@ -185,6 +191,7 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         self._turn_timeout = float(extra.get("turn_timeout",
                                              DEFAULT_TURN_TIMEOUT))
         self._context_length_knob = extra.get("context_length")
+        self._warmup = bool(extra.get("warmup", True))
         api_params = extra.get("api_params") or {}
         self._temperature = api_params.get("temperature")
         self._top_k = api_params.get("top_k")
@@ -275,6 +282,31 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         self._connected = True
         logger.info("chrome_ai: connected (model=%s, context=%d tokens)",
                     self._model_name, self._context_limit)
+        if self._warmup and not skip_model_test:
+            self._warmup_model()
+
+    def _warmup_model(self) -> None:
+        """Absorb the on-device model's cold-start on connect(), not turn 1.
+
+        The first inference after the model is provisioned pays a one-time
+        compile/load cost (~11s to first token on Chrome 149 / Gemini Nano)
+        and can return an empty completion. Running one throwaway generation
+        here moves that cost off the caller's first real turn and discards
+        the empty-first artifact. Best-effort: a warmup failure never fails
+        connect() (the model is already verified available) — it just logs,
+        and the cost falls back onto turn 1. Skipped when ``warmup: false``
+        or ``skip_model_test`` (expert path). ``_last_usage`` is reset so the
+        warmup's tokens never surface via ``get_token_usage()``.
+        """
+        try:
+            self._bridge.warmup(timeout=self._turn_timeout)
+            logger.info("chrome_ai: model warmup complete")
+        except Exception:
+            logger.warning("chrome_ai: model warmup failed (non-fatal; the "
+                           "cold-start cost will fall on the first turn)",
+                           exc_info=True)
+        finally:
+            self._last_usage = TokenUsage()
 
     @property
     def is_connected(self) -> bool:

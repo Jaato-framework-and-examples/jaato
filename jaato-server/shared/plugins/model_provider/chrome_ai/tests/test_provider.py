@@ -136,6 +136,43 @@ class TestConnect:
         assert provider.is_connected
 
 
+class TestWarmup:
+    @pytest.fixture(autouse=True)
+    def _attach_mode(self, make_provider):
+        self.make = lambda extra=None: make_provider(
+            {"cdp_url": "http://localhost:9222", **(extra or {})})
+
+    def test_warmup_runs_by_default(self, fake_bridge):
+        provider = self.make()
+        provider.connect("gemini-nano")
+        assert fake_bridge.warmup_calls == 1
+
+    def test_warmup_disabled_by_knob(self, fake_bridge):
+        provider = self.make({"warmup": False})
+        provider.connect("gemini-nano")
+        assert fake_bridge.warmup_calls == 0
+        assert provider.is_connected
+
+    def test_skip_model_test_skips_warmup(self, fake_bridge):
+        provider = self.make({"context_length": 6144})
+        provider.connect("gemini-nano", skip_model_test=True)
+        assert fake_bridge.warmup_calls == 0
+
+    def test_warmup_failure_is_non_fatal(self, fake_bridge):
+        # A warmup hiccup must not fail connect() — the model is already
+        # verified available; the cold-start just falls onto turn 1.
+        fake_bridge.warmup_should_raise = True
+        provider = self.make()
+        provider.connect("gemini-nano")
+        assert fake_bridge.warmup_calls == 1
+        assert provider.is_connected
+
+    def test_warmup_leaves_usage_zeroed(self, fake_bridge):
+        provider = self.make()
+        provider.connect("gemini-nano")
+        assert provider.get_token_usage().total_tokens == 0
+
+
 class TestVerifyAuth:
     def test_true_with_cdp_url_env(self, monkeypatch):
         monkeypatch.setenv("JAATO_CHROME_AI_CDP_URL", "http://localhost:9222")

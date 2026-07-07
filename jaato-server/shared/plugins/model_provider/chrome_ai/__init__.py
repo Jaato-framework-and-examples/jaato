@@ -139,6 +139,10 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("context_length", "int", None,
                  "Manual context-window override (normally detected from "
                  "the session quota)"),
+        KnobSpec("warmup", "bool", True,
+                 "Run one throwaway generation at connect() to absorb the "
+                 "on-device model's cold-start (~11s first-token) off the "
+                 "first real turn; set false for fastest connect"),
     ), description="browser connection"),
     KnobLayer("api_params", (
         KnobSpec("temperature", "float", None,
