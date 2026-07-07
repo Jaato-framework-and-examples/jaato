@@ -10,6 +10,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `antigravity` | ✅ | — | — | — | ✅ | — | ✅ | ✅ |
 | `chrome_ai` | — | — | — | — | — | — | ✅ | ✅ |
 | `claude_cli` | — | — | — | — | ✅ | — | ✅ | — |
+| `doubleword` | ✅ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ |
 | `github_models` | — | — | — | — | ✅ | — | ✅ | ✅ |
 | `google_genai` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ |
 | `lmstudio` | ✅ | ✅ | — | — | — | — | ✅ | ✅ |

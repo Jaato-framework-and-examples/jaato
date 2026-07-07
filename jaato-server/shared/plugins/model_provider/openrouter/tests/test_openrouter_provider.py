@@ -1102,6 +1102,85 @@ class TestProviderRouting:
         assert call_kwargs.get("stream") is True
 
 
+class TestServiceTierKnob:
+    """Tests for ``api_params.service_tier`` (OpenAI-style processing tier).
+
+    ``"flex"`` buys discounted best-effort processing, ``"priority"``
+    low-latency processing; OpenRouter forwards the field to
+    tier-supporting upstreams.  Default is unset — the field must not
+    appear on the wire unless the profile opts in.
+    """
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_unset_by_default_and_absent_from_wire(self, mock_client_class):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        assert provider._service_tier is None
+
+        provider.connect("openai/gpt-4o", skip_model_test=True)
+        provider.complete([Message.from_text(Role.USER, "hi")])
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert "service_tier" not in call_kwargs
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_flex_forwarded_on_the_wire(self, mock_client_class):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"service_tier": "flex"}},
+        ))
+        assert provider._service_tier == "flex"
+
+        provider.connect("openai/gpt-4o", skip_model_test=True)
+        provider.complete([Message.from_text(Role.USER, "hi")])
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["service_tier"] == "flex"
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_value_is_normalised_to_lowercase(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"service_tier": "Priority"}},
+        ))
+        assert provider._service_tier == "priority"
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_invalid_tier_raises(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(ValueError, match="service_tier.*flex.*priority"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"api_params": {"service_tier": "turbo"}},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_legacy_flat_key_still_read(self, mock_client_class):
+        # The _knob fallback accepts the legacy flat position with a
+        # deprecation warning, same as the other api_params knobs.
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"service_tier": "flex"},
+        ))
+        assert provider._service_tier == "flex"
+
+
 class TestThinkingKnobs:
     """Tests for the flat-key thinking convention (matches Anthropic / Antigravity).
 

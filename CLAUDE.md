@@ -139,6 +139,7 @@ Four plugin types:
 - `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
 - `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
+- `model_provider/doubleword/`: Doubleword (serverless open-model inference priced by delivery window, OpenAI-compatible; `api_params.service_tier: flex` opts into the discounted async tier — queued work, ~1 min to first token — on the same chat endpoint; catalog auto-detects context window + modalities when reported)
 
 **Model Quirks** — per-model workarounds a profile opts into via `quirks:`
 (injected into `config.extra["quirks"]`; each provider declares the names it
@@ -824,6 +825,12 @@ plugin_configs:
                                    # Pairs with routing.sort.partition="none"
                                    # to find the best provider across all
                                    # candidate models.
+      service_tier: "flex"         # auto|default|flex|priority|scale —
+                                   # OpenAI-style processing tier forwarded
+                                   # to tier-supporting upstreams (flex =
+                                   # ~50% off, slower; priority = faster,
+                                   # premium).  See
+                                   # https://openrouter.ai/docs/guides/features/service-tiers
       enable_thinking: true        # extended-reasoning request + extraction
       thinking_budget: 16384       # → reasoning.max_tokens
       thinking_level: "high"       # → reasoning.effort (low/medium/high)
@@ -863,7 +870,7 @@ plugin_configs:
 | Layer | Keys | Purpose |
 |-------|------|---------|
 | top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `app_categories` (`List[str]`) is jaato's hook into [OpenRouter's app marketplace](https://openrouter.ai/docs/app-attribution) — emitted as the `X-OpenRouter-Categories` header. Default is `["cli-agent"]` (jaato is a terminal-driven agentic tool orchestrator); pass `[]` to opt out of category attribution entirely. Validated strictly: lowercase hyphen-separated slugs, ≤30 chars each, ≤5 entries; unrecognized categories are silently dropped server-side. `extra_headers` (`Dict[str,str]`) is the hook for OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) — Anthropic `x-anthropic-beta` is the canonical case (`fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`, `structured-outputs-2025-11-13`). Both merge into the OpenAI client's `default_headers`; profile values win on key collisions. |
-| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl`, `strict_tools` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. `strict_tools: true` (server 0.6.118+) emits `"strict": true` as a sibling of `parameters` in each tool definition; OpenRouter forwards to supported upstreams (Sonnet 4.5 / Opus 4.1+, GPT-4o+, Gemini, OSS, Fireworks per [structured outputs list](https://openrouter.ai/docs/guides/features/structured-outputs)) for grammar-constrained tool-arg sampling. Required for cascade-determinism use cases (see `feedback_cascade_completion_schemas_require_strict_model_support` memory); the framework does NOT auto-rewrite schemas to satisfy OpenAI's strict-mode requirements (kb authors own schema shape — `additionalProperties: false` on every object, exhaustive `required` arrays, no `oneOf`/`anyOf` if you enable strict). |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `service_tier`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl`, `strict_tools` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `service_tier` (`auto` / `default` / `flex` / `priority` / `scale`) is the OpenAI-style processing-tier selector, forwarded to tier-supporting upstreams (OpenAI, Gemini, ...) per [service tiers](https://openrouter.ai/docs/guides/features/service-tiers) — `flex` trades latency for ~50% off, `priority` the reverse; the response reports the tier actually used. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. `strict_tools: true` (server 0.6.118+) emits `"strict": true` as a sibling of `parameters` in each tool definition; OpenRouter forwards to supported upstreams (Sonnet 4.5 / Opus 4.1+, GPT-4o+, Gemini, OSS, Fireworks per [structured outputs list](https://openrouter.ai/docs/guides/features/structured-outputs)) for grammar-constrained tool-arg sampling. Required for cascade-determinism use cases (see `feedback_cascade_completion_schemas_require_strict_model_support` memory); the framework does NOT auto-rewrite schemas to satisfy OpenAI's strict-mode requirements (kb authors own schema shape — `additionalProperties: false` on every object, exhaustive `required` arrays, no `oneOf`/`anyOf` if you enable strict). |
 | `routing` | any [provider routing](https://openrouter.ai/docs/features/provider-routing) key (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `ignore`, `only`, `quantizations`, `sort` (string or `{by, partition}`), `zdr`, `enforce_distillable_text`, `max_price`, `preferred_min_throughput`, `preferred_max_latency`, ...) | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts) and `api_params.models` (cross-model fallback list, routing constrains providers across all of them). Opaque pass-through — new routing keys land automatically. |
 | `framework_overrides` | `context_length`, `base_url` | rare escape hatches; normally context length is discovered from the OpenRouter catalog at connect time. |
 
@@ -977,6 +984,66 @@ Profile knobs under `plugin_configs.ovhcloud`:
 | `context_length` | int | Manual context-window override (used when the catalog doesn't report the model's window) |
 | `modalities` | list[str] | Assert/correct input modalities (e.g. `["text","image"]`) for a model the catalog doesn't classify |
 | `allow_anonymous` | bool | Opt into the keyless rate-limited free tier (evaluation only) |
+
+### Doubleword
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_DOUBLEWORD_API_KEY` | API key (from https://app.doubleword.ai/api-keys) |
+| `JAATO_DOUBLEWORD_BASE_URL` | Endpoint (default: `https://api.doubleword.ai/v1`) |
+| `JAATO_DOUBLEWORD_MODEL` | Default model name (e.g. `deepseek-ai/DeepSeek-V4-Pro`) |
+| `JAATO_DOUBLEWORD_CONTEXT_LENGTH` | Override / supply the context window when the catalog doesn't report it |
+| `JAATO_DOUBLEWORD_SERVICE_TIER` | Inference tier: `flex` (discounted async) or `priority` (realtime); the profile knob wins when both are set |
+
+**Authentication (in priority order):**
+1. **Environment variable**: `JAATO_DOUBLEWORD_API_KEY`
+2. **Stored credentials**: `doubleword-auth` (validates against the OpenAI-compatible `/chat/completions` endpoint and stores securely)
+
+Doubleword (https://doubleword.ai) is a hosted **serverless** inference
+service for open models (DeepSeek, Qwen, GLM, Kimi, gpt-oss, Nemotron, ...)
+that prices by **delivery window** on one OpenAI-compatible API
+(`https://api.doubleword.ai/v1`).  The same `/chat/completions` endpoint
+serves the realtime tier and — via the `service_tier: "flex"` request-body
+field — the discounted **async** tier: work is queued and guaranteed to
+start within ~1 minute (minutes-level latency, ~1 min to first token) at a
+fraction of realtime pricing.  Suits background agents and fan-out
+workloads where each turn tolerates a short queue delay.  Model IDs are
+vendor-prefixed catalog names, e.g. `deepseek-ai/DeepSeek-V4-Pro`,
+`Qwen/Qwen3.5-35B-A3B` — browse them at https://doubleword.ai/models or via
+`list_models()`.
+
+`list_models()` queries `GET /v1/models` (**authenticated** — the listing
+is account-scoped).  At `connect()` the provider bootstraps the active
+model's context window from that catalog when it reports one (tolerating
+the common key spellings: `context_length`, `max_model_len`,
+`max_context_length`), then falls back to the profile knob
+`plugin_configs.doubleword.context_length` / env, else fail-loud.  Input
+modalities resolve catalog → `plugin_configs.doubleword.modalities` knob →
+text floor.  No hardcoded fallback.
+
+Profile knobs under `plugin_configs.doubleword`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `base_url` | str | Override `JAATO_DOUBLEWORD_BASE_URL` (e.g. a local proxy) |
+| `context_length` | int | Manual context-window override (used when the catalog doesn't report the model's window) |
+| `modalities` | list[str] | Assert/correct input modalities (e.g. `["text","image"]`) for a model the catalog doesn't classify |
+| `api_params.service_tier` | str | `flex` (discounted async tier) or `priority` (realtime); forwarded verbatim, so future tier names work without a provider release |
+
+```yaml
+# profile example: a background agent on the discounted async tier
+provider: doubleword
+model: deepseek-ai/DeepSeek-V4-Pro
+plugin_configs:
+  doubleword:
+    api_params:
+      service_tier: flex
+```
+
+> **Note (batch tier):** Doubleword's deepest-discount **batch** tier
+> (JSONL file upload + `/batches` jobs with a 24h completion window) is a
+> different interaction shape (submit → poll → collect) and is not part of
+> this provider; background-job polling and batch-job support are a
+> follow-up.
 
 ### Claude CLI Provider
 | Variable | Purpose |

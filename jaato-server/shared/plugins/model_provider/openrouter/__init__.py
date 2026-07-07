@@ -48,6 +48,9 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("top_k", "int"),
         KnobSpec("max_tokens", "int"),
         KnobSpec("parallel_tool_calls", "bool"),
+        KnobSpec("service_tier", "str", None,
+                 "auto|default|flex|priority|scale — OpenAI-style "
+                 "processing tier forwarded to tier-supporting upstreams"),
         KnobSpec("strict_tools", "bool", None, "emit strict:true on tool defs"),
         KnobSpec("enable_thinking", "bool"),
         KnobSpec("thinking_budget", "int", None, "→ reasoning.max_tokens"),
