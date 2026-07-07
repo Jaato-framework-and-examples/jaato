@@ -60,6 +60,7 @@ _CONVERTERS: Dict[str, Tuple[str, str]] = {
     "zhipuai_openai": ("_openai_compat/converters.py",        "message_to_openai"),
     "triton":         ("_openai_compat/converters.py",        "message_to_openai"),
     "ovhcloud":       ("_openai_compat/converters.py",        "message_to_openai"),
+    "doubleword":     ("_openai_compat/converters.py",        "message_to_openai"),
     "anthropic":      ("anthropic/converters.py",  "message_to_anthropic"),
     "chrome_ai":      ("chrome_ai/converters.py",  "message_to_prompt_api"),
     "ollama":         ("anthropic/converters.py",  "message_to_anthropic"),
