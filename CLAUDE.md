@@ -131,6 +131,7 @@ Four plugin types:
 - `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
 - `model_provider/antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
 - `model_provider/ollama/`: Ollama local models (Anthropic-compatible API)
+- `model_provider/chrome_ai/`: Chrome built-in AI — the Gemini Nano on-device model via the browser's Prompt API (`LanguageModel` global), driven over the Chrome DevTools Protocol; zero cost, no credentials, tiny context (~6-9k)
 - `model_provider/lmstudio/`: LM Studio local models (OpenAI-compat chat + native load-control)
 - `model_provider/nim/`: NVIDIA NIM (OpenAI-compatible API, hosted + self-hosted)
 - `model_provider/tensorrt_llm/`: NVIDIA TensorRT-LLM via `trtllm-serve` (OpenAI-compatible, self-hosted GPU inference)
@@ -559,6 +560,56 @@ Benefits:
 - Run models locally without API costs
 - Privacy - data never leaves your machine
 - Use any model Ollama supports (Qwen, Llama, Mistral, etc.)
+
+### Chrome Built-in AI (Gemini Nano, Local)
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_CHROME_AI_BINARY` | Browser binary path (default: search PATH / well-known locations for Google Chrome, then Microsoft Edge) |
+| `JAATO_CHROME_AI_CDP_URL` | Attach to an already-running browser (`http://host:port` DevTools endpoint or `ws://` URL) instead of launching one |
+| `JAATO_CHROME_AI_USER_DATA_DIR` | Persistent profile directory (default: `~/.jaato/chrome_ai/profile`; the model download is profile-bound) |
+| `JAATO_CHROME_AI_HEADLESS` | Run headless (default: `true`; the model must already be downloaded in the profile) |
+| `JAATO_CHROME_AI_CONTEXT_LENGTH` | Manual context-window override (normally detected from the session quota) |
+| `JAATO_CHROME_AI_MODEL` | Nominal model name (default: `gemini-nano` — the Prompt API has no model selection) |
+| `JAATO_CHROME_AI_PAGE_URL` | Page hosting the Prompt API calls (default: `about:blank`) |
+
+Drives the on-device LLM embedded in Google Chrome (Gemini Nano) through the
+built-in AI **Prompt API** (`LanguageModel` global; stable for web pages since
+Chrome 148, extensions since 138), bridged over the Chrome DevTools Protocol.
+No credentials, no API costs, no new Python dependencies (the CDP transport
+reuses the core `websockets` package). Microsoft Edge (which ships the
+same-shaped API backed by Phi-4-mini / Aion-1.0-Instruct) works via the same
+provider.
+
+Requirements & limits:
+- **Branded Google Chrome or Edge only** — plain Chromium has no on-device
+  model (it's a Google-proprietary component).
+- The model (~2-4 GB component; ~22 GB free disk required by Chrome) must be
+  downloaded into the browser profile. Set `auto_download: true` to let the
+  provider trigger it at `connect()`, or run once headed and evaluate
+  `await LanguageModel.create()` in DevTools. On older/gated builds enable
+  `chrome://flags/#prompt-api-for-gemini-nano` and
+  `chrome://flags/#optimization-guide-on-device-model` (BypassPerfRequirement).
+- The context window is tiny (~6-9k tokens, shared input+output, detected via
+  the session quota) — pair with an aggressive GC strategy.
+- Tool calling is prompt-injected (`tool_call` fenced blocks, parsed by the
+  provider — the Prompt API's native `tools` option isn't on stable Chrome);
+  expect small-model reliability. Structured output uses the API's native
+  `responseConstraint` (JSON Schema) and is comparatively strong.
+
+Profile knobs under `plugin_configs.chrome_ai`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `binary` | str | Browser binary override |
+| `cdp_url` | str | Attach to a running browser instead of launching |
+| `user_data_dir` | str | Persistent profile dir |
+| `headless` | bool | `--headless=new` (default true) |
+| `page_url` | str | Page hosting the API calls (point at an https origin if the build gates the API) |
+| `extra_args` | list | Additional Chrome CLI switches |
+| `auto_download` | bool | Trigger the model component download at connect (default false) |
+| `download_timeout` / `connect_timeout` / `turn_timeout` | int | Seconds: model download / launch+attach / mid-turn silence before abort |
+| `context_length` | int | Manual context-window override |
+| `api_params.temperature`, `api_params.top_k` | float / int | `LanguageModel.create()` sampling options (unset = browser defaults) |
 
 ### LM Studio (Local Models)
 | Variable | Purpose |

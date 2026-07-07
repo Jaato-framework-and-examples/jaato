@@ -44,8 +44,12 @@ _SENTINEL = "WIRE_LEAK_SENTINEL_humanToolName_42"
 
 def _tool_schema_fn(message_fn: str) -> str:
     """The tool-schema converter fn that pairs with a message converter."""
-    return ("tool_schemas_to_anthropic" if message_fn == "message_to_anthropic"
-            else "tool_schemas_to_openai")
+    return {
+        "message_to_anthropic": "tool_schemas_to_anthropic",
+        # chrome_ai has no wire tools array — its "tools surface" is the
+        # prompt-injected section, rendered (and hashed) by this fn.
+        "message_to_prompt_api": "tool_schemas_to_prompt",
+    }.get(message_fn, "tool_schemas_to_openai")
 
 
 # ----------------------------------------------- surface 1: tools array (behavioral)
