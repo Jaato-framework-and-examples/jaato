@@ -41,6 +41,8 @@ class FakeBridge:
         self.connect_calls = 0
         self.close_calls = 0
         self.download_calls = 0
+        self.warmup_calls = 0
+        self.warmup_should_raise = False
         self.payloads: List[Dict[str, Any]] = []
         self.aborted: List[str] = []
         self._queues: Dict[str, "queue.Queue[Dict[str, Any]]"] = {}
@@ -72,6 +74,14 @@ class FakeBridge:
 
     def probe_quota(self) -> Optional[int]:
         return self.quota
+
+    def warmup(self, timeout: float = 60.0) -> None:
+        self.warmup_calls += 1
+        if self.warmup_should_raise:
+            from shared.plugins.model_provider.chrome_ai.errors import (
+                ChromeAIConnectionError,
+            )
+            raise ChromeAIConnectionError("warmup boom")
 
     def download(self, on_progress=None, timeout: float = 1800.0) -> None:
         self.download_calls += 1

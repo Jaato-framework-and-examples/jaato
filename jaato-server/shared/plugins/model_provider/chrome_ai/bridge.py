@@ -325,6 +325,40 @@ class PromptApiBridge:
         finally:
             self.finish_turn(run_id)
 
+    def warmup(self, timeout: float = 60.0) -> None:
+        """Run one throwaway generation to absorb the model's cold-start.
+
+        Drives the same ``run`` path as a real turn with a minimal prompt
+        and no history, draining events until the turn concludes and
+        discarding all output. The first post-provision inference pays the
+        on-device compile/load cost (~11s to first token), so calling this
+        once at connect() moves that off the first real turn. Returns on the
+        first terminal event; raises :class:`ChromeAIConnectionError` on
+        timeout or browser death (the provider treats a warmup failure as
+        non-fatal).
+        """
+        run_id = self.start_turn({"initialPrompts": [], "prompt": "Hi"})
+        events = self.events(run_id)
+        try:
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.abort(run_id)
+                    raise ChromeAIConnectionError(
+                        f"model warmup produced no result within {timeout:.0f}s")
+                try:
+                    event = events.get(timeout=min(remaining, 5.0))
+                except queue.Empty:
+                    if not self.is_alive:
+                        raise ChromeAIConnectionError(
+                            "browser died during model warmup")
+                    continue
+                if event.get("type") in ("done", "error", "cancelled"):
+                    return
+        finally:
+            self.finish_turn(run_id)
+
     def start_turn(self, payload: Dict[str, Any]) -> str:
         """Kick off one generation run; returns its ``run_id``.
 
