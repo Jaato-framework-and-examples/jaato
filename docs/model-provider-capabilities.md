@@ -8,6 +8,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 |---|---|---|---|---|---|---|---|---|
 | `anthropic` | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
 | `antigravity` | ✅ | — | — | — | ✅ | — | ✅ | ✅ |
+| `chrome_ai` | — | — | — | — | — | — | ✅ | ✅ |
 | `claude_cli` | — | — | — | — | ✅ | — | ✅ | — |
 | `github_models` | — | — | — | — | ✅ | — | ✅ | ✅ |
 | `google_genai` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ |

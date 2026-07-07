@@ -141,6 +141,7 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
 # frozenset to a module constant so explain/validate can read it and the
 # linter can reject unknown quirk names (previously silently dropped).
 PROVIDER_QUIRKS = frozenset({
+    "prose_tool_calls",
     "coerce_typed_tool_args",
     "force_tool_choice_for_lifecycle",
     "force_narration_between_tools",

@@ -283,6 +283,7 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
         self._auto_finalize_on_complete = bool(
             quirks.get("auto_finalize_on_complete", False))
         _KNOWN_QUIRKS = frozenset({
+            "prose_tool_calls",  # honored by the OpenAICompat base
             "coerce_typed_tool_args",
             "force_tool_choice_for_lifecycle",
             "force_narration_between_tools",

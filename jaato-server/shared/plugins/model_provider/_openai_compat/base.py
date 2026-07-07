@@ -66,6 +66,12 @@ from .converters import (
     response_from_openai,
     tool_schemas_to_openai,
 )
+from .._prose_tools import (
+    augment_system_with_tools,
+    messages_to_prose_chat,
+    read_prose_tool_calls_quirk,
+    rewrite_prose_tool_calls,
+)
 from shared.tool_id_map import tool_choice_to_wire
 
 logger = logging.getLogger(__name__)
@@ -122,6 +128,14 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # _FORWARDED_API_PARAMS) + opaque extra_body, forwarded on each call.
         self._api_params: Dict[str, Any] = {}
         self._extra_body: Optional[Dict[str, Any]] = None
+
+        # Quirk: prose_tool_calls (opt-in via profile.quirks).  When set,
+        # the model is assumed unable to emit native tool calls: the tools
+        # array is withheld, schemas are prompt-injected (hashed wire ids),
+        # tool traffic in history is replayed as text, and fenced tool_call
+        # blocks in the response are parsed back into FunctionCall parts.
+        # See shared/plugins/model_provider/_prose_tools.py.
+        self._prose_tool_calls: bool = False
 
         # Thinking/reasoning configuration
         self._enable_thinking: bool = True
@@ -193,6 +207,10 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
         # Common: api_params (allowlisted) + extra_body from the profile.
         self._read_api_params(config)
+
+        # Common: the prose_tool_calls model quirk (profile.quirks).
+        self._prose_tool_calls = read_prose_tool_calls_quirk(
+            config.extra, provider=self.name)
 
         # Hook: provider's context-window resolution.  Runs after the auth
         # check so an auth failure surfaces first.
@@ -384,15 +402,28 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                 "Provider not connected. Call initialize() and connect() first."
             )
 
+        # Quirk path: models that cannot emit native tool calls get the
+        # text-encoded protocol — schemas prompt-injected, tool traffic in
+        # history replayed as prose, no tools array on the wire.
+        prose_mode = bool(self._prose_tool_calls and tools)
+
         # Build OpenAI-format messages from explicit parameters
         openai_messages: List[Dict[str, Any]] = []
-        if system_instruction:
-            openai_messages.append({"role": "system", "content": system_instruction})
-        openai_messages.extend(history_to_openai(list(messages)))
+        if prose_mode:
+            system_text = augment_system_with_tools(system_instruction, tools)
+            if system_text:
+                openai_messages.append({"role": "system",
+                                        "content": system_text})
+            openai_messages.extend(messages_to_prose_chat(list(messages)))
+        else:
+            if system_instruction:
+                openai_messages.append({"role": "system",
+                                        "content": system_instruction})
+            openai_messages.extend(history_to_openai(list(messages)))
 
         # Build kwargs
         kwargs: Dict[str, Any] = {}
-        if tools:
+        if tools and not prose_mode:
             openai_tools = tool_schemas_to_openai(tools)
             if openai_tools:
                 kwargs["tools"] = openai_tools
@@ -425,6 +456,13 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                 cached = self._extract_cache_tokens(getattr(response, "usage", None))
                 if cached is not None and provider_response.usage is not None:
                     provider_response.usage.cache_read_tokens = cached
+
+            # Prose-mode counterpart of the native tool-call flush: parse
+            # fenced tool_call blocks out of the text into FunctionCall
+            # parts (no-op on cancelled / call-free responses).
+            if prose_mode:
+                provider_response = rewrite_prose_tool_calls(
+                    provider_response, call_id_prefix=self.name)
 
             # Per-call accounting (NOT conversation state)
             self._last_usage = provider_response.usage
