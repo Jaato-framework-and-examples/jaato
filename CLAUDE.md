@@ -140,6 +140,23 @@ Four plugin types:
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
 - `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
 
+**Model Quirks** — per-model workarounds a profile opts into via `quirks:`
+(injected into `config.extra["quirks"]`; each provider declares the names it
+honors in its `PROVIDER_QUIRKS` contract):
+
+| Quirk | Honored by | Effect |
+|-------|-----------|--------|
+| `prose_tool_calls` | all OpenAI-compat providers (nim, nebius, ovhcloud, lmstudio, tensorrt_llm, triton, vllm, zhipuai_openai) + openrouter | Prose-emulated tool calling for upstream models that cannot emit native tool calls: the `tools` array is withheld, schemas are prompt-injected (hashed wire ids, model picks by description), tool traffic in history is replayed as text, and fenced ` ```tool_call ` JSON blocks in the response are parsed back into `FunctionCall` parts. Reliability tier below native tool calling (hallucinated ids surface as recoverable unknown-tool errors; malformed blocks stay visible in text). Shared machinery in `model_provider/_prose_tools.py` — the same protocol `chrome_ai` uses unconditionally. |
+| `coerce_typed_tool_args`, `force_tool_choice_for_lifecycle`, `force_narration_between_tools`, `auto_finalize_on_complete` | vllm | Small-model tool-calling workarounds; see `vllm/provider.py` |
+
+```yaml
+# profile example: a cheap OpenRouter model that answers in prose
+provider: openrouter
+model: some-vendor/cheap-model
+quirks:
+  prose_tool_calls: true
+```
+
 ### Tool Execution Flow
 
 1. Create `JaatoClient` and connect: `jaato.connect(project, location, model)`

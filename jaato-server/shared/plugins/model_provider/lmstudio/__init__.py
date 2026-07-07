@@ -75,7 +75,13 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
                           "flash_attention, offload_kv_cache_to_gpu, "
                           "eval_batch_size, num_experts, ...)"),
 ))
-PROVIDER_QUIRKS = frozenset()
+PROVIDER_QUIRKS = frozenset({
+    # Opt-in prose-emulated tool calling for upstream models that cannot
+    # emit native tool calls (schemas prompt-injected with hashed wire
+    # ids; fenced tool_call blocks parsed from the response text).  See
+    # shared/plugins/model_provider/_prose_tools.py.
+    "prose_tool_calls",
+})
 
 # --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
 PROVIDER_AUTH_RESOLUTION = (

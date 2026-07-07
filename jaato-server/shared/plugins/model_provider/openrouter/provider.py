@@ -101,6 +101,12 @@ from .converters import (
     system_message_with_cache,
     tool_schemas_to_openai,
 )
+from .._prose_tools import (
+    augment_system_with_tools,
+    messages_to_prose_chat,
+    read_prose_tool_calls_quirk,
+    rewrite_prose_tool_calls,
+)
 from .env import (
     DEFAULT_BASE_URL,
     HEADER_APP_CATEGORIES,
@@ -375,6 +381,15 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         # ``required`` arrays, no ``oneOf``/``anyOf``); kb authors own
         # schema shape.  Wire errors surface mismatches.
         self._strict_tools: bool = False
+
+        # Quirk: prose_tool_calls (opt-in via profile.quirks).  For cheap
+        # upstream models that cannot emit native tool calls and answer in
+        # prose instead: the tools array is withheld, schemas are
+        # prompt-injected (hashed wire ids), tool traffic in history is
+        # replayed as text, and fenced tool_call blocks in the response
+        # are parsed back into FunctionCall parts.  See
+        # shared/plugins/model_provider/_prose_tools.py.
+        self._prose_tool_calls: bool = False
 
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
@@ -718,6 +733,10 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         parallel_extra = _knob("parallel_tool_calls", layer=api_params)
         if parallel_extra is not None:
             self._parallel_tool_calls = bool(parallel_extra)
+
+        # Model quirks (profile.quirks → config.extra["quirks"]).
+        self._prose_tool_calls = read_prose_tool_calls_quirk(
+            config.extra, provider=self.name)
 
         # Thinking knobs — framework abstractions that translate to
         # OpenRouter's ``reasoning`` extension on the wire.  Live under
@@ -1137,15 +1156,28 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         cache_active = self._caching_active()
         cache_control = make_cache_control(self._cache_ttl) if cache_active else None
 
+        # Quirk path: models that cannot emit native tool calls get the
+        # text-encoded protocol — schemas prompt-injected, tool traffic in
+        # history replayed as prose, no tools array on the wire.
+        prose_mode = bool(self._prose_tool_calls and tools)
+
         openai_messages: List[Dict[str, Any]] = []
-        if system_instruction:
-            openai_messages.append(
-                system_message_with_cache(system_instruction, cache_control)
-            )
-        openai_messages.extend(history_to_openai(list(messages)))
+        if prose_mode:
+            system_text = augment_system_with_tools(system_instruction, tools)
+            if system_text:
+                openai_messages.append(
+                    system_message_with_cache(system_text, cache_control)
+                )
+            openai_messages.extend(messages_to_prose_chat(list(messages)))
+        else:
+            if system_instruction:
+                openai_messages.append(
+                    system_message_with_cache(system_instruction, cache_control)
+                )
+            openai_messages.extend(history_to_openai(list(messages)))
 
         kwargs: Dict[str, Any] = {}
-        if tools:
+        if tools and not prose_mode:
             openai_tools = tool_schemas_to_openai(
                 tools,
                 cache_control=cache_control,
@@ -1206,6 +1238,13 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             # always reasons regardless of request kwargs).
             if not self._enable_thinking:
                 provider_response.thinking = None
+
+            # Prose-mode counterpart of the native tool-call flush: parse
+            # fenced tool_call blocks out of the text into FunctionCall
+            # parts (no-op on cancelled / call-free responses).
+            if prose_mode:
+                provider_response = rewrite_prose_tool_calls(
+                    provider_response, call_id_prefix=self.name)
 
             self._last_usage = provider_response.usage
 
