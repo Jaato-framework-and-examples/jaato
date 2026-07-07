@@ -24,6 +24,28 @@ These are **not** unit tests — they require a live daemon and a live
 OpenRouter API key (with credits). Unit tests for the provider live in
 `../tests/`.
 
+## Direct-provider smoke: `prose_tool_calls` quirk
+
+`smoke_prose_tool_calls.py` is a **different kind** of smoke — it needs
+**no daemon**. It instantiates `OpenRouterProvider` directly and calls
+`complete()` to exercise the shared prose-emulated tool protocol
+(`model_provider/_prose_tools.py`) end to end against a model that lacks
+native tool calling. It is the wire proof that the opt-in
+`prose_tool_calls` quirk lets a tool-less model drive the harness.
+
+```bash
+export JAATO_OPENROUTER_API_KEY=sk-or-...      # or $(pass jaato/openrouter/api-key)
+python smoke_prose_tool_calls.py               # 1 turn, quirk ON → parsed FunctionCall
+python smoke_prose_tool_calls.py --compare     # + quirk OFF → gateway 404 (no tool endpoint)
+python smoke_prose_tool_calls.py --loop        # + 2-turn loop → grounded final answer
+```
+
+Default model `google/gemma-3-4b-it` has **no** tool-use endpoint on
+OpenRouter, so with the quirk OFF the gateway rejects a `tools` request
+(HTTP 404 "No endpoints found that support tool use") — which is exactly
+why the quirk exists. Exits non-zero if the quirk-ON turn produces no
+tool call.
+
 ## Configuration model
 
 The smoke separates **profile knobs** (model, plugins, GC) from
@@ -49,6 +71,7 @@ smoke/
 ├── smoke_chat.py                            # #1 — pure text round-trip
 ├── smoke_signal_completion.py               # #2 — lifecycle, schema-driven
 ├── smoke_tools.py                           # #3 — cli + signal_completion
+├── smoke_prose_tool_calls.py                # direct-provider — prose_tool_calls quirk (no daemon)
 ├── .env.example                             # workspace env template
 └── .jaato.example/                          # workspace .jaato/ template
     ├── profiles/
