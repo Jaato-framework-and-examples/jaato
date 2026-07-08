@@ -5990,7 +5990,30 @@ class SessionManager:
         )
 
         restored_profile = None
-        if state.profile_name:
+        if state.profile_spec:
+            # INLINE-profile restore: the persisted spec is authoritative and
+            # self-contained, so reconstruct from it DIRECTLY — never named-
+            # resolve.  This is both correct (an inline session was never a
+            # named profile) and collision-safe: now that an inline spec's own
+            # ``name`` is honored (e.g. "nano-chat", not the "<inline>"
+            # sentinel), a named lookup could otherwise match an unrelated
+            # same-named DISK profile.  Uses the SAME build_inline_profile path
+            # create uses (re-resolving any pass:// secrets daemon-side —
+            # nothing sensitive is on disk).  The spec is also carried onto the
+            # restored Session (below) so re-saves re-persist it.
+            from shared.plugins.subagent.config import build_inline_profile
+            try:
+                restored_profile = build_inline_profile(state.profile_spec)
+                logger.info(
+                    "_load_session: reconstructed inline profile for session "
+                    "%s from persisted profile_spec (name=%s, model=%s, "
+                    "provider=%s)", session_id, restored_profile.name,
+                    restored_profile.model, restored_profile.provider)
+            except ValueError as exc:
+                logger.error(
+                    "_load_session: persisted inline profile_spec for session "
+                    "%s failed to rebuild: %s", session_id, exc)
+        elif state.profile_name:
             restored_profile, profile_err = self._resolve_profile(
                 state.profile_name,
                 workspace_path=state.workspace_path or workspace_path or "",
@@ -5998,40 +6021,15 @@ class SessionManager:
                 env_file=session_env_file,
             )
             if restored_profile is None:
-                # INLINE-profile restore: an inline spec has no re-resolvable
-                # named profile ("<inline>" isn't on disk), so the named
-                # lookup above always misses.  Reconstruct the recipe from the
-                # persisted UNRESOLVED spec via the SAME path create uses
-                # (build_inline_profile), which re-resolves any pass:// secrets
-                # daemon-side — nothing sensitive was on disk.  Without this,
-                # build_session_envelope reads model off a None profile →
-                # envelope.model_name="" → runner bootstrap fails.  The spec
-                # is also carried onto the restored Session (below) so re-saves
-                # re-persist it.  (Named-profile misses still log + fail loud.)
-                if state.profile_spec:
-                    from shared.plugins.subagent.config import build_inline_profile
-                    try:
-                        restored_profile = build_inline_profile(state.profile_spec)
-                        logger.info(
-                            "_load_session: reconstructed inline profile for "
-                            "session %s from persisted profile_spec "
-                            "(model=%s, provider=%s)", session_id,
-                            restored_profile.model, restored_profile.provider)
-                    except ValueError as exc:
-                        logger.error(
-                            "_load_session: persisted inline profile_spec for "
-                            "session %s failed to rebuild: %s",
-                            session_id, exc)
-                if restored_profile is None:
-                    logger.error(
-                        "_load_session: profile %r for session %s not "
-                        "resolvable (%s) — initialize will likely fail "
-                        "(workspace=%s config_root=%s) — verify the "
-                        "profile still exists at "
-                        "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
-                        state.profile_name, session_id, profile_err,
-                        state.workspace_path, restore_config_root,
-                    )
+                logger.error(
+                    "_load_session: profile %r for session %s not "
+                    "resolvable (%s) — initialize will likely fail "
+                    "(workspace=%s config_root=%s) — verify the "
+                    "profile still exists at "
+                    "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
+                    state.profile_name, session_id, profile_err,
+                    state.workspace_path, restore_config_root,
+                )
 
         # Rebind the agent PERSONA on restore.  Persisting + restoring
         # ``agent_name`` (below, on the envelope) restores the agent IDENTITY

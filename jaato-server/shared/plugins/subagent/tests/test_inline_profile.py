@@ -49,6 +49,22 @@ class TestBuildInlineProfile:
         assert p.max_turns == 25
         assert p.env == {"FOO": "bar"}
 
+    def test_spec_name_is_honored(self):
+        """The spec's own ``name`` is used (like disk profiles), not silently
+        replaced by the ``<inline>`` placeholder — so profile_name and the
+        agent display read e.g. 'nano-chat'."""
+        p = build_inline_profile(
+            {"name": "nano-chat", "model": "gemini-nano", "plugins": []})
+        assert p.name == "nano-chat"
+
+    def test_name_falls_back_to_placeholder_when_spec_omits_it(self):
+        # No name in the spec → the param default ("<inline>") stands.
+        assert build_inline_profile(
+            {"model": "X", "plugins": []}).name == "<inline>"
+        # An explicit name param still wins when the spec omits name.
+        assert build_inline_profile(
+            {"model": "X", "plugins": []}, name="ops").name == "ops"
+
     def test_suppress_base_instructions_forwarded(self):
         """``suppress_base_instructions`` must round-trip onto the profile so
         disk-restore (which reconstructs an inline profile from the persisted
