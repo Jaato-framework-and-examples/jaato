@@ -227,7 +227,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         JSON-compatible dictionary.
     """
     return {
-        'version': '2.6',  # Bumped for agent_name (orphan-revive persona restore)
+        'version': '2.7',  # Bumped for profile_spec (inline-profile resume)
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -237,6 +237,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'user_inputs': state.user_inputs,
         'metadata': state.metadata,
         'profile_name': state.profile_name,
+        'profile_spec': state.profile_spec,  # unresolved inline recipe (2.7+)
         'workspace_path': state.workspace_path,
         'config_root': state.config_root,
         'sandbox_mode': state.sandbox_mode,
@@ -280,6 +281,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         user_inputs=data.get('user_inputs', []),
         metadata=data.get('metadata', {}),
         profile_name=data.get('profile_name'),
+        profile_spec=data.get('profile_spec'),  # None on pre-2.7 records
         workspace_path=data.get('workspace_path'),
         config_root=data.get('config_root'),
         sandbox_mode=data.get('sandbox_mode'),

@@ -165,6 +165,13 @@ class Session:
     provisioned: bool = False  # True if workspace was auto-provisioned by server
     created_by: Optional[str] = None  # Authenticated user who created the session
     sandbox_mode: Optional[str] = None  # "apparmor" or "soft" when workspace sandboxing is active
+    # The UNRESOLVED inline-profile spec (dict), for sessions created from
+    # an inline profile rather than a named one.  Carried so _save_session
+    # can persist it (SessionState.profile_spec) → disk-restore reconstructs
+    # the recipe by id alone (no named profile on disk).  None for
+    # named-profile sessions.  Set at create (from the BootstrapEnvelope)
+    # and at restore (from state.profile_spec) so it survives save cycles.
+    inline_profile_spec: Optional[Dict[str, Any]] = None
     # Server 0.6.164+ (Bug B real root cause): opaque cascade tenant
     # ID stamped at session creation.  Consumed by
     # :meth:`_dispatch_to_cascade_clients` (Phase 1 cascade-as-client
@@ -2776,6 +2783,7 @@ class SessionManager:
             provisioned=envelope.provisioned,
             created_by=envelope.created_by,
             sandbox_mode=planned_sandbox,
+            inline_profile_spec=envelope.inline_profile_spec,
         )
 
         return server, session
@@ -4696,6 +4704,10 @@ class SessionManager:
             client_id=client_id,
             env_file=session_env_file,
             profile=profile,
+            # Carry the UNRESOLVED inline spec so the created Session can
+            # stash it for disk-restore (persisted as profile_spec).  Only
+            # set for inline-spec sessions; None for named/no-profile.
+            inline_profile_spec=inline_profile_data,
             agent_name=agent_name,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=effective_suppress_base,
@@ -5986,15 +5998,40 @@ class SessionManager:
                 env_file=session_env_file,
             )
             if restored_profile is None:
-                logger.error(
-                    "_load_session: profile %r for session %s not "
-                    "resolvable (%s) — initialize will likely fail "
-                    "(workspace=%s config_root=%s) — verify the "
-                    "profile still exists at "
-                    "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
-                    state.profile_name, session_id, profile_err,
-                    state.workspace_path, restore_config_root,
-                )
+                # INLINE-profile restore: an inline spec has no re-resolvable
+                # named profile ("<inline>" isn't on disk), so the named
+                # lookup above always misses.  Reconstruct the recipe from the
+                # persisted UNRESOLVED spec via the SAME path create uses
+                # (build_inline_profile), which re-resolves any pass:// secrets
+                # daemon-side — nothing sensitive was on disk.  Without this,
+                # build_session_envelope reads model off a None profile →
+                # envelope.model_name="" → runner bootstrap fails.  The spec
+                # is also carried onto the restored Session (below) so re-saves
+                # re-persist it.  (Named-profile misses still log + fail loud.)
+                if state.profile_spec:
+                    from shared.plugins.subagent.config import build_inline_profile
+                    try:
+                        restored_profile = build_inline_profile(state.profile_spec)
+                        logger.info(
+                            "_load_session: reconstructed inline profile for "
+                            "session %s from persisted profile_spec "
+                            "(model=%s, provider=%s)", session_id,
+                            restored_profile.model, restored_profile.provider)
+                    except ValueError as exc:
+                        logger.error(
+                            "_load_session: persisted inline profile_spec for "
+                            "session %s failed to rebuild: %s",
+                            session_id, exc)
+                if restored_profile is None:
+                    logger.error(
+                        "_load_session: profile %r for session %s not "
+                        "resolvable (%s) — initialize will likely fail "
+                        "(workspace=%s config_root=%s) — verify the "
+                        "profile still exists at "
+                        "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
+                        state.profile_name, session_id, profile_err,
+                        state.workspace_path, restore_config_root,
+                    )
 
         # Rebind the agent PERSONA on restore.  Persisting + restoring
         # ``agent_name`` (below, on the envelope) restores the agent IDENTITY
@@ -6277,6 +6314,9 @@ class SessionManager:
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
             provisioned=state.metadata.get('provisioned', False),
             sandbox_mode=getattr(state, "sandbox_mode", None),
+            # Carry the inline spec forward so a re-save of the restored
+            # session re-persists it (survives restore → save → restore).
+            inline_profile_spec=getattr(state, "profile_spec", None),
             # Phase 3 §3.12 + peer-review M5/N1: mark this session as
             # awaiting first client-attach.  While set, the runner-
             # side permission plugin queues ASK prompts rather than
@@ -6729,6 +6769,11 @@ class SessionManager:
                 turn_accounting=turn_accounting,
                 user_inputs=session.user_inputs,  # Command history for prompt restoration
                 profile_name=profile_name,
+                # Persist the UNRESOLVED inline spec (if any) so disk-restore
+                # reconstructs an inline profile's recipe by id alone — the
+                # named-profile ``profile_name`` ("<inline>") isn't
+                # re-resolvable.  None for named-profile sessions.
+                profile_spec=session.inline_profile_spec,
                 workspace_path=session.workspace_path,
                 config_root=session.config_root,
                 # Persist confinement so orphan-revive / disk-restore re-applies

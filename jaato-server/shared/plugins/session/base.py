@@ -67,6 +67,25 @@ class SessionState:
     recipe source.
     """
 
+    profile_spec: Optional[Dict[str, Any]] = None
+    """The UNRESOLVED inline-profile spec, when the session was created
+    from an inline profile (``profile_name == "<inline>"``) rather than a
+    named profile on disk.
+
+    An inline profile has no re-resolvable name, so disk-restore cannot
+    re-bind its recipe via the profile registry (the named-profile
+    assumption behind ``profile_name``).  Persisting the original spec
+    dict — the same JSON shape ``build_inline_profile`` accepts — lets
+    restore reconstruct the full recipe (model + provider + plugins +
+    plugin_configs + system_instructions + GC) with NO named profile.
+
+    Stored **unresolved** (secret URIs like ``pass://`` preserved, not the
+    resolved literals) so credentials never land in the on-disk session
+    record; the daemon re-resolves them at restore, exactly as it does at
+    create.  ``None`` for named-profile sessions (they restore via
+    ``profile_name``) and for records written before this field existed.
+    """
+
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""
 
