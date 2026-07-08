@@ -65,6 +65,20 @@ class TestBuildInlineProfile:
         assert build_inline_profile(
             {"model": "X", "plugins": []}, name="ops").name == "ops"
 
+    def test_suppress_base_instructions_forwarded(self):
+        """``suppress_base_instructions`` must round-trip onto the profile so
+        disk-restore (which reconstructs an inline profile from the persisted
+        spec) re-applies it — else a restored session silently regains the
+        ~3-5k framework base instructions and tiny-context models overflow."""
+        assert build_inline_profile(
+            {"model": "gemini-nano", "plugins": [],
+             "suppress_base_instructions": True}
+        ).suppress_base_instructions is True
+        # Default stays False when the key is absent.
+        assert build_inline_profile(
+            {"model": "gemini-nano", "plugins": []}
+        ).suppress_base_instructions is False
+
     def test_preload_annotation_in_plugin_list(self):
         """``plugin(preload)`` syntax is split the same as on-disk profiles."""
         p = build_inline_profile({

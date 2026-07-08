@@ -1641,16 +1641,21 @@ class JaatoServer:
         Args:
             emit: Event callback to use for emission.
         """
-        for agent_id, agent in self._agents.items():
-            if not agent.history:
+        for agent_id in list(self._agents.keys()):
+            # Read via get_history so the MAIN agent's transcript comes from
+            # the runner (authoritative post-seat-flip) — the daemon-side
+            # agent.history is empty for a cold-restored runner session, which
+            # is why reconnecting clients saw a blank panel.
+            history = self.get_history(agent_id)
+            if not history:
                 continue
 
             logger.info(
-                f"  replaying {len(agent.history)} history messages "
+                f"  replaying {len(history)} history messages "
                 f"for agent {agent_id}"
             )
 
-            for msg in agent.history:
+            for msg in history:
                 role = msg.role
                 # Compare by value to avoid import dependency on Role enum
                 role_value = role.value if hasattr(role, 'value') else str(role)
@@ -5491,12 +5496,57 @@ class JaatoServer:
 
         ``agent_id=None`` resolves to the main agent's id (``main`` by
         default, or the ``--agent <name>`` value when one was supplied).
+
+        Post-seat-flip the session and its AUTHORITATIVE history live
+        runner-side; the daemon-side ``_agents[*].history`` is NOT
+        maintained for a runner-based session — it is empty after a cold
+        disk-restore and stale after new turns (``on_agent_history_updated``
+        only fires in the in-process path).  So for the MAIN agent, when a
+        runner is attached, read from the runner via the RPC surface the
+        architecture mandates (see the ``get_session`` removal note above).
+        Without this, disk-restored WS sessions replayed an empty transcript
+        and ``history.request`` returned nothing even though the runner had
+        the turns.  Subagents (no per-agent runner history RPC) and
+        in-process sessions read the daemon-side copy as before.  A runner
+        read failure falls back to daemon-side so a transient RPC blip
+        degrades rather than raises.
         """
         if agent_id is None:
             agent_id = self._main_agent_id
+        if self._runner_rpc is not None and agent_id == self._main_agent_id:
+            fetched = self._runner_history_or_none()
+            if fetched is not None:
+                return fetched
         if agent_id in self._agents:
             return self._agents[agent_id].history
         return []
+
+    def _runner_history_or_none(self) -> Optional[List[Any]]:
+        """Fetch + deserialize the runner-side main history, or None on any
+        failure (so ``get_history`` can fall back to the daemon-side copy).
+
+        The runner serializes each message with the canonical session
+        serializer (``_serialize_message_for_wire`` → ``serialize_message``),
+        so ``deserialize_history`` round-trips it back to ``Message`` objects
+        — the shape every ``get_history`` consumer already expects.
+        """
+        rpc = self._runner_rpc
+        if rpc is None:
+            return None
+        try:
+            dicts = rpc.session_get_history_threadsafe(timeout=10.0)
+        except Exception:  # noqa: BLE001 — read boundary; degrade to daemon-side
+            logger.warning(
+                "get_history: runner fetch failed; falling back to daemon-side",
+                exc_info=True)
+            return None
+        try:
+            from shared.plugins.session.serializer import deserialize_history
+            return deserialize_history(dicts)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "get_history: runner history deserialize failed", exc_info=True)
+            return None
 
     def get_turn_accounting(self, agent_id: Optional[str] = None) -> List[Dict]:
         """Get turn accounting for an agent.
