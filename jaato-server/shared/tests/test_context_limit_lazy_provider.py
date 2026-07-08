@@ -106,3 +106,34 @@ class TestContextLimitFromProvider:
 
         # Must not raise.
         assert s._ensure_provider() is new_provider
+
+
+class TestGetContextLimitHonestUnknown:
+    """The PUBLIC ``get_context_limit()`` returns 0 (honest unknown) — not a
+    hardcoded 1_048_576 — when the lazy provider hasn't materialized yet.
+
+    Root cause closed here (2026-07-08): the initial ``ContextUpdatedEvent``
+    is emitted at ``initialize()`` time, BEFORE the lazy provider exists, so
+    ``get_context_limit()`` fell through to a hardcoded ``1_048_576``.  The
+    daemon then cached that 1M (``core.py`` ``_cached_context_limit``) and
+    only refreshes the cache on a ``0`` reading — a non-zero-but-wrong 1M was
+    cached forever, so every ``ContextUpdatedEvent`` reported a 1M window even
+    for a tiny-context model (Gemini Nano ~9k), making budget GC LOOK inert in
+    the usage report (the GC math itself keys off the provider's real limit at
+    turn time and was always correct).  Returning 0 lets the existing
+    ``if context_limit == 0`` refresh path heal the cache on the first turn.
+    """
+
+    def test_get_context_limit_zero_without_provider(self):
+        """No provider yet → 0, not the old hardcoded 1_048_576."""
+        s = _make_session()
+        _prep(s)
+        s._provider = None
+        assert s.get_context_limit() == 0
+
+    def test_get_context_limit_delegates_to_provider(self):
+        """Provider present → its real window, verbatim."""
+        s = _make_session()
+        _prep(s)
+        s._provider.get_context_limit.return_value = 9216
+        assert s.get_context_limit() == 9216

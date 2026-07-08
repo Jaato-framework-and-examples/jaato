@@ -720,15 +720,24 @@ class JaatoClient:
     def get_context_limit(self) -> int:
         """Get the context window limit for the current model.
 
+        Returns ``0`` (honest "unknown") when no session exists yet, rather
+        than a hardcoded default.  See ``JaatoSession.get_context_limit`` for
+        why a fake non-zero value is harmful (it poisons the daemon-side
+        context-limit cache, which only refreshes on ``0``).
+
         Returns:
-            The context window size in tokens.
+            The context window size in tokens, or ``0`` when unknown.
         """
         if not self._session:
-            return 1_048_576
+            return 0
         return self._session.get_context_limit()
 
     def get_context_usage(self) -> Dict[str, Any]:
         """Get context window usage statistics.
+
+        When no session exists yet, ``context_limit`` / ``tokens_remaining``
+        are ``0`` (honest "unknown") rather than a hardcoded default — see
+        ``get_context_limit`` above.
 
         Returns:
             Dict with context usage information.
@@ -736,13 +745,13 @@ class JaatoClient:
         if not self._session:
             return {
                 'model': self._model_name or 'unknown',
-                'context_limit': 1_048_576,
+                'context_limit': 0,
                 'total_tokens': 0,
                 'prompt_tokens': 0,
                 'output_tokens': 0,
                 'turns': 0,
                 'percent_used': 0,
-                'tokens_remaining': 1_048_576,
+                'tokens_remaining': 0,
             }
         return self._session.get_context_usage()
 
