@@ -30,14 +30,18 @@ _reverse: Dict[str, str] = {}
 
 # A complete model-facing id: t_<8 hex> (tool) or c_<8 hex> (category), as a
 # whole token (markdown backticks / spaces / punctuation are non-word, so the
-# word boundaries match ``t_xxxxxxxx`` whether bare or wrapped).
-_ID_RE = re.compile(r"\b[tc]_[0-9a-f]{8}\b")
+# word boundaries match ``t_xxxxxxxx`` whether bare or wrapped).  The ``\\?``
+# tolerates a markdown-ESCAPED underscore (``t\_xxxxxxxx``): small models emit
+# ids inside ``**bold**`` / list items and backslash-escape the ``_`` so it
+# isn't parsed as italic — without this the scrubber would miss them and the
+# raw id would leak to the user (that is exactly how the leak was observed).
+_ID_RE = re.compile(r"\b[tc]\\?_[0-9a-f]{8}\b")
 
 # A trailing fragment that could be an INCOMPLETE id prefix at a stream-chunk
-# boundary (``t`` / ``t_`` / ``t_<0-7 hex>``) — held back so a split id is never
-# emitted half-scrubbed.  A COMPLETE id (8 hex) does NOT match (the {0,7} cap),
-# so it is emitted and scrubbed rather than held.
-_PARTIAL_TAIL_RE = re.compile(r"[tc](_[0-9a-f]{0,7})?$")
+# boundary (``t`` / ``t_`` / ``t_<0-7 hex>``, escaped or not) — held back so a
+# split id is never emitted half-scrubbed.  A COMPLETE id (8 hex) does NOT match
+# (the {0,7} cap), so it is emitted and scrubbed rather than held.
+_PARTIAL_TAIL_RE = re.compile(r"[tc](\\?_[0-9a-f]{0,7})?$")
 
 
 def scrub_tool_ids(text: str) -> str:
@@ -47,8 +51,10 @@ def scrub_tool_ids(text: str) -> str:
     :func:`id_to_name`, so coincidental ``t_########`` hex strings are safe.
     This is the user-facing-surface guard for the contract in this module's
     docstring: model NARRATION that mentions an id must show the real name.
+    A markdown-escaped underscore in the match (``t\\_xxxxxxxx``) is normalized
+    away before the lookup so the id still resolves to its real name.
     """
-    return _ID_RE.sub(lambda m: id_to_name(m.group(0)), text)
+    return _ID_RE.sub(lambda m: id_to_name(m.group(0).replace("\\", "")), text)
 
 
 class StreamScrubber:
