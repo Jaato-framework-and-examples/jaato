@@ -40,7 +40,9 @@ profile objects).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional
+
+from .instruction_suppression import normalize_suppression, suppression_to_wire
 
 
 # Bumped per schema change.  Runners refuse a higher-version
@@ -251,9 +253,15 @@ class SessionInitEnvelope:
     # drop WOULD be ~24K if honored).  See
     # ``project_backlog_suppress_base_instructions_not_honored``
     # memory for the falsification recipe + full evidence chain.
-    # ``False`` default keeps backward compat with envelopes built
-    # before this field landed.
-    suppress_base_instructions: bool = False
+    # ``suppress_base_instructions`` (2026-07-08 made granular): the
+    # canonical frozenset of framework instruction pieces to drop
+    # (subset of {disk, constants, security}; see ``instruction_
+    # suppression``).  Serialized on the wire as a sorted list; the
+    # deserializer normalizes a legacy bool (``true`` → {disk,
+    # constants}) too, so older daemons/envelopes stay compatible.
+    # Empty default keeps backward compat with envelopes built before
+    # this field landed.
+    suppress_base_instructions: FrozenSet[str] = field(default_factory=frozenset)
     # 2026-06-06: symmetric fix for ``system_instruction_override`` —
     # same shape of bug as ``suppress_base_instructions``.  The
     # daemon-side ``JaatoServer._system_instruction_override`` was set
@@ -278,6 +286,18 @@ class SessionInitEnvelope:
     # compat; same-build daemon+runner so no schema_version bump needed.
     client_tools: List[Dict[str, Any]] = field(default_factory=list)
     schema_version: int = SESSION_ENVELOPE_VERSION
+
+    def __post_init__(self) -> None:
+        """Normalize ``suppress_base_instructions`` to the canonical frozenset.
+
+        The field is a frozenset invariant, but callers (and legacy
+        ``getattr(server, ..., False)`` defaults / test stubs) may hand it a
+        bool.  Normalizing here — the type boundary — keeps ``to_dict``'s
+        ``suppression_to_wire`` total and mirrors ``SubagentProfile``.
+        """
+        self.suppress_base_instructions = normalize_suppression(
+            self.suppress_base_instructions
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a JSON-friendly dict for the wire.
@@ -312,7 +332,9 @@ class SessionInitEnvelope:
             # 2026-06-06: both knobs serialized on the wire so the
             # runner-side from_dict() receives them.  See field
             # docstrings for the bug history (silent no-op pre-fix).
-            "suppress_base_instructions": self.suppress_base_instructions,
+            "suppress_base_instructions": suppression_to_wire(
+                self.suppress_base_instructions
+            ),
             "system_instruction_override": self.system_instruction_override,
             "client_tools": [dict(t) for t in self.client_tools],
         }
@@ -374,7 +396,7 @@ class SessionInitEnvelope:
             cascade_driver_id=d.get("cascade_driver_id"),
             # 2026-06-06: defaults preserve backward compat with
             # older daemons that don't carry these fields on the wire.
-            suppress_base_instructions=bool(
+            suppress_base_instructions=normalize_suppression(
                 d.get("suppress_base_instructions", False)
             ),
             system_instruction_override=d.get("system_instruction_override"),
@@ -460,7 +482,9 @@ class BootstrapEnvelope:
     inline_profile_spec: Optional[Dict[str, Any]] = None
     agent_name: str = "main"
     system_instruction_override: Optional[str] = None
-    suppress_base_instructions: bool = False
+    # Canonical frozenset of framework instruction pieces to drop (see
+    # ``instruction_suppression``); daemon-internal, never crosses the wire.
+    suppress_base_instructions: FrozenSet[str] = field(default_factory=frozenset)
     env_overrides: Dict[str, str] = field(default_factory=dict)
     config_root: Optional[str] = None
     instruction_token_cache: Optional[Any] = None

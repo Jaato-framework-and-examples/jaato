@@ -190,7 +190,7 @@ class TestRealPathWiring:
             assert fake.configure_tools_session_kwargs == {
                 "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}},
                 "plugins": None,
-                "suppress_base_instructions": False,
+                "suppress_base_instructions": frozenset(),
             }
             # A plain key passes through resolve_secret_uri unchanged; pass://
             # resolution requires jaato-premium and is exercised by the example
@@ -270,7 +270,7 @@ class TestTransportAgnosticEntry:
             assert holder["client"].configure_tools_session_kwargs == {
                 "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}},
                 "plugins": [],
-                "suppress_base_instructions": False,
+                "suppress_base_instructions": frozenset(),
             }
 
         asyncio.run(_run())
@@ -603,7 +603,7 @@ class TestSuppressBaseInstructions:
             ) as s:
                 await s.ask("hi")
             sk = holder["client"].configure_tools_session_kwargs
-            assert sk["suppress_base_instructions"] is False
+            assert sk["suppress_base_instructions"] == frozenset()
 
         asyncio.run(_run())
 
@@ -619,7 +619,7 @@ class TestSuppressBaseInstructions:
             ) as s:
                 await s.ask("hi")
             sk = holder["client"].configure_tools_session_kwargs
-            assert sk["suppress_base_instructions"] is True
+            assert sk["suppress_base_instructions"] == frozenset({"disk", "constants"})
 
         asyncio.run(_run())
 
@@ -632,7 +632,7 @@ class TestSuppressBaseInstructions:
             "name: lean\nmodel: m\nsuppress_base_instructions: true\nplugins: []\n"
         )
         spec = _resolve_named_profile("lean", str(tmp_path))
-        assert spec["suppress_base_instructions"] is True
+        assert spec["suppress_base_instructions"] == frozenset({"disk", "constants"})
 
 
 class TestStream:

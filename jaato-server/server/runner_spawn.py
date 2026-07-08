@@ -644,8 +644,10 @@ def build_session_envelope(
         # are set in JaatoServer.__init__ from BootstrapEnvelope so
         # they should always be present, but the defaults are also the
         # documented "no-op" values for both knobs).
+        # Default frozenset() (suppress nothing); the envelope's __post_init__
+        # also normalizes a legacy bool defensively.
         suppress_base_instructions=getattr(
-            server, "_suppress_base_instructions", False,
+            server, "_suppress_base_instructions", frozenset(),
         ),
         system_instruction_override=getattr(
             server, "_system_instruction_override", None,

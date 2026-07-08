@@ -69,15 +69,38 @@ class TestBuildInlineProfile:
         """``suppress_base_instructions`` must round-trip onto the profile so
         disk-restore (which reconstructs an inline profile from the persisted
         spec) re-applies it — else a restored session silently regains the
-        ~3-5k framework base instructions and tiny-context models overflow."""
+        framework instructions and tiny-context models overflow.
+
+        Normalized to the canonical frozenset: ``true`` drops {disk,
+        constants} (security kept)."""
         assert build_inline_profile(
             {"model": "gemini-nano", "plugins": [],
              "suppress_base_instructions": True}
-        ).suppress_base_instructions is True
-        # Default stays False when the key is absent.
+        ).suppress_base_instructions == frozenset({"disk", "constants"})
+        # Default stays empty (suppress nothing) when the key is absent.
         assert build_inline_profile(
             {"model": "gemini-nano", "plugins": []}
-        ).suppress_base_instructions is False
+        ).suppress_base_instructions == frozenset()
+
+    def test_suppress_base_instructions_granular_dict(self):
+        """A dict gives per-piece control; absent key = keep.  ``security``
+        is dropped only when named (never by the blanket ``true``)."""
+        # Drop constants only — keep the disk base and the security boundary.
+        assert build_inline_profile(
+            {"model": "m", "plugins": [],
+             "suppress_base_instructions": {"constants": True}}
+        ).suppress_base_instructions == frozenset({"constants"})
+        # Explicitly drop everything, including the security boundary.
+        assert build_inline_profile(
+            {"model": "m", "plugins": [],
+             "suppress_base_instructions": {
+                 "disk": True, "constants": True, "security": True}}
+        ).suppress_base_instructions == frozenset({"disk", "constants", "security"})
+        # Unknown piece fails loud at profile-build time.
+        with pytest.raises(ValueError, match="unknown piece"):
+            build_inline_profile(
+                {"model": "m", "plugins": [],
+                 "suppress_base_instructions": {"bogus": True}})
 
     def test_preload_annotation_in_plugin_list(self):
         """``plugin(preload)`` syntax is split the same as on-disk profiles."""

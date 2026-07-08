@@ -318,7 +318,7 @@ class InProcessClient:
         config_root: Optional[str] = None,
         system_instructions: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
-        suppress_base_instructions: bool = False,
+        suppress_base_instructions: Any = False,
         env_file: Optional[str] = ".env",
         project: Optional[str] = None,
         location: Optional[str] = None,
@@ -357,12 +357,18 @@ class InProcessClient:
         self._system_instructions = system_instructions
         self._completion_payload_schema = completion_payload_schema
         # The profile knob that controls base-layer composition:
-        # ``include_base = not suppress_base_instructions`` in configure(). False
-        # (default) -> persona/system_instructions composes ON TOP of the
-        # framework base; True -> the base is dropped (the profile keeps only its
-        # own agent/plugin/framework content). Threaded so an embedded session
-        # honors the same knob the daemon does.
-        self._suppress_base_instructions = suppress_base_instructions
+        # Granular base-composition knob (bool / dict / list): which framework
+        # instruction pieces to drop.  ``False`` composes persona ON TOP of all
+        # framework layers; ``True`` drops {disk, constants} (security kept); a
+        # dict/list gives per-piece control — configure() gates each layer.
+        # Normalized to the canonical frozenset here so the embedded session
+        # honors the same knob the daemon does.  Lazy shared import keeps the
+        # facade SDK-only-importable at module load (ipc/ws paths never touch
+        # ``shared``); this line runs only in the embedded runtime path.
+        from shared.instruction_suppression import normalize_suppression
+        self._suppress_base_instructions = normalize_suppression(
+            suppress_base_instructions
+        )
         # ``env_file`` is a BOTH-modes kwarg (unlike ``socket_path``, which is
         # IPC-only): the embedded runtime reads the same env the daemon loads
         # from ``.env`` (``JAATO_PROVIDER`` / ``MODEL_NAME`` / provider creds),

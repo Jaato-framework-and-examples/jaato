@@ -1447,6 +1447,8 @@ class JaatoRuntime:
         presentation_context: Optional['PresentationContext'] = None,
         preloaded_plugins: Optional[set] = None,
         include_base: bool = True,
+        include_constants: bool = True,
+        include_security: bool = True,
     ) -> Optional[str]:
         """Get system instructions, optionally filtered by plugin names.
 
@@ -1480,6 +1482,16 @@ class JaatoRuntime:
                 to the client's capabilities.
             preloaded_plugins: Optional set of plugin names that should bypass
                               deferred tool loading for system instructions.
+            include_constants: When False, skip the framework prompt constants
+                              (task-completion/verification, parallel/batching,
+                              turn-summary) — the granular counterpart of
+                              ``include_base``.  Driven by
+                              ``suppress_base_instructions: {constants: true}``.
+            include_security: When False, skip the untrusted-content boundary.
+                              Driven only by an explicit
+                              ``suppress_base_instructions: {security: true}``
+                              (the blanket ``true`` keeps it — it is the
+                              indirect-prompt-injection defense).
 
         Returns:
             Combined system instructions string, or None.
@@ -1561,21 +1573,28 @@ class JaatoRuntime:
             if ctx_instruction:
                 result_parts.append(ctx_instruction)
 
-        # 6. Framework-level prompt constants (provided by jaato-premium)
-        if _TASK_COMPLETION_INSTRUCTION:
-            result_parts.append(_TASK_COMPLETION_INSTRUCTION)
-        if _is_parallel_tools_enabled() and _PARALLEL_TOOL_GUIDANCE:
-            result_parts.append(_PARALLEL_TOOL_GUIDANCE)
-        if _TURN_SUMMARY_INSTRUCTION:
-            result_parts.append(_TURN_SUMMARY_INSTRUCTION)
+        # 6. Framework-level prompt constants (provided by jaato-premium).
+        #    Skipped when include_constants=False — the granular counterpart of
+        #    include_base, for ``suppress_base_instructions: {constants: true}``.
+        if include_constants:
+            if _TASK_COMPLETION_INSTRUCTION:
+                result_parts.append(_TASK_COMPLETION_INSTRUCTION)
+            if _is_parallel_tools_enabled() and _PARALLEL_TOOL_GUIDANCE:
+                result_parts.append(_PARALLEL_TOOL_GUIDANCE)
+            if _TURN_SUMMARY_INSTRUCTION:
+                result_parts.append(_TURN_SUMMARY_INSTRUCTION)
 
-        # 7. Untrusted-content boundary (security baseline).  Always included —
-        # web_fetch/web_search/MCP tools are deferred-loaded, so gating on tool
-        # presence would drop the instruction for a tool the model can still
-        # discover + call.  Teaches the model to treat boundary-wrapped tool
-        # results as data, not instructions (indirect-prompt-injection defense).
-        from jaato_sdk.plugins.model_provider.types import untrusted_boundary_instruction
-        result_parts.append(untrusted_boundary_instruction())
+        # 7. Untrusted-content boundary (security baseline).  Included by
+        # default — web_fetch/web_search/MCP tools are deferred-loaded, so
+        # gating on tool presence would drop the instruction for a tool the
+        # model can still discover + call.  Teaches the model to treat
+        # boundary-wrapped tool results as data, not instructions
+        # (indirect-prompt-injection defense).  Dropped ONLY when a session
+        # explicitly opts in via ``suppress_base_instructions: {security:
+        # true}`` (never by the blanket ``true``).
+        if include_security:
+            from jaato_sdk.plugins.model_provider.types import untrusted_boundary_instruction
+            result_parts.append(untrusted_boundary_instruction())
 
         return "\n\n".join(result_parts)
 
