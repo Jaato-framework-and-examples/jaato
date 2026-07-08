@@ -1390,8 +1390,9 @@ def build_inline_profile(
     Mirrors the field set understood by ``_load_profiles_from_directory``
     so an inline spec on ``session.new`` accepts the same JSON shape as a
     profile file on disk. ``inherits`` is intentionally ignored — inline
-    specs are atomic, not chained — and ``name`` / ``description`` default
-    to safe placeholders since SDK clients aren't required to invent them.
+    specs are atomic, not chained. ``name`` is taken from ``data['name']``
+    when the client supplied one (like disk profiles), else the ``name``
+    param (default ``<inline>``); ``description`` defaults to a placeholder.
 
     Args:
         data: The dict carried in ``CommandRequest.payload['spec']``.
@@ -1462,7 +1463,15 @@ def build_inline_profile(
     )
 
     return SubagentProfile(
-        name=name,
+        # Honor the spec's own ``name`` (e.g. "nano-chat") when the SDK
+        # client supplied one; fall back to the ``name`` param (default
+        # "<inline>") otherwise.  Mirrors disk profiles, which take
+        # ``data.get('name')`` — previously an inline spec's name was
+        # silently dropped, so ``profile_name`` / the agent display always
+        # read "<inline>".  Inline restore no longer depends on the name
+        # being an unresolvable sentinel (it reconstructs from
+        # ``profile_spec`` directly — see SessionManager._load_session_impl).
+        name=data.get('name') or name,
         description=description,
         plugins=clean_plugins,
         preloaded_plugins=preloaded,

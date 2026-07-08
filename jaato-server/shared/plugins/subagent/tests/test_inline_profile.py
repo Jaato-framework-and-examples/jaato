@@ -49,6 +49,22 @@ class TestBuildInlineProfile:
         assert p.max_turns == 25
         assert p.env == {"FOO": "bar"}
 
+    def test_spec_name_is_honored(self):
+        """The spec's own ``name`` is used (like disk profiles), not silently
+        replaced by the ``<inline>`` placeholder — so profile_name and the
+        agent display read e.g. 'nano-chat'."""
+        p = build_inline_profile(
+            {"name": "nano-chat", "model": "gemini-nano", "plugins": []})
+        assert p.name == "nano-chat"
+
+    def test_name_falls_back_to_placeholder_when_spec_omits_it(self):
+        # No name in the spec → the param default ("<inline>") stands.
+        assert build_inline_profile(
+            {"model": "X", "plugins": []}).name == "<inline>"
+        # An explicit name param still wins when the spec omits name.
+        assert build_inline_profile(
+            {"model": "X", "plugins": []}, name="ops").name == "ops"
+
     def test_preload_annotation_in_plugin_list(self):
         """``plugin(preload)`` syntax is split the same as on-disk profiles."""
         p = build_inline_profile({
