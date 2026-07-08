@@ -5343,8 +5343,9 @@ class SessionManager:
                 # Try to load from disk (pass client_id for init progress events)
                 logger.debug(f"attach_session: session {session_id} not in memory, loading from disk...")
                 try:
-                    session = self._load_session(session_id, client_id=client_id, workspace_path=workspace_path)
-                    logger.debug(f"attach_session: _load_session returned {session is not None}")
+                    session = self._load_persisted_with_index_fallback(
+                        session_id, client_id, workspace_path)
+                    logger.debug(f"attach_session: load returned {session is not None}")
                 except Exception as e:
                     logger.error(f"attach_session: _load_session raised: {type(e).__name__}: {e}")
                     import traceback
@@ -5797,6 +5798,49 @@ class SessionManager:
         return run_in_fresh_session_context(
             self._load_session_impl, session_id, client_id, workspace_path,
         )
+
+    def _load_persisted_with_index_fallback(
+        self,
+        session_id: str,
+        client_id: Optional[str],
+        workspace_path: Optional[str],
+    ) -> Optional["Session"]:
+        """Load a persisted session by id: client workspace first, then the
+        server-side session-workspace index.
+
+        The disk-restore path locates a record at ``<workspace>/.jaato/
+        sessions/<id>.json``.  For a workspace-PINNED client (an IPC client
+        whose ``working_dir`` *is* the session's workspace) the first
+        attempt lands.  For a workspace-PINLESS client (a browser over WS,
+        whose session lives in a server-provisioned ``ws_<hash>`` dir it
+        cannot present) the first attempt misses, so we fall back to
+        :class:`SessionWorkspaceIndex` — the authoritative
+        ``session_id → workspace`` map, the SAME server-side resolution the
+        wake path uses (``_wake_impl`` → ``resume_session``).  This is what
+        lets ``jaato.session(mode="ws", recovery=True).attach_session(id)``
+        cold-resume a persisted session with zero client-side workspace
+        knowledge — IPC parity.
+
+        The index ``resolve`` returns ``None`` for an unknown OR ambiguous
+        id (a cross-workspace id collision), so the fallback never guesses;
+        and it is skipped when the resolved workspace equals the one the
+        client attempt already used (no redundant reload).
+
+        Returns the loaded :class:`Session`, or ``None`` if no record is
+        found by either route.
+        """
+        session = self._load_session(
+            session_id, client_id=client_id, workspace_path=workspace_path)
+        if session is not None:
+            return session
+        resolved_ws = self._session_workspace_index.resolve(session_id)
+        if resolved_ws and resolved_ws != workspace_path:
+            logger.info(
+                "attach_session: %s not under client workspace; resolving via "
+                "session-workspace index → %s", session_id, resolved_ws)
+            session = self._load_session(
+                session_id, client_id=client_id, workspace_path=resolved_ws)
+        return session
 
     @staticmethod
     def _resolve_restore_config_root(
@@ -7482,6 +7526,15 @@ class SessionManager:
                     norm = self._normalize_workspace(wp)
                     if norm:
                         known_workspaces.add(norm)
+        # Union the session-workspace index's workspaces so cold, persisted
+        # sessions in server-provisioned ``ws_<hash>`` dirs (which no
+        # in-memory session or attached client references) still surface —
+        # the discovery half of workspace-pinless (browser/WS) resume, mirror
+        # of the attach-time index fallback above.
+        for norm in (self._normalize_workspace(w)
+                     for w in self._session_workspace_index.workspaces()):
+            if norm:
+                known_workspaces.add(norm)
 
         # Add persisted sessions from all known workspaces.
         # ``model_name`` left blank for persisted-only entries — the

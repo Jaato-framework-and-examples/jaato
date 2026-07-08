@@ -61,6 +61,18 @@ def test_empty_inputs_ignored(tmp_path):
     assert idx.resolve("s1") is None
 
 
+def test_workspaces_returns_distinct_paths(tmp_path):
+    # Used by list_sessions to surface cold provisioned-workspace sessions.
+    idx = _idx(tmp_path)
+    assert idx.workspaces() == set()
+    idx.record("s1", "/ws/a")
+    idx.record("s2", "/ws/a")   # same workspace, two sessions → one path
+    idx.record("s3", "/ws/b")
+    assert idx.workspaces() == {"/ws/a", "/ws/b"}
+    idx.forget("s3")
+    assert idx.workspaces() == {"/ws/a"}
+
+
 def test_corrupt_file_starts_empty_not_crash(tmp_path):
     p = tmp_path / "index.json"
     p.write_text("{ this is not json", encoding="utf-8")
