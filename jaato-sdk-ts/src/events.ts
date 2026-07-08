@@ -8544,7 +8544,7 @@ export type History = {
   [k: string]: unknown;
 }[];
 export type TurnAccounting = {
-  [k: string]: number;
+  [k: string]: unknown;
 }[];
 /**
  * All event types in the protocol.
