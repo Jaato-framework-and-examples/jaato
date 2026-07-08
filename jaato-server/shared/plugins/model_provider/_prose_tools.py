@@ -131,16 +131,19 @@ def tool_schemas_to_prompt(tools: List[ToolSchema]) -> str:
     lines = [
         "# Tools",
         "",
-        "You can call tools. Tools are identified by opaque ids (e.g. "
-        "t_1a2b3c4d); pick by DESCRIPTION and use the id exactly as "
-        "listed. To call one, output ONLY a fenced block:",
+        "You can call the tools listed under 'Available tools' below. "
+        "Each tool appears as a '## <id>' heading followed by its "
+        "description. Pick the tool whose description fits the task and "
+        "use its id copied EXACTLY from the heading. To call one, output "
+        "ONLY a fenced block:",
         "",
         f"```{TOOL_CALL_FENCE}",
         '{"name": "<tool id>", "arguments": {<arguments as JSON>}}',
         "```",
         "",
         "Rules:",
-        "- Only the tool ids listed below exist. Never invent ids.",
+        "- Use only an id that appears as a '##' heading below, copied "
+        "exactly. Never invent an id or use one that is not listed.",
         "- Emit one block per call; you may emit several blocks for"
         " independent calls.",
         "- After emitting tool_call blocks, stop. The results arrive in"

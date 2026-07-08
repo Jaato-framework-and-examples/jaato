@@ -10,6 +10,16 @@ def test_scrub_replaces_known_id_bare_and_markdown():
     assert scrub_tool_ids(f"the `{tid}` tool") == "the `docker_status` tool"
 
 
+def test_scrub_replaces_markdown_escaped_underscore():
+    # Small models emit ids inside **bold** / list items and backslash-escape
+    # the underscore (t\_xxxxxxxx) so markdown doesn't italicize it. The scrubber
+    # must still rewrite these — otherwise the raw id leaks (observed live).
+    tid = name_to_id("browser_navigate")
+    escaped = tid.replace("_", "\\_")                   # t\_xxxxxxxx
+    assert scrub_tool_ids(f"* **{escaped}**: navigate") == "* **browser_navigate**: navigate"
+    assert scrub_tool_ids(f"I used {escaped} to go there") == "I used browser_navigate to go there"
+
+
 def test_scrub_leaves_unknown_id_unchanged():
     assert scrub_tool_ids("t_deadbeef ran") == "t_deadbeef ran"   # never issued
 

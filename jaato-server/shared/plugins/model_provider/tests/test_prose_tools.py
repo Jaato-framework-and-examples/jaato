@@ -55,7 +55,10 @@ class TestToolPrompt:
         assert "Weather lookup" in prompt
         assert "```tool_call" in prompt
         assert '"city"' in prompt  # compact schema included
-        assert "Never invent ids" in prompt
+        assert "Never invent an id" in prompt
+        # No concrete example id in the preamble: a tiny model copies it
+        # verbatim and then reports "tool <example> not available".
+        assert "t_1a2b3c4d" not in prompt
 
     def test_human_names_never_reach_the_model(self):
         # The framework-wide no-human-name-on-the-wire contract (see
