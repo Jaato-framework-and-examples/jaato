@@ -46,6 +46,7 @@ from shared.plugins.session import (
 from shared.instruction_token_cache import InstructionTokenCache
 from shared.runtime_limits import RuntimeLimits, apply_isolated_defaults
 from shared.session_envelope import BootstrapEnvelope
+from shared.instruction_suppression import normalize_suppression
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from .session_workspace_index import SessionWorkspaceIndex
@@ -4683,11 +4684,15 @@ class SessionManager:
         # logical identity (e.g. ``"coordinator"``).  Without this, all
         # AgentCompletedEvents would carry ``agent_id="main"`` regardless
         # of which agent the session was launched with.
-        # Resolve effective suppress_base_instructions: explicit kwarg wins
-        # if True; otherwise profile-level field controls.  Either source
-        # asking for True is sufficient (OR semantics).
-        effective_suppress_base = suppress_base_instructions or bool(
-            profile and getattr(profile, "suppress_base_instructions", False)
+        # Resolve effective suppress_base_instructions: UNION of the explicit
+        # kwarg (CLI --no-instructions / SDK bool-or-dict) and the profile's
+        # field.  A piece is suppressed if EITHER source asks for it.  Both
+        # normalize to the canonical frozenset (see instruction_suppression).
+        effective_suppress_base = normalize_suppression(
+            suppress_base_instructions
+        ) | (
+            getattr(profile, "suppress_base_instructions", frozenset())
+            if profile else frozenset()
         )
 
         # Phase 3 §3.12.0: route the construction +
@@ -6102,8 +6107,10 @@ class SessionManager:
             # The create path derives this from an explicit kwarg OR the
             # profile; on restore there is no client kwarg, so the reconstructed
             # profile is the sole source.  Fixes named AND inline profiles.
-            suppress_base_instructions=bool(getattr(
-                restored_profile, "suppress_base_instructions", False)),
+            # Reconstructed profile is already the canonical frozenset
+            # (normalized in SubagentProfile.__post_init__).
+            suppress_base_instructions=getattr(
+                restored_profile, "suppress_base_instructions", frozenset()),
             config_root=restore_config_root,
             # Rebind the persona (--agent) on revive so persona-only guidance
             # (e.g. enter_tier on images) survives — else JaatoServer(agent_name

@@ -196,6 +196,19 @@ plugin_configs: {}
 # Agent identity and instructions belong in .jaato/agents/<name>.md (persona)
 # layered on top of .jaato/instructions/ base instructions.
 # system_instructions: DEPRECATED — use agents instead.
+# suppress_base_instructions: drop framework-injected instruction layers
+#   (persona + plugin instructions are ALWAYS kept). Accepts a bool or a
+#   granular map over three pieces:
+#     - disk      — the .jaato/instructions/*.md base layer
+#     - constants — framework prompt constants (task-completion/verification,
+#                   parallel/batching, turn-summary; incl. jaato-premium overrides)
+#     - security  — the untrusted-content boundary (indirect-prompt-injection defense)
+#   `true` ≡ {disk: true, constants: true} — the security boundary is KEPT
+#   (drop it only by naming it explicitly). Absent key = keep. Examples:
+#     suppress_base_instructions: true                    # drop disk + constants
+#     suppress_base_instructions: {constants: true}       # keep disk + security
+#     suppress_base_instructions: {disk: true, constants: true, security: true}
+#   Inheritance merges by UNION (a piece any layer drops stays dropped).
 gc:
   type: budget
   threshold_percent: 80.0

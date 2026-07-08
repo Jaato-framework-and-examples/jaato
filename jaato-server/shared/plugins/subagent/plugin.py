@@ -21,6 +21,7 @@ from .config import (
     expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
     validate_profile,
 )
+from shared.instruction_suppression import suppression_to_wire
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
@@ -2413,7 +2414,8 @@ class SubagentPlugin:
             "plugins": list(profile.plugins),
             "plugin_configs": dict(profile.plugin_configs),
             "system_instructions": profile.system_instructions,
-            "suppress_base_instructions": profile.suppress_base_instructions,
+            "suppress_base_instructions": suppression_to_wire(
+                profile.suppress_base_instructions),
             "max_turns": profile.max_turns,
             "env": dict(profile.env),
         }

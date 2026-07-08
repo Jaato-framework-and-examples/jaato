@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, FrozenSet, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 from .session_history import SessionHistory
@@ -38,6 +38,12 @@ from .instruction_budget_builder import (
     count_tokens as _builder_count_tokens,
     collect_instruction_texts as _builder_collect_instruction_texts,
     apply_instruction_counts as _builder_apply_instruction_counts,
+)
+from .instruction_suppression import (
+    PIECE_CONSTANTS,
+    PIECE_DISK,
+    PIECE_SECURITY,
+    normalize_suppression,
 )
 from .session_persistence import SessionPersistence
 from .session_telemetry import (
@@ -528,10 +534,11 @@ class JaatoSession:
         # budget without having to be re-passed the value through every
         # call site.
         self._system_instruction_override: Optional[str] = None
-        # Partial-suppression flag — drop the BASE layer only.  Keeps
-        # agent / plugin / framework layers in play.  Ignored when
-        # _system_instruction_override is set (override wins).
-        self._suppress_base_instructions: bool = False
+        # Granular partial-suppression: the canonical frozenset of framework
+        # instruction pieces to drop (subset of {disk, constants, security};
+        # see ``instruction_suppression``).  Empty = suppress nothing.  Ignored
+        # when _system_instruction_override is set (override wins).
+        self._suppress_base_instructions: FrozenSet[str] = frozenset()
         self._tool_plugins: Optional[List[str]] = None  # Plugin names for this session
 
         # Per-turn token accounting
@@ -1826,7 +1833,7 @@ class JaatoSession:
         preloaded_plugins: Optional[set] = None,
         skip_model_test: bool = False,
         system_instruction_override: Optional[str] = None,
-        suppress_base_instructions: bool = False,
+        suppress_base_instructions: Any = False,
         workspace_path: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
         tier_config: Optional['ModelTierConfig'] = None,
@@ -2248,8 +2255,14 @@ class JaatoSession:
 
         # Remember both knobs so _populate_instruction_budget (called
         # below) can produce an honest budget reflecting the wire prompt.
+        # ``suppress_base_instructions`` is normalized to the canonical
+        # frozenset of pieces to drop (accepts bool / dict / list; see
+        # ``instruction_suppression``).
         self._system_instruction_override = system_instruction_override
-        self._suppress_base_instructions = suppress_base_instructions
+        self._suppress_base_instructions = normalize_suppression(
+            suppress_base_instructions
+        )
+        _suppress = self._suppress_base_instructions
 
         # Build system instructions.
         #
@@ -2258,12 +2271,14 @@ class JaatoSession:
         # in configure_tools(), so tool functionality is intact; only the
         # would-be-discarded enrichment text is skipped.
         #
-        # Otherwise: assemble normally.  ``include_base=False`` drops just
-        # the BASE layer (framework baseline) while keeping the agent
-        # prompt, plugin instructions, and framework constants — the
-        # partial-suppression path for small-context models.  Base is
-        # also lazy-loaded on first use, so sessions that always suppress
-        # it never touch the disk.
+        # Otherwise: assemble normally.  Each ``include_*`` gate drops one
+        # framework-originated layer when its piece is in the suppression
+        # set — ``disk`` (the .jaato/instructions baseline), ``constants``
+        # (task-completion / parallel / turn-summary), ``security`` (the
+        # untrusted-content boundary) — while the agent prompt and plugin
+        # instructions always remain.  The partial-suppression path for
+        # small-context models.  Base is lazy-loaded on first use, so
+        # sessions that always suppress it never touch the disk.
         if system_instruction_override is not None:
             self._system_instruction = system_instruction_override
         else:
@@ -2271,7 +2286,9 @@ class JaatoSession:
                 plugin_names=plugins,
                 additional=system_instructions,
                 presentation_context=self._presentation_context,
-                include_base=not suppress_base_instructions,
+                include_base=PIECE_DISK not in _suppress,
+                include_constants=PIECE_CONSTANTS not in _suppress,
+                include_security=PIECE_SECURITY not in _suppress,
             )
 
         # Dynamic-instructions expansion ({{!py:script.py}}).  Walks
@@ -2762,7 +2779,8 @@ class JaatoSession:
         requests = self._collect_instruction_texts(
             session_instructions,
             system_instruction_override=self._system_instruction_override,
-            suppress_base=self._suppress_base_instructions,
+            suppress_base=PIECE_DISK in self._suppress_base_instructions,
+            suppress_constants=PIECE_CONSTANTS in self._suppress_base_instructions,
         )
 
         # --- Resolve phase: use cache or estimate for each request ---
@@ -2804,6 +2822,7 @@ class JaatoSession:
         session_instructions: Optional[str],
         system_instruction_override: Optional[str] = None,
         suppress_base: bool = False,
+        suppress_constants: bool = False,
     ) -> List['_TokenCountRequest']:
         """Collect all instruction texts that need token counting.
 
@@ -2814,12 +2833,17 @@ class JaatoSession:
         ``self._deferred_plugin_instructions`` (the side effect this
         method has always carried). Returns just the request list, as
         before.
+
+        ``suppress_base`` / ``suppress_constants`` drop the disk BASE layer
+        and the framework constants respectively, keeping the budget in step
+        with the wire prompt's ``include_base`` / ``include_constants`` gates.
         """
         requests, deferred_plugins = _builder_collect_instruction_texts(
             self._runtime,
             session_instructions,
             system_instruction_override=system_instruction_override,
             suppress_base=suppress_base,
+            suppress_constants=suppress_constants,
             pinned_references=getattr(self, '_pinned_references', {}),
             preloaded_plugins=getattr(self, '_preloaded_plugins', set()),
         )

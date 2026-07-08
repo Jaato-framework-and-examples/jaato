@@ -53,6 +53,39 @@ def test_minimal_envelope_round_trip() -> None:
     assert back == e
 
 
+def test_suppress_base_instructions_wire_round_trip() -> None:
+    # Granular frozenset serializes to a sorted list and restores intact.
+    e = SessionInitEnvelope(
+        session_id="s1",
+        workspace_path="/tmp/ws",
+        profile_name="p",
+        provider_name="anthropic",
+        model_name="m",
+        suppress_base_instructions=frozenset({"disk", "constants"}),
+    )
+    d = e.to_dict()
+    assert d["suppress_base_instructions"] == ["constants", "disk"]  # sorted list
+    back = SessionInitEnvelope.from_dict(d)
+    assert back.suppress_base_instructions == frozenset({"disk", "constants"})
+
+
+def test_suppress_base_instructions_legacy_bool_wire_compat() -> None:
+    # An older daemon emits a bare bool; from_dict normalizes it — true drops
+    # {disk, constants}, false suppresses nothing.
+    base = {"schema_version": 1, "session_id": "s1"}
+    true_env = SessionInitEnvelope.from_dict(
+        {**base, "suppress_base_instructions": True}
+    )
+    assert true_env.suppress_base_instructions == frozenset({"disk", "constants"})
+    false_env = SessionInitEnvelope.from_dict(
+        {**base, "suppress_base_instructions": False}
+    )
+    assert false_env.suppress_base_instructions == frozenset()
+    # Absent field defaults to suppress-nothing.
+    absent_env = SessionInitEnvelope.from_dict(base)
+    assert absent_env.suppress_base_instructions == frozenset()
+
+
 def test_full_envelope_round_trip() -> None:
     e = SessionInitEnvelope(
         session_id="sess-1",
@@ -463,7 +496,7 @@ def test_bootstrap_envelope_minimal_construction() -> None:
     assert env.profile is None
     assert env.agent_name == "main"
     assert env.system_instruction_override is None
-    assert env.suppress_base_instructions is False
+    assert env.suppress_base_instructions == frozenset()
     assert env.env_overrides == {}
     assert env.config_root is None
     assert env.instruction_token_cache is None

@@ -48,6 +48,7 @@ from shared import (
     active_cert_bundle,
 )
 from shared.dynamic_instructions import DynamicInstructionsError
+from shared.instruction_suppression import normalize_suppression
 from shared.instruction_token_cache import InstructionTokenCache
 from shared.message_queue import SourceType
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
@@ -292,7 +293,7 @@ class JaatoServer:
         instruction_token_cache: Optional[InstructionTokenCache] = None,
         profile: Optional[Any] = None,
         system_instruction_override: Optional[str] = None,
-        suppress_base_instructions: bool = False,
+        suppress_base_instructions: Any = False,
         agent_name: Optional[str] = None,
     ):
         """Initialize the server.
@@ -343,7 +344,11 @@ class JaatoServer:
         self._provider = provider
         self._profile = profile
         self._system_instruction_override = system_instruction_override
-        self._suppress_base_instructions = suppress_base_instructions
+        # Canonical frozenset of framework instruction pieces to drop
+        # (accepts bool / dict / list / frozenset; see instruction_suppression).
+        self._suppress_base_instructions = normalize_suppression(
+            suppress_base_instructions
+        )
         # Client-provided ("host") tools registered via the WS/IPC protocol
         # (websocket._register_client_tools).  name -> schema dict.  Read by
         # spawn_session_runner to seed envelope.client_tools so the RUNNER-tier
@@ -2685,7 +2690,9 @@ class JaatoServer:
         if self._system_instruction_override is not None:
             kwargs["system_instruction_override"] = self._system_instruction_override
         if self._suppress_base_instructions:
-            kwargs["suppress_base_instructions"] = True
+            # Pass the canonical frozenset through; configure() normalizes it
+            # (idempotent) and gates each framework layer accordingly.
+            kwargs["suppress_base_instructions"] = self._suppress_base_instructions
 
         return kwargs or None
 

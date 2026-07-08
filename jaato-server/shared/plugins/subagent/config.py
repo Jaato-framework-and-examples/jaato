@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tup
 from typing import runtime_checkable
 
 from shared.runtime_limits import RuntimeLimits
+from shared.instruction_suppression import normalize_suppression
 
 logger = logging.getLogger(__name__)
 
@@ -1038,10 +1039,15 @@ class SubagentProfile:
     # per turn, which can be the difference between fitting in a small
     # model's context window and triggering aggressive GC.  Defaults to
     # ``False`` (full framework instructions).
-    suppress_base_instructions: bool = field(default=False, metadata={
-        "description": "Drop the framework's always-on BASE instructions layer "
-        "from the system prompt (plugin + agent instructions still included). "
-        "Saves ~3-5k tokens/turn for narrow goal-focused agents. Default False."})
+    suppress_base_instructions: Any = field(default=False, metadata={
+        "description": "Drop framework-injected instruction layers from the system "
+        "prompt (plugin + agent instructions always kept).  `true` drops the disk "
+        "BASE layer (.jaato/instructions/*.md) AND the framework constants "
+        "(task-completion, parallel guidance, turn-summary); the security "
+        "untrusted-content boundary is kept.  A dict gives granular control, e.g. "
+        "`{disk: true, constants: true, security: false}` (absent key = keep).  "
+        "Saves ~3-5k tokens/turn for narrow goal-focused agents.  Default False.  "
+        "Normalized to a canonical frozenset of piece names in __post_init__."})
     model: Optional[str] = field(default=None, metadata={
         "description": "Model override (uses the parent's model if unset). "
         "Silently ignored when model_tiers is non-empty."})
@@ -1226,6 +1232,20 @@ class SubagentProfile:
         "(~/.jaato/apparmor-fragments/, <workspace>/.jaato/apparmor-fragments/, "
         "+ the .cache/ layer). None = compose ALL fragments; [] = none "
         "(maximally locked-down)."})
+
+    def __post_init__(self) -> None:
+        """Normalize ``suppress_base_instructions`` to its canonical form.
+
+        Accepts the authored bool / dict / list (or an already-normalized
+        frozenset, idempotently) and stores a ``frozenset`` of piece names.
+        Centralizing here means every construction path — ``from_dict``,
+        ``build_inline_profile``, inheritance merge, direct kwargs — ends up
+        with one representation, and an unknown piece name fails loud at
+        profile-load time rather than silently keeping a layer.
+        """
+        self.suppress_base_instructions = normalize_suppression(
+            self.suppress_base_instructions
+        )
 
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
@@ -1794,15 +1814,18 @@ def _merge_profiles(
         errors[child_name] = conflict_msg
         return None
 
-    # ``suppress_base_instructions`` follows OR semantics: True if any
-    # layer in the chain (parents or child) sets it True.  Rationale:
-    # a base saying "I'm minimal, framework instructions add no value"
-    # shouldn't be silently overridable by an inheritor; an inheritor
-    # that genuinely wants base instructions back should not inherit
-    # from a minimalist parent.
-    merged_suppress_base = any(
-        getattr(p, 'suppress_base_instructions', False) for p in parents
-    ) or getattr(child, 'suppress_base_instructions', False)
+    # ``suppress_base_instructions`` follows UNION semantics: a piece is
+    # suppressed if ANY layer in the chain (parents or child) suppresses
+    # it.  Rationale: a base saying "drop the framework constants, I'm
+    # minimal" shouldn't be silently overridable by an inheritor; an
+    # inheritor that genuinely wants a layer back should not inherit from
+    # a parent that drops it.  Each profile's field is already the
+    # canonical frozenset (normalized in __post_init__), so the merge is
+    # a plain set union.
+    merged_suppress_base = frozenset().union(
+        *(getattr(p, 'suppress_base_instructions', frozenset()) for p in parents),
+        getattr(child, 'suppress_base_instructions', frozenset()),
+    )
 
     # ``apparmor`` follows OR semantics: True if any layer in the chain
     # (parents or child) sets it True.  Same rationale as

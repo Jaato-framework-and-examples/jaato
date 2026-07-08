@@ -202,6 +202,8 @@ class TestJaatoSessionConfigure:
             additional="Be a researcher.",
             presentation_context=None,
             include_base=True,
+            include_constants=True,
+            include_security=True,
         )
 
 
