@@ -173,8 +173,9 @@ class TestJournalRoundTrip:
         original = self._make_state({"audit_chain_head": "deadbeef", "n": 3})
         data = serialize_session_state(original)
         # Current serializer schema version (bumped 2.2 -> 2.3 -> 2.4 for
-        # profile_name/config_root disk-restore; serializer.py:230).
-        assert data["version"] == "2.6"
+        # profile_name/config_root, 2.5 sandbox_mode, 2.6 agent_name,
+        # 2.7 profile_spec for inline-profile disk-restore; serializer.py:230).
+        assert data["version"] == "2.7"
         assert data["session_state"] == {"audit_chain_head": "deadbeef", "n": 3}
         restored = deserialize_session_state(data)
         assert restored.session_state == {"audit_chain_head": "deadbeef", "n": 3}
