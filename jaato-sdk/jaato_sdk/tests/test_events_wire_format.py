@@ -186,6 +186,32 @@ def test_session_terminated_error_context_round_trips():
     assert restored.error_type == "AnthropicAPIError"
 
 
+def test_history_event_accepts_rich_turn_accounting():
+    """HistoryEvent.turn_accounting must accept the runner's RICHER per-turn
+    dict — float ``duration_seconds`` + list ``function_calls`` (mirroring
+    TurnCompletedEvent) — not just int token counts.  A strict
+    ``Dict[str, int]`` rejected those with a pydantic ValidationError and took
+    the whole event down, so a disk-restored session's history.request /
+    attach-replay / snapshot all failed on the accounting alone.
+    """
+    from jaato_sdk.events import HistoryEvent
+
+    # The exact shape from the observed ValidationError (2-turn session).
+    rich = [
+        {"prompt": 10, "output": 20, "total": 30,
+         "duration_seconds": 0.530914, "function_calls": []},
+        {"prompt": 5, "output": 7, "total": 12,
+         "duration_seconds": 0.257768, "function_calls": [{"name": "x"}]},
+    ]
+    ev = HistoryEvent(agent_id="main", turn_accounting=rich)
+    assert ev.turn_accounting[0]["duration_seconds"] == 0.530914
+    assert ev.turn_accounting[1]["function_calls"] == [{"name": "x"}]
+    # Backward-compat: plain int-only dicts still accepted.
+    assert HistoryEvent(
+        turn_accounting=[{"prompt": 1, "output": 2, "total": 3}]
+    ).turn_accounting[0]["total"] == 3
+
+
 def test_session_terminated_natural_reason_keeps_error_fields_none():
     """Backwards-compat: natural-completion / client-request / stopped
     paths emit ``error_summary=None`` + ``error_type=None``.  Existing

@@ -1568,8 +1568,15 @@ class HistoryEvent(Event):
     agent_id: str = "main"
     history: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of serialized Message objects
-    turn_accounting: List[Dict[str, int]] = Field(default_factory=list)
-    # ^ List of {prompt, output, total} per turn
+    turn_accounting: List[Dict[str, Any]] = Field(default_factory=list)
+    # ^ Per-turn accounting dicts.  The value type is Any (not int): besides
+    # the int token counts ({prompt, output, total}) each entry may carry the
+    # richer fields the runner records — ``duration_seconds`` (float) and
+    # ``function_calls`` (list) — mirroring TurnCompletedEvent.  A strict
+    # ``Dict[str, int]`` here rejected those and took the whole HistoryEvent
+    # down (pydantic ValidationError), so a disk-restored session's
+    # history.request / attach-replay / snapshot all failed on the accounting
+    # alone even though the messages validated fine.
 
 
 # =============================================================================
