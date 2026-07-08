@@ -7875,9 +7875,28 @@ NOTES
         self.reset_session(current_history)
 
     def get_context_limit(self) -> int:
-        """Get the context window limit for the current model."""
+        """Get the context window limit for the current model.
+
+        Returns ``0`` — the honest "unknown" sentinel — when the provider
+        has not been materialized yet.  The provider is lazy-created
+        (``_ensure_provider``, first model use), so before the first turn
+        there is no model to read a window from.
+
+        This mirrors the ``InstructionBudget`` design, which also starts at
+        ``context_limit = 0`` (see ``_populate_instruction_budget``) rather
+        than a hardcoded default: a fake non-zero limit (the old
+        ``1_048_576``) masked a not-yet-materialized/misconfigured provider
+        and, worse, poisoned the daemon-side ``_cached_context_limit`` — the
+        cache only refreshes on a ``0`` reading (``core.py`` context-update
+        handler), so a bogus 1M value was cached at ``initialize()`` time and
+        never healed, making every ``ContextUpdatedEvent`` report 1M even for
+        a tiny-context model (e.g. Gemini Nano ~9k).  Every consumer of this
+        value already guards ``context_limit > 0`` / ``max(0, ...)``, and the
+        runner RPC handler documents ``0`` as the provider-not-initialized
+        signal daemon callers retry on.
+        """
         if not self._provider:
-            return 1_048_576
+            return 0
         return self._provider.get_context_limit()
 
     def get_context_usage(self) -> Dict[str, Any]:
