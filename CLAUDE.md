@@ -622,6 +622,7 @@ Profile knobs under `plugin_configs.chrome_ai`:
 | `user_data_dir` | str | Persistent profile dir |
 | `headless` | bool | `--headless=new` (default true) |
 | `page_url` | str | Page hosting the API calls (point at an https origin if the build gates the API) |
+| `reuse_page` | bool | Attach to an already-open tab whose URL == `page_url` instead of creating a dedicated one, and leave it open on teardown (default false). Anchors the Prompt API onto a real https tab the user already has open; falls back to creating a tab when none matches. The page helper is re-installed per turn, so the session self-heals if the anchored tab navigates. |
 | `extra_args` | list | Additional Chrome CLI switches |
 | `auto_download` | bool | Trigger the model component download at connect (default false) |
 | `download_timeout` / `connect_timeout` / `turn_timeout` | int | Seconds: model download / launch+attach / mid-turn silence before abort |
