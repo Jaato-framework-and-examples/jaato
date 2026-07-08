@@ -55,6 +55,17 @@ class TestInitialize:
         assert fake_bridge.ctor_kwargs["extra_args"] == ["--foo"]
         assert fake_bridge.ctor_kwargs["connect_timeout"] == 7
 
+    def test_reuse_page_defaults_off(self, fake_bridge, make_provider):
+        provider = make_provider({"cdp_url": "http://localhost:9222"})
+        provider.connect("gemini-nano")
+        assert fake_bridge.ctor_kwargs["reuse_page"] is False
+
+    def test_reuse_page_knob_reaches_bridge(self, fake_bridge, make_provider):
+        provider = make_provider({"cdp_url": "http://localhost:9222",
+                                  "reuse_page": True})
+        provider.connect("gemini-nano")
+        assert fake_bridge.ctor_kwargs["reuse_page"] is True
+
     def test_cdp_url_skips_binary_lookup(self, fake_bridge, make_provider):
         provider = make_provider({"cdp_url": "http://localhost:9222"})
         provider.connect("gemini-nano")

@@ -143,6 +143,7 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         self._user_data_dir: Optional[str] = None
         self._headless: bool = True
         self._page_url: str = DEFAULT_PAGE_URL
+        self._reuse_page: bool = False
         self._extra_args: List[str] = []
         self._auto_download: bool = False
         self._download_timeout: float = 1800.0
@@ -184,6 +185,12 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         self._headless = True if headless is None else bool(headless)
         self._page_url = (extra.get("page_url") or resolve_page_url()
                           or DEFAULT_PAGE_URL)
+        # Anchor onto a pre-existing tab whose URL == page_url (attach, and
+        # leave it open on teardown) instead of creating — and closing — a
+        # dedicated tab.  Lets a caller point the provider at a real https
+        # tab the user already has open; falls back to creating a tab when
+        # none matches.  Default off = the historical create-a-tab behavior.
+        self._reuse_page = bool(extra.get("reuse_page", False))
         self._extra_args = list(extra.get("extra_args") or [])
         self._auto_download = bool(extra.get("auto_download", False))
         self._download_timeout = float(extra.get("download_timeout", 1800))
@@ -572,6 +579,7 @@ class ChromeAIProvider(ModalityCapabilityMixin):
             page_url=self._page_url,
             extra_args=self._extra_args,
             connect_timeout=self._connect_timeout,
+            reuse_page=self._reuse_page,
         )
         self._bridge.connect()
 

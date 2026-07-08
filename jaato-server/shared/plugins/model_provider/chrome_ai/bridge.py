@@ -154,6 +154,7 @@ class PromptApiBridge:
         page_url: str = "about:blank",
         extra_args: Optional[List[str]] = None,
         connect_timeout: float = 30.0,
+        reuse_page: bool = False,
     ) -> None:
         self._binary = binary
         self._cdp_url = cdp_url
@@ -162,11 +163,15 @@ class PromptApiBridge:
         self._page_url = page_url
         self._extra_args = list(extra_args or [])
         self._connect_timeout = connect_timeout
+        self._reuse_page = reuse_page
 
         self._process: Optional[subprocess.Popen] = None
         self._conn: Optional[cdp.CDPConnection] = None
         self._session_id: Optional[str] = None
         self._target_id: Optional[str] = None
+        #: Whether WE created ``_target_id`` (→ close it on teardown) or
+        #: merely attached to a pre-existing user tab (→ leave it open).
+        self._owns_target: bool = False
         self._queues: Dict[str, "queue.Queue[Dict[str, Any]]"] = {}
         self._queues_lock = threading.Lock()
 
@@ -188,6 +193,15 @@ class PromptApiBridge:
         owns the browser's lifetime.  Launch mode spawns Chrome on the
         configured persistent profile (the Gemini Nano download is
         profile-bound, so ephemeral profiles would re-download per run).
+
+        Page acquisition: by default a fresh tab is created at
+        ``page_url`` (and closed on teardown).  When ``reuse_page`` is set,
+        the bridge first looks for an already-open page whose URL equals
+        ``page_url`` and *attaches* to it instead — no new tab, and the tab
+        is left open on ``close()`` because it belongs to the user.  Only
+        if no such tab exists does it fall back to creating one.  This is
+        how a caller anchors the Prompt API onto a real https tab the user
+        already has open (see the ``reuse_page`` provider knob).
         """
         if self._cdp_url:
             ws_url = cdp.discover_ws_url(self._cdp_url,
@@ -210,9 +224,15 @@ class PromptApiBridge:
                                        open_timeout=self._connect_timeout)
         self._conn.add_event_listener(self._on_cdp_event)
 
-        target = self._conn.send("Target.createTarget",
-                                 {"url": self._page_url})
-        self._target_id = target["targetId"]
+        existing = self._find_existing_page() if self._reuse_page else None
+        if existing:
+            self._target_id = existing
+            self._owns_target = False
+        else:
+            target = self._conn.send("Target.createTarget",
+                                     {"url": self._page_url})
+            self._target_id = target["targetId"]
+            self._owns_target = True
         attach = self._conn.send("Target.attachToTarget",
                                  {"targetId": self._target_id,
                                   "flatten": True})
@@ -220,16 +240,18 @@ class PromptApiBridge:
         self._page_send("Runtime.enable")
         self._page_send("Runtime.addBinding", {"name": BINDING_NAME})
         self._wait_page_ready()
-        result = self._eval(HELPER_JS)
-        if result != "ok":
-            raise ChromeAIConnectionError(
-                f"helper script installation returned {result!r}")
+        self._ensure_helper()
 
     def close(self) -> None:
-        """Tear down the page, the CDP link, and any owned process."""
+        """Tear down the page, the CDP link, and any owned process.
+
+        A tab we *created* (``_owns_target``) is closed; a pre-existing
+        tab we merely *attached* to (``reuse_page`` mode) is left open —
+        it belongs to the user, so closing it would be destructive.
+        """
         if self._conn is not None and self._conn.is_open:
             try:
-                if self._target_id:
+                if self._target_id and self._owns_target:
                     self._conn.send("Target.closeTarget",
                                     {"targetId": self._target_id}, timeout=5)
             except ChromeAIConnectionError:
@@ -244,6 +266,7 @@ class PromptApiBridge:
         self._conn = None
         self._session_id = None
         self._target_id = None
+        self._owns_target = False
         if self._process is not None:
             try:
                 self._process.wait(timeout=10)
@@ -370,6 +393,13 @@ class PromptApiBridge:
         run_id = self._new_run_id()
         with self._queues_lock:
             self._queues.setdefault(run_id, queue.Queue())
+        # Re-assert the page-side helper before every turn: in reuse_page
+        # mode the anchored tab may have navigated since connect() (a
+        # browser tool, or the user), which wipes ``window.__jaato``.  The
+        # helper is idempotent and the CDP binding survives navigation, so
+        # this is a cheap no-op on a settled page and a self-heal otherwise.
+        self._wait_page_ready()
+        self._ensure_helper()
         self._call_helper("run", run_id, payload)
         return run_id
 
@@ -396,6 +426,40 @@ class PromptApiBridge:
     @staticmethod
     def _new_run_id() -> str:
         return uuid.uuid4().hex
+
+    def _find_existing_page(self) -> Optional[str]:
+        """Return the targetId of an open page whose URL == ``page_url``.
+
+        Used only in ``reuse_page`` mode to anchor onto a tab the user
+        already has open instead of creating a new one.  Matches on the
+        exact URL (``Target.getTargets`` reports each page's current URL);
+        ``None`` when no page matches, so ``connect()`` falls back to
+        creating a fresh tab.  Never raises — a CDP hiccup here just means
+        "no match", and creation proceeds.
+        """
+        try:
+            result = self._conn.send("Target.getTargets")
+        except ChromeAIConnectionError:
+            return None
+        for info in (result or {}).get("targetInfos", []):
+            if info.get("type") == "page" and info.get("url") == self._page_url:
+                return info.get("targetId")
+        return None
+
+    def _ensure_helper(self) -> None:
+        """(Re)install the page-side ``window.__jaato`` helper.
+
+        Idempotent — the helper guards on ``window.__jaato`` and returns
+        ``"ok"`` when already present — so it is safe (and cheap) to call
+        before every turn.  This is what makes ``reuse_page`` robust: a
+        navigation on the anchored tab wipes ``window.__jaato`` but not the
+        ``Runtime.addBinding`` binding, so re-evaluating the helper here
+        restores the full page-side surface without a reconnect.
+        """
+        result = self._eval(HELPER_JS)
+        if result != "ok":
+            raise ChromeAIConnectionError(
+                f"helper script installation returned {result!r}")
 
     def _page_send(self, method: str, params: Optional[Dict[str, Any]] = None,
                    timeout: Optional[float] = None) -> Dict[str, Any]:
