@@ -452,6 +452,12 @@ class BootstrapEnvelope:
     # -- JaatoServer construction ----------------------------------------
     env_file: Optional[str] = None
     profile: Optional[Any] = None
+    # The UNRESOLVED inline-profile spec dict, when ``profile`` was built
+    # from an inline spec (``build_inline_profile``).  Carried daemon-
+    # internal so the created Session can stash it for disk-restore
+    # (persisted as ``SessionState.profile_spec``).  None for named-profile
+    # / no-profile sessions.
+    inline_profile_spec: Optional[Dict[str, Any]] = None
     agent_name: str = "main"
     system_instruction_override: Optional[str] = None
     suppress_base_instructions: bool = False
