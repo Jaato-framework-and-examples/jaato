@@ -159,3 +159,15 @@ class SessionWorkspaceIndex:
                     "(collides across workspaces)", session_id)
                 return None
             return self._map.get(session_id)
+
+    def workspaces(self) -> Set[str]:
+        """Return the distinct workspace paths this index knows about.
+
+        Lets ``SessionManager.list_sessions`` include the workspaces of
+        cold, persisted sessions that no in-memory session or attached
+        client currently references — the WS per-session-provisioned
+        ``ws_<hash>`` dirs a workspace-pinless client can't surface on its
+        own.  A snapshot copy (safe to iterate outside the lock).
+        """
+        with self._lock:
+            return set(self._map.values())
