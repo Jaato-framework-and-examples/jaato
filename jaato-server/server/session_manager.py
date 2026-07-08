@@ -6092,6 +6092,20 @@ class SessionManager:
             # above) so a pre-persistence None can't hang the runner.
             apparmor=(getattr(state, "sandbox_mode", None) == "apparmor"),
             profile=restored_profile,
+            # Re-apply the profile's ``suppress_base_instructions`` on restore.
+            # Unlike plugins / plugin_configs / system_instructions / gc (which
+            # flow through ``server._profile`` → ``build_session_envelope``),
+            # this knob is read on the wire from ``server._suppress_base_
+            # instructions`` (runner_spawn.py), set from the BootstrapEnvelope
+            # field — which the restore envelope never populated, so a restored
+            # session silently regained the ~3-5k framework base instructions
+            # even when the profile suppressed them.  On tiny-context models
+            # (Gemini Nano ~9k) that overflowed the window ("input too large").
+            # The create path derives this from an explicit kwarg OR the
+            # profile; on restore there is no client kwarg, so the reconstructed
+            # profile is the sole source.  Fixes named AND inline profiles.
+            suppress_base_instructions=bool(getattr(
+                restored_profile, "suppress_base_instructions", False)),
             config_root=restore_config_root,
             # Rebind the persona (--agent) on revive so persona-only guidance
             # (e.g. enter_tier on images) survives — else JaatoServer(agent_name
