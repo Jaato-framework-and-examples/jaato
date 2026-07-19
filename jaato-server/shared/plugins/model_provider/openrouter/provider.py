@@ -364,6 +364,16 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         # emitting N readFiles + signal_completion in one assistant
         # message).  Default ``None`` ⇒ omit the field, upstream default.
         self._parallel_tool_calls: Optional[bool] = None
+        # ``api_params.service_tier`` — OpenAI-style processing-tier
+        # selector, forwarded to upstreams that price by tier: ``"flex"``
+        # buys ~50%-off best-effort processing (slower responses, may 429
+        # under load), ``"priority"`` buys low-latency processing at a
+        # premium; ``"auto"`` / ``"default"`` defer to the upstream.
+        # OpenRouter passes the field through to tier-supporting upstreams
+        # (OpenAI, Gemini, ...) and reports the tier actually used in the
+        # response.  Default ``None`` ⇒ omit the field entirely.
+        # See https://openrouter.ai/docs/guides/features/service-tiers.
+        self._service_tier: Optional[str] = None
 
         # Strict tool-use mode (server 0.6.118+, 2026-05-16).  When True,
         # ``tool_schema_to_openai`` emits ``"strict": True`` as a sibling
@@ -490,6 +500,10 @@ class OpenRouterProvider(ModalityCapabilityMixin):
               "Provider-Specific Headers".
         - ``api_params`` (OpenAI Chat Completions request body fields):
             - ``temperature``, ``top_p``, ``top_k``, ``max_tokens``
+            - ``service_tier`` (``"auto"`` / ``"default"`` / ``"flex"`` /
+              ``"priority"`` / ``"scale"``) — OpenAI-style processing
+              tier, forwarded to tier-supporting upstreams.  ``"flex"``
+              trades latency for ~50% off; ``"priority"`` the reverse.
             - ``models`` (``List[str]``) — OpenRouter's request-level
               cross-model fallback list (sibling of ``model`` in the
               request body).  OpenRouter walks each candidate on
@@ -733,6 +747,20 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         parallel_extra = _knob("parallel_tool_calls", layer=api_params)
         if parallel_extra is not None:
             self._parallel_tool_calls = bool(parallel_extra)
+
+        # Processing-tier selector (OpenAI-style ``service_tier``).
+        # Validated against the values OpenRouter documents so a profile
+        # typo fails loud instead of being silently ignored upstream.
+        tier_extra = _knob("service_tier", layer=api_params)
+        if tier_extra is not None:
+            tier_str = str(tier_extra).lower()
+            if tier_str not in ("auto", "default", "flex", "priority", "scale"):
+                raise ValueError(
+                    "OpenRouter 'service_tier' must be one of 'auto' / "
+                    "'default' / 'flex' / 'priority' / 'scale', "
+                    f"got {tier_extra!r}"
+                )
+            self._service_tier = tier_str
 
         # Model quirks (profile.quirks → config.extra["quirks"]).
         self._prose_tool_calls = read_prose_tool_calls_quirk(
@@ -1199,6 +1227,8 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             kwargs["max_tokens"] = self._max_tokens
         if self._parallel_tool_calls is not None:
             kwargs["parallel_tool_calls"] = self._parallel_tool_calls
+        if self._service_tier is not None:
+            kwargs["service_tier"] = self._service_tier
 
         # OpenRouter request-body extras (e.g. ``provider`` routing).  The
         # OpenAI SDK has no typed parameter for these, so we pass them
