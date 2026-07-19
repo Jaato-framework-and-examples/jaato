@@ -16,15 +16,26 @@ Doubleword-specific concerns live here: identity, the error-class
 parameterization, credential resolution, the ``service_tier`` knob (the
 only ``api_params`` addition over the shared allowlist, with a
 ``JAATO_DOUBLEWORD_SERVICE_TIER`` env fallback), and the **catalog
-bootstrap** — the context window and input modalities are auto-detected
-from the ``GET /v1/models`` catalog at ``connect()`` once the active model
-is known, with profile-knob / env override fallbacks and a fail-loud "not
-configured" error (no hardcoded fallback).  Doubleword's catalog metadata
-is not pinned to one schema, so the context lookup tolerates the common
-key spellings (``context_length``, ``max_model_len``,
-``max_context_length``) and degrades to the manual tiers when none is
-present.  The catalog GET is **authenticated** (Doubleword's ``/models``
-is account-scoped — it lists the models your API key can access).
+bootstrap** — the context window and input modalities are looked up in the
+``GET /v1/models`` catalog at ``connect()`` once the active model is known,
+falling through to the profile-knob / env override tiers and finally a
+fail-loud "not configured" error (no hardcoded fallback).  The catalog GET
+is **authenticated** (Doubleword's ``/models`` is account-scoped — it lists
+the models your API key can access).
+
+.. important::
+   **The catalog tier is dormant against the live API.**  Verified
+   2026-07-19: ``GET /v1/models`` serves bare OpenAI-shaped entries —
+   all 25 listed models carry only ``{id, object, created, owned_by}``,
+   with no context-length or modality field.  So
+   ``plugin_configs.doubleword.context_length`` (or
+   ``JAATO_DOUBLEWORD_CONTEXT_LENGTH``) is effectively **required**, and
+   vision models must be asserted through the ``modalities`` knob.  The
+   lookups below are kept — they are written to tolerate the schema
+   Doubleword *might* serve (``context_length`` / ``max_model_len`` /
+   ``max_context_length``) and return ``None`` cleanly when, as today,
+   none is present — so enriching the catalog upstream would make the
+   manual knob redundant with no code change here.
 
 Doubleword's deeper-discount batch tier (JSONL file upload + ``/batches``
 jobs, 24h SLA) is a different interaction shape and out of scope here; a
@@ -38,7 +49,8 @@ Environment variables:
     JAATO_DOUBLEWORD_API_KEY: API key
     JAATO_DOUBLEWORD_BASE_URL: Endpoint (default: https://api.doubleword.ai/v1)
     JAATO_DOUBLEWORD_MODEL: Default model name
-    JAATO_DOUBLEWORD_CONTEXT_LENGTH: Override the catalog-detected context window
+    JAATO_DOUBLEWORD_CONTEXT_LENGTH: Context window (required in practice — the
+        catalog reports no per-model window; see the note above)
     JAATO_DOUBLEWORD_SERVICE_TIER: Inference tier ("flex" = discounted async,
         "priority" = realtime); the profile knob
         plugin_configs.doubleword.api_params.service_tier wins when both are set
@@ -298,6 +310,12 @@ class DoublewordProvider(OpenAICompatProvider):
         since Doubleword's OpenAI-compat catalog schema is not pinned;
         returns ``None`` when the model is absent or no key is present, so
         resolution falls through to the manual override tiers.
+
+        **Returns ``None`` for every live model today** — Doubleword's
+        catalog carries only ``{id, object, created, owned_by}`` (verified
+        2026-07-19), so the manual tier always wins.  Kept for the case
+        where the vendor enriches the listing.  See
+        ``test_live_catalog_shape_falls_through_to_manual_tier``.
         """
         for entry in self._fetch_catalog():
             if entry.get("id") != model:
@@ -318,6 +336,10 @@ class DoublewordProvider(OpenAICompatProvider):
         (text / image / audio / video) extracted.  Returns ``None`` when the
         model is absent or the field is missing, so resolution falls through
         to the manual knob / text floor.
+
+        **Returns ``None`` for every live model today** — the catalog carries
+        no ``architecture`` block (verified 2026-07-19), so vision models
+        must be asserted via ``plugin_configs.doubleword.modalities``.
         """
         for entry in self._fetch_catalog():
             if entry.get("id") != model:

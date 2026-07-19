@@ -786,3 +786,80 @@ class TestGetAuthInfo:
         p._base_url = "http://localhost:8000/v1"
         with patch.dict("os.environ", {}, clear=True):
             assert "Self-hosted" in p.get_auth_info()
+
+
+# ==================== Live catalog shape (regression) ====================
+
+# Verbatim entries from a live `GET https://api.doubleword.ai/v1/models`
+# (captured 2026-07-19, authenticated).  ALL 25 catalog models had exactly
+# this key set — no context-length field, no `architecture` block.  This
+# fixture exists so the suite tests the shape the vendor actually serves,
+# not the enriched shape the other fixtures assume.
+LIVE_CATALOG_SAMPLE = [
+    {"id": "Qwen/Qwen3-14B-FP8", "object": "model",
+     "created": 1771510633, "owned_by": "None"},
+    {"id": "deepseek-ai/DeepSeek-V4-Pro", "object": "model",
+     "created": 1771510633, "owned_by": "None"},
+    {"id": "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8", "object": "model",
+     "created": 1771510633, "owned_by": "None"},
+]
+
+
+class TestLiveCatalogShape:
+    """The catalog auto-detect tier is DORMANT against the real API.
+
+    Doubleword's `/v1/models` serves bare OpenAI-shaped entries, so both
+    catalog lookups return None for every real model and resolution falls
+    through to the manual knob / text floor.  These tests pin that reality
+    so the tier's dormancy is a documented, asserted property rather than a
+    surprise at `connect()` — and so they FAIL (prompting a doc update) if
+    Doubleword ever enriches the listing.
+    """
+
+    def _provider(self):
+        p = DoublewordProvider()
+        p._catalog_cache = LIVE_CATALOG_SAMPLE
+        return p
+
+    def test_live_catalog_reports_no_context_length(self):
+        p = self._provider()
+        for entry in LIVE_CATALOG_SAMPLE:
+            assert p._lookup_context_length(entry["id"]) is None
+
+    def test_live_catalog_classifies_no_modalities(self):
+        """Even the VL (vision) model is unclassified — the knob is the
+        only way to declare image input for Doubleword models."""
+        p = self._provider()
+        for entry in LIVE_CATALOG_SAMPLE:
+            assert p._lookup_modalities(entry["id"]) is None
+
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_live_catalog_shape_fails_loud_without_knob(self, mock_client_class):
+        """The real-world failure mode: the model IS in the catalog, but the
+        entry carries no window — so connect() must fail loud, not guess.
+
+        Distinct from `test_connect_raises_when_context_unresolved`, which
+        seeds an EMPTY catalog (model absent).  Absent-model and
+        present-but-bare are different paths into the same fail-loud tier.
+        """
+        mock_client_class.return_value = MagicMock()
+        p = DoublewordProvider()
+        p.initialize(ProviderConfig(api_key="dw-test-test"))
+        p._catalog_cache = LIVE_CATALOG_SAMPLE
+        with pytest.raises(ValueError, match="context_length could not be resolved"):
+            p.connect("deepseek-ai/DeepSeek-V4-Pro")
+
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_live_catalog_shape_resolves_via_knob(self, mock_client_class):
+        """With the (in practice mandatory) knob set, connect() succeeds and
+        the manual window is what the session sees."""
+        mock_client_class.return_value = MagicMock()
+        p = DoublewordProvider()
+        p.initialize(ProviderConfig(
+            api_key="dw-test-test", extra={"context_length": 131072},
+        ))
+        p._catalog_cache = LIVE_CATALOG_SAMPLE
+        p.connect("deepseek-ai/DeepSeek-V4-Pro")
+        assert p.get_context_limit() == 131072

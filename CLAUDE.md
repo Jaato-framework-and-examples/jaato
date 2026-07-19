@@ -139,7 +139,7 @@ Four plugin types:
 - `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
 - `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
-- `model_provider/doubleword/`: Doubleword (serverless open-model inference priced by delivery window, OpenAI-compatible; `api_params.service_tier: flex` opts into the discounted async tier — queued work, ~1 min to first token — on the same chat endpoint; catalog auto-detects context window + modalities when reported)
+- `model_provider/doubleword/`: Doubleword (serverless open-model inference priced by delivery window, OpenAI-compatible; `api_params.service_tier: flex` opts into the discounted async tier — queued work, ~1 min to first token — on the same chat endpoint; `context_length` must be set — the catalog reports no per-model window)
 
 **Model Quirks** — per-model workarounds a profile opts into via `quirks:`
 (injected into `config.extra["quirks"]`; each provider declares the names it
@@ -1020,7 +1020,7 @@ Profile knobs under `plugin_configs.ovhcloud`:
 | `JAATO_DOUBLEWORD_API_KEY` | API key (from https://app.doubleword.ai/api-keys) |
 | `JAATO_DOUBLEWORD_BASE_URL` | Endpoint (default: `https://api.doubleword.ai/v1`) |
 | `JAATO_DOUBLEWORD_MODEL` | Default model name (e.g. `deepseek-ai/DeepSeek-V4-Pro`) |
-| `JAATO_DOUBLEWORD_CONTEXT_LENGTH` | Override / supply the context window when the catalog doesn't report it |
+| `JAATO_DOUBLEWORD_CONTEXT_LENGTH` | Context window (**required in practice** — Doubleword's catalog reports no per-model window; see below) |
 | `JAATO_DOUBLEWORD_SERVICE_TIER` | Inference tier: `flex` (discounted async) or `priority` (realtime); the profile knob wins when both are set |
 
 **Authentication (in priority order):**
@@ -1041,21 +1041,34 @@ vendor-prefixed catalog names, e.g. `deepseek-ai/DeepSeek-V4-Pro`,
 `list_models()`.
 
 `list_models()` queries `GET /v1/models` (**authenticated** — the listing
-is account-scoped).  At `connect()` the provider bootstraps the active
-model's context window from that catalog when it reports one (tolerating
-the common key spellings: `context_length`, `max_model_len`,
-`max_context_length`), then falls back to the profile knob
-`plugin_configs.doubleword.context_length` / env, else fail-loud.  Input
-modalities resolve catalog → `plugin_configs.doubleword.modalities` knob →
-text floor.  No hardcoded fallback.
+is account-scoped).
+
+> **You must set a context window.**  Doubleword's catalog serves bare
+> OpenAI-shaped entries — verified live 2026-07-19, every one of the 25
+> listed models reports only `{id, object, created, owned_by}`, with no
+> context-length or modality field.  So
+> `plugin_configs.doubleword.context_length` (or
+> `JAATO_DOUBLEWORD_CONTEXT_LENGTH`) is in practice **required**: without
+> it `connect()` fails loud rather than guessing.  Per-model windows are
+> listed at https://doubleword.ai/models.
+
+`connect()` still consults the catalog **first** (tolerating the common key
+spellings `context_length` / `max_model_len` / `max_context_length`), so
+the manual knob becomes redundant automatically if Doubleword ever
+enriches the listing — but today that tier never fires.  Resolution order
+is catalog → profile knob → env → fail-loud.  Input modalities resolve
+catalog → `plugin_configs.doubleword.modalities` knob → text floor; the
+catalog tier is likewise dormant today, so assert vision models (e.g.
+`Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`) via the knob.  No hardcoded
+fallback.
 
 Profile knobs under `plugin_configs.doubleword`:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `base_url` | str | Override `JAATO_DOUBLEWORD_BASE_URL` (e.g. a local proxy) |
-| `context_length` | int | Manual context-window override (used when the catalog doesn't report the model's window) |
-| `modalities` | list[str] | Assert/correct input modalities (e.g. `["text","image"]`) for a model the catalog doesn't classify |
+| `context_length` | int | Context window. **Required in practice** — the catalog reports none, so `connect()` fails loud without it |
+| `modalities` | list[str] | Assert input modalities (e.g. `["text","image"]`). Required for vision models — the catalog classifies none |
 | `api_params.service_tier` | str | `flex` (discounted async tier) or `priority` (realtime); forwarded verbatim, so future tier names work without a provider release |
 
 ```yaml
@@ -1064,6 +1077,7 @@ provider: doubleword
 model: deepseek-ai/DeepSeek-V4-Pro
 plugin_configs:
   doubleword:
+    context_length: 131072      # required — the catalog reports no window
     api_params:
       service_tier: flex
 ```
