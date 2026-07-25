@@ -3129,7 +3129,8 @@ class JaatoServer:
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,
                                         output_tokens, total_tokens, duration_seconds,
                                         function_calls, cache_read_tokens=None,
-                                        cache_creation_tokens=None):
+                                        cache_creation_tokens=None,
+                                        finish_reason="stop"):
                 # Flush any remaining buffered content from the agent's formatter pipeline
                 agent_pipeline = server._get_agent_pipeline(agent_id)
                 if agent_pipeline:
@@ -3177,6 +3178,7 @@ class JaatoServer:
                     ),
                     duration_seconds=duration_seconds,
                     function_calls=function_calls,
+                    finish_reason=finish_reason,
                 ))
 
             def on_agent_context_updated(self, agent_id, total_tokens, prompt_tokens,
@@ -4546,6 +4548,7 @@ class JaatoServer:
                             function_calls=fc_payload,
                             cache_read_tokens=payload.get("cache_read_tokens"),
                             cache_creation_tokens=payload.get("cache_creation_tokens"),
+                            finish_reason=payload.get("finish_reason", "stop"),
                         )
                     return
 

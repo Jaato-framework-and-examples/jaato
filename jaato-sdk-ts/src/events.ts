@@ -4673,6 +4673,7 @@ export type FunctionCalls = {
   [k: string]: unknown;
 }[];
 export type FormattedText = string | null;
+export type FinishReason = string;
 /**
  * All event types in the protocol.
  */
@@ -14330,6 +14331,7 @@ export interface TurnCompletedEvent {
   duration_seconds?: DurationSeconds1;
   function_calls?: FunctionCalls;
   formatted_text?: FormattedText;
+  finish_reason?: FinishReason;
 }
 /**
  * Incremental progress during turn execution.

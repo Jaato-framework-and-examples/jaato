@@ -247,7 +247,10 @@ class TurnCompletedPayload(TypedDict):
 
     Source: ``TurnCompletedEvent``.  ``usage`` mirrors the
     ``UsageBreakdown`` shape on the wire (token counts, cache hits,
-    reasoning/thinking tokens, optional ``cost_usd``).
+    reasoning/thinking tokens, optional ``cost_usd``).  ``finish_reason``
+    is the terminal response's ``FinishReason`` value (``"stop"`` by
+    default; ``"max_tokens"`` / ``"safety"`` / ``"error"`` flag an
+    abnormal/truncated turn).
     """
     agent_id: str
     turn_number: int
@@ -255,6 +258,7 @@ class TurnCompletedPayload(TypedDict):
     duration_seconds: float
     function_calls: List[Dict[str, Any]]
     formatted_text: NotRequired[Optional[str]]
+    finish_reason: str
 
 
 class TurnProgressPayload(TypedDict):

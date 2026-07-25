@@ -1002,6 +1002,17 @@ class TurnCompletedEvent(Event):
     # Formatted output text (with syntax highlighting, validation, etc.)
     # Client can use this to replace raw streaming output with formatted version
     formatted_text: Optional[str] = None
+    # The provider's finish reason for the turn's terminal response, as the
+    # lowercase ``FinishReason`` enum value: ``"stop"`` (normal completion),
+    # ``"max_tokens"`` (output-token limit — response truncated), ``"safety"``
+    # (safety filter), ``"error"`` (provider error), plus ``"tool_use"`` /
+    # ``"cancelled"`` / ``"unknown"`` for completeness.  Defaults to ``"stop"``
+    # so a client can deterministically branch on ``finish_reason != "stop"``
+    # to flag an abnormal/truncated turn WITHOUT inferring it from empty
+    # output.  The framework also emits a human-readable ``source="system"``
+    # ``AgentOutputEvent`` banner alongside abnormal finishes for direct
+    # display; this field is the machine-readable companion.
+    finish_reason: str = "stop"
 
 
 class TurnProgressEvent(Event):

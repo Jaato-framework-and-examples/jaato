@@ -812,6 +812,11 @@ class InProcessClient:
         # Drain the AGENT_OUTPUT callbacks queued from the worker thread before
         # the terminal, so the facade sees all output ahead of TURN_COMPLETED.
         await asyncio.sleep(0)
+        # NOTE: this facade emits a deliberately minimal terminal (no usage
+        # / duration either); ``finish_reason`` therefore defaults to
+        # ``"stop"``.  The daemon path (IPC/WS) carries the real per-turn
+        # ``finish_reason`` end-to-end — threading it here from the now-available
+        # ``on_agent_turn_completed(finish_reason=...)`` hook is a follow-up.
         emitter.emit(TurnCompletedEvent(agent_id="main"))
         return final_text
 
@@ -870,6 +875,8 @@ class InProcessClient:
         try:
             await asyncio.to_thread(self._embedded.send_message, text, on_output)
             await asyncio.sleep(0)
+            # Minimal terminal (see send_message): finish_reason defaults to
+            # "stop"; the daemon path carries the real value.
             emitter.emit(TurnCompletedEvent(agent_id="main"))
         finally:
             self._continuation_busy = False

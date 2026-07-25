@@ -3017,6 +3017,7 @@ class RunnerRPC:
                         function_calls=last_turn.get("function_calls", []),
                         cache_read_tokens=last_turn.get("cache_read"),
                         cache_creation_tokens=last_turn.get("cache_creation"),
+                        finish_reason=last_turn.get("finish_reason", "stop"),
                     )
                     usage = session.get_context_usage()
                     ui_hooks.on_agent_context_updated(
@@ -4769,6 +4770,7 @@ class _AgentUIHooksNotificationShim:
         function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
+        finish_reason: str = "stop",
     ) -> None:
         """Forward ``on_agent_turn_completed`` across the wire.
 
@@ -4795,6 +4797,7 @@ class _AgentUIHooksNotificationShim:
                     "function_calls": list(function_calls or []),
                     "cache_read_tokens": cache_read_tokens,
                     "cache_creation_tokens": cache_creation_tokens,
+                    "finish_reason": str(finish_reason or "stop"),
                 },
             )
         except Exception:  # noqa: BLE001
