@@ -4338,9 +4338,37 @@ NOTES
             f"across multiple invocations. Try again now."
         )
 
+    @staticmethod
+    def _abnormal_finish_message(finish_reason: FinishReason) -> str:
+        """Human-readable banner for an abnormal terminal finish reason.
+
+        Surfaced to clients via an ``on_output("system", ...)`` call (which
+        the server adapter turns into an ``AgentOutputEvent(source="system")``)
+        so an operator sees WHY a turn ended early instead of the truncation
+        looking like a clean completion.  Mirrors the sibling notification
+        the cancellation path emits in ``_handle_cancellation``.
+        """
+        return {
+            FinishReason.MAX_TOKENS:
+                "Model stopped early: hit the output-token limit "
+                "(max_tokens); the response is truncated.",
+            FinishReason.SAFETY:
+                "Model stopped early: the provider's safety filter "
+                "triggered (safety); the response may be incomplete.",
+            FinishReason.ERROR:
+                "Model stopped early: the provider reported an error "
+                "(error).",
+        }.get(
+            finish_reason,
+            f"Model stopped early: "
+            f"{getattr(finish_reason, 'value', finish_reason)}.",
+        )
+
     def _classify_finish_reason(
         self,
         response: ProviderResponse,
+        turn_data: Optional[Dict[str, Any]] = None,
+        on_output: Optional[OutputCallback] = None,
     ) -> Optional[TurnResult]:
         """Classify a provider response's finish reason.
 
@@ -4352,17 +4380,39 @@ NOTES
         ``CANCELLED`` is handled separately by ``_handle_cancellation``
         because it requires additional logic (mid-turn interrupts,
         UI notification, model notification).
+
+        Side effects (both best-effort, gated on the optional args):
+
+        - ``turn_data``: when supplied, the response's finish reason is
+          recorded as ``turn_data['finish_reason']`` (the lowercase enum
+          value) for EVERY response — including normal ``STOP`` — so the
+          terminal classification in a turn leaves the true reason on the
+          turn-accounting dict.  That value rides
+          ``on_agent_turn_completed`` → ``TurnCompletedEvent.finish_reason``
+          out to clients, letting them branch deterministically instead of
+          inferring truncation from empty output.
+        - ``on_output``: when supplied AND the finish is abnormal, a
+          human-readable ``source="system"`` banner is emitted so the
+          abnormal stop is visible, not merely logged — the sibling of the
+          cancellation notification.
         """
-        if response.finish_reason in (
+        finish_reason = response.finish_reason
+        if turn_data is not None and finish_reason is not None:
+            turn_data['finish_reason'] = finish_reason.value
+        if finish_reason in (
             FinishReason.STOP,
             FinishReason.UNKNOWN,
             FinishReason.TOOL_USE,
             FinishReason.CANCELLED,
         ):
             return None
-        logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
+        logger.warning(f"Model stopped with finish_reason={finish_reason}")
+        if on_output is not None:
+            on_output(
+                "system", self._abnormal_finish_message(finish_reason), "write"
+            )
         return TurnResult.from_finish_reason(
-            response.finish_reason, response.get_text()
+            finish_reason, response.get_text()
         )
 
     def _handle_cancellation(
@@ -4730,7 +4780,7 @@ NOTES
             return cr.new_response, None, True
 
         # 5. Classify finish reason for abnormal stops
-        abnormal = self._classify_finish_reason(response)
+        abnormal = self._classify_finish_reason(response, turn_data, on_output)
         if abnormal is not None:
             return None, abnormal, False
 
@@ -4983,7 +5033,7 @@ NOTES
                 on_output("thinking", response.thinking, "write")
 
             # Check finish_reason for abnormal termination
-            abnormal = self._classify_finish_reason(response)
+            abnormal = self._classify_finish_reason(response, turn_data, on_output)
             if abnormal is not None:
                 return abnormal.text
 
@@ -8467,6 +8517,31 @@ NOTES
             raise
 
         finally:
+            # Record the terminal response's finish reason on the turn
+            # accounting (it rides ``TurnCompletedEvent.finish_reason``) and,
+            # for an abnormal stop, surface a ``source="system"`` banner so a
+            # truncated turn isn't mistaken for a clean completion.  Unlike
+            # ``_run_chat_loop`` this parts loop has no per-continuation
+            # classifier, so the terminal ``response`` here is the single
+            # reliable capture point — it also covers a *continuation* that
+            # ended abnormally, which the initial-response inline check above
+            # never saw.
+            if response is not None and response.finish_reason is not None:
+                turn_data['finish_reason'] = response.finish_reason.value
+                if (
+                    response.finish_reason in (
+                        FinishReason.MAX_TOKENS,
+                        FinishReason.SAFETY,
+                        FinishReason.ERROR,
+                    )
+                    and on_output is not None
+                ):
+                    on_output(
+                        "system",
+                        self._abnormal_finish_message(response.finish_reason),
+                        "write",
+                    )
+
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()

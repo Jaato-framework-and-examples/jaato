@@ -3536,6 +3536,7 @@ class SubagentPlugin:
                         function_calls=turn.get('function_calls', []),
                         cache_read_tokens=turn.get('cache_read'),
                         cache_creation_tokens=turn.get('cache_creation'),
+                        finish_reason=turn.get('finish_reason', 'stop'),
                     )
 
                 self._ui_hooks.on_agent_context_updated(

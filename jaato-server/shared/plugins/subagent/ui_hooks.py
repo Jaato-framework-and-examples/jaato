@@ -206,6 +206,7 @@ class AgentUIHooks(Protocol):
         function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
+        finish_reason: str = "stop",
     ) -> None:
         """Called after each conversation turn completes.
 
@@ -224,6 +225,13 @@ class AgentUIHooks(Protocol):
                 None when the provider does not support caching.
             cache_creation_tokens: Tokens written to prompt cache.
                 None when the provider does not support caching.
+            finish_reason: The provider's finish reason for the turn's
+                terminal response, as the lowercase ``FinishReason`` enum
+                value (``"stop"``, ``"max_tokens"``, ``"safety"``,
+                ``"error"``, ...).  Defaults to ``"stop"``.  Rides out to
+                clients on ``TurnCompletedEvent.finish_reason`` so an
+                abnormal/truncated turn is machine-detectable instead of
+                looking like a clean completion.
         """
         ...
 

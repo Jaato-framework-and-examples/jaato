@@ -15,5 +15,6 @@
   },
   "duration_seconds": 0.0,
   "function_calls": [],
-  "formatted_text": null
+  "formatted_text": null,
+  "finish_reason": "stop"
 }
