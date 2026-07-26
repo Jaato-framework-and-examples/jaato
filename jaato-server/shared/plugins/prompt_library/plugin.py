@@ -125,6 +125,27 @@ COMMAND_PATTERN = re.compile(r'\{\{!(.+?)\}\}')
 # Timeout for command substitution (seconds)
 COMMAND_TIMEOUT = 30
 
+# Authoring documentation for the placeholder grammar above.  This single
+# string is the source of truth cited at BOTH authoring surfaces the model
+# sees — the ``savePrompt`` ``content`` tool-parameter description and the
+# ``get_system_instructions`` "Creating and Updating Prompts" block — so the
+# two cannot drift apart (the drift that let a model author a prompt with
+# Jinja filter syntax jaato's grammar never matched).  jaato's grammar is NOT
+# Jinja/nunjucks: the filter form ``{{name | default('x')}}`` does not match
+# NAMED_PARAM_PATTERN (after the name it requires ``:`` or ``}}``, not a space)
+# so it is left literal and ``name`` is never registered as a parameter.
+PARAM_GRAMMAR_DOC = (
+    "Placeholder grammar (this is NOT Jinja/nunjucks):\n"
+    "- {{name}} - required parameter.\n"
+    "- {{name:default text}} - optional; the default is used when the caller "
+    "omits the arg. The default runs to the first '}', so it cannot contain "
+    "'}'.\n"
+    "- {{$1}}, {{$2}}, {{$0}} - positional args ({{$0}} = all args joined).\n"
+    "- {{!command}} - shell command substitution.\n"
+    "Filter syntax such as {{name | default('x')}} is unsupported and renders "
+    "literally."
+)
+
 
 @dataclass
 class PromptParam:
@@ -175,9 +196,10 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
     - Type `prompt <name> [args...]` to use a prompt
 
     Model can:
-    - Call listPrompts() to discover available prompts
-    - Call usePrompt(name, params) to retrieve and expand a prompt
-    - Call savePrompt(name, content, description) to create new prompts
+    - Discover prompt tools via list_tools(category="prompt")
+    - Invoke a prompt by calling its prompt.<name>(...) tool directly
+    - Call savePrompt(name, content, description) to create/update prompts
+    - Call deletePrompt(name) to remove a writable prompt
     """
 
     def __init__(self):
@@ -1784,7 +1806,10 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                         },
                         "content": {
                             "type": "string",
-                            "description": "The prompt content with optional {{param}} placeholders"
+                            "description": (
+                                "The prompt body, with optional parameter "
+                                "placeholders.\n\n" + PARAM_GRAMMAR_DOC
+                            ),
                         },
                         "description": {
                             "type": "string",
@@ -2748,6 +2773,8 @@ Use savePrompt(name, content, description) to create new reusable prompts.
 Use savePrompt(name, content, description, overwrite=true) to update an existing prompt.
 The user can also invoke prompts with `prompt <name> [args...]`
 
+{PARAM_GRAMMAR_DOC}
+
 ### Deleting Prompts
 Use deletePrompt(name) to remove a prompt from the library.
 Only prompts in writable locations (.jaato/) can be deleted.
@@ -2759,7 +2786,7 @@ When you notice the user performing similar tasks repeatedly (2-3 times), sugges
 If they agree, use savePrompt() with:
 - A descriptive name (lowercase, hyphens)
 - Clear instructions capturing their preferences
-- Parameter placeholders: {{{{file}}}}, {{{{focus}}}}"""
+- Parameter placeholders per the grammar above, e.g. {{{{file}}}}, {{{{focus:security}}}}"""
 
 
 def create_plugin() -> PromptLibraryPlugin:
