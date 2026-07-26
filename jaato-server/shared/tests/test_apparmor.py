@@ -2467,11 +2467,15 @@ class TestPromptLibraryPluginApparmorRules:
             config_root=None,
             plugin_config={},
         )
-        # User-tier jaato prompts/skills
-        assert "@{HOME}/.jaato/prompts/    r," in rules
-        assert "@{HOME}/.jaato/prompts/**  r," in rules
-        assert "@{HOME}/.jaato/skills/     r," in rules
-        assert "@{HOME}/.jaato/skills/**   r," in rules
+        # User-tier jaato prompts/skills are WRITABLE (savePrompt/deletePrompt
+        # global tier): rwk, not read-only.
+        assert "@{HOME}/.jaato/prompts/    rwk," in rules
+        assert "@{HOME}/.jaato/prompts/**  rwk," in rules
+        assert "@{HOME}/.jaato/skills/     rwk," in rules
+        assert "@{HOME}/.jaato/skills/**   rwk," in rules
+        # Agents stay READ-ONLY (not managed by these tools).
+        assert "@{HOME}/.jaato/agents/     r," in rules
+        assert "@{HOME}/.jaato/agents/**   r," in rules
         # Claude Code interop
         assert "@{HOME}/.claude/skills/    r," in rules
         assert "@{HOME}/.claude/skills/**  r," in rules
@@ -2509,9 +2513,49 @@ class TestPromptLibraryPluginApparmorRules:
             config_root=None, plugin_config={},
         )
         rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
-        # Each of the 8 rules appears 3 times (base + tool_hat + child)
-        assert rendered.count("@{HOME}/.jaato/prompts/    r,") == 3
+        # Each rule appears 3 times (base + tool_hat + child)
+        assert rendered.count("@{HOME}/.jaato/prompts/    rwk,") == 3
         assert rendered.count("@{HOME}/.claude/commands/  r,") == 3
+
+    def test_workspace_prompts_writable_but_config_dirs_still_deny_denied(self, manager):
+        """Posture pin for the savePrompt/deletePrompt fix: the framework
+        template makes .jaato/prompts/ runner-WRITABLE (no wlk deny — unlink
+        needs 'w') while agents/profiles/scripts stay integrity-protected.
+
+        Regression guard against BOTH directions: a future re-add of the
+        prompts wlk deny (breaks deletePrompt again), or an accidental drop
+        of the agents/profiles denies (over-widens the carve-out).
+        """
+        rendered = manager._render_profile("s1", "/workspace")
+        # prompts is NO LONGER write-denied (the deliberate carve-out)...
+        assert "audit deny /workspace/.jaato/prompts/**            wlk," not in rendered
+        # ...but the sibling user-authored config dirs STILL are.
+        assert "audit deny /workspace/.jaato/agents/**             wlk," in rendered
+        assert "audit deny /workspace/.jaato/profiles/**           wlk," in rendered
+        assert "audit deny /workspace/.jaato/scripts/**            wlk," in rendered
+        # And the tool_hat READ-isolation deny on prompts is untouched.
+        assert "audit deny /workspace/.jaato/prompts/**            r," in rendered
+
+    def test_rendered_profile_with_prompt_rules_compiles(self, manager, tmp_path):
+        """The whole point of the fix: the profile carrying prompt_library's
+        writable-tier grants must actually COMPILE (PR #547 shipped an invalid
+        'd,' that didn't — caught only by running apparmor_parser)."""
+        import shutil, subprocess
+        parser = shutil.which("apparmor_parser")
+        if not parser:
+            pytest.skip("apparmor_parser not installed")
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        rules = PromptLibraryPlugin.get_apparmor_rules(
+            workspace_path="/workspace", session_id="s1",
+            config_root="/cfg", plugin_config={},
+        )
+        rendered = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        prof = tmp_path / "p.aa"
+        prof.write_text(rendered)
+        res = subprocess.run(
+            [parser, "-Q", "-K", str(prof)], capture_output=True, text=True
+        )
+        assert res.returncode == 0, res.stderr
 
 
 class TestSubprofileComplainFlag:

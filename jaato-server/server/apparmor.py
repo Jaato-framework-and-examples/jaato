@@ -321,7 +321,11 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   {workspace_path}/** rwkl,
   audit deny {workspace_path}/.jaato/agents/**             wlk,
   audit deny {workspace_path}/.jaato/profiles/**           wlk,
-  audit deny {workspace_path}/.jaato/prompts/**            wlk,
+  # .jaato/prompts/ intentionally OMITTED from the write-denies: prompt_library's
+  # savePrompt/deletePrompt run in the confined runner and need write/unlink
+  # (unlink is granted by 'w' — classic AppArmor has no standalone 'd' mode).
+  # Accepted posture tradeoff: a confined agent may author/rewrite prompts (whose
+  # content is later executed). agents/profiles/scripts/schemas stay protected.
   audit deny {workspace_path}/.jaato/scripts/**            wlk,
   audit deny {workspace_path}/.jaato/services/*/           wlk,
   audit deny {workspace_path}/.jaato/reactors.json         wlk,
@@ -1388,7 +1392,11 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # ---- integrity-protected write-denies (mirror parent base) ----
   audit deny {workspace_path}/.jaato/agents/**             wlk,
   audit deny {workspace_path}/.jaato/profiles/**           wlk,
-  audit deny {workspace_path}/.jaato/prompts/**            wlk,
+  # .jaato/prompts/ intentionally OMITTED from the write-denies: prompt_library's
+  # savePrompt/deletePrompt run in the confined runner and need write/unlink
+  # (unlink is granted by 'w' — classic AppArmor has no standalone 'd' mode).
+  # Accepted posture tradeoff: a confined agent may author/rewrite prompts (whose
+  # content is later executed). agents/profiles/scripts/schemas stay protected.
   audit deny {workspace_path}/.jaato/scripts/**            wlk,
   audit deny {workspace_path}/.jaato/services/*/           wlk,
   audit deny {workspace_path}/.jaato/reactors.json         wlk,
@@ -2163,7 +2171,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {workspace_path}/** rwkl,
     audit deny {workspace_path}/.jaato/agents/**             wlk,
     audit deny {workspace_path}/.jaato/profiles/**           wlk,
-    audit deny {workspace_path}/.jaato/prompts/**            wlk,
+    # .jaato/prompts/ intentionally OMITTED from the write-denies (see base): the
+    # confined runner needs write/unlink for savePrompt/deletePrompt. Accepted
+    # posture tradeoff. agents/profiles/scripts/schemas stay protected.
     audit deny {workspace_path}/.jaato/scripts/**            wlk,
     audit deny {workspace_path}/.jaato/services/*/           wlk,
     audit deny {workspace_path}/.jaato/reactors.json         wlk,
@@ -2311,7 +2321,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {workspace_path}/** rwkl,
     audit deny {workspace_path}/.jaato/agents/**             wlk,
     audit deny {workspace_path}/.jaato/profiles/**           wlk,
-    audit deny {workspace_path}/.jaato/prompts/**            wlk,
+    # .jaato/prompts/ intentionally OMITTED from the write-denies (see base): the
+    # confined runner needs write/unlink for savePrompt/deletePrompt. Accepted
+    # posture tradeoff. agents/profiles/scripts/schemas stay protected.
     audit deny {workspace_path}/.jaato/scripts/**            wlk,
     audit deny {workspace_path}/.jaato/services/*/           wlk,
     audit deny {workspace_path}/.jaato/reactors.json         wlk,

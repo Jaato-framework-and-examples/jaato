@@ -273,13 +273,33 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         — the resolver unions both contributions; AppArmor parsing
         is idempotent on duplicate rules.
 
-        All home-tier reads are read-only.
+        **Writable prompt/skill tiers (savePrompt/deletePrompt).** The
+        plugin OWNS tools that write/unlink prompts and skills in their
+        four WRITABLE sources (``_execute_delete_prompt``: ``project``/
+        ``global`` prompts, ``project-skills``/``global-skills``).  Those
+        need ``w`` (unlink is granted by ``w`` — classic AppArmor has no
+        standalone ``d`` mode).  By tier:
+        - **workspace** (``project``/``project-skills``): covered by the
+          framework ``{workspace_path}/** rwkl`` rule.  The framework
+          template deliberately OMITS ``.jaato/prompts/`` from its
+          ``audit deny ... wlk`` block (a more-specific allow cannot
+          override that deny, so the deny itself must not cover prompts)
+          — see ``apparmor.py``.  Accepted posture tradeoff: a confined
+          runner may author/rewrite prompts (whose content is later
+          executed).  ``.jaato/skills/`` was never under a deny.
+        - **home** (``global``/``global-skills``): granted ``rwk`` below
+          (was read-only before deletePrompt support).
+        - **config_root** (cascade override that routes the workspace
+          tier to ``<config_root>/{prompts,skills}/``): granted ``rwk``
+          below when set.
+        ``~/.jaato/agents/`` and the ``~/.claude/`` interop dirs stay
+        READ-ONLY (agents/skills there are not managed by these tools).
         """
-        return [
-            "@{HOME}/.jaato/prompts/    r,",
-            "@{HOME}/.jaato/prompts/**  r,",
-            "@{HOME}/.jaato/skills/     r,",
-            "@{HOME}/.jaato/skills/**   r,",
+        rules = [
+            "@{HOME}/.jaato/prompts/    rwk,",
+            "@{HOME}/.jaato/prompts/**  rwk,",
+            "@{HOME}/.jaato/skills/     rwk,",
+            "@{HOME}/.jaato/skills/**   rwk,",
             "@{HOME}/.jaato/agents/     r,",
             "@{HOME}/.jaato/agents/**   r,",
             "@{HOME}/.claude/skills/    r,",
@@ -287,6 +307,14 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
             "@{HOME}/.claude/commands/  r,",
             "@{HOME}/.claude/commands/**  r,",
         ]
+        if config_root:
+            rules += [
+                f"{config_root}/prompts/    rwk,",
+                f"{config_root}/prompts/**  rwk,",
+                f"{config_root}/skills/     rwk,",
+                f"{config_root}/skills/**   rwk,",
+            ]
+        return rules
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the prompt library plugin.
