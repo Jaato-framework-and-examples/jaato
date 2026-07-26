@@ -7,8 +7,8 @@ import os
 import tempfile
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable
-from jaato import ToolSchema
 from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
     DISCOVERABILITY_DEFERRED,
 )
 from shared.trace import trace as _trace_write

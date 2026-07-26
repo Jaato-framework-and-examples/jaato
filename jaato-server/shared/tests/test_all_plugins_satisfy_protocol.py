@@ -178,3 +178,44 @@ def test_registry_discovers_full_plugin_set() -> None:
         f"(same shape as the Phase 1a regression).  Discovered: "
         f"{discovered}"
     )
+
+
+@pytest.mark.parametrize(
+    "plugin_dir", _plugin_directories(), ids=lambda p: p.name
+)
+def test_plugin_does_not_import_from_bare_jaato_facade(plugin_dir: Path) -> None:
+    """Pin: no ``plugin.py`` imports from the bare ``jaato`` facade.
+
+    The ``jaato`` package is a convenience re-export for EXTERNAL SDK
+    consumers.  Internal framework plugins must import framework types
+    from the canonical ``jaato_sdk...`` paths (as all other plugins do).
+
+    The bare facade import (``from jaato import ToolSchema``) failed to
+    resolve inside the live runner's forked plugin-discovery context —
+    ``jaato`` resolved to a namespace ("unknown location") while
+    ``jaato_sdk`` stayed warm in ``sys.modules`` post-fork — so the two
+    plugins that used it (``environment``, ``calculator``) were silently
+    dropped at every session bootstrap.  A plain unconfined import
+    succeeds, so only a source-level gate catches a re-introduction.
+
+    Source-level AST check (not import-time) so it runs even when a
+    plugin's runtime deps aren't installed.
+    """
+    plugin_py = plugin_dir / "plugin.py"
+    if not plugin_py.exists():
+        pytest.skip(f"{plugin_dir.name}: missing plugin.py")
+    tree = ast.parse(plugin_py.read_text())
+    offenders = [
+        f"line {node.lineno}: from {node.module} import "
+        + ", ".join(a.name for a in node.names)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 0
+        and node.module == "jaato"  # exactly the facade, not jaato_sdk / jaato.x
+    ]
+    assert not offenders, (
+        f"{plugin_dir.name}/plugin.py imports from the bare 'jaato' "
+        f"facade (fails in the forked runner). Repoint to the canonical "
+        f"jaato_sdk path like every other plugin. Offending:\n  "
+        + "\n  ".join(offenders)
+    )
