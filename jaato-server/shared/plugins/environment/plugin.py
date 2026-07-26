@@ -1,8 +1,8 @@
 # shared/plugins/environment/plugin.py
 
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
-from jaato import ToolSchema
 from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
     TRAIT_REPLAY_SAFE,
     DISCOVERABILITY_EAGER,
 )
