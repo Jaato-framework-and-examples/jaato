@@ -2558,3 +2558,73 @@ class TestSubprofileComplainFlag:
             assert "profile tool_hat flags=" not in rendered, (
                 f"JAATO_APPARMOR_COMPLAIN={value!r} incorrectly enabled complain on tool_hat"
             )
+
+
+class TestRenderedProfileCompiles:
+    """Guard: a rendered profile must not merely CONTAIN the expected rule
+    strings — it must actually COMPILE under ``apparmor_parser``.
+
+    Regression pin for PR #547: ``prompt_library.get_apparmor_rules`` emitted
+    ``<tier>/**  d,`` — an INVALID rule (classic AppArmor has no standalone
+    ``d`` delete mode; ``apparmor_parser`` fails with "unexpected TOK_ID,
+    expecting TOK_MODE"). The whole per-session profile then failed to compile
+    and never loaded, so every runner ran UNCONFINED. String-containment tests
+    all passed because the bytes were present — only a real compile catches it.
+
+    Skips when ``apparmor_parser`` isn't on the box (CI images without it);
+    runs everywhere it exists (dev, VPS-like envs).
+    """
+
+    def _parser(self):
+        import shutil
+        return shutil.which("apparmor_parser")
+
+    def _assert_compiles(self, profile_text: str, tmp_path) -> None:
+        import subprocess
+        parser = self._parser()
+        if not parser:
+            pytest.skip("apparmor_parser not installed")
+        prof = tmp_path / "candidate.aa"
+        prof.write_text(profile_text)
+        # -Q: parse + cache only (don't load into kernel). -K: skip the shared
+        # cache (avoids needing write access to /var/cache/apparmor).
+        res = subprocess.run(
+            [parser, "-Q", "-K", str(prof)],
+            capture_output=True, text=True,
+        )
+        assert res.returncode == 0, (
+            "rendered AppArmor profile does NOT compile — it would fail to "
+            "load and DISABLE confinement (PR #547 class). apparmor_parser "
+            f"stderr:\n{res.stderr}"
+        )
+
+    def test_default_profile_compiles(self, manager, tmp_path):
+        profile = manager._render_profile("s1", "/workspace")
+        self._assert_compiles(profile, tmp_path)
+
+    def test_profile_with_prompt_library_rules_compiles(self, manager, tmp_path):
+        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        rules = PromptLibraryPlugin.get_apparmor_rules(
+            workspace_path="/workspace", session_id="s1",
+            config_root=None, plugin_config={},
+        )
+        profile = manager._render_profile("s1", "/workspace", plugin_rules=rules)
+        self._assert_compiles(profile, tmp_path)
+
+    def test_standalone_d_mode_is_rejected_by_parser(self, tmp_path):
+        """Direct pin of the invalid token, independent of any plugin: the
+        classic policy language has no bare ``d`` mode. If a future AppArmor
+        ever adds one, this test flips and we can reconsider delete-only."""
+        import subprocess
+        parser = self._parser()
+        if not parser:
+            pytest.skip("apparmor_parser not installed")
+        prof = tmp_path / "bare_d.aa"
+        prof.write_text("profile t { /ws/x/** d,\n}\n")
+        res = subprocess.run(
+            [parser, "-Q", "-K", str(prof)], capture_output=True, text=True
+        )
+        assert res.returncode != 0, (
+            "expected apparmor_parser to REJECT a bare 'd,' mode; if it now "
+            "accepts one, delete-only grants may be reconsidered"
+        )
