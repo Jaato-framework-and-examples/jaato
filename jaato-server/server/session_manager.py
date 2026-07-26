@@ -8059,9 +8059,20 @@ class SessionManager:
 
             # If the message was purely help requests, the user just
             # wanted documentation — don't dispatch anything to the
-            # model.  Persist the (already-appended) user input and
-            # return early.
+            # model.  The help was already delivered as a HelpTextEvent by
+            # ``_intercept_prompt_help_refs``; persist the (already-appended)
+            # user input and return early WITHOUT a model turn.
             if not (message_text and message_text.strip()):
+                # Close the turn lifecycle even though no model turn ran.  A
+                # client that waits for a per-message completion signal (WS /
+                # chat renderers) would otherwise see zero further events and
+                # trip its stall detector, killing the session — the observed
+                # ``%name --help`` stall.  A synthetic TurnCompletedEvent
+                # (finish_reason="stop") resets that timer and closes the turn;
+                # it is targeted at the requesting client only (no model turn
+                # exists to fan out to the whole session).
+                if client_id is not None:
+                    self._emit_to_client(client_id, TurnCompletedEvent())
                 self._save_session(session)
                 return
 
