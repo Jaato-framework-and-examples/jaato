@@ -259,8 +259,15 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
 
         The plugin discovers prompts from five tiers (see
         :class:`PromptLibraryPlugin` module docstring):
-        - workspace tier: ``.jaato/prompts/`` (covered by the
-          framework-template workspace rule)
+        - workspace tier: ``.jaato/prompts/`` — the framework-template
+          workspace rule (``{workspace_path}/** rwkl``) grants READ
+          here, so discovery works without a plugin contribution.  It
+          does NOT grant delete (``d``): the broad rule is ``rwkl`` and
+          the template further carries ``audit deny .jaato/prompts/**
+          wlk``.  ``d`` is granted nowhere, so ``deletePrompt``'s
+          ``unlink`` was AppArmor-DENIED in the confined runner
+          (``requested_mask=d``) — the plugin OWNS the tool that
+          unlinks these files, so it must contribute the ``d`` grant.
         - user tier: ``~/.jaato/prompts/`` and ``~/.jaato/skills/``
         - Claude Code interop: ``~/.claude/skills/`` and
           ``~/.claude/commands/``
@@ -273,9 +280,26 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         — the resolver unions both contributions; AppArmor parsing
         is idempotent on duplicate rules.
 
-        All home-tier reads are read-only.
+        All home-tier READS are read-only.
+
+        **Delete grants (Option A, delete-only — server 0.6.x, this
+        change).**  ``deletePrompt`` ``unlink``\\s / ``shutil.rmtree``\\s
+        prompts and skills in the four WRITABLE sources
+        (``_execute_delete_prompt``: ``project``/``global`` prompts,
+        ``project-skills``/``global-skills``).  The kernel's
+        ``requested_mask`` for the failure was exactly ``d``, so we
+        grant ``d`` (and ONLY ``d`` — not ``w``) on those tiers:
+        ``d`` sits in no deny mask, so the grant takes effect, while
+        the ``wlk`` deny on ``.jaato/prompts/**`` stays intact — the
+        runner still cannot CREATE or rewrite prompts (that would let
+        an LLM plant instructions it later executes).  Enabling
+        ``savePrompt`` in the runner is deliberately out of scope: it
+        would require narrowing that framework deny, a separate posture
+        decision.  ``config_root`` (cascade config override) routes the
+        workspace tier to ``<config_root>/{prompts,skills}/``, so those
+        get the same ``d`` grant when it is set.
         """
-        return [
+        rules = [
             "@{HOME}/.jaato/prompts/    r,",
             "@{HOME}/.jaato/prompts/**  r,",
             "@{HOME}/.jaato/skills/     r,",
@@ -287,6 +311,21 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
             "@{HOME}/.claude/commands/  r,",
             "@{HOME}/.claude/commands/**  r,",
         ]
+        # Delete-only grant on the WRITABLE prompt/skill tiers so
+        # deletePrompt's unlink/rmtree succeeds in the confined runner.
+        delete_dirs = [
+            f"{workspace_path}/.jaato/prompts",
+            f"{workspace_path}/.jaato/skills",
+            "@{HOME}/.jaato/prompts",
+            "@{HOME}/.jaato/skills",
+        ]
+        if config_root:
+            delete_dirs += [
+                f"{config_root}/prompts",
+                f"{config_root}/skills",
+            ]
+        rules.extend(f"{d}/**  d," for d in delete_dirs)
+        return rules
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the prompt library plugin.
