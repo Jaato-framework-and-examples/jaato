@@ -534,6 +534,47 @@ class TestExploreToolsGuidanceWording:
         assert "always explore" not in si.lower()
 
 
+class TestNoFabricateToolIdGuardrail:
+    """2026-07-26 regression pin: the discovery guidance carries an
+    anti-fabrication guardrail.
+
+    A small exec model (gemini-2.5-flash) read a human tool name
+    (``delete_memory``) from another plugin's system-instructions, saw
+    that loaded tools are called by opaque ``t_<8hex>`` ids, and
+    FABRICATED ``t_delete_memory`` for the deferred (unloaded) tool — which
+    then leaked to the user (the scrubber only normalizes real 8-hex ids).
+    Root-cause fix is instruction-level: tell the model never to invent an
+    id and to discover unseen capabilities via ``list_tools`` instead.
+    """
+
+    def test_guidance_forbids_inventing_tool_ids(self):
+        plugin = create_plugin()
+        si = plugin.get_system_instructions()
+        assert si is not None
+        si_lower = si.lower()
+        # The prohibition must be explicit.
+        assert "never invent" in si_lower and "tool id" in si_lower, (
+            "Introspection guidance must explicitly forbid inventing/"
+            "guessing a tool id or name. Got: " + repr(si)
+        )
+        # And it must point at the real discovery path as the alternative.
+        assert "list_tools" in si
+
+    def test_guardrail_rides_inside_the_deferred_tools_gate(self):
+        """The guardrail must live in the SAME gated block as the rest of
+        the discovery guidance: when the session suppresses it (nothing
+        deferred to discover), the anti-fabrication text must go too —
+        otherwise the prompt tells the model to 'discover via list_tools'
+        when list_tools isn't on the wire (the ex08 loop)."""
+        plugin = create_plugin()
+
+        class _FlaggedSession:
+            _introspection_guidance_suppressed = True
+
+        plugin.set_session(_FlaggedSession())
+        assert plugin.get_system_instructions() is None
+
+
 def test_discovery_guidance_suppressed_when_session_flags_it():
     """The introspection discovery guidance (list_tools/get_tool_schemas
     workflow) must be suppressed when the session dropped introspection's TOOLS
