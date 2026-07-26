@@ -283,6 +283,21 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         documented escape hatch.  This change is for the typical
         case where the persona is the authority on tool scoping
         and the framework defers.
+
+        2026-07-26 addition: an anti-fabrication guardrail
+        ("only call tools in your list by their exact ids; NEVER
+        invent a ``t_<name>`` id; discover unseen capabilities via
+        ``list_tools`` instead of guessing").  It rides INSIDE the
+        same deferred-tools gate on purpose — the guidance to
+        discover-don't-guess is only coherent when discovery tools
+        are actually on the wire.  When the gate suppresses this
+        block (nothing deferred), every real tool is already loaded
+        with its real id, so there is nothing to discover and the
+        prompt must not nudge toward absent ``list_tools`` (the
+        ex08 loop).  Motivated by a live leak where a small exec
+        model read a human tool name (``delete_memory``) from
+        another plugin's instructions and fabricated
+        ``t_delete_memory`` for the deferred (unloaded) tool.
         """
         # Align with the TOOL gate: when the session dropped introspection's
         # tools because nothing is deferred to discover (jaato_session.configure
@@ -301,7 +316,14 @@ class IntrospectionPlugin(RunnerForwardingMixin):
             "CAPABILITY DISCOVERY:\n"
             "When your current information is insufficient to act, explore "
             "available tools before concluding 'I cannot do X'.  Skip discovery "
-            "when the persona has already named the tool(s) to call.\n\n"
+            "when the persona has already named the tool(s) to call.\n"
+            "Only call tools that appear in your available tool list, using "
+            "their exact ids.  NEVER invent, guess, or construct a tool id or "
+            "name (e.g. do not turn a human name you saw in prose into "
+            "`t_<name>`) — the opaque ids come only from your tool list and "
+            "from `get_tool_schemas`.  If you need a capability you don't "
+            "currently see, DISCOVER it via `list_tools(category_id=...)` to "
+            "load the real tool and its id, rather than guessing.\n\n"
             "TOOL DISCOVERY WORKFLOW (when required):\n"
             "1. `list_tools()` - See all categories with IDs and tool counts\n"
             "2. `list_tools(category_id='...')` - See tools in a specific category\n"
