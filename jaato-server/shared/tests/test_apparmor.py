@@ -2222,14 +2222,13 @@ class TestPromptLibraryAgentsContribution:
         assert "@{HOME}/.jaato/agents/**   r," in rules
 
     def test_prompt_library_total_rule_count_includes_agents(self):
-        """Phase 2 shipped 8 rules; Phase 4 adds agents/ + agents/** → 10;
-        the delete-only grant adds 4 (workspace + home prompts/skills) → 14."""
+        """Phase 2 shipped 8 rules; Phase 4 adds agents/ + agents/** → 10."""
         from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
         rules = PromptLibraryPlugin.get_apparmor_rules(
             workspace_path="/ws", session_id="s1",
             config_root=None, plugin_config={},
         )
-        assert len(rules) == 14
+        assert len(rules) == 10
 
     def test_resolver_unions_subagent_and_prompt_library_agents(self):
         """When both plugins are in profile.plugins, the resolver appends
@@ -2484,58 +2483,13 @@ class TestPromptLibraryPluginApparmorRules:
 
         Phase 2 contract: 8 rules (prompts/skills/claude paths).
         Phase 4 contract: 10 rules (adds agents/ + agents/**).
-        Delete-only contract: 14 rules (adds 4 delete grants —
-        workspace prompts/skills + home prompts/skills).
         """
         from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
         rules = PromptLibraryPlugin.get_apparmor_rules(
             workspace_path="/ws", session_id="s1",
             config_root=None, plugin_config={},
         )
-        assert len(rules) == 14
-
-    def test_grants_delete_on_writable_prompt_and_skill_tiers(self):
-        """deletePrompt unlinks/rmtrees prompts & skills in the writable
-        tiers; the framework rule grants rwkl (no 'd') and denies 'wlk' on
-        prompts, so the plugin must contribute the 'd' grant or unlink is
-        AppArmor-denied in the confined runner (the reported bug)."""
-        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
-        rules = PromptLibraryPlugin.get_apparmor_rules(
-            workspace_path="/ws", session_id="s1",
-            config_root=None, plugin_config={},
-        )
-        assert "/ws/.jaato/prompts/**  d," in rules
-        assert "/ws/.jaato/skills/**  d," in rules
-        assert "@{HOME}/.jaato/prompts/**  d," in rules
-        assert "@{HOME}/.jaato/skills/**  d," in rules
-
-    def test_delete_only_does_not_grant_write_on_prompts(self):
-        """Option A is delete-only: the plugin must NOT contribute a write
-        grant on prompts (save-in-runner stays disabled; the framework
-        'audit deny .jaato/prompts/** wlk' posture is preserved). Guard
-        against a future 'rwkld' broadening slipping in unreviewed."""
-        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
-        rules = PromptLibraryPlugin.get_apparmor_rules(
-            workspace_path="/ws", session_id="s1",
-            config_root=None, plugin_config={},
-        )
-        # No rule may grant 'w' (write) on any prompts path.
-        assert not any(
-            "prompts" in r and "w" in r.split()[-1].rstrip(",")
-            for r in rules
-        ), f"delete-only must not grant write on prompts; got: {rules}"
-
-    def test_config_root_gets_delete_grant_when_set(self):
-        """When a cascade config_root override routes the workspace tier to
-        <config_root>/{prompts,skills}/, the delete grant must follow."""
-        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
-        rules = PromptLibraryPlugin.get_apparmor_rules(
-            workspace_path="/ws", session_id="s1",
-            config_root="/cfg", plugin_config={},
-        )
-        assert "/cfg/prompts/**  d," in rules
-        assert "/cfg/skills/**  d," in rules
-        assert len(rules) == 16
+        assert len(rules) == 10
 
     def test_template_no_longer_hardcodes_prompts_skills_claude(self, manager):
         """Phase 2 acceptance: rendered profile body (with no plugins)
