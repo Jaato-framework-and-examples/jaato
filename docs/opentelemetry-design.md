@@ -1034,6 +1034,14 @@ OTLP ingestion reads directly: `session.id`, `llm.token_count.*`,
   > confined runner (via the bootstrap envelope, like `jaato.session_id`) is a
   > follow-up; today multi-user WS deployments set `set_client_user_id()`
   > daemon-side or inject `JAATO_TELEMETRY_USER_ID` into the per-session env.
+- **Prompt → trace linking.** `JaatoSession.set_llm_span_attributes({...})` is a
+  vendor-neutral hook to stamp custom attributes on every LLM (generation) span
+  — external code with a session handle (a `{{!py:}}` prefetch via
+  `context.session`, or a plugin) can attach them. For Langfuse prompt
+  management, a prefetch that resolves a managed prompt records
+  `langfuse.observation.prompt.name` / `langfuse.observation.prompt.version`, so
+  Langfuse links the generation to that prompt version and reports per-version
+  performance. Core stays vendor-neutral — the keys are the caller's choice.
 
 ### 12.2 Arize Phoenix
 

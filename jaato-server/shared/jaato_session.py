@@ -599,6 +599,14 @@ class JaatoSession:
         # ``JAATO_TELEMETRY_USER_ID`` env at turn time. Emitted as the
         # OpenInference ``user.id`` span attribute.
         self._client_user_id: Optional[str] = None
+        # Custom attributes stamped on every LLM (generation) telemetry span.
+        # A vendor-neutral hook for external code — prefetch scripts, plugins —
+        # to correlate generations with build-time context. Canonical use:
+        # prompt-management linking (a prefetch that resolves a managed prompt
+        # sets the backend's prompt-link keys here, e.g. Langfuse's
+        # ``langfuse.observation.prompt.name`` / ``.version``). Merged in
+        # :meth:`_build_llm_span_attributes`; see :meth:`set_llm_span_attributes`.
+        self._llm_span_attributes: Dict[str, Any] = {}
 
         # Retry notification callback (client-configurable)
         self._on_retry: Optional[RetryCallback] = None
@@ -1040,6 +1048,44 @@ class JaatoSession:
                 claim), or ``None`` to leave it unset.
         """
         self._client_user_id = user_id
+
+    def set_llm_span_attributes(
+        self, attributes: Dict[str, Any], *, merge: bool = True,
+    ) -> None:
+        """Attach custom attributes to every LLM (generation) telemetry span.
+
+        A vendor-neutral extension hook: external code that runs with a handle
+        on the session — a ``{{!py:}}`` prefetch script (via
+        ``context.session``), a plugin — can stamp attributes onto the
+        generation spans of this session so observability backends correlate
+        each LLM call with build-time context.
+
+        The canonical use is **prompt-management → trace linking**: a prefetch
+        that resolves a managed prompt records the backend's prompt-link keys,
+        e.g. for Langfuse::
+
+            context.session.set_llm_span_attributes({
+                "langfuse.observation.prompt.name": name,
+                "langfuse.observation.prompt.version": version,
+            })
+
+        so Langfuse links the generation to that prompt version and reports
+        per-version performance. Core stays vendor-neutral — the keys are
+        chosen by the caller.
+
+        Values must be OTLP-compatible (str / bool / int / float, or sequences
+        thereof). Applies to LLM spans opened after this call within the
+        session.
+
+        Args:
+            attributes: Attribute key/value pairs to stamp on LLM spans.
+            merge: When True (default) merge into any previously-set
+                attributes; when False replace them (pass ``{}`` to clear).
+        """
+        if merge:
+            self._llm_span_attributes.update(attributes or {})
+        else:
+            self._llm_span_attributes = dict(attributes or {})
 
     def _resolve_telemetry_user_id(self) -> Optional[str]:
         """Resolve the end-user id for telemetry ``user.id`` on this turn.
@@ -4294,6 +4340,10 @@ NOTES
                 attrs.update(cache_attrs)
             except Exception as e:
                 self._trace(f"LLM_TELEMETRY: cache attr fetch failed: {e}")
+        # Custom attributes set via set_llm_span_attributes (e.g. a prefetch's
+        # prompt-management link). Last so callers can override framework keys.
+        if self._llm_span_attributes:
+            attrs.update(self._llm_span_attributes)
         return attrs
 
     def _build_gc_span_attributes(
