@@ -166,6 +166,7 @@ def test_resolver_dedups_identical_tool_contributions():
 
     class Reg:
         def get_plugin(self, n): return plugins.get(n)
+        def all_plugins(self): return plugins
 
     class Server:
         registry = Reg()
