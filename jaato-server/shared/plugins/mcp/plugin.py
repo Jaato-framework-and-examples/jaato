@@ -17,7 +17,8 @@ from typing import AsyncIterator, Dict, List, Any, Callable, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import UserCommand, CommandParameter, CommandCompletion, HelpLines
-from jaato_sdk.plugins.model_provider.types import ToolSchema, CancelledException
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema, CancelledException, TRAIT_UNTRUSTED_CONTENT)
 from ..streaming.protocol import StreamChunk, ChunkCallback, StreamingCapable
 from ..subagent.config import expand_variables
 from shared.ai_tool_runner import get_current_cancel_token
@@ -208,6 +209,10 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._config_path: Optional[str] = None  # Path config was loaded from
         self._custom_config_path: Optional[str] = None  # User-specified path via plugin_configs
         self._workspace_path: Optional[str] = None  # Client's working directory
+        # Operator-declared secret name globs stripped from every MCP server
+        # subprocess's inherited environment (secrets-broker scrub, #10). Off by
+        # default; opt-in via the 'scrub_secret_env' plugin config knob.
+        self._scrub_secret_env: List[str] = []
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
@@ -310,6 +315,9 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 - workspace_path: Client's working directory for finding .mcp.json
                 - session_id: Session identifier for log disambiguation
                 - agent_name: Name for trace logging
+                - scrub_secret_env: List of env-var name globs to strip from
+                  every MCP server subprocess's inherited environment
+                  (secrets-broker scrub; default []/off)
         """
         if self._initialized:
             return
@@ -320,10 +328,50 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._session_id = config.get("session_id")
         self._custom_config_path = config.get("config_path")
         self._workspace_path = config.get("workspace_path")
+        # Normalize like the cli plugin: a single string (common YAML mistake,
+        # e.g. `scrub_secret_env: "*_TOKEN"`) is coerced to a 1-item list rather
+        # than silently disabling scrubbing (which would fail OPEN and reintroduce
+        # the secret leak). Entries are coerced to str.
+        scrub = config.get("scrub_secret_env", [])
+        if isinstance(scrub, str):
+            scrub = [scrub]
+        self._scrub_secret_env = (
+            [str(s) for s in scrub] if isinstance(scrub, (list, tuple)) else []
+        )
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
+
+    def get_config_schema(self) -> dict:
+        """Return JSON Schema for this plugin's operator-facing configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "config_path": {
+                    "type": "string",
+                    "description": (
+                        "Explicit path to a .mcp.json (overrides the default "
+                        "workspace/user search)."
+                    ),
+                },
+                "scrub_secret_env": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": (
+                        "Env-var name globs (case-insensitive fnmatch) to strip "
+                        "from the INHERITED environment of every MCP server "
+                        "subprocess, so a model-invokable / third-party MCP server "
+                        "named in .mcp.json cannot read raw credentials the runner "
+                        "itself holds (provider key, tokens). A secret listed in a "
+                        "server's own 'env' is an explicit grant and is NOT "
+                        "scrubbed. Empty = off (default). Recommended starting set: "
+                        "['*_API_KEY','*_TOKEN','*_SECRET','ANTHROPIC_AUTH_TOKEN']."
+                    ),
+                },
+            },
+        }
 
     def set_workspace_path(self, path: str) -> None:
         """Set the workspace path for finding config files.
@@ -433,10 +481,42 @@ class MCPToolPlugin(RunnerForwardingMixin):
                         description=tool.description,
                         parameters=cleaned_schema,
                         category="MCP",
+                        # MCP server output is untrusted third-party content —
+                        # wrap it in the untrusted-content boundary so injected
+                        # instructions in a payload can't hijack the agent.
+                        traits=frozenset({TRAIT_UNTRUSTED_CONTENT}),
                     )
                     schemas.append(schema)
                 except Exception as exc:
                     self._log_event(LOG_ERROR, f"Error creating schema for {tool.name}", server=server_name, details=str(exc), include_traceback=True)
+
+        # Static management tool: lets the model reload .mcp.json mid-session
+        # (e.g. after authoring/editing it) to (re)connect servers + re-discover
+        # their tools without a session restart.  GATED on a .mcp.json existing
+        # (workspace/custom): the model stays unaware of MCP — incl. mcp_reload —
+        # until the config has been authored on the user's request.  Once the
+        # file exists, the next deferred list_tools/get_tool_schemas surfaces it.
+        # Permission-gated (NOT in get_auto_approved_tools): reload spawns server
+        # subprocesses + connects out, so it must require approval.
+        if self._config_file_exists():
+            schemas.append(ToolSchema(
+                name="mcp_reload",
+                description=(
+                    "Reload MCP server configuration from .mcp.json: re-reads "
+                    "the file, (re)connects servers, and re-discovers their "
+                    "tools. Call this after creating or editing .mcp.json to "
+                    "pick up new or changed MCP servers without restarting the "
+                    "session. Returns a summary of connected servers, tool "
+                    "counts, and any new/removed tools — the newly discovered "
+                    "tools then become callable."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                category="MCP",
+            ))
 
         schema_names = [s.name for s in schemas]
         self._trace(f"get_tool_schemas: returning {len(schemas)} schemas: {schema_names[:10]}...")
@@ -468,6 +548,18 @@ class MCPToolPlugin(RunnerForwardingMixin):
             return self.execute_user_command('mcp', args)
         executors['mcp'] = mcp_command_executor
 
+        # Executor for the model-callable 'mcp_reload' management tool — reuses
+        # the same reload machinery as the 'mcp reload' user command.  Gated on
+        # a .mcp.json existing, in lockstep with its schema in get_tool_schemas.
+        # Wrapped by wrap_executors_for_runner_forwarding below (like every
+        # other MCP executor) so the reload — which (re)spawns MCP stdio
+        # subprocesses — runs under the runner's AppArmor profile when a runner
+        # is attached.
+        if self._config_file_exists():
+            def mcp_reload_executor(args: Dict[str, Any]) -> str:
+                return self._cmd_reload()
+            executors['mcp_reload'] = mcp_reload_executor
+
         tool_names = [name for name in executors.keys() if name != 'mcp']
         self._trace(f"get_executors: returning {len(executors)} executors ({tool_count} MCP tools from {len(self._tool_cache)} servers): {tool_names[:10]}...")
 
@@ -479,23 +571,41 @@ class MCPToolPlugin(RunnerForwardingMixin):
         return self.wrap_executors_for_runner_forwarding(executors)
 
     def get_system_instructions(self) -> Optional[str]:
-        """Return system instructions describing available MCP tools."""
+        """Return system instructions describing available MCP tools + the
+        ``mcp_reload`` management tool.
+
+        Returns ``None`` when there is NO workspace/custom ``.mcp.json`` AND no
+        discovered tools — the model stays unaware of MCP until the config is
+        authored (on the user's request).  Once a ``.mcp.json`` exists, the
+        management path (edit ``.mcp.json`` + ``mcp_reload``) is advertised so
+        the model can (re)connect servers and discover their tools mid-session.
+        """
         if not self._initialized:
             self.initialize()
 
-        if not self._tool_cache:
+        file_exists = self._config_file_exists()
+        if not file_exists and not self._tool_cache:
             return None
 
-        lines = ["You have access to the following MCP (Model Context Protocol) tools:"]
+        lines = []
+        if file_exists:
+            lines.append(
+                "You can manage MCP (Model Context Protocol) servers: edit the "
+                "workspace's `.mcp.json` to add or change servers, then call the "
+                "`mcp_reload` tool to (re)connect them and discover their tools "
+                "without restarting the session."
+            )
 
-        for server_name, tools in self._tool_cache.items():
-            lines.append(f"\nFrom '{server_name}' server:")
-            for tool in tools:
-                desc = tool.description or "No description"
-                normalized_name = self._normalize_tool_name(server_name, tool.name)
-                lines.append(f"  - {normalized_name}: {desc}")
+        if self._tool_cache:
+            lines.append("\nYou have access to the following MCP tools:")
+            for server_name, tools in self._tool_cache.items():
+                lines.append(f"\nFrom '{server_name}' server:")
+                for tool in tools:
+                    desc = tool.description or "No description"
+                    normalized_name = self._normalize_tool_name(server_name, tool.name)
+                    lines.append(f"  - {normalized_name}: {desc}")
 
-        return "\n".join(lines)
+        return "\n".join(lines) if lines else None
 
     def get_auto_approved_tools(self) -> List[str]:
         """MCP model tools require permission, but user commands are auto-approved."""
@@ -1120,6 +1230,31 @@ class MCPToolPlugin(RunnerForwardingMixin):
         registry = self._load_mcp_registry(self._custom_config_path)
         self._config_cache = registry
 
+    def _config_file_exists(self) -> bool:
+        """True iff a workspace/custom ``.mcp.json`` exists on disk.
+
+        Gate for exposing ANY MCP tool to the model — including the
+        ``mcp_reload`` management tool: the model stays UNAWARE of MCP until a
+        ``.mcp.json`` has been authored (on the user's request).  Checked LIVE
+        (not the load-time ``_config_path``) so a freshly-authored file is
+        picked up on the next deferred ``list_tools`` / ``get_tool_schemas``
+        query.
+
+        Scope is the **workspace** (and explicit ``config_path``) only — the
+        file the model can author/edit and reload.  ``~/.mcp.json`` is
+        deliberately excluded: it's operator-global config the model doesn't
+        author, and including it would make the gate depend on the host's home
+        dir.  (Tools discovered from any loaded config, incl. ``~/.mcp.json``,
+        still surface via ``_tool_cache`` as before — this gates only the
+        always-on ``mcp_reload`` tool.)
+        """
+        candidates = []
+        if self._custom_config_path:
+            candidates.append(self._custom_config_path)
+        if self._workspace_path:
+            candidates.append(os.path.join(self._workspace_path, '.mcp.json'))
+        return any(os.path.isfile(p) for p in candidates)
+
     def _save_config(self) -> Optional[str]:
         """Save current configuration to .mcp.json file.
 
@@ -1579,7 +1714,9 @@ class MCPToolPlugin(RunnerForwardingMixin):
 
             # Create stderr capture that routes to internal log buffer
             errlog = LogCapture(self._log_event)
-            manager = MCPClientManager(errlog=errlog)
+            manager = MCPClientManager(
+                errlog=errlog, scrub_secret_env=self._scrub_secret_env,
+            )
             async with manager:
                 # Connect to all configured servers in parallel for faster bootstrap
                 server_list = list(servers.items())

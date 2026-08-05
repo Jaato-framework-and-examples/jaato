@@ -54,3 +54,45 @@ __all__ = [
     "KNOWN_MODELS",
     "MODEL_CONTEXT_LIMITS",
 ]
+
+
+# --- Provider capability contract (see docs/model-provider-capabilities.md) ---
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
+)
+
+PROVIDER_CAPABILITIES = ProviderCapabilities(
+    user_message_images=True,
+    tool_result_images=True,
+    pdf_input=False,
+    tool_choice_forwarding=False,
+    thinking=True,
+    prompt_caching=False,
+    streaming=True,
+    cancellation=True,
+)
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("base_url", "str", None, "ZHIPUAI_OPENAI_BASE_URL override"),
+        KnobSpec("context_length", "int"),
+        KnobSpec("enable_thinking", "bool"),
+        KnobSpec("thinking_budget", "int"),
+    ), description="connection / generation"),
+))
+PROVIDER_QUIRKS = frozenset({
+    # Opt-in prose-emulated tool calling for upstream models that cannot
+    # emit native tool calls (schemas prompt-injected with hashed wire
+    # ids; fenced tool_call blocks parsed from the response text).  See
+    # shared/plugins/model_provider/_prose_tools.py.
+    "prose_tool_calls",
+})
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_key",
+               "plugin_configs.zhipuai_openai.api_key"),
+    AuthSource("env", "ZHIPUAI_API_KEY", "shared with zhipuai provider"),
+    AuthSource("stored", "zhipuai-auth", "shared zhipuai_auth.json"),
+)

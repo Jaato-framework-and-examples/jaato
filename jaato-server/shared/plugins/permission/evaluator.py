@@ -28,7 +28,7 @@ Path resolution: workspace ``.jaato/`` → user ``~/.jaato/`` → absolute.
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from shared.script_loader import load_script_symbol, resolve_script_path
 
@@ -108,6 +108,14 @@ class EvalContext:
         model_preamble: Text the model emitted before this tool call
             in the current response.  May be None if the model called
             the tool without any preamble text.
+        execution_log: Read-only snapshot of the session's PRIOR permission
+            decisions, oldest-first — a list of ``{"tool_name", "arguments",
+            "decision", "reason"}`` dicts.  Lets an evaluator decide based on
+            what happened earlier this session (e.g. deny a tool after N prior
+            uses, or escalate once a risky tool has run).  Does NOT include the
+            current call being evaluated (that decision hasn't been made yet).
+            A snapshot, not the live log — mutating it does not affect the
+            plugin's audit trail.  Empty when no evaluator context supplies it.
         extra: Extensible dict for future context fields.
     """
     tool_name: str
@@ -118,6 +126,7 @@ class EvalContext:
     workspace_path: Optional[str] = None
     turn_index: Optional[int] = None
     model_preamble: Optional[str] = None
+    execution_log: List[Dict[str, Any]] = field(default_factory=list)
     extra: Dict[str, Any] = field(default_factory=dict)
 
 

@@ -206,6 +206,7 @@ class AgentUIHooks(Protocol):
         function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
+        finish_reason: str = "stop",
     ) -> None:
         """Called after each conversation turn completes.
 
@@ -224,6 +225,13 @@ class AgentUIHooks(Protocol):
                 None when the provider does not support caching.
             cache_creation_tokens: Tokens written to prompt cache.
                 None when the provider does not support caching.
+            finish_reason: The provider's finish reason for the turn's
+                terminal response, as the lowercase ``FinishReason`` enum
+                value (``"stop"``, ``"max_tokens"``, ``"safety"``,
+                ``"error"``, ...).  Defaults to ``"stop"``.  Rides out to
+                clients on ``TurnCompletedEvent.finish_reason`` so an
+                abnormal/truncated turn is machine-detectable instead of
+                looking like a clean completion.
         """
         ...
 
@@ -348,6 +356,7 @@ class AgentUIHooks(Protocol):
         continuation_id: Optional[str] = None,
         show_output: Optional[bool] = None,
         show_popup: Optional[bool] = None,
+        is_error_result: bool = False,
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -357,6 +366,11 @@ class AgentUIHooks(Protocol):
             success: Whether the tool executed successfully.
             duration_seconds: How long the tool took to execute.
             error_message: Error message if the tool failed.
+            is_error_result: Computed deeper error check — True when the tool
+                returned an error body (e.g. ``{"error": ...}`` or HTTP
+                status_code >= 400) even though ``success`` is True. Distinct
+                from ``success`` (which only catches raised exceptions /
+                permission / missing-executor).
             call_id: Unique identifier for this tool call (for correlation).
             backgrounded: True if tool was auto-backgrounded (still producing output).
             continuation_id: Session ID for tools that expect follow-up calls

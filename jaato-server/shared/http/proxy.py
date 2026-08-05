@@ -77,7 +77,7 @@ def is_kerberos_proxy_enabled() -> bool:
     Returns:
         True if Kerberos proxy auth should be used.
     """
-    value = os.environ.get(ENV_JAATO_KERBEROS_PROXY, "").lower()
+    value = os.environ.get(ENV_JAATO_KERBEROS_PROXY, "").lower()  # env: enable Kerberos/SPNEGO proxy auth (needs valid tickets; pyspnego on Linux/macOS)
     return value in ("true", "1", "yes")
 
 
@@ -147,7 +147,7 @@ def _get_jaato_no_proxy_hosts() -> list:
     Returns:
         List of hostnames (lowercase) that should bypass proxy.
     """
-    value = os.environ.get(ENV_JAATO_NO_PROXY, "")
+    value = os.environ.get(ENV_JAATO_NO_PROXY, "")  # env: exact-host no-proxy list (vs NO_PROXY's suffix matching)
     if not value:
         return []
     return [h.strip().lower() for h in value.split(",") if h.strip()]

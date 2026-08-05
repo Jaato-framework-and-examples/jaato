@@ -12,10 +12,10 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, FrozenSet, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 from .session_history import SessionHistory
@@ -39,6 +39,12 @@ from .instruction_budget_builder import (
     collect_instruction_texts as _builder_collect_instruction_texts,
     apply_instruction_counts as _builder_apply_instruction_counts,
 )
+from .instruction_suppression import (
+    PIECE_CONSTANTS,
+    PIECE_DISK,
+    PIECE_SECURITY,
+    normalize_suppression,
+)
 from .session_persistence import SessionPersistence
 from .session_telemetry import (
     classify_cache_outcome,
@@ -50,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 from .ai_tool_runner import ToolExecutor
 from .session_context import set_current_session
+from .tool_id_map import StreamScrubber
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
 from .token_accounting import TokenLedger
 from jaato_sdk.plugins.base import HelpLines, UserCommand, OutputCallback
@@ -77,6 +84,8 @@ from jaato_sdk.plugins.model_provider.types import (
     Attachment,
     CancelledException,
     CancelToken,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
     FinishReason,
     FunctionCall,
     Message,
@@ -89,6 +98,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TurnOutcome,
     TurnResult,
+    tool_result_is_error,
 )
 
 if TYPE_CHECKING:
@@ -111,6 +121,25 @@ AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
 # Keep small: the point is to unstick the model once, not to loop.
 # See ``docs/design/rewind-with-hint.md`` for rationale.
 REWIND_BUDGET_PER_OPERATION = 2
+
+
+def _telemetry_json_default(obj: Any) -> str:
+    """``json.dumps`` ``default=`` for telemetry span output.
+
+    Tool results can carry raw binary (a multimodal ``readFile`` returns
+    ``image_data`` bytes BEFORE ``_build_tool_result`` strips it).  A span
+    attribute must never embed megabytes of binary nor crash the model loop on
+    a non-serializable value — summarise bytes compactly and ``repr`` anything
+    else exotic.
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        return f"<{type(obj).__name__}: {len(obj)} bytes>"
+    return repr(obj)
+
+
+def _telemetry_safe_json(value: Any) -> str:
+    """Serialise a tool result for an OTel span without choking on binary."""
+    return json.dumps(value, default=_telemetry_json_default)
 
 
 class ActivityPhase(Enum):
@@ -184,6 +213,70 @@ class _CancellationResult:
     new_response: Optional[ProviderResponse] = None
 
 
+# Introspection's tools (list_tools / get_tool_schemas) give the model SCHEMA
+# VISIBILITY — the ability to discover deferred tools.
+_INTROSPECTION_TOOL_NAMES = frozenset({"list_tools", "get_tool_schemas"})
+
+
+def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
+                              tool_scopes, plugin_of) -> bool:
+    """Is there genuinely something for the model to discover?
+
+    True iff a discoverable (non-``core``) tool that belongs to a profile plugin
+    which is NOT ``(preload)``-ed and NOT scoped-out is exposed.  When this is
+    False, nothing is pending *discovery* — but introspection is NOT necessarily
+    dead weight: a session with eager/preloaded real tools still needs it for
+    *re-inspection* after GC offloads their schemas/instructions.  The full drop
+    decision lives in :func:`_should_drop_introspection`.
+
+    Pure (no session/registry deps) so it is unit-testable.  ``plugin_of(name)``
+    maps a tool name to its owning plugin name (or ``None``).
+    """
+    profile = set(profile_plugins or [])
+    pre = set(preloaded or [])
+    scopes = tool_scopes or {}
+    for sc in exposed_schemas:
+        if sc.name in _INTROSPECTION_TOOL_NAMES:
+            continue
+        if getattr(sc, "discoverability", DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
+            continue  # eager — not something to "discover"
+        pname = plugin_of(sc.name)
+        if pname is None or pname not in profile or pname in pre:
+            continue
+        allow = scopes.get(pname)
+        if allow is not None and sc.name not in allow:
+            continue  # scoped out — not exposed
+        return True
+    return False
+
+
+def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
+    """Whether to drop introspection's discovery tools from a session's wire.
+
+    Drop ONLY when the wire is genuinely empty of real tools: nothing is
+    deferred to discover AND there are no real (non-introspection) tools present.
+
+    Keeping introspection whenever real tools exist — even all-eager/preloaded
+    ones with nothing currently deferred — is deliberate: preloading a tool only
+    means its schema/instructions *start* in-context; GC can offload them under
+    context pressure, after which the model needs ``list_tools`` /
+    ``get_tool_schemas`` to RE-INSPECT the tool.  Dropping introspection there
+    would both strip that capability AND (for a no-``suppress_base`` session)
+    leave a "discover via list_tools" prose nudge with no list_tools on the wire
+    — the model then invents the call, hits no-executor, and loops (the ex08
+    lead hang).  A truly empty wire (e.g. ``plugins=[]``) has nothing to inspect,
+    so introspection is correctly dropped — keeping the ``plugins=[]`` "no tools"
+    semantic intact.
+
+    Pure, so it is unit-testable.  ``tool_names`` is the current wire's tool
+    names; ``has_deferred_to_discover`` is :func:`_has_deferred_to_discover`'s
+    result.
+    """
+    if has_deferred_to_discover:
+        return False
+    return not any(n not in _INTROSPECTION_TOOL_NAMES for n in tool_names)
+
+
 class JaatoSession:
     """Per-agent conversation session.
 
@@ -244,6 +337,14 @@ class JaatoSession:
         # operates against a different workspace than the runtime's
         # default (e.g. a worktree snapshot for fork-replay).
         self._workspace_path: Optional[str] = None
+        # Lazily-loaded pricing table used to stamp cost on LLM telemetry
+        # spans when the provider doesn't report one (mirrors the daemon's
+        # core.py:_build_usage precedence, but computed while the span is
+        # still open — the daemon boundary runs after the span closes).
+        # ``_span_pricing`` is None until first use; ``_span_pricing_loaded``
+        # guards the one-time load so cost-free sessions never read the JSON.
+        self._span_pricing = None
+        self._span_pricing_loaded = False
         # Shape 3 PR 1: per-session resolved env (workspace ``.env`` +
         # profile env + overrides, expanded and secret-URI-resolved).
         # Populated by runner-side ``bootstrap_session`` AFTER the
@@ -311,6 +412,11 @@ class JaatoSession:
         # ``_completion_nudges_fired`` bounds the retry budget.
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
+        # Set in configure() when introspection's tools are dropped because there
+        # is nothing deferred to discover — read by introspection's
+        # get_system_instructions to suppress the now-mismatched discovery
+        # guidance (keeps the instruction-gate aligned with the tool-gate).
+        self._introspection_guidance_suppressed: bool = False
 
         # Per-turn model-tier config.  ``_tier_config`` is the resolved
         # view (built from profile.tiers or env vars).  ``_active_tier``
@@ -354,6 +460,21 @@ class JaatoSession:
         # session).  Once the provider exists, the lock's hot path
         # is just an "already initialized" check.
         self._provider_init_lock = threading.Lock()
+        # V2 cross-provider tiers: per-provider instance cache (provider_name ->
+        # ModelProviderPlugin) so a tier that declares a DIFFERENT provider gets
+        # its own cached instance, switched in O(1) by switch_tier without
+        # re-paying create_provider's init cost on every text<->vision hop.
+        # ``_active_provider_name`` tracks which provider self._provider IS
+        # (the provider's own .name is unreliable for subclassed providers like
+        # zhipuai-extends-anthropic, so we track the name we created it under).
+        # Empty/None until the default provider is created in _ensure_provider.
+        self._provider_cache: Dict[str, 'ModelProviderPlugin'] = {}
+        self._active_provider_name: Optional[str] = None
+        # Persistent provider base config (plugin_configs + skip_model_test) for
+        # V2 cross-provider tier switches — set in configure(), read by
+        # _provider_for_tier.  Distinct from _provider_lazy_pending (which is
+        # cleared once the main provider is created).
+        self._tier_provider_base: Optional[Dict[str, Any]] = None
         # True iff ``configure()`` finished its work successfully.
         # Decoupled from ``_provider is not None`` because the
         # provider is now lazy; ``is_configured`` checks this flag
@@ -421,10 +542,11 @@ class JaatoSession:
         # budget without having to be re-passed the value through every
         # call site.
         self._system_instruction_override: Optional[str] = None
-        # Partial-suppression flag — drop the BASE layer only.  Keeps
-        # agent / plugin / framework layers in play.  Ignored when
-        # _system_instruction_override is set (override wins).
-        self._suppress_base_instructions: bool = False
+        # Granular partial-suppression: the canonical frozenset of framework
+        # instruction pieces to drop (subset of {disk, constants, security};
+        # see ``instruction_suppression``).  Empty = suppress nothing.  Ignored
+        # when _system_instruction_override is set (override wins).
+        self._suppress_base_instructions: FrozenSet[str] = frozenset()
         self._tool_plugins: Optional[List[str]] = None  # Plugin names for this session
 
         # Per-turn token accounting
@@ -868,11 +990,23 @@ class JaatoSession:
         # reference may not be set yet when set_agent_context is called.
 
     def set_daemon_session_id(self, session_id: str) -> None:
-        """Set the daemon session manager ID for telemetry correlation.
+        """Set the daemon session manager ID for this session.
 
-        This ID (e.g. ``"20260328_204308"``) is emitted as the
-        ``jaato.session_id`` span attribute so Phoenix traces can be
-        correlated back to jaato session manager sessions.
+        This ID (e.g. ``"20260328_204308"``) identifies the daemon-side
+        session-manager session and is the per-session source of truth
+        for any consumer that needs the session id at execution time:
+        emitted as the ``jaato.session_id`` telemetry span attribute,
+        resolved by dynamic-instructions ``{{session_id}}``, and read by
+        the ``memory`` plugin for the ``source_session`` provenance field.
+
+        **Set on BOTH tiers.**  Daemon-side it is wired by ``JaatoClient``;
+        runner-side it is stamped from ``envelope.session_id`` during
+        ``bootstrap_session`` (``runner/session.py``).  The runner-side
+        stamp is load-bearing: each sibling subagent has its own
+        JaatoSession, so reading this per-session value (via
+        ``get_current_session()``) is per-sibling-correct, whereas the
+        previous fallback to the SHARED ``registry._session_id`` leaked
+        the last-bootstrapped sibling's id across siblings.
 
         Args:
             session_id: The session manager's session ID.
@@ -1150,6 +1284,40 @@ class JaatoSession:
             # Low-priority (CHILD) → processed when becoming idle
             self._message_queue.put(text, actual_source_id, actual_source_type)
             self._trace(f"INJECT_PROMPT: queue_size_after={len(self._message_queue)}")
+
+    def try_drain_pending_user(self) -> Optional[str]:
+        """Atomically pop the first pending high-priority (USER/PARENT/SYSTEM)
+        message for the daemon's post-turn drain.
+
+        Multi-turn deadlock fix: a client send that races into the turn
+        wind-down — ``turn.completed`` reaches the client (which sends the
+        next turn) *before* the daemon clears ``_model_running`` — is
+        forwarded by the daemon gate as an :meth:`inject_prompt`.  Finding
+        the session idle with no active turn (and the per-RPC continuation
+        callback already restored to ``None``), ``inject_prompt`` takes the
+        else/queue branch, so the message sits with no drainer and the turn
+        never runs.  The daemon's model-thread ``finally`` calls this after
+        every runner-tier turn (via the ``session.try_drain_pending_user``
+        RPC); when it returns text the daemon starts a fresh turn with it.
+
+        Guarded on ``not _is_running`` so it never steals a message from an
+        active turn (which drains the queue itself mid-turn) — in that case
+        the running turn owns the message and this returns ``None``.
+
+        Returns:
+            The message text to run as the next turn, or ``None`` when no
+            high-priority message is queued or a turn is already running.
+        """
+        if self._is_running:
+            return None
+        if not self._message_queue.has_parent_messages():
+            return None
+        msg = self._message_queue.pop_first_parent_message()
+        if msg is None:
+            return None
+        if self._on_prompt_injected:
+            self._on_prompt_injected(msg.text)
+        return msg.text
 
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
@@ -1673,7 +1841,7 @@ class JaatoSession:
         preloaded_plugins: Optional[set] = None,
         skip_model_test: bool = False,
         system_instruction_override: Optional[str] = None,
-        suppress_base_instructions: bool = False,
+        suppress_base_instructions: Any = False,
         workspace_path: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
         tier_config: Optional['ModelTierConfig'] = None,
@@ -1818,6 +1986,16 @@ class JaatoSession:
                 'skip_model_test': skip_model_test,
                 'plugin_configs': plugin_configs,
             }
+        # Persist the provider base config (plugin_configs + skip_model_test) for
+        # V2 cross-provider tier switches.  _provider_lazy_pending is CLEARED once
+        # the main provider is created (_ensure_provider), but _provider_for_tier
+        # still needs these to build a tier's provider — without this it received
+        # plugin_configs=None and built the tier provider with no api_key at all
+        # (#354 cross-provider tier bug: "No <provider> API key found").
+        self._tier_provider_base = {
+            'skip_model_test': skip_model_test,
+            'plugin_configs': plugin_configs,
+        }
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
@@ -1920,6 +2098,30 @@ class JaatoSession:
                 ]
                 if approved:
                     self._runtime.permission_plugin.add_whitelist_tools(approved)
+                # Framework-reserved: lifecycle terminals (signal_completion —
+                # session-level, NOT a registry core tool) PLUS the registry's
+                # core tools (stream / event_bus / introspection / client host
+                # tools) are exempt from a business catch-all "default"
+                # evaluator, so a locked-down default-deny agent can still
+                # complete.  Re-populated here every configure() so it survives
+                # PermissionPlugin.shutdown() nulling _registry between sessions.
+                #
+                # Source is ``get_registered_core_tool_names()`` (the
+                # ``register_core_tool`` set, == ``is_core_tool``) — NOT
+                # ``get_core_tool_schemas()``, which also returns exposed
+                # *plugin* tools flagged ``discoverability='core'`` (readFile,
+                # the todo tools, ...).  Using the broad schema set would
+                # silently exempt those powerful business tools from a
+                # catch-all default evaluator — the exact "never
+                # cli/file_edit/business tools" case #487/#488 prohibit.
+                reserved = set(exposed_lifecycle_names)
+                if self._runtime.registry:
+                    reserved.update(
+                        self._runtime.registry.get_registered_core_tool_names()
+                    )
+                self._runtime.permission_plugin.add_framework_reserved_tools(
+                    reserved
+                )
 
             # Apply per-plugin tool allow-lists (profile ``tools:[...]``)
             # to the assembled ``self._tools`` so scoped-out tools are
@@ -1938,6 +2140,39 @@ class JaatoSession:
                         f"tool(s) from the initial surface "
                         f"(scopes={self._tool_scopes})"
                     )
+
+            # Gate introspection on the presence of something to discover.
+            # Its [core] tools are always in the initial schema, but they are
+            # dead weight (and invite a wasted discovery turn) when EVERY profile
+            # tool is already eager — core, or its plugin is (preload)-ed.  The
+            # deferred set is read from the LIVE registry, so a dynamic plugin
+            # (mcp) that already surfaced discoverable tools keeps introspection
+            # automatically — no hardcoded plugin list.  Conservative: only act
+            # with an explicit profile plugin filter (an unfiltered session
+            # exposes everything and may legitimately need discovery).
+            if self._tool_plugins is not None and self._tools:
+                reg = self._runtime.registry
+                deferred = _has_deferred_to_discover(
+                        reg.get_exposed_tool_schemas(), self._tool_plugins,
+                        self._preloaded_plugins, self._tool_scopes,
+                        lambda n: getattr(reg.get_plugin_for_tool(n), "name", None))
+                if _should_drop_introspection(
+                        deferred, [t.name for t in self._tools]):
+                    # Empty wire -> drop introspection's tools AND flag the
+                    # session so the introspection plugin suppresses its now-
+                    # mismatched discovery GUIDANCE (read by
+                    # introspection.get_system_instructions). See
+                    # _should_drop_introspection for the full rationale (GC
+                    # re-inspection + tool/instruction-gate alignment).
+                    self._introspection_guidance_suppressed = True
+                    n0 = len(self._tools)
+                    self._tools = [t for t in self._tools
+                                   if t.name not in _INTROSPECTION_TOOL_NAMES]
+                    if len(self._tools) != n0:
+                        self._trace(
+                            "configure: dropped introspection — empty wire (no "
+                            "deferred tools to discover, no eager tools to "
+                            "re-inspect)")
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
@@ -2028,8 +2263,14 @@ class JaatoSession:
 
         # Remember both knobs so _populate_instruction_budget (called
         # below) can produce an honest budget reflecting the wire prompt.
+        # ``suppress_base_instructions`` is normalized to the canonical
+        # frozenset of pieces to drop (accepts bool / dict / list; see
+        # ``instruction_suppression``).
         self._system_instruction_override = system_instruction_override
-        self._suppress_base_instructions = suppress_base_instructions
+        self._suppress_base_instructions = normalize_suppression(
+            suppress_base_instructions
+        )
+        _suppress = self._suppress_base_instructions
 
         # Build system instructions.
         #
@@ -2038,20 +2279,24 @@ class JaatoSession:
         # in configure_tools(), so tool functionality is intact; only the
         # would-be-discarded enrichment text is skipped.
         #
-        # Otherwise: assemble normally.  ``include_base=False`` drops just
-        # the BASE layer (framework baseline) while keeping the agent
-        # prompt, plugin instructions, and framework constants — the
-        # partial-suppression path for small-context models.  Base is
-        # also lazy-loaded on first use, so sessions that always suppress
-        # it never touch the disk.
+        # Otherwise: assemble normally.  Each ``include_*`` gate drops one
+        # framework-originated layer when its piece is in the suppression
+        # set — ``disk`` (the .jaato/instructions baseline), ``constants``
+        # (task-completion / parallel / turn-summary), ``security`` (the
+        # untrusted-content boundary) — while the agent prompt and plugin
+        # instructions always remain.  The partial-suppression path for
+        # small-context models.  Base is lazy-loaded on first use, so
+        # sessions that always suppress it never touch the disk.
         if system_instruction_override is not None:
             self._system_instruction = system_instruction_override
         else:
             self._system_instruction = self._runtime.get_system_instructions(
-                plugin_names=tools,
+                plugin_names=plugins,
                 additional=system_instructions,
                 presentation_context=self._presentation_context,
-                include_base=not suppress_base_instructions,
+                include_base=PIECE_DISK not in _suppress,
+                include_constants=PIECE_CONSTANTS not in _suppress,
+                include_security=PIECE_SECURITY not in _suppress,
             )
 
         # Dynamic-instructions expansion ({{!py:script.py}}).  Walks
@@ -2192,6 +2437,12 @@ class JaatoSession:
                 skip_model_test=cfg['skip_model_test'],
                 plugin_configs=cfg['plugin_configs'],
             )
+            # V2 cross-provider tiers: record which provider this instance IS and
+            # seed the per-provider cache so switch_tier can compare against it
+            # and reuse it on a switch back.
+            self._active_provider_name = cfg['provider_name']
+            if cfg['provider_name'] is not None:
+                self._provider_cache[cfg['provider_name']] = self._provider
             # Propagate agent context to provider for trace identification.
             if hasattr(self._provider, 'set_agent_context'):
                 self._provider.set_agent_context(
@@ -2536,7 +2787,8 @@ class JaatoSession:
         requests = self._collect_instruction_texts(
             session_instructions,
             system_instruction_override=self._system_instruction_override,
-            suppress_base=self._suppress_base_instructions,
+            suppress_base=PIECE_DISK in self._suppress_base_instructions,
+            suppress_constants=PIECE_CONSTANTS in self._suppress_base_instructions,
         )
 
         # --- Resolve phase: use cache or estimate for each request ---
@@ -2578,6 +2830,7 @@ class JaatoSession:
         session_instructions: Optional[str],
         system_instruction_override: Optional[str] = None,
         suppress_base: bool = False,
+        suppress_constants: bool = False,
     ) -> List['_TokenCountRequest']:
         """Collect all instruction texts that need token counting.
 
@@ -2588,12 +2841,17 @@ class JaatoSession:
         ``self._deferred_plugin_instructions`` (the side effect this
         method has always carried). Returns just the request list, as
         before.
+
+        ``suppress_base`` / ``suppress_constants`` drop the disk BASE layer
+        and the framework constants respectively, keeping the budget in step
+        with the wire prompt's ``include_base`` / ``include_constants`` gates.
         """
         requests, deferred_plugins = _builder_collect_instruction_texts(
             self._runtime,
             session_instructions,
             system_instruction_override=system_instruction_override,
             suppress_base=suppress_base,
+            suppress_constants=suppress_constants,
             pinned_references=getattr(self, '_pinned_references', {}),
             preloaded_plugins=getattr(self, '_preloaded_plugins', set()),
         )
@@ -3479,12 +3737,38 @@ NOTES
 
         return []
 
+    def _parts_from_user_message(
+        self, message: str, attachments: List[Dict[str, Any]]
+    ) -> List["Part"]:
+        """Build a Part list from a user message text + wire attachments.
+
+        Wire attachments are ``{mime_type, data: base64-str, display_name}``
+        (the canonical user-message multimodal contract — client-expanded,
+        JSON-safe).  ``data`` is base64-decoded to the ``bytes`` that
+        ``Part.inline_data`` expects.  The text part precedes the inline-data
+        parts; an empty ``message`` (image-only turn) yields parts with no text.
+        """
+        import base64
+        parts: List[Part] = []
+        if message:
+            parts.append(Part.from_text(message))
+        for att in attachments or []:
+            data = att.get("data")
+            if isinstance(data, str):      # base64 wire form → raw bytes
+                data = base64.b64decode(data)
+            parts.append(Part(inline_data={
+                "mime_type": att.get("mime_type"),
+                "data": data,
+            }))
+        return parts
+
     def send_message(
         self,
         message: str,
         on_output: Optional[OutputCallback] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_gc_threshold: Optional[GCThresholdCallback] = None
+        on_gc_threshold: Optional[GCThresholdCallback] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """Send a message to the model.
 
@@ -3496,6 +3780,12 @@ NOTES
                 Signature: (usage: TokenUsage) -> None
             on_gc_threshold: Optional callback when GC threshold is crossed.
                 Signature: (percent_used: float, threshold: float) -> None
+            attachments: Optional user-message multimodal attachments, each a
+                ``{mime_type, data: base64-str, display_name}`` dict (the
+                client-expanded wire contract).  When present, the turn is
+                routed through the multimodal parts loop (text + inline image/
+                file Parts); the model receives them gated by its provider's
+                vision/input modality (see resolve_modalities).
 
         Returns:
             The final model response text.
@@ -3505,6 +3795,13 @@ NOTES
         """
         if not self._configured:
             raise RuntimeError("Session not configured. Call configure() first.")
+
+        # User-message multimodal: attachments present → build a Part list
+        # (text + inline image/file data) and route through the canonical parts
+        # loop instead of the text-only path below.  Keeps one multimodal entry.
+        if attachments:
+            parts = self._parts_from_user_message(message, attachments)
+            return self.send_message_with_parts(parts, on_output)
 
         # Lazy-init the provider on first model use (deferred-provider-INIT
         # design 2026-05-13).  The 9s/2-3s INIT cost happens here on first
@@ -3571,6 +3868,23 @@ NOTES
             self._gc_threshold_crossed = False
             self._gc_threshold_callback = on_gc_threshold
 
+            # Scrub provider tool-ids (t_xxxxxxxx / c_xxxxxxxx) out of user-facing
+            # MODEL text before it reaches the client.  The id exists only at the
+            # provider boundary, but the model's free-text narration can mention
+            # one — and that must not surface to the user.  Runner-side, where the
+            # _reverse map is populated at schema build.  StreamScrubber handles
+            # ids split across streaming chunks; history keeps the raw ids (the
+            # model stays on hashes), only the user-facing emission is scrubbed.
+            _id_scrubber = StreamScrubber()
+            _raw_output = on_output
+            if _raw_output is not None:
+                def on_output(source, text, mode, _raw=_raw_output, _s=_id_scrubber):
+                    if source == "model" and text:
+                        text = _s.feed(text)
+                        if not text:
+                            return
+                    _raw(source, text, mode)
+
             # Store output callback for this turn so enrichment can use it directly
             # This avoids the race condition where concurrent sessions overwrite
             # the shared registry callback
@@ -3594,6 +3908,13 @@ NOTES
                 turn_span.record_exception(e)
                 turn_span.set_status_error(str(e))
                 raise
+            finally:
+                # Emit any trailing partial-id fragment the scrubber held back at
+                # the last chunk boundary (raw output — already scrubbed by flush).
+                if _raw_output is not None:
+                    _tail = _id_scrubber.flush()
+                    if _tail:
+                        _raw_output("model", _tail, "write")
 
             # Record turn completion metadata
             turn_metadata = {}
@@ -4025,9 +4346,37 @@ NOTES
             f"across multiple invocations. Try again now."
         )
 
+    @staticmethod
+    def _abnormal_finish_message(finish_reason: FinishReason) -> str:
+        """Human-readable banner for an abnormal terminal finish reason.
+
+        Surfaced to clients via an ``on_output("system", ...)`` call (which
+        the server adapter turns into an ``AgentOutputEvent(source="system")``)
+        so an operator sees WHY a turn ended early instead of the truncation
+        looking like a clean completion.  Mirrors the sibling notification
+        the cancellation path emits in ``_handle_cancellation``.
+        """
+        return {
+            FinishReason.MAX_TOKENS:
+                "Model stopped early: hit the output-token limit "
+                "(max_tokens); the response is truncated.",
+            FinishReason.SAFETY:
+                "Model stopped early: the provider's safety filter "
+                "triggered (safety); the response may be incomplete.",
+            FinishReason.ERROR:
+                "Model stopped early: the provider reported an error "
+                "(error).",
+        }.get(
+            finish_reason,
+            f"Model stopped early: "
+            f"{getattr(finish_reason, 'value', finish_reason)}.",
+        )
+
     def _classify_finish_reason(
         self,
         response: ProviderResponse,
+        turn_data: Optional[Dict[str, Any]] = None,
+        on_output: Optional[OutputCallback] = None,
     ) -> Optional[TurnResult]:
         """Classify a provider response's finish reason.
 
@@ -4039,17 +4388,39 @@ NOTES
         ``CANCELLED`` is handled separately by ``_handle_cancellation``
         because it requires additional logic (mid-turn interrupts,
         UI notification, model notification).
+
+        Side effects (both best-effort, gated on the optional args):
+
+        - ``turn_data``: when supplied, the response's finish reason is
+          recorded as ``turn_data['finish_reason']`` (the lowercase enum
+          value) for EVERY response — including normal ``STOP`` — so the
+          terminal classification in a turn leaves the true reason on the
+          turn-accounting dict.  That value rides
+          ``on_agent_turn_completed`` → ``TurnCompletedEvent.finish_reason``
+          out to clients, letting them branch deterministically instead of
+          inferring truncation from empty output.
+        - ``on_output``: when supplied AND the finish is abnormal, a
+          human-readable ``source="system"`` banner is emitted so the
+          abnormal stop is visible, not merely logged — the sibling of the
+          cancellation notification.
         """
-        if response.finish_reason in (
+        finish_reason = response.finish_reason
+        if turn_data is not None and finish_reason is not None:
+            turn_data['finish_reason'] = finish_reason.value
+        if finish_reason in (
             FinishReason.STOP,
             FinishReason.UNKNOWN,
             FinishReason.TOOL_USE,
             FinishReason.CANCELLED,
         ):
             return None
-        logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
+        logger.warning(f"Model stopped with finish_reason={finish_reason}")
+        if on_output is not None:
+            on_output(
+                "system", self._abnormal_finish_message(finish_reason), "write"
+            )
         return TurnResult.from_finish_reason(
-            response.finish_reason, response.get_text()
+            finish_reason, response.get_text()
         )
 
     def _handle_cancellation(
@@ -4417,7 +4788,7 @@ NOTES
             return cr.new_response, None, True
 
         # 5. Classify finish reason for abnormal stops
-        abnormal = self._classify_finish_reason(response)
+        abnormal = self._classify_finish_reason(response, turn_data, on_output)
         if abnormal is not None:
             return None, abnormal, False
 
@@ -4670,7 +5041,7 @@ NOTES
                 on_output("thinking", response.thinking, "write")
 
             # Check finish_reason for abnormal termination
-            abnormal = self._classify_finish_reason(response)
+            abnormal = self._classify_finish_reason(response, turn_data, on_output)
             if abnormal is not None:
                 return abnormal.text
 
@@ -5316,6 +5687,9 @@ NOTES
                         fc_show_output = er.get('show_output')
                         fc_show_popup = er.get('show_popup')
                 if self._ui_hooks:
+                    fc_result_payload = _split_executor_result_impl(
+                        result.executor_result
+                    )[1]
                     self._ui_hooks.on_tool_call_end(
                         agent_id=self._agent_id,
                         tool_name=fc.name,
@@ -5327,6 +5701,7 @@ NOTES
                         continuation_id=fc_continuation_id,
                         show_output=fc_show_output,
                         show_popup=fc_show_popup,
+                        is_error_result=tool_result_is_error(fc_result_payload),
                     )
 
         # Build results in original order
@@ -5558,7 +5933,7 @@ NOTES
             elif isinstance(executor_result, dict):
                 result_dict_for_output = executor_result
             if result_dict_for_output is not None:
-                tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                tool_span.set_attribute("output.value", _telemetry_safe_json(result_dict_for_output))
                 tool_span.set_attribute("output.mime_type", "application/json")
 
             # Pack jaato-specific tool metadata
@@ -5587,6 +5962,7 @@ NOTES
 
         # Emit hook: tool ended
         if self._ui_hooks:
+            fc_result_payload = _split_executor_result_impl(executor_result)[1]
             self._ui_hooks.on_tool_call_end(
                 agent_id=self._agent_id,
                 tool_name=name,
@@ -5598,6 +5974,7 @@ NOTES
                 continuation_id=fc_continuation_id,
                 show_output=fc_show_output,
                 show_popup=fc_show_popup,
+                is_error_result=tool_result_is_error(fc_result_payload),
             )
 
         return _ToolExecutionResult(
@@ -5815,7 +6192,7 @@ NOTES
                 elif isinstance(executor_result, dict):
                     result_dict_for_output = executor_result
                 if result_dict_for_output is not None:
-                    tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                    tool_span.set_attribute("output.value", _telemetry_safe_json(result_dict_for_output))
                     tool_span.set_attribute("output.mime_type", "application/json")
 
                 # Pack jaato-specific tool metadata
@@ -5863,20 +6240,16 @@ NOTES
         """Send tool results back to the model and get the continuation response."""
         # with_retry is already imported at module level from .retry_utils
 
-        # Inject task completion spur into last tool result
+        # Inject task-completion spur as a MODEL-FACING suffix on the last tool
+        # result — NOT folded into ``result`` (that str()'d the structured dict
+        # into a repr-string and broke the ledger / provenance / enrichment).
+        # ``result`` stays structured; the converter appends ``model_suffix`` at
+        # serialization time (render_result_for_model).
         if tool_results:
             last = tool_results[-1]
-            result_text = str(last.result) if last.result is not None else ""
-            spurred_result = f"{result_text}\n\n<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
-            tool_results = tool_results[:-1] + [
-                ToolResult(
-                    call_id=last.call_id,
-                    name=last.name,
-                    result=spurred_result,
-                    is_error=last.is_error,
-                    attachments=last.attachments
-                )
-            ]
+            hidden = f"<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
+            combined = f"{last.model_suffix}\n\n{hidden}" if last.model_suffix else hidden
+            tool_results = tool_results[:-1] + [_dc_replace(last, model_suffix=combined)]
 
         # Check for queued mid-turn prompts to inject between tool executions.
         # This ensures user prompts are processed during tool-calling chains,
@@ -5904,21 +6277,17 @@ NOTES
         if injected_prompts and tool_results:
             combined_prompt = "\n\n".join(injected_prompts)
             last = tool_results[-1]
-            result_text = str(last.result) if last.result is not None else ""
-            tool_results = tool_results[:-1] + [
-                ToolResult(
-                    call_id=last.call_id,
-                    name=last.name,
-                    result=(
-                        f"{result_text}\n\n"
-                        f"<user_message>{combined_prompt}</user_message>\n"
-                        f"The user has sent a new message during your tool execution. "
-                        f"Please address their input in your next response."
-                    ),
-                    is_error=last.is_error,
-                    attachments=last.attachments
-                )
-            ]
+            # Model-facing suffix (keep ``result`` structured — see above).
+            piggyback = (
+                f"<user_message>{combined_prompt}</user_message>\n"
+                f"The user has sent a new message during your tool execution. "
+                f"Please address their input in your next response."
+            )
+            combined = (
+                f"{last.model_suffix}\n\n{piggyback}"
+                if last.model_suffix else piggyback
+            )
+            tool_results = tool_results[:-1] + [_dc_replace(last, model_suffix=combined)]
             self._trace(
                 f"MID_TURN_PROMPT_PIGGYBACK: Injected {len(injected_prompts)} prompt(s) "
                 f"into last tool result"
@@ -6254,20 +6623,16 @@ NOTES
         if not withheld:
             return result
         note = self._build_withheld_attachment_note(withheld)
-        base = "" if result.result is None else str(result.result)
-        new_result = f"{base}\n\n{note}" if base else note
         self._trace(
             f"MODALITY_GATE: withheld {dict(withheld)} from tool "
             f"{result.name!r} (active model {self._model_name!r} lacks them)"
         )
-        return ToolResult(
-            call_id=result.call_id,
-            name=result.name,
-            result=new_result,
-            is_error=result.is_error,
-            attachments=(kept or None),
-            enrichment_metadata=result.enrichment_metadata,
+        # Keep ``result`` structured; the withheld-attachment note is
+        # model-facing only (append to model_suffix, appended at serialization).
+        combined = (
+            f"{result.model_suffix}\n\n{note}" if result.model_suffix else note
         )
+        return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
 
     def _build_withheld_attachment_note(self, withheld: Dict[str, int]) -> str:
         """Build the actionable note appended to a gated tool result.
@@ -6325,6 +6690,14 @@ NOTES
         from .model_tiers import TIER_VISION, ModelTierConfigError
         vision_entry = tier_config.tiers.get(TIER_VISION)
         if vision_entry is None:
+            return
+        # V2 cross-provider: a vision tier on a DIFFERENT provider is NOT checked
+        # here — validating it would eagerly create that provider (paying its
+        # init cost on turn 1 even if vision is never entered).  Such tiers are
+        # validated lazily when first entered + by the content-boundary gate;
+        # only same-provider vision tiers (the active provider owns the model)
+        # are fail-fast checked at startup.
+        if vision_entry.provider and vision_entry.provider != self._active_provider_name:
             return
         if provider.supports_modality("image", model=vision_entry.model):
             return
@@ -6718,12 +7091,24 @@ NOTES
         # Executor returns (ok, result_dict) tuple, or a bare value.
         ok, result_data = _split_executor_result_impl(executor_result)
 
+        # Mark results from untrusted-content tools (web_fetch / web_search /
+        # MCP) so the provider converter wraps the model-facing text in the
+        # untrusted-content boundary — indirect-prompt-injection mitigation.
+        # See TRAIT_UNTRUSTED_CONTENT.
+        from jaato_sdk.plugins.model_provider.types import TRAIT_UNTRUSTED_CONTENT
+        _untrusted = bool(
+            self._runtime.registry
+            and TRAIT_UNTRUSTED_CONTENT in self._runtime.registry.get_tool_traits(fc.name)
+        )
+        _untrusted_source = fc.name if _untrusted else None
+
         # Check for multimodal result
         attachments: Optional[List[Attachment]] = None
         if isinstance(result_data, dict) and result_data.get('_multimodal'):
             attachments = _extract_multimodal_attachments_impl(result_data)
             result_data = {k: v for k, v in result_data.items()
-                          if not k.startswith('_multimodal') and k not in ('image_data',)}
+                          if not k.startswith('_multimodal')
+                          and k not in ('image_data', 'file_data')}
 
         # String results pass through directly so converters never
         # JSON-encode them (which would escape quotes, backslashes, etc.).
@@ -6751,6 +7136,8 @@ NOTES
                 is_error=not ok,
                 attachments=attachments,
                 enrichment_metadata=enrichment_metadata,
+                untrusted=_untrusted,
+                untrusted_source=_untrusted_source,
             )
 
         # Normalize the payload into the model-facing form: wrap non-dicts,
@@ -6777,6 +7164,8 @@ NOTES
             is_error=not ok,
             attachments=attachments,
             enrichment_metadata=enrichment_metadata,
+            untrusted=_untrusted,
+            untrusted_source=_untrusted_source,
         )
 
     def _inject_synthetic_cancelled_results(self, fcs: List[FunctionCall]) -> None:
@@ -7169,6 +7558,10 @@ NOTES
         (which auto-computes ``llm.token_count.total`` via _SpanWrapper),
         plus optional cache and reasoning detail attributes.
 
+        When the provider reports a cost (``usage.cost_usd``), also sets
+        ``gen_ai.usage.cost`` (Langfuse OTLP cost ingestion) and
+        ``llm.cost.total`` (OpenInference / Arize Phoenix).
+
         Also records ``llm.output_messages.*`` (OpenInference indexed attributes)
         from the model response, and ``gen_ai.response.finish_reasons``.
 
@@ -7206,6 +7599,27 @@ NOTES
         if usage.reasoning_tokens is not None:
             span.set_attribute("llm.token_count.completion_details.reasoning", usage.reasoning_tokens)
 
+        # Cost (USD). Precedence mirrors the daemon's core.py:_build_usage:
+        #   1. provider-reported ``usage.cost_usd`` (e.g. claude_cli's
+        #      total_cost_usd, OpenRouter's cost) — fiscal truth, wins.
+        #   2. operator pricing table (.jaato/pricing.json) computed from
+        #      the model name + token counts, so cost lands on the span even
+        #      for providers that don't report it on the wire.
+        #   3. None — no source knew; the observability backend may still
+        #      compute cost from model + token counts (e.g. Langfuse's
+        #      model-pricing catalog).
+        # We resolve here, while the span is open — the daemon boundary that
+        # populates UsageBreakdown.cost_usd runs after the span has closed.
+        # Two keys are emitted so pre-computed cost renders in either backend:
+        #   - ``gen_ai.usage.cost``  → Langfuse's OTLP cost ingestion
+        #   - ``llm.cost.total``     → OpenInference (Arize Phoenix)
+        # Both are cost attributes (not token-count buckets), so emitting both
+        # does not trip Langfuse's inclusive/exclusive token-bucket contract.
+        cost_usd = self._resolve_span_cost(usage)
+        if cost_usd is not None:
+            span.set_attribute("gen_ai.usage.cost", cost_usd)
+            span.set_attribute("llm.cost.total", cost_usd)
+
         # Cache outcome classification (hit/partial/warm/miss/unknown)
         # so external observers can correlate cache behavior with the
         # GC ↔ cache coordination dance.
@@ -7228,6 +7642,50 @@ NOTES
             if usage.output_tokens is not None:
                 self._turn_completion_tokens = getattr(self, '_turn_completion_tokens', 0) + usage.output_tokens
                 turn_span.set_attribute("llm.token_count.completion", self._turn_completion_tokens)
+
+    def _resolve_span_cost(self, usage) -> Optional[float]:
+        """Resolve per-call cost (USD) for an LLM telemetry span.
+
+        Precedence mirrors ``JaatoServer._build_usage`` so the span and the
+        emitted ``UsageBreakdown`` agree:
+
+        1. ``usage.cost_usd`` — provider-reported; fiscal truth, wins.
+        2. Operator pricing table (``.jaato/pricing.json`` via
+           ``shared.pricing``) computed from the model name + token counts.
+        3. ``None`` — no source knew (the backend may still estimate).
+
+        The pricing table is loaded lazily on first non-reported cost and
+        cached on the session, so cost-free sessions never touch the JSON.
+        Any failure to load/compute degrades to ``None`` (telemetry must
+        never break a turn).
+
+        Args:
+            usage: The response ``TokenUsage``.
+
+        Returns:
+            Cost in USD, or ``None`` when no source can supply it.
+        """
+        if usage.cost_usd is not None:
+            return usage.cost_usd
+        if not self._model_name:
+            return None
+        try:
+            if not self._span_pricing_loaded:
+                from shared.pricing import load_pricing
+                self._span_pricing = load_pricing(self.workspace_path)
+                self._span_pricing_loaded = True
+            if self._span_pricing is None or not self._span_pricing.has(self._model_name):
+                return None
+            return self._span_pricing.cost_for_usage(
+                self._model_name,
+                prompt_tokens=int(usage.prompt_tokens or 0),
+                output_tokens=int(usage.output_tokens or 0),
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            self._trace(f"LLM_TELEMETRY: pricing-table cost lookup failed: {e}")
+            return None
 
     def _record_input_messages_telemetry(self, span) -> None:
         """Record OpenInference input messages on a telemetry span.
@@ -7568,9 +8026,28 @@ NOTES
         self.reset_session(current_history)
 
     def get_context_limit(self) -> int:
-        """Get the context window limit for the current model."""
+        """Get the context window limit for the current model.
+
+        Returns ``0`` — the honest "unknown" sentinel — when the provider
+        has not been materialized yet.  The provider is lazy-created
+        (``_ensure_provider``, first model use), so before the first turn
+        there is no model to read a window from.
+
+        This mirrors the ``InstructionBudget`` design, which also starts at
+        ``context_limit = 0`` (see ``_populate_instruction_budget``) rather
+        than a hardcoded default: a fake non-zero limit (the old
+        ``1_048_576``) masked a not-yet-materialized/misconfigured provider
+        and, worse, poisoned the daemon-side ``_cached_context_limit`` — the
+        cache only refreshes on a ``0`` reading (``core.py`` context-update
+        handler), so a bogus 1M value was cached at ``initialize()`` time and
+        never healed, making every ``ContextUpdatedEvent`` report 1M even for
+        a tiny-context model (e.g. Gemini Nano ~9k).  Every consumer of this
+        value already guards ``context_limit > 0`` / ``max(0, ...)``, and the
+        runner RPC handler documents ``0`` as the provider-not-initialized
+        signal daemon callers retry on.
+        """
         if not self._provider:
-            return 1_048_576
+            return 0
         return self._provider.get_context_limit()
 
     def get_context_usage(self) -> Dict[str, Any]:
@@ -7941,7 +8418,7 @@ NOTES
                 else:
                     return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
-            function_calls = list(response.function_calls) if response.function_calls else []
+            function_calls = list(response.get_function_calls())
             while function_calls:
                 response_text = response.get_text()
                 if response_text and on_output:
@@ -8022,6 +8499,9 @@ NOTES
                     # Emit hook: tool ended
                     fc_duration = (fc_end - fc_start).total_seconds()
                     if self._ui_hooks:
+                        fc_result_payload = _split_executor_result_impl(
+                            executor_result
+                        )[1]
                         self._ui_hooks.on_tool_call_end(
                             agent_id=self._agent_id,
                             tool_name=name,
@@ -8033,6 +8513,7 @@ NOTES
                             continuation_id=fc_continuation_id,
                             show_output=fc_show_output,
                             show_popup=fc_show_popup,
+                            is_error_result=tool_result_is_error(fc_result_payload),
                         )
 
                     turn_data['function_calls'].append({
@@ -8082,7 +8563,7 @@ NOTES
                     self._accumulate_turn_tokens(response, turn_data)
                     # Record token usage to telemetry span
                     self._record_token_telemetry(llm_telemetry, response)
-                function_calls = list(response.function_calls) if response.function_calls else []
+                function_calls = list(response.get_function_calls())
 
             final_text = response.get_text()
             if final_text and on_output:
@@ -8113,6 +8594,31 @@ NOTES
             raise
 
         finally:
+            # Record the terminal response's finish reason on the turn
+            # accounting (it rides ``TurnCompletedEvent.finish_reason``) and,
+            # for an abnormal stop, surface a ``source="system"`` banner so a
+            # truncated turn isn't mistaken for a clean completion.  Unlike
+            # ``_run_chat_loop`` this parts loop has no per-continuation
+            # classifier, so the terminal ``response`` here is the single
+            # reliable capture point — it also covers a *continuation* that
+            # ended abnormally, which the initial-response inline check above
+            # never saw.
+            if response is not None and response.finish_reason is not None:
+                turn_data['finish_reason'] = response.finish_reason.value
+                if (
+                    response.finish_reason in (
+                        FinishReason.MAX_TOKENS,
+                        FinishReason.SAFETY,
+                        FinishReason.ERROR,
+                    )
+                    and on_output is not None
+                ):
+                    on_output(
+                        "system",
+                        self._abnormal_finish_message(response.finish_reason),
+                        "write",
+                    )
+
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
@@ -8591,6 +9097,37 @@ NOTES
             return self._system_instruction + "\n\n" + tier_line
         return tier_line
 
+    def _provider_for_tier(self, provider_name: str, model: str) -> 'ModelProviderPlugin':
+        """Cached provider instance for a cross-provider tier (V2).
+
+        Creates + caches on first use, keyed by ``provider_name``.  Reuses the
+        session's lazy-pending ``plugin_configs`` / ``skip_model_test`` so each
+        provider reads its OWN ``plugin_configs`` section (e.g.
+        ``plugin_configs.openrouter``).  A later switch back is O(1) (cache hit).
+        """
+        prov = self._provider_cache.get(provider_name)
+        if prov is not None:
+            return prov
+        # Read the PERSISTENT base config, NOT _provider_lazy_pending — the
+        # latter is cleared to None once the main provider is created, which
+        # left cross-provider tier providers with plugin_configs=None (no
+        # api_key).  _tier_provider_base survives that clear.
+        cfg = self._tier_provider_base or {}
+        prov = self._runtime.create_provider(
+            model,
+            provider_name=provider_name,
+            skip_model_test=cfg.get('skip_model_test', True),
+            plugin_configs=cfg.get('plugin_configs'),
+        )
+        if hasattr(prov, 'set_agent_context'):
+            prov.set_agent_context(
+                agent_type=self._agent_type,
+                agent_name=self._agent_name,
+                agent_id=self._agent_id,
+            )
+        self._provider_cache[provider_name] = prov
+        return prov
+
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.
 
@@ -8638,11 +9175,21 @@ NOTES
             }
 
         if self._provider is not None:
+            target_provider = entry.provider
             try:
+                if target_provider and target_provider != self._active_provider_name:
+                    # V2 cross-provider tier: swap self._provider to the cached
+                    # (or newly-created) instance for this tier's provider, then
+                    # point it at the tier's model.  History is provider-neutral
+                    # (Message/Part), so the conversation flows across the swap.
+                    self._provider = self._provider_for_tier(
+                        target_provider, entry.model)
+                    self._active_provider_name = target_provider
                 self._provider.connect(entry.model, skip_model_test=True)
             except Exception as exc:
                 logger.warning(
-                    "switch_tier: provider.connect(%s) failed: %s",
+                    "switch_tier: swap/connect to %s/%s failed: %s",
+                    target_provider or self._active_provider_name,
                     entry.model, exc,
                 )
                 raise

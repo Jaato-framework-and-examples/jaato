@@ -40,7 +40,7 @@ def _get_ambiguous_width() -> int:
         1 or 2 depending on configuration.
     """
     try:
-        value = os.environ.get("JAATO_AMBIGUOUS_WIDTH", "1")
+        value = os.environ.get("JAATO_AMBIGUOUS_WIDTH", "1")  # env: width of East Asian Ambiguous chars in tables (1 default; 2 for CJK terminals)
         return 2 if value == "2" else 1
     except (ValueError, TypeError):
         return 1

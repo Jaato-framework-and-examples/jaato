@@ -35,17 +35,17 @@ DEFAULT_CONTEXT_LENGTH = 8192
 
 def resolve_host() -> str:
     """Return the LM Studio server URL."""
-    return os.environ.get(ENV_HOST, DEFAULT_HOST)
+    return os.environ.get(ENV_HOST, DEFAULT_HOST)  # env: LM Studio server URL (default http://localhost:1234)
 
 
 def resolve_model() -> Optional[str]:
     """Return the default model name, if configured."""
-    return os.environ.get(ENV_MODEL)
+    return os.environ.get(ENV_MODEL)  # env: default model name (unset = whatever LM Studio already has loaded)
 
 
 def resolve_context_length() -> Optional[int]:
     """Return the context length override, if configured."""
-    val = os.environ.get(ENV_CONTEXT_LENGTH)
+    val = os.environ.get(ENV_CONTEXT_LENGTH)  # env: override context window (normally discovered from /api/v0/models)
     if val:
         try:
             return int(val)
@@ -60,4 +60,4 @@ def resolve_api_token() -> Optional[str]:
     Returns None when LM Studio is running without ``Require API Token``
     (the common local-dev case).
     """
-    return os.environ.get(ENV_API_TOKEN)
+    return os.environ.get(ENV_API_TOKEN)  # env: bearer token, only when LM Studio requires auth

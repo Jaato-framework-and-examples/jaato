@@ -80,6 +80,9 @@ class TestLifecycleFlagInvariant:
         tools._session = session
         tools._payload_schema = payload_schema
         tools._processors_loaded = None
+        # Production __init__ seeds this dict; the no-args
+        # signal_completion path reads it (lifecycle_tools.py:695).
+        tools._accumulated_payload = {}
         return tools, session
 
     def test_flag_stays_false_on_schema_validation_failure(self):
@@ -182,6 +185,7 @@ class TestExecuteToolsAndContinueTermination:
         session._signal_completion_called = signal_completion_called
         session._cancel_token = None
         session._is_cancelled = lambda: False
+        session._provider = None  # lazy — not created until _ensure_provider
         session._executor = MagicMock()
         session._gc_plugin = None
         session._gc_config = None

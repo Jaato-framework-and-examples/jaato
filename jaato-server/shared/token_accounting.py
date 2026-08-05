@@ -170,7 +170,7 @@ class TokenLedger:
         can't leave a partial line in the ledger (which would corrupt
         downstream JSONL parsers).
         """
-        path = os.environ.get("LEDGER_PATH", filepath)
+        path = os.environ.get("LEDGER_PATH", filepath)  # env: output path for the token-accounting JSONL ledger
         try:
             with open(path, "a", encoding="utf-8") as f:
                 for idx, ev in enumerate(self._events):

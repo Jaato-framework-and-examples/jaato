@@ -9,13 +9,15 @@ import logging
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, TextIO
+from typing import Any, Sequence, TextIO
 from contextlib import asynccontextmanager
 import os
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool, CallToolResult, Implementation
+
+from shared.secret_scrub import scrub_env
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +49,31 @@ class MCPServerUnavailableError(RuntimeError):
 
 @dataclass
 class ServerConfig:
-    """Configuration for an MCP server."""
+    """Configuration for an MCP server.
+
+    ``scrub_secret_env`` holds operator-declared name globs (case-insensitive
+    fnmatch) for secrets that must NOT be inherited by the server subprocess.
+    The MCP server is model-invokable, possibly third-party code named in
+    ``.mcp.json``; without scrubbing it inherits the runner's full ``os.environ``
+    (provider key, tokens) and can exfiltrate them.  See :mod:`shared.secret_scrub`.
+    """
     name: str
     command: str
     args: list[str] = field(default_factory=list)
     env: dict[str, str] | None = None
+    scrub_secret_env: Sequence[str] = ()
 
     def to_stdio_params(self) -> StdioServerParameters:
+        # Scrub declared secrets from the INHERITED environment only; the
+        # per-server ``env`` (an explicit operator grant in .mcp.json) is
+        # overlaid afterwards and never scrubbed — so a token the operator
+        # deliberately hands this server still reaches it, while framework
+        # secrets it was never granted do not leak in.
+        inherited = scrub_env(os.environ, self.scrub_secret_env)
         return StdioServerParameters(
             command=self.command,
             args=self.args,
-            env={**os.environ, **(self.env or {})},
+            env={**inherited, **(self.env or {})},
         )
 
 
@@ -150,10 +166,24 @@ class MCPClientManager:
                 server initialization messages.
     """
 
-    def __init__(self, errlog: TextIO | None = None):
+    def __init__(
+        self,
+        errlog: TextIO | None = None,
+        scrub_secret_env: Sequence[str] = (),
+    ):
         self._connections: dict[str, ServerConnection] = {}
         self._task_group = None
         self._errlog = errlog if errlog is not None else sys.stderr
+        # Operator-declared secret name globs stripped from every server
+        # subprocess's inherited environment (see ServerConfig.to_stdio_params).
+        # Defensively normalize the public knob: a lone string is a 1-item tuple
+        # (NOT split into characters, which would disable scrubbing), and every
+        # entry is coerced to str (a non-str would raise in fnmatch).
+        if isinstance(scrub_secret_env, str):
+            scrub_secret_env = (scrub_secret_env,)
+        self._scrub_secret_env: Sequence[str] = tuple(
+            str(p) for p in (scrub_secret_env or ())
+        )
 
     @property
     def servers(self) -> list[str]:
@@ -215,6 +245,7 @@ class MCPClientManager:
             command=command,
             args=args or [],
             env=env,
+            scrub_secret_env=self._scrub_secret_env,
         )
 
         return await self._do_connect(config)

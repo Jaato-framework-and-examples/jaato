@@ -67,6 +67,25 @@ class SessionState:
     recipe source.
     """
 
+    profile_spec: Optional[Dict[str, Any]] = None
+    """The UNRESOLVED inline-profile spec, when the session was created
+    from an inline profile (``profile_name == "<inline>"``) rather than a
+    named profile on disk.
+
+    An inline profile has no re-resolvable name, so disk-restore cannot
+    re-bind its recipe via the profile registry (the named-profile
+    assumption behind ``profile_name``).  Persisting the original spec
+    dict — the same JSON shape ``build_inline_profile`` accepts — lets
+    restore reconstruct the full recipe (model + provider + plugins +
+    plugin_configs + system_instructions + GC) with NO named profile.
+
+    Stored **unresolved** (secret URIs like ``pass://`` preserved, not the
+    resolved literals) so credentials never land in the on-disk session
+    record; the daemon re-resolves them at restore, exactly as it does at
+    create.  ``None`` for named-profile sessions (they restore via
+    ``profile_name``) and for records written before this field existed.
+    """
+
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""
 
@@ -87,6 +106,34 @@ class SessionState:
 
     None for sessions persisted before 2.4 OR sessions spawned
     without a config_root override (default workspace-only layout).
+    """
+
+    sandbox_mode: Optional[str] = None
+    """Confinement mode at session-creation time (e.g. ``"apparmor"``).
+
+    Persisted so disk-restore / orphan-revive re-applies the SAME
+    confinement on runner re-spawn.  Without it a revived session's
+    ``_load_session`` read of ``state.sandbox_mode`` was always None
+    (the field didn't exist) → the re-spawned runner ran UNCONFINED
+    after any idle detach — a security regression.  Mirrors the
+    ``BootstrapEnvelope.sandbox_mode`` the restore path consumes;
+    None on old records / never-confined sessions (unchanged behavior).
+    """
+
+    agent_name: Optional[str] = None
+    """Agent/persona identity (``--agent <name>``) the session was
+    spawned with.
+
+    Persisted so disk-restore / orphan-revive rebinds the SAME persona
+    (``.jaato/agents/<name>.md`` layered on the base instructions).
+    Without it a revived session's ``_load_session`` built
+    ``JaatoServer(agent_name=None)`` → no persona → persona-only
+    guidance (e.g. "call ``enter_tier('vision')`` on user images") was
+    silently dropped, so a revived multimodal session kept its
+    ``enter_tier`` tool but never the instruction to use it → images
+    hit the text tier and confabulated.  Mirrors
+    ``BootstrapEnvelope.agent_name``; None on old records / no-persona
+    sessions (unchanged behavior — the agent id falls back to "main").
     """
 
     budget_state: Optional[Dict[str, Any]] = None

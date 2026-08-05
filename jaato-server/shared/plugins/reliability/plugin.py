@@ -16,7 +16,7 @@ from jaato_sdk.plugins.base import (
     ToolPlugin,
     UserCommand,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, tool_result_is_error
 from .types import (
     BehavioralPattern,
     BehavioralPatternType,
@@ -1251,10 +1251,13 @@ class ReliabilityPlugin(RunnerForwardingMixin):
             return self._handle_success(state)
 
     def _is_error_result(self, result: Any) -> bool:
-        """Check if a result indicates an error even if execution 'succeeded'."""
-        if not isinstance(result, dict):
-            return False
-        return "error" in result or result.get("status_code", 200) >= 400
+        """Check if a result indicates an error even if execution 'succeeded'.
+
+        Delegates to the canonical ``tool_result_is_error`` helper so there is a
+        single source of truth shared with the ``tool.call_completed`` event
+        populate.
+        """
+        return tool_result_is_error(result)
 
     def _get_or_create_state(self, key_str: str, tool_name: str) -> ToolReliabilityState:
         """Get existing state or create new one."""
@@ -2730,7 +2733,7 @@ class ReliabilityPlugin(RunnerForwardingMixin):
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(generate_default_config_safe(), encoding="utf-8")
 
-        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"  # env: external editor for interactive edits (EDITOR, then VISUAL, else vi)
 
         try:
             result = subprocess.run([editor, str(config_path)], check=False)

@@ -10,6 +10,7 @@ This plugin provides interactive Python notebook capabilities:
 """
 
 import asyncio
+import contextvars
 import io
 import os
 import queue
@@ -21,7 +22,7 @@ from enum import Enum
 from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
 
 from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .types import ExecutionStatus, OutputType
 from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
@@ -29,6 +30,7 @@ from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
 from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
 from shared.ai_tool_runner import get_current_tool_output_callback
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from ..workspace_venv import pip_apparmor_rules
 from shared.trace import trace as _trace_write
 
 # Thread-local storage for per-session tool bindings state.
@@ -89,7 +91,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         # Cache last analysis for permission display
         self._last_analysis: Optional[AnalysisResult] = None
         # Notebook Tool Bindings state
-        self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "true").lower() not in ("0", "false", "no")
+        self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "true").lower() not in ("0", "false", "no")  # env: expose jaato tools as callable Python bindings inside notebooks (default true)
         self._tool_bindings_signatures: Optional[str] = None  # Cached for system instructions (not thread-local)
         # Tool bindings state (_tool_executor, _tool_bindings_bridge,
         # _tool_bindings_module) is stored in thread-local via properties
@@ -169,13 +171,28 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         local_backend.initialize(config)
         self._backends["local"] = local_backend
 
+        # Opt-in subprocess-kernel backend (design 1c): each notebook runs in its
+        # OWN subprocess rooted at workspace_root, so notebook code's relative
+        # paths resolve in-workspace (no process-global chdir, core.py:915).
+        # Default stays "local" (in-process) until the PR 3 cutover.
+        from .backends.subprocess_kernel import SubprocessKernelBackend
+        subprocess_backend = SubprocessKernelBackend()
+        subprocess_backend.initialize(config)
+        self._backends["subprocess"] = subprocess_backend
+
         # Kaggle backend is initialized lazily when first requested (gpu=true)
         # This avoids stalling during plugin init if kaggle auth is missing/slow
         if not _KAGGLE_AVAILABLE:
             self._trace("Kaggle backend not available: kaggle package not installed")
 
-        # Set default backend (only local is available at init time)
-        self._active_backend_name = "local"
+        # 1c cutover: the subprocess kernel (cwd=workspace, so notebook relative
+        # paths resolve in-workspace) is the DEFAULT.  "local" opts back to the
+        # in-process backend — kept one release as the CWD-escape fallback.
+        # kaggle is chosen per-call via gpu.
+        requested = (config.get("default_backend") or config.get("backend")
+                     or "subprocess")
+        self._active_backend_name = (
+            "local" if requested == "local" else "subprocess")
 
         self._initialized = True
         self._trace(f"Initialized with backend={self._active_backend_name}")
@@ -266,8 +283,39 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "description": "Sandbox mode",
                     "enum": ["disabled", "warn", "block_critical", "strict"],
                 },
+                "workspace_venv": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped venv to run the "
+                        "subprocess kernel from (empty = off; subprocess "
+                        "backend only). Relative paths resolve against the "
+                        "workspace root. Created if absent with "
+                        "--system-site-packages; the model's in-notebook pip "
+                        "installs persist there. Recommended: .jaato/tool-venv"
+                    ),
+                },
             },
         }
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute pip's AppArmor rules to the profile.
+
+        In-notebook ``pip install`` / ``!pip`` needs the distro/UA OS-id reads
+        (crashes without them under confinement) plus, when a ``workspace_venv``
+        is set, an ``ix`` grant on the venv bin so a bare ``!pip`` / console
+        script runs.  Scoped to sessions that load ``notebook`` —
+        least-privilege.  See ``pip_apparmor_rules``.
+        """
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
 
     def set_workspace_path(self, path: str) -> None:
         """Set workspace root path (auto-wired by PluginRegistry).
@@ -280,6 +328,12 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         """
         self._workspace_root = path
         self._rebuild_code_analyzer()
+        # Propagate to the subprocess-kernel backend so its kernels spawn with
+        # cwd=workspace — the workspace can be set AFTER initialize() (the #344
+        # set_workspace_path flow), and kernels spawn lazily on first execute.
+        sub = self._backends.get("subprocess")
+        if sub is not None:
+            sub.initialize({"workspace_root": path})
         self._trace(f"Workspace path set to: {path}")
 
     def set_plugin_registry(self, registry) -> None:
@@ -353,6 +407,11 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         for backend in self._backends.values():
             if isinstance(backend, LocalJupyterBackend):
                 backend.inject_tools_module(self._tool_bindings_module)
+            elif hasattr(backend, "set_tool_executor"):
+                # Subprocess-kernel backend (1c): wire the executor that serves
+                # the kernel's cross-process tool_call frames — the out-of-process
+                # analogue of inject_tools_module.
+                backend.set_tool_executor(self._tool_executor.execute)
 
     def _rebuild_code_analyzer(self) -> None:
         """Rebuild the code analyzer with current configuration.
@@ -430,7 +489,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "required": ["code"]
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_create",
@@ -454,7 +513,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "required": ["name"]
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_variables",
@@ -469,7 +528,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     },
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_reset",
@@ -484,7 +543,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     },
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_list",
@@ -494,7 +553,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "properties": {},
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="notebook_backends",
@@ -504,7 +563,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "properties": {},
                 },
                 category="code",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
         ]
 
@@ -883,7 +942,11 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                 }
             backend = self._backends["kaggle"]
         else:
-            backend = self._backends["local"]
+            # Honor the active (non-gpu) backend — "subprocess" by default since
+            # the 1c cutover, "local" only when explicitly opted out.  Hardcoding
+            # "local" here silently bypassed the subprocess kernel entirely
+            # (notebooks ran in-process, so os.getcwd() == the daemon launch dir).
+            backend = self._active_backend
 
         try:
             info = backend.create_notebook(name, gpu_enabled=gpu)
@@ -1090,8 +1153,12 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
             yield chunk
             return
 
-        # Get current execution count (will be incremented after execution)
-        exec_count = backend._execution_counts.get(notebook_id, 0) + 1
+        # Next execution number (cosmetic "In [N]:" label).  Read it via the
+        # NotebookInfo protocol, not a backend-specific internal — the subprocess
+        # kernel backend has no `_execution_counts`.
+        prior = next((nb.execution_count for nb in backend.list_notebooks()
+                      if nb.notebook_id == notebook_id), 0)
+        exec_count = prior + 1
 
         self._trace(f"Streaming execution in {notebook_id}: {code[:50]}...")
 
@@ -1142,8 +1209,17 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
             except Exception as e:
                 error_holder[0] = e
 
-        # Start execution in background thread
-        exec_thread = threading.Thread(target=run_execution, daemon=True)
+        # Start execution in a background thread, within a COPY of the current
+        # context.  ContextVars do NOT propagate to a raw thread, and the
+        # subprocess backend's _spawn reads the session workspace from the
+        # session_context ContextVar (get_workspace_root) — without this copy it
+        # would miss the per-session value and the kernel would chdir to the
+        # daemon launch dir (the streaming-path analogue of the thread-local
+        # trusted_bridge note in run_execution; same root cause, ContextVars
+        # instead of a thread-local).
+        ctx = contextvars.copy_context()
+        exec_thread = threading.Thread(
+            target=lambda: ctx.run(run_execution), daemon=True)
         exec_thread.start()
 
         # Wait for execution to complete (with periodic checks)
@@ -1279,7 +1355,9 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
     def _format_input_cell(self, code: str, exec_count: int) -> str:
         """Format code as an input cell with nb-row markers.
 
-        Uses 'ipython' language to skip LSP validation (supports !shell, %magic).
+        Uses 'ipython' language to skip LSP validation.  Cells support
+        per-line ``!shell`` escapes (see cell_transform.py); ``%magic`` is
+        NOT implemented.
         """
         label = f"In [{exec_count}]:"
         return f'<nb-row type="input" label="{label}">\n```ipython\n{code}\n```\n</nb-row>'

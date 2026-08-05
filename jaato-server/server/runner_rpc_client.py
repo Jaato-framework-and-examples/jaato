@@ -501,6 +501,9 @@ class RunnerRPCClient:
                         )
                         continue
                     fut = self._in_flight.pop(env.id, None)
+                    logger.info(   # [RPC_DIAG] DIAG BRANCH — daemon reply match
+                        "[RPC_DIAG] daemon read_loop RESPONSE id=%s in_flight_had=%s client=%s",
+                        env.id, fut is not None, id(self))
                     self._stream_cbs.pop(env.id, None)
                     self._notification_cbs.pop(env.id, None)
                     if fut is not None and not fut.done():
@@ -712,6 +715,8 @@ class RunnerRPCClient:
 
         fut: "asyncio.Future[ResponseEnvelope]" = self._loop.create_future()
         self._in_flight[request_id] = fut
+        logger.info(   # [RPC_DIAG] DIAG BRANCH — daemon future registered
+            "[RPC_DIAG] daemon _in_flight SET id=%s client=%s", request_id, id(self))
         if on_output is not None:
             self._stream_cbs[request_id] = on_output
         if on_notification is not None:
@@ -954,6 +959,30 @@ class RunnerRPCClient:
             self.session_health_check(timeout=timeout), timeout=timeout,
         )
 
+    async def session_register_client_tools(
+        self, client_tools: List[Dict[str, Any]], *,
+        timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        """Mid-session: glue newly-registered client-provided ("host") tool
+        SCHEMAS to the LIVE runner registry so the runner-tier model sees them
+        WITHOUT a session restart (calls ``_register_client_tools_on_runner``).
+        Execution still forwards daemon-side → the client via the existing
+        host-tool proxy.  Returns ``{"registered": [names]}``.
+        """
+        return await self._call_named(
+            "session.register_client_tools",
+            {"client_tools": client_tools}, timeout=timeout,
+        )
+
+    def session_register_client_tools_threadsafe(
+        self, client_tools: List[Dict[str, Any]], *,
+        timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_register_client_tools(client_tools, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_state(
         self,
         key: str,
@@ -1104,6 +1133,34 @@ class RunnerRPCClient:
     ) -> Tuple[bool, int]:
         return self._run_threadsafe(
             self.session_try_completion_nudge(max_nudges, timeout=timeout),
+            timeout=timeout,
+        )
+
+    async def session_try_drain_pending_user(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        """Atomically pop a pending high-priority (USER/PARENT/SYSTEM)
+        message for the daemon's post-turn drain (multi-turn deadlock fix).
+
+        See :meth:`JaatoSession.try_drain_pending_user`.  Returns the message
+        text to run as the next turn, or ``None`` when nothing is queued (or
+        a turn is already running runner-side).
+
+        Raises:
+            RunnerCallError on transport failure or runner-side exception.
+        """
+        result = await self._call_named(
+            "session.try_drain_pending_user",
+            {},
+            timeout=timeout,
+        )
+        return result.get("text")
+
+    def session_try_drain_pending_user_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        return self._run_threadsafe(
+            self.session_try_drain_pending_user(timeout=timeout),
             timeout=timeout,
         )
 
@@ -1376,7 +1433,7 @@ class RunnerRPCClient:
                 call).
         """
         from jaato_sdk.plugins.model_provider.types import (
-            EditableContent, ToolSchema,
+            EditableContent, ToolSchema, DISCOVERABILITY_DEFERRED,
         )
 
         result = await self._call_named(
@@ -1416,8 +1473,8 @@ class RunnerRPCClient:
                     else None
                 ),
                 discoverability=str(
-                    entry.get("discoverability", "discoverable")
-                    or "discoverable",
+                    entry.get("discoverability", DISCOVERABILITY_DEFERRED)
+                    or DISCOVERABILITY_DEFERRED,
                 ),
                 editable=editable,
                 traits=traits,
@@ -2186,6 +2243,7 @@ class RunnerRPCClient:
         on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Phase 3 §7b.2: dispatch ``session.send_message`` to the
         runner.  Long-running — streams output via ``on_output``
@@ -2224,9 +2282,14 @@ class RunnerRPCClient:
                 (``stage="cancelled"``), or send-loop crash
                 (``stage="send"``).
         """
+        # Text-only sends stay wire-identical (no attachments key); user-message
+        # multimodal adds the base64 attachment list for the runner session.
+        args: Dict[str, Any] = {"prompt": prompt}
+        if attachments:
+            args["attachments"] = attachments
         coro = self.call(
             "session.send_message",
-            {"prompt": prompt},
+            args,
             on_output=on_output,
             on_notification=on_notification,
             cancel_token=cancel_token,
@@ -2256,6 +2319,7 @@ class RunnerRPCClient:
         on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Synchronous wrapper for ``session_send_message`` from
         worker threads.  Note: long-running; the future may block
@@ -2273,6 +2337,7 @@ class RunnerRPCClient:
             on_notification=on_notification,
             cancel_token=cancel_token,
             timeout=timeout,
+            attachments=attachments,
         )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(

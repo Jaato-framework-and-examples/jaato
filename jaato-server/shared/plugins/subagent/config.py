@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tup
 from typing import runtime_checkable
 
 from shared.runtime_limits import RuntimeLimits
+from shared.instruction_suppression import normalize_suppression
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +229,69 @@ def _resolve_secret_uri(value: str) -> str:
         raise
     except Exception as exc:
         raise SecretResolutionError(value, str(exc)) from exc
+
+
+def looks_like_unresolved_secret_uri(value: Any) -> bool:
+    """Return True if *value* is a non-network ``scheme://`` secret-URI that
+    was NOT resolved (it passed through literally because no resolver is
+    registered for its scheme).
+
+    Used to FAIL LOUD at the provider credential boundary: a *resolved* secret
+    is a plain string, so a credential field still shaped like ``pass://...`` /
+    ``vault://...`` means the providing resolver plugin (e.g. jaato-premium's
+    ``secret_resolvers`` entry point) isn't installed.  ``_resolve_secret_uri``
+    intentionally passes such values through (so non-provider consumers like
+    ``service_connector`` can report "credential missing" with provenance), but
+    a provider must NOT send a literal secret URI as an API key — that produces
+    a confusing upstream 401.  Network schemes (http/ws/...), ``${VAR}``
+    placeholders, and non-URI strings return False.
+    """
+    if not isinstance(value, str) or "${" in value:
+        return False
+    m = _SECRET_URI_RE.match(value)
+    if not m:
+        return False
+    return m.group("scheme") not in _NETWORK_SCHEMES
+
+
+# Regex for a MALFORMED single-colon secret reference: ``scheme:path`` with
+# the ``//`` dropped (``pass:x`` instead of ``pass://x`` — the #1 secret-URI
+# typo).  The ``(?!//)`` lookahead excludes the well-formed ``scheme://`` form
+# (that's :data:`_SECRET_URI_RE`), so this matches ONLY the ``//``-less shape.
+_MALFORMED_SECRET_URI_RE = re.compile(
+    r'^(?P<scheme>[a-z][a-z0-9_+-]*):(?!//)(?P<rest>\S+)$'
+)
+
+
+def looks_like_malformed_secret_uri(value: Any) -> Optional[str]:
+    """Return the scheme name if *value* is a MALFORMED single-colon secret
+    reference for a REGISTERED resolver — e.g. ``pass:jaato/x`` when the user
+    meant ``pass://jaato/x`` — else ``None``.
+
+    The well-formed ``scheme://`` form is handled by
+    :func:`looks_like_unresolved_secret_uri`.  This catches the common
+    ``//``-dropped typo, which is invisible to the resolver machinery: a single
+    colon fails :data:`_SECRET_URI_RE`, so the value is passed through
+    literally and reaches the provider as a bearer token — producing exactly
+    the confusing upstream 401 the ``//`` guard exists to prevent.
+
+    Only a scheme that is an ACTIVELY REGISTERED resolver
+    (:func:`_discover_secret_resolvers`) is flagged, so on a host without that
+    resolver a literal ``word:word`` value is left untouched and there is no
+    hardcoded scheme list.  Network schemes (http/ws/...) and ``${VAR}``
+    placeholders return ``None``.
+    """
+    if not isinstance(value, str) or "${" in value:
+        return None
+    m = _MALFORMED_SECRET_URI_RE.match(value)
+    if not m:
+        return None
+    scheme = m.group("scheme")
+    if scheme in _NETWORK_SCHEMES:
+        return None
+    if scheme in _discover_secret_resolvers():
+        return scheme
+    return None
 
 
 def reset_secret_resolvers() -> None:
@@ -472,8 +536,8 @@ def expand_variables(
         # confinement boundary, just not inside project-root subtree).
         # Operator-facing template var symmetric with workspaceRoot.
         'jdtlsStateRoot': _compute_jdtls_state_root(workspace_root),
-        'HOME': os.environ.get('HOME', ''),
-        'USER': os.environ.get('USER', ''),
+        'HOME': os.environ.get('HOME', ''),  # env: ambient — expanded as a template variable in profile/persona files
+        'USER': os.environ.get('USER', ''),  # env: ambient — expanded as a template variable in profile/persona files
     }
     # Merge with provided context (provided takes precedence)
     effective_context = {**default_context, **context}
@@ -924,10 +988,18 @@ class SubagentProfile:
             the rest is read by the CLI/interactive_shell plugins at
             tool-call time.  ``None`` means "no limits" (host defaults).
     """
-    name: str
-    description: str
-    plugins: List[str] = field(default_factory=list)
-    preloaded_plugins: set = field(default_factory=set)
+    name: str = field(metadata={
+        "description": "Unique profile identifier (the <agent>.yaml stem)."})
+    description: str = field(metadata={
+        "description": "Human-readable summary of what this (sub)agent does."})
+    plugins: List[str] = field(default_factory=list, metadata={
+        "description": "Plugin names to enable. `name(preload)` bypasses "
+        "deferred tool-loading (all its tools, incl. discoverable, enter the "
+        "initial context); `name(tools:[a,b])` scopes which tools are exposed "
+        "(see tool_scopes)."})
+    preloaded_plugins: set = field(default_factory=set, metadata={
+        "description": "DERIVED from `(preload)` annotations in `plugins` during "
+        "parsing — not set directly."})
     # Per-plugin tool allow-lists derived from ``tools:[...]`` modifiers
     # in the raw ``plugins`` list (see :func:`parse_plugin_entry`).  Maps
     # plugin name → list of tool names to expose; every other tool the
@@ -943,9 +1015,19 @@ class SubagentProfile:
     # cross-persona instruction) names a tool that the allow-list omits,
     # the model will be told to use a tool it cannot see.  Keep the
     # allow-list and the persona's referenced tools in sync.
-    tool_scopes: Dict[str, List[str]] = field(default_factory=dict)
-    plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    system_instructions: Optional[str] = None
+    tool_scopes: Dict[str, List[str]] = field(default_factory=dict, metadata={
+        "description": "Per-plugin tool allow-lists (plugin -> [tool names to "
+        "expose]); every other tool that plugin ships is dropped from this "
+        "session's wire + grammar. Absent plugin = all its tools. Keep in sync "
+        "with the persona's referenced tools."})
+    plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict, metadata={
+        "description": "Per-plugin config overrides (plugin name -> config "
+        "dict), e.g. plugin_configs.<provider>.api_params / .extra_body, "
+        "plugin_configs.permission.policy."})
+    system_instructions: Optional[str] = field(default=None, metadata={
+        "description": "DEPRECATED — use agents (.jaato/agents/<name>.md) "
+        "instead; an `--agent`'s rendered markdown replaces this. Profiles "
+        "should carry runtime config only."})
     # When True, drop the framework's BASE instructions layer (the
     # "Principle 1: Transparency Mandate" and other always-on framework
     # instructions) from this profile's system prompt.  Plugin-contributed
@@ -957,15 +1039,46 @@ class SubagentProfile:
     # per turn, which can be the difference between fitting in a small
     # model's context window and triggering aggressive GC.  Defaults to
     # ``False`` (full framework instructions).
-    suppress_base_instructions: bool = False
-    model: Optional[str] = None
-    provider: Optional[str] = None
-    max_turns: int = 10
-    gc: Optional[GCProfileConfig] = None
-    env: Dict[str, str] = field(default_factory=dict)
-    inherits: Optional[List[str]] = None
-    completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
-    spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = None
+    suppress_base_instructions: Any = field(default=False, metadata={
+        "description": "Drop framework-injected instruction layers from the system "
+        "prompt (plugin + agent instructions always kept).  `true` drops the disk "
+        "BASE layer (.jaato/instructions/*.md) AND the framework constants "
+        "(task-completion, parallel guidance, turn-summary); the security "
+        "untrusted-content boundary is kept.  A dict gives granular control, e.g. "
+        "`{disk: true, constants: true, security: false}` (absent key = keep).  "
+        "Saves ~3-5k tokens/turn for narrow goal-focused agents.  Default False.  "
+        "Normalized to a canonical frozenset of piece names in __post_init__."})
+    model: Optional[str] = field(default=None, metadata={
+        "description": "Model override (uses the parent's model if unset). "
+        "Silently ignored when model_tiers is non-empty."})
+    provider: Optional[str] = field(default=None, metadata={
+        "description": "Provider override (e.g. anthropic, nebius, vllm). A "
+        "profile binds exactly one provider + model."})
+    max_turns: int = field(default=10, metadata={
+        "description": "Max conversation turns before the (sub)agent returns."})
+    gc: Optional[GCProfileConfig] = field(default=None, metadata={
+        "description": "Garbage-collection strategy + thresholds for this "
+        "session (type + threshold_percent / target / preserve_recent_turns). "
+        "None = framework default."})
+    env: Dict[str, str] = field(default_factory=dict, metadata={
+        "description": "Session-scoped env vars (support ${VAR} expansion + "
+        "secret URIs, e.g. vault://secret/app#key). Applied for the session's "
+        "duration, never leak to other sessions."})
+    inherits: Optional[List[str]] = field(default=None, metadata={
+        "description": "Parent profile names to inherit from (tier-1 _base_* / "
+        "profile-set composition). Resolved + flattened at discover_profiles(); "
+        "cleared after."})
+    completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = field(
+        default=None, metadata={
+        "description": "JSON Schema constraining signal_completion's `payload` "
+        "(inline dict or a path under .jaato/completion_schemas/). Carried on "
+        "the tool so providers enforce it at sampling time + LifecycleTools "
+        "validates server-side. None = legacy `summary: str`."})
+    spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = field(
+        default=None, metadata={
+        "description": "JSON Schema constraining the spawn-time payload "
+        "(input boundary), mirror of completion_payload_schema. Inline dict or "
+        "a .jaato/completion_schemas/ path."})
     # Unified completion-processor surface (server 0.6.125+).  Replaces
     # the prior split between ``completion_artifacts`` (renderers that
     # produce files) and ``completion_validators`` (kb Python that
@@ -976,8 +1089,16 @@ class SubagentProfile:
     # docstring for the full kb author contract (probe-by-symbol:
     # ``render`` and/or ``validate``).  Inheritance concatenates
     # parent + child — each processor is independent and all fire.
-    completion_processors: List[CompletionProcessor] = field(default_factory=list)
-    runtime_limits: Optional[RuntimeLimits] = None
+    completion_processors: List[CompletionProcessor] = field(
+        default_factory=list, metadata={
+        "description": "kb Python hooks (.jaato/scripts/processors/, probed for "
+        "`render` and/or `validate`) run after jsonschema.validate passes; a "
+        "validator's error list blocks completion, a renderer produces files. "
+        "Inheritance concatenates parent + child; all fire."})
+    runtime_limits: Optional[RuntimeLimits] = field(default=None, metadata={
+        "description": "Per-session resource caps (memory, PIDs, CPU weight, "
+        "tool wall-clock timeout, stdout). 'How much can it consume' — "
+        "orthogonal to AppArmor's 'what can it touch'. None = host defaults."})
     # Per-turn model-tier config.  Empty dict means "single-model
     # mode" — the framework falls back to env vars (JAATO_TIER_*) at
     # session-init time, and from there to single-model behavior using
@@ -992,7 +1113,15 @@ class SubagentProfile:
     # enforces same-provider across all tiers).  See
     # ``shared/model_tiers.py`` for the resolver and validation, and
     # ``project_backlog_per_turn_model`` for the full design.
-    model_tiers: Dict[str, Any] = field(default_factory=dict)
+    model_tiers: Dict[str, Any] = field(default_factory=dict, metadata={
+        "description": "Per-turn model-tier selection. Single-level dict "
+        "mapping a tier key to a model (a model-name string, or "
+        "{model (required), provider (optional; V1 requires the same provider "
+        "across all tiers)}), plus the reserved control keys initial / fallback. "
+        "Non-empty silently ignores `model` (warns at load) — the active model "
+        "is picked per turn from model_tiers[<active_tier>]. Empty = "
+        "single-model mode (falls back to the JAATO_TIER_* env vars, then "
+        "`model`)."})
     # AppArmor confinement intent for the session (PR-A, 2026-05-14).
     #
     # ``False`` (default, back-compat) — the session bootstraps
@@ -1022,7 +1151,11 @@ class SubagentProfile:
     #      ``SessionManager.create_headless_session`` (kwarg wins).
     #   2. This profile field.
     #   3. Legacy unconfined default (``False`` until PR-B).
-    apparmor: bool = False
+    apparmor: bool = field(default=False, metadata={
+        "description": "Opt into per-session kernel-enforced AppArmor "
+        "confinement (best-effort; no-ops on hosts without AppArmor). "
+        "False = unconfined. Resolution: create_headless_session kwarg > this "
+        "field > legacy unconfined default."})
 
     # Provider/model quirks declarations (server 0.6.194+).
     #
@@ -1050,7 +1183,10 @@ class SubagentProfile:
     # Defaults to an empty dict (no quirks active).  Inheritance follows
     # the collection-union rule: child + parent keys are merged; on
     # key collision the child wins.
-    quirks: Dict[str, Any] = field(default_factory=dict)
+    quirks: Dict[str, Any] = field(default_factory=dict, metadata={
+        "description": "Opt the active provider into known wire-format / "
+        "model-behavior workarounds (the provider reads the keys it knows; "
+        "unknown keys warn). e.g. coerce_typed_tool_args (vllm)."})
 
     # Per-profile AppArmor fragment scoping (Piece 1, 2026-05-14).
     #
@@ -1090,7 +1226,26 @@ class SubagentProfile:
     # design ask + the cascade footgun this closes (workspace-tier
     # fragments bleeding binary-exec across all cascade stages when
     # only one stage should have it).
-    apparmor_fragments: Optional[List[str]] = None
+    apparmor_fragments: Optional[List[str]] = field(default=None, metadata={
+        "description": "Scope WHICH AppArmor .rules fragments compose this "
+        "session's policy, by basename, from the fragment search path "
+        "(~/.jaato/apparmor-fragments/, <workspace>/.jaato/apparmor-fragments/, "
+        "+ the .cache/ layer). None = compose ALL fragments; [] = none "
+        "(maximally locked-down)."})
+
+    def __post_init__(self) -> None:
+        """Normalize ``suppress_base_instructions`` to its canonical form.
+
+        Accepts the authored bool / dict / list (or an already-normalized
+        frozenset, idempotently) and stores a ``frozenset`` of piece names.
+        Centralizing here means every construction path — ``from_dict``,
+        ``build_inline_profile``, inheritance merge, direct kwargs — ends up
+        with one representation, and an unknown piece name fails loud at
+        profile-load time rather than silently keeping a layer.
+        """
+        self.suppress_base_instructions = normalize_suppression(
+            self.suppress_base_instructions
+        )
 
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
@@ -1255,8 +1410,9 @@ def build_inline_profile(
     Mirrors the field set understood by ``_load_profiles_from_directory``
     so an inline spec on ``session.new`` accepts the same JSON shape as a
     profile file on disk. ``inherits`` is intentionally ignored — inline
-    specs are atomic, not chained — and ``name`` / ``description`` default
-    to safe placeholders since SDK clients aren't required to invent them.
+    specs are atomic, not chained. ``name`` is taken from ``data['name']``
+    when the client supplied one (like disk profiles), else the ``name``
+    param (default ``<inline>``); ``description`` defaults to a placeholder.
 
     Args:
         data: The dict carried in ``CommandRequest.payload['spec']``.
@@ -1327,7 +1483,15 @@ def build_inline_profile(
     )
 
     return SubagentProfile(
-        name=name,
+        # Honor the spec's own ``name`` (e.g. "nano-chat") when the SDK
+        # client supplied one; fall back to the ``name`` param (default
+        # "<inline>") otherwise.  Mirrors disk profiles, which take
+        # ``data.get('name')`` — previously an inline spec's name was
+        # silently dropped, so ``profile_name`` / the agent display always
+        # read "<inline>".  Inline restore no longer depends on the name
+        # being an unresolvable sentinel (it reconstructs from
+        # ``profile_spec`` directly — see SessionManager._load_session_impl).
+        name=data.get('name') or name,
         description=description,
         plugins=clean_plugins,
         preloaded_plugins=preloaded,
@@ -1596,6 +1760,14 @@ def _merge_profiles(
     # so two parents declaring the same limits don't conflict.
     merged_runtime_limits = _resolve_scalar('runtime_limits', child.runtime_limits)
 
+    # model_tiers: scalar-override (the child's whole tier-config wins; inherit
+    # the parent's when the child declares none).  default={} so an unset child
+    # ({}) is treated as "not set" and inherits.  WAS DROPPED entirely pre-fix:
+    # the construction below omitted model_tiers, so inherits/set-based tiered
+    # profiles silently lost their tiers and fell back to single-model.
+    merged_model_tiers = _resolve_scalar(
+        'model_tiers', child.model_tiers, default={})
+
     # completion_payload_schema: scalar-override (parents must agree or
     # child overrides). Inline dicts and string paths both compared as-is
     # via str() in _resolve_scalar.
@@ -1642,15 +1814,18 @@ def _merge_profiles(
         errors[child_name] = conflict_msg
         return None
 
-    # ``suppress_base_instructions`` follows OR semantics: True if any
-    # layer in the chain (parents or child) sets it True.  Rationale:
-    # a base saying "I'm minimal, framework instructions add no value"
-    # shouldn't be silently overridable by an inheritor; an inheritor
-    # that genuinely wants base instructions back should not inherit
-    # from a minimalist parent.
-    merged_suppress_base = any(
-        getattr(p, 'suppress_base_instructions', False) for p in parents
-    ) or getattr(child, 'suppress_base_instructions', False)
+    # ``suppress_base_instructions`` follows UNION semantics: a piece is
+    # suppressed if ANY layer in the chain (parents or child) suppresses
+    # it.  Rationale: a base saying "drop the framework constants, I'm
+    # minimal" shouldn't be silently overridable by an inheritor; an
+    # inheritor that genuinely wants a layer back should not inherit from
+    # a parent that drops it.  Each profile's field is already the
+    # canonical frozenset (normalized in __post_init__), so the merge is
+    # a plain set union.
+    merged_suppress_base = frozenset().union(
+        *(getattr(p, 'suppress_base_instructions', frozenset()) for p in parents),
+        getattr(child, 'suppress_base_instructions', frozenset()),
+    )
 
     # ``apparmor`` follows OR semantics: True if any layer in the chain
     # (parents or child) sets it True.  Same rationale as
@@ -1720,6 +1895,7 @@ def _merge_profiles(
         spawn_payload_schema=merged_spawn_schema,
         completion_processors=merged_completion_processors,
         runtime_limits=merged_runtime_limits,
+        model_tiers=merged_model_tiers,
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
         quirks=merged_quirks,
@@ -1805,7 +1981,17 @@ def _scan_profiles_dir(
         profiles: Accumulator dict — discovered profiles are added here.
         errors: Accumulator dict — parse errors are added here.
     """
-    if not directory.is_dir():
+    try:
+        if not directory.is_dir():
+            return
+        entries = list(directory.iterdir())
+    except OSError as exc:
+        # The directory is inaccessible: missing, or a confined session
+        # correctly denied this tier (e.g. ~/.jaato/profiles under AppArmor —
+        # is_dir()/iterdir() raise PermissionError, not return False).  This is
+        # an OPTIONAL tier: skip it so the other tiers (workspace, premium)
+        # still discover.  A denied tier must NEVER abort the whole discovery.
+        logger.debug("Profiles tier %s not scannable (%s); skipping", directory, exc)
         return
 
     # Track names actually registered IN THIS PASS so the summary
@@ -1817,7 +2003,7 @@ def _scan_profiles_dir(
     # 'codegen' in it?  it doesn't.").  See 2026-05-15 finding.
     found_names: List[str] = []
     found = 0
-    for file_path in directory.iterdir():
+    for file_path in entries:
         if not file_path.is_file():
             continue
         if file_path.suffix not in ('.json', '.yaml', '.yml'):
@@ -1948,6 +2134,143 @@ def _scan_profiles_dir(
             found, directory,
             ", ".join(found_names),
         )
+
+
+def resolve_agent(
+    agent_name: str,
+    params: Optional[Dict[str, str]],
+    workspace_path: Optional[str],
+    config_root: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve an agent by name from .jaato/agents/ and .jaato/prompts/.
+
+    Scans agent directories (workspace then user-level), reads the markdown
+    file, parses frontmatter, substitutes params, and returns the rendered
+    system instructions.
+
+    The single source of truth for agent-persona resolution: the daemon's
+    ``SessionManager._resolve_agent`` delegates here, and the embedded
+    in-process client (``jaato_embedded.client``) imports it directly — so a
+    daemon-free embedded session resolves ``agent=<name>`` the same way the
+    daemon does, without depending on ``server`` (mirrors how
+    ``shared.config_resolver.resolve_secret_uri`` was lifted out of the daemon).
+
+    Args:
+        agent_name: Agent name (filename stem).
+        params: Parameter values for ``{{param}}`` placeholders.
+        workspace_path: Workspace directory for agent resolution.
+        config_root: Optional override for the workspace tier.  When set, scans
+            ``<config_root>/agents/`` and ``<config_root>/prompts/`` instead of
+            the workspace-anchored paths.  See
+            :func:`shared.config_resolver.resolve_config_search_path`.
+
+    Returns:
+        Dict with ``system_instructions``, ``description``, ``default_profile``,
+        ``missing_params``, ``source_path``, or ``None`` if not found.
+    """
+    search_dirs = []
+    if config_root:
+        cr = Path(config_root).expanduser().resolve()
+        search_dirs.append(cr / "agents")
+        search_dirs.append(cr / "prompts")
+    elif workspace_path:
+        search_dirs.append(Path(workspace_path) / ".jaato" / "agents")
+        search_dirs.append(Path(workspace_path) / ".jaato" / "prompts")
+    search_dirs.append(Path.home() / ".jaato" / "agents")
+    search_dirs.append(Path.home() / ".jaato" / "prompts")
+
+    # Find the agent file
+    agent_path = None
+    for search_dir in search_dirs:
+        if not search_dir.is_dir():
+            continue
+        # Single file: agents/gen-references.md
+        candidate = search_dir / f"{agent_name}.md"
+        if candidate.is_file():
+            agent_path = candidate
+            break
+        # Directory: agents/gen-references/PROMPT.md
+        candidate_dir = search_dir / agent_name
+        if candidate_dir.is_dir():
+            for entry_name in ("PROMPT.md", "SKILL.md"):
+                entry = candidate_dir / entry_name
+                if entry.is_file():
+                    agent_path = entry
+                    break
+            if agent_path:
+                break
+
+    if not agent_path:
+        return None
+
+    raw = agent_path.read_text(encoding="utf-8")
+
+    # Parse YAML frontmatter
+    frontmatter: Dict[str, Any] = {}
+    body = raw
+    if raw.startswith("---"):
+        match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+        if match:
+            try:
+                import yaml
+                frontmatter = yaml.safe_load(match.group(1)) or {}
+            except Exception:
+                pass
+            body = raw[match.end():]
+
+    # Substitute params
+    effective_params = dict(params or {})
+    param_defs = frontmatter.get("params", {})
+
+    # Apply frontmatter defaults for params not provided
+    if isinstance(param_defs, dict):
+        for pname, pdef in param_defs.items():
+            if pname not in effective_params:
+                if isinstance(pdef, dict) and "default" in pdef:
+                    default = pdef["default"]
+                    if default is not None:
+                        effective_params[pname] = str(default)
+
+    # Pre-scan: collect inline ``{{name:default}}`` defaults declared anywhere
+    # in the body so a later bare ``{{name}}`` can fall back to the same
+    # default.  Without this, an agent that uses a parameter both with and
+    # without an inline default would mark it missing on the bare occurrences
+    # and leave literal ``{{name}}`` placeholders in the rendered system
+    # instructions — which then bloat every turn's prompt.
+    inline_defaults: Dict[str, str] = {}
+    inline_pattern = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
+    for m in inline_pattern.finditer(body):
+        name = m.group(1)
+        default = m.group(2)
+        if default is not None and name not in inline_defaults:
+            inline_defaults[name] = default
+
+    # Use a set for O(1) dedup; the public missing list is built once at the
+    # end so the same name never appears twice.
+    missing_set: set = set()
+
+    def replace_param(m: "re.Match") -> str:
+        name = m.group(1)
+        inline_default = m.group(2)
+
+        if name in effective_params:
+            return effective_params[name]
+        if inline_default is not None:
+            return inline_default
+        if name in inline_defaults:
+            return inline_defaults[name]
+        missing_set.add(name)
+        return m.group(0)  # Keep unresolved (debugging signal)
+
+    rendered = inline_pattern.sub(replace_param, body)
+
+    return {
+        "system_instructions": rendered,
+        "description": frontmatter.get("description", ""),
+        "default_profile": frontmatter.get("default_profile"),
+        "missing_params": sorted(missing_set),
+        "source_path": str(agent_path),
+    }
 
 
 def discover_profiles(

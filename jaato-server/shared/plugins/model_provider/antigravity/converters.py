@@ -94,7 +94,21 @@ def part_to_api(part: Part) -> Optional[Dict[str, Any]]:
 
     if part.function_response is not None:
         fr = part.function_response
-        response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
+        if fr.untrusted:
+            # Untrusted external content (web_fetch/web_search/MCP): wrap in the
+            # boundary so the model treats it as data, not instructions.
+            from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+            _text = fr.result if isinstance(fr.result, str) else json.dumps(fr.result)
+            response = {"untrusted_external_content":
+                        wrap_untrusted_content(_text, fr.untrusted_source)}
+        else:
+            response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
+        # Dict-response provider: deliver the model-facing steering suffix as a
+        # reserved key so the model still sees it, while the structured result
+        # (and the ledger, which reads history not this converter output) stays
+        # clean.  See ToolResult.model_suffix.
+        if fr.model_suffix:
+            response = {**response, "_agent_guidance": fr.model_suffix}
         return {
             "functionResponse": {
                 "name": name_to_id(fr.name),
@@ -558,6 +572,7 @@ def build_generation_config(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     top_k: Optional[int] = None,
+    seed: Optional[int] = None,
     thinking_config: Optional[Dict[str, Any]] = None,
     response_schema: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -568,6 +583,7 @@ def build_generation_config(
         temperature: Sampling temperature.
         top_p: Top-p sampling parameter.
         top_k: Top-k sampling parameter.
+        seed: Deterministic-sampling seed.
         thinking_config: Thinking/reasoning configuration.
         response_schema: JSON schema for structured output.
 
@@ -587,6 +603,9 @@ def build_generation_config(
 
     if top_k is not None:
         config["topK"] = top_k
+
+    if seed is not None:
+        config["seed"] = seed
 
     if thinking_config is not None:
         config["thinkingConfig"] = thinking_config

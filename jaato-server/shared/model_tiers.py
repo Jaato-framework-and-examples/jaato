@@ -224,29 +224,11 @@ class ModelTierConfig:
                 f"tier_fallback {self.tier_fallback!r} not in declared "
                 f"tiers {sorted(self.tiers)}"
             )
-        self._validate_same_provider_v1()
-
-    def _validate_same_provider_v1(self) -> None:
-        """Reject mixed-provider configs (V1 constraint).
-
-        Currently jaato can switch model names within a single provider
-        via ``provider.connect(new_model_name, skip_model_test=True)``
-        without reconnecting.  Cross-provider switching needs auth/
-        connection-state/tool-schema-dialect handling that V1 doesn't
-        yet implement.  When V2 lifts this, delete this method and
-        teach the session layer how to swap providers on transition.
-        """
-        declared_providers = {
-            entry.provider for entry in self.tiers.values()
-            if entry.provider is not None
-        }
-        if len(declared_providers) > 1:
-            raise ModelTierConfigError(
-                "V1 supports only same-provider tier switching; "
-                f"this config declares providers {sorted(declared_providers)}. "
-                "Either drop the per-tier 'provider' fields (the session's "
-                "main provider will be used) or normalise them to one value."
-            )
+        # V2 (cross-provider tiers): the V1 same-provider gate is lifted.  A
+        # tier may declare its own ``provider``; JaatoSession.switch_tier swaps
+        # to a cached per-tier provider instance when the active tier's provider
+        # differs (history is provider-neutral, so it flows across the swap).
+        # Same-provider configs are unaffected (no swap path is taken).
 
     def model_for(self, tier_name: str) -> Tuple[str, TierEntry]:
         """Resolve a tier name to ``(actual_tier, entry)``.

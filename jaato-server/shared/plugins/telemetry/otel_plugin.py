@@ -435,7 +435,7 @@ class OTelPlugin:
         # Build resource attributes starting with service name
         service_name = config.get(
             "service_name",
-            os.environ.get("OTEL_SERVICE_NAME", "jaato")
+            os.environ.get("OTEL_SERVICE_NAME", "jaato")  # env: service name stamped on spans (default jaato)
         )
         resource_attrs = {SERVICE_NAME: service_name}
 
@@ -497,7 +497,7 @@ class OTelPlugin:
             # File exporter - writes OTLP JSON to a file
             file_path = config.get(
                 "file_path",
-                os.environ.get("JAATO_TELEMETRY_FILE", "/tmp/jaato-traces.jsonl")
+                os.environ.get("JAATO_TELEMETRY_FILE", "/tmp/jaato-traces.jsonl")  # env: file-exporter output path (default /tmp/jaato-traces.jsonl)
             )
             service_name = config.get(
                 "service_name",
@@ -509,7 +509,7 @@ class OTelPlugin:
             # Get endpoint from config or environment
             endpoint = config.get(
                 "endpoint",
-                os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+                os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")  # env: OTLP collector endpoint (unset = OTLP export skipped)
             )
             if not endpoint:
                 # No endpoint configured, skip OTLP export
@@ -517,15 +517,28 @@ class OTelPlugin:
 
             # Parse headers from config or environment
             headers = config.get("headers", {})
-            env_headers = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+            env_headers = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")  # env: comma-separated key=value headers for the OTLP exporter
             if env_headers:
                 for pair in env_headers.split(","):
                     if "=" in pair:
                         key, value = pair.split("=", 1)
                         headers[key.strip()] = value.strip()
 
-            # Try gRPC first, fall back to HTTP
-            try:
+            # Protocol selection. The default is gRPC-first (fall back to HTTP)
+            # for backward compatibility with existing collector setups. Some
+            # backends only speak OTLP/HTTP — Langfuse's ingestion endpoint
+            # (`.../api/public/otel`) is HTTP-only — so honor an explicit
+            # preference: the `protocol` config key, else the standard
+            # OTEL_EXPORTER_OTLP_PROTOCOL env var (`grpc` / `http/protobuf`).
+            protocol = str(
+                config.get(
+                    "protocol",
+                    os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "")  # env: OTLP wire protocol — "grpc" (default) or "http/protobuf"
+                )
+            ).strip().lower()
+            prefer_http = protocol in ("http", "http/protobuf", "httpprotobuf")
+
+            def _grpc_exporter():
                 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
                     OTLPSpanExporter as GrpcExporter
                 )
@@ -533,10 +546,8 @@ class OTelPlugin:
                     endpoint=endpoint,
                     headers=tuple(headers.items()) if headers else None,
                 )
-            except ImportError:
-                pass
 
-            try:
+            def _http_exporter():
                 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                     OTLPSpanExporter as HttpExporter
                 )
@@ -544,8 +555,19 @@ class OTelPlugin:
                     endpoint=endpoint,
                     headers=headers if headers else None,
                 )
-            except ImportError:
-                pass
+
+            # Order the two attempts by the requested protocol; each falls
+            # back to the other if its exporter package isn't installed.
+            attempts = (
+                (_http_exporter, _grpc_exporter)
+                if prefer_http
+                else (_grpc_exporter, _http_exporter)
+            )
+            for build in attempts:
+                try:
+                    return build()
+                except ImportError:
+                    continue
 
             # No OTLP exporter available
             return None
@@ -562,6 +584,23 @@ class OTelPlugin:
             self._provider = None
             self._tracer = None
             self._enabled = False
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (required by the ``TelemetryPlugin``
+        protocol).
+
+        On a pool slot reused across cascade sessions, the framework
+        calls this BETWEEN sessions.  End this session's per-session /
+        per-agent long-lived spans so they don't leak into the next
+        session, and reset the per-turn agent context — but KEEP the
+        provider, tracer, and redaction config (across-session-by-design
+        state; tearing those down is ``shutdown()``'s job at slot end).
+        Per the litmus test in ``docs/design/runner-cascade-sharing.md``
+        §4.3.
+        """
+        for key in list(self._long_lived_spans):
+            self._end_long_lived(key)
+        self._agent_context = threading.local()
 
     @property
     def enabled(self) -> bool:
@@ -694,6 +733,26 @@ class OTelPlugin:
         daemon_sid = getattr(self._agent_context, "daemon_session_id", None)
         if daemon_sid:
             attrs["jaato.session_id"] = daemon_sid
+
+    def _inject_session_id(self, attrs: Dict[str, Any]) -> None:
+        """Stamp the OpenInference ``session.id`` on a child span.
+
+        The turn (AGENT root) span already carries ``session.id``.
+        Propagating the SAME id onto child ``llm`` / ``tool`` spans lets
+        observability backends filter and aggregate **per observation** by
+        session, not just at the trace root — the practice Langfuse
+        recommends for OTLP ingestion (trace-level attributes should be
+        present on every span). ``session.id`` is read by Langfuse's
+        ingestion mapping directly (it accepts the OpenInference key
+        alongside ``langfuse.session.id``).
+
+        The active turn's session id lives on the thread-local
+        (``agent_id``, set by :meth:`turn_span`); this is a no-op outside a
+        turn context or if a caller already set ``session.id`` explicitly.
+        """
+        session_id = getattr(self._agent_context, "agent_id", None)
+        if session_id and "session.id" not in attrs:
+            attrs["session.id"] = session_id
 
     def _get_context_metadata(self) -> Dict[str, Any]:
         """Build metadata dict from thread-local context.
@@ -851,6 +910,7 @@ class OTelPlugin:
             "llm.model_name": model,
         }
         self._inject_daemon_session_id(attrs)
+        self._inject_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["streaming"] = streaming
@@ -891,6 +951,7 @@ class OTelPlugin:
             "tool.id": call_id,
         }
         self._inject_daemon_session_id(attrs)
+        self._inject_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["plugin_type"] = plugin_type

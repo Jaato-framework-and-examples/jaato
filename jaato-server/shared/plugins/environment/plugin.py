@@ -1,8 +1,11 @@
 # shared/plugins/environment/plugin.py
 
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
-from jaato import ToolSchema
-from jaato_sdk.plugins.model_provider.types import TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_REPLAY_SAFE,
+    DISCOVERABILITY_EAGER,
+)
 from datetime import datetime, timezone
 from shared.terminal_caps import detect as detect_terminal_caps
 import json
@@ -124,7 +127,7 @@ class EnvironmentPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="system",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             )
         ]
@@ -454,7 +457,7 @@ class EnvironmentPlugin(RunnerForwardingMixin):
             result["agent_name"] = agent_name
 
         # Also expose via environment variable if set
-        env_session_id = os.environ.get("JAATO_SESSION_ID")
+        env_session_id = os.environ.get("JAATO_SESSION_ID")  # env: internal — session id injected into the process env; surfaced in environment info
         if env_session_id:
             result["env_session_id"] = env_session_id
 
@@ -604,10 +607,10 @@ class EnvironmentPlugin(RunnerForwardingMixin):
         # --- Proxy configuration ---
         proxy_info: Dict[str, Any] = {
             "http_proxy": self._mask_proxy_url(
-                os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+                os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")  # env: standard proxy URL for outbound HTTP (both spellings honored)
             ),
             "https_proxy": self._mask_proxy_url(
-                os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+                os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")  # env: standard proxy URL for outbound HTTPS (both spellings honored)
             ),
             "configured": False,
         }
@@ -642,7 +645,7 @@ class EnvironmentPlugin(RunnerForwardingMixin):
         result["proxy_auth"] = auth_info
 
         # --- SSL / TLS ---
-        ssl_verify_raw = os.environ.get("JAATO_SSL_VERIFY")
+        ssl_verify_raw = os.environ.get("JAATO_SSL_VERIFY")  # env: verify TLS certs (default true); false only as an escape hatch for SSL-intercepting proxies
         if ssl_verify_raw is not None:
             ssl_verify = ssl_verify_raw.lower() not in ("false", "0", "no")
         else:
@@ -664,7 +667,7 @@ class EnvironmentPlugin(RunnerForwardingMixin):
         # --- No-proxy rules ---
         no_proxy_info: Dict[str, Any] = {}
 
-        no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
+        no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")  # env: standard no-proxy hosts, suffix matching (both spellings honored)
         if no_proxy:
             no_proxy_info["no_proxy"] = no_proxy
 

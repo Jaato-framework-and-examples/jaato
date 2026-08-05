@@ -207,6 +207,72 @@ class TestMessageConversion:
         assert result["role"] == "assistant"
         assert result["content"] == "Hi there"
 
+    def test_user_message_with_image_marshals_image_url_block(self):
+        # A vision-declared OpenAI-compat model must actually RECEIVE the image:
+        # an inline_data part becomes an OpenAI image_url content block (base64
+        # data URL).  Without this the image was silently dropped and only the
+        # text reached the wire ("no image attached").
+        import base64
+        png = b"\x89PNG\r\n\x1a\nFAKEPNGBYTES"
+        msg = Message(role=Role.USER, parts=[
+            Part(text="What is in this image?"),
+            Part(inline_data={"mime_type": "image/png", "data": png}),
+        ])
+        result, = message_to_openai(msg)
+
+        assert result["role"] == "user"
+        # content is now a LIST of blocks (text + image), not a bare string
+        assert isinstance(result["content"], list)
+        text_blocks = [b for b in result["content"] if b["type"] == "text"]
+        img_blocks = [b for b in result["content"] if b["type"] == "image_url"]
+        assert text_blocks[0]["text"] == "What is in this image?"
+        assert len(img_blocks) == 1
+        expected = "data:image/png;base64," + base64.b64encode(png).decode("utf-8")
+        assert img_blocks[0]["image_url"]["url"] == expected
+
+    def test_user_message_image_only_no_text(self):
+        png = b"rawbytes"
+        msg = Message(role=Role.USER, parts=[
+            Part(inline_data={"mime_type": "image/jpeg", "data": png}),
+        ])
+        result, = message_to_openai(msg)
+        assert isinstance(result["content"], list)
+        assert all(b["type"] == "image_url" for b in result["content"])
+        assert result["content"][0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    def test_tool_result_image_routed_to_followup_user_message(self):
+        # OpenAI-compat tool messages can't carry images, so a tool result with
+        # an image attachment (readFile on a PNG) surfaces the image as a
+        # follow-up user message; the tool message keeps the text result.
+        from jaato_sdk.plugins.model_provider.types import Attachment
+        tr = ToolResult(
+            call_id="c1", name="readFile",
+            result={"path": "x.png", "type": "image"},
+            attachments=[Attachment(mime_type="image/png", data=b"PNGBYTES",
+                                    display_name="x.png")],
+        )
+        msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
+        out = message_to_openai(msg)
+        assert out[0]["role"] == "tool"
+        assert "x.png" in out[0]["content"]      # text result, no raw bytes
+        assert out[-1]["role"] == "user"
+        imgs = [b for b in out[-1]["content"] if b["type"] == "image_url"]
+        assert len(imgs) == 1
+        assert imgs[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_tool_result_without_image_emits_no_followup(self):
+        tr = ToolResult(call_id="c1", name="grep", result={"matches": 3})
+        msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
+        out = message_to_openai(msg)
+        assert len(out) == 1 and out[0]["role"] == "tool"
+
+    def test_text_only_user_message_stays_a_string(self):
+        # Regression: no images -> plain-string content, unchanged wire shape.
+        msg = Message(role=Role.USER, parts=[Part(text="just text")])
+        result, = message_to_openai(msg)
+        assert result["content"] == "just text"
+        assert isinstance(result["content"], str)
+
     def test_assistant_message_with_tool_calls(self):
         fc = FunctionCall(id="call_1", name="read_file", args={"path": "/tmp"})
         msg = Message(role=Role.MODEL, parts=[Part(function_call=fc)])
@@ -377,7 +443,7 @@ class TestAuthentication:
 
         assert "JAATO_NEBIUS_API_KEY" in str(exc_info.value)
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_with_api_key(self, mock_client_class):
         """Should initialize with key from config.api_key."""
         mock_client_class.return_value = MagicMock()
@@ -392,7 +458,7 @@ class TestAuthentication:
         assert provider._api_key == "nbk-test-test"
         assert provider._client is not None
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NEBIUS_API_KEY": "nbk-test-env"}, clear=True)
     def test_initialize_from_env(self, mock_client_class):
         """Should auto-detect key from JAATO_NEBIUS_API_KEY env var."""
@@ -403,7 +469,7 @@ class TestAuthentication:
 
         assert provider._api_key == "nbk-test-env"
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NEBIUS_BASE_URL": "http://localhost:8000/v1"}, clear=True)
     def test_initialize_self_hosted_no_key(self, mock_client_class):
         """Should initialize without key for self-hosted endpoints."""
@@ -415,7 +481,7 @@ class TestAuthentication:
         assert provider._api_key is None
         assert provider._client is not None
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {}, clear=True)
     def test_connect_raises_when_context_unresolved(self, mock_client_class):
         """No hardcoded fallback: with the catalog empty (no per-model entry)
@@ -429,7 +495,7 @@ class TestAuthentication:
         with pytest.raises(ValueError, match="context_length could not be resolved"):
             provider.connect("some/model")
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NEBIUS_CONTEXT_LENGTH": "200000"}, clear=True)
     def test_env_knob_stashed_at_init_resolves_at_connect(self, mock_client_class):
         """The env override is stashed at init and used at connect when the
@@ -443,7 +509,7 @@ class TestAuthentication:
         provider.connect("some/model")
         assert provider._context_length == 200000
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_catalog_context_beats_knob_at_connect(self, mock_client_class):
         """Catalog auto-detect is PRIMARY: the per-model context_length from
         GET /v1/models wins over the manual knob."""
@@ -459,7 +525,7 @@ class TestAuthentication:
             provider.connect("meta-llama/Llama-3.3-70B-Instruct")
             assert provider._context_length == 131072  # catalog wins over 200000
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_stashes_profile_knob_over_env(self, mock_client_class):
         """Profile knob (config.extra.context_length) wins over the env tier
         when stashed at init."""
@@ -471,7 +537,7 @@ class TestAuthentication:
             ))
             assert provider._context_length_knob == 131072
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_custom_base_url(self, mock_client_class):
         """Should use custom base_url from config.extra."""
         mock_client_class.return_value = MagicMock()
@@ -484,7 +550,7 @@ class TestAuthentication:
 
         assert provider._base_url == "http://nim.internal:8080/v1"
 
-    @patch("shared.plugins.model_provider.nebius.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_stashes_custom_context_length_knob(self, mock_client_class):
         """A custom context_length from config.extra is stashed as the knob
         (used at connect when the catalog lacks the model)."""
@@ -818,7 +884,7 @@ class TestApiParams:
 
     def _provider(self, api_params):
         with patch(
-            "shared.plugins.model_provider.nebius.provider.get_openai_client_class"
+            "shared.plugins.model_provider._openai_compat.base.get_openai_client_class"
         ) as mc:
             mc.return_value = MagicMock()
             p = NebiusProvider()
@@ -859,15 +925,19 @@ class TestApiParams:
         assert kwargs["temperature"] == 0.0
 
     def test_per_call_tool_choice_overrides_profile(self):
+        from shared.tool_id_map import name_to_id
         p = self._provider({"tool_choice": "required"})
         kwargs = {"tools": [1]}
         named = {"type": "function", "function": {"name": "x"}}
         p._apply_api_params(kwargs, tool_choice=named)
-        assert kwargs["tool_choice"] == named
+        # Per-call wins over the profile's "required"; the function name is
+        # mapped to its wire id (name_to_id) like the tools array (#332).
+        assert kwargs["tool_choice"] == {
+            "type": "function", "function": {"name": name_to_id("x")}}
 
     def test_non_dict_api_params_raises(self):
         with patch(
-            "shared.plugins.model_provider.nebius.provider.get_openai_client_class"
+            "shared.plugins.model_provider._openai_compat.base.get_openai_client_class"
         ) as mc:
             mc.return_value = MagicMock()
             p = NebiusProvider()

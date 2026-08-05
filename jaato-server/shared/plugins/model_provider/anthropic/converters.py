@@ -26,6 +26,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ToolResult,
     ToolSchema,
+    render_result_for_model,
 )
 
 from shared.tool_id_map import id_to_name, name_to_id
@@ -95,12 +96,10 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
 
     if part.function_response is not None:
         fr = part.function_response
-        # Result can be string or dict - Anthropic expects string or list of blocks
-        content: Any
-        if isinstance(fr.result, str):
-            content = fr.result
-        else:
-            content = json.dumps(fr.result)
+        # Result can be string or dict - Anthropic expects string or list of blocks.
+        # render_result_for_model serializes the STRUCTURED result and appends
+        # the model-facing steering suffix (see ToolResult.model_suffix).
+        content: Any = render_result_for_model(fr.result, fr.model_suffix, untrusted=fr.untrusted, untrusted_source=fr.untrusted_source)
 
         block: Dict[str, Any] = {
             "type": "tool_result",
@@ -117,15 +116,11 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
             if content:
                 content_blocks.append({"type": "text", "text": content})
             for att in fr.attachments:
-                if att.mime_type.startswith("image/"):
-                    content_blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": att.mime_type,
-                            "data": base64.b64encode(att.data).decode("utf-8"),
-                        }
-                    })
+                media = _anthropic_media_block(
+                    att.mime_type, base64.b64encode(att.data).decode("utf-8"),
+                )
+                if media:
+                    content_blocks.append(media)
             block["content"] = content_blocks
 
         return block
@@ -135,15 +130,25 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
         data = part.inline_data.get("data", b"")
         if isinstance(data, bytes):
             data = base64.b64encode(data).decode("utf-8")
+        return _anthropic_media_block(mime_type, data)
+
+    return None
+
+
+def _anthropic_media_block(mime_type: str, b64: str) -> Optional[Dict[str, Any]]:
+    """Anthropic content block for a base64 attachment: ``image`` for
+    ``image/*``, ``document`` for ``application/pdf`` (Claude reads PDF pages
+    natively — text AND embedded figures), else ``None``."""
+    if mime_type == "application/pdf":
+        return {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
+        }
+    if (mime_type or "").startswith("image/"):
         return {
             "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": mime_type,
-                "data": data,
-            }
+            "source": {"type": "base64", "media_type": mime_type, "data": b64},
         }
-
     return None
 
 
@@ -390,11 +395,8 @@ def message_from_anthropic(msg: Dict[str, Any]) -> Message:
 
 def tool_result_to_anthropic(result: ToolResult) -> Dict[str, Any]:
     """Convert ToolResult to Anthropic tool_result content block."""
-    content: Any
-    if isinstance(result.result, str):
-        content = result.result
-    else:
-        content = json.dumps(result.result)
+    # Serialize the STRUCTURED result + append the model-facing steering suffix.
+    content: Any = render_result_for_model(result.result, result.model_suffix, untrusted=result.untrusted, untrusted_source=result.untrusted_source)
 
     block: Dict[str, Any] = {
         "type": "tool_result",

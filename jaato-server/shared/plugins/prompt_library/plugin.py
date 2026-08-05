@@ -92,7 +92,10 @@ def tokenize_prompt_args(text: str) -> List[str]:
         # than failing the whole prompt expansion.
         return text.split()
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, HelpLines
 from .validation import PromptValidator, format_validation_error
 from shared.http import get_httpx_client
@@ -121,6 +124,27 @@ ARGUMENTS_PLACEHOLDER = re.compile(r'\$ARGUMENTS\b')
 COMMAND_PATTERN = re.compile(r'\{\{!(.+?)\}\}')
 # Timeout for command substitution (seconds)
 COMMAND_TIMEOUT = 30
+
+# Authoring documentation for the placeholder grammar above.  This single
+# string is the source of truth cited at BOTH authoring surfaces the model
+# sees — the ``savePrompt`` ``content`` tool-parameter description and the
+# ``get_system_instructions`` "Creating and Updating Prompts" block — so the
+# two cannot drift apart (the drift that let a model author a prompt with
+# Jinja filter syntax jaato's grammar never matched).  jaato's grammar is NOT
+# Jinja/nunjucks: the filter form ``{{name | default('x')}}`` does not match
+# NAMED_PARAM_PATTERN (after the name it requires ``:`` or ``}}``, not a space)
+# so it is left literal and ``name`` is never registered as a parameter.
+PARAM_GRAMMAR_DOC = (
+    "Placeholder grammar (this is NOT Jinja/nunjucks):\n"
+    "- {{name}} - required parameter.\n"
+    "- {{name:default text}} - optional; the default is used when the caller "
+    "omits the arg. The default runs to the first '}', so it cannot contain "
+    "'}'.\n"
+    "- {{$1}}, {{$2}}, {{$0}} - positional args ({{$0}} = all args joined).\n"
+    "- {{!command}} - shell command substitution.\n"
+    "Filter syntax such as {{name | default('x')}} is unsupported and renders "
+    "literally."
+)
 
 
 @dataclass
@@ -172,9 +196,10 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
     - Type `prompt <name> [args...]` to use a prompt
 
     Model can:
-    - Call listPrompts() to discover available prompts
-    - Call usePrompt(name, params) to retrieve and expand a prompt
-    - Call savePrompt(name, content, description) to create new prompts
+    - Discover prompt tools via list_tools(category="prompt")
+    - Invoke a prompt by calling its prompt.<name>(...) tool directly
+    - Call savePrompt(name, content, description) to create/update prompts
+    - Call deletePrompt(name) to remove a writable prompt
     """
 
     def __init__(self):
@@ -187,8 +212,17 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         self._config_root: Optional[str] = None
         self._initialized = False
         self._agent_name: Optional[str] = None
-        # Cache of discovered prompts (refreshed on each list)
+        # Cache of discovered prompts.  mtime-gated: ``_discover_prompts``
+        # re-walks ONLY when a source directory's mtime changes (entries
+        # added/removed/renamed); otherwise it returns this cache.  Pre-fix
+        # this was re-walked on EVERY call — an uncached per-item
+        # realpath/symlink walk that, on a cold daemon-side instance during
+        # re-attach, blocked the event loop ~15s inside the synchronous
+        # tool-id-registry emit (the register-push self-block).
         self._prompt_cache: Dict[str, PromptInfo] = {}
+        # Source-mtime signature the cache was built from (None = never
+        # walked).  Compared in _discover_prompts to decide whether to re-walk.
+        self._prompt_cache_signature: Optional[tuple] = None
         # Confirmation callback for interactive prompts (set by client)
         self._confirm_callback: Optional[Callable[[str, List[str]], Optional[str]]] = None
         # Output callback for progress messages
@@ -239,13 +273,33 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         — the resolver unions both contributions; AppArmor parsing
         is idempotent on duplicate rules.
 
-        All home-tier reads are read-only.
+        **Writable prompt/skill tiers (savePrompt/deletePrompt).** The
+        plugin OWNS tools that write/unlink prompts and skills in their
+        four WRITABLE sources (``_execute_delete_prompt``: ``project``/
+        ``global`` prompts, ``project-skills``/``global-skills``).  Those
+        need ``w`` (unlink is granted by ``w`` — classic AppArmor has no
+        standalone ``d`` mode).  By tier:
+        - **workspace** (``project``/``project-skills``): covered by the
+          framework ``{workspace_path}/** rwkl`` rule.  The framework
+          template deliberately OMITS ``.jaato/prompts/`` from its
+          ``audit deny ... wlk`` block (a more-specific allow cannot
+          override that deny, so the deny itself must not cover prompts)
+          — see ``apparmor.py``.  Accepted posture tradeoff: a confined
+          runner may author/rewrite prompts (whose content is later
+          executed).  ``.jaato/skills/`` was never under a deny.
+        - **home** (``global``/``global-skills``): granted ``rwk`` below
+          (was read-only before deletePrompt support).
+        - **config_root** (cascade override that routes the workspace
+          tier to ``<config_root>/{prompts,skills}/``): granted ``rwk``
+          below when set.
+        ``~/.jaato/agents/`` and the ``~/.claude/`` interop dirs stay
+        READ-ONLY (agents/skills there are not managed by these tools).
         """
-        return [
-            "@{HOME}/.jaato/prompts/    r,",
-            "@{HOME}/.jaato/prompts/**  r,",
-            "@{HOME}/.jaato/skills/     r,",
-            "@{HOME}/.jaato/skills/**   r,",
+        rules = [
+            "@{HOME}/.jaato/prompts/    rwk,",
+            "@{HOME}/.jaato/prompts/**  rwk,",
+            "@{HOME}/.jaato/skills/     rwk,",
+            "@{HOME}/.jaato/skills/**   rwk,",
             "@{HOME}/.jaato/agents/     r,",
             "@{HOME}/.jaato/agents/**   r,",
             "@{HOME}/.claude/skills/    r,",
@@ -253,6 +307,14 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
             "@{HOME}/.claude/commands/  r,",
             "@{HOME}/.claude/commands/**  r,",
         ]
+        if config_root:
+            rules += [
+                f"{config_root}/prompts/    rwk,",
+                f"{config_root}/prompts/**  rwk,",
+                f"{config_root}/skills/     rwk,",
+                f"{config_root}/skills/**   rwk,",
+            ]
+        return rules
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the prompt library plugin.
@@ -351,7 +413,11 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         This refreshes the prompt cache and notifies subscribers.
         """
         self._trace(f"_notify_tools_changed: {new_tools}")
-        # Refresh the cache
+        # Refresh the cache.  Force a re-walk past the mtime gate: a content
+        # edit to an EXISTING prompt doesn't bump the source-dir mtime, so the
+        # gate would otherwise skip the rediscovery this explicit "prompts
+        # changed" signal exists to perform.
+        self._prompt_cache_signature = None
         self._discover_prompts()
         # Notify callback if set
         if self._on_tools_changed:
@@ -603,6 +669,23 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
 
         return None
 
+    def _prompt_sources_signature(self, sources) -> tuple:
+        """Cheap change-detector for the prompt source dirs: ``(path, mtime)``
+        per source.  A directory's mtime bumps when entries are added,
+        removed, or renamed — the cases that change the discovered set.
+        Absent/unreadable sources record ``None`` so a source appearing (or
+        becoming readable) later invalidates the cache.  Stat-only — NO
+        realpath/symlink resolution, so it stays cheap even on the slow
+        filesystem that made the full walk ~15s.
+        """
+        sig = []
+        for source in sources:
+            try:
+                sig.append((str(source.path), source.path.stat().st_mtime))
+            except (OSError, PermissionError):
+                sig.append((str(source.path), None))
+        return tuple(sig)
+
     def _discover_prompts(self) -> Dict[str, PromptInfo]:
         """Discover all available prompts from all sources.
 
@@ -611,10 +694,22 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
         silently. ``.claude/skills`` and ``.claude/commands`` are
         Claude Code interop directories that may live outside the
         session sandbox.
+
+        mtime-gated: returns the cached result unless a source directory
+        has changed since the last walk (see ``_prompt_sources_signature``).
+        The per-item realpath/symlink resolve in ``_load_prompt_info`` is
+        what made this ~15s on a cold filesystem; gating it keeps the hot
+        ``get_tool_schemas`` path (and ~15 other callers) cheap and, on
+        re-attach, off the event-loop-blocking critical path.
         """
+        sources = self._get_prompt_sources()
+        signature = self._prompt_sources_signature(sources)
+        if self._prompt_cache and signature == self._prompt_cache_signature:
+            return self._prompt_cache
+
         prompts: Dict[str, PromptInfo] = {}
 
-        for source in self._get_prompt_sources():
+        for source in sources:
             try:
                 if not source.path.exists():
                     continue
@@ -648,6 +743,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                     self._trace(f"Discovered prompt: {info.name} from {info.source}")
 
         self._prompt_cache = prompts
+        self._prompt_cache_signature = signature
         return prompts
 
     def _expand_commands(self, content: str, cwd: str) -> str:
@@ -1705,7 +1801,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
             description=info.description or f"Prompt: {info.name}",
             parameters=self._params_to_json_schema(info.params),
             category="prompt",
-            discoverability="discoverable",
+            discoverability=DISCOVERABILITY_DEFERRED,
         )
 
     # ==================== Model Tools ====================
@@ -1738,7 +1834,10 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                         },
                         "content": {
                             "type": "string",
-                            "description": "The prompt content with optional {{param}} placeholders"
+                            "description": (
+                                "The prompt body, with optional parameter "
+                                "placeholders.\n\n" + PARAM_GRAMMAR_DOC
+                            ),
                         },
                         "description": {
                             "type": "string",
@@ -1761,7 +1860,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                     "required": ["name", "content", "description"]
                 },
                 category="prompt",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             # deletePrompt - remove prompts
             ToolSchema(
@@ -1786,7 +1885,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                     "required": ["name"]
                 },
                 category="prompt",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
@@ -2702,6 +2801,8 @@ Use savePrompt(name, content, description) to create new reusable prompts.
 Use savePrompt(name, content, description, overwrite=true) to update an existing prompt.
 The user can also invoke prompts with `prompt <name> [args...]`
 
+{PARAM_GRAMMAR_DOC}
+
 ### Deleting Prompts
 Use deletePrompt(name) to remove a prompt from the library.
 Only prompts in writable locations (.jaato/) can be deleted.
@@ -2713,7 +2814,7 @@ When you notice the user performing similar tasks repeatedly (2-3 times), sugges
 If they agree, use savePrompt() with:
 - A descriptive name (lowercase, hyphens)
 - Clear instructions capturing their preferences
-- Parameter placeholders: {{{{file}}}}, {{{{focus}}}}"""
+- Parameter placeholders per the grammar above, e.g. {{{{file}}}}, {{{{focus:security}}}}"""
 
 
 def create_plugin() -> PromptLibraryPlugin:

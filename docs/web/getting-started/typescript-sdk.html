@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TypeScript SDK - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="quickstart.html">Quickstart</a></li>
+          <li><a href="typescript-sdk.html" class="active">TypeScript SDK</a></li>
+          <li><a href="quickstart.html#developer-tooling">Developer Tooling</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+          <li><a href="../guides/connection-recovery.html">Connection Recovery</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/anthropic.html">Anthropic</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../api-reference/providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../api-reference/providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../api-reference/providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
+          <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
+          <li><a href="../api-reference/providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../api-reference/providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../api-reference/providers/vllm.html">vLLM</a></li>
+          <li><a href="../api-reference/providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../api-reference/providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../api-reference/providers/nebius.html">Nebius</a></li>
+          <li><a href="../api-reference/providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../api-reference/providers/triton.html">Triton</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- A. Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>TypeScript SDK</h1>
+          <p class="lead">
+            <code>@jaato/sdk</code> is the TypeScript client for jaato. It talks to
+            a long-lived jaato <strong>daemon</strong> over a WebSocket transport, so
+            your Node (or browser) app drives real agent sessions without hosting the
+            runtime itself.
+          </p>
+
+          <h2 id="overview">Overview</h2>
+          <p>
+            Install the package and target a modern Node toolchain. The examples in
+            this guide assume <strong>Node 24</strong>, ESM with
+            <code>"module": "NodeNext"</code>, and an <code>ES2022</code> target —
+            the <code>await using</code> syntax used throughout depends on it.
+          </p>
+          <p>
+            The mental model is one static factory:
+            <code>JaatoClient.session(options)</code> opens a session against the
+            daemon and resolves to a <code>Session</code> facade. That facade owns the
+            send-and-wait recipe, so <code>await s.ask(...)</code> returns the answer
+            with no event plumbing. The session is an <code>AsyncDisposable</code> —
+            <code>await using</code> tears it down on scope exit.
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">This is not the Python <code>JaatoClient</code></div>
+            The TypeScript <code>@jaato/sdk</code> <code>JaatoClient</code> is a
+            <strong>separate package over a WebSocket transport</strong>. It is
+            <em>not</em> the Python in-process <code>jaato.JaatoClient</code> that runs
+            the runtime inside your own process. Same name, different layer: the TS
+            client is always a remote client of a daemon, like the Python
+            <code>jaato_sdk.IPCClient</code> — but over <code>wss://</code> instead of
+            a local IPC socket.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Install</div>
+          <div class="code-block">
+            <pre><code class="language-bash">npm install @jaato/sdk
+# Node 24, ESM, NodeNext module resolution</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">tsconfig.json</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ESNext"],
+    "strict": true
+  }
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">ex01 — hello world</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">import { JaatoClient } from "@jaato/sdk";
+
+await using s = await JaatoClient.session({
+  url: "wss://&lt;host&gt;",
+  token,
+  profile: {
+    model: "google/gemini-2.5-flash",
+    provider: "openrouter",
+    plugins: [],
+    plugin_configs: {
+      openrouter: { api_key: "pass://jaato/openrouter/api-key" },
+    },
+  },
+});
+console.log(await s.ask("Who are you? One sentence."));</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- B. Connect & transport -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="connect">Connect &amp; Transport</h2>
+          <p>
+            A session needs two connection knobs: <code>url</code> (the daemon's
+            <code>wss://</code> endpoint) and <code>token</code> (a bearer token). The
+            transport authenticates by appending the token as a query parameter —
+            <code>wss://&lt;host&gt;/?token=&lt;token&gt;</code>. In the browser the
+            query parameter is the only option; on Node a <code>Bearer</code>
+            <em>header</em> is also supported.
+          </p>
+          <p>
+            For a self-signed development certificate, trust the CA
+            <strong>out-of-band</strong> through Node's
+            <code>NODE_EXTRA_CA_CERTS</code> environment variable — typically set by a
+            run wrapper, not in code. This is the clean path: TLS verification stays
+            on. Never disable certificate verification to make a dev cert work.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">Keep secrets out of source</div>
+            The bearer token and the CA path come from the environment (e.g.
+            <code>$HOME/.jaato/ws.token</code> and
+            <code>$HOME/.jaato/certs/ca.crt</code>), not from committed literals.
+            Centralise them in one small config module so the
+            <code>JaatoClient.session</code> call shape stays clean.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">config.ts — connection knobs</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// wss endpoint of the daemon + bearer token (read from the environment).
+const url = "wss://&lt;host&gt;";
+const token = readFileSync(
+  join(homedir(), ".jaato", "ws.token"),
+  "utf8",
+).trim();
+
+export const CONN = { url, token };</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Trust the dev CA (run wrapper)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Self-signed dev cert: trusted out-of-band, verification stays ON.
+export NODE_EXTRA_CA_CERTS="$HOME/.jaato/certs/ca.crt"
+node --import tsx src/ex01_basic_ask.ts</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- C. The facade -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="facade">The Session Facade</h2>
+          <p>
+            <code>JaatoClient.session(...)</code> returns a <code>Session</code> with
+            four entry points plus an escape hatch:
+          </p>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">s.ask(prompt)</span>
+              <span class="param-type">Promise&lt;string&gt;</span>
+              <div class="param-desc">Send a prompt, wait for the full reply text.</div>
+            </li>
+            <li>
+              <span class="param-name">s.stream(prompt)</span>
+              <span class="param-type">AsyncIterable&lt;string&gt;</span>
+              <div class="param-desc">Iterate reply chunks as they arrive.</div>
+            </li>
+            <li>
+              <span class="param-name">s.complete(prompt)</span>
+              <span class="param-type">Promise&lt;object | null&gt;</span>
+              <div class="param-desc">Return a typed, server-validated completion payload (or <code>null</code>).</div>
+            </li>
+            <li>
+              <span class="param-name">s.client</span>
+              <span class="param-type">low-level client</span>
+              <div class="param-desc">Escape hatch to the raw client / event API.</div>
+            </li>
+          </ul>
+          <p>
+            For a throwaway call, the module-level <code>ask(prompt, options)</code>
+            helper opens a session, asks, and tears it down in one line.
+          </p>
+          <p>
+            The session is an <code>AsyncDisposable</code>. With
+            <code>await using s = await JaatoClient.session(...)</code> the session is
+            disposed automatically when the enclosing scope exits — no manual
+            <code>close()</code> in the happy path or on error.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ask / stream / complete</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">import { JaatoClient, ask } from "@jaato/sdk";
+
+// Facade ask.
+await using s = await JaatoClient.session({ ...CONN, profile });
+console.log(await s.ask("Who are you? One sentence."));
+
+// One-shot module helper.
+console.log(await ask("Who are you? One sentence.", { ...CONN, profile }));
+
+// Streaming (ex02).
+for await (const chunk of s.stream("Tell me a short story.")) {
+  process.stdout.write(chunk);
+}
+
+// Typed completion (ex04).
+const person = await s.complete("Alice is 30."); // object | null
+console.log(person?.name, person?.age);</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- D. Session establishment & timeout -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="establishment">Session Establishment &amp; Timeout</h2>
+          <p>
+            <code>JaatoClient.session(...)</code> does not resolve the moment the
+            socket opens. Internally it waits for the daemon to assign a
+            <strong>session id</strong> before handing back the facade, so the
+            returned <code>Session</code> never races on a missing id — by the time
+            you call <code>s.ask(...)</code> the session is fully established.
+          </p>
+          <p>
+            That wait is bounded by <code>sessionTimeoutMs</code> (default
+            <code>60000</code>). If the id does not arrive within the window, opening
+            the session rejects rather than returning a half-initialised facade. Raise
+            it for a slow link, or lower it to fail fast.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">sessionTimeoutMs</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">await using s = await JaatoClient.session({
+  ...CONN,
+  profile,
+  sessionTimeoutMs: 60000, // default; bounds the wait for the session id
+});
+
+// session() has already awaited the session id here —
+// no need to poll or guard before the first ask().
+console.log(await s.ask("Ready when you are."));</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- E. Inline vs declarative profiles -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="profiles">Inline vs Declarative Profiles</h2>
+          <p>
+            <code>profile</code> takes two shapes: an <strong>inline</strong> object
+            (<code>{ model, provider, plugins, plugin_configs }</code>) or the
+            <strong>name</strong> of a declarative asset (a string) that the daemon
+            resolves from a <code>.jaato</code> tree.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">Inline specs require <code>plugins</code></div>
+            An inline profile <strong>must</strong> carry a <code>plugins</code> key —
+            use <code>[]</code> for a tool-less session. Credentials go in
+            <code>plugin_configs</code> as a <code>pass://</code> resolver knob
+            (<code>pass://jaato/&lt;provider&gt;/api-key</code>), never a raw key and
+            never an environment variable — that is a project convention.
+          </div>
+          <p>
+            Declarative profiles and agents resolve from a workspace's
+            <code>.jaato</code>. The catch: a WebSocket connection
+            <strong>auto-provisions a fresh per-session workspace</strong>, and the
+            daemon resolves named assets from <em>that</em> workspace — not from
+            <code>workspacePath</code> alone. So a named <code>profile</code> /
+            <code>agent</code> needs <code>configRoot</code> pointed at the
+            <code>.jaato</code> that holds the assets (and <code>workspacePath</code>
+            for any files they reference). <code>workspacePath</code> maps to the
+            session's <code>working_dir</code>; <code>configRoot</code> maps to
+            <code>config_root</code>.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Inline (ex01) — plugins required</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">await using s = await JaatoClient.session({
+  ...CONN,
+  profile: {
+    model: "google/gemini-2.5-flash",
+    provider: "openrouter",
+    plugins: [], // REQUIRED on an inline spec
+    plugin_configs: {
+      openrouter: { api_key: "pass://jaato/openrouter/api-key" },
+    },
+  },
+});</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Declarative (ex04) — needs configRoot</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">import { join } from "node:path";
+
+// Point configRoot at the .jaato that holds the named asset, because a WS
+// session resolves declarative assets from its auto-provisioned workspace.
+const CONFIG_ROOT = join(WORKSPACE, ".jaato");
+
+await using s = await JaatoClient.session({
+  ...CONN,
+  workspacePath: WORKSPACE, // -> working_dir
+  configRoot: CONFIG_ROOT,  // -> config_root (resolves "person-extractor")
+  profile: "person-extractor",
+});</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- F. Client (host) tools -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="client-tools">Client (Host) Tools</h2>
+          <p>
+            <code>clientTools</code> exposes functions that run
+            <strong>in your process</strong>. Each entry is
+            <code>{ name, description, parameters, handler }</code>: the daemon's agent
+            loop sees the JSON-schema <code>parameters</code>, decides to call the
+            tool, and calls back over the socket; your <code>handler</code> executes
+            locally and returns a result the model consumes.
+          </p>
+          <p>
+            This is the right home for anything that must touch
+            <em>your</em> machine, app state, or private APIs — the daemon never sees
+            the implementation, only the schema and the returned value.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ex05 — a host tool</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">await using s = await JaatoClient.session({
+  ...CONN,
+  profile,
+  clientTools: [
+    {
+      name: "get_weather",
+      description: "Return the weather for a city.",
+      parameters: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+      },
+      handler: (args) =&gt; ({
+        weather: `${args.city as string}: sunny, 24C`,
+      }), // runs in YOUR process
+    },
+  ],
+});
+console.log(await s.ask("Weather in Paris?"));</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- G. Server-side plugins -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="plugins">Server-Side Plugins</h2>
+          <p>
+            Where client tools run locally, <code>plugins</code> on the profile select
+            tools the <strong>daemon</strong> hosts and drives — for example
+            <code>["cli", "web_search", "todo"]</code>. You send one message; the
+            model → tool-call → result → model loop runs entirely in the runner. The
+            <strong>daemon is the loop</strong>; you receive the final answer (and, if
+            you subscribe, the intermediate events).
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">WebSocket file ops are sandboxed</div>
+            File-touching plugins (e.g. <code>cli</code>) operate inside the WS
+            session's auto-provisioned workspace, not your project directory. This
+            isolation is intentional — a remote client should not get ambient write
+            access to the host. Assert on the model's output, or read results back
+            through a tool, rather than expecting a file to appear locally.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ex06 — daemon-hosted tool loop</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">await using s = await JaatoClient.session({
+  ...CONN,
+  workspacePath: WORKSPACE,
+  configRoot: CONFIG_ROOT,
+  profile: {
+    model: "google/gemini-2.5-flash",
+    provider: "openrouter",
+    plugins: ["cli", "web_search", "todo"],
+    plugin_configs: {
+      openrouter: { api_key: "pass://jaato/openrouter/api-key" },
+      permission: { policy: { defaultPolicy: "allow" } },
+    },
+  },
+});
+console.log(
+  await s.ask(
+    "Using the shell, get the date and an `ls` listing, " +
+      "then write both into report.txt. Just do it.",
+  ),
+);</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- H. Human-in-the-loop permissions -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="permissions">Human-in-the-Loop Permissions</h2>
+          <p>
+            Gate tool calls with <code>onPermission</code>: a callback that receives
+            the permission event and returns <code>"y"</code> to allow or
+            <code>"n"</code> to deny. In a UI it would prompt a human; headless, it can
+            log and auto-decide.
+          </p>
+          <p>
+            Whether a given tool call is gated is set by
+            <code>plugin_configs.permission</code>. A
+            <code>defaultPolicy</code> of <code>"ask"</code> routes every otherwise
+            ungoverned call through <code>onPermission</code>;
+            <code>"allow"</code> runs them without asking. The mechanism is identical
+            for any gated tool, so set <code>"ask"</code> to see the gate fire
+            deterministically.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ex07 — onPermission + ask policy</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">function approve(toolName: string): boolean {
+  console.log(`[permission] ${toolName} -&gt; approve`);
+  return true; // a UI would prompt here
+}
+
+await using s = await JaatoClient.session({
+  ...CONN,
+  workspacePath: WORKSPACE,
+  configRoot: CONFIG_ROOT,
+  profile: {
+    model: "google/gemini-2.5-flash",
+    provider: "openrouter",
+    plugins: ["cli"],
+    plugin_configs: {
+      openrouter: { api_key: "pass://jaato/openrouter/api-key" },
+      permission: { policy: { defaultPolicy: "ask" } },
+    },
+  },
+  onPermission: (ev) =&gt;
+    approve((ev as { tool_name: string }).tool_name) ? "y" : "n",
+});
+console.log(await s.ask("Run `date` in the shell and report it."));</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- I. Typed completion gate -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="typed-completion">Typed Completion Gate</h2>
+          <p>
+            For structured output, declare a
+            <code>completion_payload_schema</code> on the profile. The daemon then
+            <strong>forces</strong> the model to end the turn by calling
+            <code>signal_completion</code> with a payload, validates that payload
+            against the schema, and <code>s.complete(prompt)</code> resolves to the
+            validated object — or <code>null</code> if no valid payload was produced.
+          </p>
+          <p>
+            This is a server-side gate, not a prompt convention: the model cannot
+            "finish" by chatting; it must satisfy the schema. The same mechanism backs
+            both single-shot structured extraction (below) and the cross-stage handoff
+            in cascades.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">person-extractor.json (declarative)</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">{
+  "name": "person-extractor",
+  "model": "google/gemini-2.5-flash",
+  "provider": "openrouter",
+  "plugins": [],
+  "completion_payload_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "age"],
+    "properties": {
+      "name": { "type": "string" },
+      "age": { "type": "integer", "minimum": 0 }
+    }
+  }
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">ex04 / ex08 — s.complete()</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">await using s = await JaatoClient.session({
+  ...CONN,
+  workspacePath: WORKSPACE,
+  configRoot: CONFIG_ROOT,
+  profile: "person-extractor",
+});
+const person = await s.complete("Alice is 30."); // validated object | null
+console.log(person?.name, person?.age); // "Alice" 30</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- J. Subagent delegation + event API -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="subagents">Subagent Delegation &amp; the Event API</h2>
+          <p>
+            A <code>lead</code> agent can delegate to subagents through the
+            <code>subagent</code> plugin: <code>agent: "lead"</code>,
+            <code>plugins: ["subagent"]</code>, and a <code>max_turns</code> bound so
+            the session always terminates. Delegation spans many turns, so this is
+            where you drop from the facade to the event API via
+            <code>s.client.subscribe(EventTypeValue.AGENT_OUTPUT, ...)</code> to
+            collect streamed output as it is produced.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">Which terminal event? It depends on the agent</div>
+            The event you wait on is not universal. A
+            <strong>completion-gated</strong> lead (one whose profile declares a
+            <code>completion_payload_schema</code>) terminates with
+            <code>SESSION_TERMINATED</code> — that is what ex08 waits on, because its
+            lead carries a <code>blurb</code> schema. A
+            <strong>plain single-shot</strong> turn instead ends with
+            <code>turn.completed</code>. Pick the one that matches your agent; do not
+            assume <code>SESSION_TERMINATED</code> always fires.
+          </div>
+          <p>
+            Whether the lead actually calls <code>spawn_subagent</code> is
+            <strong>model-dependent</strong>. The wiring is complete either way; a
+            given model may answer directly instead of delegating.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ex08 — delegation via the event API</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">import { JaatoClient, EventTypeValue } from "@jaato/sdk";
+
+await using s = await JaatoClient.session({
+  ...CONN,
+  workspacePath: WORKSPACE,
+  configRoot: CONFIG_ROOT,
+  agent: "lead",
+  profile: {
+    model: "google/gemini-2.5-flash",
+    provider: "openrouter",
+    plugins: ["subagent"],
+    max_turns: 8,
+    completion_payload_schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["blurb"],
+      properties: { blurb: { type: "string" } },
+    },
+    plugin_configs: {
+      openrouter: { api_key: "pass://jaato/openrouter/api-key" },
+    },
+  },
+});
+
+const out: string[] = [];
+s.client.subscribe(EventTypeValue.AGENT_OUTPUT, (e: { text?: string }) =&gt; {
+  if (e.text) out.push(e.text);
+});
+await new Promise&lt;void&gt;((resolve) =&gt; {
+  // This lead is completion-gated -> SESSION_TERMINATED (NOT turn.completed).
+  s.client.subscribeOnce(EventTypeValue.SESSION_TERMINATED, () =&gt; resolve());
+  void s.client.sendMessage(
+    "Research tide pools, then write a blurb from the findings.",
+  );
+});
+console.log(out.join(""));</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- K. Reactor-driven cascade -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="cascade">Reactor-Driven Cascade</h2>
+          <p>
+            A cascade is a multi-stage pipeline that runs <strong>decoupled in the
+            daemon</strong>. The client only triggers stage 1: open a session with a
+            <code>cascadeDriverId</code> and call <code>s.complete(...)</code>. From
+            there a reactor chain (<code>extract</code> → <code>summarize</code> →
+            <code>verify</code>) advances stage to stage server-side. The
+            <code>.jaato</code> reactor assets and stage scripts are daemon-side and
+            language-agnostic — the same assets serve a TypeScript or a Python
+            trigger.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">Typed handoff requires the producer's schema</div>
+            Cross-stage typed data does <strong>not</strong> flow automatically. The
+            <strong>producer</strong> stage's profile must declare a
+            <code>completion_payload_schema</code> with a top-level field; that makes
+            the model call <code>signal_completion(field=…)</code>, and the daemon
+            attaches the validated payload to the bus event the reactor receives so the
+            next stage can read it with <code>event.get("field")</code>. Without the
+            producer schema, the downstream payload is null/empty. The chain is:
+            producer <code>completion_payload_schema</code> → flat
+            <code>signal_completion(field=…)</code> → consumer reads the field.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ex09 — client triggers stage 1</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">import { randomUUID } from "node:crypto";
+import { JaatoClient } from "@jaato/sdk";
+
+const cid = randomUUID();
+await using s = await JaatoClient.session({
+  ...CONN,
+  workspacePath: WORKSPACE,
+  configRoot: CONFIG_ROOT,
+  agent: "extract",
+  profile: "extract",       // producer: declares a `facts` schema
+  cascadeDriverId: cid,
+});
+await s.complete("Extract the facts from this doc: ...");
+console.log(`stage 1 done; cascade ${cid} continues in the daemon`);</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Producer schema -&gt; reactor -&gt; consumer (daemon-side)</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">// extract.json (PRODUCER): schema exposes a top-level `facts` field
+// "completion_payload_schema": { "required": ["facts"],
+//   "properties": { "facts": { "type": "string" } } }
+
+// .jaato/reactors/cascade.json: on extract done, run the next stage
+// { "match": { "where": "source_agent == 'extract'" },
+//   "action": { "script": "scripts/spawn_summarize.py" } }
+
+// spawn_summarize.py (CONSUMER, runs in the daemon):
+//   facts = event.get("facts")          # hoisted typed payload
+//   ctx.create_session(agent="summarize", profile="summarize",
+//       initial_prompt=f"Summarise these findings: {facts}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- L. Recovery / reattach -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="recovery">Recovery &amp; Reattach</h2>
+          <p>
+            Pass <code>recovery: {}</code> to make the session resilient across a
+            daemon bounce or a dropped connection: the client auto-reconnects and
+            re-attaches to the same session, so an in-flight
+            <code>s.ask(...)</code> survives the interruption instead of failing.
+          </p>
+          <p>
+            Observe the transition with <code>onStatusChange</code>, which fires with a
+            status whose <code>state</code> moves through
+            <code>reconnecting</code> → <code>connected</code> → <code>closed</code>.
+            Use it to surface connection health in your UI or logs.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">Opaque "Session not found" is intentional</div>
+            If a reattach targets a session the daemon no longer holds, the failure is
+            deliberately opaque — the boundary does not leak whether the id was wrong,
+            expired, or belongs to someone else. Treat it as a signal to open a fresh
+            session.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ex10 — recovery + onStatusChange</div>
+          <div class="code-block">
+            <pre><code class="language-typescript">await using s = await JaatoClient.session({
+  ...CONN,
+  profile,
+  recovery: {}, // auto-reconnect + auto reattach across a daemon bounce
+  onStatusChange: (st) =&gt; console.log(st.state),
+  // reconnecting / connected / closed
+});
+console.log(await s.ask("Long task...")); // survives a daemon restart</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

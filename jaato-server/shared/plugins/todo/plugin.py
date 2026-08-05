@@ -21,7 +21,7 @@ from jaato_sdk.plugins.todo.models import (
     PlanStatus, StepStatus, TodoPlan, TodoStep,
     TaskEventType, TaskEvent, TaskRef, EventFilter, Subscription
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent, TRAIT_REPLAY_SAFE, DISCOVERABILITY_EAGER
 from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from shared.trace import trace as _trace_write
@@ -433,7 +433,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": ["title", "steps"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 editable=EditableContent(
                     parameters=["title", "steps"],
                     format="yaml",
@@ -458,7 +458,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -494,7 +494,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": ["step_id", "status"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -511,7 +511,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -535,7 +535,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": ["status"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -560,7 +560,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": ["description"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             # === Cross-agent collaboration tools ===
@@ -645,7 +645,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": ["step_id", "depends_on"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -689,7 +689,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": ["step_id", "output"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -713,7 +713,7 @@ class TodoPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]

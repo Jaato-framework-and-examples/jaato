@@ -13,6 +13,7 @@ from shared.config_resolver import (
     TIER_WORKSPACE,
     resolve_config_search_path,
     resolve_domain_search_path,
+    resolve_secret_uri,
     workspace_state_path,
 )
 
@@ -247,3 +248,34 @@ class TestWorkspaceStatePath:
         via_constant = ws / JAATO_DIRNAME / "x"
 
         assert via_helper == via_constant
+
+
+class TestResolveSecretUri:
+    """Tests for :func:`resolve_secret_uri` — the public entry point for
+    secret-URI resolution.
+
+    These cases are resolver-independent (they exercise only the
+    pass-through contract), so they need no ``jaato.premium`` secret
+    resolver installed and run deterministically in CI. The actual
+    ``scheme://`` resolution is the premium resolver's contract, tested
+    where those resolvers live.
+    """
+
+    def test_public_name_is_importable(self):
+        """The function is reachable at the public location, not only via
+        the private ``shared.plugins.subagent.config._resolve_secret_uri``."""
+        assert callable(resolve_secret_uri)
+        assert resolve_secret_uri.__module__ == "shared.config_resolver"
+
+    def test_plain_string_passes_through(self):
+        """A non-URI credential value is returned unchanged."""
+        assert resolve_secret_uri("sk-or-plain-key-123") == "sk-or-plain-key-123"
+
+    def test_network_scheme_passes_through(self):
+        """Standard network schemes are never treated as secret URIs."""
+        assert resolve_secret_uri("https://example.com/x") == "https://example.com/x"
+        assert resolve_secret_uri("wss://host:8099/?token=t") == "wss://host:8099/?token=t"
+
+    def test_unresolved_var_passes_through(self):
+        """A still-present ``${VAR}`` reference is not a secret URI."""
+        assert resolve_secret_uri("${OPENROUTER_API_KEY}") == "${OPENROUTER_API_KEY}"

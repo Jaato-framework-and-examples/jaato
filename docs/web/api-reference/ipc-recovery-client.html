@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -62,6 +63,7 @@
           <li><a href="jaato-client.html">JaatoClient</a></li>
           <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
           <li><a href="jaato-session.html">JaatoSession</a></li>
+          <li><a href="ipc-client.html">IPCClient</a></li>
           <li><a href="ipc-recovery-client.html" class="active">IPCRecoveryClient</a></li>
           <li><a href="plugin-registry.html">PluginRegistry</a></li>
           <li><a href="tool-executor.html">ToolExecutor</a></li>
@@ -85,6 +87,9 @@
           <li><a href="providers/vllm.html">vLLM</a></li>
           <li><a href="providers/tensorrt-llm.html">TensorRT-LLM</a></li>
           <li><a href="providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="providers/nebius.html">Nebius</a></li>
+          <li><a href="providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="providers/triton.html">Triton</a></li>
         </ul>
       </div>
 
@@ -116,13 +121,32 @@
             An IPC client with automatic connection recovery. Wraps
             <code>IPCClient</code> to provide automatic reconnection when the
             server becomes unavailable, with session reattachment, exponential
-            backoff, and status callbacks for UI updates.
+            backoff, and status callbacks for UI updates. Like
+            <a href="ipc-client.html"><code>IPCClient</code></a>, it exposes the
+            <code>.session(...)</code> +
+            <code>ask</code>/<code>complete</code>/<code>stream</code> facade
+            (recommended); the methods documented below are the low-level building
+            blocks the facade uses.
           </p>
 
           <div class="method-signature">
             <span class="token-keyword">from</span> jaato_sdk.client <span class="token-keyword">import</span> IPCRecoveryClient, ConnectionState<br>
             <span class="token-keyword">from</span> jaato_sdk.client.config <span class="token-keyword">import</span> RecoveryConfig, get_recovery_config<br>
             <span class="token-keyword">from</span> jaato_sdk.events <span class="token-keyword">import</span> ClientType
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Same recovery over WebSocket — <code>WSRecoveryClient</code></div>
+            For a <strong>remote</strong> daemon, <code>WSRecoveryClient</code>
+            offers identical recovery over <code>ws://</code> / <code>wss://</code>:
+            the same state machine, session reattachment, backoff, and
+            <code>on_status_change</code> callback, just on a WebSocket transport
+            (plus <code>ssl=</code> / <code>ca=</code> for self-signed
+            <code>wss://</code> TLS). Reach for it via
+            <code>jaato.session(mode="ws", recovery=True, …)</code> or
+            <code>WSRecoveryClient.session(…)</code>; it needs the
+            <code>jaato-sdk[ws]</code> extra. Everything documented below applies to
+            both clients.
           </div>
 
           <div class="callout callout-info">
@@ -133,38 +157,30 @@
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Quick example</div>
+          <div class="code-label">Quick example (facade)</div>
           <div class="code-block">
             <pre><code class="language-python">import asyncio
-from jaato_sdk.client import IPCRecoveryClient, ConnectionState
-from jaato_sdk.client.recovery import ConnectionStatus
-
-def on_status(status: ConnectionStatus):
-    if status.state == ConnectionState.RECONNECTING:
-        print(f"Reconnecting... attempt "
-              f"{status.attempt}/{status.max_attempts}")
+from jaato_sdk import IPCRecoveryClient
 
 async def main():
-    client = IPCRecoveryClient(
-        socket_path="/tmp/jaato.sock",
-        client_type=ClientType.TERMINAL,
-        on_status_change=on_status,
-    )
-    await client.connect()
-
-    # Create session with an agent profile
-    session_id = await client.create_session(
-        "work", profile="researcher-claude"
-    )
-    client.set_session_id(session_id)
-
-    await client.send_message("Hello!")
-    async for event in client.events():
-        handle_event(event)
-
-    await client.close()
+    # The .session() facade + ask/complete/stream, with auto-reconnect.
+    # Connection, session creation, and reattachment are handled for you.
+    async with IPCRecoveryClient.session(
+        profile={"model": "...", "provider": "...", "plugins": []},
+        on_status_change=lambda st: print(st.state),  # RECONNECTING / CONNECTED
+    ) as s:
+        print(await s.ask("Long task..."))
 
 asyncio.run(main())</code></pre>
+          </div>
+
+          <div class="callout callout-info" style="margin-top: 16px;">
+            <div class="callout-title">Low-level API</div>
+            The methods below (<code>connect()</code>, <code>create_session()</code>,
+            <code>send_message()</code>, <code>events()</code>, ...) are the building
+            blocks the facade is built on. Use them directly for custom event
+            handling; with the facade, iterating <code>events()</code> yourself is
+            optional.
           </div>
         </div>
       </section>
@@ -453,7 +469,8 @@ print(client.is_closed)       # True</code></pre>
             &nbsp;&nbsp;<span class="param">profile</span>: <span class="type">Optional[Union[str, Dict]]</span> = <span class="type">None</span>,<br>
             &nbsp;&nbsp;<span class="param">agent</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
             &nbsp;&nbsp;<span class="param">agent_params</span>: <span class="type">Optional[Dict[str, str]]</span> = <span class="type">None</span>,<br>
-            &nbsp;&nbsp;<span class="param">cascade_driver_id</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            &nbsp;&nbsp;<span class="param">cascade_driver_id</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">timeout</span>: <span class="type">float</span> = <span class="type">60.0</span><br>
             ) -> <span class="type">Optional[str]</span>
           </div>
 
@@ -512,6 +529,19 @@ print(client.is_closed)       # True</code></pre>
                 across cascade stages. Pass the same UUID across every session of one
                 cascade; subagent sessions inherit automatically via the shared runner.
                 <code>None</code> (default) = standalone session, no slot reuse.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">timeout</span>
+              <span class="param-type">float</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Seconds to wait for the server's <code>SessionInfoEvent</code>
+                confirmation. Mirrors <code>IPCClient.create_session(timeout=…)</code>
+                so a plain&rarr;recovery swap is drop-in (forwarded to the inner
+                client). Default <code>60.0</code>. The recovery client's own
+                reconnect timing is governed separately (recovery config +
+                <code>connect(timeout=)</code>).
               </div>
             </li>
           </ul>

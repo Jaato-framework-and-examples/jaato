@@ -12,7 +12,12 @@ The plugin supports deferred tool loading for token economy:
 import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_REPLAY_SAFE,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.tool_id_map import name_to_id
 from ..streaming import StreamingCapable
@@ -145,7 +150,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="system",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -166,7 +171,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                     "required": ["tool_ids"]
                 },
                 category="system",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
@@ -278,13 +283,47 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         documented escape hatch.  This change is for the typical
         case where the persona is the authority on tool scoping
         and the framework defers.
+
+        2026-07-26 addition: an anti-fabrication guardrail
+        ("only call tools in your list by their exact ids; NEVER
+        invent a ``t_<name>`` id; discover unseen capabilities via
+        ``list_tools`` instead of guessing").  It rides INSIDE the
+        same deferred-tools gate on purpose — the guidance to
+        discover-don't-guess is only coherent when discovery tools
+        are actually on the wire.  When the gate suppresses this
+        block (nothing deferred), every real tool is already loaded
+        with its real id, so there is nothing to discover and the
+        prompt must not nudge toward absent ``list_tools`` (the
+        ex08 loop).  Motivated by a live leak where a small exec
+        model read a human tool name (``delete_memory``) from
+        another plugin's instructions and fabricated
+        ``t_delete_memory`` for the deferred (unloaded) tool.
         """
+        # Align with the TOOL gate: when the session dropped introspection's
+        # tools because nothing is deferred to discover (jaato_session.configure
+        # -> _introspection_guidance_suppressed), suppress this discovery
+        # guidance too. Otherwise the prompt nudges the model to call list_tools
+        # / get_tool_schemas that aren't on its wire -> it invents them, hits
+        # no-executor, and loops (the ex08 0-tool subagent hang). Tool-gate and
+        # instruction-gate must stay aligned.
+        session = self._session
+        if session is not None and getattr(
+            session, "_introspection_guidance_suppressed", False
+        ):
+            return None
         return (
             "You have a DYNAMIC tool system with discoverable capabilities.\n\n"
             "CAPABILITY DISCOVERY:\n"
             "When your current information is insufficient to act, explore "
             "available tools before concluding 'I cannot do X'.  Skip discovery "
-            "when the persona has already named the tool(s) to call.\n\n"
+            "when the persona has already named the tool(s) to call.\n"
+            "Only call tools that appear in your available tool list, using "
+            "their exact ids.  NEVER invent, guess, or construct a tool id or "
+            "name (e.g. do not turn a human name you saw in prose into "
+            "`t_<name>`) — the opaque ids come only from your tool list and "
+            "from `get_tool_schemas`.  If you need a capability you don't "
+            "currently see, DISCOVER it via `list_tools(category_id=...)` to "
+            "load the real tool and its id, rather than guessing.\n\n"
             "TOOL DISCOVERY WORKFLOW (when required):\n"
             "1. `list_tools()` - See all categories with IDs and tool counts\n"
             "2. `list_tools(category_id='...')` - See tools in a specific category\n"
@@ -669,7 +708,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                 self._accessed_tools.add(tool_name)
 
                 # Check if this is a discoverable tool that needs activation
-                if getattr(target_schema, 'discoverability', 'discoverable') == 'discoverable':
+                if getattr(target_schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_DEFERRED:
                     tools_to_activate.append(tool_name)
 
                 # Find plugin source

@@ -117,6 +117,7 @@ def collect_instruction_texts(
     *,
     system_instruction_override: Optional[str] = None,
     suppress_base: bool = False,
+    suppress_constants: bool = False,
     pinned_references: Optional[Dict[str, Any]] = None,
     preloaded_plugins: Optional[Set[str]] = None,
 ) -> Tuple[List[TokenCountRequest], Set[str]]:
@@ -142,7 +143,13 @@ def collect_instruction_texts(
         session_instructions: The user-provided system_instructions.
         system_instruction_override: When not ``None``, supplants the
             whole assembly — see above.
-        suppress_base: Skip BASE instructions while keeping other children.
+        suppress_base: Skip BASE (disk) instructions while keeping other children.
+        suppress_constants: Skip the framework prompt constants (task-completion,
+            parallel guidance, turn-summary) so the budget matches a wire prompt
+            assembled with ``include_constants=False``.  (The builder never
+            emits the security boundary, so there is no ``suppress_security``
+            knob here — the wire prompt's security block is simply uncounted,
+            as it was before this change.)
         pinned_references: Mapping of ref_id -> pinned reference (with
             ``content`` / ``ref_name`` attributes), promoted to SYSTEM.
         preloaded_plugins: Plugin names whose instructions are always
@@ -213,19 +220,22 @@ def collect_instruction_texts(
             label="Client Instructions",
         ))
 
-    # 3. Framework constants (concatenated into one request)
-    framework_parts = [_TASK_COMPLETION_INSTRUCTION]
-    if _is_parallel_tools_enabled():
-        framework_parts.append(_PARALLEL_TOOL_GUIDANCE)
-    framework_parts.append(_TURN_SUMMARY_INSTRUCTION)
-    framework_text = "\n\n".join(framework_parts)
-    requests.append(TokenCountRequest(
-        text=framework_text,
-        source=InstructionSource.SYSTEM,
-        child_key=SystemChildType.FRAMEWORK.value,
-        gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
-        label="Framework",
-    ))
+    # 3. Framework constants (concatenated into one request).  Skipped when
+    #    suppress_constants is set, mirroring the wire prompt's
+    #    include_constants=False so the budget denominator stays truthful.
+    if not suppress_constants:
+        framework_parts = [_TASK_COMPLETION_INSTRUCTION]
+        if _is_parallel_tools_enabled():
+            framework_parts.append(_PARALLEL_TOOL_GUIDANCE)
+        framework_parts.append(_TURN_SUMMARY_INSTRUCTION)
+        framework_text = "\n\n".join(framework_parts)
+        requests.append(TokenCountRequest(
+            text=framework_text,
+            source=InstructionSource.SYSTEM,
+            child_key=SystemChildType.FRAMEWORK.value,
+            gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
+            label="Framework",
+        ))
 
     # 4. Pinned preselected references (content read by the model and
     #    promoted to system instruction for GC protection)

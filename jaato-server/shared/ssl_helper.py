@@ -17,7 +17,7 @@ def normalize_ca_env_vars(prefer_order: Optional[Iterable[str]] = None) -> None:
         os.environ[var] = expanded
 
     # Optional validation (opt-in)
-    if os.environ.get('ENV_VALIDATE_CA', '').lower() in ('1', 'true', 'yes'):
+    if os.environ.get('ENV_VALIDATE_CA', '').lower() in ('1', 'true', 'yes'):  # env: opt-in: warn at startup when REQUESTS_CA_BUNDLE / SSL_CERT_FILE point to missing files
         for var in (prefer_order or _OPTIONAL_CA_VARS):
             val = os.environ.get(var)
             if not val:
@@ -56,7 +56,7 @@ def log_ssl_guidance(prefix: str, exc: Exception, silent: bool = False, pre_coun
     """
     if silent:
         return
-    bundle = os.environ.get('REQUESTS_CA_BUNDLE') or os.environ.get('SSL_CERT_FILE')
+    bundle = os.environ.get('REQUESTS_CA_BUNDLE') or os.environ.get('SSL_CERT_FILE')  # env: custom CA bundle for TLS verification (standard vars; first set one wins)
     print(f'[SSL] {prefix} certificate verification failed.')
     print(f'[SSL] Exception: {str(exc)}')
     if bundle:

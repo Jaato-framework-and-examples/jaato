@@ -54,7 +54,16 @@ def _make_sm() -> SessionManager:
     sm._cascade_client_sweep_thread = None
     sm._cid_last_session_ts = {}  # Bug B fix, server 0.6.161+
     sm._HEADLESS_CLIENT_ID = "_headless"
+    sm._pending_wakes = {}  # wake deferred-turn store (production has it)
+    # no wake bindings in these cascade tests → the sweep's wake-durability
+    # exemption is a no-op (has_live_binding_for_cid → False).
+    sm._wake_binding_registry = _NoWakeBindings()
     return sm
+
+
+class _NoWakeBindings:
+    def has_live_binding_for_cid(self, cid):
+        return False
 
 
 def _make_session(
@@ -301,6 +310,38 @@ class TestDispatch:
         event = _FakeEvent()
         sm._dispatch_to_cascade_clients(session, event)
         cb.assert_called_once_with(event)
+
+    def test_owner_equals_observer_deduped_post_bootstrap(self):
+        # owner==observer on one connection: the client is BOTH attached (so it
+        # already received the direct _emit_to_client fan-out) AND a cascade
+        # observer.  The post-bootstrap cascade dispatch must SKIP its entry
+        # (delivery_target_id in session.attached_clients) so post-bootstrap turn
+        # events don't double-deliver on the same raw connection.
+        sm = _make_sm()
+        cb = MagicMock()
+        sm.register_in_process_client(
+            client_id="obs", callback=cb,
+            cascade_driver_id="abc", role="observer",
+            delivery_target_id="conn1",           # raw connection id
+        )
+        session = _make_session("s1", cid="abc", attached_clients={"conn1"})
+        sm._dispatch_to_cascade_clients(session, _FakeEvent())
+        cb.assert_not_called()                    # deduped — already got direct emit
+
+    def test_observer_on_separate_connection_still_delivered(self):
+        # A cascade observer on a DIFFERENT connection (NOT attached to the
+        # session) did not get the direct emit → must still receive via cascade.
+        sm = _make_sm()
+        cb = MagicMock()
+        sm.register_in_process_client(
+            client_id="obs", callback=cb,
+            cascade_driver_id="abc", role="observer",
+            delivery_target_id="conn2",           # not attached
+        )
+        session = _make_session("s1", cid="abc", attached_clients={"conn1"})
+        event = _FakeEvent()
+        sm._dispatch_to_cascade_clients(session, event)
+        cb.assert_called_once_with(event)         # delivered (not deduped)
 
     def test_event_type_filter_drops_non_matches(self):
         sm = _make_sm()
@@ -673,6 +714,28 @@ class TestSweep:
         # No session with cid="abc" exists → eligible for GC.
         sm._cascade_client_sweep_once()
         assert "abc" not in sm._cascade_clients
+
+    def test_sweep_exempts_cid_with_live_wake_binding(self):
+        # Wake durability (Option 2): a stale, session-less cid is normally
+        # reaped — but NOT while a live wake binding carries it (a wake may still
+        # arrive; the observer must survive the session going cold).
+        sm = _make_sm()
+        sm._cascade_client_idle_timeout = 0.05
+
+        class _HasBindingForCid:
+            def has_live_binding_for_cid(self, cid):
+                return cid == "wake-cid"
+        sm._wake_binding_registry = _HasBindingForCid()
+
+        sm.register_in_process_client(
+            client_id="bot", callback=MagicMock(),
+            cascade_driver_id="wake-cid", role="observer",
+        )
+        entry = sm._cascade_clients["wake-cid"][0]
+        entry.registered_at = time.monotonic() - 1.0  # stale, no session
+        sm._cascade_client_sweep_once()
+        # observer SURVIVES because a live wake binding keeps the cid alive
+        assert "wake-cid" in sm._cascade_clients
 
     def test_sweep_skips_entries_with_active_sessions(self):
         sm = _make_sm()

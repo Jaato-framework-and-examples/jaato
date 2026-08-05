@@ -17,8 +17,15 @@ logger = logging.getLogger(__name__)
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
-from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    EditableContent,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
+from ..workspace_venv import (
+    resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, pip_apparmor_rules,
+)
 from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
@@ -116,6 +123,9 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         super().__init__(max_workers=4)
 
         self._extra_paths: List[str] = []
+        # Secrets-broker (feature #10): env-var name globs to strip from the
+        # environment handed to model-driven subprocesses.  Empty = off.
+        self._scrub_secret_env: List[str] = []
         self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
         self._auto_background_threshold: float = DEFAULT_AUTO_BACKGROUND_THRESHOLD
         self._initialized = False
@@ -142,6 +152,11 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         # (self._bg_tool_output_callback) via set_tool_output_callback()
         # Workspace root for path sandboxing (None = no sandboxing)
         self._workspace_root: Optional[str] = None
+        # Workspace-scoped venv path for tool subprocesses (None/empty = off).
+        # When set, commands run with this venv activated so the model's
+        # ``pip install`` persists there and later imports resolve.  See
+        # shared/plugins/workspace_venv.py.
+        self._workspace_venv: Optional[str] = None
         # Plugin registry for checking authorized external paths
         self._plugin_registry = None
 
@@ -212,6 +227,14 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                 workspace = config['workspace_root']
                 if workspace:
                     self._workspace_root = os.path.realpath(os.path.abspath(workspace))
+            if 'workspace_venv' in config:
+                self._workspace_venv = config['workspace_venv']
+            if 'scrub_secret_env' in config:
+                scrub = config['scrub_secret_env']
+                if isinstance(scrub, str):
+                    scrub = [scrub]
+                if isinstance(scrub, (list, tuple)):
+                    self._scrub_secret_env = [str(s) for s in scrub]
 
         # Auto-detect workspace_root from environment if not explicitly provided
         if not self._workspace_root:
@@ -427,8 +450,51 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     "default": 4,
                     "description": "Maximum concurrent background workers",
                 },
+                "scrub_secret_env": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": (
+                        "Env-var name globs (case-insensitive fnmatch) to strip "
+                        "from the environment of commands run by this tool, so a "
+                        "model-driven command cannot read raw credentials the "
+                        "runner itself holds (e.g. echo $GITHUB_TOKEN). Empty = "
+                        "off (default). Recommended starting set: "
+                        "['*_API_KEY','*_TOKEN','*_SECRET','ANTHROPIC_AUTH_TOKEN']."
+                    ),
+                },
+                "workspace_venv": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped venv to activate for "
+                        "commands (empty = off). Relative paths resolve "
+                        "against the workspace root. Created if absent with "
+                        "--system-site-packages; the model's pip installs "
+                        "persist there. Recommended: .jaato/tool-venv"
+                    ),
+                },
             },
         }
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute pip's AppArmor rules to the profile.
+
+        The cli tool can run ``pip`` (directly or via the model's shell
+        commands): the distro/UA OS-id reads (crashes without them under
+        confinement) plus, when a ``workspace_venv`` is set, an ``ix`` grant on
+        the venv bin so a bare ``pip`` / console script runs.  Scoped to
+        sessions that load ``cli`` — least-privilege.  See ``pip_apparmor_rules``.
+        """
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ToolSchema for the CLI tool."""
@@ -467,7 +533,7 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                 "required": ["command"]
             },
             category="system",
-            discoverability="discoverable",
+            discoverability=DISCOVERABILITY_DEFERRED,
             editable=EditableContent(
                 parameters=["command"],
                 format="text",
@@ -731,6 +797,21 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             if extra_paths:
                 path_sep = os.pathsep
                 env['PATH'] = env.get('PATH', '') + path_sep + path_sep.join(extra_paths)
+
+            # Activate the workspace venv (if configured) so ``pip install``
+            # persists to it and later imports resolve.  Prepends the venv
+            # bin ahead of extra_paths so the venv's python/pip win.
+            venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+            if venv_path:
+                ensure_workspace_venv(venv_path)
+                apply_venv_to_env(env, venv_path)
+
+            # Secrets-broker scrub (feature #10): strip declared secret vars
+            # from the subprocess env so a model-driven command can't read raw
+            # credentials the runner itself holds.  No-op when unconfigured.
+            if self._scrub_secret_env:
+                from shared.secret_scrub import scrub_env as _scrub_secret_env
+                env = _scrub_secret_env(env, self._scrub_secret_env)
 
             # Check if shell interpretation is needed
             use_shell = self._requires_shell(command)
@@ -1286,6 +1367,24 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     + path_sep + path_sep.join(extra_paths)
                 }
 
+            # Activate the workspace venv (if configured) on the FOREGROUND path
+            # too — run_command starts from os.environ + extra_env, so seed a
+            # full env, activate, and carry the venv-touched keys back into
+            # extra_env.  Without this, foreground `python`/`pip` resolve to the
+            # runner base venv instead of the tool-venv (parity with the
+            # streaming path in _execute_streaming).
+            venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+            if venv_path:
+                ensure_workspace_venv(venv_path)
+                seed = dict(os.environ)
+                if extra_env:
+                    seed.update(extra_env)
+                apply_venv_to_env(seed, venv_path)
+                extra_env = extra_env or {}
+                for _k in ('PATH', 'VIRTUAL_ENV', 'PYTHONPATH'):
+                    if _k in seed:
+                        extra_env[_k] = seed[_k]
+
             # Resolve streaming callback
             effective_callback = self._get_effective_output_callback()
             self._trace(f"execute: streaming={'YES' if effective_callback else 'NO'}")
@@ -1313,6 +1412,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 on_stdout_line=effective_callback,
                 check_cancel=True,
                 preexec_fn=self._build_subprocess_preexec_fn(),
+                scrub_env=self._scrub_secret_env or None,
             )
 
             # Executable-not-found is surfaced as an error dict so the

@@ -38,6 +38,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     TokenUsage,
     ToolResult,
+    render_result_for_model,
     ToolSchema,
 )
 
@@ -168,7 +169,7 @@ def message_to_sdk(message: Message) -> List["ChatRequestMessage"]:
         # results reach the model (each keyed by its own call_id).
         tool_msgs: List["ChatRequestMessage"] = []
         for fr in function_responses:
-            result_str = json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
+            result_str = render_result_for_model(fr.result, fr.model_suffix, untrusted=fr.untrusted, untrusted_source=fr.untrusted_source)
             tool_msgs.append(get_models().ToolMessage(
                 tool_call_id=fr.call_id,
                 content=result_str,

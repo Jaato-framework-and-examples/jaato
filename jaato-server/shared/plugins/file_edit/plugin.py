@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from shared.ui_utils import ellipsize_path, ellipsize_path_pair
 from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE, DISCOVERABILITY_EAGER, DISCOVERABILITY_DEFERRED
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from .backup import BackupManager
 from .diff_utils import (
@@ -722,9 +722,40 @@ class FileEditPlugin(RunnerForwardingMixin):
             return resolved
         return p
 
+    @staticmethod
+    def _is_jaato_rule(line: str) -> bool:
+        """True if a .gitignore line is ANY rule anchored at ``.jaato`` — bare,
+        ``/``-anchored, ``/*`` / ``/**`` globbed, a ``.jaato/<sub>`` path, or a
+        ``!``-negation thereof.  Used to detect that the user is already managing
+        ``.jaato`` so we never auto-append a redundant (or negation-defeating)
+        rule on top of a deliberate setup."""
+        s = line.strip()
+        if not s or s.startswith("#"):
+            return False
+        s = s.lstrip("!").lstrip("/")            # drop negation marker + anchor
+        if s.startswith(".jaato/"):
+            return True
+        return s.rstrip("*").rstrip("/") == ".jaato"
+
     def _ensure_gitignore(self) -> None:
-        """Add .jaato to .gitignore if it exists and entry is missing."""
-        gitignore = Path(".gitignore")
+        """Add a ``.jaato/`` ignore to the WORKSPACE .gitignore — but only if it
+        exists and has NO existing ``.jaato``-anchored rule.
+
+        - Anchored to the session workspace (``get_workspace_root``), not the
+          process cwd, so it never edits an unrelated repo's .gitignore when the
+          daemon was launched outside the workspace.
+        - Skips entirely when ANY ``.jaato`` rule is already present, so a
+          deliberate setup (e.g. ``.jaato/*`` + ``!.jaato/profiles/``) is not
+          fought every session (dani's principle: no auto-mods over a
+          deterministic user setup).
+        - Appends the directory form ``.jaato/``; a bare ``.jaato`` placed after a
+          ``!``-negation re-excludes the whole dir and silently un-tracks future
+          profile/agent files.
+        """
+        workspace = get_workspace_root()
+        if not workspace:
+            return
+        gitignore = Path(workspace) / ".gitignore"
         if not gitignore.exists():
             return
 
@@ -732,16 +763,17 @@ class FileEditPlugin(RunnerForwardingMixin):
             content = gitignore.read_text(encoding="utf-8")
             lines = content.splitlines()
 
-            # Check if .jaato is already present
-            if ".jaato" in lines or ".jaato/" in lines:
+            # Any existing .jaato-anchored rule → the user is managing it; leave
+            # it alone (the narrow exact-match check used to miss `.jaato/*` and
+            # re-append a bare `.jaato` every session).
+            if any(self._is_jaato_rule(l) for l in lines):
                 return
 
-            # Add .jaato to gitignore
             with gitignore.open("a", encoding="utf-8") as f:
                 # Add newline if file doesn't end with one
                 if content and not content.endswith("\n"):
                     f.write("\n")
-                f.write(".jaato\n")
+                f.write(".jaato/\n")
         except OSError as exc:
             # If we can't read/write gitignore, just log and skip
             logger.debug(f"Failed to update .gitignore: {exc}")
@@ -831,7 +863,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -903,7 +935,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["old", "new", "new_content"],
                     format="diff",
@@ -940,7 +972,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path", "content"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["content"],
                     format="text",
@@ -963,7 +995,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -990,7 +1022,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["source_path", "destination_path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1017,7 +1049,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["source_path", "destination_path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1035,7 +1067,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1098,7 +1130,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["operations"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1133,7 +1165,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["pattern", "replacement", "paths"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1155,7 +1187,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -1172,7 +1204,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
@@ -1564,6 +1596,23 @@ Backups are automatically created for file modifications."""
                 }
             except OSError as e:
                 return {"error": f"Failed to read image: {e}"}
+
+        if ext == '.pdf':
+            self._trace("readFile: detected PDF, returning as multimodal file")
+            try:
+                data = file_path.read_bytes()
+                return {
+                    "_multimodal": True,
+                    "_multimodal_type": "file",
+                    "file_data": data,
+                    "mime_type": "application/pdf",
+                    "display_name": file_path.name,
+                    "path": normalize_result_path(path),
+                    "size": len(data),
+                    "type": "file",
+                }
+            except OSError as e:
+                return {"error": f"Failed to read PDF: {e}"}
 
         # Validate offset and limit if provided
         if offset is not None:

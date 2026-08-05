@@ -188,7 +188,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
 
 from .completion_schema_loader import resolve_completion_schema
 
@@ -201,8 +201,18 @@ logger = logging.getLogger(__name__)
 class LifecycleTools:
     """Agent lifecycle signaling tools.
 
-    Instantiated per-session in ``JaatoSession.configure()`` and
-    registered via ``registry.register_core_tool()``.
+    Instantiated per-session in ``JaatoSession.configure()`` and registered
+    SESSION-LEVEL — the schemas are appended to ``session._tools`` and the
+    executors to ``session._executor`` (``JaatoSession.configure`` ~line 2050),
+    NOT via ``registry.register_core_tool()``.  This is deliberate (see the
+    "unlike core tools" comment there): lifecycle tools must be visible in the
+    model's schema regardless of the profile's plugin list, and must be
+    filterable per-presentation (hidden for interactive roots), which the
+    registry core-tool surface does not support.  Consequence:
+    ``registry.is_core_tool('signal_completion')`` is ``False`` — code that
+    needs to treat lifecycle terminals as framework machinery must use the
+    permission plugin's ``_framework_reserved`` set (populated at configure),
+    not ``is_core_tool``.
 
     On construction, resolves the session's
     ``_completion_payload_schema`` (inline dict or path under
@@ -328,7 +338,7 @@ class LifecycleTools:
                         "inspect accumulated state."
                     ),
                     parameters=parameters,
-                    discoverability="core",
+                    discoverability=DISCOVERABILITY_EAGER,
                 )
             )
 
@@ -409,7 +419,7 @@ class LifecycleTools:
                             "required": ["field_path", "value"],
                             "additionalProperties": False,
                         },
-                        discoverability="core",
+                        discoverability=DISCOVERABILITY_EAGER,
                     )
                 )
                 schemas.append(
@@ -432,7 +442,7 @@ class LifecycleTools:
                             "properties": {},
                             "additionalProperties": False,
                         },
-                        discoverability="core",
+                        discoverability=DISCOVERABILITY_EAGER,
                     )
                 )
 
@@ -570,7 +580,7 @@ class LifecycleTools:
                 },
                 "required": ["name"],
             },
-            discoverability="core",
+            discoverability=DISCOVERABILITY_EAGER,
         )
 
     def get_executors(self) -> Dict[str, Any]:
@@ -1319,9 +1329,29 @@ class LifecycleTools:
                 if current.get("type") != "object":
                     return None
                 properties = current.get("properties", {})
-                if seg not in properties:
+                if seg in properties:
+                    current = properties[seg]
+                elif properties and "additionalProperties" not in current:
+                    # TYPED object (declares ``properties``) with no explicit
+                    # ``additionalProperties``: a key not in ``properties`` is
+                    # treated as a typo — reject (preserves the "does not match
+                    # schema structure" typo-protection this path is built for).
                     return None
-                current = properties[seg]
+                else:
+                    # FREE-SHAPE object (no ``properties``) OR one that
+                    # EXPLICITLY declares ``additionalProperties``: arbitrary
+                    # sub-keys are allowed unless additionalProperties is
+                    # explicitly False.  Resolve to the additionalProperties
+                    # sub-schema (if a dict) else a permissive ``{}`` — so
+                    # dot-notation into e.g.
+                    # ``stack_config: {type:object, minProperties:1}`` is
+                    # accepted + stored, not rejected.  One-shot validates the
+                    # ASSEMBLED object against minProperties; the accumulator
+                    # must match.
+                    additional = current.get("additionalProperties", True)
+                    if additional is False:
+                        return None
+                    current = additional if isinstance(additional, dict) else {}
         return current if isinstance(current, dict) else None
 
     def _set_at_path(
@@ -1523,6 +1553,24 @@ class LifecycleTools:
         if schema.get("type") == "object":
             properties = schema.get("properties", {})
             required = schema.get("required", [])
+            # Free-shape floor: an object whose constraint is ``minProperties``
+            # (e.g. ``stack_config: {type:object, minProperties:1}`` with no
+            # ``required``) is still UNMET until it holds that many keys.
+            # Without this, a present-but-too-empty free-shape object passes
+            # the ``required[]`` walk yet fails one-shot's ``minProperties`` —
+            # the accumulator/one-shot floor mismatch this fixes.
+            min_props = schema.get("minProperties")
+            if (
+                min_props is not None
+                and isinstance(accumulated, dict)
+                and len(accumulated) < min_props
+            ):
+                pending.append(
+                    self._describe_pending_field(
+                        path_prefix or "(root)", schema,
+                        root_schema=root_schema,
+                    )
+                )
             for req_key in required:
                 child_path = (
                     f"{path_prefix}.{req_key}" if path_prefix else req_key

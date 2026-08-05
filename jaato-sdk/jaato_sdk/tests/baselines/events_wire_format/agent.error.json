@@ -1,0 +1,13 @@
+{
+  "type": "agent.error",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "session_id": "",
+  "error_type": "",
+  "error_summary": "",
+  "request_id": null,
+  "attempt": "0",
+  "classification": null,
+  "framework_retries_exhausted": null,
+  "occurred_at": null
+}

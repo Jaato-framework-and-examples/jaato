@@ -32,6 +32,8 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="quickstart.html" class="active">Quickstart</a></li>
+          <li><a href="quickstart.html#developer-tooling">Developer Tooling</a></li>
+          <li><a href="typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -81,6 +83,9 @@
           <li><a href="../api-reference/providers/vllm.html">vLLM</a></li>
           <li><a href="../api-reference/providers/tensorrt-llm.html">TensorRT-LLM</a></li>
           <li><a href="../api-reference/providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../api-reference/providers/nebius.html">Nebius</a></li>
+          <li><a href="../api-reference/providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../api-reference/providers/triton.html">Triton</a></li>
         </ul>
       </div>
     </aside>
@@ -99,54 +104,29 @@
           <h2 id="requirements">Requirements</h2>
           <ul>
             <li>Python 3.10 or higher</li>
-            <li>Credentials for at least one AI provider (see table)</li>
+            <li>Credentials for at least one AI provider (see below)</li>
           </ul>
 
           <h2 id="auth-options">Choose a Provider</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Provider</th>
-                <th>Use Case</th>
-                <th>Setup</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><strong>Anthropic</strong></td>
-                <td>Complex reasoning, code generation</td>
-                <td><a href="../api-reference/providers/anthropic.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Google GenAI</strong></td>
-                <td>Long context, multimodal</td>
-                <td><a href="../api-reference/providers/google-genai.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>GitHub Models</strong></td>
-                <td>Multi-model access via single API</td>
-                <td><a href="../api-reference/providers/github-models.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Ollama</strong></td>
-                <td>Local models, privacy, no API costs</td>
-                <td><a href="../api-reference/providers/ollama.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Claude CLI</strong></td>
-                <td>Claude Pro/Max subscribers</td>
-                <td><a href="../api-reference/providers/claude-cli.html">Setup guide</a></td>
-              </tr>
-              <tr>
-                <td><strong>Zhipu AI</strong></td>
-                <td>GLM models, chain-of-thought reasoning</td>
-                <td><a href="../api-reference/providers/zhipuai.html">Setup guide</a></td>
-              </tr>
-            </tbody>
-          </table>
           <p>
-            See the <a href="../api-reference/providers/index.html">Providers Reference</a>
-            for detailed configuration options for each provider.
+            jaato reaches a wide range of model providers through one uniform
+            interface. They group by how the model runs:
+          </p>
+          <ul>
+            <li><strong>Hosted API providers</strong> &mdash; cloud services you
+              reach with an API key or OAuth (e.g. Anthropic, Google GenAI).</li>
+            <li><strong>Local runtimes</strong> &mdash; models on your own
+              hardware, no API cost (e.g. Ollama, vLLM).</li>
+            <li><strong>Unified gateways</strong> &mdash; a single endpoint
+              fronting many vendors' models (e.g. OpenRouter).</li>
+            <li><strong>Subscription-based</strong> &mdash; drive an existing
+              Claude Pro/Max or Google subscription (e.g. Claude CLI,
+              Antigravity).</li>
+          </ul>
+          <p>
+            See the <a href="../api-reference/providers/index.html">Providers
+            Reference</a> for the complete list of supported providers and
+            per-provider setup &mdash; the sidebar links each one directly.
           </p>
         </div>
         <div class="panel-code">
@@ -212,6 +192,66 @@ MODEL_NAME=qwen3:32b
         </div>
       </section>
 
+      <!-- Developer tooling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="developer-tooling">Developer Tooling</h2>
+          <p>
+            Two console scripts help you build and debug clients and agent
+            profiles <strong>against the installed framework</strong>, so they
+            can't drift from the code.
+          </p>
+          <p>
+            <code>jaato-doctor</code> (ships with <code>jaato-sdk</code>) is a
+            client preflight — run it before your client calls
+            <code>connect()</code>. It checks whether <code>server</code> is
+            importable (autostart), the socket is listening or stale, the
+            daemon's <code>HOME</code> vs yours (why <code>pass://</code> secrets
+            resolve from the wrong store), the <code>env_file</code>, and where
+            profiles/logs land. Non-zero exit on any failure, so it doubles as a
+            CI gate.
+          </p>
+          <p>
+            <code>jaato-scaffold</code> (ships with <code>jaato-server</code>)
+            interrogates, validates, and scaffolds: <code>explain</code> reads
+            the live plugin/provider registry, <code>validate</code> lints a
+            profile against it, and <code>new</code> generates a starting client
+            or cascade — the source of truth for <em>current</em> patterns.
+          </p>
+          <p>
+            For <strong>runtime</strong> failures, <code>jaato-scaffold explain
+            runtime</code> is the map — the session/runner entities, how the
+            workspace flows from client to plugin, and where each log lands — and
+            <code>jaato-doctor --session &lt;id|latest&gt;</code> applies it to a
+            live session, reporting whether its runner-tier path plugins resolved
+            the workspace or got <code>workspace=none</code> (path tools denied).
+            That turns a manual log hunt into one command.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">jaato-doctor — client preflight</div>
+          <div class="code-block">
+            <pre><code class="language-bash">jaato-doctor --workspace . --env-file .env
+# non-zero exit on any FAIL → usable as a gate
+jaato-doctor --session latest --workspace .  # debug a RUNNING session:
+# did its runner-tier path plugins resolve the workspace, or get
+# workspace=none (→ readFile/file_edit/cli Permission-denied)?
+# (equivalent: python -m jaato_sdk.doctor)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">jaato-scaffold — interrogate / validate / scaffold</div>
+          <div class="code-block">
+            <pre><code class="language-bash">jaato-scaffold explain                 # plugins · providers · gc · archetypes
+jaato-scaffold explain provider anthropic   # capabilities · knobs · quirks
+jaato-scaffold explain profile         # the agent-profile schema, field by field
+jaato-scaffold explain runtime         # session/runner entities · workspace flow · log map
+jaato-scaffold validate my-profile.yaml     # lint vs the live registry
+jaato-scaffold new client --workspace . --provider anthropic --model claude-sonnet-4-20250514
+# (equivalent: python -m shared.scaffold ...)</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- Basic usage -->
       <section class="two-panel">
         <div class="panel-explanation">
@@ -249,6 +289,98 @@ client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env
 
 response = client.generate("What is 2 + 2?")
 print(response)  # "4"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Talking to a daemon -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="daemon-facade">Talking to a Daemon (recommended)</h2>
+          <p>
+            The example above runs the agent runtime <strong>in-process</strong>
+            with <code>JaatoClient</code>. The <strong>recommended</strong> Python
+            entry path instead talks to a long-lived jaato
+            <strong>daemon</strong> over IPC, using the async
+            <code>IPCClient</code> facade
+            (<a href="../api-reference/ipc-client.html">full reference</a>).
+          </p>
+          <p>
+            <code>IPCClient.session(...)</code> is an async context manager: on
+            entry it connects to (or auto-starts) the daemon and creates a
+            session; on exit it disconnects. The yielded
+            <code>Session</code> owns the send-and-wait recipe, so
+            <code>await s.ask(...)</code> returns the answer without any event
+            plumbing. For a throwaway call, the module-level <code>ask()</code>
+            opens a session, asks, and tears down in one line.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">One facade, three transports</div>
+            The same <code>Session</code> facade (<code>s.ask</code> /
+            <code>s.complete</code> / <code>s.stream</code>) runs three ways via
+            <code>jaato.session(mode=...)</code> &mdash; <code>mode</code> is the
+            only thing that changes:
+            <code>mode="in_process"</code> (embedded; the agent runs in your
+            process with no daemon &mdash; <code>InProcessClient</code>),
+            <code>mode="ipc"</code> (a <strong>local</strong> daemon over a Unix
+            socket &mdash; <code>IPCClient</code>, shown here), and
+            <code>mode="ws"</code> (a <strong>remote</strong> daemon over
+            <code>ws://</code> / <code>wss://</code> &mdash; <code>WSClient</code>,
+            needs the <code>jaato-sdk[ws]</code> extra). An inline
+            <code>profile</code> spec <strong>requires</strong> a
+            <code>plugins</code> key (use <code>[]</code> for a tool-less
+            session); credentials resolve from a <code>pass:</code> knob, never a
+            raw key or env var.
+            <br><br>
+            On the daemon transports, add <code>recovery=True</code> for the
+            auto-reconnect client
+            (<a href="../guides/connection-recovery.html"><code>IPCRecoveryClient</code>
+            / <code>WSRecoveryClient</code></a>; <code>mode="in_process"</code>
+            rejects it). For a self-signed <code>wss://</code> cert, pass
+            <code>ca=</code> (a CA-bundle path) on <code>mode="ws"</code>. A
+            non-terminal client (chat / web) can pass <code>presentation=</code>
+            (a <code>PresentationContext</code> or <code>dict</code>) to replace
+            the default terminal display context so the model adapts its output.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">daemon_facade.py</div>
+          <div class="code-block">
+            <pre><code class="language-python">import asyncio
+from jaato_sdk import IPCClient, ask
+
+async def main():
+    # Open a session, ask, tear down on exit.
+    async with IPCClient.session(profile={
+        "model": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "plugins": [],
+        "plugin_configs": {
+            "anthropic": {"api_key": "pass://jaato/anthropic/api-key"},
+        },
+    }) as s:
+        print(await s.ask("What is 2 + 2?"))   # "4"
+
+    # ...or the one-shot helper, for a throwaway call.
+    print(await ask("What is 2 + 2?", profile={
+        "model": "claude-sonnet-4-20250514",
+        "provider": "anthropic",
+        "plugins": [],
+        "plugin_configs": {
+            "anthropic": {"api_key": "pass://jaato/anthropic/api-key"},
+        },
+    }))
+
+# Transport-agnostic entry — same spec + same s.ask/.complete/.stream,
+# flip the transport with mode:
+import jaato
+#   jaato.session(mode="in_process", profile={...})   # embedded, no daemon
+#   jaato.session(mode="ipc",        profile={...})   # local daemon (above)
+#   jaato.session(mode="ws", url="wss://host:8080", token="...", profile={...})
+# Add recovery=True (mode ipc/ws) for the auto-reconnect client; ca="ca.pem"
+# (mode ws) to trust a self-signed wss:// cert.
+
+asyncio.run(main())</code></pre>
           </div>
         </div>
       </section>

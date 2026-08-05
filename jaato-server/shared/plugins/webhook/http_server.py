@@ -111,6 +111,26 @@ class WebhookHTTPServer:
             logger.warning("Webhook HTTP server already running")
             return
 
+        # Fail-loud on posture: no routes at all, or routes that accept unsigned
+        # requests, are surfaced at startup so the operator can't miss them.
+        if not self.config.routes:
+            logger.warning(
+                "Webhook listener on %s:%d has NO routes configured — every "
+                "request will 404. Declare routes in the webhook config.",
+                self.config.host, self.config.port,
+            )
+        transport_auth = self.transport_authenticated()
+        for name, route in self.config.routes.items():
+            has_hmac = bool(route.secret_header and route.secret_algo)
+            if not has_hmac and not transport_auth and route.allow_unauthenticated:
+                logger.warning(
+                    "Webhook route '%s' (%s) accepts UNSIGNED requests "
+                    "(allow_unauthenticated=true, no mutual-TLS / IP-allowlist) "
+                    "— anyone who can reach %s:%d can inject events into agent "
+                    "sessions.",
+                    name, route.path, self.config.host, self.config.port,
+                )
+
         handler = _create_handler(self)
         self._server = HTTPServer((self.config.host, self.config.port), handler)
         self._server.timeout = 1.0  # Allow periodic shutdown checks
@@ -167,6 +187,19 @@ class WebhookHTTPServer:
         self._server = None
         self._thread = None
         logger.info("Webhook HTTP server stopped")
+
+    def transport_authenticated(self) -> bool:
+        """True when the deployment authenticates callers below the HMAC layer.
+
+        Either mutual TLS (``tls.enabled`` with a ``ca_certfile``, so clients
+        must present a valid client certificate) or a non-empty IP allowlist.
+        A route without an HMAC secret may accept requests only when this is
+        True or the route sets ``allow_unauthenticated`` — otherwise the request
+        is refused (fail-closed).
+        """
+        tls = self.config.tls
+        mutual_tls = bool(tls.enabled and tls.ca_certfile)
+        return mutual_tls or bool(self._allowed_networks)
 
     def check_ip_allowed(self, client_ip: str) -> bool:
         """Check if a client IP is in the allowed list.
@@ -332,6 +365,7 @@ def _create_handler(server_instance: WebhookHTTPServer):
             headers = {k: v for k, v in self.headers.items()}
             event, err_status, err_msg = parse_webhook_request(
                 body, headers, route_name, route, config.secret,
+                transport_authenticated=server_instance.transport_authenticated(),
             )
 
             if event is None:

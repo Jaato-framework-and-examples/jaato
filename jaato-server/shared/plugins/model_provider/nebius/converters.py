@@ -24,6 +24,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     TokenUsage,
     ToolResult,
+    render_result_for_model,
     ToolSchema,
 )
 
@@ -94,6 +95,25 @@ def tool_schemas_to_openai(schemas: Optional[List[ToolSchema]]) -> Optional[List
 
 # ==================== Message Conversion ====================
 
+def _tool_result_image_blocks(attachments: Any) -> List[Dict[str, Any]]:
+    """OpenAI ``image_url`` content blocks for image attachments on a tool result.
+
+    OpenAI-compat ``tool`` messages cannot carry image content — images live
+    only in ``user`` messages — so a tool that returns an image (e.g.
+    ``readFile`` on a PNG) must surface it via a follow-up user message.
+    """
+    blocks: List[Dict[str, Any]] = []
+    for att in attachments or []:
+        mime = getattr(att, "mime_type", "") or ""
+        if mime.startswith("image/"):
+            b64 = base64.b64encode(att.data).decode("utf-8")
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+    return blocks
+
+
 def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     """Convert internal Message to OpenAI message dict(s).
 
@@ -127,14 +147,32 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
         # One wire ``role:"tool"`` message PER function_response so all N
         # parallel results reach the model (each keyed by its own call_id).
         tool_msgs: List[Dict[str, Any]] = []
+        image_followups: List[Dict[str, Any]] = []
         for fr in function_responses:
-            result_str = json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
+            result_str = render_result_for_model(fr.result, fr.model_suffix, untrusted=fr.untrusted, untrusted_source=fr.untrusted_source)
             tool_msgs.append({
                 "role": "tool",
                 "tool_call_id": fr.call_id,
                 "content": result_str,
             })
-        return tool_msgs
+            # tool messages can't carry images — surface image attachments as a
+            # follow-up user message so a vision model actually SEES them.
+            blocks = _tool_result_image_blocks(getattr(fr, "attachments", None))
+            if blocks:
+                names = ", ".join(
+                    a.display_name or a.mime_type
+                    for a in fr.attachments
+                    if (getattr(a, "mime_type", "") or "").startswith("image/")
+                )
+                image_followups.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"[Image returned by tool call: {names}]"}
+                    ] + blocks,
+                })
+        # All tool messages first (each keyed to its tool_call_id), then any
+        # image follow-ups, then the model generates its next turn.
+        return tool_msgs + image_followups
 
     if role == Role.MODEL:
         msg: Dict[str, Any] = {
@@ -158,7 +196,33 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 msg["content"] = None
         return [msg]
 
-    # Default to user message
+    # Default to user message.  Marshal any inline_data (image) parts into
+    # OpenAI multimodal content blocks so a vision-declared OpenAI-compat model
+    # (nebius / nim / vllm / lmstudio / tensorrt_llm) actually RECEIVES the
+    # image.  The capability is declared via ``resolve_modalities`` (the
+    # ``modalities`` knob / catalog), but without this the image part was
+    # silently dropped and only the text reached the wire ("no image
+    # attached").  Text-only turns keep a plain-string ``content`` (unchanged
+    # wire shape).
+    inline_images = [p.inline_data for p in message.parts if p.inline_data is not None]
+    if inline_images:
+        blocks: List[Dict[str, Any]] = []
+        if content:
+            blocks.append({"type": "text", "text": content})
+        for img in inline_images:
+            mime = img.get("mime_type", "image/png")
+            data = img.get("data", b"")
+            b64 = (
+                base64.b64encode(data).decode("utf-8")
+                if isinstance(data, (bytes, bytearray))
+                else data  # already-encoded base64/string payload
+            )
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+        return [{"role": "user", "content": blocks}]
+
     return [{
         "role": "user",
         "content": content,
@@ -311,6 +375,20 @@ def extract_finish_reason(response: "ChatCompletion") -> FinishReason:
     return FinishReason.UNKNOWN
 
 
+def cached_tokens_from(usage: Any) -> Optional[int]:
+    """OpenAI-compatible cache-hit count (``usage.prompt_tokens_details.cached_tokens``).
+
+    Nebius's Context Caching (and the vLLM backends it serves) report automatic
+    prefix-cache hits here.  Returns the count when present + nonzero, else
+    ``None`` — so it maps onto ``TokenUsage.cache_read_tokens`` for cost /
+    cache-hit-rate measurement.  Defensive: the field is absent on responses
+    without a cache hit (and on backends that don't report it).
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    return cached if cached else None
+
+
 def extract_usage(response: "ChatCompletion") -> TokenUsage:
     """Extract token usage from OpenAI response.
 
@@ -318,7 +396,7 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
         response: OpenAI ChatCompletion response object.
 
     Returns:
-        TokenUsage with counts.
+        TokenUsage with counts (incl. ``cache_read_tokens`` on a cache hit).
     """
     usage = TokenUsage()
 
@@ -328,6 +406,7 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
     usage.prompt_tokens = response.usage.prompt_tokens or 0
     usage.output_tokens = response.usage.completion_tokens or 0
     usage.total_tokens = response.usage.total_tokens or 0
+    usage.cache_read_tokens = cached_tokens_from(response.usage)
 
     return usage
 

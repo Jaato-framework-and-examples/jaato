@@ -108,10 +108,11 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
 # a model absent here resolves to the text-only floor in modalities()
 # (never a false image claim).
 MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
-    "claude-opus-4": frozenset({"text", "image"}),
-    "claude-sonnet-4": frozenset({"text", "image"}),
-    "claude-haiku-4": frozenset({"text", "image"}),
-    "claude-3": frozenset({"text", "image"}),
+    "claude-opus-4": frozenset({"text", "image", "file"}),
+    "claude-sonnet-4": frozenset({"text", "image", "file"}),
+    "claude-haiku-4": frozenset({"text", "image", "file"}),
+    # claude-3 prefix covers 3.5/3.7 (PDF-capable); 3.0 is EOL.
+    "claude-3": frozenset({"text", "image", "file"}),
 }
 
 # Models that support extended thinking
@@ -575,8 +576,12 @@ class AnthropicProvider(ModalityCapabilityMixin):
         # branch name calls out.
         # Pull workspace_path / config_root from config.extra so
         # verify_auth surfaces credentials from the same path the
-        # runtime configured the provider with.
-        extra = getattr(self._config, 'extra', None) or {}
+        # runtime configured the provider with.  Read the ``config``
+        # PARAMETER (not ``self._config``): per the base contract
+        # verify_auth runs BEFORE initialize(), so ``self._config`` is
+        # unset here — reading it raised AttributeError on the
+        # in-process runtime path, which does not initialize() first.
+        extra = getattr(config, 'extra', None) or {}
         ws_path = extra.get('workspace_path')
         cr = extra.get('config_root')
 
@@ -1265,7 +1270,7 @@ class AnthropicProvider(ModalityCapabilityMixin):
         # what the model receives and produces across framework changes.
         # The marker tokens PROVIDER_REQUEST_DUMP / PROVIDER_RESPONSE_DUMP
         # make this greppable in mixed daemon logs.
-        _dump_enabled = os.environ.get("JAATO_DUMP_PROVIDER_REQUEST", "").lower() in ("1", "true", "yes", "on")
+        _dump_enabled = os.environ.get("JAATO_DUMP_PROVIDER_REQUEST", "").lower() in ("1", "true", "yes", "on")  # env: debug — log full request/response dumps (greppable PROVIDER_*_DUMP markers)
         if _dump_enabled:
             try:
                 tools_in_kwargs = kwargs.get("tools") or []

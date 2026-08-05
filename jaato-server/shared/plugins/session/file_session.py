@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.plugins.base import ToolPlugin, UserCommand, CommandParameter, CommandCompletion, PromptEnrichmentResult
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+from shared.session_id import validate_session_id
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .serializer import (
     serialize_session_state,
@@ -189,6 +190,9 @@ class FileSessionPlugin:
 
         target_dir = storage_dir or self._storage_path
         target_dir.mkdir(parents=True, exist_ok=True)
+        # Fail-closed: never build a path from an unsafe session id (a traversal
+        # id would write outside the sessions directory).
+        validate_session_id(state.session_id)
         file_path = target_dir / f"{state.session_id}.json"
         data = serialize_session_state(state)
 
@@ -248,6 +252,9 @@ class FileSessionPlugin:
             ValueError: If the session data is corrupted.
         """
         target_dir = storage_dir or self._storage_path
+        # Fail-closed: a client can supply session_id when attaching, so refuse
+        # a traversal id (``../../etc/foo``) before it reaches the filesystem.
+        validate_session_id(session_id)
         file_path = target_dir / f"{session_id}.json"
 
         if not file_path.exists():

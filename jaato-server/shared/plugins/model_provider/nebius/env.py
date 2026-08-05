@@ -77,7 +77,7 @@ def resolve_base_url() -> str:
     Returns:
         The API base URL (the fixed serverless endpoint unless overridden).
     """
-    return os.environ.get(ENV_NEBIUS_BASE_URL, DEFAULT_BASE_URL)
+    return os.environ.get(ENV_NEBIUS_BASE_URL, DEFAULT_BASE_URL)  # env: endpoint (default https://api.tokenfactory.nebius.com/v1)
 
 
 def resolve_model() -> Optional[str]:
@@ -86,7 +86,7 @@ def resolve_model() -> Optional[str]:
     Returns:
         Model name if found, None otherwise.
     """
-    return os.environ.get(ENV_NEBIUS_MODEL)
+    return os.environ.get(ENV_NEBIUS_MODEL)  # env: default model name (e.g. deepseek-ai/DeepSeek-R1)
 
 
 def resolve_context_length() -> Optional[int]:
@@ -99,7 +99,7 @@ def resolve_context_length() -> Optional[int]:
     connect time.  No hardcoded fallback is substituted (project
     no-fallback rule).
     """
-    value = os.environ.get(ENV_NEBIUS_CONTEXT_LENGTH)
+    value = os.environ.get(ENV_NEBIUS_CONTEXT_LENGTH)  # env: override the catalog-detected context window
     if value:
         try:
             return int(value)
@@ -132,17 +132,23 @@ def is_self_hosted(base_url: str) -> bool:
     )
 
 
-def get_checked_credential_locations() -> List[str]:
+def get_checked_credential_locations(config=None) -> List[str]:
     """Get the list of locations checked for credentials.
 
     Used for error messages to help users understand what was checked.
 
+    ``config`` (optional ``ProviderConfig``) surfaces the highest-precedence
+    source — the profile ``plugin_configs.nebius.api_key`` knob — which the
+    env-only checks below cannot see.
+
     Returns:
         List of location descriptions.
     """
-    locations = []
+    from ..base import profile_api_key_location
 
-    jaato_key = os.environ.get(ENV_NEBIUS_API_KEY)
+    locations = [profile_api_key_location(config, "nebius")]
+
+    jaato_key = os.environ.get(ENV_NEBIUS_API_KEY)  # env: Nebius Token Factory API key (jaato namespace, highest priority)
     if jaato_key:
         masked = (
             f"{jaato_key[:6]}...{jaato_key[-4:]}" if len(jaato_key) > 12 else "***"
@@ -151,7 +157,7 @@ def get_checked_credential_locations() -> List[str]:
     else:
         locations.append(f"{ENV_NEBIUS_API_KEY}: not set")
 
-    vendor_key = os.environ.get(ENV_NEBIUS_API_KEY_VENDOR)
+    vendor_key = os.environ.get(ENV_NEBIUS_API_KEY_VENDOR)  # env: the vendor's own API key var; honored when JAATO_NEBIUS_API_KEY is unset
     if vendor_key:
         masked = (
             f"{vendor_key[:6]}...{vendor_key[-4:]}" if len(vendor_key) > 12 else "***"

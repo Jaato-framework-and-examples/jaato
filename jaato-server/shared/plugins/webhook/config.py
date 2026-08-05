@@ -19,6 +19,24 @@ from ..subagent.config import expand_variables
 logger = logging.getLogger(__name__)
 
 
+def _as_bool_strict(value: Any) -> bool:
+    """Fail-closed boolean coercion for security flags.
+
+    Native booleans pass through.  Strings (which is what a value becomes after
+    ``${ENV_VAR}`` expansion, or when an operator quotes it in YAML/JSON) count
+    as True ONLY for an explicit affirmative token — so a stray ``"false"`` or
+    ``""`` never silently enables the flag via Python truthiness (``bool("false")``
+    is ``True``).  Anything else is False.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    if isinstance(value, (int, float)):
+        return value == 1
+    return False
+
+
 @dataclass
 class RouteConfig:
     """Configuration for a single webhook route.
@@ -32,12 +50,18 @@ class RouteConfig:
         secret_algo: HMAC algorithm (e.g., 'hmac-sha256'). Only 'hmac-sha256' supported.
         event_type_header: Header to extract event type from (e.g., 'X-GitHub-Event').
         metadata: Static metadata merged into every event from this route.
+        allow_unauthenticated: Explicit opt-in to accept UNSIGNED requests on
+            this route. Default False (fail-closed). A route without an HMAC
+            secret is refused unless the deployment provides mutual TLS or an
+            IP allowlist, or this flag is set — so an operator cannot expose an
+            open ingestion endpoint by omission.
     """
     path: str
     secret_header: Optional[str] = None
     secret_algo: Optional[str] = None
     event_type_header: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    allow_unauthenticated: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'RouteConfig':
@@ -48,6 +72,7 @@ class RouteConfig:
             secret_algo=data.get('secret_algo'),
             event_type_header=data.get('event_type_header'),
             metadata=data.get('metadata', {}),
+            allow_unauthenticated=_as_bool_strict(data.get('allow_unauthenticated', False)),
         )
 
 
@@ -116,10 +141,14 @@ class WebhookConfig:
     rate_limit_per_second: float = 0
 
     def __post_init__(self):
-        if not self.routes:
-            self.routes = {
-                'generic': RouteConfig(path='/webhook'),
-            }
+        # Intentionally do NOT auto-create a route.  A zero-config default route
+        # would be an unauthenticated, open ingestion endpoint (the fail-open
+        # this class previously had).  Empty routes means the listener matches
+        # nothing (every request 404s); the operator must declare routes
+        # explicitly, and each unsigned route must opt in via
+        # allow_unauthenticated (or be covered by mutual TLS / an IP allowlist).
+        # http_server logs a startup warning when no routes are configured.
+        pass
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'WebhookConfig':

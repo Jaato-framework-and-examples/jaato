@@ -56,6 +56,7 @@ from jaato_sdk.events import (
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
+    ClarificationBatchResponseEvent,
     ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
@@ -232,6 +233,8 @@ class IPCClient:
         config_root: Optional[str] = None,
         apparmor: bool = False,
         min_protocol_version: Optional[str] = None,
+        autostart_timeout: float = 120.0,
+        presentation: Optional[Any] = None,
     ):
         """Initialize the IPC client.
 
@@ -295,14 +298,41 @@ class IPCClient:
                 for development against unreleased daemons; production
                 deployments should pin a real minimum at the class
                 level so the SDK refuses to talk to incompatible servers.
+            presentation: Override the display-capability context sent to
+                the server at connect (``ClientConfigRequest.presentation``).
+                Accepts a ``PresentationContext`` or a plain ``dict``.  When
+                ``None`` (default) the client auto-derives a TUI-shaped
+                context from the terminal width + ``client_type``.  Pass an
+                explicit context for non-terminal clients (chat / web) whose
+                capabilities differ from a terminal's — e.g. a chat client
+                with ``supports_tables=False`` / ``supports_images=True`` /
+                ``supports_expandable_content=True`` and a fixed narrow
+                ``content_width`` — so the model adapts its output format.
         """
+        if env_file is None:
+            raise ValueError(
+                "IPCClient(env_file=...) must be a path (e.g. '.env'), not "
+                "None — the IPC handshake serializes it, and None raises an "
+                "opaque os.PathLike TypeError mid-connect.  Pass a real .env "
+                "path (a minimal one is fine if the daemon gets provider "
+                "config another way)."
+            )
         self.socket_path = socket_path
         self.auto_start = auto_start
         self.env_file = env_file
+        # Cold-daemon autostart can take ~30-60s (plugin discovery + imports);
+        # the connect ``timeout`` (default 5s) is for an already-running daemon.
+        # When THIS client launches the daemon, the post-launch wait + connect
+        # retry budget uses this longer ``autostart_timeout`` instead.
+        self.autostart_timeout = autostart_timeout
         self.workspace_path = workspace_path
         self.config_root = config_root
         self.apparmor = apparmor
         self.client_type = client_type
+        # Optional caller-supplied presentation override (PresentationContext
+        # or dict).  When set, it REPLACES the auto-derived terminal context at
+        # config-send — the SDK hook for non-terminal (chat/web) clients.
+        self._presentation = presentation
         self._min_protocol_version: str = (
             min_protocol_version or self.MIN_PROTOCOL_VERSION
         )
@@ -539,6 +569,32 @@ class IPCClient:
         self._registry.dispatch(event)
 
     # =========================================================================
+    # High-level convenience facade
+    # =========================================================================
+
+    @classmethod
+    def session(cls, **kwargs):
+        """Open a session with the high-level facade (additive sugar).
+
+        Returns an async context manager yielding a
+        :class:`~jaato_sdk.client.convenience.Session` that owns the
+        send-and-wait recipe — so the common path never reproduces the
+        ``SESSION_TERMINATED``-only hang (PR #399)::
+
+            async with IPCClient.session(profile="researcher", agent="pirate") as s:
+                print(await s.ask("Research tide pools."))
+
+        ``profile`` (str=named / dict=inline spec), ``agent``, ``agent_params``,
+        ``cascade_driver_id`` are forwarded to :meth:`create_session` unchanged
+        — both declarative and programmatic styles are preserved.  Connection
+        knobs (``socket_path``, ``env_file``, ``workspace_path``, ``auto_start``,
+        ``client_type``, ``connect_timeout``) and ``on_permission`` have sensible
+        defaults.  See ``docs/design/sdk-convenience-layer.md``.
+        """
+        from .convenience import open_session
+        return open_session(cls, **kwargs)
+
+    # =========================================================================
     # Connection Management
     # =========================================================================
 
@@ -580,7 +636,8 @@ class IPCClient:
                     # ghost client.  Instead we use the full remaining budget
                     # and only retry on errors that prove no connection was
                     # established (ConnectionRefused, FileNotFound, OSError).
-                    deadline = time.time() + timeout
+                    # Use the cold-start budget: we just launched the daemon.
+                    deadline = time.time() + self.autostart_timeout
                     last_err: Optional[Exception] = None
                     while True:
                         remaining = deadline - time.time()
@@ -644,7 +701,8 @@ class IPCClient:
                     # Only retry on ConnectionRefusedError/OSError (no
                     # transport created).  On TimeoutError, stop to avoid
                     # leaking a transport that the server already accepted.
-                    deadline = time.time() + timeout
+                    # Use the cold-start budget: we just launched the daemon.
+                    deadline = time.time() + self.autostart_timeout
                     last_err: Optional[Exception] = None
                     while True:
                         remaining = deadline - time.time()
@@ -674,6 +732,18 @@ class IPCClient:
                 else:
                     raise ConnectionError(f"Connection failed: {e}")
 
+        return await self._handshake()
+
+    async def _handshake(self) -> bool:
+        """Post-transport handshake — shared by the IPC and WebSocket transports.
+
+        Once the transport is open (Unix socket / Windows pipe / WebSocket),
+        the wire protocol is identical: read the server's unprompted
+        ``ConnectedEvent``, gate on protocol compatibility, send the workspace
+        + client config, and start the single drain reader. Subclasses that
+        swap the transport (see ``WSClient``) reuse this verbatim — only the
+        ``_read_message`` / ``_write_message`` / connection setup differ.
+        """
         # Wait for connected event
         try:
             message = await self._read_message()
@@ -717,7 +787,7 @@ class IPCClient:
                     # subscribe queues to the drain loop's fan-out.
                     self._drain_task = asyncio.create_task(
                         self._drain_loop(),
-                        name=f"ipc-drain-{id(self)}",
+                        name=f"jaato-drain-{id(self)}",
                     )
                     return True
         except IncompatibleServerError:
@@ -908,13 +978,23 @@ class IPCClient:
         if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
             content_width -= 6  # debug line number gutter (4-digit num + "│ ")
 
-        # Build presentation context describing TUI terminal capabilities.
-        # This is transmitted to the server so the model can adapt its output
-        # (e.g. avoid wide tables on narrow terminals).
-        presentation = PresentationContext(
-            content_width=content_width,
-            client_type=self.client_type,
-        )
+        # Build the presentation context transmitted to the server so the model
+        # can adapt its output (e.g. avoid wide tables on narrow terminals).
+        # A caller-supplied override (the ``presentation=`` ctor param) wins —
+        # the hook for non-terminal clients (chat/web) whose capabilities differ
+        # from a TUI's.  Accepts a PresentationContext or a plain dict; falls
+        # back to the auto-derived terminal context otherwise.
+        if self._presentation is not None:
+            presentation_payload = (
+                self._presentation.to_dict()
+                if isinstance(self._presentation, PresentationContext)
+                else dict(self._presentation)
+            )
+        else:
+            presentation_payload = PresentationContext(
+                content_width=content_width,
+                client_type=self.client_type,
+            ).to_dict()
 
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = self.workspace_path or os.getcwd()
@@ -935,8 +1015,32 @@ class IPCClient:
             config_root=self.config_root,
             env_file=env_file_abs,
             apparmor=self.apparmor,
-            presentation=presentation.to_dict(),
+            presentation=presentation_payload,
         ))
+
+    def _endpoint_is_live(self) -> bool:
+        """Whether the socket/pipe actually ACCEPTS a connection (not just exists).
+
+        The authoritative "is the daemon up" signal — unlike a pidfile PID
+        (which can be a recycled, unrelated process) or a socket *file* (which
+        can be stale after a crash).  Gates trusting the pidfile in
+        :meth:`_start_server` so a reused PID can't block auto-start on a dead
+        socket.
+        """
+        if self._is_windows_pipe():
+            try:
+                return bool(self._check_pipe_exists())
+            except Exception:
+                return False
+        import socket as _socket
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        try:
+            return s.connect_ex(self.socket_path) == 0
+        except OSError:
+            return False
+        finally:
+            s.close()
 
     async def _start_server(self) -> bool:
         """Auto-start the server daemon.
@@ -954,11 +1058,28 @@ class IPCClient:
             True if server started (or was already running) and the IPC
             endpoint became available within the timeout.
         """
-        # Check if server is already running
+        # Check if server is already running.  A live pidfile PID alone is NOT
+        # proof the daemon is up: ``os.kill(pid, 0)`` only confirms SOME
+        # process exists at that PID, and PIDs get recycled.  Require the
+        # endpoint to actually accept a connection — otherwise a stale pidfile
+        # (dead daemon whose PID was reused by an unrelated process) makes us
+        # wait on a dead socket forever instead of relaunching.
         pid = self._check_server_running()
         if pid:
-            # Server is running, just wait for socket/pipe
-            return await self._wait_for_socket()
+            if self._endpoint_is_live():
+                # Genuinely running — wait for the socket/pipe and attach.
+                return await self._wait_for_socket()
+            # PID alive but endpoint dead → stale daemon / reused PID.  Clear
+            # the stale pidfile so the relaunch below starts from a clean slate.
+            logger.info(
+                "pidfile %s -> PID %s is alive but the endpoint is not "
+                "listening (stale daemon / reused PID); relaunching",
+                DEFAULT_PID_FILE, pid,
+            )
+            try:
+                Path(DEFAULT_PID_FILE).unlink()
+            except OSError:
+                pass
 
         # On Windows, the PID-file check can fail even when the server IS
         # running (e.g. stale PID, ctypes truncation on 64-bit, or the
@@ -1012,8 +1133,10 @@ class IPCClient:
             print(f"Failed to start server: {e}")
             return False
 
-        # Wait for socket/pipe to appear
-        return await self._wait_for_socket()
+        # Wait for the socket/pipe to appear.  We just launched a COLD daemon
+        # (plugin discovery + imports) — use the longer autostart budget, not
+        # the short already-running connect timeout.
+        return await self._wait_for_socket(timeout=self.autostart_timeout)
 
     async def _wait_for_socket(self, timeout: float = 10.0) -> bool:
         """Wait for the IPC endpoint to become available.
@@ -1487,6 +1610,40 @@ class IPCClient:
     # Requests
     # =========================================================================
 
+    @staticmethod
+    def _normalize_attachments(attachments: Optional[list]) -> List[Dict[str, Any]]:
+        """Normalize user-message attachments to the canonical wire shape
+        ``{mime_type, data: base64-str, display_name}`` (client-expanded — the
+        daemon/runner can't read client-side paths, esp. cross-host WS).
+
+        Accepts, per item:
+          - a file-path ``str`` → read bytes, base64-encode, guess mime from ext
+          - a ``dict`` with ``bytes`` ``data`` → base64-encode it
+          - a ``dict`` with base64-``str`` ``data`` → pass through unchanged
+        Unknown shapes are skipped (no fabricated content).
+        """
+        import base64
+        import mimetypes
+        import os
+        out: List[Dict[str, Any]] = []
+        for a in attachments or []:
+            if isinstance(a, str):
+                with open(a, "rb") as fh:
+                    raw = fh.read()
+                out.append({
+                    "mime_type": mimetypes.guess_type(a)[0]
+                                 or "application/octet-stream",
+                    "data": base64.b64encode(raw).decode("ascii"),
+                    "display_name": os.path.basename(a),
+                })
+            elif isinstance(a, dict):
+                d = dict(a)
+                data = d.get("data")
+                if isinstance(data, (bytes, bytearray)):
+                    d["data"] = base64.b64encode(bytes(data)).decode("ascii")
+                out.append(d)
+        return out
+
     async def send_message(
         self,
         text: str,
@@ -1497,7 +1654,12 @@ class IPCClient:
 
         Args:
             text: The message text.
-            attachments: Optional file attachments.
+            attachments: Optional user-message attachments — each a file-path
+                ``str`` OR a ``{mime_type, data, display_name}`` dict (``data``
+                as raw ``bytes`` or a base64 ``str``).  Normalized client-side
+                to the canonical wire shape ``{mime_type, data: base64-str,
+                display_name}`` and delivered to the model's multimodal path
+                (gated by the provider's vision/input modality).
             parallel_tools: Per-call override for parallel tool execution.
                 ``None`` (default) keeps the env-configured behaviour
                 (``JAATO_PARALLEL_TOOLS``).  ``True`` / ``False`` forces
@@ -1505,7 +1667,7 @@ class IPCClient:
         """
         await self._send_event(SendMessageRequest(
             text=text,
-            attachments=attachments or [],
+            attachments=self._normalize_attachments(attachments),
             parallel_tools=parallel_tools,
         ))
 
@@ -1542,6 +1704,28 @@ class IPCClient:
         await self._send_event(ClarificationResponseRequest(
             request_id=request_id,
             response=response,
+        ))
+
+    async def respond_to_clarification_batch(
+        self,
+        request_id: str,
+        answers: List[str],
+    ) -> None:
+        """Respond to a batched clarification — all answers at once.
+
+        The blessed public form for WS/chat clients that receive every
+        question in one ``ClarificationBatchRequestedEvent`` (server PR #411)
+        and answer them together, rather than calling
+        ``respond_to_clarification`` per question.  ``answers`` is an ordered
+        list, one entry per question by index.
+
+        Args:
+            request_id: The clarification request ID.
+            answers: Ordered answers, one per question (by index).
+        """
+        await self._send_event(ClarificationBatchResponseEvent(
+            request_id=request_id,
+            answers=answers,
         ))
 
     async def respond_to_reference_selection(
@@ -1590,6 +1774,52 @@ class IPCClient:
             error=error,
         ))
 
+    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+        """Register client-provided ("host") tools the agent can call.
+
+        Each entry: ``{"name", "description", "parameters", "handler"}`` (plus
+        optional ``"timeout"`` ms / ``"auto_approve"``).  ``handler(args) -> Any``
+        runs when the agent invokes the tool; its return (JSON-encoded if not a
+        str) is sent back as the result.  Register **before** ``create_session``
+        so the schema reaches the runner-tier model (mid-session registration
+        isn't seen until a follow-up lands the runner mid-session push).
+        """
+        from jaato_sdk.events import ToolsRegisterClientRequest, EventType
+        if not hasattr(self, "_host_tool_handlers"):
+            self._host_tool_handlers: Dict[str, Any] = {}
+            self.subscribe(
+                EventType.TOOL_EXECUTE_REQUEST, self._on_tool_execute_request)
+        for t in tools:
+            if t.get("handler"):
+                self._host_tool_handlers[t["name"]] = t["handler"]
+        wire = [{k: v for k, v in t.items() if k != "handler"} for t in tools]
+        await self._send_event(
+            ToolsRegisterClientRequest(tools=wire, categories={}))
+
+    def _on_tool_execute_request(self, event: Any) -> None:
+        """Run the registered host-tool handler for an agent tool call and send
+        the result back via :meth:`respond_to_tool_execution`."""
+        import asyncio
+        import json
+        fn = getattr(self, "_host_tool_handlers", {}).get(event.tool_name)
+
+        async def _run() -> None:
+            if fn is None:
+                await self.respond_to_tool_execution(
+                    event.call_id,
+                    error=f"no handler for host tool {event.tool_name!r}")
+                return
+            try:
+                out = fn(event.tool_args)
+                if asyncio.iscoroutine(out):
+                    out = await out
+                result = out if isinstance(out, str) else json.dumps(out)
+                await self.respond_to_tool_execution(event.call_id, result=result)
+            except Exception as exc:  # report the failure to the model
+                await self.respond_to_tool_execution(event.call_id, error=str(exc))
+
+        asyncio.create_task(_run())
+
     async def stop(self) -> None:
         """Stop current operation."""
         await self._send_event(StopRequest())
@@ -1609,6 +1839,28 @@ class IPCClient:
             command=command,
             args=args or [],
         ))
+
+    # ---- typed wake-primitive methods (see _wake_client) ----
+    async def bind_wake(self, wake_ref: str, trust_keys: list, *,
+                        timeout: float = 30.0):
+        """Declare a wake binding for this session; await the typed result.
+        See :func:`jaato_sdk.client._wake_client.bind_wake`."""
+        from ._wake_client import bind_wake
+        return await bind_wake(self, wake_ref, trust_keys, timeout=timeout)
+
+    async def unbind_wake(self, wake_ref: str, *, timeout: float = 30.0):
+        """Remove this session's wake binding; await the typed result.
+        See :func:`jaato_sdk.client._wake_client.unbind_wake`."""
+        from ._wake_client import unbind_wake
+        return await unbind_wake(self, wake_ref, timeout=timeout)
+
+    async def cascade_register(self, cascade_driver_id: str,
+                              role: str = "observer",
+                              event_types: Optional[list] = None) -> None:
+        """Register as a cascade owner/observer (event CLASSES or names).
+        See :func:`jaato_sdk.client._wake_client.cascade_register`."""
+        from ._wake_client import cascade_register
+        await cascade_register(self, cascade_driver_id, role, event_types)
 
     async def disable_tool(self, tool_name: str) -> None:
         """Disable a tool directly via registry.
@@ -1833,6 +2085,29 @@ class IPCClient:
     # =========================================================================
     # Event Stream
     # =========================================================================
+
+    def open_event_stream(self) -> "_SyncSubscribedStream":
+        """Subscribe SYNCHRONOUSLY (at call time) and return an event iterator.
+
+        Unlike :meth:`events` — an async generator that subscribes lazily on its
+        first ``__anext__`` — this registers the subscriber queue NOW, before it
+        returns.  Use it when the subscription must be established before an
+        action that triggers server-side output, e.g.::
+
+            stream = client.open_event_stream()   # queue registered now
+            await client.attach(session_id)        # driven output can't be missed
+            async for ev in stream:
+                ...
+
+        This removes any need to reach into ``_subscribe_events`` /
+        ``_event_subscribers`` to force + prove registration.  Same fan-out and
+        ``None``-sentinel disconnect semantics as :meth:`events` (buffered events
+        are replayed into the queue first).  Lifetime is caller-managed: the
+        stream unsubscribes on disconnect, on ``aclose()``, or on ``async with``
+        exit — a long-lived consumer should ``aclose()`` at teardown.
+        """
+        from ._event_stream import _SyncSubscribedStream
+        return _SyncSubscribedStream(self, self._subscribe_events())
 
     async def events(self) -> AsyncIterator[Event]:
         """Async iterator for receiving events.

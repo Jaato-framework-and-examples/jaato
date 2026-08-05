@@ -15,12 +15,14 @@ from typing import (
     Any,
     Callable,
     Dict,
+    FrozenSet,
     Iterable,
     List,
     Literal,
     Optional,
     Protocol,
     Set,
+    Tuple,
     runtime_checkable,
 )
 
@@ -112,6 +114,39 @@ class ProviderConfig:
     target_service_account: Optional[str] = None
     credentials: Optional[Any] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+def profile_api_key_location(
+    config: Optional["ProviderConfig"], provider_name: str
+) -> str:
+    """Describe the profile ``plugin_configs.<provider>.api_key`` knob for a
+    provider's ``get_checked_credential_locations()`` list.
+
+    The runtime promotes ``plugin_configs.<provider>.api_key`` to
+    ``config.api_key`` (``jaato_runtime.py``) — the HIGHEST-precedence key
+    source, consulted before env vars and stored credentials
+    (``self._api_key = config.api_key or resolve_...``).  Env-only
+    checked-locations helpers cannot see it, so an ``APIKeyNotFoundError``
+    omitted the very first source it checked.  This returns a single
+    precedence-ordered line (masked when set) so the profile knob is always
+    surfaced.  ``config`` may be the initialize-time config (key promoted to
+    ``config.api_key``) or the verify-time config (key still under
+    ``config.extra['api_key']``) — both are inspected.
+
+    Returns a ``"... : not set"`` line when ``config`` is None or carries no
+    key, so callers can unconditionally prepend it.
+    """
+    key: Optional[str] = None
+    if config is not None:
+        key = getattr(config, "api_key", None)
+        if not key:
+            extra = getattr(config, "extra", None) or {}
+            key = extra.get("api_key")
+    label = f"plugin_configs.{provider_name}.api_key (profile)"
+    if key:
+        masked = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+        return f"{label}: set ({masked})"
+    return f"{label}: not set"
 
 
 def resolve_context_window(
@@ -262,6 +297,235 @@ class ModalityCapabilityMixin:
     def supports_modality(self, kind: str, model: Optional[str] = None) -> bool:
         """Whether ``model`` (or the active model) accepts ``kind`` as input."""
         return kind.strip().lower() in self.modalities(model)
+
+    def capabilities(self) -> "ProviderCapabilities":
+        """Declared wire-level capabilities (baseline default).
+
+        Returns the honest minimal-adapter baseline.  Providers OVERRIDE
+        this to return their ``PROVIDER_CAPABILITIES`` constant.  See
+        :class:`ProviderCapabilities`.
+        """
+        return ProviderCapabilities()
+
+
+# Canonical capability fields — the COLUMNS of the capability matrix.  Each is a
+# concrete, wire-testable behavior (not a vague label) so the CI conformance
+# guard can assert it.  Adding a field here is the one place a new capability is
+# defined; the doc generator and the guard both read this tuple.
+CAPABILITY_FIELDS = (
+    "user_message_images",
+    "tool_result_images",
+    "pdf_input",
+    "tool_choice_forwarding",
+    "thinking",
+    "prompt_caching",
+    "streaming",
+    "cancellation",
+)
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """Declared wire-level capabilities of a model provider.
+
+    The SINGLE SOURCE OF TRUTH for both the capability doc table
+    (``docs/model-provider-capabilities.md``) and the CI conformance guard.
+    Each provider declares a module-level ``PROVIDER_CAPABILITIES`` constant in
+    its ``__init__.py`` and returns it from :meth:`capabilities`.
+
+    The guard asserts BOTH (1) every provider declares it (structural, AST) AND
+    (2) every flag set ``True`` is actually delivered on the wire (behavioral) —
+    closing the "declared ``image: yes`` but the converter silently drops it"
+    gap this contract exists to prevent.
+
+    Defaults are the honest baseline of a minimal OpenAI-compat adapter: it
+    streams and cancels, but marshals text only and forwards no advanced knobs.
+    Providers override per the behavior they actually implement.
+    """
+
+    user_message_images: bool = False   # Part.inline_data image -> wire image block
+    tool_result_images: bool = False    # tool-result image attachment -> the model
+    pdf_input: bool = False             # application/pdf attachment -> wire file/document block
+    tool_choice_forwarding: bool = False  # complete(tool_choice=...) reaches the wire
+    thinking: bool = False              # extended-reasoning request and/or extraction
+    prompt_caching: bool = False        # cache_control breakpoints emitted on the wire
+    streaming: bool = True              # on_chunk token streaming
+    cancellation: bool = True           # cancel_token actually halts generation
+
+    def as_dict(self) -> Dict[str, bool]:
+        return {f: bool(getattr(self, f)) for f in CAPABILITY_FIELDS}
+
+
+# Canonical config-knob layers — the named sub-dicts under
+# ``plugin_configs.<provider>`` an author can set.  ``top_level`` is the
+# special layer for keys read directly off the provider config (not nested).
+# Adding a layer name here is informational only; ProviderKnobs accepts any
+# layer string, but keeping the vocabulary in one place lets the doc
+# generator and the validator share a stable set of column names.
+KNOB_LAYERS = (
+    "top_level",            # keys directly under plugin_configs.<provider>
+    "api_params",           # request-body sampling / generation params
+    "routing",              # gateway routing extension (provider-specific)
+    "load",                 # model-load passthrough (local runtimes)
+    "framework_overrides",  # rare escape hatches (context_length, base_url)
+)
+
+
+@dataclass(frozen=True)
+class KnobSpec:
+    """One config knob the provider reads: key, type, default, description.
+
+    ``type`` is a hint string — one of ``"str"``, ``"int"``, ``"float"``,
+    ``"bool"``, ``"list"``, ``"dict"``.  ``default`` is the provider's
+    STATIC default when the key is absent, or ``None`` when the provider
+    RESOLVES it at runtime (env var → auth store → catalog).  ``None`` here
+    honestly means "no static default; the provider has a resolution chain",
+    NOT "defaults to null" — authored from the provider.py read site.
+    """
+
+    name: str
+    type: str = "str"
+    default: Any = None
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class KnobLayer:
+    """One config layer of a provider and the knobs it recognizes.
+
+    A layer maps to a nesting level under ``plugin_configs.<provider>``:
+    ``top_level`` knobs sit directly under the provider; named layers
+    (``api_params``, ``routing``, ``load``, ``framework_overrides``) are
+    sub-dicts the provider reads.
+
+    ``opaque=True`` marks a **pass-through** layer — the provider forwards
+    every key verbatim to its upstream (e.g. OpenRouter's ``routing``
+    provider-extension dict, LM Studio's ``load`` body).  For an opaque
+    layer ``knobs`` is advisory documentation only; the validator MUST NOT
+    reject unknown keys in it (there is no fixed key set — that's the
+    point).  For a non-opaque layer ``knobs`` is the authoritative, closed
+    set: the validator rejects anything outside it (these are the
+    silently-ignored-typo failures the contract exists to catch).
+    """
+
+    layer: str
+    knobs: Tuple[KnobSpec, ...] = ()
+    opaque: bool = False
+    description: str = ""
+
+    @property
+    def keys(self) -> FrozenSet[str]:
+        """The recognized key names (for the validator's membership test)."""
+        return frozenset(k.name for k in self.knobs)
+
+
+@dataclass(frozen=True)
+class ProviderKnobs:
+    """Declared config knobs of a provider, grouped by layer.
+
+    The SINGLE SOURCE OF TRUTH for ``jaato-scaffold explain provider <name>
+    --knobs`` and for the ``validate`` linter's unknown-knob detection.
+    Each provider declares a module-level ``PROVIDER_KNOBS`` constant in its
+    ``__init__.py`` (sibling of ``PROVIDER_CAPABILITIES``), authored from the
+    keys the provider's code actually reads — NOT from prose docs, which
+    drift.
+
+    **Framework-wiring keys are intentionally excluded.**  ``workspace_path``
+    / ``config_root`` are set by the framework, never by a profile author, so
+    they are not knobs (same exclusion rule as ``PluginSetting`` /
+    ``get_config_schema``).  Auth/identity keys an author CAN set in a
+    profile (``api_key``, ``oauth_token``) ARE included, in ``top_level``.
+
+    A CI guard asserts every provider declares ``PROVIDER_KNOBS`` (+
+    ``PROVIDER_QUIRKS``), mirroring the capability guard — so a new provider
+    cannot silently ship prose-only knobs again.
+    """
+
+    layers: Tuple[KnobLayer, ...] = ()
+
+    def get_layer(self, name: str) -> Optional[KnobLayer]:
+        """Return the declared :class:`KnobLayer` named ``name``, or None."""
+        for lyr in self.layers:
+            if lyr.layer == name:
+                return lyr
+        return None
+
+    def as_dict(self) -> Dict[str, Dict[str, Any]]:
+        """Flatten to JSON-friendly ``{layer: {opaque, description, knobs}}``.
+
+        Each knob carries ``{type, default, description}``.  Used by
+        ``explain --json`` and the doc generator.
+        """
+        return {
+            lyr.layer: {
+                "opaque": lyr.opaque,
+                "description": lyr.description,
+                "knobs": {
+                    k.name: {
+                        "type": k.type,
+                        "default": k.default,
+                        "description": k.description,
+                    }
+                    for k in lyr.knobs
+                },
+            }
+            for lyr in self.layers
+        }
+
+    def accepts(self, layer: str, key: str) -> bool:
+        """Whether ``key`` is valid in ``layer`` (for the validator).
+
+        Opaque layers accept any key (pass-through).  A non-opaque layer
+        accepts only its declared keys.  An undeclared layer name is
+        rejected (the author nested under a layer the provider never reads).
+        """
+        lyr = self.get_layer(layer)
+        if lyr is None:
+            return False
+        return True if lyr.opaque else key in lyr.keys
+
+
+# Canonical credential-source kinds for PROVIDER_AUTH_RESOLUTION steps.
+AUTH_SOURCE_KINDS = (
+    "api_key_param",  # api_key via ProviderConfig / plugin_configs.<provider>.api_key
+    "env",            # an environment variable (name = the var)
+    "stored",         # a credential persisted by an auth plugin (name = command/file)
+    "oauth",          # an interactive OAuth token store (name = the store file)
+    "adc",            # Google Application Default Credentials
+    "cli",            # delegates to an external CLI's own session
+    "none",           # no credential required (local servers)
+)
+
+
+@dataclass(frozen=True)
+class AuthSource:
+    """One step in a provider's credential-resolution chain.
+
+    Providers try sources in order, highest priority first, until one yields a
+    credential (the ``or``-chain in ``resolve_api_key`` / ``verify_auth``).
+    Authored from the provider's actual auth code, NOT prose — so
+    ``explain provider`` can show *why* a credential resolved the way it did
+    (the #1 provider confusion source: "I set X but it used Y").
+
+    Attributes:
+        kind: one of :data:`AUTH_SOURCE_KINDS`.
+        name: the concrete identifier — env var name, auth command, store file
+            (empty for ``adc`` / ``none``).
+        note: optional human note (e.g. "vendor var", "optional").
+    """
+
+    kind: str
+    name: str = ""
+    note: str = ""
+
+
+# Default empty quirk set.  Providers that honor model quirks declare a
+# module-level ``PROVIDER_QUIRKS = frozenset({...})`` in their ``__init__.py``
+# enumerating the quirk names they read from ``profile.quirks`` /
+# ``config.extra["quirks"]``.  Today only ``vllm`` is non-empty; the guard
+# requires every provider to declare the constant (empty is the honest answer
+# for the rest) so a new quirk consumer can't ship an unvalidated allow-list.
+PROVIDER_QUIRKS_DEFAULT: FrozenSet[str] = frozenset()
 
 
 @runtime_checkable

@@ -18,7 +18,10 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from ..streaming import StreamingCapable, StreamChunk, ChunkCallback
 
@@ -284,7 +287,7 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForwarding
                     "required": ["pattern"],
                 },
                 category="search",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

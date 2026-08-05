@@ -26,7 +26,11 @@ from jaato_sdk.plugins.base import (
     model_matches_requirements,
     OutputCallback,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from .streaming.protocol import StreamingCapable
 from .enrichment_formatter import (
     EnrichmentNotification,
@@ -98,17 +102,24 @@ def _tier_filter_matches(
     return plugin_tier in accepted
 
 
-def _trace(msg: str, include_traceback: bool = False) -> None:
+def _trace(msg: str, include_traceback: bool = False, warning: bool = False) -> None:
     """Write trace message to log file for debugging.
 
     Args:
         msg: The message to log.
-        include_traceback: If True, append the current exception traceback.
+        include_traceback: If True, log at ERROR with the current exception
+            traceback attached (for genuine plugin bugs / unexpected failures).
+        warning: If True (and ``include_traceback`` is False), log at WARNING
+            for a concise, user-visible one-liner — used for expected,
+            actionable skips (e.g. a plugin's optional backend dependency is
+            not installed) where a full traceback would read as a crash.
     """
     _trace_write("PluginRegistry", msg, include_traceback=include_traceback)
     # Also log to standard logger for visibility
     if include_traceback:
         logger.error(msg, exc_info=True)
+    elif warning:
+        logger.warning(msg)
     else:
         logger.debug(msg)
 
@@ -793,6 +804,19 @@ class PluginRegistry:
                         "create_ms": round(create_ms, 2),
                     }
 
+            except ModuleNotFoundError as exc:
+                # A plugin's (declared) dependency is not installed in this
+                # environment — e.g. interactive_shell needs pexpect on Unix.
+                # The plugin correctly does NOT load; this is an environment-
+                # provisioning issue, not a plugin bug, so emit a concise,
+                # actionable one-line WARNING naming the missing module rather
+                # than dumping a full traceback that reads as a crash mid-scan.
+                missing = exc.name or str(exc)
+                _trace(
+                    f" Plugin '{name}' skipped: missing dependency "
+                    f"'{missing}' — install it to enable this plugin.",
+                    warning=True,
+                )
             except Exception as exc:
                 _trace(f" Error loading plugin '{name}': {exc}", include_traceback=True)
 
@@ -969,6 +993,38 @@ class PluginRegistry:
         if auto_approved:
             self._core_auto_approved.add(schema.name)
         _trace(f"Registered core tool: {schema.name} (auto_approved={auto_approved})")
+
+    def is_core_tool(self, tool_name: str) -> bool:
+        """Return True if ``tool_name`` is a framework core tool.
+
+        Core tools are framework machinery registered via
+        :meth:`register_core_tool` — the lifecycle terminal
+        ``signal_completion``, introspection/event-bus tools, etc. — as
+        opposed to a plugin-provided tool (``cli``, ``file_edit``, business
+        tools).  Consumers use this to give framework machinery different
+        treatment from the business tool surface (e.g. the permission
+        pipeline exempts core tools from a catch-all ``"default"`` evaluator
+        so a business default-deny can't brick the agent's ability to
+        complete).
+        """
+        return tool_name in self._core_tools
+
+    def get_registered_core_tool_names(self) -> Set[str]:
+        """Return the names of tools registered via :meth:`register_core_tool`.
+
+        This is the authoritative "framework machinery" set — stream
+        controls, event-bus, introspection, client host tools — mirroring
+        :meth:`is_core_tool`.  It is DELIBERATELY narrower than
+        :meth:`get_core_tool_schemas`, which returns every exposed *plugin*
+        tool whose ``discoverability == 'core'`` (an eager-loading
+        performance flag applied to real business tools like ``readFile``
+        and the ``todo`` tools).  Consumers that must distinguish framework
+        machinery from the business tool surface — e.g. the permission
+        pipeline's catch-all ``"default"`` evaluator exemption — must use
+        THIS accessor, not ``get_core_tool_schemas()``, or they silently
+        exempt powerful plugin tools from that evaluator (see #487/#488).
+        """
+        return set(self._core_tools.keys())
 
     def get_core_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Get executors for all registered core framework tools.
@@ -1372,9 +1428,14 @@ class PluginRegistry:
         self._workspace_path = path
         _trace(f"set_workspace_path: {path}")
 
-        # Broadcast to all exposed plugins that support it
-        for name in self._exposed:
-            plugin = self._plugins.get(name)
+        # Broadcast to ALL registered plugins that support it — not just the
+        # ones exposed to the model.  A runner-tier plugin can need the per-
+        # session workspace before/without model exposure (e.g. a pool-slot
+        # runner whose plugin was initialized at template time, or the notebook
+        # subprocess backend that spawns kernels rooted at the workspace).  The
+        # exposed-only scope was a #344-class propagation gap: registered-but-
+        # unexposed plugins silently kept their init-time (launch-dir) default.
+        for name, plugin in self._plugins.items():
             if plugin and hasattr(plugin, 'set_workspace_path'):
                 try:
                     plugin.set_workspace_path(path)
@@ -1406,8 +1467,9 @@ class PluginRegistry:
         self._config_root: Optional[str] = path
         _trace(f"set_config_root: {path}")
 
-        for name in self._exposed:
-            plugin = self._plugins.get(name)
+        # Parity with set_workspace_path: broadcast to ALL registered plugins,
+        # not just exposed ones (same #344-class propagation gap).
+        for name, plugin in self._plugins.items():
             if plugin and hasattr(plugin, 'set_config_root'):
                 try:
                     plugin.set_config_root(path)
@@ -1546,11 +1608,30 @@ class PluginRegistry:
                 result[name] = entry
         return result
 
-    def get_exposed_tool_schemas(self) -> List[ToolSchema]:
-        """Get ToolSchemas from all exposed plugins and core tools."""
+    def get_exposed_tool_schemas(
+        self, exclude_runner_tier: bool = False,
+    ) -> List[ToolSchema]:
+        """Get ToolSchemas from all exposed plugins and core tools.
+
+        ``exclude_runner_tier=True`` skips ``PLUGIN_TIER = "runner"``
+        plugins.  Used by the daemon-side tool-id-registry emit, whose
+        runner-tier tool names come from the runner via
+        ``session_get_tool_schemas`` — NOT a daemon-side walk.  Invoking a
+        runner-tier plugin's ``get_tool_schemas`` daemon-side runs its
+        filesystem discovery ON THE DAEMON (e.g. ``prompt_library``'s
+        prompt walk); on the event-loop thread during re-attach that
+        blocked the loop ~15s and self-blocked the register-RPC send.
+        """
         schemas = []
         # Add plugin tool schemas
         for name in self._exposed:
+            if exclude_runner_tier:
+                plugin = self._plugins.get(name)
+                tier = self._lookup_module_tier(
+                    getattr(type(plugin), "__module__", "")
+                ) if plugin is not None else None
+                if tier == "runner":
+                    continue
             try:
                 schemas.extend(self._plugins[name].get_tool_schemas())
             except Exception as exc:
@@ -1788,7 +1869,7 @@ class PluginRegistry:
                 core_schemas = [
                     s for s in plugin_schemas
                     if s.name not in self._disabled_tools
-                    and getattr(s, 'discoverability', 'discoverable') == 'core'
+                    and getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                 ]
                 schemas.extend(core_schemas)
 
@@ -1805,7 +1886,7 @@ class PluginRegistry:
         # Add core tool schemas that have discoverability='core' (excluding disabled)
         for name, schema in self._core_tools.items():
             if name not in self._disabled_tools:
-                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     schemas.append(schema)
 
         return schemas
@@ -1928,7 +2009,7 @@ class PluginRegistry:
             return False
         try:
             for schema in plugin.get_tool_schemas():
-                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     return True
         except Exception:
             pass

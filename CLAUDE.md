@@ -131,12 +131,32 @@ Four plugin types:
 - `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
 - `model_provider/antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
 - `model_provider/ollama/`: Ollama local models (Anthropic-compatible API)
+- `model_provider/chrome_ai/`: Chrome built-in AI — the Gemini Nano on-device model via the browser's Prompt API (`LanguageModel` global), driven over the Chrome DevTools Protocol; zero cost, no credentials, tiny context (~6-9k)
 - `model_provider/lmstudio/`: LM Studio local models (OpenAI-compat chat + native load-control)
 - `model_provider/nim/`: NVIDIA NIM (OpenAI-compatible API, hosted + self-hosted)
 - `model_provider/tensorrt_llm/`: NVIDIA TensorRT-LLM via `trtllm-serve` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/vllm/`: vLLM via `vllm.entrypoints.openai.api_server` (OpenAI-compatible, self-hosted GPU inference)
 - `model_provider/openrouter/`: OpenRouter (unified gateway over 300+ models, OpenAI-compatible)
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
+- `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
+- `model_provider/doubleword/`: Doubleword (serverless open-model inference priced by delivery window, OpenAI-compatible; `api_params.service_tier: flex` opts into the discounted async tier — queued work, ~1 min to first token — on the same chat endpoint; `context_length` must be set — the catalog reports no per-model window)
+
+**Model Quirks** — per-model workarounds a profile opts into via `quirks:`
+(injected into `config.extra["quirks"]`; each provider declares the names it
+honors in its `PROVIDER_QUIRKS` contract):
+
+| Quirk | Honored by | Effect |
+|-------|-----------|--------|
+| `prose_tool_calls` | all OpenAI-compat providers (nim, nebius, ovhcloud, lmstudio, tensorrt_llm, triton, vllm, zhipuai_openai) + openrouter | Prose-emulated tool calling for upstream models that cannot emit native tool calls: the `tools` array is withheld, schemas are prompt-injected (hashed wire ids, model picks by description), tool traffic in history is replayed as text, and fenced ` ```tool_call ` JSON blocks in the response are parsed back into `FunctionCall` parts. Reliability tier below native tool calling (hallucinated ids surface as recoverable unknown-tool errors; malformed blocks stay visible in text). Shared machinery in `model_provider/_prose_tools.py` — the same protocol `chrome_ai` uses unconditionally. |
+| `coerce_typed_tool_args`, `force_tool_choice_for_lifecycle`, `force_narration_between_tools`, `auto_finalize_on_complete` | vllm | Small-model tool-calling workarounds; see `vllm/provider.py` |
+
+```yaml
+# profile example: a cheap OpenRouter model that answers in prose
+provider: openrouter
+model: some-vendor/cheap-model
+quirks:
+  prose_tool_calls: true
+```
 
 ### Tool Execution Flow
 
@@ -177,6 +197,19 @@ plugin_configs: {}
 # Agent identity and instructions belong in .jaato/agents/<name>.md (persona)
 # layered on top of .jaato/instructions/ base instructions.
 # system_instructions: DEPRECATED — use agents instead.
+# suppress_base_instructions: drop framework-injected instruction layers
+#   (persona + plugin instructions are ALWAYS kept). Accepts a bool or a
+#   granular map over three pieces:
+#     - disk      — the .jaato/instructions/*.md base layer
+#     - constants — framework prompt constants (task-completion/verification,
+#                   parallel/batching, turn-summary; incl. jaato-premium overrides)
+#     - security  — the untrusted-content boundary (indirect-prompt-injection defense)
+#   `true` ≡ {disk: true, constants: true} — the security boundary is KEPT
+#   (drop it only by naming it explicitly). Absent key = keep. Examples:
+#     suppress_base_instructions: true                    # drop disk + constants
+#     suppress_base_instructions: {constants: true}       # keep disk + security
+#     suppress_base_instructions: {disk: true, constants: true, security: true}
+#   Inheritance merges by UNION (a piece any layer drops stays dropped).
 gc:
   type: budget
   threshold_percent: 80.0
@@ -559,6 +592,72 @@ Benefits:
 - Privacy - data never leaves your machine
 - Use any model Ollama supports (Qwen, Llama, Mistral, etc.)
 
+### Chrome Built-in AI (Gemini Nano, Local)
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_CHROME_AI_BINARY` | Browser binary path (default: search PATH / well-known locations for Google Chrome, then Microsoft Edge) |
+| `JAATO_CHROME_AI_CDP_URL` | Attach to an already-running browser (`http://host:port` DevTools endpoint or `ws://` URL) instead of launching one |
+| `JAATO_CHROME_AI_USER_DATA_DIR` | Persistent profile directory (default: `~/.jaato/chrome_ai/profile`; the model download is profile-bound) |
+| `JAATO_CHROME_AI_HEADLESS` | Run headless (default: `true`; the model must already be downloaded in the profile) |
+| `JAATO_CHROME_AI_CONTEXT_LENGTH` | Manual context-window override (normally detected from the session quota) |
+| `JAATO_CHROME_AI_MODEL` | Nominal model name (default: `gemini-nano` — the Prompt API has no model selection) |
+| `JAATO_CHROME_AI_PAGE_URL` | Page hosting the Prompt API calls (default: `about:blank`) |
+
+Drives the on-device LLM embedded in Google Chrome (Gemini Nano) through the
+built-in AI **Prompt API** (`LanguageModel` global; stable for web pages since
+Chrome 148, extensions since 138), bridged over the Chrome DevTools Protocol.
+No credentials, no API costs, no new Python dependencies (the CDP transport
+reuses the core `websockets` package). Microsoft Edge (which ships the
+same-shaped API backed by Phi-4-mini / Aion-1.0-Instruct) works via the same
+provider.
+
+Requirements & limits:
+- **Branded Google Chrome or Edge only** — plain Chromium has no on-device
+  model (it's a Google-proprietary component).
+- The model (~2-4 GB component; ~22 GB free disk required by Chrome) must be
+  downloaded into the browser profile. Set `auto_download: true` to let the
+  provider trigger it at `connect()`, or run once headed and evaluate
+  `await LanguageModel.create()` in DevTools. On older/gated builds enable
+  `chrome://flags/#prompt-api-for-gemini-nano` and
+  `chrome://flags/#optimization-guide-on-device-model` (BypassPerfRequirement).
+- The context window is tiny (~6-9k tokens, shared input+output, detected via
+  the session quota) — pair with an aggressive GC strategy.
+- Tool calling is prompt-injected (`tool_call` fenced blocks, parsed by the
+  provider — the Prompt API's native `tools` option isn't on stable Chrome);
+  expect small-model reliability. Structured output uses the API's native
+  `responseConstraint` (JSON Schema) and is comparatively strong.
+
+Profile knobs under `plugin_configs.chrome_ai`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `binary` | str | Browser binary override |
+| `cdp_url` | str | Attach to a running browser instead of launching |
+| `user_data_dir` | str | Persistent profile dir |
+| `headless` | bool | `--headless=new` (default true) |
+| `page_url` | str | Page hosting the API calls (point at an https origin if the build gates the API) |
+| `reuse_page` | bool | Attach to an already-open tab whose URL == `page_url` instead of creating a dedicated one, and leave it open on teardown (default false). Anchors the Prompt API onto a real https tab the user already has open; falls back to creating a tab when none matches. The page helper is re-installed per turn, so the session self-heals if the anchored tab navigates. |
+| `extra_args` | list | Additional Chrome CLI switches |
+| `auto_download` | bool | Trigger the model component download at connect (default false) |
+| `download_timeout` / `connect_timeout` / `turn_timeout` | int | Seconds: model download / launch+attach / mid-turn silence before abort |
+| `context_length` | int | Manual context-window override |
+| `warmup` | bool | Run one throwaway generation at `connect()` to absorb the model cold-start (default true; see below). Set false for fastest connect. |
+| `api_params.temperature`, `api_params.top_k` | float / int | `LanguageModel.create()` sampling options (unset = browser defaults) |
+
+Performance (measured on real Gemini Nano, Chrome 149, consumer GPU;
+fully on-device, zero network/token cost):
+- **Cold start dominates the first turn.** The first inference after the
+  model is provisioned pays a one-time compile/load cost — **~11s to first
+  token** — and can return an empty completion. The `warmup` knob (default
+  **on**) runs one throwaway generation at the end of `connect()` so that
+  cost lands in setup, not on the caller's first real turn; it's
+  best-effort (a warmup failure never fails `connect()`) and skipped under
+  `warmup: false` or `skip_model_test`.
+- **Warm steady-state is sub-second:** `connect()` ~180ms; a tool-call
+  turn ~930ms (ttft ~155ms, ~22 tok/s); a plain-prose turn ~480ms
+  (ttft ~135ms, ~42 tok/s). Structured/`tool_call` decoding is ~2× costlier
+  per token than free prose — budget for it in tool-heavy loops.
+
 ### LM Studio (Local Models)
 | Variable | Purpose |
 |----------|---------|
@@ -755,6 +854,12 @@ plugin_configs:
                                    # Pairs with routing.sort.partition="none"
                                    # to find the best provider across all
                                    # candidate models.
+      service_tier: "flex"         # auto|default|flex|priority|scale —
+                                   # OpenAI-style processing tier forwarded
+                                   # to tier-supporting upstreams (flex =
+                                   # ~50% off, slower; priority = faster,
+                                   # premium).  See
+                                   # https://openrouter.ai/docs/guides/features/service-tiers
       enable_thinking: true        # extended-reasoning request + extraction
       thinking_budget: 16384       # → reasoning.max_tokens
       thinking_level: "high"       # → reasoning.effort (low/medium/high)
@@ -794,7 +899,7 @@ plugin_configs:
 | Layer | Keys | Purpose |
 |-------|------|---------|
 | top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `app_categories` (`List[str]`) is jaato's hook into [OpenRouter's app marketplace](https://openrouter.ai/docs/app-attribution) — emitted as the `X-OpenRouter-Categories` header. Default is `["cli-agent"]` (jaato is a terminal-driven agentic tool orchestrator); pass `[]` to opt out of category attribution entirely. Validated strictly: lowercase hyphen-separated slugs, ≤30 chars each, ≤5 entries; unrecognized categories are silently dropped server-side. `extra_headers` (`Dict[str,str]`) is the hook for OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) — Anthropic `x-anthropic-beta` is the canonical case (`fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`, `structured-outputs-2025-11-13`). Both merge into the OpenAI client's `default_headers`; profile values win on key collisions. |
-| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl`, `strict_tools` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. `strict_tools: true` (server 0.6.118+) emits `"strict": true` as a sibling of `parameters` in each tool definition; OpenRouter forwards to supported upstreams (Sonnet 4.5 / Opus 4.1+, GPT-4o+, Gemini, OSS, Fireworks per [structured outputs list](https://openrouter.ai/docs/guides/features/structured-outputs)) for grammar-constrained tool-arg sampling. Required for cascade-determinism use cases (see `feedback_cascade_completion_schemas_require_strict_model_support` memory); the framework does NOT auto-rewrite schemas to satisfy OpenAI's strict-mode requirements (kb authors own schema shape — `additionalProperties: false` on every object, exhaustive `required` arrays, no `oneOf`/`anyOf` if you enable strict). |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `service_tier`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl`, `strict_tools` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `service_tier` (`auto` / `default` / `flex` / `priority` / `scale`) is the OpenAI-style processing-tier selector, forwarded to tier-supporting upstreams (OpenAI, Gemini, ...) per [service tiers](https://openrouter.ai/docs/guides/features/service-tiers) — `flex` trades latency for ~50% off, `priority` the reverse; the response reports the tier actually used. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. `strict_tools: true` (server 0.6.118+) emits `"strict": true` as a sibling of `parameters` in each tool definition; OpenRouter forwards to supported upstreams (Sonnet 4.5 / Opus 4.1+, GPT-4o+, Gemini, OSS, Fireworks per [structured outputs list](https://openrouter.ai/docs/guides/features/structured-outputs)) for grammar-constrained tool-arg sampling. Required for cascade-determinism use cases (see `feedback_cascade_completion_schemas_require_strict_model_support` memory); the framework does NOT auto-rewrite schemas to satisfy OpenAI's strict-mode requirements (kb authors own schema shape — `additionalProperties: false` on every object, exhaustive `required` arrays, no `oneOf`/`anyOf` if you enable strict). |
 | `routing` | any [provider routing](https://openrouter.ai/docs/features/provider-routing) key (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `ignore`, `only`, `quantizations`, `sort` (string or `{by, partition}`), `zdr`, `enforce_distillable_text`, `max_price`, `preferred_min_throughput`, `preferred_max_latency`, ...) | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts) and `api_params.models` (cross-model fallback list, routing constrains providers across all of them). Opaque pass-through — new routing keys land automatically. |
 | `framework_overrides` | `context_length`, `base_url` | rare escape hatches; normally context length is discovered from the OpenRouter catalog at connect time. |
 
@@ -866,6 +971,122 @@ this provider.
 > implements the **serverless** path only (including serverless custom/
 > fine-tuned models); dedicated-endpoint provisioning is out of scope (it
 > incurs GPU cost and is managed out-of-band via the Nebius dashboard/CLI).
+
+### OVHcloud AI Endpoints
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_OVHCLOUD_API_KEY` | API key (jaato namespace, highest priority) |
+| `OVH_AI_ENDPOINTS_ACCESS_TOKEN` | API key (the vendor's own documented variable; honored so users who already set it for OVHcloud's OpenAI SDK examples work with no extra config) |
+| `JAATO_OVHCLOUD_BASE_URL` | Endpoint (default: `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1`) |
+| `JAATO_OVHCLOUD_MODEL` | Default model name (e.g. `gpt-oss-120b`, `Meta-Llama-3_3-70B-Instruct`) |
+| `JAATO_OVHCLOUD_CONTEXT_LENGTH` | Override / supply the context window when the catalog doesn't report it |
+| `JAATO_OVHCLOUD_ALLOW_ANONYMOUS` | Opt into the keyless rate-limited free tier (`1`/`true`/`yes`/`on`; evaluation only — never a silent fallback) |
+
+**Authentication Options (in priority order):**
+1. **Environment variable**: `JAATO_OVHCLOUD_API_KEY`, then the vendor's `OVH_AI_ENDPOINTS_ACCESS_TOKEN`
+2. **Stored credentials**: `ovhcloud-auth` (validates against the OpenAI-compatible `/chat/completions` endpoint and stores securely)
+3. **Anonymous free tier**: explicit opt-in via `JAATO_OVHCLOUD_ALLOW_ANONYMOUS` / the `allow_anonymous` knob (heavily rate-limited)
+
+OVHcloud AI Endpoints is a hosted **serverless** inference service for open
+models (Llama, Mistral, Qwen, gpt-oss, DeepSeek distills, ...) running in
+OVHcloud's European data centers, behind a single OpenAI-compatible unified
+gateway (`https://oai.endpoints.kepler.ai.cloud.ovh.net/v1`). Model IDs are
+**case-sensitive** catalog names, e.g. `gpt-oss-120b`,
+`Meta-Llama-3_3-70B-Instruct`, `Qwen2.5-Coder-32B-Instruct` — browse them at
+https://endpoints.ai.cloud.ovh.net/catalog or via `list_models()`.
+
+`list_models()` queries `GET /v1/models`. At `connect()` the provider
+bootstraps the active model's context window from that catalog when it
+reports one (the lookup tolerates the common key spellings:
+`context_length`, `max_model_len`, `max_context_length`), then falls back to
+the profile knob `plugin_configs.ovhcloud.context_length` / env, else
+fail-loud. Input modalities resolve catalog → `plugin_configs.ovhcloud.
+modalities` knob → text floor (assert vision models the catalog doesn't
+classify, e.g. `Qwen2.5-VL-72B-Instruct`, via the knob). No hardcoded
+fallback.
+
+Profile knobs under `plugin_configs.ovhcloud`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `base_url` | str | Override `JAATO_OVHCLOUD_BASE_URL` (e.g. a local proxy, or a legacy per-model `*.endpoints.kepler.ai.cloud.ovh.net` endpoint) |
+| `context_length` | int | Manual context-window override (used when the catalog doesn't report the model's window) |
+| `modalities` | list[str] | Assert/correct input modalities (e.g. `["text","image"]`) for a model the catalog doesn't classify |
+| `allow_anonymous` | bool | Opt into the keyless rate-limited free tier (evaluation only) |
+
+### Doubleword
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_DOUBLEWORD_API_KEY` | API key (from https://app.doubleword.ai/api-keys) |
+| `JAATO_DOUBLEWORD_BASE_URL` | Endpoint (default: `https://api.doubleword.ai/v1`) |
+| `JAATO_DOUBLEWORD_MODEL` | Default model name (e.g. `deepseek-ai/DeepSeek-V4-Pro`) |
+| `JAATO_DOUBLEWORD_CONTEXT_LENGTH` | Context window (**required in practice** — Doubleword's catalog reports no per-model window; see below) |
+| `JAATO_DOUBLEWORD_SERVICE_TIER` | Inference tier: `flex` (discounted async) or `priority` (realtime); the profile knob wins when both are set |
+
+**Authentication (in priority order):**
+1. **Environment variable**: `JAATO_DOUBLEWORD_API_KEY`
+2. **Stored credentials**: `doubleword-auth` (validates against the OpenAI-compatible `/chat/completions` endpoint and stores securely)
+
+Doubleword (https://doubleword.ai) is a hosted **serverless** inference
+service for open models (DeepSeek, Qwen, GLM, Kimi, gpt-oss, Nemotron, ...)
+that prices by **delivery window** on one OpenAI-compatible API
+(`https://api.doubleword.ai/v1`).  The same `/chat/completions` endpoint
+serves the realtime tier and — via the `service_tier: "flex"` request-body
+field — the discounted **async** tier: work is queued and guaranteed to
+start within ~1 minute (minutes-level latency, ~1 min to first token) at a
+fraction of realtime pricing.  Suits background agents and fan-out
+workloads where each turn tolerates a short queue delay.  Model IDs are
+vendor-prefixed catalog names, e.g. `deepseek-ai/DeepSeek-V4-Pro`,
+`Qwen/Qwen3.5-35B-A3B` — browse them at https://doubleword.ai/models or via
+`list_models()`.
+
+`list_models()` queries `GET /v1/models` (**authenticated** — the listing
+is account-scoped).
+
+> **You must set a context window.**  Doubleword's catalog serves bare
+> OpenAI-shaped entries — verified live 2026-07-19, every one of the 25
+> listed models reports only `{id, object, created, owned_by}`, with no
+> context-length or modality field.  So
+> `plugin_configs.doubleword.context_length` (or
+> `JAATO_DOUBLEWORD_CONTEXT_LENGTH`) is in practice **required**: without
+> it `connect()` fails loud rather than guessing.  Per-model windows are
+> listed at https://doubleword.ai/models.
+
+`connect()` still consults the catalog **first** (tolerating the common key
+spellings `context_length` / `max_model_len` / `max_context_length`), so
+the manual knob becomes redundant automatically if Doubleword ever
+enriches the listing — but today that tier never fires.  Resolution order
+is catalog → profile knob → env → fail-loud.  Input modalities resolve
+catalog → `plugin_configs.doubleword.modalities` knob → text floor; the
+catalog tier is likewise dormant today, so assert vision models (e.g.
+`Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`) via the knob.  No hardcoded
+fallback.
+
+Profile knobs under `plugin_configs.doubleword`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `base_url` | str | Override `JAATO_DOUBLEWORD_BASE_URL` (e.g. a local proxy) |
+| `context_length` | int | Context window. **Required in practice** — the catalog reports none, so `connect()` fails loud without it |
+| `modalities` | list[str] | Assert input modalities (e.g. `["text","image"]`). Required for vision models — the catalog classifies none |
+| `api_params.service_tier` | str | `flex` (discounted async tier) or `priority` (realtime); forwarded verbatim, so future tier names work without a provider release |
+
+```yaml
+# profile example: a background agent on the discounted async tier
+provider: doubleword
+model: deepseek-ai/DeepSeek-V4-Pro
+plugin_configs:
+  doubleword:
+    context_length: 131072      # required — the catalog reports no window
+    api_params:
+      service_tier: flex
+```
+
+> **Note (batch tier):** Doubleword's deepest-discount **batch** tier
+> (JSONL file upload + `/batches` jobs with a 24h completion window) is a
+> different interaction shape (submit → poll → collect) and is not part of
+> this provider; background-job polling and batch-job support are a
+> follow-up.
 
 ### Claude CLI Provider
 | Variable | Purpose |
@@ -1021,6 +1242,28 @@ Span hierarchy: `jaato.turn` → `jaato.tool` → `jaato.permission`
 Key attributes:
 - Turn: `session_id`, `agent_type`, `turn_index`, `streaming`, `cancelled`
 - Tool: `tool.name`, `tool.plugin_type`, `tool.success`, `tool.duration_seconds`
+
+Spans follow **OpenInference** semantic conventions (`openinference.span.kind`,
+`llm.token_count.*`, `llm.model_name`), so they render natively in Arize
+Phoenix, Langfuse, and other OpenInference-compatible backends. The LLM span
+carries per-call cost as `gen_ai.usage.cost` (Langfuse) and `llm.cost.total`
+(Phoenix), resolved in the same precedence as `UsageBreakdown`:
+provider-reported `TokenUsage.cost_usd` → operator pricing table
+(`.jaato/pricing.json`, computed from model + token counts) → none (backend may
+still estimate). Resolution happens in `jaato_session._resolve_span_cost` while
+the span is open.
+
+**Langfuse backend:** set `JAATO_TELEMETRY_ENABLED=true` +
+`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (+ optional `LANGFUSE_HOST`). The
+`langfuse` backend (`LangfusePlugin`, an `OTelPlugin` subclass) derives the
+`/api/public/otel` endpoint, `http/protobuf` transport (Langfuse is HTTP-only;
+the generic exporter is gRPC-first), and Basic-auth header from the keys. It's
+auto-selected when a Langfuse public key is set and no
+`OTEL_EXPORTER_OTLP_ENDPOINT` is configured; force with
+`JAATO_TELEMETRY_BACKEND=langfuse` (`=otel` to opt out). For a generic OTLP
+collector, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (or the `protocol`
+config key) yourself. See
+[docs/opentelemetry-design.md §12.1](docs/opentelemetry-design.md).
 
 ## Coding Policies
 

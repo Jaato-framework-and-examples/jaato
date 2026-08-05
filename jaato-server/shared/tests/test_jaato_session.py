@@ -202,6 +202,8 @@ class TestJaatoSessionConfigure:
             additional="Be a researcher.",
             presentation_context=None,
             include_base=True,
+            include_constants=True,
+            include_security=True,
         )
 
 
@@ -1410,7 +1412,7 @@ class TestForceNarrationBetweenToolsQuirk:
         from shared.plugins.model_provider.base import ProviderConfig
 
         provider = VLLMProvider()
-        provider._verify_connectivity = lambda: None
+        provider._verify_connectivity = lambda *a, **k: None
         provider._trace = lambda _msg: None
         cfg = ProviderConfig(
             api_key="EMPTY",
@@ -1426,7 +1428,7 @@ class TestForceNarrationBetweenToolsQuirk:
         from shared.plugins.model_provider.base import ProviderConfig
 
         provider = VLLMProvider()
-        provider._verify_connectivity = lambda: None
+        provider._verify_connectivity = lambda *a, **k: None
         provider._trace = lambda _msg: None
         cfg = ProviderConfig(
             api_key="EMPTY",
@@ -1444,7 +1446,7 @@ class TestForceNarrationBetweenToolsQuirk:
         from shared.plugins.model_provider.base import ProviderConfig
 
         provider = VLLMProvider()
-        provider._verify_connectivity = lambda: None
+        provider._verify_connectivity = lambda *a, **k: None
         provider._trace = lambda _msg: None
         cfg = ProviderConfig(
             api_key="EMPTY",
@@ -1503,7 +1505,7 @@ class TestForceNarrationBetweenToolsQuirk:
         import logging
 
         provider = VLLMProvider()
-        provider._verify_connectivity = lambda: None
+        provider._verify_connectivity = lambda *a, **k: None
         provider._trace = lambda _msg: None
         cfg = ProviderConfig(
             api_key="EMPTY",
@@ -1546,7 +1548,7 @@ class TestForceNarrationBetweenToolsQuirk:
         import logging
 
         provider = VLLMProvider()
-        provider._verify_connectivity = lambda: None
+        provider._verify_connectivity = lambda *a, **k: None
         provider._trace = lambda _msg: None
         cfg = ProviderConfig(
             api_key="EMPTY",

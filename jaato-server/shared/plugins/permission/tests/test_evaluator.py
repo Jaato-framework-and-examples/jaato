@@ -30,6 +30,7 @@ class TestEvalContext:
         assert ctx.agent_name is None
         assert ctx.session_id is None
         assert ctx.workspace_path is None
+        assert ctx.execution_log == []
         assert ctx.extra == {}
 
     def test_all_fields(self):
@@ -44,6 +45,36 @@ class TestEvalContext:
         )
         assert ctx.agent_type == "subagent"
         assert ctx.extra["custom"] is True
+
+    def test_execution_log_field(self):
+        log = [{"tool_name": "cli", "arguments": {}, "decision": "allow",
+                "reason": "x"}]
+        ctx = EvalContext(tool_name="cli", args={}, execution_log=log)
+        assert ctx.execution_log == log
+
+    def test_evaluator_can_decide_on_execution_log(self, tmp_path):
+        # An evaluator that denies a tool once it has already run >= 2 times
+        # this session — reasoning purely from EvalContext.execution_log.
+        script = tmp_path / ".jaato" / "rate_limit.py"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "from shared.plugins.permission.evaluator import PolicyDecision\n"
+            "def evaluate(tool_name, args, context):\n"
+            "    prior = sum(1 for e in context.execution_log\n"
+            "                if e.get('tool_name') == tool_name)\n"
+            "    return PolicyDecision.DENY if prior >= 2 else PolicyDecision.FALLBACK\n"
+        )
+        evaluators = load_evaluators({"default": "rate_limit.py"},
+                                     workspace_path=str(tmp_path))
+        entry = {"tool_name": "cli", "arguments": {}, "decision": "allow", "reason": ""}
+
+        def _decide(log):
+            ctx = EvalContext(tool_name="cli", args={}, execution_log=log)
+            return run_evaluator(evaluators, "cli", {}, ctx).decision
+
+        assert _decide([]) == PolicyDecision.FALLBACK
+        assert _decide([entry]) == PolicyDecision.FALLBACK
+        assert _decide([entry, entry]) == PolicyDecision.DENY
 
 
 # ---------------------------------------------------------------------------

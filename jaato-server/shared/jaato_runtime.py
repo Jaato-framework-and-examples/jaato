@@ -15,7 +15,11 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .token_accounting import TokenLedger
 from .instruction_token_cache import InstructionTokenCache
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from .plugins.model_provider.base import ProviderConfig
 from .plugins.model_provider import load_provider
 from .plugins.telemetry import TelemetryPlugin, create_plugin as create_telemetry_plugin
@@ -162,7 +166,7 @@ def _get_sandbox_guidance() -> Optional[str]:
     informing the model about path restrictions.
     """
     from shared.session_context import get_workspace_root
-    workspace = get_workspace_root() or os.environ.get('workspaceRoot')
+    workspace = get_workspace_root() or os.environ.get('workspaceRoot')  # env: workspace root hint (VS Code-style) fallback when session context has none
     if not workspace:
         return None
 
@@ -177,7 +181,7 @@ def _get_sandbox_guidance() -> Optional[str]:
 
 def _is_parallel_tools_enabled() -> bool:
     """Check if parallel tool execution is enabled."""
-    return os.environ.get(
+    return os.environ.get(  # env: run multiple tool calls per turn in a thread pool (default true; max 8 concurrent)
         'JAATO_PARALLEL_TOOLS', 'true'
     ).lower() not in ('false', '0', 'no')
 
@@ -192,7 +196,7 @@ def _is_deferred_tools_enabled() -> bool:
     Default is 'true' for token economy. Set JAATO_DEFERRED_TOOLS=false
     to disable and load all tools upfront.
     """
-    return os.environ.get(
+    return os.environ.get(  # env: load only core tools upfront, others discovered on demand (default true); false loads all
         'JAATO_DEFERRED_TOOLS', 'true'
     ).lower() not in ('false', '0', 'no')
 
@@ -1214,6 +1218,44 @@ class JaatoRuntime:
                     replace_kwargs["api_key"] = promoted_api_key
                 config = replace(config, **replace_kwargs)
 
+        # Fail loud at the provider credential boundary: if api_key is still
+        # shaped like an unresolved secret URI (e.g. ``pass://...`` that passed
+        # through because no resolver is registered — the providing plugin isn't
+        # installed), refuse rather than send the literal URI as a credential
+        # (which produced a confusing upstream 401 — the nebius regression).
+        # ``_resolve_secret_uri`` stays lenient/pass-through so non-provider
+        # consumers (service_connector) keep reporting "credential missing"
+        # gracefully; the strict check lives here, where a literal secret URI
+        # is unambiguously wrong.
+        from .plugins.subagent.config import (
+            looks_like_unresolved_secret_uri,
+            looks_like_malformed_secret_uri,
+            SecretResolutionError,
+        )
+        # Near-miss FIRST: a single-colon ``pass:...`` (the ``//``-dropped typo)
+        # is invisible to the resolver (regex miss → passed through literally),
+        # so it would otherwise leak to the provider as a bearer token and
+        # produce a confusing upstream 401.  Fail loud with a did-you-mean.
+        malformed_scheme = looks_like_malformed_secret_uri(config.api_key)
+        if malformed_scheme:
+            raise SecretResolutionError(
+                config.api_key,
+                f"provider '{effective_provider}' received a MALFORMED secret "
+                f"URI as its api_key — a single-colon '{malformed_scheme}:...'. "
+                f"Secret URIs require '//': did you mean "
+                f"'{malformed_scheme}://<path>'?  (A resolver for "
+                f"'{malformed_scheme}' IS registered; only the '//' is missing.)",
+            )
+        if looks_like_unresolved_secret_uri(config.api_key):
+            raise SecretResolutionError(
+                config.api_key,
+                f"provider '{effective_provider}' received an unresolved secret "
+                f"URI as its api_key — no resolver is registered for its scheme "
+                f"(is the plugin that provides it, e.g. jaato-premium, "
+                f"installed?). Refusing to send a literal secret URI as a "
+                f"credential.",
+            )
+
         t0 = time.perf_counter()
         provider = load_provider(effective_provider, config)
         load_ms = (time.perf_counter() - t0) * 1000
@@ -1253,7 +1295,7 @@ class JaatoRuntime:
             try:
                 schemas = plugin.get_tool_schemas()
                 for schema in schemas:
-                    if getattr(schema, 'discoverability', None) == 'core':
+                    if getattr(schema, 'discoverability', None) == DISCOVERABILITY_EAGER:
                         core_plugins.append(plugin_name)
                         break  # Found one core tool, plugin qualifies
             except Exception:
@@ -1341,7 +1383,7 @@ class JaatoRuntime:
                     # Filter to core tools only - others discovered via introspection
                     plugin_schemas = [
                         s for s in plugin_schemas
-                        if getattr(s, 'discoverability', 'discoverable') == 'core'
+                        if getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                     ]
                 schemas.extend(plugin_schemas)
 
@@ -1352,7 +1394,7 @@ class JaatoRuntime:
                 # Permission tools should be core (always available)
                 permission_schemas = [
                     s for s in permission_schemas
-                    if getattr(s, 'discoverability', 'discoverable') == 'core'
+                    if getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                 ]
             schemas.extend(permission_schemas)
 
@@ -1405,6 +1447,8 @@ class JaatoRuntime:
         presentation_context: Optional['PresentationContext'] = None,
         preloaded_plugins: Optional[set] = None,
         include_base: bool = True,
+        include_constants: bool = True,
+        include_security: bool = True,
     ) -> Optional[str]:
         """Get system instructions, optionally filtered by plugin names.
 
@@ -1438,6 +1482,16 @@ class JaatoRuntime:
                 to the client's capabilities.
             preloaded_plugins: Optional set of plugin names that should bypass
                               deferred tool loading for system instructions.
+            include_constants: When False, skip the framework prompt constants
+                              (task-completion/verification, parallel/batching,
+                              turn-summary) — the granular counterpart of
+                              ``include_base``.  Driven by
+                              ``suppress_base_instructions: {constants: true}``.
+            include_security: When False, skip the untrusted-content boundary.
+                              Driven only by an explicit
+                              ``suppress_base_instructions: {security: true}``
+                              (the blanket ``true`` keeps it — it is the
+                              indirect-prompt-injection defense).
 
         Returns:
             Combined system instructions string, or None.
@@ -1519,13 +1573,28 @@ class JaatoRuntime:
             if ctx_instruction:
                 result_parts.append(ctx_instruction)
 
-        # 6. Framework-level prompt constants (provided by jaato-premium)
-        if _TASK_COMPLETION_INSTRUCTION:
-            result_parts.append(_TASK_COMPLETION_INSTRUCTION)
-        if _is_parallel_tools_enabled() and _PARALLEL_TOOL_GUIDANCE:
-            result_parts.append(_PARALLEL_TOOL_GUIDANCE)
-        if _TURN_SUMMARY_INSTRUCTION:
-            result_parts.append(_TURN_SUMMARY_INSTRUCTION)
+        # 6. Framework-level prompt constants (provided by jaato-premium).
+        #    Skipped when include_constants=False — the granular counterpart of
+        #    include_base, for ``suppress_base_instructions: {constants: true}``.
+        if include_constants:
+            if _TASK_COMPLETION_INSTRUCTION:
+                result_parts.append(_TASK_COMPLETION_INSTRUCTION)
+            if _is_parallel_tools_enabled() and _PARALLEL_TOOL_GUIDANCE:
+                result_parts.append(_PARALLEL_TOOL_GUIDANCE)
+            if _TURN_SUMMARY_INSTRUCTION:
+                result_parts.append(_TURN_SUMMARY_INSTRUCTION)
+
+        # 7. Untrusted-content boundary (security baseline).  Included by
+        # default — web_fetch/web_search/MCP tools are deferred-loaded, so
+        # gating on tool presence would drop the instruction for a tool the
+        # model can still discover + call.  Teaches the model to treat
+        # boundary-wrapped tool results as data, not instructions
+        # (indirect-prompt-injection defense).  Dropped ONLY when a session
+        # explicitly opts in via ``suppress_base_instructions: {security:
+        # true}`` (never by the blanket ``true``).
+        if include_security:
+            from jaato_sdk.plugins.model_provider.types import untrusted_boundary_instruction
+            result_parts.append(untrusted_boundary_instruction())
 
         return "\n\n".join(result_parts)
 

@@ -252,6 +252,12 @@ class EventType(str, Enum):
     RESOLVE_FORK_POINT_REQUEST = "resolve_fork_point.request"  # Client -> Server
     RESOLVE_FORK_POINT_RESULT = "resolve_fork_point.result"    # Server -> Client
 
+    # Wake primitive: result of session.bind_wake / session.unbind_wake
+    WAKE_BIND_RESULT = "session.wake_bind_result"              # Server -> Client
+    # Wake primitive: a wake arrived for a session with no attached client —
+    # revived server-side; the woken turn is DEFERRED until a client re-attaches.
+    SESSION_WOKEN = "session.woken"                            # Server -> Client
+
     # SDK feature parity — typed permission-policy verbs replacing
     # stringly-typed CommandRequest("permissions", [...]) for SDK
     # consumers.  CLI command path stays for actual users.
@@ -603,6 +609,7 @@ class ToolCallEndEvent(Event):
     tool_name: str = ""
     call_id: Optional[str] = None
     success: bool = True
+    is_error_result: bool = False  # computed deeper error check — success=True but error body; distinct from `success`
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
     backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)
@@ -995,6 +1002,17 @@ class TurnCompletedEvent(Event):
     # Formatted output text (with syntax highlighting, validation, etc.)
     # Client can use this to replace raw streaming output with formatted version
     formatted_text: Optional[str] = None
+    # The provider's finish reason for the turn's terminal response, as the
+    # lowercase ``FinishReason`` enum value: ``"stop"`` (normal completion),
+    # ``"max_tokens"`` (output-token limit — response truncated), ``"safety"``
+    # (safety filter), ``"error"`` (provider error), plus ``"tool_use"`` /
+    # ``"cancelled"`` / ``"unknown"`` for completeness.  Defaults to ``"stop"``
+    # so a client can deterministically branch on ``finish_reason != "stop"``
+    # to flag an abnormal/truncated turn WITHOUT inferring it from empty
+    # output.  The framework also emits a human-readable ``source="system"``
+    # ``AgentOutputEvent`` banner alongside abnormal finishes for direct
+    # display; this field is the machine-readable companion.
+    finish_reason: str = "stop"
 
 
 class TurnProgressEvent(Event):
@@ -1503,6 +1521,52 @@ class ToolExecuteResultEvent(Event):
     error: str = ""   # Error message if execution failed
 
 
+class WakeBindResultEvent(Event):
+    """Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
+
+    ``outcome`` is the ``BindOutcome`` value (``ok`` / ``unauthorized`` /
+    ``malformed_key`` / ``too_many_keys`` / ``no_keys`` / ``no_session`` /
+    ``unknown``); route on it, not ``detail``.  On a successful ``bind_wake``,
+    ``wake_ref`` echoes the (session-supplied) ref and ``expires_at`` is the
+    binding's Unix expiry — the values the caller's waker keys on.
+    """
+    type: EventType = Field(default=EventType.WAKE_BIND_RESULT)
+    wake_ref: str = ""
+    outcome: str = ""
+    detail: str = ""
+    expires_at: float = 0.0
+    # The daemon's operator-declared PUBLIC wake endpoint (wake.json
+    # ``public_url``), so a binding session can embed it as the relay's routing
+    # marker WITHOUT any bot-side URL config.  Empty when the operator hasn't
+    # declared one (the ingress may still be reachable by other means).
+    endpoint: str = ""
+
+
+class SessionWokenEvent(Event):
+    """A wake arrived for a session with NO attached client; the daemon revived
+    it and DEFERRED the turn until a client re-attaches.
+
+    Routed to the session's cascade observers (a connected-but-detached client
+    that registered ``cascade.register(cid, "observer", ["SessionWokenEvent"])``
+    — the cascade filter matches on the event's CLASS NAME
+    (``type(event).__name__``), NOT the ``EventType`` value ``"session.woken"``;
+    registering the value string silently never matches), so a bot whose session
+    went cold can learn it must re-attach to serve the
+    woken turn's host tools + render.  Re-emitted whenever an observer
+    (re)registers for the cid while a wake is still pending, so a reconnecting
+    bot is re-nudged.
+
+    Filter client-side by ``session_id`` (map it to your chat / attach target).
+    ``wake_ref`` names the matter (e.g. the PR); ``source`` is the provenance
+    tag.  The wake TEXT is NOT here — it stays inside the deferred turn (the
+    notification is a signal to attach, not the untrusted payload).
+    """
+    type: EventType = Field(default=EventType.SESSION_WOKEN)
+    session_id: str = ""
+    wake_ref: str = ""
+    source: str = ""
+
+
 class HistoryRequest(Event):
     """Client request for conversation history."""
     type: EventType = Field(default=EventType.HISTORY_REQUEST)
@@ -1515,8 +1579,15 @@ class HistoryEvent(Event):
     agent_id: str = "main"
     history: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of serialized Message objects
-    turn_accounting: List[Dict[str, int]] = Field(default_factory=list)
-    # ^ List of {prompt, output, total} per turn
+    turn_accounting: List[Dict[str, Any]] = Field(default_factory=list)
+    # ^ Per-turn accounting dicts.  The value type is Any (not int): besides
+    # the int token counts ({prompt, output, total}) each entry may carry the
+    # richer fields the runner records — ``duration_seconds`` (float) and
+    # ``function_calls`` (list) — mirroring TurnCompletedEvent.  A strict
+    # ``Dict[str, int]`` here rejected those and took the whole HistoryEvent
+    # down (pydantic ValidationError), so a disk-restored session's
+    # history.request / attach-replay / snapshot all failed on the accounting
+    # alone even though the messages validated fine.
 
 
 # =============================================================================
@@ -2327,6 +2398,12 @@ class GateReleasedEvent(Event):
     """
     type: EventType = Field(default=EventType.GATE_RELEASED)
     gate_name: str = ""
+    session_id: str = ""                     # originating session (from the
+                                             # gate's announce intent); empty
+                                             # for a gate with no session
+                                             # association. Lets bus subscribers
+                                             # (reactors) target the parked
+                                             # session without parsing gate_name.
     tenant_id: str = ""
     owner: str = ""
     outcome: Optional[Dict[str, Any]] = None
@@ -2377,6 +2454,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
     EventType.AGENT_ERROR.value: AgentErrorEvent,
     EventType.SESSION_TERMINATED.value: SessionTerminatedEvent,
+    EventType.SESSION_RESTORED.value: SessionRestoredEvent,
     EventType.SLOT_SETTLED.value: SlotSettledEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
@@ -2477,6 +2555,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.REPLAY_MESSAGES_RESULT.value: ReplayMessagesResultEvent,
     EventType.RESOLVE_FORK_POINT_REQUEST.value: ResolveForkPointRequest,
     EventType.RESOLVE_FORK_POINT_RESULT.value: ResolveForkPointResultEvent,
+    EventType.WAKE_BIND_RESULT.value: WakeBindResultEvent,
+    EventType.SESSION_WOKEN.value: SessionWokenEvent,
     # SDK feature parity — permission policy verbs
     EventType.PERMISSION_ADD_WHITELIST_REQUEST.value: PermissionAddWhitelistRequest,
     EventType.PERMISSION_ADD_BLACKLIST_REQUEST.value: PermissionAddBlacklistRequest,

@@ -237,6 +237,15 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # context_length).  Wins over catalog + fallback table in
         # get_context_limit() — escape hatch for a model with no catalog sizing.
         self._context_length_knob: Optional[int] = None
+        # Sampling parameters (plugin_configs.github_models.api_params.*).
+        # ``None`` = omit from the request and let the backend apply its
+        # server-side default.  A profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        # Threaded into the Azure SDK kwargs AND the Copilot complete* calls.
+        self._temperature: Optional[float] = None
+        self._top_p: Optional[float] = None
+        self._seed: Optional[int] = None
+        self._max_tokens_override: Optional[int] = None
 
         # Configuration
         self._token: Optional[str] = None
@@ -347,6 +356,33 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
             env_value=None,
         )
 
+        # Sampling parameters (plugin_configs.github_models.api_params).  They
+        # live NESTED at config.extra["api_params"][...] — the canonical
+        # namespaced layer mirroring anthropic / openrouter.  ``None`` means
+        # "omit from the request and let the backend apply its server-side
+        # default"; a profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        # These thread into the Azure SDK kwargs (batch + streaming) and the
+        # Copilot complete*/complete*_stream call sites.
+        api_params = config.extra.get("api_params") or {}
+        if not isinstance(api_params, dict):
+            raise TypeError(
+                "GitHub Models 'api_params' config must be a dict of "
+                f"request body fields, got {type(api_params).__name__}"
+            )
+        temp_extra = api_params.get("temperature")
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = api_params.get("top_p")
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        seed_extra = api_params.get("seed")
+        if seed_extra is not None:
+            self._seed = int(seed_extra)
+        max_tokens_extra = api_params.get("max_tokens")
+        if max_tokens_extra is not None:
+            self._max_tokens_override = int(max_tokens_extra)
+
         # Resolve configuration
         raw_token = config.api_key or resolve_token()
         self._organization = config.extra.get('organization') or resolve_organization()
@@ -357,7 +393,8 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         if not raw_token:
             raise TokenNotFoundError(
                 auth_method=resolve_auth_method(),
-                checked_locations=get_checked_credential_locations(resolve_auth_method()),
+                checked_locations=get_checked_credential_locations(
+                    resolve_auth_method(), config=config),
             )
 
         # If using OAuth, exchange for Copilot token and use Copilot API
@@ -471,7 +508,11 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # used to produce the same generic "no credentials found"
         # message, hiding the actual fixable problem (corrupt JSON,
         # missing field, permission error) from the user.
-        extra = getattr(self._config, 'extra', None) or {}
+        # Read the ``config`` PARAMETER (not ``self._config``): per the
+        # base contract verify_auth runs BEFORE initialize(), so
+        # ``self._config`` is unset here (AttributeError on the
+        # in-process runtime path, which does not initialize() first).
+        extra = getattr(config, 'extra', None) or {}
         _, load_error = try_load_tokens_with_reason(
             workspace_path=extra.get('workspace_path'),
             config_root=extra.get('config_root'),
@@ -489,7 +530,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # No token found
         if not allow_interactive:
             raise TokenNotFoundError(
-                checked_locations=get_checked_credential_locations()
+                checked_locations=get_checked_credential_locations(config=config)
             )
 
         # Try interactive device code flow
@@ -1309,6 +1350,10 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                     model=self._copilot_model_name(),
                     messages=api_messages,
                     system_instruction=system_instruction,
+                    max_tokens=self._max_tokens_override,
+                    temperature=self._temperature,
+                    top_p=self._top_p,
+                    seed=self._seed,
                     tools=api_tools,
                 )
                 provider_response = self._responses_api_response_to_provider(response)
@@ -1316,6 +1361,10 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                 response = self._copilot_client.complete(
                     model=self._copilot_model_name(),
                     messages=api_messages,
+                    max_tokens=self._max_tokens_override,
+                    temperature=self._temperature,
+                    top_p=self._top_p,
+                    seed=self._seed,
                     tools=api_tools,
                 )
                 provider_response = self._copilot_response_to_provider(response)
@@ -1333,6 +1382,25 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                     pass
 
         return provider_response
+
+    def _apply_sampling_knobs(self, kwargs: Dict[str, Any]) -> None:
+        """Thread profile sampling knobs into an Azure SDK ``complete`` kwargs dict.
+
+        Reads the per-profile sampling overrides resolved at ``initialize()``
+        from ``plugin_configs.github_models.api_params`` and copies each one that
+        was set into ``kwargs`` so it reaches the wire.  ``None`` keys are skipped
+        (``is not None`` guards), so ``temperature: 0.0`` — the determinism knob —
+        survives while unset knobs let the backend apply its defaults.  Used by
+        both the Azure batch and streaming paths (they share one kwargs dict).
+        """
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        if self._top_p is not None:
+            kwargs["top_p"] = self._top_p
+        if self._seed is not None:
+            kwargs["seed"] = self._seed
+        if self._max_tokens_override is not None:
+            kwargs["max_tokens"] = self._max_tokens_override
 
     def _complete_azure(
         self,
@@ -1385,6 +1453,10 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         response_format_json = get_response_format_json()
         if response_schema and response_format_json is not None:
             kwargs['response_format'] = response_format_json()
+        # Profile sampling knobs (api_params.{temperature,top_p,seed,max_tokens}).
+        # Only sent when set on the profile; ``temperature: 0.0`` (determinism)
+        # survives the ``is not None`` guards.
+        self._apply_sampling_knobs(kwargs)
 
         if on_chunk:
             # Streaming mode
@@ -1745,6 +1817,10 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
             for choice in self._copilot_client.complete_stream(
                 model=self._copilot_model_name(),
                 messages=messages,
+                max_tokens=self._max_tokens_override,
+                temperature=self._temperature,
+                top_p=self._top_p,
+                seed=self._seed,
                 tools=tools,
             ):
                 if cancel_token and cancel_token.is_cancelled:
@@ -1874,6 +1950,10 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                 model=self._copilot_model_name(),
                 messages=messages,
                 system_instruction=self._system_instruction,
+                max_tokens=self._max_tokens_override,
+                temperature=self._temperature,
+                top_p=self._top_p,
+                seed=self._seed,
                 tools=tools,
             ):
                 if cancel_token and cancel_token.is_cancelled:

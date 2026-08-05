@@ -57,6 +57,11 @@ class _StubSession:
 
     def __init__(self, **kwargs: Any) -> None:
         self.create_session_kwargs = dict(kwargs)
+        self._daemon_session_id: Optional[str] = None
+
+    def set_daemon_session_id(self, session_id: str) -> None:
+        # Bootstrap stamps envelope.session_id onto the session.
+        self._daemon_session_id = session_id
 
 
 class _StubRuntime:

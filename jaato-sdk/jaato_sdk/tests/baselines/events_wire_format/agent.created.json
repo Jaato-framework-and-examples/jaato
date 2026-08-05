@@ -6,5 +6,6 @@
   "agent_type": "",
   "profile_name": null,
   "parent_agent_id": null,
-  "created_at": null
+  "created_at": null,
+  "session_id": ""
 }

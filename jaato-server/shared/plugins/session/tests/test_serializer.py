@@ -185,7 +185,7 @@ class TestSessionStateSerialization:
 
         data = serialize_session_state(state)
 
-        assert data["version"] == "2.4"
+        assert data["version"] == "2.7"
         assert data["session_id"] == "20251207_143022"
         assert data["description"] == "Test session"
         assert data["turn_count"] == 1
@@ -240,13 +240,90 @@ class TestSessionStateSerialization:
         )
 
         data = serialize_session_state(state)
-        assert data["version"] == "2.4"
+        assert data["version"] == "2.7"
         assert data["config_root"] == "/repo/.jaato"
         assert data["profile_name"] == "discovery"
 
         restored = deserialize_session_state(data)
         assert restored.config_root == "/repo/.jaato"
         assert restored.profile_name == "discovery"
+
+    def test_profile_spec_round_trip(self):
+        """2.7: the UNRESOLVED inline-profile spec persists so disk-restore
+        reconstructs an inline session's recipe by id alone — the
+        ``profile_name`` ("<inline>") isn't re-resolvable from disk."""
+        spec = {
+            "model": "gemini-nano",
+            "provider": "chrome_ai",
+            "plugins": [],
+            "suppress_base_instructions": True,
+            # plugin_configs MUST survive — resume can't reconnect chrome_ai
+            # without cdp_url/reuse_page.
+            "plugin_configs": {"chrome_ai": {
+                "cdp_url": "http://[::1]:9222", "page_url": "https://example.com",
+                "reuse_page": True}},
+        }
+        state = SessionState(
+            session_id="inline_test",
+            history=[],
+            created_at=datetime(2026, 7, 8, 12, 0, 0),
+            updated_at=datetime(2026, 7, 8, 12, 0, 0),
+            description="inline spec test",
+            turn_count=0,
+            profile_name="<inline>",
+            profile_spec=spec,
+        )
+        data = serialize_session_state(state)
+        assert data["version"] == "2.7"
+        assert data["profile_spec"] == spec              # full recipe on the wire
+
+        restored = deserialize_session_state(data)
+        assert restored.profile_spec == spec
+        # plugin_configs survives intact — the crux for chrome_ai resume.
+        assert (restored.profile_spec["plugin_configs"]["chrome_ai"]["cdp_url"]
+                == "http://[::1]:9222")
+
+    def test_profile_spec_absent_on_named_and_old_records(self):
+        # Named-profile sessions carry no spec; pre-2.7 records (no key)
+        # deserialize to None, not a crash.
+        state = SessionState(
+            session_id="named", history=[],
+            created_at=datetime(2026, 7, 8, 12, 0, 0),
+            updated_at=datetime(2026, 7, 8, 12, 0, 0),
+            profile_name="researcher")
+        assert serialize_session_state(state)["profile_spec"] is None
+        # A 2.6 record with no profile_spec key at all:
+        old = {"version": "2.6", "session_id": "old", "history": [],
+               "created_at": "2026-07-08T12:00:00", "updated_at": "2026-07-08T12:00:00",
+               "profile_name": "researcher"}
+        assert deserialize_session_state(old).profile_spec is None
+
+    def test_sandbox_mode_round_trip(self):
+        """2.5: ``sandbox_mode`` persisted so orphan-revive / disk-restore
+        re-applies the SAME confinement on runner re-spawn (else the revive
+        ran unconfined after any idle detach — a security regression)."""
+        state = SessionState(
+            session_id="sandbox_test",
+            history=[],
+            created_at=datetime(2026, 7, 1, 16, 22, 28),
+            updated_at=datetime(2026, 7, 1, 16, 22, 28),
+            sandbox_mode="apparmor",
+        )
+        data = serialize_session_state(state)
+        assert data["sandbox_mode"] == "apparmor"
+        assert deserialize_session_state(data).sandbox_mode == "apparmor"
+
+    def test_pre_2_5_record_deserializes_sandbox_mode_none(self):
+        """Pre-2.5 JSONs lack ``sandbox_mode`` — deserialize to None
+        (unchanged behavior; the revive apparmor= computation reads None)."""
+        data = {
+            "version": "2.4",
+            "session_id": "old",
+            "created_at": "2026-06-30T12:00:00",
+            "updated_at": "2026-06-30T12:00:00",
+            "history": [],
+        }
+        assert deserialize_session_state(data).sandbox_mode is None
 
     def test_deserialize_pre_2_4_no_config_root(self):
         """Pre-2.4 session JSONs lack ``config_root``.  Deserialize
@@ -451,3 +528,30 @@ class TestMessageProvenanceSerialization:
         # Model message preserves provenance
         assert restored.history[1].model == "gemini-2.5-flash"
         assert restored.history[1].provider == "google_genai"
+
+    def test_agent_name_round_trip(self):
+        """2.6: ``agent_name`` (persona/--agent) persisted so orphan-revive
+        rebinds the persona — else revived multimodal sessions lose their
+        enter_tier guidance and confabulate on images."""
+        state = SessionState(
+            session_id="agent_test",
+            history=[],
+            created_at=datetime(2026, 7, 1, 16, 22, 28),
+            updated_at=datetime(2026, 7, 1, 16, 22, 28),
+            agent_name="telegram_chat",
+        )
+        data = serialize_session_state(state)
+        assert data["agent_name"] == "telegram_chat"
+        assert deserialize_session_state(data).agent_name == "telegram_chat"
+
+    def test_pre_2_6_record_deserializes_agent_name_none(self):
+        """Pre-2.6 JSONs lack ``agent_name`` — deserialize to None (unchanged;
+        JaatoServer falls back agent id to 'main')."""
+        data = {
+            "version": "2.5",
+            "session_id": "old",
+            "created_at": "2026-06-30T12:00:00",
+            "updated_at": "2026-06-30T12:00:00",
+            "history": [],
+        }
+        assert deserialize_session_state(data).agent_name is None

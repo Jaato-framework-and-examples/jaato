@@ -7,9 +7,17 @@ Usage:
 
 from jaato_sdk.client import (
     IPCClient,
+    WSClient,
+    WSRecoveryClient,
     IPCRecoveryClient,
     ConnectionState,
     RecoveryConfig,
+)
+from jaato_sdk.client.convenience import (
+    Session,
+    AgentError,
+    PermissionUnhandled,
+    ask,
 )
 from jaato_sdk.events import (
     Event,
@@ -38,9 +46,16 @@ from jaato_sdk.trace import (
 __all__ = [
     # Client
     "IPCClient",
+    "WSClient",
+    "WSRecoveryClient",
     "IPCRecoveryClient",
     "ConnectionState",
     "RecoveryConfig",
+    # High-level convenience facade
+    "Session",
+    "AgentError",
+    "PermissionUnhandled",
+    "ask",
     # Events
     "Event",
     "EventType",

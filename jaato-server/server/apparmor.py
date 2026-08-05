@@ -42,6 +42,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple
 
+from shared.session_id import validate_session_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -319,7 +321,11 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   {workspace_path}/** rwkl,
   audit deny {workspace_path}/.jaato/agents/**             wlk,
   audit deny {workspace_path}/.jaato/profiles/**           wlk,
-  audit deny {workspace_path}/.jaato/prompts/**            wlk,
+  # .jaato/prompts/ intentionally OMITTED from the write-denies: prompt_library's
+  # savePrompt/deletePrompt run in the confined runner and need write/unlink
+  # (unlink is granted by 'w' — classic AppArmor has no standalone 'd' mode).
+  # Accepted posture tradeoff: a confined agent may author/rewrite prompts (whose
+  # content is later executed). agents/profiles/scripts/schemas stay protected.
   audit deny {workspace_path}/.jaato/scripts/**            wlk,
   audit deny {workspace_path}/.jaato/services/*/           wlk,
   audit deny {workspace_path}/.jaato/reactors.json         wlk,
@@ -1386,7 +1392,11 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # ---- integrity-protected write-denies (mirror parent base) ----
   audit deny {workspace_path}/.jaato/agents/**             wlk,
   audit deny {workspace_path}/.jaato/profiles/**           wlk,
-  audit deny {workspace_path}/.jaato/prompts/**            wlk,
+  # .jaato/prompts/ intentionally OMITTED from the write-denies: prompt_library's
+  # savePrompt/deletePrompt run in the confined runner and need write/unlink
+  # (unlink is granted by 'w' — classic AppArmor has no standalone 'd' mode).
+  # Accepted posture tradeoff: a confined agent may author/rewrite prompts (whose
+  # content is later executed). agents/profiles/scripts/schemas stay protected.
   audit deny {workspace_path}/.jaato/scripts/**            wlk,
   audit deny {workspace_path}/.jaato/services/*/           wlk,
   audit deny {workspace_path}/.jaato/reactors.json         wlk,
@@ -1853,7 +1863,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # ------------------------------------------------------------------
 
     def get_profile_name(self, session_id: str) -> str:
-        """Return the AppArmor profile name for a session."""
+        """Return the AppArmor profile name for a session.
+
+        Fail-closed on an unsafe id: the name is interpolated into the profile
+        grammar and the on-disk profile filename, so a traversal / injection id
+        must never reach it.
+        """
+        validate_session_id(session_id)
         return f"jaato-ws-{session_id}"
 
     @staticmethod
@@ -2057,7 +2073,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         # AppArmor sub-profiles do NOT inherit base rules — every allow
         # and deny must be redeclared.  We mirror the base body
         # verbatim and append the hat-specific read-denies on
-        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")
+        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")  # env: generate AppArmor profiles in complain (log-only) mode; confinement debugging aid
         profile_flags = "attach_disconnected, complain" if complain else "attach_disconnected"
         # v22 (2026-05-16): propagate complain to sub-profiles.  AppArmor
         # sub-profiles do NOT inherit the parent's flag set, so
@@ -2155,7 +2171,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {workspace_path}/** rwkl,
     audit deny {workspace_path}/.jaato/agents/**             wlk,
     audit deny {workspace_path}/.jaato/profiles/**           wlk,
-    audit deny {workspace_path}/.jaato/prompts/**            wlk,
+    # .jaato/prompts/ intentionally OMITTED from the write-denies (see base): the
+    # confined runner needs write/unlink for savePrompt/deletePrompt. Accepted
+    # posture tradeoff. agents/profiles/scripts/schemas stay protected.
     audit deny {workspace_path}/.jaato/scripts/**            wlk,
     audit deny {workspace_path}/.jaato/services/*/           wlk,
     audit deny {workspace_path}/.jaato/reactors.json         wlk,
@@ -2303,7 +2321,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     {workspace_path}/** rwkl,
     audit deny {workspace_path}/.jaato/agents/**             wlk,
     audit deny {workspace_path}/.jaato/profiles/**           wlk,
-    audit deny {workspace_path}/.jaato/prompts/**            wlk,
+    # .jaato/prompts/ intentionally OMITTED from the write-denies (see base): the
+    # confined runner needs write/unlink for savePrompt/deletePrompt. Accepted
+    # posture tradeoff. agents/profiles/scripts/schemas stay protected.
     audit deny {workspace_path}/.jaato/scripts/**            wlk,
     audit deny {workspace_path}/.jaato/services/*/           wlk,
     audit deny {workspace_path}/.jaato/reactors.json         wlk,
@@ -2618,6 +2638,20 @@ def resolve_plugin_apparmor_rules(
                 "gc apparmor rules failed for session %s — skipping",
                 session_id,
             )
+
+    # Dedup identical rule lines while preserving first-seen order.  Distinct
+    # plugins can contribute the same literal grant (e.g. cli + notebook +
+    # interactive_shell all contribute the pip/distro OS-id reads); a rule line
+    # is idempotent, so collapsing keeps rendered profiles readable without any
+    # change in AppArmor semantics.
+    if rules:
+        seen = set()
+        deduped = []
+        for r in rules:
+            if r not in seen:
+                seen.add(r)
+                deduped.append(r)
+        rules = deduped
 
     return rules if rules else None
 

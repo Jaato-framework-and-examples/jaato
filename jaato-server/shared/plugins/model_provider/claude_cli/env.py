@@ -31,7 +31,7 @@ def resolve_cli_path(config_path: Optional[str] = None) -> str:
         raise FileNotFoundError(f"Claude CLI not found at: {config_path}")
 
     # 2. Environment variable
-    env_path = os.environ.get("JAATO_CLAUDE_CLI_PATH")
+    env_path = os.environ.get("JAATO_CLAUDE_CLI_PATH")  # env: path to the claude CLI binary (default: found on PATH)
     if env_path:
         if os.path.isfile(env_path) and os.access(env_path, os.X_OK):
             return env_path
@@ -72,7 +72,7 @@ def resolve_cli_mode(config_mode: Optional[str] = None) -> CLIMode:
         return _parse_mode(config_mode)
 
     # 2. Environment variable
-    env_mode = os.environ.get("JAATO_CLAUDE_CLI_MODE")
+    env_mode = os.environ.get("JAATO_CLAUDE_CLI_MODE")  # env: delegated (CLI runs its own tools, default) or passthrough (jaato runs tools)
     if env_mode:
         return _parse_mode(env_mode)
 
@@ -114,7 +114,7 @@ def resolve_max_turns(config_max_turns: Optional[int] = None) -> Optional[int]:
         return config_max_turns
 
     # 2. Environment variable
-    env_max_turns = os.environ.get("JAATO_CLAUDE_CLI_MAX_TURNS")
+    env_max_turns = os.environ.get("JAATO_CLAUDE_CLI_MAX_TURNS")  # env: maximum agentic turns per request
     if env_max_turns:
         try:
             return int(env_max_turns)
@@ -150,7 +150,7 @@ def resolve_permission_mode(config_mode: Optional[str] = None) -> Optional[str]:
         return config_mode
 
     # 2. Environment variable
-    env_mode = os.environ.get("JAATO_CLAUDE_CLI_PERMISSION_MODE")
+    env_mode = os.environ.get("JAATO_CLAUDE_CLI_PERMISSION_MODE")  # env: permission mode passed to the CLI (unset = CLI default)
     if env_mode:
         return env_mode
 

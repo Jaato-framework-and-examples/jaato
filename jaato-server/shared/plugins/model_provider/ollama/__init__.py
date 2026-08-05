@@ -60,3 +60,34 @@ __all__ = [
     "resolve_context_length",
     "DEFAULT_OLLAMA_HOST",
 ]
+
+
+# --- Provider capability contract (see docs/model-provider-capabilities.md) ---
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
+)
+
+PROVIDER_CAPABILITIES = ProviderCapabilities(
+    user_message_images=True,
+    tool_result_images=True,
+    pdf_input=False,
+    tool_choice_forwarding=False,
+    thinking=False,
+    prompt_caching=False,
+    streaming=True,
+    cancellation=True,
+)
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("host", "str", None, "OLLAMA_HOST override"),
+        KnobSpec("context_length", "int"),
+    ), description="connection"),
+))
+PROVIDER_QUIRKS = frozenset()
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("none", "", "local server — no credential (dummy key)"),
+)

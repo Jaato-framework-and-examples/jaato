@@ -116,7 +116,7 @@ class BackupManager:
         else:
             self._base_dir = Path(".jaato/backups").resolve()
         self._max_backups = int(
-            os.environ.get(BACKUP_COUNT_ENV_VAR, DEFAULT_BACKUP_COUNT)
+            os.environ.get(BACKUP_COUNT_ENV_VAR, DEFAULT_BACKUP_COUNT)  # env: max rotating backups kept per edited file (default 5)
         )
 
         # Session tracking

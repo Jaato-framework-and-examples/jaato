@@ -80,9 +80,11 @@ class TestContentGate:
         assert len(out) == 1
         r = out[0]
         assert r.attachments is None  # image stripped
-        assert "file bytes follow" in r.result  # original text preserved
-        assert "withheld" in r.result.lower()
-        assert 'enter_tier("vision")' in r.result  # actionable, vision tier exists
+        assert "file bytes follow" in r.result  # original result kept STRUCTURED
+        # The withheld-attachment note is MODEL-FACING → model_suffix (appended
+        # at serialization), not folded into the structured result.
+        assert "withheld" in r.model_suffix.lower()
+        assert 'enter_tier("vision")' in r.model_suffix  # actionable, vision tier exists
 
     def test_vision_provider_passes_image_through_unchanged(self):
         s = _session(_FakeProvider({"text", "image"}), model="google/gemini-3-pro")
@@ -95,8 +97,8 @@ class TestContentGate:
         out = s._gate_tool_results_for_active_modalities([_img_result()])
         r = out[0]
         assert r.attachments is None
-        assert "no vision tier" in r.result.lower()
-        assert "enter_tier" not in r.result  # nothing to switch into
+        assert "no vision tier" in r.model_suffix.lower()
+        assert "enter_tier" not in r.model_suffix  # nothing to switch into
 
     def test_mixed_attachments_keeps_supported_strips_unsupported(self):
         # An image (unsupported) alongside an unclassifiable blob (kept —
@@ -137,11 +139,11 @@ class TestContentGate:
         )
         out = s._gate_tool_results_for_active_modalities([res])
         assert out[0].attachments is None
-        assert "audio" in out[0].result.lower()
+        assert "audio" in out[0].model_suffix.lower()
         # image-capable model + audio withheld + vision-only tier => the
         # generic note (vision tier is for image, not audio).
-        assert "no vision tier" in out[0].result.lower() \
-            or "enter_tier" not in out[0].result
+        assert "no vision tier" in out[0].model_suffix.lower() \
+            or "enter_tier" not in out[0].model_suffix
 
 
 class _ModelAwareProvider:

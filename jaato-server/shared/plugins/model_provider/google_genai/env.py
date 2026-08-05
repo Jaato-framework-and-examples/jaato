@@ -77,7 +77,7 @@ def resolve_auth_method() -> AuthMethod:
     Returns:
         The resolved authentication method.
     """
-    explicit = os.environ.get(ENV_GOOGLE_AUTH_METHOD, "").lower()
+    explicit = os.environ.get(ENV_GOOGLE_AUTH_METHOD, "").lower()  # env: force auth method: api_key/service_account_file/adc/impersonation/auto (default: infer)
     if explicit in ("api_key", "service_account_file", "adc", "auto", "impersonation"):
         return explicit  # type: ignore
 
@@ -104,7 +104,7 @@ def resolve_use_vertex() -> bool:
     Returns:
         True for Vertex AI, False for AI Studio.
     """
-    explicit = os.environ.get(ENV_GOOGLE_USE_VERTEX)
+    explicit = os.environ.get(ENV_GOOGLE_USE_VERTEX)  # env: true = Vertex AI, false = AI Studio (default inferred from auth method)
     if explicit is not None:
         return _get_bool_env(ENV_GOOGLE_USE_VERTEX, default=True)
 
@@ -122,7 +122,7 @@ def resolve_api_key() -> Optional[str]:
     Returns:
         API key if found, None otherwise.
     """
-    return os.environ.get(ENV_GOOGLE_API_KEY)
+    return os.environ.get(ENV_GOOGLE_API_KEY)  # env: API key for the Gemini API (AI Studio, non-Vertex)
 
 
 def resolve_credentials_path() -> Optional[str]:
@@ -131,7 +131,7 @@ def resolve_credentials_path() -> Optional[str]:
     Returns:
         Path to credentials file if found, None otherwise.
     """
-    return os.environ.get(ENV_GOOGLE_APP_CREDENTIALS)
+    return os.environ.get(ENV_GOOGLE_APP_CREDENTIALS)  # env: path to a service-account key JSON for Vertex AI auth
 
 
 def resolve_project() -> Optional[str]:
@@ -174,7 +174,7 @@ def resolve_target_service_account() -> Optional[str]:
     Returns:
         Target service account email if found, None otherwise.
     """
-    return os.environ.get(ENV_GOOGLE_TARGET_SERVICE_ACCOUNT)
+    return os.environ.get(ENV_GOOGLE_TARGET_SERVICE_ACCOUNT)  # env: service account to impersonate via ADC
 
 
 def resolve_model_name() -> Optional[str]:

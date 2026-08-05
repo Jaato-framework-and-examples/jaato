@@ -51,7 +51,7 @@ def resolve_api_key(
     Returns:
         API key if found, None otherwise.
     """
-    env_key = os.environ.get(ENV_NIM_API_KEY)
+    env_key = os.environ.get(ENV_NIM_API_KEY)  # env: API key for hosted NIM (nvapi-... from build.nvidia.com)
     if env_key:
         return env_key
     try:
@@ -69,7 +69,7 @@ def resolve_base_url() -> str:
     Returns:
         The API base URL.
     """
-    return os.environ.get(ENV_NIM_BASE_URL, DEFAULT_BASE_URL)
+    return os.environ.get(ENV_NIM_BASE_URL, DEFAULT_BASE_URL)  # env: endpoint (default https://integrate.api.nvidia.com/v1); point at self-hosted NIM
 
 
 def resolve_model() -> Optional[str]:
@@ -78,7 +78,7 @@ def resolve_model() -> Optional[str]:
     Returns:
         Model name if found, None otherwise.
     """
-    return os.environ.get(ENV_NIM_MODEL)
+    return os.environ.get(ENV_NIM_MODEL)  # env: default model name
 
 
 def resolve_context_length() -> Optional[int]:
@@ -91,7 +91,7 @@ def resolve_context_length() -> Optional[int]:
     OpenAI-compatible ``/v1/models`` does not surface a per-model context
     window, so there is no auto-detect tier for this provider.
     """
-    value = os.environ.get(ENV_NIM_CONTEXT_LENGTH)
+    value = os.environ.get(ENV_NIM_CONTEXT_LENGTH)  # env: override context window size
     if value:
         try:
             return int(value)
@@ -118,15 +118,21 @@ def is_self_hosted(base_url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "0.0.0.0") or host.startswith("192.168.") or host.startswith("10.")
 
 
-def get_checked_credential_locations() -> List[str]:
+def get_checked_credential_locations(config=None) -> List[str]:
     """Get list of locations checked for credentials.
 
     Used for error messages to help users understand what was checked.
 
+    ``config`` (optional ``ProviderConfig``) surfaces the highest-precedence
+    source — the profile ``plugin_configs.nim.api_key`` knob — which the
+    env-only checks below cannot see.
+
     Returns:
         List of location descriptions.
     """
-    locations = []
+    from ..base import profile_api_key_location
+
+    locations = [profile_api_key_location(config, "nim")]
 
     api_key = os.environ.get(ENV_NIM_API_KEY)
     if api_key:

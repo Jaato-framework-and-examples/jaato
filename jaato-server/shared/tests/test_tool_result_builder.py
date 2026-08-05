@@ -53,6 +53,24 @@ class TestExtractMultimodalAttachments:
     def test_missing_image_data_returns_none(self):
         assert extract_multimodal_attachments({"_multimodal_type": "image"}) is None
 
+    def test_file_attachment(self):
+        # readFile on a .pdf emits _multimodal_type:"file" with file_data;
+        # extract pulls it into the generic Attachment for PDF marshalling.
+        out = extract_multimodal_attachments({
+            "_multimodal": True,
+            "_multimodal_type": "file",
+            "file_data": b"%PDF-1.4 bytes",
+            "mime_type": "application/pdf",
+            "display_name": "doc.pdf",
+        })
+        assert out is not None and len(out) == 1
+        assert out[0].mime_type == "application/pdf"
+        assert out[0].data == b"%PDF-1.4 bytes"
+        assert out[0].display_name == "doc.pdf"
+
+    def test_missing_file_data_returns_none(self):
+        assert extract_multimodal_attachments({"_multimodal_type": "file"}) is None
+
     def test_unknown_type_returns_none(self):
         assert extract_multimodal_attachments({"_multimodal_type": "audio"}) is None
 

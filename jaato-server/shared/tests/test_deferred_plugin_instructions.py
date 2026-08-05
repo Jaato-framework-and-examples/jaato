@@ -140,11 +140,13 @@ def _make_session(
     session._system_instruction = None
     session._tools = []
     session._tool_plugins = None  # No profile restriction by default
+    session._tool_scopes = {}  # No per-plugin tool allow-list by default
     session._deferred_plugin_instructions = set()
     session._preloaded_plugins = set()
-    # Normally set in configure(); bypassed by __new__.
+    # Normally set in configure(); bypassed by __new__.  The suppression knob's
+    # invariant is a canonical frozenset (empty = suppress nothing).
     session._system_instruction_override = None
-    session._suppress_base_instructions = False
+    session._suppress_base_instructions = frozenset()
 
     # Phase 1: SessionHistory wrapper (canonical history owned by session)
     from ..session_history import SessionHistory

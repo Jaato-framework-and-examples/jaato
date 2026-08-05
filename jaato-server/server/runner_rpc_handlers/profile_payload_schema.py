@@ -30,6 +30,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, FrozenSet, Optional
 
+from shared.instruction_suppression import normalize_suppression
+
 
 # ──────────────────────────────────────────────────────────────────
 # Allow-list — the single source of truth for which keys the
@@ -150,11 +152,15 @@ def validate_profile_payload(payload: Any) -> None:
 
     if "suppress_base_instructions" in payload:
         v = payload["suppress_base_instructions"]
-        if not isinstance(v, bool):
+        # bool | mapping over {disk,constants,security} | list of piece names
+        # (wire form).  normalize_suppression fails loud on an unknown piece
+        # or unsupported type — surface that as the payload validation error.
+        try:
+            normalize_suppression(v)
+        except ValueError as exc:
             raise ValueError(
-                f"profile_payload.suppress_base_instructions must "
-                f"be a bool, got {type(v).__name__}"
-            )
+                f"profile_payload.suppress_base_instructions invalid: {exc}"
+            ) from exc
 
     if "max_turns" in payload:
         v = payload["max_turns"]
