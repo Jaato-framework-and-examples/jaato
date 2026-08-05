@@ -63,7 +63,11 @@ from shared.framing import (
     write_frame_sync,
 )
 
-from jaato_sdk.plugins.model_provider.types import CancelToken
+from jaato_sdk.plugins.model_provider.types import (
+    CancelToken,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 
 from .envelope import (
     KIND_CANCEL,
@@ -381,6 +385,10 @@ class RunnerRPC:
         executor is caught and serialized into the error payload — the
         wire never sees a half-open call.
         """
+        import threading as _thr   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+        logger.info(
+            "[RPC_DIAG] _handle_request ENTER method=%s id=%s tid=%s",
+            env.method, env.id, _thr.get_ident())
         token = CancelToken()
         with self._active_lock:
             self._active_calls[env.id] = _ActiveCall(cancel_token=token)
@@ -424,6 +432,8 @@ class RunnerRPC:
                     env.id, ok=False, result=result, error=err,
                 )
         finally:
+            logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+                "[RPC_DIAG] _handle_request EXIT method=%s id=%s", env.method, env.id)
             _thread_local.cancel_token = None
             _thread_local.on_output = None
             with self._active_lock:
@@ -539,6 +549,13 @@ class RunnerRPC:
             # ``{"should_nudge": bool, "nudges_fired": int}``.
             return self._handle_session_try_completion_nudge(env.args)
 
+        if env.method == "session.try_drain_pending_user":
+            # Multi-turn deadlock fix: after a turn ends, atomically pop a
+            # pending high-priority (USER/PARENT/SYSTEM) message that raced
+            # into the turn wind-down and was queued with no active turn to
+            # drain it.  args = ``{}``.  Returns ``{"text": str | None}``.
+            return self._handle_session_try_drain_pending_user()
+
         if env.method == "session.get_auth_info":
             # Phase 3 §7c step 6.6.4.5c.1: read provider-credential
             # source string from the runner-side session.  Replaces
@@ -584,6 +601,9 @@ class RunnerRPC:
             # (Path A) — CommandCompletion is a NamedTuple with
             # primitive fields (value, description), no callables.
             return self._handle_session_get_model_completions(env.args)
+
+        if env.method == "session.register_client_tools":
+            return self._handle_session_register_client_tools(env.args)
 
         if env.method == "session.get_tool_schemas":
             # Phase 3 §7c step 6.6.4.5c.5: read the runner-side
@@ -2839,6 +2859,15 @@ class RunnerRPC:
                 "error": "session.send_message: missing 'prompt' arg (str)",
                 "stage": "decode",
             }
+        # Optional user-message multimodal attachments (wire form:
+        # ``[{mime_type, data: base64-str, display_name}, ...]``).  Forwarded to
+        # the session's multimodal path; absent/empty → text-only (unchanged).
+        attachments = args.get("attachments") or None
+        if attachments is not None and not isinstance(attachments, list):
+            return False, {
+                "error": "session.send_message: 'attachments' must be a list",
+                "stage": "decode",
+            }
         ready, err, session = self._require_ready_session()
         if not ready:
             return err
@@ -2917,6 +2946,7 @@ class RunnerRPC:
                     on_output=on_output,
                     on_usage_update=usage_shim,
                     on_gc_threshold=gc_shim,
+                    attachments=attachments,
                 )
             except Exception as exc:  # noqa: BLE001 — boundary
                 # Cancellation surfaces as a typed exception today
@@ -2987,6 +3017,7 @@ class RunnerRPC:
                         function_calls=last_turn.get("function_calls", []),
                         cache_read_tokens=last_turn.get("cache_read"),
                         cache_creation_tokens=last_turn.get("cache_creation"),
+                        finish_reason=last_turn.get("finish_reason", "stop"),
                     )
                     usage = session.get_context_usage()
                     ui_hooks.on_agent_context_updated(
@@ -3666,6 +3697,38 @@ class RunnerRPC:
             "nudges_fired": int(nudges_fired),
         }
 
+    def _handle_session_try_drain_pending_user(self) -> "tuple[bool, Any]":
+        """Atomically pop a pending high-priority message for the daemon's
+        post-turn drain (multi-turn deadlock fix).
+
+        Delegates to ``JaatoSession.try_drain_pending_user`` on the runner-
+        side session.  Returns ``{"text": str | None}`` — the message text to
+        run as a fresh turn, or ``None`` when nothing is queued.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try_method = getattr(session, "try_drain_pending_user", None)
+        if not callable(try_method):
+            return False, {
+                "error": (
+                    "session.try_drain_pending_user: session class lacks "
+                    "public try_drain_pending_user() method"
+                ),
+                "stage": "missing_method",
+            }
+        try:
+            text = try_method()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.try_drain_pending_user: try_drain_pending_user "
+                    f"raised {type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        return True, {"text": text}
+
     def _handle_session_get_auth_info(self) -> "tuple[bool, Any]":
         """Read the credential-source description string from the
         runner-side session's provider.
@@ -3964,6 +4027,86 @@ class RunnerRPC:
         ]
         return True, {"completions": serialized}
 
+    def _handle_session_register_client_tools(self, args) -> "tuple[bool, Any]":
+        """Mid-session glue of client-provided ("host") tool SCHEMAS onto the
+        LIVE runner registry, so the runner-tier model sees a tool the client
+        registered AFTER session.new — without a session restart.
+
+        Mirrors the bootstrap-time ``_register_client_tools_on_runner`` (which
+        only ran from ``envelope.client_tools`` at spawn); the model's next
+        ``get_tool_schemas`` (live-read) surfaces the new tool.  Execution is
+        unchanged — the runner-side forwarding executor proxies daemon-side via
+        the ``__client_tools__`` sentinel → the existing ToolExecuteRequestEvent
+        → the client runs the handler.
+
+        Args (over the wire): ``{"client_tools": [schema_dict, ...]}``.
+        Returns ``{"registered": [names]}``.
+        """
+        client_tools = args.get("client_tools")
+        if not isinstance(client_tools, list):
+            return False, {
+                "error": "session.register_client_tools: 'client_tools' must "
+                         "be a list",
+                "stage": "decode",
+            }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        if registry is None:
+            return False, {
+                "error": "session.register_client_tools: no runner registry",
+                "stage": "no_registry",
+            }
+        from server.runner.session import _register_client_tools_on_runner
+        _register_client_tools_on_runner(registry, client_tools)
+        # ``_register_client_tools_on_runner`` records each tool as
+        # ``auto_approved=True`` in ``registry._core_auto_approved`` — but
+        # ``check_permission`` gates on the permission POLICY whitelist, not
+        # that registry set.  The bridge (``add_whitelist_tools``) runs ONCE at
+        # bootstrap (``jaato_runtime`` after ``envelope.client_tools``
+        # registration), so tools registered HERE — mid-session, after that
+        # one-time sync — are auto-approved in the registry yet absent from the
+        # policy whitelist.  A cold-revived session driven headlessly (e.g. a
+        # ``session.wake``) always registers its client tools mid-session (the
+        # client attaches after revive), so the tool would prompt for operator
+        # permission and block forever (no operator on a headless turn).  Sync
+        # the newly-auto-approved names into the runner permission whitelist
+        # now — mirrors the bootstrap sync and the daemon-side handler for
+        # ``PermissionAddWhitelistRequest``.
+        permission_plugin = getattr(
+            getattr(session, "_runtime", None), "permission_plugin", None)
+        if permission_plugin is not None:
+            names = [ct.get("name") for ct in client_tools if ct.get("name")]
+            if names:
+                permission_plugin.add_whitelist_tools(names)
+        # The registry registration above wires the forwarding EXECUTOR, but the
+        # model's per-turn tool list is the cached ``session._tools`` (built at
+        # configure()).  Append the new schemas so the model both SEES and can
+        # CALL them — mirrors the refresh path at jaato_session.py:~1971.  The
+        # next provider call / get_tool_schemas surfaces them.
+        from jaato_sdk.plugins.model_provider.types import ToolSchema
+        if getattr(session, "_tools", None) is not None:
+            existing = {s.name for s in session._tools}
+            for ct in client_tools:
+                nm = ct.get("name")
+                if nm and nm not in existing:
+                    session._tools.append(ToolSchema(
+                        name=nm,
+                        description=ct.get("description", ""),
+                        parameters=ct.get("parameters", {}),
+                        category=ct.get("category") or None,
+                        # Default EAGER (see _register_client_tools_on_runner);
+                        # honor an explicit discoverability from the client.
+                        discoverability=ct.get("discoverability", DISCOVERABILITY_EAGER),
+                    ))
+        return True, {
+            "registered": [
+                ct.get("name") for ct in client_tools if ct.get("name")
+            ],
+        }
+
     def _handle_session_get_tool_schemas(self) -> "tuple[bool, Any]":
         """Read the runner-side session's resolved tool schemas.
 
@@ -4056,8 +4199,8 @@ class RunnerRPC:
                     else None
                 ),
                 "discoverability": str(
-                    getattr(s, "discoverability", "discoverable")
-                    or "discoverable",
+                    getattr(s, "discoverability", DISCOVERABILITY_DEFERRED)
+                    or DISCOVERABILITY_DEFERRED,
                 ),
                 "editable": editable_serialized,
                 # FrozenSet → list for wire safety (JSON has no set type).
@@ -4130,6 +4273,8 @@ class RunnerRPC:
                             "runner RPC: malformed request frame: %s", exc,
                         )
                         continue
+                    logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+                        "[RPC_DIAG] serve recv method=%s id=%s", env.method, env.id)
                     if env.method == "session.bootstrap":
                         # Pool PR 5a-fix: ``session.bootstrap`` runs
                         # synchronously on the main thread (NOT via
@@ -4389,6 +4534,7 @@ class _AgentUIHooksNotificationShim:
         continuation_id: Optional[str] = None,
         show_output: Optional[bool] = None,
         show_popup: Optional[bool] = None,
+        is_error_result: bool = False,
     ) -> None:
         try:
             self._rpc.emit_notification(
@@ -4398,6 +4544,7 @@ class _AgentUIHooksNotificationShim:
                     "agent_id": str(agent_id or ""),
                     "tool_name": str(tool_name or ""),
                     "success": bool(success),
+                    "is_error_result": bool(is_error_result),
                     "duration_seconds": float(duration_seconds),
                     "error_message": error_message,
                     "call_id": call_id,
@@ -4623,6 +4770,7 @@ class _AgentUIHooksNotificationShim:
         function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
+        finish_reason: str = "stop",
     ) -> None:
         """Forward ``on_agent_turn_completed`` across the wire.
 
@@ -4649,6 +4797,7 @@ class _AgentUIHooksNotificationShim:
                     "function_calls": list(function_calls or []),
                     "cache_read_tokens": cache_read_tokens,
                     "cache_creation_tokens": cache_creation_tokens,
+                    "finish_reason": str(finish_reason or "stop"),
                 },
             )
         except Exception:  # noqa: BLE001

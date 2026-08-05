@@ -9,7 +9,6 @@ from ..provider import (
     ZhipuAIAPIKeyNotFoundError,
     ZhipuAIConnectionError,
     ZhipuAIRateLimitError,
-    DEFAULT_CONTEXT_LIMIT,
     MODEL_CONTEXT_LIMITS,
     KNOWN_MODELS,
     THINKING_CAPABLE_MODELS,
@@ -300,13 +299,42 @@ class TestContextLimit:
     """Tests for context limit handling."""
 
     @patch('anthropic.Anthropic')
-    def test_default_context_limit(self, mock_anthropic):
-        """Should return fallback 200K when no model connected."""
+    def test_no_model_no_override_raises(self, mock_anthropic):
+        """No hardcoded fallback: no model connected + no override → raise."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(api_key="test-key"))
 
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
-        assert provider.get_context_limit() == 204800
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
+
+    @patch('anthropic.Anthropic')
+    def test_dated_variant_resolves_via_longest_prefix(self, mock_anthropic):
+        """A dated variant lands on its family (glm-4.7), not a shorter prefix."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7-20250601")
+        assert provider.get_context_limit() == 204800  # glm-4.7 family, not glm-4
+
+    @patch('anthropic.Anthropic')
+    def test_legacy_glm4_family_resolved(self, mock_anthropic):
+        """Legacy GLM-4 generation (128K) is in the table, not fail-loud."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4")
+        assert provider.get_context_limit() == 131072
+        provider.connect("glm-4v")
+        assert provider.get_context_limit() == 131072
+
+    @patch('anthropic.Anthropic')
+    def test_override_knob_covers_unknown_model(self, mock_anthropic):
+        """context_length override is the escape hatch for an unlisted model."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(
+            api_key="test-key",
+            extra={"framework_overrides": {"context_length": 65536}},
+        ))
+        provider.connect("glm-99-future")
+        assert provider.get_context_limit() == 65536
 
     @patch('anthropic.Anthropic')
     def test_model_specific_context_limit(self, mock_anthropic):

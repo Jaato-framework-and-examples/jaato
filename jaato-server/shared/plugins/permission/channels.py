@@ -747,7 +747,7 @@ class WebhookChannel(Channel):
 
         self._timeout = config.get("timeout", 30)
         self._headers = config.get("headers", {})
-        self._auth_token = config.get("auth_token") or os.environ.get("PERMISSION_WEBHOOK_TOKEN")
+        self._auth_token = config.get("auth_token") or os.environ.get("PERMISSION_WEBHOOK_TOKEN")  # env: bearer token for the permission webhook channel when config lacks auth_token
 
     def request_permission(self, request: PermissionRequest) -> ChannelResponse:
         """Send permission request to webhook and wait for response."""

@@ -319,7 +319,7 @@ def create_storage(
     elif storage_type == "hybrid":
         if not path:
             # Default path
-            path = os.environ.get("TODO_STORAGE_PATH", "./todo_plans.json")
+            path = os.environ.get("TODO_STORAGE_PATH", "./todo_plans.json")  # env: where the todo plugin persists plans (default ./todo_plans.json)
         return HybridStorage(path, use_directory)
 
     else:

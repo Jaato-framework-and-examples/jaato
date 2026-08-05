@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER, DISCOVERABILITY_DEFERRED
 
 logger = logging.getLogger(__name__)
 from ..subagent.config import expand_variables
@@ -988,7 +988,12 @@ class ReferencesPlugin(RunnerForwardingMixin):
             else:
                 self._project_root = str(base_path_obj)
 
-        # Try to load from file first (master catalog)
+        # Try to load from file first (master catalog).  load_config skips any
+        # HOME tier it can't reach (missing, or a confined session correctly
+        # denied ~/.jaato/references / ~/.config/jaato — see config_loader's
+        # OSError handling), so it won't raise here under confinement; the
+        # workspace-tier catalog is loaded by set_workspace_path() ->
+        # _reload_catalog().
         config_path = config.get("config_path")
         try:
             self._config = load_config(config_path, workspace_path=inline_base_path)
@@ -1684,7 +1689,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="knowledge",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listReferences",
@@ -1710,7 +1715,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="knowledge",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="validateReference",
@@ -1731,7 +1736,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="knowledge",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="compute_embedding",
@@ -1762,7 +1767,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="knowledge",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

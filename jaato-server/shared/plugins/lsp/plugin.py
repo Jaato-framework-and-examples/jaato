@@ -1,25 +1,29 @@
 """LSP tool plugin for code intelligence via Language Server Protocol."""
 
 import asyncio
+import atexit
 import json
 import logging
 import os
 import queue
 import shutil
+import signal
+import sys
 import threading
-import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
-
 from jaato_sdk.plugins.base import (
     UserCommand, CommandParameter, CommandCompletion,
     ToolResultEnrichmentResult, HelpLines, PluginSetting
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_FILE_WRITER,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..subagent.config import expand_variables
 from .lsp_client import (
     LSPClient, ServerConfig, Location, Diagnostic, Hover,
@@ -28,6 +32,46 @@ from .lsp_client import (
 
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
+
+# Module logger — lands in the process's standard log (e.g. the daemon's
+# /tmp/jaato.log), unlike self._log_event/_trace which route to the LSP
+# debug log under the workspace (daemon-side writes there don't surface).
+# Used for the #284 daemon-process gate logging (thread suppression + the
+# connect_server defense guard).
+logger = logging.getLogger(__name__)
+
+
+def _running_in_daemon_process() -> bool:
+    """True when this process is the daemon (``python -m server``), False in a
+    runner/slot (``python -m server.runner``).
+
+    The daemon must NEVER host a language server.  In the seat-flip
+    architecture the per-session runner hosts LSP in a reapable slot; a jdtls
+    spawned in the long-lived daemon has no owning slot, is never reaped, and
+    accumulates resident until the daemon OOMs (#284).  The daemon-side LSP
+    instance exists only as a :class:`RunnerForwardingMixin` executor stub
+    (forwards tool calls via RPC) — it never needs the LSP background thread.
+
+    **Why process identity (not the registry):** the #285 diagnostic proved the
+    daemon-side LSP instance has ``_plugin_registry is None`` at connect time
+    (it is never wired), so the earlier ``registry.runner_rpc`` gate was
+    structurally unreachable and never fired.  Process identity is the only
+    signal available at LSP init/connect time.  Detected via the ``__main__``
+    module package (``server`` = daemon, ``server.runner`` = runner), with an
+    ``argv[0]`` script-path fallback.  Unknown contexts (tests, odd launchers)
+    return ``False`` — i.e. "not the daemon, host LSP" — so suppression only
+    ever triggers when we are positively sure this is the daemon.
+    """
+    main_mod = sys.modules.get("__main__")
+    pkg = getattr(main_mod, "__package__", "") or ""
+    if pkg == "server.runner" or pkg.startswith("server.runner"):
+        return False
+    if pkg == "server":
+        return True
+    argv0 = (sys.argv[0] if sys.argv else "").replace("\\", "/")
+    if argv0.endswith("server/runner/__main__.py"):
+        return False
+    return argv0.endswith("server/__main__.py")
 
 
 # Symbol kinds that represent exportable/referenceable entities
@@ -103,15 +147,20 @@ LOG_WARN = 'WARN'
 
 MAX_LOG_ENTRIES = 500
 
-# Default per-server LSP connect timeout (seconds).  The previous
-# hard-coded value of 15.0 was sufficient for lightweight servers like
-# pyright / typescript-language-server (which initialize in under 5s),
-# but starves Eclipse JDT LS (jdtls) on Maven / Gradle workspaces where
-# cold-start `initialize` + workspace import routinely takes 30-60s.
-# Operators with very large Java workspaces or other heavy-init servers
-# can raise this further via `plugin_configs.lsp.connect_timeout_seconds`
-# in their profile (capped at MAX_CONNECT_TIMEOUT_SECONDS).
-DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
+# Default per-server LSP connect timeout (seconds).  Lightweight servers
+# (pyright / typescript-language-server) initialize in under 5s, but
+# Eclipse JDT LS (jdtls) on a cold Maven / Gradle workspace routinely
+# takes 60-120s+ for `initialize` + dependency download + workspace
+# import.  A too-short default makes `connect_server` time out WHILE
+# jdtls is still legitimately starting; that timeout cancels the connect
+# coroutine but leaves the spawned subprocess alive (now reaped via
+# `_reap_failed_client`, #284) and the retry-autoconnect then spawns a
+# fresh one — so every premature timeout cost one jdtls cold-start of
+# wasted CPU/RAM.  180s comfortably covers a cold jdtls import while
+# still bounding a genuinely hung server.  Operators can raise further
+# via `plugin_configs.lsp.connect_timeout_seconds` (capped at
+# MAX_CONNECT_TIMEOUT_SECONDS).
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 180.0
 MIN_CONNECT_TIMEOUT_SECONDS = 1.0
 MAX_CONNECT_TIMEOUT_SECONDS = 300.0
 
@@ -420,6 +469,9 @@ class LSPToolPlugin(RunnerForwardingMixin):
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}
+        # atexit backstop: reap jdtls when THIS (slot/runner) process exits.
+        # Registered lazily in _ensure_thread.  See _atexit_reap_jdtls / #284.
+        self._atexit_registered: bool = False
         self._log: deque = deque(maxlen=MAX_LOG_ENTRIES)
         self._log_lock = threading.Lock()
         # Agent context for trace logging
@@ -1289,12 +1341,20 @@ class LSPToolPlugin(RunnerForwardingMixin):
         return path
 
     def shutdown(self) -> None:
-        """Shutdown the LSP plugin and clean up resources."""
+        """Shutdown the LSP plugin and clean up resources.
+
+        Sending the ``(None, None)`` sentinel makes the server thread
+        reap every connected LSP server (``await client.stop()`` —
+        terminate → wait → kill) BEFORE it exits its event loop, so the
+        jdtls subprocesses don't leak.  The join timeout (15s) bounds the
+        reap: ``client.stop()`` waits up to 5s per server for graceful
+        termination before SIGKILL, so a single jdtls finishes well within
+        the window.  See #284 (per-slot jdtls leak)."""
         self._trace("shutdown: cleaning up resources")
         if self._request_queue:
             self._request_queue.put((None, None))
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=15)
         # Close stderr capture
         if self._errlog:
             self._errlog.close()
@@ -1377,7 +1437,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["symbol"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_find_references",
@@ -1406,7 +1466,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["symbol"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_hover",
@@ -1430,7 +1490,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["symbol"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_get_diagnostics",
@@ -1452,7 +1512,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["file_path"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_document_symbols",
@@ -1468,7 +1528,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["file_path"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_workspace_symbols",
@@ -1484,7 +1544,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["query"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_rename_symbol",
@@ -1517,7 +1577,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["symbol", "new_name"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_FILE_WRITER}),
             ),
             ToolSchema(
@@ -1559,7 +1619,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["file_path", "start_line", "start_column", "end_line", "end_column"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="lsp_apply_code_action",
@@ -1600,7 +1660,7 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     "required": ["file_path", "start_line", "start_column", "end_line", "end_column", "action_title"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_FILE_WRITER}),
             ),
         ]
@@ -1698,13 +1758,38 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
     # ==================== Tool Result Enrichment ====================
 
+    def _daemon_must_not_host_lsp(self) -> bool:
+        """True when this LSP instance runs in the daemon process and must
+        therefore NOT host a language server (suppress the lifecycle).
+
+        Delegates to :func:`_running_in_daemon_process`.  See that function for
+        the full rationale; in short: the daemon-side LSP is a forwarding stub
+        for executor RPC, and any jdtls it spawns leaks resident in the
+        long-lived daemon → OOM (#284).  The per-session runner hosts LSP
+        instead (in a reapable slot).
+
+        **History (#285):** this used to read ``registry.runner_rpc`` via
+        :meth:`_runner_rpc_handle`, but the diagnostic proved the daemon-side
+        instance has no registry reference at connect time, so that gate never
+        fired.  Process identity is the only reliable signal.
+        """
+        return _running_in_daemon_process()
+
     def subscribes_to_tool_result_enrichment(self) -> bool:
         """Subscribe to tool result enrichment to auto-run diagnostics after file writes.
 
         When enabled, the LSP plugin will automatically run diagnostics on files
         that are modified by file-writing tools (updateFile, writeNewFile, etc.)
         and append diagnostic information to the tool result.
+
+        Returns ``False`` in the daemon process (#284): diagnostics enrichment
+        must run on the runner-side instance that owns the workspace and hosts
+        jdtls in a reapable slot — never daemon-side, where jdtls would
+        accumulate resident and OOM the daemon.  See
+        :meth:`_daemon_must_not_host_lsp`.
         """
+        if self._daemon_must_not_host_lsp():
+            return False
         return True
 
     def get_tool_result_enrichment_priority(self) -> int:
@@ -1735,70 +1820,24 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             ToolResultEnrichmentResult with diagnostics appended if applicable.
         """
         self._trace(f"enrich_tool_result: checking {tool_name}")
-        # TEMP PR-220 (a) ENTRY — peer falsified (B); LSP IS in subscriber
-        # list, so this method IS being invoked.  lsp_debug.log silence
-        # means either self._trace itself is broken inside this code path
-        # OR we early-return before any meaningful log emission.  These
-        # logger.info probes bypass self._trace and write to jaato.log.
-        try:
-            _result_keys: Any = "unparseable"
-            try:
-                _parsed = json.loads(result) if isinstance(result, str) else None
-                if isinstance(_parsed, dict):
-                    _result_keys = sorted(_parsed.keys())
-            except Exception:
-                pass
-            logger.info(
-                "ENRICH_LSP_ENTRY tool=%s has_args=%s connected_servers=%s "
-                "result_is_str=%s result_len=%s result_keys=%s",
-                tool_name,
-                tool_args is not None,
-                sorted(self._connected_servers),
-                isinstance(result, str),
-                len(result) if isinstance(result, str) else None,
-                _result_keys,
-            )
-        except Exception as _probe_exc:
-            logger.info("ENRICH_LSP_ENTRY_EXC tool=%s exc=%s", tool_name, _probe_exc)
 
         # Skip if no LSP servers are connected
         if not self._connected_servers:
             self._trace(f"enrich_tool_result: skipped - no servers connected")
-            # TEMP PR-220 — surface this branch in jaato.log
-            logger.info(
-                "ENRICH_LSP_EARLY_RETURN tool=%s reason=no_servers_connected",
-                tool_name,
-            )
             return ToolResultEnrichmentResult(result=result)
 
         # Parse the result to extract file paths
         file_paths = self._extract_file_paths_from_result(tool_name, result)
         if not file_paths:
             self._trace(f"enrich_tool_result: no file paths found in result")
-            # TEMP PR-220 (b) FILE-FILTER outcome — empty extraction
-            logger.info(
-                "ENRICH_LSP_EARLY_RETURN tool=%s reason=no_file_paths_in_result",
-                tool_name,
-            )
             return ToolResultEnrichmentResult(result=result)
 
         self._trace(f"enrich_tool_result: found files {file_paths}")
 
         # Filter to files that have LSP support
         supported_files = self._filter_supported_files(file_paths)
-        # TEMP PR-220 (b) FILE-FILTER outcome — extracted vs supported
-        logger.info(
-            "ENRICH_LSP_FILE_FILTER tool=%s extracted=%s supported=%s",
-            tool_name,
-            file_paths,
-            supported_files,
-        )
         if not supported_files:
             self._trace(f"enrich_tool_result: no supported file types")
-            logger.info(
-                "ENRICH_LSP_EARLY_RETURN tool=%s reason=no_supported_file_types",
-                tool_name,
-            )
             return ToolResultEnrichmentResult(result=result)
 
         self._trace(f"enrich_tool_result: checking diagnostics for {supported_files}")
@@ -1806,21 +1845,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         # Run diagnostics on each file and collect results
         all_diagnostics = {}
         for file_path in supported_files:
-            # TEMP PR-220 (c) JDTLS-QUERY-PRE
-            logger.info(
-                "ENRICH_LSP_QUERY_PRE tool=%s file=%s",
-                tool_name,
-                file_path,
-            )
             diags = self._get_diagnostics_for_file(file_path)
-            # TEMP PR-220 (d) JDTLS-QUERY-POST — count + first-3 sample
-            logger.info(
-                "ENRICH_LSP_QUERY_POST tool=%s file=%s diag_count=%s sample=%s",
-                tool_name,
-                file_path,
-                len(diags) if isinstance(diags, list) else "non_list",
-                diags[:3] if isinstance(diags, list) else None,
-            )
             if diags:
                 all_diagnostics[file_path] = diags
 
@@ -2265,8 +2290,8 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 default=DEFAULT_CONNECT_TIMEOUT_SECONDS,
                 description=(
                     "Per-server LSP `initialize` handshake timeout. "
-                    "Raise for heavy-init servers (jdtls on Maven / Gradle "
-                    "workspaces typically needs 30-60s). Clamped to "
+                    "Raise for heavy-init servers (jdtls on a cold Maven / "
+                    "Gradle workspace routinely needs 60-120s+). Clamped to "
                     f"[{MIN_CONNECT_TIMEOUT_SECONDS}, "
                     f"{MAX_CONNECT_TIMEOUT_SECONDS}]."
                 ),
@@ -2725,10 +2750,94 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         if self._thread and self._thread.is_alive():
             return
 
+        # #284/#285: the daemon process must NOT run the LSP background thread.
+        # The thread's auto-connect spawns a jdtls that leaks resident in the
+        # long-lived daemon (no owning slot, never reaped) → OOM.  Executor
+        # forwarding (RunnerForwardingMixin) does not use this thread, so the
+        # daemon-side stub keeps forwarding tool calls to the runner; only the
+        # LSP server lifecycle (connect + diagnostics) is suppressed.  The
+        # per-session runner hosts jdtls in a reapable slot instead.  This is
+        # the earliest, single chokepoint — no thread means no auto-connect and
+        # no connect_server.
+        if self._daemon_must_not_host_lsp():
+            logger.info(
+                "LSP background thread suppressed in daemon process pid=%d "
+                "(runner-side hosts jdtls; #284)", os.getpid(),
+            )
+            return
+
+        # Register the atexit reaper the first time a server thread starts
+        # (i.e. the first time jdtls et al become spawnable).  Idempotent.
+        self._register_atexit_reaper()
+
         self._request_queue = queue.Queue()
         self._response_queue = queue.Queue()
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
         self._thread.start()
+
+    def _register_atexit_reaper(self) -> None:
+        """Register the process-exit jdtls reaper exactly once."""
+        if self._atexit_registered:
+            return
+        try:
+            atexit.register(self._atexit_reap_jdtls)
+            self._atexit_registered = True
+        except Exception:  # pragma: no cover — atexit.register never raises
+            pass
+
+    def _atexit_reap_jdtls(self) -> None:
+        """Process-exit backstop: SIGKILL every still-running LSP server
+        subprocess when THIS process (a runner / pre-warm pool slot) exits.
+
+        Root cause (#284 residual, per-slot jdtls leak): the pool-slot
+        teardown path — daemon closes the slot socket → the runner's RPC
+        ``serve()`` returns on EOF → the slot ``sys.exit(0)`` — does NOT
+        call ``plugin.shutdown()``.  So a connected jdtls (0.5-1.5 GB each)
+        was abandoned, re-parented to the daemon subreaper, and accumulated
+        one-per-slot across cascade stages until the daemon OOMed.
+
+        ``atexit`` fires on the clean ``sys.exit()`` the slot uses, so the
+        subprocess dies WITH its slot.  We SIGKILL by pid (not the async
+        ``client.stop()``) because the LSP event loop is already gone at
+        interpreter exit.  Warm cascade-reuse is unaffected: this only
+        fires when the slot PROCESS itself dies — exactly when a
+        slot-scoped jdtls should die too.  PDEATHSIG (PR-277) remains the
+        backstop for the ungraceful SIGKILL/OOM case atexit can't catch.
+        """
+        for client in list(self._clients.values()):
+            proc = getattr(client, "_process", None)
+            pid = getattr(proc, "pid", None)
+            if not pid:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+    async def _reap_failed_client(self, name: str, client) -> None:
+        """Terminate a partially-started LSP client after a failed or
+        timed-out ``connect_server`` so its subprocess does not leak.
+
+        ``LSPClient.start()`` spawns the language-server subprocess
+        (``create_subprocess_exec``) BEFORE the slow ``_initialize()``
+        handshake.  When ``connect_server`` times out (or raises) the
+        coroutine is cancelled but the spawned process is left running and
+        UNTRACKED — ``self._clients[name]`` is only assigned on the success
+        path.  ``client.stop()`` is the same teardown the success path uses
+        in ``disconnect_server`` (cancel reader task → terminate → wait →
+        kill), so it reaps regardless of whether ``_initialize()`` had
+        completed.  No-op when no client was spawned yet (``client is None``,
+        e.g. failure before ``LSPClient(...)``).  See #284.
+        """
+        if client is None:
+            return
+        try:
+            await client.stop()
+            self._trace(f"reaped failed/timed-out LSP client '{name}'")
+        except Exception as e:
+            self._trace(
+                f"reap of failed LSP client '{name}' raised (ignored): {e}"
+            )
 
     def _thread_main(self) -> None:
         """Background thread running the LSP event loop."""
@@ -2749,7 +2858,21 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
             async def connect_server(name: str, spec: dict) -> bool:
                 """Connect to a language server."""
+                # #284 defense-in-depth: the daemon process must never spawn a
+                # language server (it leaks resident → OOM).  The primary gate
+                # is in _ensure_thread (the daemon never starts this background
+                # thread), so reaching here in the daemon means the thread gate
+                # regressed — refuse + log loudly.  Runner/slot processes
+                # proceed normally.
+                if self._daemon_must_not_host_lsp():
+                    logger.error(
+                        "LSP connect_server reached in daemon process pid=%d "
+                        "despite the _ensure_thread gate — refusing (server=%s, "
+                        "#284). FIX the thread gate.", os.getpid(), name,
+                    )
+                    return False
                 self._log_event(LOG_INFO, "Connecting to server", server=name)
+                client = None
                 try:
                     # Expand variables in args (e.g., ${workspaceRoot}).
                     # PR-157 (server 0.6.140): pass
@@ -2819,10 +2942,20 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 except asyncio.TimeoutError:
                     self._failed_servers[name] = "Connection timed out"
                     self._log_event(LOG_ERROR, "Connection timed out", server=name)
+                    # Reap the partially-started server.  ``LSPClient.start()``
+                    # spawns the subprocess BEFORE the (slow) initialize
+                    # handshake, so a timeout cancels the coroutine but leaves a
+                    # live, UNTRACKED process (``self._clients[name]`` was never
+                    # set).  Without this the orphaned jdtls leaks AND the
+                    # retry-autoconnect spawns a duplicate (it sees the server as
+                    # not-connected), accumulating one jdtls per timeout until
+                    # the daemon OOMs.  See #284.
+                    await self._reap_failed_client(name, client)
                     return False
                 except Exception as e:
                     self._failed_servers[name] = str(e)
                     self._log_event(LOG_ERROR, "Connection failed", server=name, details=str(e))
+                    await self._reap_failed_client(name, client)
                     return False
 
             async def disconnect_server(name: str) -> None:
@@ -2865,6 +2998,23 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 try:
                     req = self._request_queue.get(timeout=0.1)
                     if req is None or req == (None, None):
+                        # Graceful reap: stop every connected LSP server
+                        # before the event loop exits so the subprocesses
+                        # (jdtls) don't outlive this plugin.  shutdown()
+                        # previously dropped self._clients WITHOUT stopping
+                        # them (#284 residual).  Iterate captured client
+                        # objects (not dict lookups) so a concurrent
+                        # shutdown() clearing self._clients can't KeyError.
+                        for _name, _client in list(self._clients.items()):
+                            try:
+                                await _client.stop()
+                                self._trace(f"shutdown: reaped LSP server '{_name}'")
+                            except Exception as _e:
+                                self._trace(
+                                    f"shutdown: reap of LSP server "
+                                    f"'{_name}' raised (ignored): {_e}"
+                                )
+                        self._clients.clear()
                         break
 
                     msg_type, data = req
@@ -3134,40 +3284,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         # Ensure document is open and up-to-date
         # update_document opens if not open, or sends didChange if already open
         if file_path and method not in ('workspace_symbols',):
-            # TEMP PR-221 — entry trace: per-call state of the URI and the
-            # per-URI Event before update_document / await_diagnostics fire.
-            try:
-                _uri = client.uri_from_path(file_path)
-                _ev = client._diagnostics_events.get(_uri)
-                _cached = client._diagnostics.get(_uri)
-                logger.info(
-                    "ENRICH_LSP_GETDIAG_ENTRY method=%s file=%s uri=%s "
-                    "uri_in_open_documents=%s event_already_set=%s "
-                    "cached_diag_count=%s min_wait=%s max_wait=%s",
-                    method,
-                    file_path,
-                    _uri,
-                    _uri in client._open_documents,
-                    bool(_ev and _ev.is_set()),
-                    len(_cached) if _cached is not None else None,
-                    self._diagnostics_min_wait_seconds,
-                    self._diagnostics_max_wait_seconds,
-                )
-            except Exception as _exc:
-                logger.info("ENRICH_LSP_GETDIAG_ENTRY_EXC exc=%s", _exc)
-
-            _t0 = time.monotonic()
             await client.update_document(file_path)
-            _t1 = time.monotonic()
-            # TEMP PR-221 — update_document elapsed + URI now-open state
-            logger.info(
-                "ENRICH_LSP_GETDIAG_UPDATE_DONE method=%s file=%s "
-                "elapsed_ms=%.1f uri_in_open_documents=%s",
-                method,
-                file_path,
-                (_t1 - _t0) * 1000.0,
-                client.uri_from_path(file_path) in client._open_documents,
-            )
             # Wait for server to process the document.  Bounded poll
             # for parsing-heavy methods; small fixed delay for
             # lightweight ones (workspace_symbols already excluded
@@ -3175,8 +3292,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             # pipelines (parser → compiler → linter) room to deliver
             # later batches before the cache read.
             if needs_parsing:
-                _t2 = time.monotonic()
-                _signalled = await client.await_diagnostics(
+                await client.await_diagnostics(
                     file_path,
                     max_wait=self._diagnostics_max_wait_seconds,
                     min_wait=self._diagnostics_min_wait_seconds,
@@ -3184,28 +3300,6 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                         self._diagnostics_convergence_window_seconds
                     ),
                 )
-                _t3 = time.monotonic()
-                # TEMP PR-221 — await_diagnostics outcome.  This is the
-                # gate peer cornered: 1ms PRE→POST gap means either
-                # await_diagnostics short-circuited (max_wait<=0) or the
-                # whole branch is bypassed.
-                try:
-                    _uri2 = client.uri_from_path(file_path)
-                    _cached2 = client._diagnostics.get(_uri2)
-                    logger.info(
-                        "ENRICH_LSP_GETDIAG_AWAIT_DONE method=%s file=%s "
-                        "elapsed_ms=%.1f signalled=%s cached_diag_count=%s "
-                        "min_wait=%s max_wait=%s",
-                        method,
-                        file_path,
-                        (_t3 - _t2) * 1000.0,
-                        _signalled,
-                        len(_cached2) if _cached2 is not None else None,
-                        self._diagnostics_min_wait_seconds,
-                        self._diagnostics_max_wait_seconds,
-                    )
-                except Exception as _exc:
-                    logger.info("ENRICH_LSP_GETDIAG_AWAIT_DONE_EXC exc=%s", _exc)
             else:
                 await asyncio.sleep(0.2)
 

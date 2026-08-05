@@ -881,8 +881,11 @@ class JaatoWSServer:
                 server.set_reference_authorizer(authorizer)
             sess.sandbox_mode = "apparmor"
             # Record mapping so the workspace reaper can teardown
-            # the profile by workspace ID.
-            import os
+            # the profile by workspace ID.  (Uses the module-level ``os``
+            # imported at the top — a local ``import os`` here would make
+            # ``os`` function-local throughout ``_apparmor_session_hook``
+            # and raise ``UnboundLocalError`` at the earlier
+            # ``os.path.realpath`` call.)
             workspace_id = os.path.basename(sess.workspace_path)
             ws_server._workspace_to_session_id[workspace_id] = session_id
             logger.info(
@@ -1942,6 +1945,13 @@ class JaatoWSServer:
                 self._pending_client_tools[client_id] = event.tools
                 self._pending_client_categories = getattr(self, '_pending_client_categories', {})
                 self._pending_client_categories[client_id] = event.categories
+                # Buffer the SCHEMAS daemon-side too so the session.new flow seeds
+                # JaatoServer.client_tool_schemas BEFORE the spawn reads it for
+                # envelope.client_tools — the proxy-executor apply below (after
+                # handle_request) races the spawn (PR #349 e2e bug).  Transport
+                # keeps its own buffer for the post-session.new executor register.
+                self._command_router._session_manager.buffer_client_tools(
+                    client_id, event.tools)
                 logger.info("Buffered %d client tools for %s (session pending)", len(event.tools), client_id)
             else:
                 self._register_client_tools(client_id, event.tools, event.categories)
@@ -2046,13 +2056,26 @@ class JaatoWSServer:
             # After session.new or session.attach completes, register any
             # buffered client tools that were sent before the session existed.
             if (isinstance(event, CommandRequest)
-                    and event.command.lower() in ("session.new", "session.attach")
-                    and hasattr(self, '_pending_client_tools')
-                    and client_id in self._pending_client_tools):
-                pending = self._pending_client_tools.pop(client_id)
-                pending_cats = getattr(self, '_pending_client_categories', {}).pop(client_id, None)
-                self._register_client_tools(client_id, pending, pending_cats)
-                # (runtime refresh happens inside _register_client_tools)
+                    and event.command.lower() in ("session.new", "session.attach")):
+                if (hasattr(self, '_pending_client_tools')
+                        and client_id in self._pending_client_tools):
+                    pending = self._pending_client_tools.pop(client_id)
+                    pending_cats = getattr(self, '_pending_client_categories', {}).pop(client_id, None)
+                    # Wires tools + drives any deferred wake AFTER the runner
+                    # push (see _register_client_tools._push).
+                    self._register_client_tools(client_id, pending, pending_cats)
+                else:
+                    # No buffered host tools → drive any deferred wake for the
+                    # now-attached session immediately.
+                    _sid = (self._event_sink_adapter._client_sessions.get(client_id)
+                            if self._event_sink_adapter else None)
+                    if _sid:
+                        try:
+                            self._command_router._session_manager.drive_pending_wake(_sid)
+                        except Exception:
+                            logger.exception(
+                                "deferred-wake drive on no-tools attach failed "
+                                "for %s", _sid)
 
         except Exception as exc:
             logger.error(
@@ -2187,7 +2210,11 @@ class JaatoWSServer:
                     if waiter.wait(timeout=remaining):
                         if result_holder['error']:
                             return {'error': result_holder['error']}
-                        return {'result': result_holder['result']}
+                        # Success: the client's DECODED result verbatim (a
+                        # native dict), symmetric with an in-process tool — NOT
+                        # wrapped under a "result" envelope (which buried the
+                        # real fields from the ledger / enrichment).
+                        return result_holder['result']
                     else:
                         return {'error': f'Client tool {tname} timed out after {tout}s'}
                 return executor
@@ -2202,6 +2229,16 @@ class JaatoWSServer:
                 category=category or None,
             )
             registry.register_core_tool(schema, executor, auto_approved=auto_approve)
+            # Track the schema so the RUNNER-tier model receives it (the daemon
+            # register_core_tool above only reaches the daemon registry; the
+            # model runs in the runner subprocess).  spawn_session_runner seeds
+            # envelope.client_tools from here for register-before-session.new.
+            session.server.client_tool_schemas[tool_name] = {
+                "name": tool_name,
+                "description": description,
+                "parameters": parameters,
+                "category": category or "",
+            }
 
             logger.info(
                 "Registered client tool '%s' for client %s (timeout=%ss, auto_approve=%s)",
@@ -2226,8 +2263,77 @@ class JaatoWSServer:
                     runtime._all_tool_schemas.append(schema)
             logger.info("Refreshed runtime tool list for client %s", client_id)
 
-        # Emit updated tool ID registry so clients can resolve IDs for
-        # the newly-registered client-provided tools.
+        # Glue the schemas to the RUNNER-tier model (where the model actually
+        # runs — the daemon-runtime refresh above is daemon-side only).  For a
+        # tool registered AFTER session.new, this RPC registers it on the LIVE
+        # runner registry so the model's next get_tool_schemas surfaces it
+        # without a session restart.  On RE-ATTACH this push is REQUIRED, not
+        # cosmetic: the re-spawned runner does NOT already hold the client tools
+        # (they don't survive in the restored envelope), so a dropped push leaves
+        # the turn unservable — which is why the push thread below waits for
+        # bootstrap-complete rather than firing best-effort into a not-ready slot.
+        runner_rpc = getattr(session.server, "_runner_rpc", None)
+        if runner_rpc is not None:
+            # Off the daemon event loop (this runs in the async dispatch; the
+            # threadsafe RPC's future.result() against the same loop would
+            # deadlock).  Best-effort background thread; proxy already registered.
+            import threading
+
+            def _push(server=session.server, t=tools, cid=client_id,
+                      sid=session.session_id):
+                try:
+                    # The rpc handle can be live BEFORE the runner finishes
+                    # session.bootstrap — most acutely on a reused warm pool slot
+                    # (handle reused on claim, bootstrap still running).  Pushing
+                    # into that window hit a 15s TimeoutError and the runner never
+                    # got the client tools -> unservable turn (the re-attach
+                    # stall).  Gate on bootstrap-complete (mark_runner_ready),
+                    # mirroring the send-path gate.
+                    ready = getattr(server, "_runner_ready", None)
+                    if ready is not None and not ready.wait(timeout=30.0):
+                        logger.warning(
+                            "mid-session client-tool push for %s: runner not "
+                            "ready within 30s — skipping", cid)
+                        return
+                    # Re-read the current rpc after readiness (robust to a
+                    # re-spawn during the wait).
+                    rpc = getattr(server, "_runner_rpc", None)
+                    if rpc is None:
+                        return  # runner torn down during the wait
+                    rpc.session_register_client_tools_threadsafe(t)
+                    # Runner is ready and the client tools are now registered
+                    # on it — re-emit the tool-id registry OFF the loop.  The
+                    # runner RPC session_get_tool_schemas (in
+                    # _build_tool_id_mappings) can only run off-loop, and it
+                    # supplies the runner-tier names (prompt.* + these client
+                    # tools) that the on-loop synchronous emit below skips to
+                    # avoid the daemon-side prompt_library walk.  The WS event
+                    # sink is thread-safe (run_coroutine_threadsafe).
+                    server._emit_tool_id_registry_from_schemas()
+                    # Deferred-turn (Option 2): the runner now has this client's
+                    # host tools, so drive any wake deferred while the session was
+                    # cold — the turn's schema will include these tools.  After
+                    # the push (not at attach-end) closes the drive-races-tool-
+                    # wiring gap.  Idempotent.
+                    try:
+                        self._command_router._session_manager.drive_pending_wake(sid)
+                    except Exception:
+                        logger.exception(
+                            "deferred-wake drive after client-tool push failed "
+                            "for %s", sid)
+                except Exception:
+                    logger.exception(
+                        "mid-session client-tool runner push failed for %s", cid)
+
+            threading.Thread(target=_push, daemon=True).start()
+
+        # Emit updated tool ID registry so clients can resolve IDs for the
+        # newly-registered client-provided tools.  This runs SYNCHRONOUSLY on
+        # the event loop; the daemon walk in _build_tool_id_mappings ALWAYS
+        # excludes runner-tier (prompt_library's ~15s filesystem walk blocked
+        # the loop on a cold re-attach + self-blocked the register-RPC send
+        # above).  Daemon-tier names map here; runner-tier names arrive from
+        # the off-loop _push re-emit once the runner is ready.
         if session.server:
             session.server._emit_tool_id_registry_from_schemas()
 
@@ -2241,7 +2347,11 @@ class JaatoWSServer:
             logger.warning("No waiter for tool result call_id=%s", call_id)
             return
         waiter, result_holder = entry
-        result_holder['result'] = event.result
+        # Decode the JSON-encoded host-tool result to its native value
+        # (symmetric with the SDK's encode) so it records like an in-process
+        # tool result — see decode_client_tool_result.
+        from server.client_tools import decode_client_tool_result
+        result_holder['result'] = decode_client_tool_result(event.result)
         result_holder['error'] = event.error
         waiter.set()
 

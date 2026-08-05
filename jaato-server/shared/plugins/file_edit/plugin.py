@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from shared.ui_utils import ellipsize_path, ellipsize_path_pair
 from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE, DISCOVERABILITY_EAGER, DISCOVERABILITY_DEFERRED
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from .backup import BackupManager
 from .diff_utils import (
@@ -127,6 +127,31 @@ class FileEditPlugin(RunnerForwardingMixin):
         # Explicit ``backup_dir`` from operator config (takes precedence
         # over derived paths).  Cached so broadcasts respect it.
         self._explicit_backup_dir: Optional[str] = None
+        # Per-profile cap on the character span of a single targeted edit's
+        # ``old``/``new`` arguments (``updateFile`` targeted mode).  ``None``
+        # = unlimited (default).  Set via
+        # ``plugin_configs.file_edit.max_edit_span_chars`` and read in
+        # ``initialize``.  Enforced symmetrically (``old`` AND ``new``) by
+        # ``_check_edit_span`` at the ``updateFile`` executor sites, and
+        # advertised to the model through the dynamic tool description built
+        # in ``get_tool_schemas`` (``_edit_span_hint``).  Full-file rewrites
+        # are unaffected — they go through ``new_content`` (full-replacement
+        # mode), which the cap intentionally does not touch.
+        self._max_edit_span_chars: Optional[int] = None
+        # Per-profile gate on ``updateFile``'s full-replacement mode
+        # (``new_content`` — the old-absent branch).  ``True`` (default) keeps
+        # whole-file replacement available; ``False`` removes it entirely for
+        # this session — the ``new_content`` property is dropped from the
+        # ``updateFile`` schema (model never sees it) AND a runtime attempt is
+        # rejected with a guiding error steering to targeted edits.  Set via
+        # ``plugin_configs.file_edit.allow_full_replace``.  Orthogonal to
+        # ``max_edit_span_chars``: a constrained profile typically sets the cap
+        # AND this gate together so a weak model has no whole-file path that
+        # bypasses the cap (the clobber path — each step regenerating the file
+        # and dropping prior edits).  See ``_check_edit_span`` /
+        # ``_edit_span_hint`` for how the cap-rejection wording becomes
+        # conditional on this gate.
+        self._allow_full_replace: bool = True
         # Plugin registry for checking external path authorization
         self._plugin_registry = None
 
@@ -214,6 +239,156 @@ class FileEditPlugin(RunnerForwardingMixin):
         """Write trace message to log file for debugging."""
         _trace_write("FILE_EDIT", msg)
 
+    @staticmethod
+    def _parse_edit_span_cap(raw: Any) -> Optional[int]:
+        """Validate the ``max_edit_span_chars`` config value.
+
+        Returns the cap as a positive ``int`` when *raw* is a valid positive
+        integer (accepting ``bool``-free numeric strings too, since profile
+        loaders may pass strings).  Returns ``None`` (unlimited) when *raw* is
+        absent.  For any malformed value (non-numeric, ``<= 0``, ``bool``) it
+        logs a WARNING and returns ``None`` — the knob disables itself rather
+        than clamping to a hardcoded default, keeping behaviour deterministic
+        and predictable for the operator who set it.
+        """
+        if raw is None:
+            return None
+        # Reject bool explicitly — bool is an int subclass and ``True``/``False``
+        # as a span cap is always an operator mistake.
+        if isinstance(raw, bool):
+            logger.warning(
+                "file_edit: ignoring max_edit_span_chars=%r (bool is not a valid "
+                "span cap); treating as unlimited.", raw
+            )
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "file_edit: ignoring max_edit_span_chars=%r (not an integer); "
+                "treating as unlimited.", raw
+            )
+            return None
+        if value <= 0:
+            logger.warning(
+                "file_edit: ignoring max_edit_span_chars=%d (must be a positive "
+                "integer); treating as unlimited.", value
+            )
+            return None
+        return value
+
+    @staticmethod
+    def _parse_allow_full_replace(raw: Any) -> bool:
+        """Validate the ``allow_full_replace`` config value (default ``True``).
+
+        Accepts a real ``bool`` directly, or the common YAML/string spellings
+        (``"true"``/``"false"``/``"1"``/``"0"``/``"yes"``/``"no"``/``"on"``/
+        ``"off"``, case-insensitive).  An absent value defaults to ``True``
+        (back-compatible: full replacement stays available).  Any unrecognised
+        value logs a WARNING and falls back to ``True`` (the safe, non-
+        restrictive default — a typo must not silently strip a tool mode).
+        """
+        if raw is None:
+            return True
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            token = raw.strip().lower()
+            if token in ("true", "1", "yes", "on"):
+                return True
+            if token in ("false", "0", "no", "off"):
+                return False
+        logger.warning(
+            "file_edit: ignoring allow_full_replace=%r (expected a boolean); "
+            "defaulting to True (full replacement available).", raw
+        )
+        return True
+
+    def _full_replace_gate_error(self) -> str:
+        """Guiding error returned when full replacement is attempted but gated.
+
+        Steers the model to targeted edits — the only edit path available on a
+        profile that has set ``allow_full_replace: false``.
+        """
+        return (
+            "Full-file replacement ('new_content') is disabled for this profile. "
+            "Make a targeted edit instead: 'old' (the exact current text, minimal) "
+            "→ 'new'. Try a unique 'old' alone first; add 'prologue'/'epilogue' "
+            "(literal adjacent lines, copied verbatim) only if the tool reports "
+            "the match ambiguous."
+        )
+
+    def _check_edit_span(self, old: Optional[str], new: Optional[str]) -> Optional[str]:
+        """Enforce the targeted-edit span cap on ``old`` and ``new``.
+
+        Applied to each argument independently (capping only one leaves the
+        other as an escape hatch).  Returns a model-facing guiding error string
+        when either exceeds ``self._max_edit_span_chars``, else ``None``.  When
+        the cap is unset (``None``) this is always a no-op.
+
+        The error names the offending side(s), then teaches the correct
+        disambiguation primitive — minimal ``old``/``new`` pinned by
+        ``prologue``/``epilogue`` context, NOT a widened ``old`` — so the model
+        self-corrects via the tool contract, not persona prose.  The whole-file
+        remedy (omit ``old``, use ``new_content``) is appended ONLY when
+        ``self._allow_full_replace`` is true; on a gated profile that remedy is
+        both unavailable and the clobber path, so it is suppressed.
+        """
+        cap = self._max_edit_span_chars
+        if cap is None:
+            return None
+        old_len = len(old or "")
+        new_len = len(new or "")
+        over: List[str] = []
+        if old_len > cap:
+            over.append(f"'old' is {old_len} chars")
+        if new_len > cap:
+            over.append(f"'new' is {new_len} chars")
+        if not over:
+            return None
+        msg = (
+            f"Targeted edit rejected: {' and '.join(over)}; 'old' and 'new' must "
+            f"each be ≤ {cap} characters. Shrink them to the changed text only — "
+            f"'old' is the minimal current text you are replacing, usually a "
+            f"single already-unique line (a signature/import/package line). Try "
+            f"'old' ALONE; add 'prologue'/'epilogue' only if the tool then reports "
+            f"the match ambiguous, copying the literal adjacent lines verbatim. "
+            f"Never widen 'old' itself to disambiguate — locator size and edit "
+            f"size are independent axes."
+        )
+        if self._allow_full_replace:
+            msg += (
+                " To rewrite the entire file, OMIT 'old' and provide only "
+                "'new_content' (it is ignored whenever 'old' is present)."
+            )
+        return msg
+
+    def _edit_span_hint(self) -> str:
+        """Return the dynamic schema suffix advertising the span cap.
+
+        Empty string when the cap is unset, so the static tool description is
+        unchanged.  When set, the returned sentence is appended to the
+        ``updateFile`` description (and a shorter variant to the ``old``/``new``
+        property descriptions) in :meth:`get_tool_schemas`, so the constraint
+        reaches the model through the tool contract — never the persona.
+        Computed at schema-build time from the current cap value.
+        """
+        cap = self._max_edit_span_chars
+        if cap is None:
+            return ""
+        hint = (
+            f" IMPORTANT: in targeted-edit mode, 'old' and 'new' must each be "
+            f"≤ {cap} characters — the changed text only. Use a unique 'old' "
+            f"alone; add 'prologue'/'epilogue' (literal adjacent lines, verbatim) "
+            f"only when the match is reported ambiguous, never to widen 'old'."
+        )
+        if self._allow_full_replace:
+            hint += (
+                " To replace the entire file, OMIT 'old' and provide only "
+                "'new_content'."
+            )
+        return hint
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the file edit plugin.
 
@@ -229,6 +404,27 @@ class FileEditPlugin(RunnerForwardingMixin):
                 - workspace_root: Path to workspace root for sandboxing.
                                   Auto-detected from JAATO_WORKSPACE_ROOT or
                                   workspaceRoot env vars if not specified.
+                - max_edit_span_chars: Per-profile cap on the character length
+                                  of a single targeted edit's ``old`` and
+                                  ``new`` arguments (``updateFile`` targeted
+                                  mode), applied to each independently.  Must
+                                  be a positive int; ``None``/absent = unlimited
+                                  (default).  Drives both the runtime rejection
+                                  (``_check_edit_span``) and the dynamic tool
+                                  description (``_edit_span_hint``).  Does NOT
+                                  cap ``new_content`` (full-replacement mode) —
+                                  whole-file rewrites stay legal through that
+                                  argument (see ``allow_full_replace`` to gate
+                                  that path).
+                - allow_full_replace: Bool (default ``True``).  When ``False``,
+                                  ``updateFile``'s whole-file replacement mode
+                                  (``new_content``) is removed for this session —
+                                  dropped from the tool schema and rejected at
+                                  runtime — leaving targeted ``old``/``new`` edits
+                                  as the only path.  A constrained profile sets
+                                  this alongside ``max_edit_span_chars`` so a weak
+                                  model has no whole-file path that bypasses the
+                                  cap (the clobber path).
         """
         config = config or {}
 
@@ -263,6 +459,21 @@ class FileEditPlugin(RunnerForwardingMixin):
         # backup-manager path without losing operator-supplied state.
         self._explicit_backup_dir = config.get("backup_dir")
         self._session_id = config.get("session_id")
+
+        # Per-profile targeted-edit span cap.  Validated to a positive int;
+        # any other value (incl. negative/zero/non-numeric) is rejected with a
+        # WARNING and treated as unset (unlimited) — deterministic, no silent
+        # clamping to an arbitrary default.
+        self._max_edit_span_chars = self._parse_edit_span_cap(
+            config.get("max_edit_span_chars")
+        )
+
+        # Full-replacement gate.  Defaults True (back-compatible — every
+        # existing profile keeps new_content).  A profile opts out with
+        # ``allow_full_replace: false`` to forbid whole-file replacement.
+        self._allow_full_replace = self._parse_allow_full_replace(
+            config.get("allow_full_replace")
+        )
 
         self._reinit_backup_manager()
 
@@ -511,9 +722,40 @@ class FileEditPlugin(RunnerForwardingMixin):
             return resolved
         return p
 
+    @staticmethod
+    def _is_jaato_rule(line: str) -> bool:
+        """True if a .gitignore line is ANY rule anchored at ``.jaato`` — bare,
+        ``/``-anchored, ``/*`` / ``/**`` globbed, a ``.jaato/<sub>`` path, or a
+        ``!``-negation thereof.  Used to detect that the user is already managing
+        ``.jaato`` so we never auto-append a redundant (or negation-defeating)
+        rule on top of a deliberate setup."""
+        s = line.strip()
+        if not s or s.startswith("#"):
+            return False
+        s = s.lstrip("!").lstrip("/")            # drop negation marker + anchor
+        if s.startswith(".jaato/"):
+            return True
+        return s.rstrip("*").rstrip("/") == ".jaato"
+
     def _ensure_gitignore(self) -> None:
-        """Add .jaato to .gitignore if it exists and entry is missing."""
-        gitignore = Path(".gitignore")
+        """Add a ``.jaato/`` ignore to the WORKSPACE .gitignore — but only if it
+        exists and has NO existing ``.jaato``-anchored rule.
+
+        - Anchored to the session workspace (``get_workspace_root``), not the
+          process cwd, so it never edits an unrelated repo's .gitignore when the
+          daemon was launched outside the workspace.
+        - Skips entirely when ANY ``.jaato`` rule is already present, so a
+          deliberate setup (e.g. ``.jaato/*`` + ``!.jaato/profiles/``) is not
+          fought every session (dani's principle: no auto-mods over a
+          deterministic user setup).
+        - Appends the directory form ``.jaato/``; a bare ``.jaato`` placed after a
+          ``!``-negation re-excludes the whole dir and silently un-tracks future
+          profile/agent files.
+        """
+        workspace = get_workspace_root()
+        if not workspace:
+            return
+        gitignore = Path(workspace) / ".gitignore"
         if not gitignore.exists():
             return
 
@@ -521,22 +763,79 @@ class FileEditPlugin(RunnerForwardingMixin):
             content = gitignore.read_text(encoding="utf-8")
             lines = content.splitlines()
 
-            # Check if .jaato is already present
-            if ".jaato" in lines or ".jaato/" in lines:
+            # Any existing .jaato-anchored rule → the user is managing it; leave
+            # it alone (the narrow exact-match check used to miss `.jaato/*` and
+            # re-append a bare `.jaato` every session).
+            if any(self._is_jaato_rule(l) for l in lines):
                 return
 
-            # Add .jaato to gitignore
             with gitignore.open("a", encoding="utf-8") as f:
                 # Add newline if file doesn't end with one
                 if content and not content.endswith("\n"):
                     f.write("\n")
-                f.write(".jaato\n")
+                f.write(".jaato/\n")
         except OSError as exc:
             # If we can't read/write gitignore, just log and skip
             logger.debug(f"Failed to update .gitignore: {exc}")
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return tool schemas for file editing tools."""
+        """Return tool schemas for file editing tools.
+
+        The ``updateFile`` description and its ``old``/``new`` property
+        descriptions are computed at build time:
+        - when a per-profile ``max_edit_span_chars`` cap is set, the span
+          constraint is appended so the model learns the limit through the
+          tool contract (see :meth:`_edit_span_hint`);
+        - when ``allow_full_replace`` is false, the ``new_content`` property
+          and its description clause are dropped entirely, so the model never
+          sees the whole-file-replacement mode on a gated profile.
+        When neither knob is set, the schema is unchanged from the static form.
+        """
+        # Dynamic span-cap advertisement (empty string when no cap is set).
+        span_hint = self._edit_span_hint()
+        span_prop_hint = (
+            f" Must be ≤ {self._max_edit_span_chars} characters."
+            if self._max_edit_span_chars is not None
+            else ""
+        )
+        # updateFile description is computed at build time: the full-replacement
+        # mode is advertised only when ``allow_full_replace`` is true, so a gated
+        # profile's model never sees 'new_content' (the property is also dropped
+        # from ``parameters`` below).
+        # Canonical targeted-edit guidance — the tool contract is the home for
+        # these anchoring rules (every updateFile caller, not just personas).
+        # Evidence (transform-stage diff, 36 calls): a unique 'old' alone
+        # matched 15/15; supplying prologue/epilogue failed ~9/10 because models
+        # build them from semantic landmarks that are NOT verbatim-contiguous
+        # with 'old', so prologue+old+epilogue isn't a real substring.  The two
+        # sizing axes are independent and must not be conflated: the EDIT shrinks
+        # to the changed text; the LOCATOR grows only as needed for uniqueness.
+        targeted_clause = (
+            "Targeted edit: 'old' (the exact current text) → 'new' (its "
+            "replacement). Two INDEPENDENT rules, do not conflate them: the EDIT "
+            "('old'/'new') is the changed text only, minimal; the LOCATOR "
+            "('prologue'+'old'+'epilogue') is sized for UNIQUENESS. Try 'old' "
+            "ALONE first — a method signature, import, or package line is almost "
+            "always already unique. Add 'prologue'/'epilogue' ONLY if the tool "
+            "reports the match is ambiguous: copy the LITERAL adjacent lines "
+            "verbatim (blank lines included), extending outward until the match "
+            "is unique. Never add them pre-emptively or from memory — "
+            "'prologue'+'old'+'epilogue' must be an exact substring of the file."
+        )
+        if self._allow_full_replace:
+            update_desc = (
+                "Update an existing file. Two modes. (1) " + targeted_clause
+                + " (2) Full replacement: provide 'new_content' to replace the "
+                "entire file."
+                + span_hint
+            )
+        else:
+            update_desc = (
+                "Update an existing file (targeted edit only). " + targeted_clause
+                + " (Whole-file replacement via 'new_content' is disabled for "
+                "this profile.)"
+                + span_hint
+            )
         return [
             ToolSchema(
                 name="readFile",
@@ -564,16 +863,12 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
                 name="updateFile",
-                description="Update an existing file. Supports two modes: (1) Targeted edit: "
-                           "provide 'old' and 'new' to replace a specific fragment. If 'old' "
-                           "matches multiple locations, add 'prologue'/'epilogue' — short, "
-                           "distinctive text copied verbatim from the file as context anchors. "
-                           "(2) Full replacement: provide 'new_content' to replace the entire file.",
+                description=update_desc,
                 parameters={
                     "type": "object",
                     "properties": {
@@ -584,36 +879,49 @@ class FileEditPlugin(RunnerForwardingMixin):
                         "old": {
                             "type": "string",
                             "description": (
-                                "Text to find in the file (for targeted edit). "
-                                "Must appear exactly once, or use prologue/epilogue "
-                                "to disambiguate."
+                                "The exact current text to replace — the changed "
+                                "text only, minimal. Copied verbatim from the file. "
+                                "Try it ALONE first (a signature/import/package line "
+                                "is usually already unique); only if the tool reports "
+                                "the match ambiguous, add prologue/epilogue."
+                                + span_prop_hint
                             )
                         },
                         "new": {
                             "type": "string",
                             "description": (
-                                "Replacement text (for targeted edit). "
-                                "Replaces only the matched 'old' text."
+                                "Replacement for 'old' — the changed text only. "
+                                "Replaces just the matched 'old' text."
+                                + span_prop_hint
                             )
                         },
                         "prologue": {
                             "type": "string",
                             "description": (
-                                "Context anchor: text immediately before 'old', "
-                                "copied verbatim from the file. Use a short, "
-                                "distinctive fragment (e.g., a function signature). "
-                                "Not modified in the output."
+                                "Optional disambiguator — add ONLY when 'old' alone "
+                                "matched ambiguously. The LITERAL line(s) immediately "
+                                "before 'old', copied verbatim from the file (blank "
+                                "lines included), extended outward until "
+                                "prologue+old+epilogue is unique. Never invent from "
+                                "memory. Not modified in the output."
                             )
                         },
                         "epilogue": {
                             "type": "string",
                             "description": (
-                                "Context anchor: text immediately after 'old', "
-                                "copied verbatim from the file. Use a short, "
-                                "distinctive fragment. Not modified in the output."
+                                "Optional disambiguator — add ONLY when 'old' alone "
+                                "matched ambiguously. The LITERAL line(s) immediately "
+                                "after 'old', copied verbatim from the file (blank "
+                                "lines included), extended outward until unique. "
+                                "Never invent from memory. Not modified in the output."
                             )
                         },
-                        "new_content": {
+                        # Full-replacement arg — present only when the profile
+                        # allows whole-file replacement.  Dropped from the schema
+                        # entirely on a gated profile so the model never attempts
+                        # it (the runtime gate in _execute_update_file is the
+                        # backstop for models that send it anyway).
+                        **({"new_content": {
                             "type": "string",
                             "description": (
                                 "The complete new content to write to the file "
@@ -622,12 +930,12 @@ class FileEditPlugin(RunnerForwardingMixin):
                                 "triple-quotes, or treat as a string literal. The content is "
                                 "written verbatim to the file."
                             )
-                        }
+                        }} if self._allow_full_replace else {})
                     },
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["old", "new", "new_content"],
                     format="diff",
@@ -664,7 +972,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path", "content"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["content"],
                     format="text",
@@ -687,7 +995,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -714,7 +1022,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["source_path", "destination_path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -741,7 +1049,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["source_path", "destination_path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -759,7 +1067,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -822,7 +1130,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["operations"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -857,7 +1165,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["pattern", "replacement", "paths"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -879,7 +1187,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -896,7 +1204,7 @@ class FileEditPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
@@ -1059,6 +1367,19 @@ Backups are automatically created for file modifications."""
             new_text = arguments.get("new", "")
             prologue = arguments.get("prologue")
             epilogue = arguments.get("epilogue")
+            # Enforce the per-profile span cap BEFORE attempting the anchor
+            # match, so an oversized whole-file 'old'/'new' surfaces as a
+            # guiding pre-validation error rather than a confusing
+            # EditNotFoundError.  Same channel as the edit-error path below.
+            span_error = self._check_edit_span(old_text, new_text)
+            if span_error is not None:
+                display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+                return PermissionDisplayInfo(
+                    summary=f"Update file: {display_path} (edit span exceeded)",
+                    details=span_error,
+                    format_hint="text",
+                    pre_validation_error=span_error,
+                )
             try:
                 new_content = apply_edit(old_content, old_text, new_text, prologue, epilogue)
             except (EditNotFoundError, AmbiguousEditError) as e:
@@ -1071,6 +1392,16 @@ Backups are automatically created for file modifications."""
                 )
         else:
             # Full replacement mode
+            # Gated profiles have no whole-file path — surface the guiding
+            # error through the same pre_validation_error channel as edit errors.
+            if not self._allow_full_replace:
+                display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+                return PermissionDisplayInfo(
+                    summary=f"Update file: {display_path} (full replacement disabled)",
+                    details=self._full_replace_gate_error(),
+                    format_hint="text",
+                    pre_validation_error=self._full_replace_gate_error(),
+                )
             # Accept both 'new_content' (canonical) and 'content' (alias)
             new_content = arguments.get("new_content") or arguments.get("content", "")
 
@@ -1266,6 +1597,23 @@ Backups are automatically created for file modifications."""
             except OSError as e:
                 return {"error": f"Failed to read image: {e}"}
 
+        if ext == '.pdf':
+            self._trace("readFile: detected PDF, returning as multimodal file")
+            try:
+                data = file_path.read_bytes()
+                return {
+                    "_multimodal": True,
+                    "_multimodal_type": "file",
+                    "file_data": data,
+                    "mime_type": "application/pdf",
+                    "display_name": file_path.name,
+                    "path": normalize_result_path(path),
+                    "size": len(data),
+                    "type": "file",
+                }
+            except OSError as e:
+                return {"error": f"Failed to read PDF: {e}"}
+
         # Validate offset and limit if provided
         if offset is not None:
             if not isinstance(offset, int) or offset < 1:
@@ -1355,6 +1703,18 @@ Backups are automatically created for file modifications."""
             prologue = args.get("prologue")
             epilogue = args.get("epilogue")
 
+            # Enforce the per-profile span cap before any disk read / match so
+            # an oversized whole-file 'old'/'new' is rejected with a guiding
+            # error the model can act on (localise, or switch to new_content).
+            span_error = self._check_edit_span(old_text, new_text)
+            if span_error is not None:
+                self._trace(
+                    f"updateFile(targeted) REJECTED span: path={path}, "
+                    f"old_len={len(old_text)}, new_len={len(new_text)}, "
+                    f"cap={self._max_edit_span_chars}"
+                )
+                return {"error": span_error}
+
             try:
                 current_content = file_path.read_text(encoding="utf-8")
             except OSError as e:
@@ -1370,6 +1730,13 @@ Backups are automatically created for file modifications."""
                 return {"error": f"Targeted edit failed: {e}"}
         else:
             # Full replacement mode
+            # Gate: a profile with allow_full_replace=False has no whole-file
+            # path.  Reject with a guiding error steering to targeted edits.
+            # (Backstop for models that emit new_content despite it being
+            # absent from the schema on this profile.)
+            if not self._allow_full_replace:
+                self._trace(f"updateFile(full) REJECTED — allow_full_replace=False: path={path}")
+                return {"error": self._full_replace_gate_error()}
             # Accept both 'new_content' (canonical) and 'content' (alias)
             new_content = args.get("new_content") or args.get("content", "")
             self._trace(f"updateFile(full): path={path}, content_len={len(new_content)}")

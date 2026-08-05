@@ -168,6 +168,43 @@ class RuntimeLimits:
         ))
 
 
+class ConfinementUnavailableError(RuntimeError):
+    """A profile requiring kernel confinement was used to create an in-process
+    session (shared runtime, no runner subprocess), which cannot apply it.
+
+    Raised fail-closed instead of silently running unconfined: kernel limits
+    (and AppArmor) are applied at a runner subprocess's ``fork()/exec()``.  An
+    in-process session is objects in the parent process — there is no
+    subprocess boundary to confine, so its profile's ``runtime_limits`` would
+    otherwise be silently ignored.
+    """
+
+
+def profile_requires_kernel_confinement(profile: Any) -> bool:
+    """True if ``profile`` declares cgroup-enforced ``runtime_limits``.
+
+    This is the unambiguous, profile-level kernel-confinement signal.  (AppArmor
+    is a client-level opt-in, orthogonal to the profile, so it is not consulted
+    here.)
+    """
+    limits = getattr(profile, "runtime_limits", None)
+    return bool(limits is not None and limits.has_kernel_limits())
+
+
+def assert_inprocess_can_honor(profile: Any) -> None:
+    """Fail closed if an IN-PROCESS session is being created from a profile that
+    requires kernel confinement — see :class:`ConfinementUnavailableError`."""
+    if profile_requires_kernel_confinement(profile):
+        name = getattr(profile, "name", "?")
+        raise ConfinementUnavailableError(
+            f"profile {name!r} declares kernel runtime_limits (memory/pids/cpu) "
+            f"but is being created IN-PROCESS (shared runtime, no runner "
+            f"subprocess), which cannot enforce them. Spawn it as an isolated "
+            f"runner, or remove runtime_limits for in-process use — do not run "
+            f"it silently unconfined."
+        )
+
+
 # Phase 5 §5.1: default `RuntimeLimits` applied to subagents spawned with
 # ``agent_params.isolated=true`` whenever the profile omits the
 # corresponding field.  The opt-in establishes the "isolation implies

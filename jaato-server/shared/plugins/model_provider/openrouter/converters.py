@@ -24,6 +24,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     TokenUsage,
     ToolResult,
+    render_result_for_model,
     ToolSchema,
 )
 
@@ -205,8 +206,66 @@ def system_message_with_cache(
 
 # ==================== Message Conversion ====================
 
-def message_to_openai(message: Message) -> Dict[str, Any]:
-    """Convert an internal ``Message`` to the OpenAI chat-message dict."""
+def _attachment_content_block(
+    mime: str, data: Any, filename: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """OpenAI/OpenRouter content block for a binary attachment.
+
+    ``image/*`` -> an ``image_url`` data-URL block; ``application/pdf`` -> a
+    ``file`` block (OpenRouter's PDF-input extension — the model, or the
+    optional ``file-parser`` plugin, parses it).  Returns ``None`` for a mime
+    this wire doesn't carry.
+    """
+    mime = mime or ""
+    b64 = (
+        base64.b64encode(data).decode("utf-8")
+        if isinstance(data, (bytes, bytearray))
+        else data  # already-encoded base64/string payload
+    )
+    if mime.startswith("image/"):
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+    if mime == "application/pdf":
+        return {
+            "type": "file",
+            "file": {
+                "filename": filename or "document.pdf",
+                "file_data": f"data:application/pdf;base64,{b64}",
+            },
+        }
+    return None
+
+
+def _tool_result_attachment_blocks(attachments: Any) -> List[Dict[str, Any]]:
+    """Content blocks for image/PDF attachments on a tool result.
+
+    OpenAI/OpenRouter ``tool`` messages cannot carry image/file content — they
+    live only in ``user`` messages — so a tool that returns one (``readFile`` on
+    a PNG or a PDF) must surface it via a follow-up user message.
+    """
+    blocks: List[Dict[str, Any]] = []
+    for att in attachments or []:
+        block = _attachment_content_block(
+            getattr(att, "mime_type", "") or "",
+            att.data,
+            getattr(att, "display_name", None),
+        )
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def message_to_openai(message: Message) -> List[Dict[str, Any]]:
+    """Convert an internal ``Message`` to OpenAI chat-message dict(s).
+
+    Returns a LIST: one internal ``TOOL`` message can carry N parallel
+    ``function_response`` parts (a parallel tool-call batch is appended as a
+    single ``Message(role=TOOL, parts=[...N...])`` — see
+    ``jaato_session._do_send_tool_results``), and the OpenAI chat format
+    requires ONE ``role:"tool"`` message per ``tool_call_id``.  Emitting only
+    ``function_responses[0]`` silently dropped results #2..N off the wire —
+    the model saw only the first parallel result.  Non-tool messages map to a
+    single-element list.
+    """
     role = message.role
 
     text_parts = [p.text for p in message.parts if p.text]
@@ -218,15 +277,37 @@ def message_to_openai(message: Message) -> Dict[str, Any]:
     ]
 
     if function_responses:
-        fr = function_responses[0]
-        result_str = (
-            json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
-        )
-        return {
-            "role": "tool",
-            "tool_call_id": fr.call_id,
-            "content": result_str,
-        }
+        # One wire ``role:"tool"`` message PER function_response so all N
+        # parallel results reach the model (each keyed by its own call_id).
+        tool_msgs: List[Dict[str, Any]] = []
+        image_followups: List[Dict[str, Any]] = []
+        for fr in function_responses:
+            result_str = render_result_for_model(fr.result, fr.model_suffix, untrusted=fr.untrusted, untrusted_source=fr.untrusted_source)
+            tool_msgs.append({
+                "role": "tool",
+                "tool_call_id": fr.call_id,
+                "content": result_str,
+            })
+            # tool messages can't carry image/file content — surface such
+            # attachments as a follow-up user message so the model SEES them.
+            blocks = _tool_result_attachment_blocks(getattr(fr, "attachments", None))
+            if blocks:
+                names = ", ".join(
+                    a.display_name or a.mime_type
+                    for a in fr.attachments
+                    if _attachment_content_block(
+                        getattr(a, "mime_type", "") or "", a.data,
+                    ) is not None
+                )
+                image_followups.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"[Attachment returned by tool call: {names}]"}
+                    ] + blocks,
+                })
+        # All tool messages first (each keyed to its tool_call_id), then any
+        # attachment follow-ups, then the model generates its next turn.
+        return tool_msgs + image_followups
 
     if role == Role.MODEL:
         msg: Dict[str, Any] = {"role": "assistant"}
@@ -246,12 +327,35 @@ def message_to_openai(message: Message) -> Dict[str, Any]:
             ]
             if not content:
                 msg["content"] = None
-        return msg
+        return [msg]
 
-    return {
+    # User message.  Marshal any inline_data (image / PDF) parts into OpenAI
+    # multimodal content blocks so a vision/file-declared model actually
+    # RECEIVES them.  OpenRouter declares these via the catalog
+    # (resolve_modalities catalog-detect), but this wire converter only emitted
+    # text — the binary part was silently dropped and the model confabulated.
+    # Text-only turns keep a plain-string ``content`` (unchanged wire shape).
+    inline_parts = [p.inline_data for p in message.parts if p.inline_data is not None]
+    media_blocks = [
+        b for b in (
+            _attachment_content_block(
+                p.get("mime_type", "image/png"), p.get("data", b""),
+                p.get("display_name"),
+            )
+            for p in inline_parts
+        ) if b
+    ]
+    if media_blocks:
+        blocks: List[Dict[str, Any]] = []
+        if content:
+            blocks.append({"type": "text", "text": content})
+        blocks.extend(media_blocks)
+        return [{"role": "user", "content": blocks}]
+
+    return [{
         "role": "user",
         "content": content,
-    }
+    }]
 
 
 def message_from_openai(msg: Dict[str, Any]) -> Message:
@@ -385,7 +489,11 @@ def history_to_openai(history: List[Message]) -> List[Dict[str, Any]]:
     :func:`_repair_history_shape_for_strict_upstreams` for the
     constraints enforced.
     """
-    converted = [message_to_openai(m) for m in (history or [])]
+    # Flatten: message_to_openai returns a LIST (a TOOL message with N
+    # parallel function_responses → N wire tool messages).
+    converted = [
+        wire for m in (history or []) for wire in message_to_openai(m)
+    ]
     return _repair_history_shape_for_strict_upstreams(converted)
 
 

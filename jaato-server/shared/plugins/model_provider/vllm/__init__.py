@@ -90,3 +90,68 @@ Environment variables:
 from .provider import VLLMProvider, create_provider
 
 __all__ = ["VLLMProvider", "create_provider"]
+
+
+# --- Provider capability contract (see docs/model-provider-capabilities.md) ---
+from ..base import (  # noqa: E402
+    ProviderCapabilities, ProviderKnobs, KnobLayer, KnobSpec, AuthSource,
+)
+
+PROVIDER_CAPABILITIES = ProviderCapabilities(
+    user_message_images=True,
+    tool_result_images=True,
+    pdf_input=False,
+    tool_choice_forwarding=True,
+    thinking=False,
+    prompt_caching=False,
+    streaming=True,
+    cancellation=True,
+)
+
+# --- Provider config-knob contract (authored from provider.py read sites) ---
+PROVIDER_KNOBS = ProviderKnobs(layers=(
+    KnobLayer("top_level", (
+        KnobSpec("host", "str", None, "vLLM server URL (VLLM_HOST)"),
+        KnobSpec("api_token", "str", None, "bearer token (when --api-key set)"),
+        KnobSpec("context_length", "int"),
+        KnobSpec("max_tokens", "int"),
+        KnobSpec("parallel_tool_calls", "bool"),
+        KnobSpec("quirks", "dict", None,
+                 "model-quirk toggles (see PROVIDER_QUIRKS)"),
+    ), description="vLLM server connection + generation knobs"),
+    # vLLM subclasses the OpenAI-compat base, whose `_read_api_params` reads
+    # `plugin_configs.vllm.api_params` and forwards the allow-listed keys
+    # (`_FORWARDED_API_PARAMS`) on every request.  Declared so explain/validate
+    # see the layer the provider actually honors (without this, validate warned
+    # `unknown_layer` on a working `api_params` — e.g. temperature=0).
+    KnobLayer("api_params", (
+        KnobSpec("temperature", "float"),
+        KnobSpec("top_p", "float"),
+        KnobSpec("max_tokens", "int"),
+        KnobSpec("tool_choice", "str"),
+        KnobSpec("parallel_tool_calls", "bool"),
+        KnobSpec("frequency_penalty", "float"),
+        KnobSpec("presence_penalty", "float"),
+        KnobSpec("seed", "int"),
+        KnobSpec("stop", "list"),
+    ), description="OpenAI Chat Completions params (filtered allow-list)"),
+))
+# vLLM is the only provider that honors model quirks (the _KNOWN_QUIRKS
+# allow-list in provider.py).  This declaration lifts that method-local
+# frozenset to a module constant so explain/validate can read it and the
+# linter can reject unknown quirk names (previously silently dropped).
+PROVIDER_QUIRKS = frozenset({
+    "prose_tool_calls",
+    "coerce_typed_tool_args",
+    "force_tool_choice_for_lifecycle",
+    "force_narration_between_tools",
+    "auto_finalize_on_complete",
+})
+
+# --- Provider credential-resolution contract (from verify_auth/resolve_*) ---
+PROVIDER_AUTH_RESOLUTION = (
+    AuthSource("api_key_param", "api_token",
+               "plugin_configs.vllm.api_token (optional)"),
+    AuthSource("env", "VLLM_API_TOKEN",
+               "optional — only if launched with --api-key"),
+)

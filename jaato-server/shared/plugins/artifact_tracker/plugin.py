@@ -29,7 +29,10 @@ from .models import (
     ArtifactType,
     ReviewStatus,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from jaato_sdk.plugins.base import UserCommand, ToolResultEnrichmentResult
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
@@ -442,7 +445,7 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
                     "required": ["path", "artifact_type", "description"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="updateArtifact",
@@ -499,7 +502,7 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listArtifacts",
@@ -528,7 +531,7 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="flagForReview",
@@ -552,7 +555,7 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
                     "required": ["path", "reason"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="acknowledgeReview",
@@ -587,7 +590,7 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="checkRelated",
@@ -613,7 +616,7 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
                     "required": ["path"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="removeArtifact",
@@ -638,7 +641,7 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="notifyChange",
@@ -666,7 +669,7 @@ class ArtifactTrackerPlugin(RunnerForwardingMixin):
                     "required": ["path", "reason"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

@@ -134,12 +134,16 @@ class TestModelTierConfigValidation:
         with pytest.raises(ModelTierConfigError, match="expected str or dict"):
             ModelTierConfig.from_unified_dict({"dispatcher": 42})
 
-    def test_v1_same_provider_enforcement(self):
-        with pytest.raises(ModelTierConfigError, match="same-provider"):
-            ModelTierConfig.from_unified_dict({
-                "planner": {"model": "claude-opus", "provider": "anthropic"},
-                "dispatcher": {"model": "qwen", "provider": "ollama"},
-            })
+    def test_v2_cross_provider_accepted(self):
+        # V2: cross-provider tiers are allowed (the V1 same-provider gate was
+        # lifted; JaatoSession.switch_tier swaps to a cached per-tier provider
+        # when the active tier's provider differs).
+        cfg = ModelTierConfig.from_unified_dict({
+            "planner": {"model": "claude-opus", "provider": "anthropic"},
+            "dispatcher": {"model": "qwen", "provider": "ollama"},
+        })
+        assert cfg.tiers["planner"].provider == "anthropic"
+        assert cfg.tiers["dispatcher"].provider == "ollama"
 
     def test_unset_providers_treated_as_consistent(self):
         cfg = ModelTierConfig.from_unified_dict({

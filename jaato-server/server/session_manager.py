@@ -23,6 +23,8 @@ import sys
 import pathlib
 import threading
 import time
+from collections import OrderedDict
+from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -44,8 +46,48 @@ from shared.plugins.session import (
 from shared.instruction_token_cache import InstructionTokenCache
 from shared.runtime_limits import RuntimeLimits, apply_isolated_defaults
 from shared.session_envelope import BootstrapEnvelope
+from shared.instruction_suppression import normalize_suppression
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
+from .session_workspace_index import SessionWorkspaceIndex
+from .wake_binding_registry import WakeBindingRegistry, BindOutcome
+
+
+class WakeOutcome(str, Enum):
+    """Structured result of :meth:`SessionManager.wake_session`.
+
+    Callers route on this enum, not a prose reason string — notably an HTTP
+    wake shim mapping to a status code that drives a webhook sender's (e.g.
+    GitHub's) retry behavior.  Permanence guidance for a retrying ingress:
+
+    - ``OK`` / ``DUPLICATE`` → **success** (map to 2xx).  ``DUPLICATE`` is a
+      benign redelivery no-op (at-least-once senders redeliver by design) — it
+      is NOT an error and must not trigger a retry.
+    - ``INVALID`` / ``UNRESOLVED`` → **permanent** failure (bad id, or a cold
+      id that is unknown / ambiguous in the workspace index) — map to 4xx, do
+      NOT retry.
+    - ``REVIVE_FAILED`` / ``NOT_DRIVABLE`` → **transient** failure (revive or
+      dispatch failed) — map to 5xx, safe to retry.
+    """
+    OK = "ok"
+    DUPLICATE = "duplicate"
+    INVALID = "invalid"
+    UNRESOLVED = "unresolved"
+    REVIVE_FAILED = "revive_failed"
+    NOT_DRIVABLE = "not_drivable"
+    DEFERRED = "deferred"
+
+    @property
+    def is_success(self) -> bool:
+        """True for outcomes a caller should treat as success (2xx): the turn
+        was dispatched (``OK``), a duplicate was idempotently ignored
+        (``DUPLICATE``), or the wake was accepted but the turn DEFERRED until a
+        client re-attaches (``DEFERRED`` — the session was revived cold with no
+        client; a SessionWokenEvent was emitted to its observers)."""
+        return self in (
+            WakeOutcome.OK, WakeOutcome.DUPLICATE, WakeOutcome.DEFERRED)
+
+
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -71,6 +113,21 @@ from .workspace_monitor import WorkspaceMonitor
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _PendingWake:
+    """A wake deferred because the (cold-revived) session had no attached client.
+
+    Held in ``SessionManager._pending_wakes`` keyed by ``session_id``; the turn
+    is driven when a client re-attaches (``attach_session`` drains it).  Expires
+    with the wake binding so a permanently-detached bot's pending wake doesn't
+    linger forever."""
+    text: str
+    source: str
+    wake_ref: str
+    cascade_driver_id: Optional[str]
+    expires_at: float
 
 
 @dataclass
@@ -109,6 +166,13 @@ class Session:
     provisioned: bool = False  # True if workspace was auto-provisioned by server
     created_by: Optional[str] = None  # Authenticated user who created the session
     sandbox_mode: Optional[str] = None  # "apparmor" or "soft" when workspace sandboxing is active
+    # The UNRESOLVED inline-profile spec (dict), for sessions created from
+    # an inline profile rather than a named one.  Carried so _save_session
+    # can persist it (SessionState.profile_spec) → disk-restore reconstructs
+    # the recipe by id alone (no named profile on disk).  None for
+    # named-profile sessions.  Set at create (from the BootstrapEnvelope)
+    # and at restore (from state.profile_spec) so it survives save cycles.
+    inline_profile_spec: Optional[Dict[str, Any]] = None
     # Server 0.6.164+ (Bug B real root cause): opaque cascade tenant
     # ID stamped at session creation.  Consumed by
     # :meth:`_dispatch_to_cascade_clients` (Phase 1 cascade-as-client
@@ -301,10 +365,53 @@ class SessionManager:
             'storage_path': self._session_config.storage_path
         })
 
+        # Daemon-wide reactor EventBus: the SINGLE bus reactors subscribe to so
+        # they receive events from ALL sessions and survive session unloads.
+        # Each per-session bus forwards into this via a "reactor_bus_sink"
+        # subscription wired when that session's server is built (below).  Per-
+        # session subscribers stay isolated on their own bus; only the sink
+        # forward crosses into this daemon-wide one.  Exposed to daemon
+        # extensions as ``_ExtensionContext.event_bus`` so the reactor engine
+        # subscribes ONCE here instead of per-loaded-session.  See
+        # docs/design/reactor-bus-session-scope.md.
+        from shared.event_bus import EventBus
+        self.reactor_event_bus = EventBus()
+
         # In-memory session storage
         self._sessions: Dict[str, Session] = {}
+        # In-flight async unloads (``_do_session_unload``).  session_id → an
+        # event set when that unload completes.  An entry exists ONLY between
+        # the unload's commit point (it passed its attached-clients re-check)
+        # and its final ``_sessions.pop`` — so ``attach_session`` can detect a
+        # session being torn down and await+reload instead of attaching to a
+        # session whose runner is mid-disposal (the attach-vs-unload race).
+        self._unloading: Dict[str, threading.Event] = {}
         # Use RLock (reentrant) because initialize() may emit events during session load
         self._lock = threading.RLock()
+
+        # Wake primitive (session.wake): daemon-owned session_id → workspace
+        # index so a cold session can be revived by id alone WITHOUT the caller
+        # supplying a path (which would let an untrusted wake caller point
+        # revival at a weaker sandbox root).  See session_workspace_index.py.
+        self._session_workspace_index = SessionWorkspaceIndex()
+        # Bounded LRU of wake event_ids already actioned — external ingresses
+        # (GitHub, etc.) redeliver; a duplicate event_id is dropped.
+        self._wake_seen_event_ids: "OrderedDict[str, None]" = OrderedDict()
+        # wake_ref → binding registry (the SESSION-owned half of the wake
+        # contract: which key(s) a session trusts to wake it, per opaque ref).
+        # Written by bind_wake/unbind_wake (owner = caller's session), read by
+        # the mode-B verify shim.  See wake_binding_registry.py.
+        self._wake_binding_registry = WakeBindingRegistry(
+            owner_exists=self._owner_session_record_exists)
+        # Operator-declared public wake endpoint (wake.json public_url), set at
+        # daemon boot; surfaced on bind_wake so a session can advertise it with
+        # no bot-side URL config.  Empty until the daemon wires it.
+        self._wake_public_url: str = ""
+        # Deferred wakes (Option 2): session_id → _PendingWake for a session
+        # revived COLD with no attached client.  Driven when a client
+        # re-attaches (attach_session drains it); re-emitted on observer
+        # (re)register.  Guarded by _lock.
+        self._pending_wakes: Dict[str, _PendingWake] = {}
 
         # Phase 1 cascade-as-client (server 0.6.154+): registry of
         # cascade-clients keyed by cascade_driver_id.  See
@@ -373,6 +480,12 @@ class SessionManager:
 
         # Per-client configuration (presentation context, working_dir, etc.)
         self._client_config: Dict[str, Dict[str, Any]] = {}
+        # Client-provided ("host") tool schema dicts buffered by the transport
+        # when registered BEFORE session.new (client_id -> [tool_def, ...]).
+        # Drained in the session.new flow to seed JaatoServer.client_tool_schemas
+        # BEFORE spawn_session_runner reads it for envelope.client_tools — the
+        # schemas must beat the spawn (PR #349 race fix).  Transport-agnostic.
+        self._pending_client_tools: Dict[str, List[Dict[str, Any]]] = {}
 
         # Event routing callback
         self._event_callback: Optional[Callable[[str, Event], None]] = None
@@ -398,6 +511,20 @@ class SessionManager:
         self._pre_initialize_hooks: List[Callable] = []
 
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
+
+    def buffer_client_tools(
+        self, client_id: str, tools: List[Dict[str, Any]]
+    ) -> None:
+        """Buffer client-provided ("host") tool schema dicts a transport
+        received BEFORE this client's session exists.
+
+        Drained in the session.new flow to seed
+        ``JaatoServer.client_tool_schemas`` BEFORE ``spawn_session_runner``
+        reads it for ``envelope.client_tools`` (the schemas must beat the
+        spawn — PR #349 race fix).  The transport still registers the proxy
+        EXECUTORS itself, post-session.new (execution is transport-specific).
+        """
+        self._pending_client_tools[client_id] = list(tools or [])
 
     def _session_storage_dir(self, workspace_path: str) -> pathlib.Path:
         """Resolve session storage directory for a workspace.
@@ -446,112 +573,12 @@ class SessionManager:
             Dict with ``system_instructions``, ``description``,
             ``default_profile``, ``missing_params``, or ``None`` if not found.
         """
-        import re
-
-        search_dirs = []
-        if config_root:
-            cr = pathlib.Path(config_root).expanduser().resolve()
-            search_dirs.append(cr / "agents")
-            search_dirs.append(cr / "prompts")
-        elif workspace_path:
-            search_dirs.append(pathlib.Path(workspace_path) / ".jaato" / "agents")
-            search_dirs.append(pathlib.Path(workspace_path) / ".jaato" / "prompts")
-        search_dirs.append(pathlib.Path.home() / ".jaato" / "agents")
-        search_dirs.append(pathlib.Path.home() / ".jaato" / "prompts")
-
-        # Find the agent file
-        agent_path = None
-        for search_dir in search_dirs:
-            if not search_dir.is_dir():
-                continue
-            # Single file: agents/gen-references.md
-            candidate = search_dir / f"{agent_name}.md"
-            if candidate.is_file():
-                agent_path = candidate
-                break
-            # Directory: agents/gen-references/PROMPT.md
-            candidate_dir = search_dir / agent_name
-            if candidate_dir.is_dir():
-                for entry_name in ("PROMPT.md", "SKILL.md"):
-                    entry = candidate_dir / entry_name
-                    if entry.is_file():
-                        agent_path = entry
-                        break
-                if agent_path:
-                    break
-
-        if not agent_path:
-            return None
-
-        raw = agent_path.read_text(encoding="utf-8")
-
-        # Parse YAML frontmatter
-        frontmatter: Dict[str, Any] = {}
-        body = raw
-        if raw.startswith("---"):
-            match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
-            if match:
-                try:
-                    import yaml
-                    frontmatter = yaml.safe_load(match.group(1)) or {}
-                except Exception:
-                    pass
-                body = raw[match.end():]
-
-        # Substitute params
-        effective_params = dict(params or {})
-        param_defs = frontmatter.get("params", {})
-
-        # Apply frontmatter defaults for params not provided
-        if isinstance(param_defs, dict):
-            for pname, pdef in param_defs.items():
-                if pname not in effective_params:
-                    if isinstance(pdef, dict) and "default" in pdef:
-                        default = pdef["default"]
-                        if default is not None:
-                            effective_params[pname] = str(default)
-
-        # Pre-scan: collect inline ``{{name:default}}`` defaults declared
-        # anywhere in the body so a later bare ``{{name}}`` can fall back
-        # to the same default.  Without this, an agent that uses a
-        # parameter both with and without an inline default would mark it
-        # missing on the bare occurrences and leave literal ``{{name}}``
-        # placeholders in the rendered system instructions — which then
-        # bloat every turn's prompt.
-        inline_defaults: Dict[str, str] = {}
-        inline_pattern = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
-        for m in inline_pattern.finditer(body):
-            name = m.group(1)
-            default = m.group(2)
-            if default is not None and name not in inline_defaults:
-                inline_defaults[name] = default
-
-        # Use a set for O(1) dedup; the public missing list is built
-        # once at the end so the same name never appears twice.
-        missing_set: set = set()
-
-        def replace_param(m: re.Match) -> str:
-            name = m.group(1)
-            inline_default = m.group(2)
-
-            if name in effective_params:
-                return effective_params[name]
-            if inline_default is not None:
-                return inline_default
-            if name in inline_defaults:
-                return inline_defaults[name]
-            missing_set.add(name)
-            return m.group(0)  # Keep unresolved (debugging signal)
-
-        rendered = inline_pattern.sub(replace_param, body)
-
-        return {
-            "system_instructions": rendered,
-            "description": frontmatter.get("description", ""),
-            "default_profile": frontmatter.get("default_profile"),
-            "missing_params": sorted(missing_set),
-            "source_path": str(agent_path),
-        }
+        # Logic lives in the shared loader so the embedded in-process client
+        # can reuse it without importing ``server`` (mirrors how
+        # ``shared.config_resolver.resolve_secret_uri`` was lifted out of the
+        # daemon). This thin delegate keeps the daemon's existing call sites.
+        from shared.plugins.subagent.config import resolve_agent
+        return resolve_agent(agent_name, params, workspace_path, config_root)
 
     def _resolve_profile(
         self,
@@ -955,6 +982,22 @@ class SessionManager:
                 # (always have a runner; confinement is layered).
                 pass
 
+        # Seed client-provided ("host") tool SCHEMAS the transport buffered for
+        # this client BEFORE session.new, so spawn_session_runner's
+        # envelope.client_tools sees them.  The transport registers the proxy
+        # EXECUTORS post-session.new (execution-side, before the model's first
+        # turn) — only the schemas must beat the spawn.  Fixes the
+        # spawn-vs-buffered-apply race in PR #349 (peer e2e 2026-06-21).
+        for _ct in self._pending_client_tools.pop(client_id, []):
+            _ctn = _ct.get("name")
+            if _ctn:
+                server.client_tool_schemas[_ctn] = {
+                    "name": _ctn,
+                    "description": _ct.get("description", ""),
+                    "parameters": _ct.get("parameters", {}),
+                    "category": _ct.get("category", ""),
+                }
+
         # ----- Step 5: spawn (unconditional) -----
         spawn_ok = self._spawn_session_runner_unconditional(
             server=server,
@@ -1229,6 +1272,50 @@ class SessionManager:
                 spawn_session_runner,
                 dispatch_bootstrap_envelope,
             )
+
+            # Profile-driven cgroup confinement (parity with the WS path,
+            # websocket.py:661).  Historically only the WS + isolated-runner
+            # paths provisioned a per-session cgroup, so a main IPC session got
+            # AppArmor confinement (opt-in) but no cgroup — and the cgroup-nft
+            # egress layer (§5.11d-v2) rides on the cgroup.  Here we make
+            # confinement follow the PROFILE, not the transport: if the
+            # session's profile declares runtime_limits and cgroups are
+            # available, provision a per-session cgroup and pass the attach
+            # callback so the runner migrates into it at fork().
+            #
+            # Tradeoff: passing a non-None cgroup_attach bypasses the pre-warm
+            # pool (spawn_session_runner routes to cold-spawn when
+            # cgroup_attach is not None — pool slots are forked from a shared
+            # template and can't be migrated mid-life yet).  So only profiles
+            # that declare runtime_limits pay the cold-spawn cost; profiles
+            # without limits are unchanged (cgroup_attach stays None -> pool).
+            cgroup_attach = None
+            cgroup_profile = getattr(server, "_profile", None)
+            cgroup_limits = (
+                getattr(cgroup_profile, "runtime_limits", None)
+                if cgroup_profile else None
+            )
+            if cgroup_limits is not None:
+                cgroups_manager = self._resolve_cgroups_manager()
+                if cgroups_manager is not None and cgroups_manager.is_available():
+                    try:
+                        if cgroups_manager.provision_cgroup(session_id, cgroup_limits):
+                            cgroup_attach = cgroups_manager.make_attach_callback(
+                                session_id)
+                            if cgroup_limits.has_kernel_limits():
+                                logger.info(
+                                    "Cgroup limits applied to IPC session %s "
+                                    "(memory=%s pids=%s cpu_weight=%s)",
+                                    session_id, cgroup_limits.memory_max_mb,
+                                    cgroup_limits.pids_max, cgroup_limits.cpu_weight,
+                                )
+                    except Exception as exc:  # noqa: BLE001 — best-effort
+                        logger.warning(
+                            "Cgroup provisioning failed for IPC session %s "
+                            "(%s: %s) — runner spawns in the daemon's cgroup",
+                            session_id, type(exc).__name__, exc,
+                        )
+
             spawn_session_runner(
                 server=server,
                 session_id=session_id,
@@ -1236,6 +1323,7 @@ class SessionManager:
                 profile_name=profile_name,
                 daemon_loop=getattr(self, "_daemon_loop", None),
                 disable_confine=(profile_name == ""),
+                cgroup_attach=cgroup_attach,
                 pool_manager=getattr(self, "_pool_manager_ref", None),
                 cascade_driver_id=cascade_driver_id,
             )
@@ -1974,8 +2062,8 @@ class SessionManager:
             provider_name = "anthropic"
 
         try:
-            project_val = os.environ.get("PROJECT_ID", "") or ""
-            location_val = os.environ.get("LOCATION", "") or ""
+            project_val = os.environ.get("PROJECT_ID", "") or ""  # env: GCP project ID for Google GenAI / Vertex AI
+            location_val = os.environ.get("LOCATION", "") or ""  # env: Vertex AI region for Google GenAI (e.g. us-central1 or global)
         except Exception:  # noqa: BLE001
             project_val = ""
             location_val = ""
@@ -2696,6 +2784,7 @@ class SessionManager:
             provisioned=envelope.provisioned,
             created_by=envelope.created_by,
             sandbox_mode=planned_sandbox,
+            inline_profile_spec=envelope.inline_profile_spec,
         )
 
         return server, session
@@ -2853,6 +2942,25 @@ class SessionManager:
         # for a redundant SessionError here.
         if not server.initialize():
             return None, None
+
+        # Reactor-bus sink: forward every event on this session's per-session
+        # EventBus into the daemon-wide reactor bus, so a reactor that
+        # subscribes ONCE to the daemon-wide bus receives events from ALL
+        # sessions.  Per-session subscribers stay isolated on the per-session
+        # bus; only this forward crosses into the daemon-wide one.  (Events for
+        # an already-unloaded session arrive via daemon-level sources publishing
+        # straight to the reactor bus — the per-session bus is gone by then.)
+        # See docs/design/reactor-bus-session-scope.md.
+        _runtime = getattr(server, "_runtime", None)
+        _session_bus = getattr(_runtime, "event_bus", None) if _runtime else None
+        if _session_bus is not None:
+            from jaato_sdk.event_bus import EventFilter
+            _session_bus.subscribe(
+                subscriber_name="reactor_bus_sink",
+                filter=EventFilter(),
+                callback=self.reactor_event_bus.publish,
+                replay_history=False,
+            )
 
         # Resolve sandbox_mode.  Priority:
         # 1. ``envelope.sandbox_mode`` — authoritative pre-resolved
@@ -3124,6 +3232,24 @@ class SessionManager:
             client_id, role, cascade_driver_id,
             sorted(event_types) if event_types else "ALL",
         )
+        # Wake re-nudge (Option 2): if an observer (re)registers for a cid that
+        # has a wake pending on one of its sessions, re-emit SessionWokenEvent so
+        # a reconnecting bot is nudged to re-attach even if it missed the first.
+        if role == "observer":
+            self._reemit_pending_wakes_for_cid(cascade_driver_id)
+
+    def _reemit_pending_wakes_for_cid(self, cascade_driver_id: str) -> None:
+        """Re-emit ``SessionWokenEvent`` for any not-yet-driven wake whose
+        session's cid matches — so an observer that (re)connects after the first
+        emit still learns it must re-attach."""
+        now = time.time()
+        with self._lock:
+            pending = [
+                (sid, p) for sid, p in self._pending_wakes.items()
+                if p.cascade_driver_id == cascade_driver_id and p.expires_at > now
+            ]
+        for sid, p in pending:
+            self._emit_session_woken(sid, p.wake_ref, p.source)
 
     def unregister_cascade_client(
         self,
@@ -3341,11 +3467,21 @@ class SessionManager:
         for direct-attached cascade observers.
         """
         cid = getattr(session, "cascade_driver_id", None)
-        self._dispatch_to_cascade_clients_by_cid(cid, event)
+        # Dedup owner==observer: every attached client already received this
+        # event via the direct ``_emit_to_client`` fan-out at the caller
+        # (session_manager.py ~3750), so skip any cascade entry delivering to
+        # that same raw connection — otherwise post-bootstrap turn events
+        # (ToolCallStart/End, AgentOutput, AgentCompleted) double on the wire
+        # for a client that is BOTH attached AND a cascade observer.  Parallels
+        # the bootstrap-path skip in :meth:`_route_bootstrap_event`.
+        self._dispatch_to_cascade_clients_by_cid(
+            cid, event, skip_client_ids=set(session.attached_clients),
+        )
 
     def _dispatch_to_cascade_clients_by_cid(
         self, cid: Optional[str], event: Event,
         skip_client_id: Optional[str] = None,
+        skip_client_ids: Optional[Set[str]] = None,
     ) -> None:
         """Phase 1 dispatch core — fan out an event to cascade-clients
         registered for ``cid``.
@@ -3399,12 +3535,33 @@ class SessionManager:
         (extensions wiring callbacks not tied to IPC) get None →
         skip never matches → existing behavior preserved.
 
+        ``skip_client_ids`` (server 0.6.196+): the POST-bootstrap
+        analogue of the single ``skip_client_id``.  The post-bootstrap
+        caller (:meth:`_dispatch_to_cascade_clients`) direct-emits the
+        event to EVERY ``session.attached_clients`` before this
+        cascade fan-out, so a cascade entry whose
+        ``delivery_target_id`` is any of those attached clients would
+        double-deliver on the same raw connection (owner==observer:
+        the client that fired the session AND registered as a cascade
+        observer on the same IPC connection).  Passing the
+        attached-clients set here dedups all such overlaps; a cascade
+        observer on a SEPARATE connection (not attached) is not in the
+        set and still receives the event.
+
         ``last_event_ts`` is NOT updated for skipped entries because
         they didn't actually fire; their next real delivery resets
         the timer.
         """
         if cid is None:
             return
+        # Combined skip set: bootstrap passes a single ``skip_client_id``
+        # (the direct-attach client); the post-bootstrap path passes
+        # ``skip_client_ids`` = the session's ``attached_clients``.
+        skip: Set[str] = set()
+        if skip_client_id is not None:
+            skip.add(skip_client_id)
+        if skip_client_ids:
+            skip.update(skip_client_ids)
         # Snapshot under lock to avoid mutation-during-iteration if
         # a callback unregisters concurrently.
         with self._cascade_clients_lock:
@@ -3413,9 +3570,8 @@ class SessionManager:
         # Owners first, observers second — see docstring.
         for entry in sorted(entries, key=lambda e: 0 if e.role == "owner" else 1):
             if (
-                skip_client_id is not None
-                and entry.delivery_target_id is not None
-                and entry.delivery_target_id == skip_client_id
+                entry.delivery_target_id is not None
+                and entry.delivery_target_id in skip
             ):
                 # Dedup branch (server 0.6.177+, fixed comparand
                 # 0.6.178+): this entry's callback delivers to the
@@ -3510,15 +3666,23 @@ class SessionManager:
         self, session: 'Session', event: Event,
     ) -> None:
         """Default lifecycle policy: on ``SessionTerminatedEvent`` for
-        a session that is headless OR has a registered cascade-owner,
-        force an unload.
+        a session that is headless OR has a registered cascade-owner OR
+        is cascade-stamped (``cascade_driver_id`` set), force an unload.
+
+        The cascade-stamped disjunct (server 0.6.166+) covers the
+        driver-attached DISCOVERY session, whose IPC client registers
+        only as an *observer*: without it that session was neither
+        headless nor owner-registered, hit the early-return, and its
+        slot stayed pinned for minutes until the driver detached on its
+        own — see the inline comment on the gate below.
 
         ``SessionTerminatedEvent`` is by definition a terminal-state
         signal (see :class:`jaato_sdk.events.SessionTerminatedEvent`
         — "Session has fully wound down — safe to disconnect").  All
         four current reasons (``natural``, ``error``, ``stopped``,
         ``client_request``) are terminal; any of them on a headless /
-        cascade-owned session means it's safe to unload now, which
+        cascade-owned / cascade-stamped session means it's safe to
+        unload now, which
         triggers ``JaatoServer.shutdown()`` → ``session_end`` RPC →
         ``pool_manager.return_slot_after_session(...)``.  Without this
         unload, the runner subprocess stays alive and the pool slot
@@ -3558,7 +3722,23 @@ class SessionManager:
                 entries = self._cascade_clients.get(cid, [])
                 has_cascade_owner = any(e.role == "owner" for e in entries)
 
-        if not (is_headless or has_cascade_owner):
+        # Server 0.6.166+ (γ'-guard fix): a cascade-stamped session
+        # (``cid is not None``) ALWAYS passes this gate, even when it is
+        # neither headless nor owner-registered.  Without this third
+        # disjunct the driver-attached DISCOVERY session — created via
+        # ``client.create_session("discovery", cascade_driver_id=...)``
+        # over an IPC client that registers only as an *observer* (no
+        # ``owner`` entry) — was ``is_headless=False`` AND
+        # ``has_cascade_owner=False``, hit this early-return, and so the
+        # γ' driver-detach block below NEVER ran.  Its slot stayed pinned
+        # until the driver's IPC client detached on its own (measured
+        # 2m50s–6m25s later, 2026-06-11), stalling the cascade's first
+        # handoff while every headless handoff returned its slot in
+        # ~250ms.  ``cid is not None`` makes the γ' detach reachable for
+        # discovery so its slot returns at SessionTerminated like every
+        # other stage.  TUI interactive sessions never set
+        # ``cascade_driver_id`` so they are unaffected.
+        if not (is_headless or has_cascade_owner or cid is not None):
             return
 
         # Pop the synthetic _HEADLESS_CLIENT_ID so the existing
@@ -3694,6 +3874,14 @@ class SessionManager:
             for cid, entries in list(self._cascade_clients.items()):
                 if cid in active_cids:
                     continue  # cascade still active; skip
+                # Wake durability (Option 2): while a LIVE wake binding carries
+                # this cid, its observer must survive the session going cold — a
+                # wake may still arrive.  Tie the observer's lifetime to the
+                # binding, NOT to session activity (else a wake-bound but idle
+                # bot loses its session.woken subscription after the idle timeout
+                # and silently misses the wake).
+                if self._wake_binding_registry.has_live_binding_for_cid(cid):
+                    continue
                 # Server 0.6.161+ (Bug B): also treat the cascade as
                 # alive if a session with this cid was created within
                 # ``timeout`` seconds, even if no session is currently
@@ -4411,6 +4599,24 @@ class SessionManager:
                 if profile.system_instructions:
                     logger.info("  Agent instructions override profile's system_instructions (deprecated)")
                 profile.system_instructions = agent_instructions
+            else:
+                # No explicit --profile: synthesize a minimal profile to CARRY
+                # the agent persona. runner_spawn reads system_instructions from
+                # ``profile.system_instructions``; with ``profile=None`` the
+                # resolved persona was extracted then DROPPED here, so an agent
+                # specified without a profile went bare. Every other field takes
+                # its default (plugins=[], model/provider=None, gc=None,
+                # spawn_payload_schema=None, suppress_base_instructions=False) —
+                # byte-identical to the ``profile=None`` path this replaces (same
+                # plugins=[]/model=None downstream, same False/None reads in the
+                # pre-spawn profile-gated branches). So it adds ONLY the persona,
+                # with zero plugin / model / provider / gating change.
+                from shared.plugins.subagent.config import SubagentProfile
+                profile = SubagentProfile(
+                    name=agent_name,
+                    description=agent_result.get("description", ""),
+                    system_instructions=agent_instructions,
+                )
 
         # ── Spawn-payload schema validation ──────────────────────────
         # Symmetric to the subagent plugin's check at the function-call
@@ -4478,11 +4684,15 @@ class SessionManager:
         # logical identity (e.g. ``"coordinator"``).  Without this, all
         # AgentCompletedEvents would carry ``agent_id="main"`` regardless
         # of which agent the session was launched with.
-        # Resolve effective suppress_base_instructions: explicit kwarg wins
-        # if True; otherwise profile-level field controls.  Either source
-        # asking for True is sufficient (OR semantics).
-        effective_suppress_base = suppress_base_instructions or bool(
-            profile and getattr(profile, "suppress_base_instructions", False)
+        # Resolve effective suppress_base_instructions: UNION of the explicit
+        # kwarg (CLI --no-instructions / SDK bool-or-dict) and the profile's
+        # field.  A piece is suppressed if EITHER source asks for it.  Both
+        # normalize to the canonical frozenset (see instruction_suppression).
+        effective_suppress_base = normalize_suppression(
+            suppress_base_instructions
+        ) | (
+            getattr(profile, "suppress_base_instructions", frozenset())
+            if profile else frozenset()
         )
 
         # Phase 3 §3.12.0: route the construction +
@@ -4499,6 +4709,10 @@ class SessionManager:
             client_id=client_id,
             env_file=session_env_file,
             profile=profile,
+            # Carry the UNRESOLVED inline spec so the created Session can
+            # stash it for disk-restore (persisted as profile_spec).  Only
+            # set for inline-spec sessions; None for named/no-profile.
+            inline_profile_spec=inline_profile_data,
             agent_name=agent_name,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=effective_suppress_base,
@@ -4663,6 +4877,9 @@ class SessionManager:
 
     _HEADLESS_CLIENT_ID = "_headless"
 
+    # Cap on the wake dedup LRU (session.wake event_id de-duplication).
+    _WAKE_DEDUP_CAP = 1024
+
     def create_headless_session(
         self,
         profile_name: Optional[str] = None,
@@ -4676,6 +4893,7 @@ class SessionManager:
         agent_params: Optional[Dict[str, str]] = None,
         apparmor: Optional[bool] = None,
         cascade_driver_id: Optional[str] = None,
+        inline_profile_data: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -4734,6 +4952,15 @@ class SessionManager:
                 this through from the originating reactor handler
                 (`cascade_after_*.py`).  See
                 ``docs/design/runner-cascade-sharing.md``.
+            inline_profile_data: Optional dict carrying an inline
+                ``SubagentProfile`` shape (model/provider/plugins/…), the
+                canonical ``build_inline_profile`` input.  Forwarded to
+                :meth:`create_session` so callers with a profile built
+                on-the-fly (rather than name-resolved from
+                ``.jaato/profiles/``) can spawn a headless session — used by
+                the ephemeral remote-spawn path, which receives a serialized
+                profile from the origin peer.  Mutually exclusive with
+                ``profile_name`` in practice.
 
         Returns:
             The session ID (empty string on failure).
@@ -4749,6 +4976,7 @@ class SessionManager:
             config_root=config_root,
             apparmor=apparmor,
             cascade_driver_id=cascade_driver_id,
+            inline_profile_data=inline_profile_data,
         )
         if not session_id:
             # Server 0.6.50.1+: log at WARNING so reactor callers
@@ -4811,6 +5039,53 @@ class SessionManager:
             )
 
         return session_id
+
+    def get_persisted_history(
+        self,
+        session_id: str,
+        workspace_path: Optional[str] = None,
+    ) -> Optional[List[Any]]:
+        """Read a persisted session's conversation history from disk WITHOUT
+        loading the session (no JaatoServer built, no runner spawned).
+
+        The read-only counterpart to the history-restore half of
+        :meth:`_load_session_impl`: it does the same ``self._session_plugin.load``
+        record read and returns ``state.history`` — the list of ``Message``
+        objects suitable for ``create_headless_session(initial_history=...)`` —
+        but stops short of building a server or spawning a runner.
+
+        This is the jaato-server piece of the §9 fork-from-PERSISTED resume: a
+        reactor (e.g. reliability_revive) forking a continuation from an
+        UNLOADED/ended session reads the persisted history here and feeds it to
+        :meth:`create_headless_session` (the premium ActionContext wraps the two
+        as ``ctx.fork_from_persisted_session``).  Contrast
+        ``JaatoSession.get_history`` / ``fork_from_session``, which snapshot a
+        LIVE session's in-memory history and so require it loaded.
+
+        Args:
+            session_id: The persisted session to read.
+            workspace_path: Workspace whose ``.jaato/sessions/`` holds the
+                record (same contract as :meth:`_load_session`).  ``None`` falls
+                back to the session plugin's default storage location.
+
+        Returns:
+            The session's history (list of ``Message`` objects), or ``None`` if
+            no record exists on disk for ``session_id``.
+        """
+        storage_dir = (
+            self._session_storage_dir(workspace_path) if workspace_path else None
+        )
+        try:
+            state = self._session_plugin.load(session_id, storage_dir=storage_dir)
+        except FileNotFoundError:
+            logger.debug(
+                "get_persisted_history: session %s not found on disk", session_id)
+            return None
+        except Exception as exc:  # noqa: BLE001 — a missing/corrupt record must not crash the caller
+            logger.error(
+                "get_persisted_history: failed to read %s: %s", session_id, exc)
+            return None
+        return getattr(state, "history", None)
 
     def inject_prompt_to_session(
         self,
@@ -4875,6 +5150,83 @@ class SessionManager:
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("inject_prompt forward failed: %s", exc)
+            return False
+        return True
+
+    def send_message_to_session(
+        self,
+        target_session_id: str,
+        text: str,
+    ) -> bool:
+        """DRIVE a turn on an already-loaded session in place, keeping its id.
+
+        The turn-DRIVING counterpart to :meth:`inject_prompt_to_session`:
+        ``inject_prompt_to_session`` QUEUES a prompt into the runner's inject
+        buffer (consumed only when some OTHER driver runs the next turn), so an
+        idle headless session with no client / no poll never actually runs.
+        This DISPATCHES a ``SendMessageRequest`` through the same daemon path a
+        client send takes — it is the exact call
+        :meth:`create_headless_session` uses for its ``initial_prompt`` (only
+        that path forks a NEW session first; this targets the EXISTING id) — so
+        the session RUNS a turn.
+
+        Use for the T1 reactor-driven resume (idle-but-LOADED): keeps the SAME
+        session id, NO fork-from-history.  For an unloaded/ended session (T2)
+        reload it first (attach / ``_load_session``) or resume via
+        ``create_headless_session(initial_history=..., initial_prompt=...)`` —
+        a forked continuation with a new id.
+
+        Thread-safe.  Returns ``True`` if a turn was dispatched, ``False`` if
+        the target isn't loaded in ``self._sessions``.
+        """
+        with self._lock:
+            session = self._sessions.get(target_session_id)
+        if session is None:
+            return False
+        from jaato_sdk.events import SendMessageRequest
+        try:
+            self.handle_request(
+                self._HEADLESS_CLIENT_ID,
+                target_session_id,
+                SendMessageRequest(text=text),
+            )
+        except Exception as exc:  # noqa: BLE001 — a reactor resume must not crash the caller
+            logger.debug("send_message_to_session dispatch failed: %s", exc)
+            return False
+        return True
+
+    def set_session_state_for_session(
+        self, target_session_id: str, key: str, value: Any,
+    ) -> bool:
+        """Write session-attached state to a loaded session by ID.
+
+        The session-state sibling of :meth:`inject_prompt_to_session` — a
+        routing primitive for daemon extensions (reactor rules, webhook
+        handlers) that must write ``key → value`` into a session OTHER than the
+        one whose event triggered them.  Generalises
+        ``JaatoSession.set_session_state`` from "self-targeting" to
+        "addressable by ID".  Used by the reliability T3 resume: the
+        ``gate.released`` handler (a global bus event) writes the approved-tools
+        set into the **parked** session, which is not the originating session.
+
+        Thread-safe.  Returns ``True`` if delivered, ``False`` if the target
+        isn't loaded or has no active runner.  ``value`` must be
+        JSON-serialisable (validated runner-side).
+        """
+        with self._lock:
+            session = self._sessions.get(target_session_id)
+        if session is None:
+            return False
+        rpc = getattr(session.server, "_runner_rpc", None)
+        if rpc is None:
+            return False
+        forwarder = getattr(rpc, "session_set_state_threadsafe", None)
+        if not callable(forwarder):
+            return False
+        try:
+            forwarder(key, value, timeout=2.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("set_session_state forward failed: %s", exc)
             return False
         return True
 
@@ -4974,7 +5326,32 @@ class SessionManager:
         # Track if session was already in memory (client missed init events)
         session_was_in_memory = False
 
+        # Attach-vs-unload race guard (off-lock await): if an async unload has
+        # committed for this session, its runner is mid-disposal and the session
+        # is about to be evicted. Await the unload (it needs the lock to finish,
+        # so we must wait OUTSIDE the lock), then fall through — the session
+        # will be gone and the disk-restore path below loads fresh + re-spawns.
         with self._lock:
+            pending_unload = self._unloading.get(session_id)
+        if pending_unload is not None:
+            logger.info(
+                "attach_session: session %s is mid-unload — awaiting teardown "
+                "before re-attach", session_id,
+            )
+            pending_unload.wait(timeout=30.0)
+
+        with self._lock:
+            # Atomic with the client-add below: if the unload marker is STILL
+            # present (await timed out, or an unload committed in the gap since
+            # the await), do NOT attach to a session whose runner is being
+            # disposed — bail cleanly so the client retries (the retry takes the
+            # now-clear disk-restore path).
+            if session_id in self._unloading:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=f"Session {session_id} is being unloaded; please retry",
+                    error_type="SessionError",
+                ))
+                return False
             # Check if session is in memory
             session = self._sessions.get(session_id)
             session_was_in_memory = session is not None
@@ -4983,8 +5360,9 @@ class SessionManager:
                 # Try to load from disk (pass client_id for init progress events)
                 logger.debug(f"attach_session: session {session_id} not in memory, loading from disk...")
                 try:
-                    session = self._load_session(session_id, client_id=client_id, workspace_path=workspace_path)
-                    logger.debug(f"attach_session: _load_session returned {session is not None}")
+                    session = self._load_persisted_with_index_fallback(
+                        session_id, client_id, workspace_path)
+                    logger.debug(f"attach_session: load returned {session is not None}")
                 except Exception as e:
                     logger.error(f"attach_session: _load_session raised: {type(e).__name__}: {e}")
                     import traceback
@@ -5090,7 +5468,334 @@ class SessionManager:
             style="info",
         ))
 
+        # DEFERRED-TURN drain (Option 2) is NOT done here: attach_session
+        # completes BEFORE the re-attaching client's buffered host tools are
+        # flushed to the runner (that flush happens transport-side, post-attach).
+        # Driving here would build the turn's tool schema before the client's
+        # host tools are wired, so the woken turn couldn't call them.  The
+        # transport layer drives the pending wake AFTER wiring the client's
+        # tools (or immediately when the client has none) — see
+        # ipc.py / websocket.py client-tool flush.
         return True
+
+    def resume_session(
+        self,
+        session_id: str,
+        workspace_path: Optional[str] = None,
+    ) -> Optional[str]:
+        """Reload a persisted session into a LIVE, SAME-id session and restore
+        its headless presentation, so a reactor can drive it in place via
+        :meth:`send_message_to_session` — the PUBLIC same-id RESUME counterpart
+        to the private :meth:`_load_session`.
+
+        Use for the reliability T2 resume (parked session unloaded to free the
+        runner, then revived on a late human approval).  Unlike fork-from-
+        persisted (:meth:`get_persisted_history` + ``create_headless_session``,
+        which mints a NEW id and a fresh, lossy headless reconstruction), this
+        reloads the record UNDER THE SAME ID with full fidelity — history,
+        session-attached state, profile, and the permission WHITELIST — then
+        re-applies the headless/API presentation context.
+
+        The presentation re-apply is the crux: the presentation is CLIENT
+        config (set at connect via :meth:`_apply_client_config_to_server`'s
+        ``_HEADLESS_CLIENT_ID`` branch); it is NOT persisted in the record and
+        NOT restored by :meth:`_load_session`.  Without it the reloaded
+        session's ``presentation_context`` is ``None`` → the permission base
+        flow takes the INTERACTIVE path → ``channel.request_permission`` blocks
+        waiting for a client response a reactor-driven session never gets.
+        Re-applying the API presentation makes permission behave as the
+        headless session it is, so the restored profile whitelist grants the
+        retried call directly (no per-call prompt).
+
+        Pairs with :meth:`send_message_to_session` for the unified resume→drive
+        shape mirroring the validated T1 path::
+
+            resume_session(sid, ws)            # reload + restore presentation
+            send_message_to_session(sid, ...)  # drive the continuation turn
+
+        Thread-safe (``_load_session`` runs in a fresh session context).
+
+        Args:
+            session_id: The persisted session to resume.
+            workspace_path: Workspace whose ``.jaato/sessions/`` holds the
+                record (same contract as :meth:`_load_session` /
+                :meth:`get_persisted_history`).
+
+        Returns:
+            ``session_id`` on success (the session is now loaded + presentation-
+            restored), or ``None`` if no record exists / the load failed.
+        """
+        session = self._load_session(
+            session_id,
+            client_id=self._HEADLESS_CLIENT_ID,
+            workspace_path=workspace_path,
+        )
+        if session is None:
+            logger.debug(
+                "resume_session: %s not found on disk / load failed", session_id)
+            return None
+        # _load_session restores history / session-state / profile / whitelist
+        # but NOT the presentation context (it's client-config, set at connect,
+        # not persisted).  Re-apply the headless/API presentation so the
+        # permission layer behaves headless — otherwise the interactive path
+        # blocks on this no-client session.  See the docstring.
+        self._apply_client_config_to_server(
+            self._HEADLESS_CLIENT_ID, session.server)
+        return session_id
+
+    def wake_session(
+        self,
+        session_id: str,
+        text: str,
+        source: str = "user",
+        event_id: Optional[str] = None,
+        wake_ref: Optional[str] = None,
+        cascade_driver_id: Optional[str] = None,
+    ) -> Tuple["WakeOutcome", str]:
+        """Start a USER turn on ``session_id``, reviving it if cold/unloaded.
+
+        DEFERRED-TURN (Option 2): if the session is revived COLD with no attached
+        client AND a ``cascade_driver_id`` is known (so an observer can be
+        notified), the turn is NOT driven immediately — host tools (client-side)
+        would have no client to dispatch to.  Instead a ``SessionWokenEvent`` is
+        emitted to the cid's cascade observers and the wake is held pending until
+        a client re-attaches (:meth:`attach_session` drains it).  Returns
+        ``DEFERRED`` in that case.  Without a cid (direct/reactor wake) or with a
+        client already attached, the turn drives immediately (``OK``).
+
+        The client-agnostic wake primitive (``session.wake``): any authenticated
+        caller — IPC, WS, an HTTP webhook shim, cron, a peer — can drive a fresh
+        turn on a session with NO client attached.  It composes the existing
+        headless primitives, :meth:`resume_session` (cold-revive) then
+        :meth:`send_message_to_session` (drive), and adds three wake-specific
+        concerns:
+
+        - **Workspace stays server-owned.**  A cold session's workspace is
+          resolved from the daemon's :class:`SessionWorkspaceIndex`, NEVER from
+          the caller, so an authenticated-but-untrusted caller cannot point
+          revival at a weaker sandbox root.  The sandbox root itself always
+          comes from the persisted record (``state.workspace_path`` in
+          ``_load_session``).  A loaded session's workspace is already on its
+          ``Session`` object, so the index is consulted only for cold sessions.
+        - **Payload is untrusted.**  ``text`` can be attacker-influenced (e.g. a
+          public PR-review comment), so it is wrapped via
+          :func:`wrap_untrusted_content` — the model sees it as DATA to weigh,
+          never as instructions.  The inject / USER-prompt path does NOT pass
+          through the tool-result trait auto-wrap (#495 scopes that to
+          web_fetch / web_search / MCP), so the wrap is applied explicitly here.
+        - **Dedup.**  An ``event_id`` already actioned is dropped — external
+          ingresses (GitHub, etc.) redeliver.
+
+        Fire-and-forget: returns once the turn is DISPATCHED (mirroring the
+        reactor resume→drive shape); the turn's output flows to whatever client
+        later attaches (or persists to history).
+
+        Returns ``(outcome, detail)`` where ``outcome`` is a :class:`WakeOutcome`
+        (route on this, not the prose ``detail``) — a redelivered ``event_id``
+        yields the benign ``DUPLICATE`` (idempotent no-op), NOT an error.
+        """
+        from shared.session_id import is_safe_session_id
+        if not session_id or not is_safe_session_id(session_id):
+            return (WakeOutcome.INVALID, "invalid or missing session_id")
+        if not text:
+            return (WakeOutcome.INVALID, "empty wake text")
+
+        # Dedup CLAIM (up-front): claim the event_id so a concurrent duplicate
+        # dedups immediately.  The claim is RELEASED on any failure below, so a
+        # legitimate retry — e.g. an at-least-once sender redelivering after a
+        # 5xx transient failure — can re-drive: dedup-on-SUCCESS,
+        # retry-on-failure.  A redelivery of an already-SUCCEEDED wake stays
+        # claimed → benign DUPLICATE.  (Marking before dispatch would wrongly
+        # swallow the retry of a failed wake as a no-op.)
+        claimed = False
+        if event_id:
+            with self._lock:
+                if event_id in self._wake_seen_event_ids:
+                    return (WakeOutcome.DUPLICATE,
+                            f"event_id {event_id!r} already actioned "
+                            f"(idempotent no-op)")
+                self._wake_seen_event_ids[event_id] = None
+                while len(self._wake_seen_event_ids) > self._WAKE_DEDUP_CAP:
+                    self._wake_seen_event_ids.popitem(last=False)
+                claimed = True
+
+        def _release_claim() -> None:
+            """Release the event_id claim so a retry of THIS (failed) wake is
+            not deduped away.  No-op when there was no claim."""
+            if claimed:
+                with self._lock:
+                    self._wake_seen_event_ids.pop(event_id, None)
+
+        # Revive if cold.  Workspace is resolved server-side, never from the
+        # caller (the security invariant above).
+        with self._lock:
+            loaded = self._sessions.get(session_id)
+        if loaded is None:
+            workspace = self._session_workspace_index.resolve(session_id)
+            if workspace is None:
+                _release_claim()
+                return (WakeOutcome.UNRESOLVED,
+                        f"cannot resolve workspace for cold session "
+                        f"{session_id!r} (unknown or ambiguous in the "
+                        f"session-workspace index)")
+            if self.resume_session(session_id, workspace_path=workspace) is None:
+                _release_claim()
+                return (WakeOutcome.REVIVE_FAILED,
+                        f"revive failed for session {session_id!r}")
+
+        # DEFERRED-TURN gate: a cold-revived session with NO attached client and
+        # a known cid → emit SessionWokenEvent + hold pending; do NOT drive into
+        # the void (host tools have no client to dispatch to).  The event_id
+        # claim is retained (a deferred wake is a success — a redelivery while
+        # pending is a benign DUPLICATE, not a re-defer).
+        with self._lock:
+            session = self._sessions.get(session_id)
+            has_client = bool(session and session.attached_clients)
+        if cascade_driver_id and session is not None and not has_client:
+            with self._lock:
+                # Tag the revived session with its cid (under _lock — event
+                # routing + the sweep read cascade_driver_id concurrently) so
+                # _emit_to_session reaches the cid's observers and the
+                # durability sweep sees it active.
+                session.cascade_driver_id = cascade_driver_id
+                self._pending_wakes[session_id] = _PendingWake(
+                    text=text, source=source, wake_ref=wake_ref or "",
+                    cascade_driver_id=cascade_driver_id,
+                    expires_at=self._wake_pending_expiry(wake_ref))
+            self._emit_session_woken(session_id, wake_ref or "", source)
+            logger.info(
+                "wake: session %s revived cold, no client — DEFERRED; "
+                "SessionWokenEvent emitted to cid=%s observers, turn pends re-attach",
+                session_id, cascade_driver_id)
+            return (WakeOutcome.DEFERRED,
+                    f"session {session_id!r} revived cold with no client; turn "
+                    f"deferred until re-attach (SessionWokenEvent emitted)")
+
+        # Warm (client attached) or no observer path: wrap + drive immediately.
+        from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+        wrapped = wrap_untrusted_content(text, source=f"wake:{source}")
+        if not self.send_message_to_session(session_id, wrapped):
+            _release_claim()
+            return (WakeOutcome.NOT_DRIVABLE,
+                    f"session {session_id!r} not drivable after wake")
+        return (WakeOutcome.OK, "woken")
+
+    def _wake_pending_expiry(self, wake_ref: Optional[str]) -> float:
+        """Expiry for a deferred wake — the wake binding's expiry if resolvable,
+        else a bounded default so a permanently-detached bot's pending wake
+        doesn't linger forever."""
+        if wake_ref:
+            binding = self._wake_binding_registry.resolve(wake_ref)
+            if binding is not None:
+                return binding.expires_at
+        return time.time() + 24 * 3600.0
+
+    def _emit_session_woken(
+        self, session_id: str, wake_ref: str, source: str,
+    ) -> None:
+        """Emit ``SessionWokenEvent`` to the session's cascade observers (and any
+        attached clients) via :meth:`_emit_to_session` — the same tier
+        ``SessionTerminatedEvent`` uses.  A connected-but-detached observer
+        learns it must re-attach to serve the deferred turn."""
+        from jaato_sdk.events import SessionWokenEvent
+        try:
+            self._emit_to_session(session_id, SessionWokenEvent(
+                session_id=session_id, wake_ref=wake_ref, source=source))
+        except Exception:  # noqa: BLE001 — emission must not break the wake path
+            logger.exception("failed to emit SessionWokenEvent for %s", session_id)
+
+    def drive_pending_wake(self, session_id: str) -> bool:
+        """Drive a wake that was DEFERRED for ``session_id``, if one is pending
+        and not expired.  Called by :meth:`attach_session` after a client
+        attaches (a client is now present to serve host tools).  Returns True if
+        a pending wake was driven."""
+        with self._lock:
+            pending = self._pending_wakes.pop(session_id, None)
+        if pending is None:
+            return False
+        if pending.expires_at <= time.time():
+            logger.info("drive_pending_wake: dropping expired pending wake for %s",
+                        session_id)
+            return False
+        from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+        wrapped = wrap_untrusted_content(pending.text, source=f"wake:{pending.source}")
+        driven = self.send_message_to_session(session_id, wrapped)
+        if driven:
+            logger.info(
+                "wake: drove DEFERRED turn for session %s on re-attach "
+                "(wake_ref=%s) — host tools now available", session_id,
+                pending.wake_ref)
+        else:
+            logger.warning("drive_pending_wake: %s not drivable on re-attach",
+                           session_id)
+        return driven
+
+    def bind_wake(
+        self,
+        wake_ref: str,
+        session_id: str,
+        workspace_path: str,
+        trust_keys: List[str],
+        ttl_seconds: Optional[int] = None,
+        cascade_driver_id: Optional[str] = None,
+    ) -> "BindOutcome":
+        """Owner-guarded bind of ``wake_ref`` → ``session_id`` with ``trust_keys``.
+
+        The command handler passes the CALLER'S current session as
+        ``session_id`` + its workspace (so a caller can only bind ITSELF —
+        hijack-proof) + its ``cascade_driver_id`` (so a deferred wake can reach
+        the session's cascade observers and the observer survives the session
+        going cold — see :meth:`wake_session` / the sweep exemption).  Delegates
+        to the :class:`WakeBindingRegistry`.  See ``wake_binding_registry.py``.
+        """
+        return self._wake_binding_registry.bind(
+            wake_ref, session_id, workspace_path, trust_keys, ttl_seconds,
+            cascade_driver_id=cascade_driver_id)
+
+    def unbind_wake(self, wake_ref: str, session_id: str) -> "BindOutcome":
+        """Owner-guarded removal of ``wake_ref`` (the caller's session)."""
+        return self._wake_binding_registry.unbind(wake_ref, session_id)
+
+    def set_wake_public_url(self, url: Optional[str]) -> None:
+        """Wire the operator-declared public wake endpoint (from wake.json
+        ``public_url``) so ``bind_wake`` can advertise it in its result.
+        Whitespace is stripped so a blank/whitespace-only value reads as unset
+        (``""``) rather than a marker that looks set but won't route."""
+        self._wake_public_url = (url or "").strip() if isinstance(url, str) else ""
+
+    @property
+    def wake_public_url(self) -> str:
+        """The operator-declared public wake endpoint, or ``""`` if unset."""
+        return self._wake_public_url
+
+    def _owner_session_record_exists(
+        self, session_id: str, workspace_path: str,
+    ) -> bool:
+        """Whether a session record for ``session_id`` still exists — live in
+        memory OR persisted on disk under ``workspace_path``.
+
+        The wake-binding owner-guard's liveness oracle (see
+        :class:`WakeBindingRegistry`).  A DELETED owner (record gone) frees its
+        ``wake_ref`` for re-binding; a merely-UNLOADED (cold, revivable) owner
+        keeps its record on disk and so keeps the ref protected — the
+        distinction that preserves #520 cold-revive.  On any error determining
+        the path it fails SAFE (owner assumed to exist → guard stays), so
+        uncertainty never opens a hijack.
+        """
+        if session_id in self._sessions:
+            return True
+        try:
+            storage_dir = self._session_storage_dir(workspace_path)
+        except (ValueError, TypeError):
+            return True
+        return (storage_dir / f"{session_id}.json").exists()
+
+    def resolve_wake_binding(self, wake_ref: str):
+        """Resolve a live (non-expired) binding for the mode-B verify shim, or
+        ``None``.  The shim then verifies the wake signature against
+        ``binding.trust_keys`` and drives ``binding.session_id`` via
+        :meth:`wake_session`."""
+        return self._wake_binding_registry.resolve(wake_ref)
 
     def _load_session(
         self,
@@ -5110,6 +5815,85 @@ class SessionManager:
         return run_in_fresh_session_context(
             self._load_session_impl, session_id, client_id, workspace_path,
         )
+
+    def _load_persisted_with_index_fallback(
+        self,
+        session_id: str,
+        client_id: Optional[str],
+        workspace_path: Optional[str],
+    ) -> Optional["Session"]:
+        """Load a persisted session by id: client workspace first, then the
+        server-side session-workspace index.
+
+        The disk-restore path locates a record at ``<workspace>/.jaato/
+        sessions/<id>.json``.  For a workspace-PINNED client (an IPC client
+        whose ``working_dir`` *is* the session's workspace) the first
+        attempt lands.  For a workspace-PINLESS client (a browser over WS,
+        whose session lives in a server-provisioned ``ws_<hash>`` dir it
+        cannot present) the first attempt misses, so we fall back to
+        :class:`SessionWorkspaceIndex` — the authoritative
+        ``session_id → workspace`` map, the SAME server-side resolution the
+        wake path uses (``_wake_impl`` → ``resume_session``).  This is what
+        lets ``jaato.session(mode="ws", recovery=True).attach_session(id)``
+        cold-resume a persisted session with zero client-side workspace
+        knowledge — IPC parity.
+
+        The index ``resolve`` returns ``None`` for an unknown OR ambiguous
+        id (a cross-workspace id collision), so the fallback never guesses;
+        and it is skipped when the resolved workspace equals the one the
+        client attempt already used (no redundant reload).
+
+        Returns the loaded :class:`Session`, or ``None`` if no record is
+        found by either route.
+        """
+        session = self._load_session(
+            session_id, client_id=client_id, workspace_path=workspace_path)
+        if session is not None:
+            return session
+        resolved_ws = self._session_workspace_index.resolve(session_id)
+        if resolved_ws and resolved_ws != workspace_path:
+            logger.info(
+                "attach_session: %s not under client workspace; resolving via "
+                "session-workspace index → %s", session_id, resolved_ws)
+            session = self._load_session(
+                session_id, client_id=client_id, workspace_path=resolved_ws)
+        return session
+
+    @staticmethod
+    def _resolve_restore_config_root(
+        saved_config_root: Optional[str],
+        client_config_root: Optional[str],
+        workspace_path: Optional[str],
+    ) -> Optional[str]:
+        """Resolve ``config_root`` for a disk-restore, with deterministic
+        fallbacks so a pre-persistence session can't hang the re-spawned runner.
+
+        Pre-``config_root``-persistence sessions deserialize with
+        ``state.config_root=None`` (born under an earlier daemon).  Restoring
+        with ``None`` spawns a runner that never calls ``set_config_root``
+        (runner/session.py:353) → ``file_edit`` can't resolve its backup base
+        dir, ``FilesystemQuery`` inits ``workspace=none``, and auth verification
+        hangs forever → the user's message reaches no working runner (silent).
+
+        Resolution order:
+          1. the SAVED ``config_root`` (correct for post-persistence sessions),
+          2. the ATTACHING client's ``config_root`` (the client sends it in
+             ``ClientConfigRequest`` on every (re)attach — an authoritative,
+             non-guessed value),
+          3. the framework default ``<workspace_path>/.jaato`` (workspace_path
+             is reliably persisted, so every session resolves to a working
+             config_root and the runner never hangs).
+
+        Returns ``None`` only in the degenerate case where ``workspace_path`` is
+        also unset.
+        """
+        if saved_config_root:
+            return saved_config_root
+        if client_config_root:
+            return client_config_root
+        if workspace_path:
+            return str(pathlib.Path(workspace_path) / ".jaato")
+        return None
 
     def _load_session_impl(
         self,
@@ -5199,12 +5983,46 @@ class SessionManager:
         # only succeeds if the workspace .env carries MODEL_NAME +
         # JAATO_PROVIDER — same constraint as fresh-spawn-without-
         # profile.
+        # Resolve config_root with disk-restore fallbacks (saved → attaching
+        # client → <workspace>/.jaato default) so a pre-persistence session
+        # saved with config_root=None can't hang the re-spawned runner at
+        # file_edit/auth path resolution.  Used by BOTH the profile resolution
+        # below and the BootstrapEnvelope.
+        restore_config_root = self._resolve_restore_config_root(
+            state.config_root,
+            self._client_config.get(client_id, {}).get("config_root"),
+            state.workspace_path,
+        )
+
         restored_profile = None
-        if state.profile_name:
+        if state.profile_spec:
+            # INLINE-profile restore: the persisted spec is authoritative and
+            # self-contained, so reconstruct from it DIRECTLY — never named-
+            # resolve.  This is both correct (an inline session was never a
+            # named profile) and collision-safe: now that an inline spec's own
+            # ``name`` is honored (e.g. "nano-chat", not the "<inline>"
+            # sentinel), a named lookup could otherwise match an unrelated
+            # same-named DISK profile.  Uses the SAME build_inline_profile path
+            # create uses (re-resolving any pass:// secrets daemon-side —
+            # nothing sensitive is on disk).  The spec is also carried onto the
+            # restored Session (below) so re-saves re-persist it.
+            from shared.plugins.subagent.config import build_inline_profile
+            try:
+                restored_profile = build_inline_profile(state.profile_spec)
+                logger.info(
+                    "_load_session: reconstructed inline profile for session "
+                    "%s from persisted profile_spec (name=%s, model=%s, "
+                    "provider=%s)", session_id, restored_profile.name,
+                    restored_profile.model, restored_profile.provider)
+            except ValueError as exc:
+                logger.error(
+                    "_load_session: persisted inline profile_spec for session "
+                    "%s failed to rebuild: %s", session_id, exc)
+        elif state.profile_name:
             restored_profile, profile_err = self._resolve_profile(
                 state.profile_name,
                 workspace_path=state.workspace_path or workspace_path or "",
-                config_root=state.config_root,
+                config_root=restore_config_root,
                 env_file=session_env_file,
             )
             if restored_profile is None:
@@ -5215,7 +6033,34 @@ class SessionManager:
                     "profile still exists at "
                     "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
                     state.profile_name, session_id, profile_err,
-                    state.workspace_path, state.config_root,
+                    state.workspace_path, restore_config_root,
+                )
+
+        # Rebind the agent PERSONA on restore.  Persisting + restoring
+        # ``agent_name`` (below, on the envelope) restores the agent IDENTITY
+        # but NOT the persona prose: the create path composes the persona via
+        # ``_resolve_agent`` → ``profile.system_instructions`` (which
+        # ``build_session_envelope`` forwards to the runner), and disk-restore
+        # must do the same.  Without this, a revived session had its agent id
+        # but a profile whose ``system_instructions`` lacked the persona, so
+        # persona-only guidance (e.g. "call ``enter_tier('vision')`` on user
+        # images") was silently dropped and multimodal revives confabulated.
+        # agent_params are not persisted, so ``{{param}}`` personas restore
+        # unsubstituted — a separate, pre-existing limitation.
+        if state.profile_name and restored_profile is not None and state.agent_name:
+            agent_result = self._resolve_agent(
+                state.agent_name, None,
+                state.workspace_path or workspace_path or "",
+                config_root=restore_config_root,
+            )
+            if agent_result is not None:
+                restored_profile.system_instructions = agent_result["system_instructions"]
+            else:
+                logger.warning(
+                    "_load_session: agent %r for session %s not resolvable — "
+                    "persona (e.g. enter_tier guidance) missing on restore "
+                    "(config_root=%s)",
+                    state.agent_name, session_id, restore_config_root,
                 )
 
         # Phase 3 §3.12 disk-restore migration: route the JaatoServer
@@ -5232,10 +6077,45 @@ class SessionManager:
             workspace_path=state.workspace_path,
             name=state.description or f"Session {session_id}",
             description=state.description,
-            client_id=None,  # disk-restore path; no client-driven opt-in
+            # Thread the ATTACHING client (was hardcoded None) so a restore-
+            # AFTER-UNLOAD re-attach actually spawns the runner — else
+            # _provision_ipc_apparmor_and_spawn_runner's step-1 (``client_id is
+            # None``) skips the spawn, ``_runner_rpc`` stays None, and the first
+            # message dies on the runner-readiness wait (the #370 re-attach
+            # flaky-fail, root-caused via PROVISION_ENTER client_id=None).  None
+            # on a clientless background restore preserves the old skip.
+            client_id=client_id,
             sandbox_mode=getattr(state, "sandbox_mode", None),
+            # Drive confinement from the SAVED sandbox_mode (precedence-1
+            # apparmor_override in _provision) rather than re-running the
+            # client-driven opt-in — preserves the "use saved sandbox_mode,
+            # don't re-run the opt-in" intent now that a real client_id is
+            # threaded above.  env_file stays a saved-driven override; config_root
+            # is resolved saved→client→<workspace>/.jaato (restore_config_root
+            # above) so a pre-persistence None can't hang the runner.
+            apparmor=(getattr(state, "sandbox_mode", None) == "apparmor"),
             profile=restored_profile,
-            config_root=state.config_root,
+            # Re-apply the profile's ``suppress_base_instructions`` on restore.
+            # Unlike plugins / plugin_configs / system_instructions / gc (which
+            # flow through ``server._profile`` → ``build_session_envelope``),
+            # this knob is read on the wire from ``server._suppress_base_
+            # instructions`` (runner_spawn.py), set from the BootstrapEnvelope
+            # field — which the restore envelope never populated, so a restored
+            # session silently regained the ~3-5k framework base instructions
+            # even when the profile suppressed them.  On tiny-context models
+            # (Gemini Nano ~9k) that overflowed the window ("input too large").
+            # The create path derives this from an explicit kwarg OR the
+            # profile; on restore there is no client kwarg, so the reconstructed
+            # profile is the sole source.  Fixes named AND inline profiles.
+            # Reconstructed profile is already the canonical frozenset
+            # (normalized in SubagentProfile.__post_init__).
+            suppress_base_instructions=getattr(
+                restored_profile, "suppress_base_instructions", frozenset()),
+            config_root=restore_config_root,
+            # Rebind the persona (--agent) on revive so persona-only guidance
+            # (e.g. enter_tier on images) survives — else JaatoServer(agent_name
+            # =None) drops it and multimodal revives confabulate.
+            agent_name=getattr(state, "agent_name", None),
             restore_state={"loaded_state": state},
             env_file=session_env_file,
             instruction_token_cache=self._instruction_token_cache,
@@ -5453,6 +6333,9 @@ class SessionManager:
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
             provisioned=state.metadata.get('provisioned', False),
             sandbox_mode=getattr(state, "sandbox_mode", None),
+            # Carry the inline spec forward so a re-save of the restored
+            # session re-persists it (survives restore → save → restore).
+            inline_profile_spec=getattr(state, "profile_spec", None),
             # Phase 3 §3.12 + peer-review M5/N1: mark this session as
             # awaiting first client-attach.  While set, the runner-
             # side permission plugin queues ASK prompts rather than
@@ -5788,6 +6671,11 @@ class SessionManager:
             # Resolve storage directory from workspace
             if session.workspace_path:
                 storage_dir = self._session_storage_dir(session.workspace_path)
+                # Keep the wake index current: this is the authoritative
+                # session_id → workspace mapping, used to revive a cold session
+                # by id alone (session.wake) without a caller-supplied path.
+                self._session_workspace_index.record(
+                    session.session_id, session.workspace_path)
             else:
                 storage_dir = pathlib.Path(self._session_config.storage_path)
 
@@ -5883,6 +6771,13 @@ class SessionManager:
             # connection scaffolding.
             server_profile = getattr(session.server, "_profile", None) if session.server else None
             profile_name = getattr(server_profile, "name", None) if server_profile else None
+            # Persona identity (``--agent``), so orphan-revive rebinds the same
+            # persona (see SessionState.agent_name) — else a revived multimodal
+            # session loses its enter_tier guidance and confabulates on images.
+            agent_name = (
+                getattr(session.server, "_main_agent_display_name", None)
+                if session.server else None
+            )
             state = SessionState(
                 session_id=session.session_id,
                 history=history,
@@ -5893,8 +6788,18 @@ class SessionManager:
                 turn_accounting=turn_accounting,
                 user_inputs=session.user_inputs,  # Command history for prompt restoration
                 profile_name=profile_name,
+                # Persist the UNRESOLVED inline spec (if any) so disk-restore
+                # reconstructs an inline profile's recipe by id alone — the
+                # named-profile ``profile_name`` ("<inline>") isn't
+                # re-resolvable.  None for named-profile sessions.
+                profile_spec=session.inline_profile_spec,
                 workspace_path=session.workspace_path,
                 config_root=session.config_root,
+                # Persist confinement so orphan-revive / disk-restore re-applies
+                # the SAME AppArmor mode on runner re-spawn (else the revive read
+                # of state.sandbox_mode was always None → unconfined revive).
+                sandbox_mode=session.sandbox_mode,
+                agent_name=agent_name,
                 metadata=subagent_metadata,
                 budget_state=budget_state,
                 interrupted_turn=session.interrupted_turn,  # For recovery on restart
@@ -6120,6 +7025,12 @@ class SessionManager:
                     session_id,
                 )
                 return
+            # Commit point: no clients, no active model → we ARE unloading.
+            # Publish the in-flight marker UNDER THE SAME LOCK as the re-check
+            # above, so a concurrent attach_session either added its client
+            # first (the re-check aborted us) or sees this marker and
+            # awaits+reloads. The lock makes the two paths mutually exclusive.
+            self._unloading[session_id] = threading.Event()
 
         # Save before unloading.  Now running on a real thread so
         # session_get_history_threadsafe + budget snapshot RPCs work
@@ -6167,6 +7078,12 @@ class SessionManager:
             )
         with self._lock:
             self._sessions.pop(session_id, None)
+            # Unload complete: signal any attach_session awaiting this teardown,
+            # then drop the in-flight marker so a fresh attach takes the
+            # disk-restore path (_load_session) and re-spawns the runner.
+            done_evt = self._unloading.pop(session_id, None)
+        if done_evt is not None:
+            done_evt.set()
         logger.info(f"Unloaded session: {session_id}")
 
     # ------------------------------------------------------------------
@@ -6432,9 +7349,33 @@ class SessionManager:
                 # Shutdown the server
                 session.server.shutdown()
 
+        # Stop the session's egress proxy if one was started (Phase 5 §5.11).
+        # Idempotent + guarded — a no-op for sessions without an allowlist.
+        try:
+            from server.egress_proxy import wireup as _egress_wireup
+            _egress_wireup.egress_teardown(session_id)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("egress proxy teardown failed for %s", session_id,
+                           exc_info=True)
+
         # Delete from disk
         storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
         deleted = self._session_plugin.delete(session_id, storage_dir=storage_dir)
+
+        # Release this session's daemon-side declarations so they don't outlive
+        # it.  A wake binding is the session's "wake me" invitation; a deleted
+        # session is gone for good, so its bindings must go too — else the
+        # owner-guard blocks a NEW session from re-binding that wake_ref until
+        # TTL (days), and any wake that resolved would target a dead session.
+        # (Distinct from UNLOAD, which keeps bindings so a cold session stays
+        # wakeable — the #520 cold-revive durability.)
+        released = self._wake_binding_registry.release_for_session(session_id)
+        if released:
+            logger.info("released %d wake binding(s) for deleted session %s",
+                        released, session_id)
+        # Drop the id→workspace index entry too (no TTL there — a stale entry
+        # would otherwise persist forever and mis-resolve a later id collision).
+        self._session_workspace_index.forget(session_id)
 
         logger.info(f"Session deleted: {session_id}")
         return deleted or session is not None
@@ -6649,6 +7590,15 @@ class SessionManager:
                     norm = self._normalize_workspace(wp)
                     if norm:
                         known_workspaces.add(norm)
+        # Union the session-workspace index's workspaces so cold, persisted
+        # sessions in server-provisioned ``ws_<hash>`` dirs (which no
+        # in-memory session or attached client references) still surface —
+        # the discovery half of workspace-pinless (browser/WS) resume, mirror
+        # of the attach-time index fallback above.
+        for norm in (self._normalize_workspace(w)
+                     for w in self._session_workspace_index.workspaces()):
+            if norm:
+                known_workspaces.add(norm)
 
         # Add persisted sessions from all known workspaces.
         # ``model_name`` left blank for persisted-only entries — the
@@ -7109,9 +8059,20 @@ class SessionManager:
 
             # If the message was purely help requests, the user just
             # wanted documentation — don't dispatch anything to the
-            # model.  Persist the (already-appended) user input and
-            # return early.
+            # model.  The help was already delivered as a HelpTextEvent by
+            # ``_intercept_prompt_help_refs``; persist the (already-appended)
+            # user input and return early WITHOUT a model turn.
             if not (message_text and message_text.strip()):
+                # Close the turn lifecycle even though no model turn ran.  A
+                # client that waits for a per-message completion signal (WS /
+                # chat renderers) would otherwise see zero further events and
+                # trip its stall detector, killing the session — the observed
+                # ``%name --help`` stall.  A synthetic TurnCompletedEvent
+                # (finish_reason="stop") resets that timer and closes the turn;
+                # it is targeted at the requesting client only (no model turn
+                # exists to fan out to the whole session).
+                if client_id is not None:
+                    self._emit_to_client(client_id, TurnCompletedEvent())
                 self._save_session(session)
                 return
 
@@ -7667,6 +8628,7 @@ class SessionManager:
         agent_name: str,
         on_output: Any,
         workspace_path: Optional[str] = None,
+        on_started: Any = None,
     ) -> str:
         """Implementation of ephemeral session run, called via fresh-context wrap.
 
@@ -7698,7 +8660,6 @@ class SessionManager:
         """
         import json as _json
         import uuid
-        from shared.plugins.subagent.config import build_inline_profile
 
         # Parse profile/config
         profile_data = _json.loads(profile_json) if profile_json else {}
@@ -7719,75 +8680,221 @@ class SessionManager:
         for source in (profile_data, inline_data):
             for key, value in source.items():
                 merged.setdefault(key, value)
-        profile = build_inline_profile(
-            merged,
-            name="<ephemeral>",
-            description=f"Ephemeral subagent: {agent_name}",
+        import queue
+        import threading
+
+        # Spike (§7c remote-spawn repair): route the ephemeral run through the
+        # PROVEN create_headless_session path instead of constructing an
+        # in-daemon JaatoServer.  This gives the delegated agent a real
+        # confined runner + AppArmor (the old client_id=None path ran it
+        # UNCONFINED in the daemon) and fixes the post-seat-flip TypeError
+        # (JaatoServer.send_message no longer takes on_output).  Output is
+        # sourced from the EventBus via an in-process cascade client keyed by a
+        # per-spawn cascade_driver_id; a forwarder thread relays it to
+        # ``on_output`` PER-EMIT so streaming granularity is preserved WITHOUT
+        # calling on_output under SessionManager._lock (the event callback runs
+        # under the lock and must stay trivial).  Workspace is per-session via
+        # create_headless_session(workspace_path=...) — no global chdir /
+        # JAATO_WORKSPACE_ROOT mutation (the old path raced sibling sessions by
+        # mutating daemon-global cwd).
+        from jaato_sdk.events import AgentOutputEvent, SessionTerminatedEvent, TurnCompletedEvent
+
+        # Source taxonomy (locked with gossip): relay ONLY model output into
+        # the forwarded stream.  Drop the prompt echo (source="user"),
+        # tool/status/lifecycle, and thinking (CoT is an origin opt-in, never
+        # forwarded by default across a federation boundary).  Fail-closed: any
+        # unlisted source is dropped, never relayed.
+        relay_sources = frozenset({"model"})
+
+        cid = f"ephemeral-{uuid.uuid4().hex[:12]}"
+        in_process_client_id = f"_ephemeral:{cid}"
+        try:
+            timeout_s = float(os.environ.get("JAATO_EPHEMERAL_TIMEOUT_S", "1800"))  # env: seconds an ephemeral relay session may run before the daemon gives up (default 1800)
+        except ValueError:
+            timeout_s = 1800.0
+
+        out_q: "queue.Queue[Any]" = queue.Queue()
+        collected: List[str] = []
+        terminal: Dict[str, Any] = {}
+        done = threading.Event()
+        sentinel = object()
+
+        def _on_event(event: Any) -> None:
+            # Runs synchronously on the daemon thread under
+            # SessionManager._lock — MUST stay trivial: enqueue / signal only;
+            # never call on_output (network-bound) or re-enter SessionManager.
+            if isinstance(event, AgentOutputEvent):
+                if event.source in relay_sources:
+                    out_q.put((event.source, event.text, event.mode))
+            elif isinstance(event, SessionTerminatedEvent):
+                terminal["reason"] = event.reason
+                terminal["error_type"] = event.error_type
+                terminal["error_summary"] = event.error_summary
+                out_q.put(sentinel)
+                done.set()
+            elif isinstance(event, TurnCompletedEvent):
+                # A single-shot ephemeral runs exactly one turn (one
+                # prompt -> one turn, including all tool iterations).  A
+                # NATURAL success emits turn.completed and then goes IDLE:
+                # a headless session does NOT self-terminate after its
+                # prompt, so NO SessionTerminatedEvent fires on the happy
+                # path.  Without treating turn.completed as the terminal,
+                # done.wait() blocks until the 1800s timeout and
+                # execute_spawn never sends PeerAgentCompleted (origin gets
+                # the full output stream but never the completion).
+                # turn.completed fires AFTER all of the turn's
+                # agent.output, so the sentinel lands behind every relayed
+                # chunk.  Errors still arrive as SessionTerminatedEvent
+                # (error) above; setdefault lets a real error reason win if
+                # it somehow raced in first.
+                terminal.setdefault("reason", "natural")
+                out_q.put(sentinel)
+                done.set()
+
+        def _forward() -> None:
+            # Drains off-lock and relays each chunk per-emit (live streaming).
+            while True:
+                item = out_q.get()
+                if item is sentinel:
+                    return
+                src, text, mode = item
+                collected.append(text)
+                if on_output:
+                    try:
+                        on_output(src, text, mode)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "ephemeral %s: on_output relay raised", cid,
+                        )
+
+        forwarder = threading.Thread(
+            target=_forward, name=f"ephemeral-fwd-{cid}", daemon=True,
         )
 
-        # Save and set workspace context if provided (Phase 5).
-        # The env-driven workspace root + chdir survive untouched —
-        # they're a separate concern from the bootstrap helper.
-        prev_cwd = None
-        prev_workspace_root = None
-        if workspace_path:
-            prev_cwd = os.getcwd()
-            prev_workspace_root = os.environ.get("JAATO_WORKSPACE_ROOT")
-            os.chdir(workspace_path)
-            os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
-
+        session_id = ""
         try:
-            # Build the bootstrap envelope.  ``client_id=None`` because
-            # ephemeral subagent fan-out has no client-driven apparmor
-            # opt-in (per §3.12 spec; runner-sharing semantics for
-            # default-share / opt-in-isolation come with §3.11 + the
-            # seat-flip).  ``parent_runner_handle`` stays None for now
-            # — Phase 3's spec for ephemeral migration adds the
-            # parent-runner reference for shared-runner default once
-            # the seat-flip lands.
-            envelope = BootstrapEnvelope(
-                session_id=f"ephemeral-{uuid.uuid4().hex[:12]}",
-                workspace_path=workspace_path,
-                name=agent_name or "<ephemeral>",
-                description="Ephemeral subagent fan-out",
-                client_id=None,
-                profile=profile,
-                agent_name=agent_name or "main",
+            self.register_in_process_client(
+                client_id=in_process_client_id,
+                callback=_on_event,
+                cascade_driver_id=cid,
+                role="owner",
             )
-            server, _sandbox = self._construct_and_initialize_server(envelope)
-            if server is None:
-                # Init failure already emitted via the in-init sink;
-                # surface a minimal hint to the caller so the
-                # subagent fan-out doesn't silently swallow.
+            forwarder.start()
+
+            # An inline ephemeral spawn (e.g. gossip remote-spawn) carries no
+            # workspace — there's no git/workspace replication for an
+            # inline-config subagent.  But the runner needs a cwd to spawn:
+            # without a workspace, ``_provision_ipc_apparmor_and_spawn_runner``
+            # skips the runner spawn, ``server._runner_rpc`` stays None, and
+            # the first model turn crashes with
+            # ``NoneType.session_send_message_threadsafe`` (the §7c seat-flip
+            # path forwards send_message to the runner).  Provision a scratch
+            # workspace so a runner spawns; the ephemeral session is
+            # short-lived and writes nothing meaningful there.
+            if not workspace_path:
+                import tempfile
+                workspace_path = tempfile.mkdtemp(prefix="jaato-ephemeral-")
+                logger.info(
+                    "ephemeral %s: no workspace supplied (inline spawn); "
+                    "provisioned scratch workspace %s so a runner can spawn",
+                    cid, workspace_path,
+                )
+
+            # The runner's core plugins (canonical case: file_edit's
+            # backup manager) require a config_root.  The auto
+            # "<workspace>/.jaato" fallback was removed (PR-147), so it
+            # must be set explicitly or those plugins fail to expose with
+            # a loud RuntimeError traceback on every ephemeral spawn
+            # (non-fatal, but it masquerades as a failure in logs).
+            # Mirror normal-session semantics: derive config_root from
+            # whatever workspace this ephemeral session runs in (scratch
+            # or caller-supplied).  Deterministic, no hardcoded fallback.
+            ephemeral_config_root = str(pathlib.Path(workspace_path) / ".jaato")
+
+            # For an inline-config spawn the caller's ``agent_name`` is a
+            # human-readable DISPLAY label (e.g. a gossip remote-spawn's
+            # "remote-subagent") — NOT a ``.jaato/agents/<name>.md`` persona.
+            # The inline profile IS the complete config, so there is no
+            # persona to resolve.  Passing the label as ``agent_name`` makes
+            # ``_create_session_impl`` run ``_resolve_agent(label)``, which
+            # fails (no such file) and returns an empty session_id — the
+            # remote-leg empty-init bug surfaced in gossip co-validation.
+            # Route the label to ``session_name`` for identity and pass
+            # ``agent_name=None`` when an inline profile is supplied so agent
+            # resolution is skipped; real-agent spawns (no inline profile)
+            # keep their ``agent_name`` resolution intact.
+            _display_name = agent_name or "remote-subagent"
+            session_id = self.create_headless_session(
+                agent_name=None if merged else (agent_name or "main"),
+                session_name=_display_name,
+                workspace_path=workspace_path,
+                initial_prompt=prompt,
+                inline_profile_data=merged,
+                config_root=ephemeral_config_root,
+                cascade_driver_id=cid,
+            )
+            if not session_id:
+                out_q.put(sentinel)
+                forwarder.join(timeout=5)
                 return "Ephemeral session initialization failed."
 
-            # Set workspace path on the registry so plugins discover it
-            if workspace_path and hasattr(server, 'registry') and server.registry:
-                server.registry.set_workspace_path(workspace_path)
+            # STOP (ii) hook: hand the real session_id to the caller BEFORE
+            # blocking so gossip can map request_id -> session_id and route a
+            # PeerStopRequest to the live session.  Optional — callers that
+            # don't pass on_started keep the pure blocking contract.
+            if on_started is not None:
+                try:
+                    on_started(session_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception("ephemeral %s: on_started raised", cid)
 
-            # Run the prompt and collect output
-            collected_output = []
+            # Block on the terminal.  Two paths set ``done``: a NATURAL
+            # single-shot success arrives as turn.completed (a headless
+            # session goes idle, NOT terminated, after its one prompt),
+            # while error/stop winds down via SessionTerminatedEvent.
+            # ``terminal['reason']`` classifies it (default "natural").
+            finished = done.wait(timeout=timeout_s)
+            out_q.put(sentinel)  # drain + stop the forwarder even on timeout
+            forwarder.join(timeout=5)
 
-            def _output_callback(source: str, text: str, mode: str = "") -> None:
-                collected_output.append(text)
-                if on_output:
-                    on_output(source, text, mode)
+            if not finished:
+                raise RuntimeError(
+                    f"Ephemeral session {session_id} did not reach a terminal "
+                    f"event within {timeout_s}s"
+                )
 
-            response = server.send_message(prompt, on_output=_output_callback)
-
-            # Cleanup
-            server.shutdown()
-
-            return response or "".join(collected_output) or "Task completed."
-
+            # Failure surfacing (locked contract with gossip): raise on any
+            # non-clean terminal, return the collected string on natural
+            # completion.  gossip leans on a raised exception from its
+            # to_thread call to emit PeerAgentCompletedEvent(success=False).
+            reason = terminal.get("reason")
+            if reason and reason != "natural":
+                detail = (
+                    f" ({terminal.get('error_type')}: "
+                    f"{terminal.get('error_summary')})"
+                    if reason == "error" else ""
+                )
+                raise RuntimeError(
+                    f"Ephemeral session {session_id} terminated "
+                    f"reason={reason}{detail}"
+                )
+            return "".join(collected) or "Task completed."
         finally:
-            # Restore previous workspace context
-            if prev_cwd is not None:
-                os.chdir(prev_cwd)
-            if prev_workspace_root is not None:
-                os.environ["JAATO_WORKSPACE_ROOT"] = prev_workspace_root
-            elif workspace_path:
-                os.environ.pop("JAATO_WORKSPACE_ROOT", None)
+            try:
+                self.unregister_cascade_client(cid, in_process_client_id)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "ephemeral %s: unregister_cascade_client raised", cid,
+                )
+            out_q.put(sentinel)  # belt-and-suspenders forwarder stop
+            if session_id:
+                try:
+                    self.delete_session(session_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "ephemeral %s: delete_session(%s) raised",
+                        cid, session_id,
+                    )
 
     def shutdown(self) -> None:
         """Shutdown all sessions, saving to disk first."""
@@ -7810,6 +8917,13 @@ class SessionManager:
         handler = get_session_handler()
         if handler:
             handler.close()
+
+        # Stop every per-session egress proxy (Phase 5 §5.11).
+        try:
+            from server.egress_proxy import wireup as _egress_wireup
+            _egress_wireup.shutdown_all()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("egress proxy shutdown_all failed", exc_info=True)
 
         self._session_plugin.shutdown()
         logger.info("SessionManager shutdown complete")

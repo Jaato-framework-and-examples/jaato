@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Dict, List, Optional
 
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_DEFERRED
 
 from .config import WebhookConfig, load_config
 from .http_server import WebhookHTTPServer
@@ -184,7 +184,7 @@ class WebhookPlugin(RunnerForwardingMixin):
                     "required": [],
                 },
                 category="integration",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='webhook_poll',
@@ -208,7 +208,7 @@ class WebhookPlugin(RunnerForwardingMixin):
                     "required": ["subscription_id"],
                 },
                 category="integration",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='webhook_status',
@@ -221,7 +221,7 @@ class WebhookPlugin(RunnerForwardingMixin):
                     "required": [],
                 },
                 category="integration",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

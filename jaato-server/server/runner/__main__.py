@@ -363,6 +363,21 @@ def _handle_fork_slot(
             control_sock.close()
         except OSError:
             pass
+        # #284/#280: lead our own session so every subprocess this slot
+        # spawns (jdtls, mcp servers, PTY shells) inherits the slot's
+        # process group, distinct from the daemon's.  The daemon
+        # SIGKILLs that whole group at slot teardown
+        # (RunnerRPCClient._sweep_slot_group), so nothing orphans to the
+        # daemon subreaper and leaks memory — the OOM root cause.  Safe:
+        # the slot is headless (no controlling TTY to detach from).
+        try:
+            os.setsid()
+        except OSError as exc:
+            log.warning(
+                "runner slot: os.setsid() failed (%s); slot shares the "
+                "daemon process group — jdtls subtree may leak on "
+                "teardown (#284).", exc,
+            )
         _run_slot_mode(slot_fd, log)
         # _run_slot_mode calls sys.exit; this return is a safety net.
         os._exit(0)
@@ -501,10 +516,10 @@ def main() -> None:
         sys.exit(0)
 
     # ----- 1. Read env -----
-    profile_name = os.environ.get("JAATO_RUNNER_PROFILE", "").strip()
-    session_id = os.environ.get("JAATO_RUNNER_SESSION_ID", "").strip()
-    workspace_root = os.environ.get("JAATO_RUNNER_WORKSPACE", "").strip() or None
-    log_path = os.environ.get("JAATO_RUNNER_LOG_PATH", "").strip() or None
+    profile_name = os.environ.get("JAATO_RUNNER_PROFILE", "").strip()  # env: internal — set by the daemon per runner: profile to bootstrap the session with
+    session_id = os.environ.get("JAATO_RUNNER_SESSION_ID", "").strip()  # env: internal — set by the daemon per runner: session id this runner serves
+    workspace_root = os.environ.get("JAATO_RUNNER_WORKSPACE", "").strip() or None  # env: internal — set by the daemon per runner: session workspace root
+    log_path = os.environ.get("JAATO_RUNNER_LOG_PATH", "").strip() or None  # env: internal — set by the daemon per runner: runner log file path
     max_output_chars = _parse_int_env("JAATO_RUNNER_MAX_OUTPUT_CHARS")
     tool_timeout_seconds = _parse_float_env("JAATO_RUNNER_TOOL_TIMEOUT_SECONDS")
 
@@ -513,7 +528,7 @@ def main() -> None:
     # the local-debug loop and is gated to a clear "this is not a
     # supported deployment" warning.
     disable_confine = (
-        os.environ.get("JAATO_RUNNER_DISABLE_CONFINE", "").lower()
+        os.environ.get("JAATO_RUNNER_DISABLE_CONFINE", "").lower()  # env: unsupported debug escape hatch: skip AppArmor self-confinement in the runner
         in ("1", "true", "yes")
     )
 

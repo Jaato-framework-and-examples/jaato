@@ -152,21 +152,36 @@ class DaemonPluginExecuteHandler:
                 f"daemon.plugin_execute({plugin_name}.{tool_name}): "
                 f"server has no registry (session not fully bootstrapped)"
             )
-        plugin = registry.get_plugin(plugin_name)
-        if plugin is None:
-            raise ValueError(
-                f"daemon.plugin_execute: plugin {plugin_name!r} not found "
-                f"in daemon-side registry — likely cause: PLUGIN_TIER is "
-                f"not 'daemon_callable' or the plugin failed to discover."
-            )
-        executors = plugin.get_executors()
-        executor = executors.get(tool_name)
-        if executor is None:
-            raise ValueError(
-                f"daemon.plugin_execute: tool {tool_name!r} not found in "
-                f"plugin {plugin_name!r}'s executors. Available: "
-                f"{sorted(executors.keys())}"
-            )
+        if plugin_name == "__client_tools__":
+            # Client-provided ("host") tool: registered on this session's
+            # registry as a CORE tool by ``websocket._register_client_tools``;
+            # its proxy executor sends ``ToolExecuteRequestEvent`` to the ws
+            # client and blocks for the result.  The runner-tier model invokes it
+            # under this sentinel (see ``runner/session.py``
+            # ``_make_client_tool_forwarder``) — there is no plugin to look up.
+            executor = registry.get_exposed_executors().get(tool_name)
+            if executor is None:
+                raise ValueError(
+                    f"daemon.plugin_execute: client tool {tool_name!r} not "
+                    f"registered on the daemon session registry (was it "
+                    f"unregistered, or is this the wrong session channel?)"
+                )
+        else:
+            plugin = registry.get_plugin(plugin_name)
+            if plugin is None:
+                raise ValueError(
+                    f"daemon.plugin_execute: plugin {plugin_name!r} not found "
+                    f"in daemon-side registry — likely cause: PLUGIN_TIER is "
+                    f"not 'daemon_callable' or the plugin failed to discover."
+                )
+            executors = plugin.get_executors()
+            executor = executors.get(tool_name)
+            if executor is None:
+                raise ValueError(
+                    f"daemon.plugin_execute: tool {tool_name!r} not found in "
+                    f"plugin {plugin_name!r}'s executors. Available: "
+                    f"{sorted(executors.keys())}"
+                )
 
         # ── Run the executor in a worker thread ────────────────
         # The body may block (interrogate_session forks another session

@@ -117,6 +117,56 @@ class AgentUIHooks(Protocol):
         """
         ...
 
+    def on_agent_error(
+        self,
+        agent_id: str,
+        error_type: str,
+        error_summary: str,
+        *,
+        session_id: str,
+        request_id: Optional[str] = None,
+        attempt: str = "0",
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        occurred_at: Optional[float] = None,
+    ) -> None:
+        """Called when an agent hits a terminal error the framework could not
+        self-resolve — AFTER its automatic management (``with_retry`` / the
+        completion-nudge loop) is exhausted or never applied.
+
+        Symmetric with :meth:`on_agent_completed`: this is the *failure* side of
+        the lifecycle. Implementations emit ``AgentErrorEvent`` to attached
+        clients so a reactor gets first refusal to recover the stage (re-spawn /
+        reroute / escalate) BEFORE the terminal
+        ``SessionTerminatedEvent(reason="error")`` lands. Fire-and-forget
+        (returns ``None``); control flows through the reactor's own
+        ``create_session`` calls, not a return value.
+
+        Emit ordering is the caller's responsibility: ``on_agent_error`` is
+        invoked *before* the ``SessionTerminatedEvent`` emit at each terminal
+        site, so ``AgentErrorEvent`` reaches the wire first.
+
+        Args:
+            agent_id: The failed agent / cascade stage.
+            error_type: Exception class name (``"APIError"``,
+                ``"RunnerCallError"``, ``"NudgeExhausted"``, ...). Same value
+                that lands on the subsequent ``SessionTerminatedEvent``.
+            error_summary: Human-readable cause.
+            session_id: The failed session (dedupe / handled-marking key).
+            request_id: Provider request id (e.g. OpenAI ``req_…``) when the
+                exception carries one, else ``None``.
+            attempt: Reactor-level re-spawn count for this stage, echoed from the
+                spawn's ``agent_params["attempt"]`` (string on the wire). NOT
+                ``with_retry``'s internal attempt count. ``"0"`` on first spawn.
+            classification: Optional coarse shape hint
+                (``"transient_provider"`` / ``"fatal_contract"`` /
+                ``"unknown"``). Advisory only — never gates this call.
+            framework_retries_exhausted: Optional count of automatic retries the
+                framework burned before giving up. ``None`` when not applicable.
+            occurred_at: Emit timestamp (epoch seconds).
+        """
+        ...
+
     def on_session_quiescent(
         self,
         agent_id: str,
@@ -156,6 +206,7 @@ class AgentUIHooks(Protocol):
         function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
+        finish_reason: str = "stop",
     ) -> None:
         """Called after each conversation turn completes.
 
@@ -174,6 +225,13 @@ class AgentUIHooks(Protocol):
                 None when the provider does not support caching.
             cache_creation_tokens: Tokens written to prompt cache.
                 None when the provider does not support caching.
+            finish_reason: The provider's finish reason for the turn's
+                terminal response, as the lowercase ``FinishReason`` enum
+                value (``"stop"``, ``"max_tokens"``, ``"safety"``,
+                ``"error"``, ...).  Defaults to ``"stop"``.  Rides out to
+                clients on ``TurnCompletedEvent.finish_reason`` so an
+                abnormal/truncated turn is machine-detectable instead of
+                looking like a clean completion.
         """
         ...
 
@@ -298,6 +356,7 @@ class AgentUIHooks(Protocol):
         continuation_id: Optional[str] = None,
         show_output: Optional[bool] = None,
         show_popup: Optional[bool] = None,
+        is_error_result: bool = False,
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -307,6 +366,11 @@ class AgentUIHooks(Protocol):
             success: Whether the tool executed successfully.
             duration_seconds: How long the tool took to execute.
             error_message: Error message if the tool failed.
+            is_error_result: Computed deeper error check — True when the tool
+                returned an error body (e.g. ``{"error": ...}`` or HTTP
+                status_code >= 400) even though ``success`` is True. Distinct
+                from ``success`` (which only catches raised exceptions /
+                permission / missing-executor).
             call_id: Unique identifier for this tool call (for correlation).
             backgrounded: True if tool was auto-backgrounded (still producing output).
             continuation_id: Session ID for tools that expect follow-up calls

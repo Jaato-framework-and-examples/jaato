@@ -9,7 +9,7 @@ import os
 import tempfile
 import threading
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
@@ -71,6 +71,17 @@ class PermissionPlugin(RunnerForwardingMixin):
         self._wrapped_executors: Dict[str, Callable] = {}
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
+        # Framework-reserved tool names: framework machinery (core infra +
+        # lifecycle terminals like ``signal_completion``) that a business
+        # catch-all ``"default"`` evaluator must NOT be able to deny — else a
+        # locked-down agent can do its work but never complete.  Populated at
+        # session configure() from BOTH the registry's core tools AND the
+        # session's lifecycle tools (which are NOT registry core tools — they
+        # register session-level via ``executor.register``, so ``is_core_tool``
+        # alone misses them).  Deliberately a self-contained set (no registry
+        # lookup at check time) so it survives ``shutdown()`` nulling
+        # ``_registry`` and is simply re-populated every configure.
+        self._framework_reserved: Set[str] = set()
         self._allow_all: bool = False  # When True, auto-approve all requests
         # Suspension state flags for temporary permission bypasses
         self._turn_suspended: bool = False  # Allow all remaining tools this turn
@@ -520,6 +531,28 @@ class PermissionPlugin(RunnerForwardingMixin):
             with self._policy_lock:
                 for tool in tools:
                     self._policy.whitelist_tools.add(tool)
+
+    def add_framework_reserved_tools(self, tools: List[str]) -> None:
+        """Record framework-machinery tool names exempt from the catch-all
+        ``"default"`` permission evaluator.
+
+        Framework machinery = core infra (introspection, stream, event-bus,
+        registered via ``register_core_tool``) + lifecycle terminals
+        (``signal_completion``, registered session-level via
+        ``executor.register`` — NOT a registry core tool, so ``is_core_tool``
+        alone misses it).  A business default-deny evaluator (``DENY any tool
+        not in my whitelist``) must not be able to veto these — else a
+        locked-down agent does its work but can never complete.  A
+        tool-SPECIFIC evaluator keyed to the name STILL governs (only the
+        catch-all collateral is prevented).
+
+        Called from :meth:`JaatoSession.configure` every session, so the set
+        is re-populated even after :meth:`shutdown` nulls other state.
+
+        Args:
+            tools: Framework-reserved tool names to exempt.
+        """
+        self._framework_reserved.update(tools)
 
     # Suspension management methods
 
@@ -1187,6 +1220,52 @@ class PermissionPlugin(RunnerForwardingMixin):
             "tool_name": tool_name,
         }
 
+    def _reliability_escalation_action(self, tool_name: str) -> Optional[str]:
+        """Reliability Phase-2 enforcement action for ``tool_name`` in the
+        current session, or ``None`` for no enforcement.
+
+        Returns:
+            ``"ask"``  — the reactor flagged the tool ESCALATED and the client is
+                INTERACTIVE (terminal / web / chat): re-confirm with the user
+                even when whitelisted / allow_all / suspended (Phase-2 increment 1).
+            ``"deny"`` — escalated AND the client is HEADLESS (``ClientType.API``):
+                no human to prompt, so block the tool (T1).  Non-blocking — a
+                cascade never synchronously waits here (the §7c invariant); the
+                reactor's nudge tells the model why, and T2/T3 layer out-of-band
+                human approval on top.
+            ``None``   — nothing is escalated (the common case), no session
+                context, or the client type is unknown (no presentation context
+                → no enforcement, the safe default).
+
+        The escalated-tools set is written into session-attached state by the
+        reliability reactor under the key ``reliability:escalated_tools``.
+        """
+        from shared.session_context import get_current_session
+        try:
+            sess = get_current_session()
+        except LookupError:
+            return None
+        # T3 approved-override (§9 resume primitive): a human-approved tool —
+        # written to ``reliability:approved_tools`` by the reactor's gate.released
+        # resume handler — is ALLOWED even while still flagged escalated.
+        # "approved" wins over "escalated", so the parked cascade's retried call
+        # passes once the human approves.  Read BEFORE the escalated check so
+        # approval short-circuits both the "ask" and "deny" branches.
+        approved = sess.get_session_state("reliability:approved_tools")
+        if approved and tool_name in approved:
+            return None
+        escalated = sess.get_session_state("reliability:escalated_tools")
+        if not escalated or tool_name not in escalated:
+            return None
+        pres = getattr(sess, "_presentation_context", None)
+        client_type = getattr(pres, "client_type", None)
+        from jaato_sdk.events import ClientType
+        if client_type in (ClientType.TERMINAL, ClientType.WEB, ClientType.CHAT):
+            return "ask"
+        if client_type == ClientType.API:
+            return "deny"
+        return None  # unknown presentation → no enforcement (safe default)
+
     def check_permission(
         self,
         tool_name: str,
@@ -1211,25 +1290,19 @@ class PermissionPlugin(RunnerForwardingMixin):
         """
         self._trace(f"check_permission: tool={tool_name} call_id={call_id}")
 
-        # Trusted bridge fast-path: when a plugin-provided interpreter
-        # (today only the notebook plugin's Python tool bindings) wraps
-        # dispatch in trusted_bridge_context(), the outer tool call was
-        # already permission-approved by the user and the user saw every
-        # inner ``tools.X(...)`` call in the approved code.  Re-prompting
-        # for each inner call is redundant noise that trains users to
-        # rubber-stamp without reading.  Short-circuit with ALLOW; no
-        # evaluators, no PermissionRequestedEvent, no ledger entry beyond
-        # the trace line above.
+        # Trusted bridge: when a plugin-provided interpreter (today only the
+        # notebook plugin's Python tool bindings) wraps dispatch in
+        # trusted_bridge_context(), the outer tool call was already approved and
+        # the user saw every inner ``tools.X(...)`` call in the approved code, so
+        # re-prompting each inner call is redundant noise.  The bridge therefore
+        # suppresses only the interactive PROMPT — it does NOT bypass the
+        # operator's hard boundaries.  The short-circuit lives at the
+        # ASK_CHANNEL branch below, AFTER evaluators, the blacklist, and
+        # reliability escalation have run, so a blacklisted / evaluator-denied /
+        # escalated tool is still refused even inside the bridge.  (A user
+        # approving a cell cannot grant themselves override of the operator's
+        # policy.)
         from shared.ai_tool_runner import in_trusted_bridge_context
-        if in_trusted_bridge_context():
-            self._trace(
-                f"check_permission: trusted bridge context active, "
-                f"auto-allowing {tool_name}"
-            )
-            return True, {
-                'reason': 'Allowed via trusted bridge context (outer tool already approved)',
-                'method': 'trusted_bridge',
-            }
 
         # Build evaluator context early — evaluators run even for
         # pre-approved tools so they can override approvals.
@@ -1242,12 +1315,39 @@ class PermissionPlugin(RunnerForwardingMixin):
             workspace_path=getattr(self, '_workspace_path', None),
             turn_index=context.get("turn_index") if context else None,
             model_preamble=context.get("model_preamble") if context else None,
+            # Snapshot (not the live list) of PRIOR decisions this session, so
+            # an evaluator can reason over earlier behavior.  The current call's
+            # decision isn't appended until after evaluation, so the log holds
+            # exactly calls 1..N-1 here.
+            execution_log=list(self._execution_log),
         )
 
         # Run evaluators before pre-approval short-circuits.
         # Evaluators can override pre-approvals (DENY overrides allow_all),
         # but FALLBACK preserves the pre-approval.
-        if self._policy and self._policy._evaluators:
+        run_evaluators = bool(self._policy and self._policy._evaluators)
+        if run_evaluators:
+            # Framework-reserved tools (core infra + lifecycle terminals such
+            # as ``signal_completion``) are EXEMPT from the catch-all
+            # ``"default"`` evaluator: a business default-deny (``DENY any tool
+            # not in my whitelist``) must not be able to brick the framework
+            # machinery the agent needs to complete its own lifecycle.  A
+            # tool-SPECIFIC evaluator keyed to the tool name STILL runs —
+            # explicitly governing a reserved tool is honored; only the
+            # accidental catch-all collateral is prevented.  Keyed on the
+            # self-contained ``_framework_reserved`` set (populated at
+            # configure from BOTH registry core tools AND the session's
+            # lifecycle tools) — NOT ``registry.is_core_tool``: signal_completion
+            # is session-level (not a registry core tool), and the set survives
+            # ``shutdown()`` nulling ``_registry`` between sessions.
+            has_specific_evaluator = tool_name in self._policy._evaluators
+            if not has_specific_evaluator and tool_name in self._framework_reserved:
+                run_evaluators = False
+                self._trace(
+                    f"check_permission: framework-reserved tool '{tool_name}' "
+                    f"exempt from the default evaluator (no tool-specific evaluator)"
+                )
+        if run_evaluators:
             from .evaluator import run_evaluator
             eval_result = run_evaluator(
                 self._policy._evaluators, tool_name, args, eval_context
@@ -1294,20 +1394,43 @@ class PermissionPlugin(RunnerForwardingMixin):
                         'method': 'evaluator',
                     }
 
+        # Reliability Phase-2 escalation enforcement (computed once): for an
+        # escalated tool, interactive clients are re-confirmed by the user
+        # ("ask") even when otherwise auto-approved; headless clients are denied
+        # outright ("deny", T1) since there is no human to prompt.  None for
+        # every normal call (a strict no-op until the reactor escalates).
+        escalation_action = self._reliability_escalation_action(tool_name)
+        if escalation_action == "deny":
+            # T1 — headless escalation enforcement.  No human to prompt, so block
+            # the escalated tool.  The reactor's nudge already told the model why;
+            # T2/T3 layer out-of-band human approval on top.  Non-blocking — a
+            # cascade never synchronously waits here (the §7c invariant).
+            self._log_decision(
+                tool_name, args, "deny", "reliability escalation (headless)"
+            )
+            return False, {
+                'reason': "reliability escalation: tool flagged after repeated "
+                          "failures and denied (headless session — no interactive "
+                          "approval available). Reconsider the inputs/approach or "
+                          "try a different tool.",
+                'method': 'reliability_escalation_denied',
+            }
+        force_reescalation = (escalation_action == "ask")
+
         # Check suspension states in priority order:
         # 1. idle suspension (most conservative - clears on idle)
         # 2. turn suspension (clears on turn end)
         # 3. allow_all (session-wide, persists until session ends)
-        if self._idle_suspended:
+        if not force_reescalation and self._idle_suspended:
             self._log_decision(tool_name, args, "allow", "Permission suspended until idle")
             return True, {'reason': 'Permission suspended until idle', 'method': 'idle_suspension'}
 
-        if self._turn_suspended:
+        if not force_reescalation and self._turn_suspended:
             self._log_decision(tool_name, args, "allow", "Permission suspended for turn")
             return True, {'reason': 'Permission suspended for turn', 'method': 'turn_suspension'}
 
         # Check if user pre-approved all requests
-        if self._allow_all:
+        if not force_reescalation and self._allow_all:
             self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
             return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
 
@@ -1320,6 +1443,11 @@ class PermissionPlugin(RunnerForwardingMixin):
         from .channels import ParentBridgedChannel
         channel = self._get_channel()
         is_subagent_mode = isinstance(channel, ParentBridgedChannel)
+        # Trusted-bridge inner call (see the note at the top of this method):
+        # deny-layers still apply, but a resolved ALLOW is kept quiet — the
+        # user already approved the outer cell, so per-inner-call UI events
+        # would be redundant noise (mirrors the is_subagent_mode skip).
+        is_trusted_bridge = in_trusted_bridge_context()
 
         # Evaluate against policy. Pass eval_context=None if evaluators
         # already ran above (for pre-approved tools) to avoid double execution.
@@ -1328,6 +1456,16 @@ class PermissionPlugin(RunnerForwardingMixin):
             tool_name, args,
             eval_context=None if already_evaluated else eval_context,
         )
+
+        # Reliability escalation re-gate: a whitelisted/auto-allowed tool the
+        # reactor escalated (interactive client) must be re-confirmed — turn the
+        # ALLOW into a channel prompt so the user decides whether to proceed.
+        if force_reescalation and match.decision == PermissionDecision.ALLOW:
+            import dataclasses
+            match = dataclasses.replace(
+                match, decision=PermissionDecision.ASK_CHANNEL,
+                reason="reliability escalation: tool flagged after repeated "
+                       "failures — re-confirm before running")
 
         if match.decision == PermissionDecision.ALLOW:
             # Apply scoped side effects from evaluator decisions
@@ -1359,7 +1497,7 @@ class PermissionPlugin(RunnerForwardingMixin):
                     and match.eval_result.decision == EvalDecision.ALLOW_WITH_COMMENT
                     and match.eval_result.comment):
                 eval_comment = match.eval_result.comment
-            if self._on_permission_resolved and not is_subagent_mode:
+            if self._on_permission_resolved and not is_subagent_mode and not is_trusted_bridge:
                 self._on_permission_resolved(tool_name, "", True, method, comment=eval_comment)
             result = {'reason': match.reason, 'method': method}
             # Inject advisory comment for ALLOW_WITH_COMMENT
@@ -1387,6 +1525,25 @@ class PermissionPlugin(RunnerForwardingMixin):
             return False, {'reason': match.reason, 'method': method, 'comment': match.eval_result.comment if match.eval_result else None}
 
         elif match.decision == PermissionDecision.ASK_CHANNEL:
+            # Trusted bridge suppresses the redundant interactive prompt — but
+            # only a NORMAL ask (rule-miss → default). We reach here only after
+            # the blacklist / evaluators / reliability-escalation-deny have all
+            # passed (those return DENY earlier), so allowing here does not
+            # bypass any hard boundary. A reliability-escalation re-confirm
+            # (force_reescalation) is NOT suppressed: the reactor raised that
+            # signal AFTER the cell was approved, so the user must still see it.
+            if is_trusted_bridge and not force_reescalation:
+                self._log_decision(
+                    tool_name, args, "allow",
+                    "trusted bridge (outer tool approved; prompt suppressed)",
+                )
+                return True, {
+                    'reason': 'Allowed via trusted bridge context (outer tool '
+                              'already approved); blacklist and evaluators still '
+                              'enforced',
+                    'method': 'trusted_bridge',
+                }
+
             # Need to ask the channel (already retrieved above for subagent check)
             if not channel:
                 self._log_decision(tool_name, args, "deny", "No channel configured")

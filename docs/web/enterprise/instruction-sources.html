@@ -120,6 +120,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -194,6 +195,13 @@
           <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
           <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../api-reference/providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../api-reference/providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../api-reference/providers/vllm.html">vLLM</a></li>
+          <li><a href="../api-reference/providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../api-reference/providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../api-reference/providers/nebius.html">Nebius</a></li>
+          <li><a href="../api-reference/providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../api-reference/providers/triton.html">Triton</a></li>
         </ul>
       </div>
     </aside>
@@ -227,10 +235,13 @@
           </thead>
           <tbody>
             <tr>
-              <td><strong>1. Base Instructions</strong></td>
-              <td><code>.jaato/system_instructions.md</code></td>
+              <td><strong>1. Base Instructions</strong> <span title="Never garbage-collected">(LOCKED)</span></td>
+              <td>
+                Multi-tier <code>.jaato/instructions/</code> folder &mdash; primary source (see below).<br>
+                Legacy fallback only: <code>.jaato/system_instructions.md</code> (used when no folder exists)
+              </td>
               <td>0&ndash;500+</td>
-              <td>Behavioral rules that apply to all agents (transparency, operational constraints)</td>
+              <td>Project-wide behavioral rules shared by every agent. LOCKED by the GC system &mdash; never garbage-collected regardless of context pressure.</td>
             </tr>
             <tr>
               <td><strong>2. Session Instructions</strong></td>
@@ -270,6 +281,139 @@
             </tr>
           </tbody>
         </table>
+
+        <h2 id="base-instructions-hierarchy">Base Instructions &mdash; Multi-Tier Folder Hierarchy</h2>
+        <p>
+          The <strong>Base Instructions</strong> layer (Layer 1 above) is loaded by
+          <code>JaatoRuntime._load_base_system_instructions()</code> from a multi-tier
+          <code>.jaato/instructions/</code> folder hierarchy. The single legacy file
+          <code>.jaato/system_instructions.md</code> is a <strong>fallback only</strong>,
+          used when no folder exists in any tier.
+        </p>
+        <p>
+          Tiers are searched in the following precedence order; the first tier that
+          provides a non-empty folder wins for the workspace/user layer:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Precedence</th><th>Tier</th><th>Path</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>1 (first / baseline)</strong></td>
+              <td>Premium</td>
+              <td>Premium content path (<code>instructions/</code> sub-folder)</td>
+              <td>Loaded unconditionally when the premium content path is present; layered below workspace/user instructions.</td>
+            </tr>
+            <tr>
+              <td><strong>2 (first match wins)</strong></td>
+              <td>Workspace</td>
+              <td><code>&lt;config_root&gt;/instructions/</code> when <code>config_root</code> is set, otherwise <code>&lt;workspace&gt;/.jaato/instructions/</code></td>
+              <td>Project-level instructions versioned alongside the codebase.</td>
+            </tr>
+            <tr>
+              <td><strong>2 (first match wins)</strong></td>
+              <td>User</td>
+              <td><code>~/.jaato/instructions/</code></td>
+              <td>Developer-global defaults applied across all workspaces. Used only when the workspace tier folder is absent.</td>
+            </tr>
+            <tr>
+              <td><strong>Fallback (legacy)</strong></td>
+              <td>Single file</td>
+              <td><code>&lt;config_root&gt;/system_instructions.md</code> or <code>&lt;workspace&gt;/.jaato/system_instructions.md</code>, then <code>~/.jaato/system_instructions.md</code></td>
+              <td>Consulted only when <em>no</em> <code>instructions/</code> folder exists in any tier. Deprecated path &mdash; migrate to the folder layout.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Within each folder, <strong>all <code>*.md</code> files</strong> are sorted
+          lexicographically by filename and concatenated with double-newline separators.
+          Numeric prefixes (e.g. <code>00-</code>, <code>10-</code>, <code>15-</code>)
+          control ordering. <code>README.md</code> (matched exactly, case-insensitive)
+          is skipped &mdash; it documents the folder layout and is not injected as instructions.
+        </p>
+        <p>
+          The combined base instructions form the <strong><code>BASE</code> tier</strong>
+          of the instruction budget, classified as <strong>LOCKED</strong>
+          (<code>instruction_budget.py:65</code>): they appear first in every assembled
+          prompt and are never garbage-collected, regardless of context pressure.
+        </p>
+
+        <h2 id="suppress-base-instructions">Suppressing or Overriding Base Instructions</h2>
+        <p>
+          A profile can opt out of the base instructions layer via the
+          <code>suppress_base_instructions</code> field (<code>config.py:949&ndash;960</code>).
+          When set to <code>true</code>, the <code>.jaato/instructions/</code> base layer
+          and the framework's always-on baseline are omitted from that session's prompt;
+          plugin and persona instructions still apply.
+        </p>
+        <p>
+          Typical savings are 3&ndash;5&nbsp;k tokens per turn &mdash; which can be the
+          difference between fitting a small model's context window and triggering
+          aggressive GC. It is intended for narrow, body-wired agents (echo specialists,
+          single-purpose narrators) that derive no benefit from general-purpose guidance.
+        </p>
+        <p>
+          Inheritance uses <strong>OR semantics</strong> (<code>config.py:1645&ndash;1657</code>):
+          once any ancestor in the profile inheritance chain sets
+          <code>suppress_base_instructions: true</code>, it stays suppressed &mdash; a
+          child profile cannot silently re-enable a parent's suppression. This is a
+          <strong>security primitive</strong>: a minimalist base profile cannot be
+          silently upgraded by an inheritor. A child that genuinely needs base
+          instructions should not inherit from a minimalist parent.
+        </p>
+        <p>
+          The field also enables an <strong>override pattern</strong>: set
+          <code>suppress_base_instructions: true</code> <em>and</em> supply an agent
+          persona (<code>.jaato/agents/&lt;name&gt;.md</code>) that provides the complete
+          replacement system instructions. This gives the persona full control over the
+          prompt with no shared project-level baseline layered beneath it.
+        </p>
+        <table>
+          <thead>
+            <tr><th>Pattern</th><th>Profile field</th><th>Effect</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Default</strong></td>
+              <td><code>suppress_base_instructions: false</code> (omit to use default)</td>
+              <td>Full base layer + plugin instructions + persona</td>
+            </tr>
+            <tr>
+              <td><strong>Drop</strong></td>
+              <td><code>suppress_base_instructions: true</code></td>
+              <td>Base layer removed; plugin + persona instructions remain</td>
+            </tr>
+            <tr>
+              <td><strong>Override</strong></td>
+              <td><code>suppress_base_instructions: true</code> + agent persona supplies full replacement</td>
+              <td>Persona stands alone as the session's complete system instructions</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="personas-and-system-instructions">Agent Identity: Personas vs. <code>system_instructions</code></h2>
+        <p>
+          The profile field <code>system_instructions</code> is
+          <strong>deprecated</strong> (<code>config.py:889</code>) and emits a
+          <code>DeprecationWarning</code> at runtime. Agent identity and role-specific
+          instructions belong in a <strong>persona file</strong> under
+          <code>.jaato/agents/&lt;name&gt;.md</code>, not in the profile.
+        </p>
+        <p>
+          The design separates concerns deliberately: the <strong>Profile</strong>
+          (<code>.jaato/profiles/&lt;name&gt;.yaml</code>) holds runtime configuration
+          only &mdash; model, provider, plugins, GC strategy, schemas. The
+          <strong>Persona</strong> (<code>.jaato/agents/&lt;name&gt;.md</code>) holds
+          agent identity: role, voice, domain knowledge, and lifecycle behaviour. When a
+          session names an agent via <code>--agent</code>, the framework renders the
+          persona Markdown and applies it as the session's system instructions, layered
+          on top of the base-instruction folder.
+        </p>
+        <p>
+          Migrate any existing <code>system_instructions:</code> profile field content
+          to a <code>.jaato/agents/</code> persona file.
+        </p>
 
         <h2 id="token-budget">Token Budget Overview</h2>
         <p>

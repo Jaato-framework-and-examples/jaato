@@ -29,6 +29,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -67,6 +68,13 @@
           <li><a href="../providers/ollama.html">Ollama</a></li>
           <li><a href="../providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../providers/vllm.html">vLLM</a></li>
+          <li><a href="../providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../providers/nebius.html">Nebius</a></li>
+          <li><a href="../providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../providers/triton.html">Triton</a></li>
         </ul>
       </div>
 
@@ -129,6 +137,11 @@
                 <td>Summarize middle, truncate oldest</td>
                 <td>Balanced approach</td>
               </tr>
+              <tr>
+                <td><code>gc_budget</code></td>
+                <td>Policy-driven removal (EPHEMERAL → PARTIAL → PRESERVABLE priority)</td>
+                <td>Long sessions, policy-aware context management</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -185,7 +198,19 @@ if result:
                 <td><code>threshold_percent</code></td>
                 <td>float</td>
                 <td>80.0</td>
-                <td>Context usage % to trigger GC</td>
+                <td>Context usage % to trigger GC; env: <code>JAATO_GC_THRESHOLD</code></td>
+              </tr>
+              <tr>
+                <td><code>target_percent</code></td>
+                <td>float</td>
+                <td>60.0</td>
+                <td>Target context usage % after GC completes; env: <code>JAATO_GC_TARGET</code></td>
+              </tr>
+              <tr>
+                <td><code>pressure_percent</code></td>
+                <td>float</td>
+                <td>90.0</td>
+                <td>Usage % at which PRESERVABLE content may be collected; <code>0</code> or <code>None</code> enables continuous mode; env: <code>JAATO_GC_PRESSURE</code></td>
               </tr>
               <tr>
                 <td><code>max_turns</code></td>
@@ -206,6 +231,18 @@ if result:
                 <td>Auto-trigger during streaming</td>
               </tr>
               <tr>
+                <td><code>check_before_send</code></td>
+                <td>bool</td>
+                <td>True</td>
+                <td>Check context usage and possibly trigger GC before each <code>send_message</code> call</td>
+              </tr>
+              <tr>
+                <td><code>pinned_turn_indices</code></td>
+                <td>list[int]</td>
+                <td>[]</td>
+                <td>Turn indices (0-indexed) that are never removed by any GC strategy</td>
+              </tr>
+              <tr>
                 <td><code>plugin_config</code></td>
                 <td>dict</td>
                 <td>{}</td>
@@ -219,6 +256,16 @@ if result:
             When <code>auto_trigger=True</code>, GC monitors context usage during
             streaming and triggers automatically when the threshold is crossed.
             This prevents context overflow mid-response.
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Continuous Mode</div>
+            Set <code>pressure_percent=0</code> (or <code>None</code>) to enable
+            continuous mode. In this mode GC runs after every turn whenever context
+            usage exceeds <code>target_percent</code>, providing gradual predictable
+            trimming. PRESERVABLE content is never collected in continuous mode.
+            Enabled via: <code>GCConfig(pressure_percent=None)</code> or
+            <code>JAATO_GC_PRESSURE=0</code>.
           </div>
         </div>
         <div class="panel-code">
@@ -248,6 +295,113 @@ turn_based = GCConfig(
 manual = GCConfig(
     auto_trigger=False
 )</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- GCPolicy -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="policy">GCPolicy Tiers</h2>
+
+          <p>
+            The <code>GCPolicy</code> enum (in <code>shared.instruction_budget</code>)
+            classifies instruction sources by how aggressively they may be collected.
+            The <code>gc_budget</code> strategy consults these policies to decide
+            removal order.
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Policy</th><th>Indicator</th><th>Behavior</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>LOCKED</code></td>
+                <td>🔒</td>
+                <td>Never removed — essential for operation (system instructions, original request)</td>
+              </tr>
+              <tr>
+                <td><code>PRESERVABLE</code></td>
+                <td>◑</td>
+                <td>Kept unless context exceeds <code>pressure_percent</code></td>
+              </tr>
+              <tr>
+                <td><code>PARTIAL</code></td>
+                <td>◐</td>
+                <td>Container with mixed-policy children; children evaluated individually</td>
+              </tr>
+              <tr>
+                <td><code>EPHEMERAL</code></td>
+                <td>○</td>
+                <td>First candidates for removal (enrichment, working output, thinking tokens)</td>
+              </tr>
+              <tr>
+                <td><code>CONDITIONAL</code></td>
+                <td>◈</td>
+                <td>Delegated to plugin evaluation — the plugin decides at GC time whether to remove</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            Default policies per instruction source:
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Source</th><th>Default Policy</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>SYSTEM</code></td><td><code>LOCKED</code></td></tr>
+              <tr><td><code>PLUGIN</code></td><td><code>PARTIAL</code></td></tr>
+              <tr><td><code>ENRICHMENT</code></td><td><code>EPHEMERAL</code></td></tr>
+              <tr><td><code>CONVERSATION</code></td><td><code>PARTIAL</code></td></tr>
+              <tr><td><code>THINKING</code></td><td><code>EPHEMERAL</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">gc_budget removal priority</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_budget import create_plugin as create_gc
+from shared.plugins.gc import GCConfig
+
+gc = create_gc()
+gc.initialize({
+    "preserve_recent_turns": 5,
+    "target_percent": 60.0,    # Target after GC
+    "pressure_percent": 90.0,  # When to touch PRESERVABLE
+    "notify_on_gc": True,
+})
+
+client.set_gc_plugin(gc, GCConfig(
+    threshold_percent=80.0,
+    target_percent=60.0,
+    pressure_percent=90.0,
+))
+
+# Removal order:
+# 1. EPHEMERAL (enrichment + working output) — oldest/largest first
+# 2. PARTIAL turns — oldest first, respecting preserve_recent_turns
+# 3. PRESERVABLE — only when usage > pressure_percent
+# 4. LOCKED — never removed</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Continuous mode (gc_budget)</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Continuous mode: run after every turn, PRESERVABLE never touched
+gc = create_gc()
+gc.initialize({
+    "preserve_recent_turns": 5,
+    "target_percent": 60.0,
+    "pressure_percent": 0,  # 0 = continuous mode
+})
+
+client.set_gc_plugin(gc, GCConfig(
+    threshold_percent=80.0,
+    pressure_percent=None,  # None = continuous mode in GCConfig
+))</code></pre>
           </div>
         </div>
       </section>
@@ -455,12 +609,22 @@ client.set_gc_plugin(gc, GCConfig(
               <tr>
                 <td><code>type</code></td>
                 <td>str</td>
-                <td>"truncate", "summarize", or "hybrid"</td>
+                <td>"truncate", "summarize", "hybrid", or "budget"</td>
               </tr>
               <tr>
                 <td><code>threshold_percent</code></td>
                 <td>float</td>
-                <td>Context % to trigger GC</td>
+                <td>Context % to trigger GC (default: 80.0)</td>
+              </tr>
+              <tr>
+                <td><code>target_percent</code></td>
+                <td>float</td>
+                <td>Target context % after GC (default: 60.0)</td>
+              </tr>
+              <tr>
+                <td><code>pressure_percent</code></td>
+                <td>float</td>
+                <td>PRESERVABLE threshold % (default: 90.0); 0 = continuous mode</td>
               </tr>
               <tr>
                 <td><code>preserve_recent_turns</code></td>
@@ -590,7 +754,17 @@ for gc in client.get_gc_history():
               <tr>
                 <td><code>JAATO_GC_THRESHOLD</code></td>
                 <td>80.0</td>
-                <td>Default GC threshold %</td>
+                <td>Context usage % that triggers GC</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GC_TARGET</code></td>
+                <td>60.0</td>
+                <td>Target context usage % after GC completes</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GC_PRESSURE</code></td>
+                <td>90.0</td>
+                <td>Usage % at which PRESERVABLE content may be collected; set to <code>0</code> to enable continuous mode</td>
               </tr>
             </tbody>
           </table>
@@ -598,7 +772,10 @@ for gc in client.get_gc_history():
         <div class="panel-code">
           <div class="code-label">.env</div>
           <div class="code-block">
-            <pre><code class="language-bash">JAATO_GC_THRESHOLD=75.0</code></pre>
+            <pre><code class="language-bash">JAATO_GC_THRESHOLD=75.0   # Trigger GC at 75% context usage
+JAATO_GC_TARGET=55.0      # Reduce to 55% after GC
+JAATO_GC_PRESSURE=88.0    # Allow PRESERVABLE collection at 88%
+# JAATO_GC_PRESSURE=0     # Uncomment for continuous mode</code></pre>
           </div>
         </div>
       </section>

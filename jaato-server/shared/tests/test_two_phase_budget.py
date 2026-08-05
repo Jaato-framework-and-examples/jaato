@@ -76,6 +76,10 @@ def _make_session(
     session._model_name = "test-model"
     session._provider_name_override = None
     session._provider = provider
+    # V2 cross-provider tiers: __init__ sets these; mirror them here (this
+    # helper bypasses __init__ via __new__).
+    session._provider_cache = {}
+    session._active_provider_name = None
     session._agent_id = "test"
     session._agent_type = "main"
     session._agent_name = None
@@ -85,12 +89,14 @@ def _make_session(
     session._ui_hooks = None
     session._gc_plugin = None
     session._gc_config = None
+    session._tier_config = None
     session._preloaded_plugins = set()
     # _system_instruction_override and _suppress_base_instructions are
     # normally set in configure(); tests bypass __init__ with __new__ so we
-    # set them explicitly to their defaults.
+    # set them explicitly to their defaults.  The suppression knob's invariant
+    # is a canonical frozenset (empty = suppress nothing), never a bare bool.
     session._system_instruction_override = None
-    session._suppress_base_instructions = False
+    session._suppress_base_instructions = frozenset()
 
     # SessionHistory wrapper
     from ..session_history import SessionHistory

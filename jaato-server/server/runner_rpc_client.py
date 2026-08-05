@@ -46,7 +46,7 @@ import logging
 import os
 import signal
 import socket
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover — types only
     from shared.session_envelope import SessionInitEnvelope
@@ -260,6 +260,15 @@ class RunnerRPCClient:
             return
         self._closed = True
 
+        # #284/#280: capture the slot's process group BEFORE teardown
+        # begins.  The slot leads its own session (os.setsid at fork),
+        # so its whole subtree — jdtls language servers, mcp servers,
+        # PTY shells — shares this pgid.  We SIGKILL the group after the
+        # slot leader is reaped (step 3) so nothing orphans to the
+        # daemon subreaper and leaks memory (the OOM root cause).
+        # Captured now because getpgid() fails once the slot is reaped.
+        slot_pgid = self._capture_slot_pgid()
+
         # 1. Close socket → runner sees EOF.
         if self._writer is not None:
             try:
@@ -298,6 +307,111 @@ class RunnerRPCClient:
 
         # 2. Wait for runner to exit.
         await self._wait_runner_exit(timeout)
+
+        # 3. #284/#280: sweep the slot's process group — SIGKILL any
+        # surviving subprocesses (jdtls et al.) the slot spawned.  This
+        # is the daemon-side guarantee the slot-side backstops (atexit /
+        # PDEATHSIG) could not provide: it runs on EVERY teardown path
+        # (clean EOF, SIGTERM, SIGKILL).  No-op when the slot already
+        # reaped its children cleanly.
+        self._sweep_slot_group(slot_pgid)
+
+    def _capture_slot_pgid(self) -> Optional[int]:
+        """Return the slot's process-group id for teardown sweeping.
+
+        Returns ``None`` — skipping the sweep — when the slot is already
+        gone, OR (defensively) when the slot shares the **daemon's**
+        process group.  A shared group means ``os.setsid`` regressed at
+        slot-fork; ``os.killpg`` on it would SIGKILL the daemon itself,
+        so we refuse and log loudly rather than self-destruct.  See
+        #284/#280.
+        """
+        try:
+            pgid = os.getpgid(self._runner_pid)
+        except (ProcessLookupError, OSError):
+            return None
+        if pgid == os.getpgrp():
+            logger.error(
+                "RunnerRPCClient: slot pid=%d shares the daemon process "
+                "group (pgid=%d) — slot setsid regressed; SKIPPING subtree "
+                "sweep to avoid killing the daemon. jdtls may leak (#284). "
+                "Fix slot-fork os.setsid().",
+                self._runner_pid, pgid,
+            )
+            return None
+        return pgid
+
+    def _sweep_slot_group(self, pgid: Optional[int]) -> None:
+        """SIGKILL every surviving process in the slot's group (#284).
+
+        Closes the orphan-on-teardown leak: subprocesses the slot
+        spawned (jdtls, mcp, PTY shells) inherit its pgid and would
+        otherwise re-parent to the daemon subreaper and accumulate until
+        OOM.  Logs the swept members so the daemon log proves the leak
+        is closed.  No-op when the group is already empty (the common
+        case once the slot exits cleanly).
+        """
+        if pgid is None:
+            return
+        survivors = self._list_group_members(pgid)
+        if not survivors:
+            return  # slot reaped its children cleanly — nothing to do
+        logger.info(
+            "RunnerRPCClient: slot pid=%d teardown — sweeping process group "
+            "pgid=%d: SIGKILL %d survivor(s): %s",
+            self._runner_pid, pgid, len(survivors),
+            ", ".join(f"{p}({c})" for p, c in survivors),
+        )
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            return
+        # Reap survivors that re-parent to us (the subreaper) as zombies.
+        for pid, _comm in survivors:
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
+
+    @staticmethod
+    def _list_group_members(pgid: int) -> List[Tuple[int, str]]:
+        """Enumerate live ``(pid, comm)`` in process group *pgid* via /proc.
+
+        Best-effort instrumentation for the teardown sweep (#284): the
+        returned list is logged (proving which subprocesses leaked) and
+        used to reap zombies.  Races with process exit are benign — the
+        subsequent ``killpg`` is the authority.  ``/proc/<pid>/stat``
+        field 5 is the process group; field 2 (``comm``) may contain
+        spaces/parens, so we slice between the first ``(`` and last
+        ``)``.
+        """
+        members: List[Tuple[int, str]] = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return members
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as fh:
+                    data = fh.read()
+            except (FileNotFoundError, ProcessLookupError, OSError):
+                continue
+            rparen = data.rfind(b")")
+            lparen = data.find(b"(")
+            if rparen < 0 or lparen < 0 or rparen < lparen:
+                continue
+            comm = data[lparen + 1:rparen].decode("utf-8", "replace")
+            # After "...) ": fields[0]=state, [1]=ppid, [2]=pgrp
+            fields = data[rparen + 2:].split()
+            if len(fields) >= 3:
+                try:
+                    if int(fields[2]) == pgid:
+                        members.append((int(entry), comm))
+                except ValueError:
+                    continue
+        return members
 
     async def _wait_runner_exit(self, timeout: float) -> None:
         """Reap the runner with a SIGTERM/SIGKILL ladder."""
@@ -387,6 +501,9 @@ class RunnerRPCClient:
                         )
                         continue
                     fut = self._in_flight.pop(env.id, None)
+                    logger.info(   # [RPC_DIAG] DIAG BRANCH — daemon reply match
+                        "[RPC_DIAG] daemon read_loop RESPONSE id=%s in_flight_had=%s client=%s",
+                        env.id, fut is not None, id(self))
                     self._stream_cbs.pop(env.id, None)
                     self._notification_cbs.pop(env.id, None)
                     if fut is not None and not fut.done():
@@ -598,6 +715,8 @@ class RunnerRPCClient:
 
         fut: "asyncio.Future[ResponseEnvelope]" = self._loop.create_future()
         self._in_flight[request_id] = fut
+        logger.info(   # [RPC_DIAG] DIAG BRANCH — daemon future registered
+            "[RPC_DIAG] daemon _in_flight SET id=%s client=%s", request_id, id(self))
         if on_output is not None:
             self._stream_cbs[request_id] = on_output
         if on_notification is not None:
@@ -840,6 +959,30 @@ class RunnerRPCClient:
             self.session_health_check(timeout=timeout), timeout=timeout,
         )
 
+    async def session_register_client_tools(
+        self, client_tools: List[Dict[str, Any]], *,
+        timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        """Mid-session: glue newly-registered client-provided ("host") tool
+        SCHEMAS to the LIVE runner registry so the runner-tier model sees them
+        WITHOUT a session restart (calls ``_register_client_tools_on_runner``).
+        Execution still forwards daemon-side → the client via the existing
+        host-tool proxy.  Returns ``{"registered": [names]}``.
+        """
+        return await self._call_named(
+            "session.register_client_tools",
+            {"client_tools": client_tools}, timeout=timeout,
+        )
+
+    def session_register_client_tools_threadsafe(
+        self, client_tools: List[Dict[str, Any]], *,
+        timeout: Optional[float] = 10.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_register_client_tools(client_tools, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_state(
         self,
         key: str,
@@ -990,6 +1133,34 @@ class RunnerRPCClient:
     ) -> Tuple[bool, int]:
         return self._run_threadsafe(
             self.session_try_completion_nudge(max_nudges, timeout=timeout),
+            timeout=timeout,
+        )
+
+    async def session_try_drain_pending_user(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        """Atomically pop a pending high-priority (USER/PARENT/SYSTEM)
+        message for the daemon's post-turn drain (multi-turn deadlock fix).
+
+        See :meth:`JaatoSession.try_drain_pending_user`.  Returns the message
+        text to run as the next turn, or ``None`` when nothing is queued (or
+        a turn is already running runner-side).
+
+        Raises:
+            RunnerCallError on transport failure or runner-side exception.
+        """
+        result = await self._call_named(
+            "session.try_drain_pending_user",
+            {},
+            timeout=timeout,
+        )
+        return result.get("text")
+
+    def session_try_drain_pending_user_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        return self._run_threadsafe(
+            self.session_try_drain_pending_user(timeout=timeout),
             timeout=timeout,
         )
 
@@ -1262,7 +1433,7 @@ class RunnerRPCClient:
                 call).
         """
         from jaato_sdk.plugins.model_provider.types import (
-            EditableContent, ToolSchema,
+            EditableContent, ToolSchema, DISCOVERABILITY_DEFERRED,
         )
 
         result = await self._call_named(
@@ -1302,8 +1473,8 @@ class RunnerRPCClient:
                     else None
                 ),
                 discoverability=str(
-                    entry.get("discoverability", "discoverable")
-                    or "discoverable",
+                    entry.get("discoverability", DISCOVERABILITY_DEFERRED)
+                    or DISCOVERABILITY_DEFERRED,
                 ),
                 editable=editable,
                 traits=traits,
@@ -2072,6 +2243,7 @@ class RunnerRPCClient:
         on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Phase 3 §7b.2: dispatch ``session.send_message`` to the
         runner.  Long-running — streams output via ``on_output``
@@ -2110,9 +2282,14 @@ class RunnerRPCClient:
                 (``stage="cancelled"``), or send-loop crash
                 (``stage="send"``).
         """
+        # Text-only sends stay wire-identical (no attachments key); user-message
+        # multimodal adds the base64 attachment list for the runner session.
+        args: Dict[str, Any] = {"prompt": prompt}
+        if attachments:
+            args["attachments"] = attachments
         coro = self.call(
             "session.send_message",
-            {"prompt": prompt},
+            args,
             on_output=on_output,
             on_notification=on_notification,
             cancel_token=cancel_token,
@@ -2142,6 +2319,7 @@ class RunnerRPCClient:
         on_notification: Optional[OnNotificationCb] = None,
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Synchronous wrapper for ``session_send_message`` from
         worker threads.  Note: long-running; the future may block
@@ -2159,6 +2337,7 @@ class RunnerRPCClient:
             on_notification=on_notification,
             cancel_token=cancel_token,
             timeout=timeout,
+            attachments=attachments,
         )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(

@@ -18,6 +18,7 @@ from jaato_sdk.events import Event
 from server.event_sink import EventSink
 from server.session_manager import SessionManager
 from server.session_logging import set_logging_context, clear_logging_context
+from shared.session_id import is_safe_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,18 @@ class CommandRouter:
                 self._handle_snapshot_workspace(client_id, event.args, workspace_path)
                 return
 
+            elif cmd == "session.wake":
+                self._handle_session_wake(client_id, event.args, event.payload)
+                return
+
+            elif cmd == "session.bind_wake":
+                self._handle_session_bind_wake(client_id, event.args, event.payload)
+                return
+
+            elif cmd == "session.unbind_wake":
+                self._handle_session_unbind_wake(client_id, event.args, event.payload)
+                return
+
             elif cmd == "cascade.register":
                 self._handle_cascade_register(client_id, event.args)
                 return
@@ -397,6 +410,18 @@ class CommandRouter:
             return
 
         target_session_id = args[0]
+        # Client-supplied id — reject a traversal / injection id before it
+        # reaches the persistence / cgroup / apparmor sinks (defense in depth
+        # with the sink-side validation; this gives a clean early error).
+        if not is_safe_session_id(target_session_id):
+            from jaato_sdk.events import ErrorEvent
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="invalid session_id: must match [A-Za-z0-9._-] "
+                      "(1-256 chars) with no '..'",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
         # Check for workspace mismatch
         mismatch = self._session_manager.check_workspace_mismatch(
             target_session_id, workspace_path
@@ -452,6 +477,133 @@ class CommandRouter:
                     session_env=attached.server.get_all_session_env(),
                 )
             self._event_sink.set_client_session(client_id, target_session_id)
+
+    def _handle_session_wake(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.wake`` — start a USER turn on a session, reviving it
+        if cold, for the client-agnostic wake primitive.
+
+        Accepts a structured ``payload`` (SDK callers) —
+        ``{session_id, text, source?, event_id?}`` — or positional ``args``
+        ``[session_id, text, source?, event_id?]``.  Authentication is the
+        transport's boundary (IPC socket-mode / WS bearer token / the HTTP
+        shim's #498 fail-closed check); this handler runs only for callers
+        already past that gate.  On refusal it emits an ``ErrorEvent`` with the
+        reason; on success the woken turn's output flows to the session's
+        attached clients (the caller need not be one).
+        """
+        from jaato_sdk.events import ErrorEvent
+        p = payload or {}
+        session_id = p.get("session_id") or (args[0] if len(args) > 0 else None)
+        text = p.get("text") or (args[1] if len(args) > 1 else None)
+        source = p.get("source") or (args[2] if len(args) > 2 else "user")
+        event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
+        if not session_id or not text:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="session.wake requires session_id and text",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+        outcome, detail = self._session_manager.wake_session(
+            session_id, text, source=source, event_id=event_id,
+        )
+        # Only genuine failures surface as an error.  OK and DUPLICATE are both
+        # successes — a redelivered event_id is an idempotent no-op, not a
+        # failed delivery (an HTTP shim maps both to 2xx; erroring here would
+        # make every at-least-once redelivery look failed + trigger retries).
+        if not outcome.is_success:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=f"session.wake refused ({outcome.value}): {detail}",
+                error_type="WakeError",
+                recoverable=True,
+            ))
+
+    def _handle_session_bind_wake(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.bind_wake`` — declare a wake binding for the CALLER'S
+        OWN session (the SESSION-owned half of the wake contract).
+
+        The bound session is always the caller's current session (resolved from
+        ``client_id``), so a caller can only bind ITSELF — hijack-proof by
+        construction.  Accepts a structured ``payload``
+        ``{wake_ref, trust_keys: [PEM...], ttl_seconds?}`` (the real path —
+        PEM keys are multi-line) or positional ``args`` ``[wake_ref, key...]``.
+        Always replies with a :class:`WakeBindResultEvent` carrying the
+        ``BindOutcome`` (route on it), and on success the echoed ``wake_ref`` +
+        binding ``expires_at``.
+        """
+        from jaato_sdk.events import WakeBindResultEvent
+        p = payload or {}
+        wake_ref = p.get("wake_ref") or (args[0] if len(args) > 0 else "")
+        raw_keys = p.get("trust_keys")
+        if raw_keys is None:
+            raw_keys = list(args[1:]) if len(args) > 1 else []
+        # Normalize trust_keys so a malformed payload never crashes the handler
+        # or silently splits a key: a lone PEM string → one-element list; a
+        # list → keep only str items; anything else → empty (the registry then
+        # returns NO_KEYS / MALFORMED_KEY, a clean outcome).
+        if isinstance(raw_keys, str):
+            trust_keys = [raw_keys]
+        elif isinstance(raw_keys, (list, tuple)):
+            trust_keys = [k for k in raw_keys if isinstance(k, str)]
+        else:
+            trust_keys = []
+        # Coerce ttl to int-or-None so a bad type (e.g. a JSON string) never
+        # reaches the registry's arithmetic; on failure fall back to the default.
+        raw_ttl = p.get("ttl_seconds")
+        ttl_seconds: Optional[int] = None
+        if raw_ttl is not None:
+            try:
+                ttl_seconds = int(raw_ttl)
+            except (TypeError, ValueError):
+                ttl_seconds = None
+
+        session = self._session_manager.get_client_session(client_id)
+        if session is None or not session.session_id:
+            self._event_sink.send_event(client_id, WakeBindResultEvent(
+                wake_ref=wake_ref or "", outcome="no_session",
+                detail="caller has no active session to bind"))
+            return
+
+        outcome = self._session_manager.bind_wake(
+            wake_ref, session.session_id, session.workspace_path,
+            list(trust_keys), ttl_seconds,
+            # Capture the caller session's cid so a deferred wake reaches its
+            # cascade observers and the observer survives the session going cold.
+            cascade_driver_id=getattr(session, "cascade_driver_id", None))
+        expires_at = 0.0
+        if outcome.is_ok:
+            b = self._session_manager.resolve_wake_binding(wake_ref)
+            if b is not None:
+                expires_at = b.expires_at
+        self._event_sink.send_event(client_id, WakeBindResultEvent(
+            wake_ref=wake_ref or "", outcome=outcome.value,
+            detail=f"bind_wake: {outcome.value}", expires_at=expires_at,
+            # Surface the daemon's public wake endpoint so the caller can embed
+            # it as the relay's routing marker (no bot-side URL config).
+            endpoint=self._session_manager.wake_public_url))
+
+    def _handle_session_unbind_wake(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.unbind_wake`` — remove the caller's own wake binding
+        (owner-guarded).  ``{wake_ref}`` payload or ``[wake_ref]`` args."""
+        from jaato_sdk.events import WakeBindResultEvent
+        p = payload or {}
+        wake_ref = p.get("wake_ref") or (args[0] if len(args) > 0 else "")
+        session = self._session_manager.get_client_session(client_id)
+        if session is None or not session.session_id:
+            self._event_sink.send_event(client_id, WakeBindResultEvent(
+                wake_ref=wake_ref or "", outcome="no_session",
+                detail="caller has no active session"))
+            return
+        outcome = self._session_manager.unbind_wake(wake_ref, session.session_id)
+        self._event_sink.send_event(client_id, WakeBindResultEvent(
+            wake_ref=wake_ref or "", outcome=outcome.value,
+            detail=f"unbind_wake: {outcome.value}"))
 
     def _handle_session_list(self, client_id: str, session_id: str) -> None:
         """Handle ``session.list`` command."""
@@ -1317,6 +1469,9 @@ class CommandRouter:
             {"name": "session list", "description": "List all sessions"},
             {"name": "session new", "description": "Create a new session"},
             {"name": "session attach", "description": "Attach to an existing session"},
+            {"name": "session wake", "description": "Wake a session by id (revive if cold) and start a turn"},
+            {"name": "session bind_wake", "description": "Declare a wake binding (wake_ref + trust keys) for this session"},
+            {"name": "session unbind_wake", "description": "Remove a wake binding for this session"},
             {"name": "session delete", "description": "Delete a session"},
             {"name": "session help", "description": "Show detailed help for session command"},
         ]

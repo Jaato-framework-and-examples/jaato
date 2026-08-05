@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -60,6 +61,7 @@
         <ul class="sidebar-nav">
           <li><a href="../api-reference/index.html">Overview</a></li>
           <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/ipc-client.html">IPCClient</a></li>
           <li><a href="../api-reference/ipc-recovery-client.html">IPCRecoveryClient</a></li>
           <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
           <li><a href="../api-reference/types.html">Types</a></li>
@@ -78,6 +80,13 @@
           <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
           <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../api-reference/providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../api-reference/providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../api-reference/providers/vllm.html">vLLM</a></li>
+          <li><a href="../api-reference/providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../api-reference/providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../api-reference/providers/nebius.html">Nebius</a></li>
+          <li><a href="../api-reference/providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../api-reference/providers/triton.html">Triton</a></li>
         </ul>
       </div>
     </aside>
@@ -179,15 +188,25 @@
         <div class="panel-explanation">
           <h2 id="quick-start">Quick Start</h2>
           <p>
-            Replace <code>IPCClient</code> with <code>IPCRecoveryClient</code> to get
-            automatic reconnection. The API is the same—you just get resilience for free.
+            Swap <code>IPCClient</code> for <code>IPCRecoveryClient</code> to get
+            automatic reconnection — the same
+            <a href="../api-reference/ipc-client.html"><code>.session(...)</code> +
+            <code>ask</code>/<code>complete</code>/<code>stream</code></a> facade,
+            now resilient across daemon restarts. Pass
+            <code>on_status_change</code> to observe the connection state.
           </p>
 
           <h3>Key Differences from IPCClient</h3>
           <ul>
-            <li><code>events()</code> automatically resumes after reconnection</li>
-            <li>Operations raise <code>ReconnectingError</code> during recovery instead of crashing</li>
-            <li>Session reattachment happens automatically after reconnect</li>
+            <li>Reconnection and session reattachment happen automatically after a
+              drop</li>
+            <li>Operations raise <code>ReconnectingError</code> during recovery
+              instead of crashing</li>
+            <li>The facade dispatches events for you — no manual
+              <code>events()</code> loop is needed for
+              <code>ask</code>/<code>complete</code>/<code>stream</code> (drop to
+              the low-level <code>events()</code> API, shown further down, only for
+              custom event handling)</li>
           </ul>
 
           <div class="callout callout-info">
@@ -198,38 +217,35 @@
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Minimal recovery client</div>
+          <div class="code-label">Minimal recovery client (facade)</div>
           <div class="code-block">
             <pre><code class="language-python">import asyncio
-from jaato_sdk.client import IPCRecoveryClient
+from jaato_sdk import IPCRecoveryClient
 
 async def main():
-    client = IPCRecoveryClient(
-        socket_path="/tmp/jaato.sock",
-        on_status_change=on_status
-    )
-
-    await client.connect()
-
-    # Create a session and track it for recovery
-    # Optionally pass profile= to use an agent profile
-    session_id = await client.create_session(
-        "my-session", profile="researcher-claude"
-    )
-    client.set_session_id(session_id)
-
-    # Use normally — recovery is automatic
-    await client.send_message("Hello!")
-
-    async for event in client.events():
-        print(event)
-
-    await client.close()
-
-def on_status(status):
-    print(f"Connection: {status.state.value}")
+    # Same facade as IPCClient.session, on the auto-reconnect client.
+    # Connect, session creation, and reattachment are handled for you;
+    # ask() survives a daemon restart. Credentials resolve from the
+    # profile (e.g. a pass:// knob), never an env var.
+    async with IPCRecoveryClient.session(
+        profile={"model": "...", "provider": "...", "plugins": []},
+        on_status_change=lambda st: print(st.state),  # RECONNECTING / CONNECTED
+    ) as s:
+        print(await s.ask("Long task..."))
 
 asyncio.run(main())</code></pre>
+          </div>
+
+          <div class="callout callout-info" style="margin-top: 16px;">
+            <div class="callout-title">Need the raw event stream?</div>
+            The facade covers the common case. For custom event handling you can
+            still use the low-level client directly
+            (<code>connect()</code> / <code>create_session()</code> /
+            <code>async for event in client.events()</code>); those methods are
+            documented in the sections below and on the
+            <a href="../api-reference/ipc-recovery-client.html">IPCRecoveryClient
+            API</a> page. With the facade, iterating <code>events()</code> yourself
+            is optional.
           </div>
         </div>
       </section>
@@ -253,7 +269,7 @@ asyncio.run(main())</code></pre>
             <tbody>
               <tr>
                 <td><code>DISCONNECTED</code></td>
-                <td>Initial state, or recovery gave up after max attempts</td>
+                <td>Initial state, or after a graceful <code>disconnect()</code></td>
               </tr>
               <tr>
                 <td><code>CONNECTING</code></td>
@@ -273,7 +289,7 @@ asyncio.run(main())</code></pre>
               </tr>
               <tr>
                 <td><code>CLOSED</code></td>
-                <td>Terminal state — no more connection attempts</td>
+                <td>Terminal state — max reconnection attempts exhausted, a permanent error occurred, or <code>close()</code> was called; no more connection attempts</td>
               </tr>
             </tbody>
           </table>
@@ -293,8 +309,12 @@ asyncio.run(main())</code></pre>
     IPCRecoveryClient,
     ConnectionState,
 )
+from jaato_sdk.events import ClientType
 
-client = IPCRecoveryClient("/tmp/jaato.sock")
+client = IPCRecoveryClient(
+    "/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,
+)
 
 # Check state directly
 if client.state == ConnectionState.CONNECTED:
@@ -386,6 +406,7 @@ ConnectionState.CLOSED         # "closed"</code></pre>
     ConnectionState,
 )
 from jaato_sdk.client.recovery import ConnectionStatus
+from jaato_sdk.events import ClientType
 
 def on_status(status: ConnectionStatus):
     """Update UI based on connection state."""
@@ -415,6 +436,7 @@ def on_status(status: ConnectionStatus):
 
 client = IPCRecoveryClient(
     socket_path="/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,   # required
     on_status_change=on_status,
 )</code></pre>
           </div>
@@ -436,6 +458,7 @@ client = IPCRecoveryClient(
             <thead>
               <tr>
                 <th>Exception</th>
+                <th>Classification</th>
                 <th>When</th>
                 <th>Action</th>
               </tr>
@@ -443,18 +466,21 @@ client = IPCRecoveryClient(
             <tbody>
               <tr>
                 <td><code>ReconnectingError</code></td>
-                <td>Client is reconnecting</td>
+                <td>Transient</td>
+                <td>Client is currently reconnecting</td>
                 <td>Queue and retry after reconnect</td>
               </tr>
               <tr>
                 <td><code>ConnectionClosedError</code></td>
-                <td>Connection permanently closed</td>
-                <td>Inform user, offer manual reconnect</td>
+                <td>Permanent</td>
+                <td>Connection permanently closed (max attempts exhausted or <code>close()</code> called)</td>
+                <td>Inform user, offer manual restart</td>
               </tr>
               <tr>
                 <td><code>IncompatibleServerError</code></td>
-                <td>Server version below client's minimum</td>
-                <td>Display upgrade message; not retried by recovery client</td>
+                <td>Permanent</td>
+                <td>Server wire-protocol version is below the client's minimum; raised during <code>connect()</code>; client transitions immediately to <code>CLOSED</code></td>
+                <td>Display upgrade message; upgrading one side is the only fix — no retry will help</td>
               </tr>
             </tbody>
           </table>
@@ -543,7 +569,12 @@ async for event in client.events():
         <div class="panel-code">
           <div class="code-label">Session tracking</div>
           <div class="code-block">
-            <pre><code class="language-python">client = IPCRecoveryClient("/tmp/jaato.sock")
+            <pre><code class="language-python">from jaato_sdk.events import ClientType
+
+client = IPCRecoveryClient(
+    "/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,
+)
 await client.connect()
 
 # Create session and track it
@@ -564,7 +595,10 @@ client.set_session_id(session_id)
 # (e.g., stored in a config file), you can
 # reattach manually:
 
-client = IPCRecoveryClient("/tmp/jaato.sock")
+client = IPCRecoveryClient(
+    "/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,
+)
 await client.connect()
 
 # Attach to existing session
@@ -703,6 +737,7 @@ if success:
     IPCRecoveryClient,
     RecoveryConfig,
 )
+from jaato_sdk.events import ClientType
 
 # Custom config
 config = RecoveryConfig(
@@ -713,6 +748,7 @@ config = RecoveryConfig(
 
 client = IPCRecoveryClient(
     socket_path="/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,   # required
     config=config,
 )
 
@@ -724,8 +760,103 @@ config = get_recovery_config(
 )
 client = IPCRecoveryClient(
     socket_path="/tmp/jaato.sock",
+    client_type=ClientType.TERMINAL,   # required
     config=config,
 )</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Python WebSocket Recovery -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="ws-recovery-client">Python WebSocket Recovery (<code>WSRecoveryClient</code>)</h2>
+          <p>
+            For a <strong>remote</strong> daemon over WebSocket, the Python SDK
+            ships <code>WSRecoveryClient</code> — a first-class,
+            <code>IPCRecoveryClient</code>-equivalent implementation. It is a
+            subclass of <code>WSClient</code> with the <em>same</em> recovery
+            machinery as the IPC client: the same six-state
+            <a href="#connection-states">connection state machine</a>, exponential
+            backoff with jitter, automatic session reattachment, and the
+            <code>on_status_change</code> callback. You get IPC-grade resilience
+            over <code>ws://</code> / <code>wss://</code> without dropping to raw
+            frames.
+          </p>
+          <p>
+            Through the facade, the same
+            <a href="../api-reference/ipc-client.html"><code>.session(...)</code> +
+            <code>ask</code>/<code>complete</code>/<code>stream</code></a> code runs
+            over WS recovery — either via <code>WSRecoveryClient.session(...)</code>
+            or the transport-agnostic
+            <code>jaato.session(mode="ws", recovery=True, ...)</code> flag. The
+            <code>recovery=True</code> flag works on both daemon transports
+            (<code>mode="ipc"</code> and <code>mode="ws"</code>); it raises
+            <code>ValueError</code> for <code>mode="in_process"</code>, which has no
+            daemon to reconnect to.
+          </p>
+
+          <h3 id="ws-recovery-tls">TLS for self-signed <code>wss://</code></h3>
+          <p>
+            For a development or internal <code>wss://</code> endpoint with a
+            self-signed certificate, pass <code>ssl=</code> (an
+            <code>ssl.SSLContext</code>, or <code>True</code>/<code>False</code>) or
+            <code>ca=</code> (a CA-bundle path) — accepted on
+            <code>WSClient</code> / <code>WSRecoveryClient</code> and on
+            <code>jaato.session(mode="ws", ca=...)</code>. A <code>ca</code> path is
+            loaded into a default verifying context; <code>ssl</code> wins if both
+            are set. These are scoped <strong>per connection</strong> — loaded into
+            the connection's <code>SSLContext</code>, never into
+            <code>os.environ</code> — so, unlike an <code>SSL_CERT_FILE</code> env
+            hack, they cannot leak into a subprocess-restarted daemon's outbound
+            HTTPS (the Python analog of Node's <code>NODE_EXTRA_CA_CERTS</code>).
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Needs the <code>jaato-sdk[ws]</code> extra</div>
+            The WS transport lazily imports the <code>websockets</code> package.
+            <code>WSRecoveryClient</code> <em>imports</em> without it, but
+            connecting raises <code>ImportError</code> with an install hint. Install
+            with <code>pip install 'jaato-sdk[ws]'</code>.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Minimal WS recovery client (facade)</div>
+          <div class="code-block">
+            <pre><code class="language-python">import asyncio
+import jaato
+
+async def main():
+    # Same facade as IPCRecoveryClient, over WebSocket. Reconnection,
+    # session creation, and reattachment are handled for you; ask()
+    # survives a daemon restart or a dropped socket.
+    async with jaato.session(
+        mode="ws",
+        url="wss://host:8080",
+        token="...",                 # bearer token (or ?token= in the url)
+        recovery=True,               # → WSRecoveryClient
+        ca="/etc/jaato/dev-ca.pem",  # trust a self-signed wss:// cert
+        on_status_change=lambda st: print(st.state),  # RECONNECTING / CONNECTED
+    ) as s:
+        print(await s.ask("Long task..."))
+
+asyncio.run(main())</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Constructing the client directly</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk import WSRecoveryClient
+from jaato_sdk.events import ClientType
+
+client = WSRecoveryClient(
+    url="wss://host:8080",
+    token="...",
+    client_type=ClientType.API,
+    ca="/etc/jaato/dev-ca.pem",   # or ssl=&lt;ssl.SSLContext&gt;
+    on_status_change=lambda st: print(st.state),
+)
+# Same connection-lifecycle API as IPCRecoveryClient:
+# connect() / create_session() / send_message() / events().</code></pre>
           </div>
         </div>
       </section>
@@ -733,64 +864,126 @@ client = IPCRecoveryClient(
       <!-- Web Clients (WebSocket) -->
       <section class="two-panel">
         <div class="panel-explanation">
-          <h2 id="websocket">Web Clients (WebSocket)</h2>
+          <h2 id="websocket">Browser &amp; Raw-Frame Clients (WebSocket)</h2>
           <p>
-            For WebSocket clients (web UIs, remote connections), the same recovery
-            concepts apply but you'll implement them in your client language.
-            The server-side WebSocket transport supports the same session
-            reattachment protocol.
+            Python clients should reach for <code>WSRecoveryClient</code> above.
+            This section documents the underlying <strong>raw WS frame</strong>
+            protocol for browsers / JavaScript and other non-Python clients (the
+            TypeScript <code>@jaato/sdk</code> <code>recovery: {}</code> wraps these
+            frames for you). The same recovery concepts apply, but reattachment has
+            one extra step that the IPC transport does not. Each WebSocket
+            connection is given its <em>own</em> workspace, so a new connection
+            cannot see a session created on a previous connection until it selects
+            that session's workspace first. The reconnect sequence is
+            <code>session.list</code> &rarr; <code>workspace.select</code> &rarr;
+            <code>session.attach</code>.
           </p>
 
           <h3>Key Patterns</h3>
           <ul>
-            <li>Use a reconnecting WebSocket library</li>
-            <li>Track the session ID client-side</li>
-            <li>Send <code>session.attach</code> after reconnecting</li>
+            <li>Use a reconnecting WebSocket library (or your own backoff loop)</li>
+            <li>Wait for the unprompted <code>{"type":"connected"}</code> greeting
+              before sending any command</li>
+            <li>Track the session ID <em>and its <code>workspace_path</code></em>
+              (read from <code>session.list</code>) client-side</li>
+            <li>Reattach with <code>session.list</code> &rarr;
+              <code>workspace.select</code> &rarr; <code>session.attach</code> —
+              <code>session.attach</code> is a <code>command.execute</code> with the
+              session ID as the first positional argument</li>
+            <li>The cold restore is asynchronous: a send issued while it settles can
+              return a <em>recoverable</em> <code>SessionError</code>
+              (<code>"Session not found"</code>) — reattach and resend until output
+              arrives</li>
             <li>Handle the ping/pong keepalive mechanism</li>
           </ul>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">WebSocket Authentication Required</div>
+            The server WS endpoint requires a bearer token on every connection
+            (including reconnects). Python/server-side clients send it as an HTTP
+            header on the Upgrade request:
+            <code>Authorization: Bearer &lt;token&gt;</code>.
+            Browsers cannot set custom headers in <code>new WebSocket()</code>,
+            so pass it as a query parameter instead:
+            <code>?token=&lt;token&gt;</code>.
+            Omitting or sending an invalid token causes the server to close the
+            connection immediately with WS close code <strong>1008</strong>
+            (Policy Violation). The default token path is
+            <code>$HOME/.jaato/ws.token</code>; it is auto-generated on first server
+            start if not provided via <code>--ws-token</code> /
+            <code>--ws-token-file</code>.
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Why the opaque "Session not found"</div>
+            Attaching a session you have not selected the workspace for returns a
+            bare <code>"Session not found"</code> rather than naming where the
+            session lives. This is deliberate: workspace isolation is a security
+            boundary, and the server will not confirm that a session exists in a
+            workspace the connection has not selected — otherwise the error could
+            be used to enumerate sessions across workspaces. <code>workspace.select</code>
+            is the legitimate way to re-target a workspace you own.
+          </div>
         </div>
         <div class="panel-code">
           <div class="code-label">WebSocket reconnection (TypeScript)</div>
           <div class="code-block">
-            <pre><code class="language-python">// TypeScript example for web clients
+            <pre><code class="language-typescript">// Raw WebSocket reconnect (no SDK). With @jaato/sdk, `recovery: {}` does all of
+// this for you; this shows the underlying frames.
 
 class JaatoWebClient {
   private ws: WebSocket | null = null;
   private sessionId: string | null = null;
+  private workspacePath: string | null = null; // the session's own workspace
   private reconnectAttempt = 0;
   private maxAttempts = 10;
 
+  // url carries the bearer token: wss://&lt;host&gt;/?token=&lt;token&gt;
+  // For a self-signed dev wss://, trust the dev CA out-of-band
+  // (e.g. NODE_EXTRA_CA_CERTS), never by disabling verification.
   connect(url: string) {
     this.ws = new WebSocket(url);
 
-    this.ws.onopen = () => {
-      this.reconnectAttempt = 0;
-      // Reattach session if we had one
-      if (this.sessionId) {
-        this.send({
-          type: "session.attach",
-          session_id: this.sessionId,
-        });
+    this.ws.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      switch (frame.type) {
+        case "connected": // unprompted greeting — only now is it safe to send
+          this.reconnectAttempt = 0;
+          if (this.sessionId) this.reattach();
+          break;
+        case "session.list": // find the session's workspace, then select + attach
+          this.workspacePath =
+            frame.sessions.find((s) =&gt; s.id === this.sessionId)?.workspace_path;
+          this.send({ type: "workspace.select", name: this.workspacePath });
+          this.send({ type: "command.execute",
+                      command: "session.attach", args: [this.sessionId] });
+          break;
+        case "error": // recoverable "Session not found" while the ~15s cold
+          if (frame.recoverable) this.reattach(); // restore settles — resend
+          break;
       }
     };
 
-    this.ws.onclose = () => {
-      this.scheduleReconnect(url);
-    };
+    this.ws.onclose = () =&gt; this.scheduleReconnect(url);
+  }
+
+  // A fresh connection gets its own workspace, so the session created on an
+  // earlier connection isn't reachable until we select its workspace. List
+  // sessions to find its workspace_path; the handler above does select + attach.
+  private reattach() {
+    this.send({ type: "command.execute", command: "session.list", args: [] });
   }
 
   private scheduleReconnect(url: string) {
-    if (this.reconnectAttempt >= this.maxAttempts) {
-      return; // Give up
-    }
+    if (this.reconnectAttempt &gt;= this.maxAttempts) return; // give up
 
-    const delay = Math.min(
-      60_000,
-      1000 * Math.pow(2, this.reconnectAttempt)
-    );
+    const delay = Math.min(60_000, 1000 * Math.pow(2, this.reconnectAttempt));
     this.reconnectAttempt++;
+    setTimeout(() =&gt; this.connect(url), delay);
+  }
 
-    setTimeout(() => this.connect(url), delay);
+  private send(frame: unknown) {
+    this.ws?.send(JSON.stringify(frame));
   }
 }</code></pre>
           </div>
@@ -822,7 +1015,9 @@ from jaato_sdk.client.recovery import (
     ConnectionStatus,
     ReconnectingError,
     ConnectionClosedError,
+    IncompatibleServerError,
 )
+from jaato_sdk.events import ClientType
 
 # States
 ConnectionState.DISCONNECTED

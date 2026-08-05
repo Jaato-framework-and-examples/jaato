@@ -77,7 +77,7 @@ def _pool_enabled() -> bool:
     by the flip.  Operators who never set the var get the pool
     automatically post-PR-5e.
     """
-    raw = os.environ.get("JAATO_RUNNER_POOL_ENABLED", "").strip().lower()
+    raw = os.environ.get("JAATO_RUNNER_POOL_ENABLED", "").strip().lower()  # env: use the pre-warm runner pool (faster session bootstrap); false to always cold-spawn
     # Empty (unset) → enabled.  Explicit-falsy → disabled.  Anything
     # else (truthy or unrecognised) → enabled.
     return raw not in ("0", "false", "no", "off")
@@ -591,6 +591,23 @@ def build_session_envelope(
     # persisted, or forwarded to clients.
     resolved_session_env = dict(getattr(server, "_session_env", {}) or {})
 
+    # Per-session egress allowlist (Phase 5 §5.11, opt-in).  If the profile's
+    # ``agent_params.egress_allowlist`` is set, start a per-session CONNECT
+    # proxy and point the runner's proxy env at it so all outbound HTTPS is
+    # confined to the allowlisted hosts.  Fully fail-safe: no config (the common
+    # case) leaves ``resolved_session_env`` untouched, and any wire-up error is
+    # swallowed so it can never break session spawn.
+    try:
+        from server.egress_proxy import wireup as _egress_wireup
+        _egress_env, _egress_errs = _egress_wireup.egress_env_for_session(
+            session_id, agent_params_dict.get("egress_allowlist"))
+        if _egress_env:
+            resolved_session_env.update(_egress_env)
+    except Exception:  # pragma: no cover - defensive: never block spawn
+        logger.warning(
+            "egress proxy wire-up failed for session %s (continuing without "
+            "egress restriction)", session_id, exc_info=True)
+
     return SessionInitEnvelope(
         session_id=session_id,
         workspace_path=workspace_path,
@@ -627,11 +644,22 @@ def build_session_envelope(
         # are set in JaatoServer.__init__ from BootstrapEnvelope so
         # they should always be present, but the defaults are also the
         # documented "no-op" values for both knobs).
+        # Default frozenset() (suppress nothing); the envelope's __post_init__
+        # also normalizes a legacy bool defensively.
         suppress_base_instructions=getattr(
-            server, "_suppress_base_instructions", False,
+            server, "_suppress_base_instructions", frozenset(),
         ),
         system_instruction_override=getattr(
             server, "_system_instruction_override", None,
+        ),
+        # 2026-06-21: client-provided ("host") tools registered via the WS/IPC
+        # protocol BEFORE session.new (e.g. a telegram client's send_to_telegram),
+        # ferried so the RUNNER-tier model SEES them in list_tools.  Pre-fix they
+        # registered only on the daemon registry and the runner model was blind
+        # (#344-sibling daemon-vs-runner split).  Execution forwards back to the
+        # daemon's proxy executor via daemon.plugin_execute (sentinel name).
+        client_tools=list(
+            getattr(server, "client_tool_schemas", {}).values()
         ),
     )
 
@@ -740,6 +768,31 @@ def dispatch_bootstrap_envelope(
         _emit_bootstrap_terminated(
             server=server, session_id=session_id, exc=exc,
         )
+    finally:
+        # Mark the runner ready REGARDLESS of bootstrap outcome: on success it
+        # can service mid-session client-tool pushes + sends; on the
+        # daemon-authoritative failure path the daemon-side JaatoSession still
+        # handles the turn — either way, don't strand the push / send-gate on a
+        # 30s readiness timeout.  This bootstrap-settled point is what the gates
+        # now wait for, instead of racing the reused warm pool slot's
+        # live-but-not-ready rpc handle (the re-attach client-tool-push stall).
+        server.mark_runner_ready()
+        # Runner is bootstrap-settled — re-emit the tool-id registry OFF the
+        # event loop so the runner-tier tool names (prompt.* etc.) reach the
+        # client.  Every ON-loop emit caller (emit_current_state / initialize /
+        # _register_client_tools) now skips runner-tier to avoid the
+        # daemon-side prompt_library filesystem walk on the loop (the re-attach
+        # self-block); those names come ONLY from the runner
+        # (session_get_tool_schemas), which can only run off-loop — here.  On a
+        # bootstrap failure the runner RPC yields [] and this maps daemon-tier
+        # only (harmless).
+        try:
+            server._emit_tool_id_registry_from_schemas()
+        except Exception:  # noqa: BLE001 — re-emit must not strand bootstrap
+            logger.debug(
+                "post-bootstrap tool-id re-emit failed for %s",
+                session_id, exc_info=True,
+            )
 
 
 def _emit_bootstrap_terminated(
@@ -756,26 +809,25 @@ def _emit_bootstrap_terminated(
     flow through ``_emit_to_session`` → ``_dispatch_to_cascade_clients``
     and reach cascade observers + reactor rules.
 
-    Reuses PR-186 ``error_summary`` / ``error_type`` fields on
-    SessionTerminatedEvent.  ``agent_id`` is read defensively from
-    ``server._main_agent_id`` (set during ``server.initialize``); falls
-    back to ``"main"`` so the field is always populated for
-    downstream consumers.
+    Routes through the single error-termination chokepoint
+    ``JaatoServer._emit_error_termination_from_exc`` — which emits
+    ``AgentErrorEvent`` (recovery first refusal; bootstrap has no auto-retry to
+    wait on, the framework is out of moves immediately) THEN
+    ``SessionTerminatedEvent(reason="error")`` (carrying ``error_summary`` /
+    ``error_type``) — so the "AgentErrorEvent precedes every reason=error"
+    invariant is structural here too.  ``agent_id`` falls back to ``"main"`` when
+    ``server._main_agent_id`` isn't set (early bootstrap fail).
 
-    The emit itself is wrapped in a defensive try/except: a failure
-    of the visibility path must not mask the underlying bootstrap
-    failure or disrupt the session-creation caller's error handling.
-    Logs the failure to keep the audit trail intact.
+    The call is wrapped in a defensive try/except: a failure of the visibility
+    path must not mask the underlying bootstrap failure or disrupt the
+    session-creation caller's error handling.  Logs the failure to keep the
+    audit trail intact.
     """
     try:
-        from jaato_sdk.events import SessionTerminatedEvent
-        server.emit(SessionTerminatedEvent(
-            session_id=session_id,
-            agent_id=getattr(server, "_main_agent_id", None) or "main",
-            reason="error",
-            error_summary=str(exc),
-            error_type=type(exc).__name__,
-        ))
+        agent_id = getattr(server, "_main_agent_id", None) or "main"
+        server._emit_error_termination_from_exc(
+            exc, session_id=session_id, agent_id=agent_id,
+        )
     except Exception as emit_exc:  # noqa: BLE001 — defensive
         logger.warning(
             "_emit_bootstrap_terminated: SessionTerminatedEvent emit "

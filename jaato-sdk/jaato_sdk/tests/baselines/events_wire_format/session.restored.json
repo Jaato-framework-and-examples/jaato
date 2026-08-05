@@ -1,0 +1,6 @@
+{
+  "type": "session.restored",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "pending_tool_call_count": 0
+}

@@ -19,16 +19,20 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 from ..base import (
+    MODALITY_TEXT,
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -98,7 +102,18 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "claude-3-haiku": 200_000,
 }
 
-DEFAULT_CONTEXT_LIMIT = 200_000
+# INPUT modalities per Claude model family.  All shipping Claude API
+# models (3.x, 4.x) accept image input alongside text; Claude 2.x was
+# text-only and isn't listed.  Prefix-matched like MODEL_CONTEXT_LIMITS;
+# a model absent here resolves to the text-only floor in modalities()
+# (never a false image claim).
+MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
+    "claude-opus-4": frozenset({"text", "image", "file"}),
+    "claude-sonnet-4": frozenset({"text", "image", "file"}),
+    "claude-haiku-4": frozenset({"text", "image", "file"}),
+    # claude-3 prefix covers 3.5/3.7 (PDF-capable); 3.0 is EOL.
+    "claude-3": frozenset({"text", "image", "file"}),
+}
 
 # Models that support extended thinking
 THINKING_CAPABLE_MODELS = [
@@ -116,7 +131,7 @@ EXTENDED_MAX_TOKENS = 16000  # When thinking is enabled
 CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 
-class AnthropicProvider:
+class AnthropicProvider(ModalityCapabilityMixin):
     """Stateless Anthropic Claude provider.
 
     This provider uses a stateless design: the caller (session) owns the
@@ -168,6 +183,16 @@ class AnthropicProvider:
         """Initialize the provider (not yet connected)."""
         self._client: Optional[Any] = None  # anthropic.Anthropic
         self._model_name: Optional[str] = None
+
+        # Per-profile context-window override (framework_overrides.context_length).
+        # When set, wins over the per-model MODEL_CONTEXT_LIMITS table in
+        # get_context_limit() — the escape hatch for a model not yet in the
+        # table.  None = use the table; unknown model + no override → raise
+        # (no hardcoded fallback, per project rule).
+        self._context_length_knob: Optional[int] = None
+        # INPUT-modality assertion (framework_overrides.modalities) —
+        # the escape hatch layered over MODEL_INPUT_MODALITIES.
+        self._modalities_knob: Optional[List[str]] = None
 
         # Configuration
         self._api_key: Optional[str] = None
@@ -334,6 +359,32 @@ class AnthropicProvider:
         self._thinking_budget = _knob(
             "thinking_budget", layer=api_params, default=resolve_thinking_budget(),
         )
+
+        # Context-window override (framework_overrides.context_length) via the
+        # shared precedence helper.  Anthropic has no live capacity endpoint and
+        # no env var for this, so detect_capacity/env are absent — the knob is
+        # the only override tier, layered over the per-model MODEL_CONTEXT_LIMITS
+        # table consulted in get_context_limit().
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=_knob("context_length", layer=framework_overrides),
+            env_value=None,
+        )
+
+        # INPUT-modality assertion (framework_overrides.modalities) — the
+        # escape hatch for a model not in MODEL_INPUT_MODALITIES, or to
+        # correct it.  Layered over the table in modalities().
+        modalities_override = _knob("modalities", layer=framework_overrides)
+        if modalities_override is not None:
+            if not isinstance(modalities_override, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_override
+            ):
+                raise TypeError(
+                    "Anthropic 'modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_override).__name__}"
+                )
+            self._modalities_knob = list(modalities_override)
 
         # Sampling parameters.  ``None`` means "omit from the request and
         # let Anthropic apply its server-side default" (temperature=1.0).
@@ -525,8 +576,12 @@ class AnthropicProvider:
         # branch name calls out.
         # Pull workspace_path / config_root from config.extra so
         # verify_auth surfaces credentials from the same path the
-        # runtime configured the provider with.
-        extra = getattr(self._config, 'extra', None) or {}
+        # runtime configured the provider with.  Read the ``config``
+        # PARAMETER (not ``self._config``): per the base contract
+        # verify_auth runs BEFORE initialize(), so ``self._config`` is
+        # unset here — reading it raised AttributeError on the
+        # in-process runtime path, which does not initialize() first.
+        extra = getattr(config, 'extra', None) or {}
         ws_path = extra.get('workspace_path')
         cr = extra.get('config_root')
 
@@ -918,18 +973,61 @@ class AnthropicProvider:
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``framework_overrides.context_length`` knob (``_context_length_knob``)
+           — the escape hatch for a model not yet in the table.
+        2. ``MODEL_CONTEXT_LIMITS`` prefix match — the documented per-model
+           window (the authoritative source for closed Claude models).
+        3. else raise — an unknown model with no override is a configuration
+           error, surfaced loudly rather than papered over with a guess.
+
         Returns:
             Maximum tokens the model can handle.
+
+        Raises:
+            ValueError: when neither the knob nor the table yields a value.
         """
-        if not self._model_name:
-            return DEFAULT_CONTEXT_LIMIT
+        if self._context_length_knob:
+            return self._context_length_knob
 
-        # Try prefix match
-        for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
-            if self._model_name.startswith(model_prefix):
-                return limit
+        if self._model_name:
+            for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
+                if self._model_name.startswith(model_prefix):
+                    return limit
 
-        return DEFAULT_CONTEXT_LIMIT
+        raise ValueError(
+            f"Anthropic provider: no known context window for model "
+            f"{self._model_name!r}, and no override is set.  Add the model to "
+            f"MODEL_CONTEXT_LIMITS, or set framework_overrides.context_length in "
+            f"the profile.  No hardcoded fallback exists per the project's "
+            f"no-fallback rule."
+        )
+
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
+        """INPUT modalities the active Claude model accepts.
+
+        Precedence mirrors get_context_limit() (no live capacity
+        endpoint, so detect is absent): framework_overrides.modalities
+        knob -> MODEL_INPUT_MODALITIES prefix match -> text-only floor
+        (every Claude model accepts text; image stays unconfirmed, so
+        the content gate / vision-tier validation treats it text-only).
+        """
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=self._lookup_input_modalities(model),
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
+
+    def _lookup_input_modalities(
+        self, model: Optional[str] = None
+    ) -> Optional[FrozenSet[str]]:
+        """Table-declared input modalities for ``model`` (or active)."""
+        model = model or self._model_name
+        if model:
+            for prefix, mods in MODEL_INPUT_MODALITIES.items():
+                if model.startswith(prefix):
+                    return mods
+        return None
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.
@@ -1172,7 +1270,7 @@ class AnthropicProvider:
         # what the model receives and produces across framework changes.
         # The marker tokens PROVIDER_REQUEST_DUMP / PROVIDER_RESPONSE_DUMP
         # make this greppable in mixed daemon logs.
-        _dump_enabled = os.environ.get("JAATO_DUMP_PROVIDER_REQUEST", "").lower() in ("1", "true", "yes", "on")
+        _dump_enabled = os.environ.get("JAATO_DUMP_PROVIDER_REQUEST", "").lower() in ("1", "true", "yes", "on")  # env: debug — log full request/response dumps (greppable PROVIDER_*_DUMP markers)
         if _dump_enabled:
             try:
                 tools_in_kwargs = kwargs.get("tools") or []

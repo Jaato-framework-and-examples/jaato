@@ -45,6 +45,12 @@ def _make_session_stub(
         _provider=provider,
         _runtime=runtime,
         _trace=lambda msg: None,
+        # ``_get_tools_for_provider`` runs the per-plugin tool-scope
+        # filter after the visibility filter. These tests configure no
+        # scopes, where the real ``_apply_tool_scopes`` returns its input
+        # unchanged — so a pass-through stub faithfully isolates the
+        # visibility-filter behavior under test.
+        _apply_tool_scopes=lambda schemas: schemas,
     )
 
 

@@ -17,7 +17,7 @@ def resolve_api_key() -> Optional[str]:
     Returns:
         API key if found, None otherwise.
     """
-    return os.environ.get("ANTHROPIC_API_KEY")
+    return os.environ.get("ANTHROPIC_API_KEY")  # env: Anthropic API key (sk-ant-api03-...); uses API credits
 
 
 def resolve_oauth_token() -> Optional[str]:
@@ -36,8 +36,8 @@ def resolve_oauth_token() -> Optional[str]:
     # Check both env vars - ANTHROPIC_AUTH_TOKEN is the SDK standard,
     # CLAUDE_CODE_OAUTH_TOKEN is used by Claude Code CLI
     return (
-        os.environ.get("ANTHROPIC_AUTH_TOKEN") or
-        os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        os.environ.get("ANTHROPIC_AUTH_TOKEN") or  # env: OAuth token for Claude Pro/Max subscription (sk-ant-oat01-...)
+        os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")  # env: OAuth token from `claude setup-token`; same subscription path as ANTHROPIC_AUTH_TOKEN
     )
 
 
@@ -63,7 +63,7 @@ def resolve_enable_thinking() -> bool:
     Returns:
         True if enabled, False otherwise.
     """
-    val = os.environ.get("JAATO_ANTHROPIC_ENABLE_THINKING", "").lower()
+    val = os.environ.get("JAATO_ANTHROPIC_ENABLE_THINKING", "").lower()  # env: enable extended thinking on supported Claude models (default off)
     return val in ("1", "true", "yes", "on")
 
 
@@ -76,7 +76,7 @@ def resolve_thinking_budget() -> int:
     Returns:
         Thinking budget in tokens (default: 10000).
     """
-    val = os.environ.get("JAATO_ANTHROPIC_THINKING_BUDGET", "10000")
+    val = os.environ.get("JAATO_ANTHROPIC_THINKING_BUDGET", "10000")  # env: max thinking tokens when extended thinking is on (default 10000)
     try:
         return int(val)
     except ValueError:
@@ -92,5 +92,5 @@ def resolve_enable_caching() -> bool:
     Returns:
         True if enabled, False otherwise.
     """
-    val = os.environ.get("JAATO_ANTHROPIC_ENABLE_CACHING", "").lower()
+    val = os.environ.get("JAATO_ANTHROPIC_ENABLE_CACHING", "").lower()  # env: enable Anthropic prompt caching (default off)
     return val in ("1", "true", "yes", "on")

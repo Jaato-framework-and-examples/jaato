@@ -18,11 +18,17 @@ from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from ..workspace_venv import (
+    resolve_venv_path, ensure_workspace_venv, pip_apparmor_rules,
+)
 
 
 # Maximum concurrent interactive sessions
@@ -72,6 +78,9 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         self._max_lifetime = 600
         self._idle_timeout = 0.5
         self._workspace_root: Optional[str] = None
+        # Workspace-scoped venv path for spawned sessions (None/empty = off).
+        # See shared/plugins/workspace_venv.py.
+        self._workspace_venv: Optional[str] = None
         self._agent_name: Optional[str] = None
         self._initialized = False
         self._tool_output_callback: Optional[Callable[[str], None]] = None
@@ -150,6 +159,8 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     self._workspace_root = os.path.realpath(
                         os.path.abspath(workspace)
                     )
+            if 'workspace_venv' in config:
+                self._workspace_venv = config['workspace_venv']
 
         self._initialized = True
         self._start_reaper()
@@ -246,8 +257,38 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "default": 0.5,
                     "description": "Output settling time in seconds",
                 },
+                "workspace_venv": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped venv to activate for "
+                        "spawned sessions (empty = off). Relative paths "
+                        "resolve against the workspace root. Created if "
+                        "absent with --system-site-packages. Recommended: "
+                        ".jaato/tool-venv"
+                    ),
+                },
             },
         }
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute pip's AppArmor rules to the profile.
+
+        Interactive shells can run ``pip``: the distro/UA OS-id reads (crashes
+        without them under confinement) plus, when a ``workspace_venv`` is set,
+        an ``ix`` grant on the venv bin so a bare ``pip`` / console script runs.
+        Scoped to sessions that load ``interactive_shell`` — least-privilege.
+        See ``pip_apparmor_rules``.
+        """
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.
@@ -389,7 +430,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["command"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_input',
@@ -420,7 +461,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["session_id", "input"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_read',
@@ -447,7 +488,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["session_id"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_control',
@@ -479,7 +520,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["session_id", "key"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_close',
@@ -499,7 +540,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "required": ["session_id"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_list',
@@ -513,7 +554,7 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "properties": {},
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
@@ -683,6 +724,12 @@ IMPORTANT NOTES:
 
         self._trace(f"spawn: id={session_id}, cmd={command[:80]}, backend={_BACKEND}")
 
+        # Resolve + create-if-absent the workspace venv (if configured) so the
+        # spawned session runs with it activated (pip persists, imports resolve).
+        venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+        if venv_path:
+            ensure_workspace_venv(venv_path)
+
         try:
             session = ShellSession(
                 command=spawn_command,
@@ -693,6 +740,7 @@ IMPORTANT NOTES:
                 max_lifetime=self._max_lifetime,
                 cwd=self._workspace_root,
                 preexec_fn=self._build_subprocess_preexec_fn(),
+                workspace_venv=venv_path,
             )
 
             # Read initial output (program banner, first prompt, etc.)

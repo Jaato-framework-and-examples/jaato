@@ -17,7 +17,12 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import CommandCompletion, CommandParameter, HelpLines, UserCommand
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    EditableContent,
+    ToolSchema,
+    TRAIT_GREPPABLE_CONTENT,
+    DISCOVERABILITY_DEFERRED,
+)
 
 from .auth import AuthError, AuthManager
 from .bruno_import import BrunoParseError, parse_bruno_collection
@@ -301,7 +306,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["source", "alias"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="list_endpoints",
@@ -332,7 +337,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["service"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="get_endpoint_schema",
@@ -359,14 +364,18 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["service", "method", "path"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="call_service",
                 description=(
                     "Execute an HTTP request. Can use a discovered service (with auth and "
                     "base URL) or a raw URL. Request body is validated against schema if "
-                    "available. Response is validated and truncated if too large."
+                    "available. Response is validated and truncated if too large. "
+                    "The response is bulk content: when you are scanning it for something "
+                    "specific, call grep_mode_start(pattern) first to have these responses "
+                    "filtered to matching lines (with context) instead of returned in full — "
+                    "this cuts context cost. grep_mode_stop restores full responses."
                 ),
                 parameters={
                     "type": "object",
@@ -451,12 +460,18 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["method"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["method", "path", "url", "query", "headers", "body"],
                     format="json",
                     template="# Edit the request below. Save and exit to continue.\n",
                 ),
+                # call_service responses are bulk HTTP/registry payloads whose
+                # heavy data sits under structured keys (body/headers) — invisible
+                # to the text-field enrichment path.  This trait routes the full
+                # result through enrichment so result_grep can filter it while
+                # grep-mode is active.
+                traits=frozenset({TRAIT_GREPPABLE_CONTENT}),
             ),
             ToolSchema(
                 name="preview_request",
@@ -503,7 +518,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["method"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="save_schema",
@@ -540,7 +555,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["service", "name", "schema"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="list_schemas",
@@ -558,7 +573,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="import_bruno_collection",
@@ -585,7 +600,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["path", "service_name"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="configure_service_auth",
@@ -625,7 +640,7 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "required": ["service", "auth"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

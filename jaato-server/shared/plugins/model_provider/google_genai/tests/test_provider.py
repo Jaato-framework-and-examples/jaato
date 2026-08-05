@@ -4,7 +4,7 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch, call
 
-from ..provider import GoogleGenAIProvider, MODEL_CONTEXT_LIMITS, DEFAULT_CONTEXT_LIMIT
+from ..provider import GoogleGenAIProvider, MODEL_CONTEXT_LIMITS
 from shared.plugins.model_provider.base import ProviderConfig
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -643,16 +643,25 @@ class TestTokenManagement:
         provider._model_name = "gemini-2.5-pro-preview-05-06"
         assert provider.get_context_limit() == MODEL_CONTEXT_LIMITS["gemini-2.5-pro-preview-05-06"]
 
-    def test_get_context_limit_unknown_model(self):
-        """get_context_limit() should return default for unknown models."""
+    def test_get_context_limit_unknown_model_raises(self):
+        """No hardcoded fallback: unknown model + no override raises."""
         provider = GoogleGenAIProvider()
         provider._model_name = "some-unknown-model"
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
 
-    def test_get_context_limit_no_model(self):
-        """get_context_limit() should return default when no model set."""
+    def test_get_context_limit_no_model_raises(self):
+        """No model + no override → raise (no guessed default)."""
         provider = GoogleGenAIProvider()
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
+
+    def test_get_context_limit_override_knob_wins(self):
+        """context_length override beats the table — escape hatch / budget-down."""
+        provider = GoogleGenAIProvider()
+        provider._model_name = "some-unknown-model"
+        provider._context_length_knob = 250_000
+        assert provider.get_context_limit() == 250_000
 
     def test_get_token_usage_initial(self):
         """get_token_usage() should return empty usage initially."""
@@ -935,3 +944,48 @@ class TestProviderResponseProperties:
         """has_structured_output should be False when None."""
         response = ProviderResponse(parts=[Part.from_text("plain text")])
         assert response.has_structured_output() is False
+
+
+class TestToolResultImageMarshalling:
+    """The live history_to_sdk path must surface a tool result's image
+    attachments (part_to_sdk delegates to the multimodal-aware
+    tool_result_to_sdk_part instead of dropping attachments)."""
+
+    def test_tool_result_image_reaches_sdk_part(self):
+        from jaato_sdk.plugins.model_provider.types import Attachment
+        from ..converters import part_to_sdk
+        img = b"PNG-tool-result-image-bytes"
+        tr = ToolResult(
+            call_id="c1", name="readFile", result={"path": "x.png"},
+            attachments=[Attachment(mime_type="image/png", data=img,
+                                    display_name="x.png")],
+        )
+        part = part_to_sdk(Part(function_response=tr))
+        assert "PNG-tool-result-image-bytes" in repr(part)
+
+    def test_tool_result_without_attachment_has_no_image(self):
+        from ..converters import part_to_sdk
+        tr = ToolResult(call_id="c1", name="readFile", result={"path": "x.png"})
+        part = part_to_sdk(Part(function_response=tr))
+        assert "image" not in repr(part).lower() or "x.png" in repr(part)
+
+    def test_user_message_pdf_reaches_sdk_part(self):
+        # PDF marshals via the mime-agnostic inline_data Blob (no converter
+        # change) — google reads PDF pages natively (text + embedded figures).
+        from ..converters import part_to_sdk
+        pdf = b"PDF-google-user-bytes"
+        part = part_to_sdk(Part(inline_data={"mime_type": "application/pdf", "data": pdf}))
+        assert "PDF-google-user-bytes" in repr(part)
+        assert "application/pdf" in repr(part)
+
+    def test_tool_result_pdf_reaches_sdk_part(self):
+        from jaato_sdk.plugins.model_provider.types import Attachment
+        from ..converters import part_to_sdk
+        pdf = b"PDF-google-tool-bytes"
+        tr = ToolResult(
+            call_id="c1", name="readFile", result={"path": "d.pdf"},
+            attachments=[Attachment(mime_type="application/pdf", data=pdf,
+                                    display_name="d.pdf")],
+        )
+        part = part_to_sdk(Part(function_response=tr))
+        assert "PDF-google-tool-bytes" in repr(part)

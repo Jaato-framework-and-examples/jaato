@@ -6,6 +6,7 @@ validated knowledge or promotes them to reference entries.
 """
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -21,7 +22,7 @@ from jaato_sdk.plugins.base import (
     ToolResultEnrichmentResult,
     UserCommand,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER, DISCOVERABILITY_DEFERRED
 from .indexer import MemoryIndexer
 from .models import (
     ACTIVE_MATURITIES,
@@ -50,13 +51,21 @@ class MemoryPlugin(RunnerForwardingMixin):
 
     The plugin participates in the knowledge-curation lifecycle:
     - Working agents store memories with ``maturity="raw"``
-    - Prompt enrichment only surfaces *active* memories (raw, validated)
+    - Prompt enrichment surfaces **curated memories only** — the index is
+      built from ``curated.jsonl`` (see ``initialize``); raw memories are the
+      curator's queue and do NOT auto-surface as enrichment hints. (The
+      ``retrieve_memories`` tool can still fetch raw via its ``maturity``
+      filter — that is the tool surface, not enrichment.)  So a memory must be
+      curated (raw→validated) before it appears in the 💡 hint — which makes
+      the advisor REQUIRED for cross-session continuity, not optional.  See
+      ``docs/design/agent-continuity.md``.
     - The advisor agent uses ``get_pending_curation`` (via storage) to
       review raw memories and transition them to validated/escalated/dismissed
 
     The plugin uses a two-phase retrieval system:
-    - Phase 1: Prompt enrichment adds lightweight hints about active memories
+    - Phase 1: Prompt enrichment adds lightweight hints about CURATED memories
     - Phase 2: Model decides whether to retrieve full content via function calling
+      (``retrieve_memories`` can also reach raw memories explicitly)
     """
 
     def __init__(self):
@@ -71,6 +80,11 @@ class MemoryPlugin(RunnerForwardingMixin):
         self._indexer: Optional[MemoryIndexer] = None
         self._global_storage: Optional[MemoryStorage] = None
         self._global_indexer: Optional[MemoryIndexer] = None
+        # Deployment write-side gate: which memory scopes the model may store.
+        # Default permissive (all valid scopes); restrict per-deployment via the
+        # ``allowed_scopes`` config (e.g. ``["project"]`` keeps a deployment off
+        # the HOME/global tier entirely). Resolved from config in initialize().
+        self._allowed_scopes: frozenset = VALID_SCOPES
         self._agent_name: Optional[str] = None
         self._session_id: Optional[str] = None
         # Server 0.6.168+: stashed by ``set_plugin_registry`` so
@@ -89,32 +103,67 @@ class MemoryPlugin(RunnerForwardingMixin):
         """Write trace message to log file for debugging."""
         _trace_write("MEMORY", msg)
 
-    def _get_session_id(self) -> Optional[str]:
-        """Return the current session ID if available.
+    @staticmethod
+    def _resolve_allowed_scopes(raw: Optional[List[str]]) -> frozenset:
+        """Resolve the ``allowed_scopes`` write-side gate from config.
 
-        Server 0.6.168+: prefer the registry's live ``_session_id``
-        over the plugin's cached value.  Rationale: cascade-pool
-        reuse (PR #173 / runner_pool) reuses the SAME plugin
-        instance across multiple sessions on a HIT slot.
-        ``plugin.initialize()`` only fires on MISS (first session
-        per slot); subsequent HIT-reused sessions don't re-run
-        initialize so the cached ``self._session_id`` stays at the
-        FIRST session's id (or None pre-0.6.168).  The registry's
-        ``_session_id`` IS updated per-bootstrap via
-        ``registry.set_session_id(envelope.session_id)`` at
-        ``runner/session.py:271``, so reading from the registry
-        at call time gives the always-current value.
-
-        Falls back to ``self._session_id`` when the registry
-        reference isn't wired (tests that construct the plugin
-        standalone without going through expose_tool).
+        Default (key absent / ``None``) is permissive — all ``VALID_SCOPES``.
+        When set, it is the deployment policy for which scopes ``store_memory``
+        may write (e.g. ``["project"]`` keeps a deployment off the HOME/global
+        tier entirely). The parse is deterministic and LOUD, never a silent
+        fallback: unknown scope strings are dropped with a WARNING, and an empty
+        resolved set (all entries invalid, or an explicit ``[]``) is honored —
+        it rejects every write — but logged at WARNING so a typo isn't mistaken
+        for "allow all".
         """
-        if self._plugin_registry is not None:
-            registry_sid = getattr(
-                self._plugin_registry, "_session_id", None,
-            )
-            if registry_sid:
-                return registry_sid
+        if raw is None:
+            return VALID_SCOPES
+        requested = [str(s).strip().lower() for s in raw]
+        unknown = [s for s in requested if s not in VALID_SCOPES]
+        if unknown:
+            logging.getLogger(__name__).warning(
+                "memory: allowed_scopes contains unknown scope(s) %s "
+                "(valid: %s) — ignoring them", unknown, sorted(VALID_SCOPES))
+        resolved = frozenset(s for s in requested if s in VALID_SCOPES)
+        if not resolved:
+            logging.getLogger(__name__).warning(
+                "memory: allowed_scopes=%r resolved to EMPTY — every "
+                "store_memory write will be rejected", raw)
+        return resolved
+
+    def _get_session_id(self) -> Optional[str]:
+        """Return the current session's daemon ID, per-execution.
+
+        Reads the CURRENTLY EXECUTING session via
+        ``shared.session_context.get_current_session()`` and resolves its
+        ``_daemon_session_id`` (with parent-walk for any session that
+        lacks its own — the canonical resolver in ``dynamic_instructions``).
+        Each sibling subagent has its own ``JaatoSession`` (stamped with
+        its ``envelope.session_id`` at runner bootstrap), so this value is
+        per-sibling-correct.
+
+        Deliberately does NOT read ``registry._session_id``: the plugin
+        registry is SHARED across sibling subagents, so its single
+        ``_session_id`` is overwritten by whichever sibling bootstrapped
+        last — reading it leaked one sibling's id into another's
+        ``source_session``.  Fixed by stamping the id per-session
+        (``runner/session.py`` ``bootstrap_session``) and reading it here.
+
+        Falls back to ``self._session_id`` (the config-injection value
+        from ``initialize``) only when there is no session in context —
+        standalone unit tests that construct the plugin without going
+        through a real turn.
+        """
+        try:
+            from shared.session_context import get_current_session
+            session = get_current_session()
+        except LookupError:
+            session = None
+        if session is not None:
+            from shared.dynamic_instructions import _resolve_session_id
+            sid = _resolve_session_id(session)
+            if sid:
+                return sid
         return self._session_id
 
     def set_plugin_registry(self, registry: Any) -> None:
@@ -129,37 +178,32 @@ class MemoryPlugin(RunnerForwardingMixin):
 
     def set_session(self, session: Any) -> None:
         """Auto-wiring hook called by the framework after plugin
-        configure() (server 0.6.167+).
+        configure() — intentionally a NO-OP.
 
-        Extracts the daemon session_id from the JaatoSession's
-        ``_daemon_session_id`` attribute (the session-manager ID
-        used for telemetry correlation — see
-        ``jaato_session.py:442``) and stashes it so subsequent
-        ``store_memory`` calls populate the ``source_session``
-        field on the persisted ``Memory`` record.
+        **Must not store session state on ``self``.**  Plugin instances
+        are SHARED across sibling subagents within a session (shared
+        runtime registry), so a sibling's ``set_session`` would clobber
+        another's stashed value → cross-subagent leakage.  Enforced by
+        ``tests/test_plugin_session_safety.py``.
 
-        Pre-0.6.167 the plugin defined ``set_session_context(
-        session_id: str)`` but the framework's canonical wiring is
-        ``plugin.set_session(session)`` (called from five sites in
-        ``shared/jaato_session.py``).  The method-name mismatch
-        meant the framework never reached this plugin → every
-        memory ever written had ``source_session=null``.  Peer
-        7:1 empirical audit (2026-05-28) over the
-        kb-enablement-2.0 store: 25/25 memories had
-        source_session=null despite source_agent being populated.
+        Historically (PR-196, server 0.6.167+) this stashed
+        ``session._daemon_session_id`` on ``self._session_id`` to
+        populate the ``source_session`` field.  But ``_daemon_session_id``
+        is set ONLY daemon-side (``JaatoClient.set_daemon_session_id``),
+        never on the runner-side ``JaatoSession`` — and memory is
+        ``PLUGIN_TIER = "runner"`` — so this path read ``None`` for every
+        cascade session (peer 7:1 retry-49 empirical: 4/4 memories still
+        ``source_session=null`` post-PR-196).  The session_id that
+        actually reaches ``store_memory`` comes from the config-injection
+        path (``initialize`` reads ``config['session_id']`` injected by
+        ``registry._augment_plugin_config``) preferred via
+        ``_get_session_id``'s registry read — see those docstrings.
 
         Args:
-            session: The JaatoSession instance.  ``None`` is
-                tolerated (clears the stashed session_id).
+            session: The JaatoSession instance (unused).
         """
-        session_id = (
-            getattr(session, "_daemon_session_id", None)
-            if session is not None
-            else None
-        )
-        self._session_id = session_id
-        if session_id:
-            self._trace(f"set_session: session_id={session_id}")
+        # Intentionally empty — see docstring. session_id is resolved at
+        # store time via _get_session_id (registry / config injection).
 
     def set_session_context(self, session_id: str) -> None:
         """Legacy compat shim — pre-0.6.167 callers may still use
@@ -217,6 +261,8 @@ class MemoryPlugin(RunnerForwardingMixin):
         """
         config = config or {}
         self._agent_name = config.get("agent_name")
+        self._allowed_scopes = self._resolve_allowed_scopes(config.get("allowed_scopes"))
+        self._trace(f"initialize: allowed_scopes={sorted(self._allowed_scopes)}")
         # Server 0.6.168+ (real Bug B-class fix): read session_id
         # from config.  The registry's _augment_plugin_config
         # (registry.py:1337-1386) injects session_id via setdefault
@@ -241,25 +287,56 @@ class MemoryPlugin(RunnerForwardingMixin):
         self._storage = MemoryStorage(self._storage_path_template)
         self._indexer = MemoryIndexer()
 
-        # Build index from CURATED memories only — raw memories are
-        # the curator's queue and aren't surfaced as enrichment hints.
-        existing_memories = self._storage.load_curated()
+        # Build index from CURATED memories only — raw memories are the
+        # curator's queue and aren't surfaced as enrichment hints.
+        #
+        # The template is RELATIVE: at global registry-init time it resolves
+        # against the daemon cwd, NOT the session workspace.  The real
+        # per-session store is wired later by set_workspace_path().  So a
+        # confined session is (correctly) denied this path here — tolerate it
+        # and let set_workspace_path() resolve the workspace-tier store.  See
+        # _safe_load_curated for why this must not disable the plugin.
+        existing_memories = self._safe_load_curated(
+            self._storage, tier="workspace (pre-set_workspace_path)")
         self._indexer.build_index(existing_memories)
         self._trace(f"initialize: storage_path={self._storage_path_template}, curated_memories={len(existing_memories)}")
 
-        # Global storage at ~/.jaato/memories.jsonl — cross-session
-        # knowledge shared by all agents.  Fixed path, no workspace
-        # dependency.  AppArmor profile grants rw access.
-        # Configurable via "global_storage_path" for testing.
+        # Global storage at ~/.jaato/memories.jsonl — cross-session knowledge
+        # shared by UNCONFINED agents.  This tier is OPTIONAL: a confined
+        # session is correctly denied HOME, so the tier is simply absent for it
+        # and the workspace tier is the only (priority) store.  Configurable via
+        # "global_storage_path" for testing.
         global_path = config.get(
             "global_storage_path",
             str(Path.home() / ".jaato" / "memories.jsonl"),
         )
         self._global_storage = MemoryStorage(global_path)
         self._global_indexer = MemoryIndexer()
-        global_memories = self._global_storage.load_curated()
+        global_memories = self._safe_load_curated(
+            self._global_storage, tier="global (HOME)")
         self._global_indexer.build_index(global_memories)
         self._trace(f"initialize: global_path={global_path}, global_curated_memories={len(global_memories)}")
+
+    def _safe_load_curated(self, storage: "MemoryStorage", tier: str) -> List["Memory"]:
+        """Load a tier's curated memories, tolerating an inaccessible store.
+
+        Memory has two tiers: a per-session WORKSPACE store (the priority,
+        wired by set_workspace_path) and an OPTIONAL global HOME store.  At
+        global registry init neither is guaranteed reachable — a confined
+        session is *correctly* denied both the daemon-cwd-relative template and
+        HOME.  An ``OSError`` loading a tier therefore means "this tier is
+        absent here", not "the plugin is broken": degrade to an empty index so
+        the plugin stays EXPOSED and set_workspace_path() can wire the real
+        workspace store.  A non-OSError (a genuine bug) still propagates.
+        """
+        try:
+            return storage.load_curated()
+        except OSError as e:
+            self._trace(
+                f"initialize: {tier} memory tier not loadable here ({e}); "
+                f"degrading to empty — the workspace tier is wired by "
+                f"set_workspace_path()")
+            return []
 
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
@@ -309,6 +386,17 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "type": "string",
                     "default": ".jaato/memories.jsonl",
                     "description": "Path to JSONL memory storage file",
+                },
+                "allowed_scopes": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(VALID_SCOPES)},
+                    "default": sorted(VALID_SCOPES),
+                    "description": (
+                        "Write-side gate: which memory scopes the model may "
+                        "store. Default permissive (all). Set e.g. [\"project\"] "
+                        "to keep a deployment off the HOME/global tier entirely; "
+                        "a disallowed scope is hard-rejected back to the model."
+                    ),
                 },
             },
         }
@@ -405,7 +493,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": ["content", "description", "tags"]
                 },
                 category="memory",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name='retrieve_memories',
@@ -466,7 +554,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="memory",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name='list_memory_tags',
@@ -480,7 +568,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": []
                 },
                 category="memory",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name='update_memory',
@@ -521,7 +609,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": ["id"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='delete_memory',
@@ -540,7 +628,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "required": ["id"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
@@ -958,6 +1046,28 @@ class MemoryPlugin(RunnerForwardingMixin):
         description = args.get("description", "")
         tags = args.get("tags", [])
         self._trace(f"store_memory: description={description!r}, tags={tags}")
+
+        # Validate + normalize scope, then apply the deployment write-side gate
+        # (allowed_scopes) FIRST — before per-request content checks. A disallowed
+        # scope is HARD-REJECTED back to the model (so it re-stores with an
+        # allowed scope) rather than silently down-scoped (which would hide the
+        # policy and make the model believe it stored a wider scope than it did).
+        # A deployment with allowed_scopes=["project"] thus never writes to the
+        # HOME/global tier at all.
+        scope = args.get("scope", SCOPE_PROJECT)
+        if scope not in VALID_SCOPES:
+            scope = SCOPE_PROJECT
+        if scope not in self._allowed_scopes:
+            return {
+                "status": "rejected",
+                "error": (
+                    f"scope '{scope}' is not allowed for this deployment "
+                    f"(allowed scopes: {sorted(self._allowed_scopes)}). "
+                    f"Re-store this memory with an allowed scope."
+                ),
+                "allowed_scopes": sorted(self._allowed_scopes),
+            }
+
         if not self._storage or not self._indexer:
             return {
                 "status": "error",
@@ -986,11 +1096,6 @@ class MemoryPlugin(RunnerForwardingMixin):
             confidence = max(0.0, min(1.0, float(confidence)))
         except (TypeError, ValueError):
             confidence = 0.5
-
-        # Validate scope
-        scope = args.get("scope", SCOPE_PROJECT)
-        if scope not in VALID_SCOPES:
-            scope = SCOPE_PROJECT
 
         # Create memory object — always starts as raw
         memory = Memory(

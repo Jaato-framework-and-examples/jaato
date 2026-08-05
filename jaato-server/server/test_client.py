@@ -345,7 +345,7 @@ def main():
 
     # Resolve token: explicit flag > env > well-known file.
     if args.token is None:
-        args.token = os.environ.get("JAATO_WS_TOKEN")
+        args.token = os.environ.get("JAATO_WS_TOKEN")  # env: bearer token for WS auth (falls back to ~/.jaato/ws.token, the daemon's default token file)
     if args.token is None:
         from pathlib import Path
         default_path = Path.home() / ".jaato" / "ws.token"

@@ -148,7 +148,7 @@ def _detect_graphics(
         None    - No graphics support detected (use rich-pixels fallback)
     """
     # User override always wins
-    override = os.environ.get("JAATO_GRAPHICS_PROTOCOL")
+    override = os.environ.get("JAATO_GRAPHICS_PROTOCOL")  # env: force terminal graphics protocol: kitty/iterm/sixel; any other value disables graphics
     if override:
         if override.lower() in ("kitty", "iterm", "sixel"):
             return override.lower()

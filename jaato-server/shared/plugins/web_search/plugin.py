@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_UNTRUSTED_CONTENT
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
@@ -147,6 +147,9 @@ class WebSearchPlugin(RunnerForwardingMixin):
                 "required": ["query"]
             },
             category="search",
+            # Search results are untrusted external content — wrapped in the
+            # untrusted-content boundary to defang injected instructions.
+            traits=frozenset({TRAIT_UNTRUSTED_CONTENT}),
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:

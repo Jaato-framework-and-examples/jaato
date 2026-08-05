@@ -62,6 +62,13 @@ class NullTelemetryPlugin:
         """No-op shutdown."""
         pass
 
+    def reset_for_next_session(self) -> None:
+        """No-op (required by the ``TelemetryPlugin`` protocol).
+
+        The null plugin holds no per-session state, so there is nothing
+        to clear between cascade sessions."""
+        pass
+
     @property
     def enabled(self) -> bool:
         """Always returns False."""

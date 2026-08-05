@@ -44,17 +44,17 @@ def resolve_host() -> Optional[str]:
     and no profile-level override is in place — see
     ``VLLMProvider.initialize``.
     """
-    return os.environ.get(ENV_HOST)
+    return os.environ.get(ENV_HOST)  # env: vLLM server URL (required — no localhost fallback)
 
 
 def resolve_model() -> Optional[str]:
     """Return the default model name, if configured."""
-    return os.environ.get(ENV_MODEL)
+    return os.environ.get(ENV_MODEL)  # env: model name matching the id in /v1/models
 
 
 def resolve_context_length() -> Optional[int]:
     """Return the context length override, if configured."""
-    val = os.environ.get(ENV_CONTEXT_LENGTH)
+    val = os.environ.get(ENV_CONTEXT_LENGTH)  # env: override the auto-detected max_model_len (fallback for older vLLM builds)
     if val:
         try:
             return int(val)
@@ -71,4 +71,4 @@ def resolve_api_token() -> Optional[str]:
     any ``api_key`` value in that mode, ``"EMPTY"`` is the conventional
     placeholder).
     """
-    return os.environ.get(ENV_API_TOKEN)
+    return os.environ.get(ENV_API_TOKEN)  # env: bearer token when the server was launched with --api-key or sits behind an auth proxy

@@ -14,6 +14,8 @@ from ..plugin import (
     PROMPT_ENTRY_FILE,
     SKILL_ENTRY_FILE,
     COMMAND_TIMEOUT,
+    PARAM_GRAMMAR_DOC,
+    NAMED_PARAM_PATTERN,
     tokenize_prompt_args,
 )
 
@@ -1022,6 +1024,47 @@ class TestSystemInstructions:
                 instructions = plugin.get_system_instructions()
 
                 assert instructions is None
+
+
+class TestParamGrammarDoc:
+    """Pins the single-source placeholder-grammar doc cited at BOTH authoring
+    surfaces the model sees.
+
+    Regression guard for the drift that let a model author a prompt with Jinja
+    filter syntax (``{{name | default('x')}}``) — jaato's ``NAMED_PARAM_PATTERN``
+    never matches that form, so it rendered literally and the param went
+    unrecognized.  ``PARAM_GRAMMAR_DOC`` is the one source of truth; these tests
+    assert it (a) is self-consistent with the real grammar and (b) is actually
+    surfaced verbatim at both the ``savePrompt`` tool description and the
+    ``get_system_instructions`` block, so the two cannot silently diverge again.
+    """
+
+    def test_doc_is_self_consistent_with_grammar(self):
+        # The forms the doc advertises must match the real pattern...
+        assert NAMED_PARAM_PATTERN.fullmatch("{{name}}")
+        assert NAMED_PARAM_PATTERN.fullmatch("{{name:default text}}")
+        # ...and the Jinja filter form the doc warns against must NOT match.
+        assert not NAMED_PARAM_PATTERN.search("{{name | default('x')}}")
+        assert "NOT Jinja" in PARAM_GRAMMAR_DOC
+        assert "{{name:default text}}" in PARAM_GRAMMAR_DOC
+
+    def test_save_prompt_description_cites_the_doc(self):
+        plugin = PromptLibraryPlugin()
+        schemas = {s.name: s for s in plugin.get_tool_schemas()}
+        desc = schemas["savePrompt"].parameters["properties"]["content"]["description"]
+        assert PARAM_GRAMMAR_DOC in desc
+        # The bare "{{param}}" wording that invited the over-generalization is gone.
+        assert "optional {{param}} placeholders" not in desc
+
+    def test_system_instructions_cite_the_doc(self):
+        plugin = PromptLibraryPlugin()
+        # Stub discovery so the block is produced regardless of the environment.
+        plugin._discover_prompts = lambda: {"demo": object()}
+        instructions = plugin.get_system_instructions()
+        assert PARAM_GRAMMAR_DOC in instructions
+        # f-string braces rendered, not a literal placeholder leak.
+        assert "{PARAM_GRAMMAR_DOC}" not in instructions
+        assert "{{focus:security}}" in instructions
 
 
 class TestGitHubPathFetch:

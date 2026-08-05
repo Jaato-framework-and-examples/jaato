@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import pytest
+import signal
+import sys
 import tempfile
 import threading
 import queue
@@ -1159,18 +1161,25 @@ class TestConnectTimeoutKnob:
     hard-coded 15.0 at lsp/plugin.py:1699 — enough for pyright /
     typescript-language-server (5s cold-start typical) but starves
     Eclipse JDT LS (jdtls) on Maven workspaces where the full
-    initialize + workspace import easily exceeds 30s.  The knob lets
-    profiles tune per workspace.
+    initialize + workspace import routinely runs 60-120s+.  The default
+    was later raised 30->180 (#284) and the knob lets profiles tune
+    per workspace.
     """
 
-    def test_default_is_thirty_seconds(self):
-        """Pin: unconfigured plugin uses the documented default."""
+    def test_default_is_180_seconds(self):
+        """Pin: unconfigured plugin uses the documented default.
+
+        Raised 30->180 (#284): a cold jdtls Maven import routinely runs
+        60-120s+, so a 30s default timed out WHILE jdtls was legitimately
+        starting — orphaning the spawned subprocess and triggering a
+        retry-autoconnect duplicate.  180s covers a cold import while still
+        bounding a genuinely hung server (< MAX 300s)."""
         from ..plugin import DEFAULT_CONNECT_TIMEOUT_SECONDS
         plugin = LSPToolPlugin()
         # We must not touch _ensure_thread; just verify initial state +
         # configure() does the right thing without starting LSP servers.
         assert plugin._connect_timeout_seconds == DEFAULT_CONNECT_TIMEOUT_SECONDS
-        assert DEFAULT_CONNECT_TIMEOUT_SECONDS == 30.0
+        assert DEFAULT_CONNECT_TIMEOUT_SECONDS == 180.0
 
     def test_initialize_applies_config_value(self):
         """Pin: an explicit value flows from config to the instance attr."""
@@ -1224,7 +1233,123 @@ class TestConnectTimeoutKnob:
         assert "connect_timeout_seconds" in names
         entry = next(s for s in schema if s.name == "connect_timeout_seconds")
         assert entry.type == "float"
-        assert entry.default == 30.0
+        assert entry.default == 180.0
+
+
+class TestReapFailedClient:
+    """Pin behavior of LSPToolPlugin._reap_failed_client (#284).
+
+    When ``connect_server`` times out or raises, the spawned language-server
+    subprocess (created in ``LSPClient.start()`` BEFORE the slow
+    ``_initialize()`` handshake) is left running but UNTRACKED —
+    ``self._clients[name]`` is only set on the success path.  The reaper
+    calls ``client.stop()`` (the same teardown ``disconnect_server`` uses) so
+    the orphan doesn't leak and the retry-autoconnect doesn't spawn a
+    duplicate.  Before this fix every premature 30s timeout cost one jdtls
+    cold-start of leaked RAM until the daemon OOMed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reaps_spawned_client(self):
+        """A spawned-but-failed client is stopped (subprocess killed)."""
+        plugin = LSPToolPlugin()
+        plugin._trace = Mock()
+        client = AsyncMock()
+        await plugin._reap_failed_client("java", client)
+        client.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_client_spawned(self):
+        """Failure before LSPClient(...) leaves client=None — must not raise
+        and must not attempt any teardown."""
+        plugin = LSPToolPlugin()
+        plugin._trace = Mock()
+        # Must not raise.
+        await plugin._reap_failed_client("java", None)
+
+    @pytest.mark.asyncio
+    async def test_swallows_stop_exception(self):
+        """A reap is best-effort: an exception from client.stop() must not
+        propagate out of the except handler (it would mask the original
+        connect failure and abort the auto-connect loop)."""
+        plugin = LSPToolPlugin()
+        plugin._trace = Mock()
+        client = AsyncMock()
+        client.stop.side_effect = RuntimeError("process already dead")
+        # Must not raise.
+        await plugin._reap_failed_client("java", client)
+        client.stop.assert_awaited_once()
+
+
+class TestAtexitReapJdtls:
+    """Pin the process-exit jdtls reaper (#284 per-slot leak OOM-stopper).
+
+    The pre-warm pool-slot teardown path (daemon closes the slot socket →
+    runner RPC ``serve()`` returns on EOF → slot ``sys.exit(0)``) does NOT
+    call ``plugin.shutdown()``.  Without an atexit backstop the connected
+    jdtls (0.5-1.5 GB) was abandoned, re-parented to the daemon subreaper,
+    and accumulated one-per-slot across cascade stages until the daemon
+    OOMed.  The reaper SIGKILLs each tracked subprocess by pid at
+    interpreter exit so jdtls dies WITH its slot.
+    """
+
+    def _client_with_pid(self, pid):
+        client = Mock()
+        client._process = Mock()
+        client._process.pid = pid
+        return client
+
+    def test_sigkills_each_tracked_pid(self):
+        plugin = LSPToolPlugin()
+        plugin._clients = {
+            "java": self._client_with_pid(4242),
+            "pyright": self._client_with_pid(4343),
+        }
+        with patch("shared.plugins.lsp.plugin.os.kill") as mock_kill:
+            plugin._atexit_reap_jdtls()
+        sent = {c.args for c in mock_kill.call_args_list}
+        assert (4242, signal.SIGKILL) in sent
+        assert (4343, signal.SIGKILL) in sent
+
+    def test_noop_with_no_clients(self):
+        plugin = LSPToolPlugin()
+        plugin._clients = {}
+        with patch("shared.plugins.lsp.plugin.os.kill") as mock_kill:
+            plugin._atexit_reap_jdtls()
+        mock_kill.assert_not_called()
+
+    def test_skips_client_without_live_process(self):
+        """A client whose subprocess was never spawned (``_process`` None) or
+        has no pid is skipped — no kill, no raise."""
+        plugin = LSPToolPlugin()
+        no_proc = Mock()
+        no_proc._process = None
+        plugin._clients = {"java": no_proc}
+        with patch("shared.plugins.lsp.plugin.os.kill") as mock_kill:
+            plugin._atexit_reap_jdtls()
+        mock_kill.assert_not_called()
+
+    def test_swallows_kill_errors(self):
+        """A dead/already-reaped pid (ProcessLookupError) must not propagate
+        out of the atexit handler."""
+        plugin = LSPToolPlugin()
+        plugin._clients = {"java": self._client_with_pid(999999)}
+        with patch(
+            "shared.plugins.lsp.plugin.os.kill",
+            side_effect=ProcessLookupError(),
+        ):
+            plugin._atexit_reap_jdtls()  # must not raise
+
+    def test_register_is_idempotent(self):
+        """_register_atexit_reaper registers exactly once even if called
+        repeatedly (each _ensure_thread call invokes it)."""
+        plugin = LSPToolPlugin()
+        with patch("shared.plugins.lsp.plugin.atexit.register") as mock_reg:
+            plugin._register_atexit_reaper()
+            plugin._register_atexit_reaper()
+            plugin._register_atexit_reaper()
+        mock_reg.assert_called_once_with(plugin._atexit_reap_jdtls)
+        assert plugin._atexit_registered is True
 
 
 class TestDiagnosticsWaitKnobs:
@@ -2909,3 +3034,61 @@ class TestApparmorExtraRulesKnob:
             "_compose_lsp_apparmor_extra_rules to emit operator-"
             "supplied rules (PR-158)."
         )
+
+
+class TestDaemonProcessSuppressesLSP:
+    """#284/#285: the daemon PROCESS must NOT host a language server.
+
+    The leaking jdtls came from the LSP background thread auto-connecting in the
+    long-lived daemon process (no owning slot → never reaped → OOM).  Detection
+    is by PROCESS IDENTITY (``_running_in_daemon_process``): the #285 diagnostic
+    proved the daemon-side LSP instance has ``_plugin_registry is None`` at
+    connect time, so the prior ``registry.runner_rpc`` gate was structurally
+    unreachable and never fired.  The per-session runner hosts LSP instead.
+    """
+
+    def test_detects_daemon_via_main_package(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(sys.modules["__main__"], "__package__", "server", raising=False)
+        assert lspmod._running_in_daemon_process() is True
+
+    def test_detects_runner_via_main_package(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(sys.modules["__main__"], "__package__", "server.runner", raising=False)
+        assert lspmod._running_in_daemon_process() is False
+
+    def test_unknown_context_defaults_to_not_daemon(self, monkeypatch):
+        """Tests / odd launchers → False (don't suppress unless sure)."""
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(sys.modules["__main__"], "__package__", "pytest", raising=False)
+        monkeypatch.setattr(sys, "argv", ["/usr/bin/pytest"])
+        assert lspmod._running_in_daemon_process() is False
+
+    def test_argv_fallback_detects_daemon(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(sys.modules["__main__"], "__package__", "", raising=False)
+        monkeypatch.setattr(sys, "argv", ["/x/jaato-server/server/__main__.py", "--daemon"])
+        assert lspmod._running_in_daemon_process() is True
+
+    def test_daemon_does_not_subscribe_to_enrichment(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(lspmod, "_running_in_daemon_process", lambda: True)
+        p = LSPToolPlugin()
+        assert p._daemon_must_not_host_lsp() is True
+        assert p.subscribes_to_tool_result_enrichment() is False
+
+    def test_runner_subscribes_to_enrichment(self, monkeypatch):
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(lspmod, "_running_in_daemon_process", lambda: False)
+        p = LSPToolPlugin()
+        assert p._daemon_must_not_host_lsp() is False
+        assert p.subscribes_to_tool_result_enrichment() is True
+
+    def test_daemon_does_not_start_lsp_thread(self, monkeypatch):
+        """The fix: ``_ensure_thread`` is a no-op in the daemon process — no
+        thread means no auto-connect means no daemon-side jdtls (#284)."""
+        import shared.plugins.lsp.plugin as lspmod
+        monkeypatch.setattr(lspmod, "_running_in_daemon_process", lambda: True)
+        p = LSPToolPlugin()
+        p._ensure_thread()
+        assert p._thread is None

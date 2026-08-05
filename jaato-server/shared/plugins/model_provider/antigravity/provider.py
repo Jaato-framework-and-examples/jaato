@@ -17,17 +17,21 @@ Reference: https://github.com/NoeFabris/opencode-antigravity-auth
 import json
 import os
 from shared.session_context import get_workspace_root, get_config_root
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
 
 import httpx
 
 from ..base import (
+    MODALITY_TEXT,
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ModelProviderPlugin,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -49,12 +53,12 @@ from .constants import (
     ANTIGRAVITY_MODELS,
     ANTIGRAVITY_PRIMARY_ENDPOINT,
     ANTIGRAVITY_USER_AGENT,
-    DEFAULT_CONTEXT_LIMIT,
     DEFAULT_OUTPUT_LIMIT,
     GEMINI_CLI_API_CLIENT,
     GEMINI_CLI_CLIENT_METADATA,
     GEMINI_CLI_ENDPOINT,
     GEMINI_CLI_MODELS,
+    MODEL_INPUT_MODALITIES,
     GEMINI_CLI_USER_AGENT,
     PROVIDER_ID,
 )
@@ -109,7 +113,7 @@ from .oauth import (
 )
 
 
-class AntigravityProvider:
+class AntigravityProvider(ModalityCapabilityMixin):
     """Antigravity provider for Google's IDE AI backend.
 
     This provider supports:
@@ -140,6 +144,23 @@ class AntigravityProvider:
         self._current_account: Optional[Account] = None
         self._model_name: Optional[str] = None
         self._api_model: Optional[str] = None
+        # Per-profile context-window override (plugin_configs.antigravity.
+        # context_length).  Wins over the model tables' context_limit in
+        # get_context_limit() — escape hatch for an unlisted model.  None = use
+        # the tables; unknown model + no override → raise (no hardcoded fallback).
+        self._context_length_knob: Optional[int] = None
+        # INPUT-modality assertion (plugin_configs.antigravity.modalities)
+        # layered over MODEL_INPUT_MODALITIES in modalities().
+        self._modalities_knob: Optional[List[str]] = None
+        # Sampling parameters (plugin_configs.antigravity.api_params.*).
+        # ``None`` = omit from the generationConfig and let the backend apply
+        # its server-side default.  A profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        # Threaded through _build_generation_config() → build_generation_config().
+        self._temperature: Optional[float] = None
+        self._top_p: Optional[float] = None
+        self._top_k: Optional[int] = None
+        self._seed: Optional[int] = None
 
         # Configuration
         self._endpoint: str = ANTIGRAVITY_PRIMARY_ENDPOINT
@@ -214,6 +235,55 @@ class AntigravityProvider:
         self._session_recovery = config.extra.get("session_recovery", resolve_session_recovery())
         self._thinking_level = config.extra.get("thinking_level") or resolve_thinking_level()
         self._thinking_budget = config.extra.get("thinking_budget", resolve_thinking_budget())
+
+        # Context-window override (plugin_configs.antigravity.context_length) via
+        # the shared precedence helper.  Antigravity's model windows are
+        # documented in the model tables, so there is no live auto-detect tier
+        # and no env var — the knob is the only override.
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=config.extra.get("context_length"),
+            env_value=None,
+        )
+
+        # INPUT-modality assertion (plugin_configs.antigravity.modalities)
+        # — escape hatch for a model not in MODEL_INPUT_MODALITIES.
+        modalities_override = config.extra.get("modalities")
+        if modalities_override is not None:
+            if not isinstance(modalities_override, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_override
+            ):
+                raise TypeError(
+                    "Antigravity 'modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_override).__name__}"
+                )
+            self._modalities_knob = list(modalities_override)
+
+        # Sampling parameters (plugin_configs.antigravity.api_params).  They
+        # live NESTED at config.extra["api_params"][...] — the canonical
+        # namespaced layer mirroring anthropic / openrouter.  ``None`` means
+        # "omit from the generationConfig and let the backend apply its
+        # server-side default"; a profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        api_params = config.extra.get("api_params") or {}
+        if not isinstance(api_params, dict):
+            raise TypeError(
+                "Antigravity 'api_params' config must be a dict of "
+                f"generationConfig fields, got {type(api_params).__name__}"
+            )
+        temp_extra = api_params.get("temperature")
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = api_params.get("top_p")
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = api_params.get("top_k")
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        seed_extra = api_params.get("seed")
+        if seed_extra is not None:
+            self._seed = int(seed_extra)
 
     def verify_auth(
         self,
@@ -348,15 +418,48 @@ class AntigravityProvider:
     def get_context_limit(self) -> int:
         """Get the context window limit for the current model.
 
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``context_length`` override knob (``_context_length_knob``).
+        2. the model's ``context_limit`` from the ANTIGRAVITY_MODELS /
+           GEMINI_CLI_MODELS tables.
+        3. else raise — unknown model with no override is a configuration error.
+
         Returns:
             Maximum context tokens.
+
+        Raises:
+            ValueError: when neither the knob nor a table entry yields a value.
         """
+        if self._context_length_knob:
+            return self._context_length_knob
         if self._model_name:
-            if self._model_name in ANTIGRAVITY_MODELS:
-                return ANTIGRAVITY_MODELS[self._model_name].get("context_limit", DEFAULT_CONTEXT_LIMIT)
-            if self._model_name in GEMINI_CLI_MODELS:
-                return GEMINI_CLI_MODELS[self._model_name].get("context_limit", DEFAULT_CONTEXT_LIMIT)
-        return DEFAULT_CONTEXT_LIMIT
+            for table in (ANTIGRAVITY_MODELS, GEMINI_CLI_MODELS):
+                if self._model_name in table:
+                    limit = table[self._model_name].get("context_limit")
+                    if limit:
+                        return limit
+        raise ValueError(
+            f"Antigravity provider: no known context window for model "
+            f"{self._model_name!r}, and no override is set.  Set "
+            f"plugin_configs.antigravity.context_length in the profile.  No "
+            f"hardcoded fallback exists per the project's no-fallback rule."
+        )
+
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
+        """INPUT modalities the active Antigravity model accepts.
+
+        modalities knob -> MODEL_INPUT_MODALITIES (exact) -> text-only
+        floor.  All current served models are multimodal; the floor is
+        the safe answer for any future text-only addition.
+        """
+        model = model or self._model_name
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=(
+                MODEL_INPUT_MODALITIES.get(model) if model else None
+            ),
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.
@@ -553,8 +656,16 @@ class AntigravityProvider:
                 # Claude thinking models use thinkingBudget
                 thinking_config = {"thinkingBudget": self._thinking_budget}
 
+        # Profile sampling knobs (plugin_configs.antigravity.api_params).
+        # ``None`` knobs are passed through and dropped by the helper's
+        # ``is not None`` guards, so ``temperature: 0.0`` (determinism) reaches
+        # the wire while unset knobs let the backend apply its defaults.
         return build_generation_config(
             max_output_tokens=output_limit,
+            temperature=self._temperature,
+            top_p=self._top_p,
+            top_k=self._top_k,
+            seed=self._seed,
             thinking_config=thinking_config,
             response_schema=response_schema,
         )

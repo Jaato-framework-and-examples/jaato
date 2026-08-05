@@ -1,11 +1,13 @@
 """Model-tier configuration for per-turn model switching.
 
-Three named tiers (``planner`` / ``dispatcher`` / ``executor``) the
-agent transitions between via the ``enter_tier(name)`` lifecycle tool.
-The tier set is opt-in: profiles that don't declare tiers (and aren't
-backed by tier env vars) run in single-model mode unchanged — no
-``enter_tier`` tool registered, no system-prompt augmentation, no
-provider model switching.
+Named tiers the agent transitions between via the ``enter_tier(name)``
+lifecycle tool: three *cognitive* tiers (``planner`` / ``dispatcher`` /
+``executor``) plus the optional *modality* role ``vision`` (a tier whose
+model accepts image input — multimodal-by-composition, see
+docs/design/multimodal-model-support.md).  The tier set is opt-in:
+profiles that don't declare tiers (and aren't backed by tier env vars)
+run in single-model mode unchanged — no ``enter_tier`` tool registered,
+no system-prompt augmentation, no provider model switching.
 
 Resolution order:
 
@@ -58,16 +60,26 @@ from typing import Any, Dict, FrozenSet, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-# The three valid tier names.  Order is conceptual (cheapest → most
-# capable) but doesn't enforce ordering on the model assignments —
-# operators are free to wire them however the provider's pricing makes
-# sense.  The names are exposed verbatim in the ``enter_tier`` tool's
-# ``oneOf`` schema so the model sees them as the protocol vocabulary.
+# Valid tier names.  The first three (planner / dispatcher / executor)
+# are *cognitive* tiers — order is conceptual (cheapest → most capable)
+# but doesn't enforce ordering on the model assignments; operators are
+# free to wire them however the provider's pricing makes sense.
+#
+# ``vision`` is a *modality* role (multimodal-by-composition — see
+# docs/design/multimodal-model-support.md): a tier whose model accepts
+# image input, switched into via ``enter_tier("vision")`` to view an
+# image and back out when done.  It shares the single-``_active_tier``
+# machinery with the cognitive tiers (mutually exclusive), so it's listed
+# here rather than as a separate axis.  All names are exposed verbatim in
+# the ``enter_tier`` tool's schema so the model sees them as the protocol
+# vocabulary; whether a given tier is *declared* in a profile is separate
+# (an undeclared tier routes to ``tier_fallback`` via ``model_for``).
 TIER_PLANNER = "planner"
 TIER_DISPATCHER = "dispatcher"
 TIER_EXECUTOR = "executor"
+TIER_VISION = "vision"
 VALID_TIER_NAMES: FrozenSet[str] = frozenset(
-    {TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR}
+    {TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR, TIER_VISION}
 )
 
 # Framework defaults when neither profile nor env vars specify them.
@@ -212,29 +224,11 @@ class ModelTierConfig:
                 f"tier_fallback {self.tier_fallback!r} not in declared "
                 f"tiers {sorted(self.tiers)}"
             )
-        self._validate_same_provider_v1()
-
-    def _validate_same_provider_v1(self) -> None:
-        """Reject mixed-provider configs (V1 constraint).
-
-        Currently jaato can switch model names within a single provider
-        via ``provider.connect(new_model_name, skip_model_test=True)``
-        without reconnecting.  Cross-provider switching needs auth/
-        connection-state/tool-schema-dialect handling that V1 doesn't
-        yet implement.  When V2 lifts this, delete this method and
-        teach the session layer how to swap providers on transition.
-        """
-        declared_providers = {
-            entry.provider for entry in self.tiers.values()
-            if entry.provider is not None
-        }
-        if len(declared_providers) > 1:
-            raise ModelTierConfigError(
-                "V1 supports only same-provider tier switching; "
-                f"this config declares providers {sorted(declared_providers)}. "
-                "Either drop the per-tier 'provider' fields (the session's "
-                "main provider will be used) or normalise them to one value."
-            )
+        # V2 (cross-provider tiers): the V1 same-provider gate is lifted.  A
+        # tier may declare its own ``provider``; JaatoSession.switch_tier swaps
+        # to a cached per-tier provider instance when the active tier's provider
+        # differs (history is provider-neutral, so it flows across the swap).
+        # Same-provider configs are unaffected (no swap path is taken).
 
     def model_for(self, tier_name: str) -> Tuple[str, TierEntry]:
         """Resolve a tier name to ``(actual_tier, entry)``.

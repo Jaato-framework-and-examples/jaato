@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TensorRT-LLM Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+          <li><a href="zhipuai.html">Zhipu AI</a></li>
+          <li><a href="nim.html">NVIDIA NIM</a></li>
+          <li><a href="lmstudio.html">LM Studio</a></li>
+          <li><a href="vllm.html">vLLM</a></li>
+          <li><a href="tensorrt-llm.html" class="active">TensorRT-LLM</a></li>
+          <li><a href="openrouter.html">OpenRouter</a></li>
+          <li><a href="nebius.html">Nebius</a></li>
+          <li><a href="ovhcloud.html">OVHcloud</a></li>
+          <li><a href="triton.html">Triton</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>TensorRT-LLM Provider</h1>
+          <p class="lead">
+            Maximum-throughput NVIDIA GPU inference via <code>trtllm-serve</code> &mdash;
+            the HTTP front-end for TensorRT-LLM engines. Supports FP8/INT4 quantization,
+            in-flight batching, KV-cache reuse, and speculative decoding for NVIDIA H100,
+            A100, and L40S hardware.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>tensorrt_llm</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.tensorrt_llm</code></td></tr>
+              <tr><td><strong>SDK</strong></td><td><code>openai</code> (OpenAI-compatible API)</td></tr>
+              <tr><td><strong>Auth</strong></td><td>Optional bearer token (only when fronted by an auth proxy; <code>trtllm-serve</code> has no built-in API key mechanism)</td></tr>
+              <tr><td><strong>Mode</strong></td><td>Passive &mdash; one engine per <code>trtllm-serve</code> process</td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="highlights">Highlights</h2>
+          <ul>
+            <li><strong>Maximum throughput</strong> &mdash; FP8/INT4 quantization, in-flight batching, KV-cache reuse</li>
+            <li><strong>Speculative decoding</strong> &mdash; Reduce latency with a draft model</li>
+            <li><strong>DIY NIM</strong> &mdash; Build your own TensorRT-LLM engine; NIM is essentially TensorRT-LLM productized</li>
+            <li><strong>Self-hosted</strong> &mdash; No API costs, data never leaves your hardware</li>
+            <li><strong>Function calling</strong> &mdash; Via the OpenAI-compatible tool-calling API</li>
+          </ul>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Context Length Is Required</div>
+            <code>trtllm-serve</code> does <strong>not</strong> surface <code>max_seq_len</code>
+            in its <code>/v1/models</code> response (it is fixed at engine build time).
+            You <strong>must</strong> set <code>TENSORRT_LLM_CONTEXT_LENGTH</code> (or
+            <code>plugin_configs.tensorrt_llm.context_length</code>) to match the value
+            you used with <code>trtllm-build</code>. The provider raises if neither is set.
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Passive Provider</div>
+            The provider does not build or load engines. Engine build (<code>trtllm-build</code>)
+            and server configuration (tensor parallelism, KV-cache fraction, max batch size)
+            all live at the <code>trtllm-serve</code> launch boundary. Each
+            <code>trtllm-serve</code> process hosts exactly one engine.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Launch trtllm-serve</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Serve a TensorRT-LLM engine
+trtllm-serve meta-llama/Llama-3.1-8B-Instruct \
+    --host 0.0.0.0 --port 8000</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Connect jaato</div>
+          <div class="code-block">
+            <pre><code class="language-bash">export TENSORRT_LLM_HOST=http://localhost:8000
+export TENSORRT_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
+# Required: match the engine's max_seq_len from trtllm-build
+export TENSORRT_LLM_CONTEXT_LENGTH=131072</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Python quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import JaatoClient
+
+client = JaatoClient(provider_name="tensorrt_llm")
+client.connect(
+    project=None,
+    location=None,
+    model="meta-llama/Llama-3.1-8B-Instruct"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from TensorRT-LLM!",
+    on_output=on_output
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>TENSORRT_LLM_HOST</code></td>
+                <td>&mdash;</td>
+                <td>Yes</td>
+                <td><code>trtllm-serve</code> URL (e.g. <code>http://localhost:8000</code>). No localhost fallback.</td>
+              </tr>
+              <tr>
+                <td><code>TENSORRT_LLM_MODEL</code></td>
+                <td>&mdash;</td>
+                <td>Recommended</td>
+                <td>Model name as it appears in <code>/v1/models</code></td>
+              </tr>
+              <tr>
+                <td><code>TENSORRT_LLM_CONTEXT_LENGTH</code></td>
+                <td>&mdash;</td>
+                <td><strong>Yes</strong></td>
+                <td>Context window size. Must match the engine's <code>max_seq_len</code> from <code>trtllm-build</code>. Provider raises if unset.</td>
+              </tr>
+              <tr>
+                <td><code>TENSORRT_LLM_API_TOKEN</code></td>
+                <td>&mdash;</td>
+                <td>No</td>
+                <td>Bearer token (only when fronted by an auth proxy)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Profile Knobs (<code>plugin_configs.tensorrt_llm</code>)</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>host</code></td>
+                <td>str</td>
+                <td>Override <code>TENSORRT_LLM_HOST</code></td>
+              </tr>
+              <tr>
+                <td><code>context_length</code></td>
+                <td>int</td>
+                <td>Context window override (required for long-context engines)</td>
+              </tr>
+              <tr>
+                <td><code>api_token</code></td>
+                <td>str</td>
+                <td>Bearer token override</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Full .env example</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env
+JAATO_PROVIDER=tensorrt_llm
+TENSORRT_LLM_HOST=http://localhost:8000
+TENSORRT_LLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
+TENSORRT_LLM_CONTEXT_LENGTH=131072</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Profile (YAML)</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: trtllm-llama31
+model: meta-llama/Llama-3.1-8B-Instruct
+provider: tensorrt_llm
+
+plugins:
+  - cli
+  - file_edit
+
+plugin_configs:
+  tensorrt_llm:
+    host: "http://gpu-server:8000"
+    context_length: 131072</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Engine Build -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="engine-build">Engine Build and Serve</h2>
+          <p>
+            TensorRT-LLM engines are built out-of-band with <code>trtllm-build</code>
+            from HuggingFace checkpoints. The engine is then served with <code>trtllm-serve</code>.
+            The context length (<code>--max_seq_len</code>) is fixed at build time and
+            <strong>must</strong> match <code>TENSORRT_LLM_CONTEXT_LENGTH</code>.
+          </p>
+
+          <h3>vs NVIDIA NIM</h3>
+          <p>
+            The <a href="nim.html">NVIDIA NIM provider</a> wraps the same TensorRT-LLM
+            runtime in a productized container with automatic engine selection. Use this
+            provider when you need to build and optimize your own engine (custom
+            quantization recipes, private models, GPU-specific tuning).
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Feature</th><th>TensorRT-LLM (this provider)</th><th>NVIDIA NIM</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Engine management</td>
+                <td>You build with <code>trtllm-build</code></td>
+                <td>NIM manages automatically</td>
+              </tr>
+              <tr>
+                <td>Model selection</td>
+                <td>Any HuggingFace model you convert</td>
+                <td>NIM catalog only</td>
+              </tr>
+              <tr>
+                <td>Quantization</td>
+                <td>Full control (FP8, INT4, INT8)</td>
+                <td>NIM-chosen per container</td>
+              </tr>
+              <tr>
+                <td>Context length</td>
+                <td>Must be set manually (env var)</td>
+                <td>NIM reports it; override optional</td>
+              </tr>
+              <tr>
+                <td>Hosted option</td>
+                <td>No (self-hosted only)</td>
+                <td>Yes (build.nvidia.com)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Build and serve a TensorRT-LLM engine</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># 1. Convert HuggingFace checkpoint
+python -m tensorrt_llm.commands.convert_checkpoint \
+    --model_dir meta-llama/Llama-3.1-8B-Instruct \
+    --output_dir ./llama31-trt-ckpt \
+    --dtype bfloat16
+
+# 2. Build engine
+trtllm-build \
+    --checkpoint_dir ./llama31-trt-ckpt \
+    --output_dir ./llama31-engine \
+    --max_seq_len 131072 \
+    --max_batch_size 32
+
+# 3. Serve
+trtllm-serve meta-llama/Llama-3.1-8B-Instruct \
+    --host 0.0.0.0 --port 8000
+
+# 4. Connect jaato (context_length MUST match --max_seq_len above)
+export TENSORRT_LLM_CONTEXT_LENGTH=131072</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Verify server</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Health probe
+curl http://localhost:8000/health
+
+# Model listing (note: no max_seq_len in response)
+curl http://localhost:8000/v1/models</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+
+          <table>
+            <thead>
+              <tr><th>Exception</th><th>Cause</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>TensorRTLLMConnectionError</code></td>
+                <td>Server unreachable (not running, wrong host/port)</td>
+              </tr>
+              <tr>
+                <td><code>TensorRTLLMAuthenticationError</code></td>
+                <td>Bearer token rejected by upstream proxy (HTTP 401)</td>
+              </tr>
+              <tr>
+                <td><code>TensorRTLLMModelNotFoundError</code></td>
+                <td>Requested model name not in <code>/v1/models</code></td>
+              </tr>
+              <tr>
+                <td><code>TensorRTLLMMidStreamError</code></td>
+                <td>Connection dropped mid-response (engine error after HTTP 200 committed &mdash; check <code>trtllm-serve</code> logs)</td>
+              </tr>
+              <tr>
+                <td><code>ValueError</code> (at initialize)</td>
+                <td><code>TENSORRT_LLM_HOST</code> or <code>TENSORRT_LLM_CONTEXT_LENGTH</code> not set (no hardcoded fallback)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handle errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.tensorrt_llm.errors import (
+    TensorRTLLMConnectionError,
+    TensorRTLLMMidStreamError,
+)
+
+try:
+    provider.initialize(config)
+    provider.connect("meta-llama/Llama-3.1-8B-Instruct")
+except ValueError as e:
+    # Missing TENSORRT_LLM_HOST or TENSORRT_LLM_CONTEXT_LENGTH
+    print(f"Configuration error: {e}")
+except TensorRTLLMConnectionError:
+    print("trtllm-serve not reachable")
+except TensorRTLLMMidStreamError:
+    print("Engine dropped mid-response. Check trtllm-serve logs.")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

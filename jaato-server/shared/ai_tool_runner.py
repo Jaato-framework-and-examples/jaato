@@ -667,7 +667,7 @@ class ToolExecutor:
             if name in self._registry.get_core_executors():
                 return True
         # Generic executor fallback
-        if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
+        if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):  # env: treat unregistered tools as executable via the generic executor fallback
             return True
         return False
 
@@ -855,7 +855,7 @@ class ToolExecutor:
         """
         debug = False
         try:
-            debug = os.environ.get('AI_TOOL_RUNNER_DEBUG', '').lower() in ('1', 'true', 'yes')
+            debug = os.environ.get('AI_TOOL_RUNNER_DEBUG', '').lower() in ('1', 'true', 'yes')  # env: verbose tool-executor debug logging
         except Exception as exc:
             logger.debug(f"Error checking debug env var: {exc}")
             debug = False

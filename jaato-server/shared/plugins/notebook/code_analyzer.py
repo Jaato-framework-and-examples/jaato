@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, List, Optional, Set, Tuple
 
+from .cell_transform import strip_shell_lines
+
 try:
     from ..sandbox_utils import check_path_with_jaato_containment
 except ImportError:
@@ -342,20 +344,21 @@ class CodeAnalyzer:
         self._imported_names = set()
         self._import_aliases = {}
 
-        # Check for shell command prefix (!)
-        if code.strip().startswith('!'):
-            cmd = code.strip()[1:]
+        # IPython-style `!shell` lines (per-line, matching the exec transform):
+        # flag each as a subprocess risk, then analyze the REST of the cell by
+        # replacing them with `pass` (line numbers preserved) so ast.parse works
+        # for multi-line cells that mix Python and `!` lines.
+        code, shell_cmds = strip_shell_lines(code)
+        for lineno, cmd in shell_cmds:
             result.risks.append(DetectedRisk(
                 category="subprocess",
                 description="Shell command execution",
                 level=RiskLevel.CRITICAL,
-                line_number=1,
-                code_snippet=code.strip()[:80],
+                line_number=lineno,
+                code_snippet=("!" + cmd)[:80],
                 details=f"Command: {cmd[:60]}..." if len(cmd) > 60 else f"Command: {cmd}",
             ))
-            # Also check for paths in shell command
             self._check_shell_command_paths(cmd, result)
-            return result
 
         # Parse AST
         try:

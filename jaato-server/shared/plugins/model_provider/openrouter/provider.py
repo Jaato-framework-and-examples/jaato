@@ -51,7 +51,7 @@ import copy
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +63,14 @@ if TYPE_CHECKING:
 from ..base import (
     FunctionCallDetectedCallback,
     ModelProviderPlugin,
+    MODALITY_TEXT,
+    ModalityCapabilityMixin,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
     resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -97,6 +100,12 @@ from .converters import (
     serialize_history as _serialize_history,
     system_message_with_cache,
     tool_schemas_to_openai,
+)
+from .._prose_tools import (
+    augment_system_with_tools,
+    messages_to_prose_chat,
+    read_prose_tool_calls_quirk,
+    rewrite_prose_tool_calls,
 )
 from .env import (
     DEFAULT_BASE_URL,
@@ -236,7 +245,7 @@ def _extract_generation_id(response_or_stream: Any) -> Optional[str]:
     return None
 
 
-class OpenRouterProvider:
+class OpenRouterProvider(ModalityCapabilityMixin):
     """OpenRouter model provider.
 
     Provides access to OpenRouter's catalog via the OpenAI-compatible
@@ -302,6 +311,11 @@ class OpenRouterProvider:
         # Optional manual context-window override (framework escape hatch
         # or env var) — the FALLBACK tier; the catalog auto-detect wins.
         self._context_length_knob: Optional[int] = None
+        # Optional manual INPUT-modality assertion — the escape hatch for a
+        # model the catalog doesn't list yet (or to correct it).  The
+        # catalog ``architecture.input_modalities`` auto-detect wins; this
+        # is only consulted when the catalog has no entry for the model.
+        self._modalities_knob: Optional[List[str]] = None
 
         # OpenRouter request-time routing controls.  ``provider`` is the
         # killer feature of OpenRouter — it constrains which upstream
@@ -350,6 +364,16 @@ class OpenRouterProvider:
         # emitting N readFiles + signal_completion in one assistant
         # message).  Default ``None`` ⇒ omit the field, upstream default.
         self._parallel_tool_calls: Optional[bool] = None
+        # ``api_params.service_tier`` — OpenAI-style processing-tier
+        # selector, forwarded to upstreams that price by tier: ``"flex"``
+        # buys ~50%-off best-effort processing (slower responses, may 429
+        # under load), ``"priority"`` buys low-latency processing at a
+        # premium; ``"auto"`` / ``"default"`` defer to the upstream.
+        # OpenRouter passes the field through to tier-supporting upstreams
+        # (OpenAI, Gemini, ...) and reports the tier actually used in the
+        # response.  Default ``None`` ⇒ omit the field entirely.
+        # See https://openrouter.ai/docs/guides/features/service-tiers.
+        self._service_tier: Optional[str] = None
 
         # Strict tool-use mode (server 0.6.118+, 2026-05-16).  When True,
         # ``tool_schema_to_openai`` emits ``"strict": True`` as a sibling
@@ -367,6 +391,15 @@ class OpenRouterProvider:
         # ``required`` arrays, no ``oneOf``/``anyOf``); kb authors own
         # schema shape.  Wire errors surface mismatches.
         self._strict_tools: bool = False
+
+        # Quirk: prose_tool_calls (opt-in via profile.quirks).  For cheap
+        # upstream models that cannot emit native tool calls and answer in
+        # prose instead: the tools array is withheld, schemas are
+        # prompt-injected (hashed wire ids), tool traffic in history is
+        # replayed as text, and fenced tool_call blocks in the response
+        # are parsed back into FunctionCall parts.  See
+        # shared/plugins/model_provider/_prose_tools.py.
+        self._prose_tool_calls: bool = False
 
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
@@ -467,6 +500,10 @@ class OpenRouterProvider:
               "Provider-Specific Headers".
         - ``api_params`` (OpenAI Chat Completions request body fields):
             - ``temperature``, ``top_p``, ``top_k``, ``max_tokens``
+            - ``service_tier`` (``"auto"`` / ``"default"`` / ``"flex"`` /
+              ``"priority"`` / ``"scale"``) — OpenAI-style processing
+              tier, forwarded to tier-supporting upstreams.  ``"flex"``
+              trades latency for ~50% off; ``"priority"`` the reverse.
             - ``models`` (``List[str]``) — OpenRouter's request-level
               cross-model fallback list (sibling of ``model`` in the
               request body).  OpenRouter walks each candidate on
@@ -623,6 +660,20 @@ class OpenRouterProvider:
             else resolve_context_length()
         )
 
+        # Optional INPUT-modality assertion (framework escape hatch).  Only
+        # consulted when the catalog lacks an entry for the active model.
+        modalities_extra = _knob("modalities", layer=framework_overrides)
+        if modalities_extra is not None:
+            if not isinstance(modalities_extra, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_extra
+            ):
+                raise TypeError(
+                    "OpenRouter 'modalities' config must be a list of strings "
+                    f"(e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_extra).__name__}"
+                )
+            self._modalities_knob = list(modalities_extra)
+
         # routing: OpenRouter's ``provider`` extension field (sort,
         # ignore, order, allow_fallbacks, ...).  Stored as a dict and
         # passed through verbatim via ``extra_body`` on each request.
@@ -697,6 +748,24 @@ class OpenRouterProvider:
         if parallel_extra is not None:
             self._parallel_tool_calls = bool(parallel_extra)
 
+        # Processing-tier selector (OpenAI-style ``service_tier``).
+        # Validated against the values OpenRouter documents so a profile
+        # typo fails loud instead of being silently ignored upstream.
+        tier_extra = _knob("service_tier", layer=api_params)
+        if tier_extra is not None:
+            tier_str = str(tier_extra).lower()
+            if tier_str not in ("auto", "default", "flex", "priority", "scale"):
+                raise ValueError(
+                    "OpenRouter 'service_tier' must be one of 'auto' / "
+                    "'default' / 'flex' / 'priority' / 'scale', "
+                    f"got {tier_extra!r}"
+                )
+            self._service_tier = tier_str
+
+        # Model quirks (profile.quirks → config.extra["quirks"]).
+        self._prose_tool_calls = read_prose_tool_calls_quirk(
+            config.extra, provider=self.name)
+
         # Thinking knobs — framework abstractions that translate to
         # OpenRouter's ``reasoning`` extension on the wire.  Live under
         # api_params because they're agent-tuning knobs (not gateway
@@ -738,7 +807,7 @@ class OpenRouterProvider:
 
         if not self._api_key:
             raise APIKeyNotFoundError(
-                checked_locations=get_checked_credential_locations(),
+                checked_locations=get_checked_credential_locations(config=config),
             )
 
         self._client = self._create_client()
@@ -834,13 +903,13 @@ class OpenRouterProvider:
                 )
             if not allow_interactive:
                 raise APIKeyNotFoundError(
-                    checked_locations=get_checked_credential_locations()
+                    checked_locations=get_checked_credential_locations(config=config)
                 )
             return False
 
         if not allow_interactive:
             raise APIKeyNotFoundError(
-                checked_locations=get_checked_credential_locations()
+                checked_locations=get_checked_credential_locations(config=config)
             )
 
         return False
@@ -992,6 +1061,46 @@ class OpenRouterProvider:
                     return ctx
         return None
 
+    def _lookup_modalities(self, model: str) -> Optional[List[str]]:
+        """Return the catalog-reported INPUT modalities for ``model``.
+
+        Reads ``architecture.input_modalities`` from
+        ``GET /api/v1/models`` — present for all catalog models
+        (``["text","image"]`` for vision, ``["text"]`` for text-only).
+        Returns ``None`` when the model is absent or the field is missing
+        (self-hosted gateways, catalog gaps) so resolution falls through
+        to the manual knob.
+        """
+        for entry in self._fetch_catalog():
+            if entry.get("id") == model:
+                arch = entry.get("architecture")
+                if isinstance(arch, dict):
+                    mods = arch.get("input_modalities")
+                    if isinstance(mods, list) and mods:
+                        return [str(m) for m in mods]
+                return None
+        return None
+
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
+        """INPUT modalities ``model`` (default: the active model) accepts.
+
+        Catalog auto-detect PRIMARY (``architecture.input_modalities``) →
+        manual ``modalities`` knob → text-only floor.  The detect tier
+        self-updates with OpenRouter's catalog, so vision models are
+        recognised without any per-model configuration.  ``model`` lets
+        callers resolve a model other than the connected one (e.g.
+        validating a vision-tier model); the catalog lookup is keyed by
+        the requested id, so no :meth:`connect` is needed.
+        """
+        model = model or self._model_name
+        if not model:
+            return {MODALITY_TEXT}
+        resolved = resolve_modalities(
+            detect=lambda: self._lookup_modalities(model),
+            profile_value=self._modalities_knob,
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
+
     def _caching_active(self) -> bool:
         """Whether to stamp ``cache_control`` breakpoints on this request.
 
@@ -1075,15 +1184,28 @@ class OpenRouterProvider:
         cache_active = self._caching_active()
         cache_control = make_cache_control(self._cache_ttl) if cache_active else None
 
+        # Quirk path: models that cannot emit native tool calls get the
+        # text-encoded protocol — schemas prompt-injected, tool traffic in
+        # history replayed as prose, no tools array on the wire.
+        prose_mode = bool(self._prose_tool_calls and tools)
+
         openai_messages: List[Dict[str, Any]] = []
-        if system_instruction:
-            openai_messages.append(
-                system_message_with_cache(system_instruction, cache_control)
-            )
-        openai_messages.extend(history_to_openai(list(messages)))
+        if prose_mode:
+            system_text = augment_system_with_tools(system_instruction, tools)
+            if system_text:
+                openai_messages.append(
+                    system_message_with_cache(system_text, cache_control)
+                )
+            openai_messages.extend(messages_to_prose_chat(list(messages)))
+        else:
+            if system_instruction:
+                openai_messages.append(
+                    system_message_with_cache(system_instruction, cache_control)
+                )
+            openai_messages.extend(history_to_openai(list(messages)))
 
         kwargs: Dict[str, Any] = {}
-        if tools:
+        if tools and not prose_mode:
             openai_tools = tool_schemas_to_openai(
                 tools,
                 cache_control=cache_control,
@@ -1105,6 +1227,8 @@ class OpenRouterProvider:
             kwargs["max_tokens"] = self._max_tokens
         if self._parallel_tool_calls is not None:
             kwargs["parallel_tool_calls"] = self._parallel_tool_calls
+        if self._service_tier is not None:
+            kwargs["service_tier"] = self._service_tier
 
         # OpenRouter request-body extras (e.g. ``provider`` routing).  The
         # OpenAI SDK has no typed parameter for these, so we pass them
@@ -1144,6 +1268,13 @@ class OpenRouterProvider:
             # always reasons regardless of request kwargs).
             if not self._enable_thinking:
                 provider_response.thinking = None
+
+            # Prose-mode counterpart of the native tool-call flush: parse
+            # fenced tool_call blocks out of the text into FunctionCall
+            # parts (no-op on cancelled / call-free responses).
+            if prose_mode:
+                provider_response = rewrite_prose_tool_calls(
+                    provider_response, call_id_prefix=self.name)
 
             self._last_usage = provider_response.usage
 

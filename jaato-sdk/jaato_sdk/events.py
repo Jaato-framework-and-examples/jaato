@@ -71,12 +71,26 @@ class EventType(str, Enum):
     AGENT_OUTPUT = "agent.output"
     AGENT_STATUS_CHANGED = "agent.status_changed"
     AGENT_COMPLETED = "agent.completed"
+    # Recoverable terminal error: emitted when an agent hits a terminal error
+    # AFTER the framework's automatic management (with_retry / nudge) is
+    # exhausted or never applied.  Gives a reactor first refusal to recover the
+    # stage (re-spawn / reroute / escalate) before the session's teardown
+    # SessionTerminatedEvent(reason="error") lands.  See
+    # docs/design/agent-error-recovery-event.md.
+    AGENT_ERROR = "agent.error"
 
     # Session lifecycle (Server -> Client)
     # Fires when the session has fully wound down — emitted spontaneously
     # after natural completion drains, OR in response to session.end.
     # Replaces the [SESSION_TERMINATED] string-based marker.
     SESSION_TERMINATED = "session.terminated"
+
+    # Cascade stage settled: emitted once per cascade stage at the END of
+    # session teardown — on ALL paths (warm slot returned, slot torn down on
+    # error, or cold-spawned) — so a reactor can gate the next stage's spawn on
+    # one universal, stall-proof event (no timeout).  ``was_warm`` reports
+    # whether the next spawn reuses a warm slot.  Cascade sessions only.
+    SLOT_SETTLED = "slot.settled"
 
     # Session lifecycle: emitted on first client-attach to a session
     # that was loaded from disk (Phase 3 §3.12 disk-restore +
@@ -238,6 +252,12 @@ class EventType(str, Enum):
     RESOLVE_FORK_POINT_REQUEST = "resolve_fork_point.request"  # Client -> Server
     RESOLVE_FORK_POINT_RESULT = "resolve_fork_point.result"    # Server -> Client
 
+    # Wake primitive: result of session.bind_wake / session.unbind_wake
+    WAKE_BIND_RESULT = "session.wake_bind_result"              # Server -> Client
+    # Wake primitive: a wake arrived for a session with no attached client —
+    # revived server-side; the woken turn is DEFERRED until a client re-attaches.
+    SESSION_WOKEN = "session.woken"                            # Server -> Client
+
     # SDK feature parity — typed permission-policy verbs replacing
     # stringly-typed CommandRequest("permissions", [...]) for SDK
     # consumers.  CLI command path stays for actual users.
@@ -396,6 +416,62 @@ class AgentCompletedEvent(Event):
     payload: Optional[Dict[str, Any]] = None  # Validated typed payload from signal_completion
 
 
+class AgentErrorEvent(Event):
+    """An agent hit a terminal error that the framework could not self-resolve.
+
+    This is the **recovery contract**: it fires when the framework's automatic
+    management (``with_retry`` for retryable provider errors, the completion
+    nudge loop) is **exhausted** or never applied — i.e. the framework is out of
+    moves. It gives a reactor *first refusal* to recover the failed stage
+    (re-spawn, reroute to another model/provider, escalate) via the existing
+    ``create_session`` path, BEFORE the session's terminal
+    ``SessionTerminatedEvent(reason="error")`` lands.
+
+    Emit order on the wire is **always** ``AgentErrorEvent`` first, then
+    ``SessionTerminatedEvent(reason="error")``. A reactor that recovers should
+    mark the ``session_id`` handled so the (back-compat) terminated handler
+    no-ops; a cascade with no ``AGENT_ERROR`` handler ignores this event and the
+    terminated event drives the legacy abort — fully back-compatible.
+
+    Recovery is **decoupled from transience**: a non-transient error is still
+    stage-recoverable (reroute/escalate). The framework offers the recovery
+    *point*; the reactor's policy decides what to do.
+
+    Fields:
+        agent_id: The failed agent / cascade stage.
+        session_id: The failed session (dedupe / handled-marking key).
+        error_type: Exception class name (``"APIError"``, ``"RunnerCallError"``,
+            ``"NudgeExhausted"``, ...). Same value carried on the subsequent
+            ``SessionTerminatedEvent.error_type``.
+        error_summary: Human-readable cause.
+        request_id: Provider request id (e.g. OpenAI ``req_…``) when the
+            underlying exception carries one; ``None`` otherwise. For
+            observability / support correlation.
+        attempt: The **reactor-level** re-spawn count for this logical stage,
+            echoed verbatim from the spawn's ``agent_params["attempt"]`` (a
+            string on the wire). This is NOT ``with_retry``'s internal
+            per-request attempt count (which is never surfaced). ``"0"`` /
+            absent on the first spawn. The reactor owns the cap.
+        classification: Optional COARSE shape hint — ``"transient_provider"`` /
+            ``"fatal_contract"`` / ``"unknown"``. **Advisory only**: it never
+            gates whether this event fires. ``None`` when unclassified.
+        framework_retries_exhausted: Optional informational count of automatic
+            retries the framework already burned before giving up. ``None`` when
+            not applicable.
+        occurred_at: Emit timestamp (epoch seconds).
+    """
+    type: EventType = Field(default=EventType.AGENT_ERROR)
+    agent_id: str = ""
+    session_id: str = ""
+    error_type: str = ""
+    error_summary: str = ""
+    request_id: Optional[str] = None
+    attempt: str = "0"  # reactor-level re-spawn count, echoed from agent_params (wire is str)
+    classification: Optional[str] = None  # coarse hint, non-gating
+    framework_retries_exhausted: Optional[int] = None
+    occurred_at: Optional[float] = None
+
+
 class SessionTerminatedEvent(Event):
     """Session has fully wound down — safe to disconnect or
     ``delete_session``.
@@ -445,6 +521,52 @@ class SessionTerminatedEvent(Event):
     error_type: Optional[str] = None     # Python exception class name (e.g. "AnthropicAPIError")
 
 
+class SlotSettledEvent(Event):
+    """A cascade stage's session has fully settled — its runner/slot has
+    returned to the pool (warm) or been torn down (cold) — and the next stage
+    is safe to spawn.
+
+    Emitted by the daemon at the END of ``JaatoServer.shutdown`` for **every**
+    cascade session (``cascade_driver_id`` set), on ALL teardown paths:
+    pool-slot-returned, pool-slot-torn-down-on-error, and cold-spawned.  This
+    universality is the point — a cascade reactor can gate the next stage's
+    spawn on this single event with NO timeout and NO stall risk, because it
+    fires exactly once per stage regardless of how the stage's runner ended.
+
+    ``was_warm`` reports whether a warm pre-warm-pool slot was returned (so the
+    next stage's spawn will reuse it, ≈30s→7s bootstrap) vs. a cold/torn-down
+    teardown (next stage cold-spawns).  It is observability for the reactor —
+    the spawn happens either way; ``was_warm`` just says whether it'll be fast.
+
+    Replaces the earlier warm-only ``SlotReusableEvent`` (which did not fire for
+    cold-spawned stages — common for the early cascade stages — and so could
+    stall a pure-reactor handoff).  Correlate by ``cascade_driver_id``; route
+    per-stage by ``agent_id``.  Distinct from :class:`SessionTerminatedEvent`,
+    which fires EARLIER (before the slot returns) so spawning on it races the
+    slot and cold-spawns.
+    """
+    type: EventType = Field(default=EventType.SLOT_SETTLED)
+    session_id: str = ""                      # the session that just ended
+    agent_id: Optional[str] = None            # stage's primary agent name
+                                              # (e.g. "discovery", "codegen") —
+                                              # route per-stage via
+                                              # where: agent_id == <stage>
+    cascade_driver_id: Optional[str] = None   # cascade affinity (always set here)
+    was_warm: bool = False                    # True = warm slot returned (next
+                                              # spawn reuses it); False = cold/
+                                              # torn-down (next spawn is cold)
+    pool_slot_pid: int = 0                     # the warm slot's PID (0 if cold)
+    terminal_reason: Optional[str] = None     # how the settled session ended:
+                                              # mirrors SessionTerminatedEvent.reason
+                                              # ("error"/"stopped"/"cascade_cancelled"),
+                                              # or None for natural completion.  Lets
+                                              # a stage-advance reactor SKIP advancement
+                                              # on an error-terminated session (the
+                                              # recovery path re-spawns it instead) —
+                                              # race-free, straight from the event.
+                                              # See docs/design/agent-error-recovery-event.md.
+
+
 class SessionRestoredEvent(Event):
     """Session was loaded from disk and the first client just attached.
 
@@ -487,6 +609,7 @@ class ToolCallEndEvent(Event):
     tool_name: str = ""
     call_id: Optional[str] = None
     success: bool = True
+    is_error_result: bool = False  # computed deeper error check — success=True but error body; distinct from `success`
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
     backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)
@@ -879,6 +1002,17 @@ class TurnCompletedEvent(Event):
     # Formatted output text (with syntax highlighting, validation, etc.)
     # Client can use this to replace raw streaming output with formatted version
     formatted_text: Optional[str] = None
+    # The provider's finish reason for the turn's terminal response, as the
+    # lowercase ``FinishReason`` enum value: ``"stop"`` (normal completion),
+    # ``"max_tokens"`` (output-token limit — response truncated), ``"safety"``
+    # (safety filter), ``"error"`` (provider error), plus ``"tool_use"`` /
+    # ``"cancelled"`` / ``"unknown"`` for completeness.  Defaults to ``"stop"``
+    # so a client can deterministically branch on ``finish_reason != "stop"``
+    # to flag an abnormal/truncated turn WITHOUT inferring it from empty
+    # output.  The framework also emits a human-readable ``source="system"``
+    # ``AgentOutputEvent`` banner alongside abnormal finishes for direct
+    # display; this field is the machine-readable companion.
+    finish_reason: str = "stop"
 
 
 class TurnProgressEvent(Event):
@@ -1387,6 +1521,52 @@ class ToolExecuteResultEvent(Event):
     error: str = ""   # Error message if execution failed
 
 
+class WakeBindResultEvent(Event):
+    """Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
+
+    ``outcome`` is the ``BindOutcome`` value (``ok`` / ``unauthorized`` /
+    ``malformed_key`` / ``too_many_keys`` / ``no_keys`` / ``no_session`` /
+    ``unknown``); route on it, not ``detail``.  On a successful ``bind_wake``,
+    ``wake_ref`` echoes the (session-supplied) ref and ``expires_at`` is the
+    binding's Unix expiry — the values the caller's waker keys on.
+    """
+    type: EventType = Field(default=EventType.WAKE_BIND_RESULT)
+    wake_ref: str = ""
+    outcome: str = ""
+    detail: str = ""
+    expires_at: float = 0.0
+    # The daemon's operator-declared PUBLIC wake endpoint (wake.json
+    # ``public_url``), so a binding session can embed it as the relay's routing
+    # marker WITHOUT any bot-side URL config.  Empty when the operator hasn't
+    # declared one (the ingress may still be reachable by other means).
+    endpoint: str = ""
+
+
+class SessionWokenEvent(Event):
+    """A wake arrived for a session with NO attached client; the daemon revived
+    it and DEFERRED the turn until a client re-attaches.
+
+    Routed to the session's cascade observers (a connected-but-detached client
+    that registered ``cascade.register(cid, "observer", ["SessionWokenEvent"])``
+    — the cascade filter matches on the event's CLASS NAME
+    (``type(event).__name__``), NOT the ``EventType`` value ``"session.woken"``;
+    registering the value string silently never matches), so a bot whose session
+    went cold can learn it must re-attach to serve the
+    woken turn's host tools + render.  Re-emitted whenever an observer
+    (re)registers for the cid while a wake is still pending, so a reconnecting
+    bot is re-nudged.
+
+    Filter client-side by ``session_id`` (map it to your chat / attach target).
+    ``wake_ref`` names the matter (e.g. the PR); ``source`` is the provenance
+    tag.  The wake TEXT is NOT here — it stays inside the deferred turn (the
+    notification is a signal to attach, not the untrusted payload).
+    """
+    type: EventType = Field(default=EventType.SESSION_WOKEN)
+    session_id: str = ""
+    wake_ref: str = ""
+    source: str = ""
+
+
 class HistoryRequest(Event):
     """Client request for conversation history."""
     type: EventType = Field(default=EventType.HISTORY_REQUEST)
@@ -1399,8 +1579,15 @@ class HistoryEvent(Event):
     agent_id: str = "main"
     history: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of serialized Message objects
-    turn_accounting: List[Dict[str, int]] = Field(default_factory=list)
-    # ^ List of {prompt, output, total} per turn
+    turn_accounting: List[Dict[str, Any]] = Field(default_factory=list)
+    # ^ Per-turn accounting dicts.  The value type is Any (not int): besides
+    # the int token counts ({prompt, output, total}) each entry may carry the
+    # richer fields the runner records — ``duration_seconds`` (float) and
+    # ``function_calls`` (list) — mirroring TurnCompletedEvent.  A strict
+    # ``Dict[str, int]`` here rejected those and took the whole HistoryEvent
+    # down (pydantic ValidationError), so a disk-restored session's
+    # history.request / attach-replay / snapshot all failed on the accounting
+    # alone even though the messages validated fine.
 
 
 # =============================================================================
@@ -2211,6 +2398,12 @@ class GateReleasedEvent(Event):
     """
     type: EventType = Field(default=EventType.GATE_RELEASED)
     gate_name: str = ""
+    session_id: str = ""                     # originating session (from the
+                                             # gate's announce intent); empty
+                                             # for a gate with no session
+                                             # association. Lets bus subscribers
+                                             # (reactors) target the parked
+                                             # session without parsing gate_name.
     tenant_id: str = ""
     owner: str = ""
     outcome: Optional[Dict[str, Any]] = None
@@ -2259,7 +2452,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_OUTPUT.value: AgentOutputEvent,
     EventType.AGENT_STATUS_CHANGED.value: AgentStatusChangedEvent,
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
+    EventType.AGENT_ERROR.value: AgentErrorEvent,
     EventType.SESSION_TERMINATED.value: SessionTerminatedEvent,
+    EventType.SESSION_RESTORED.value: SessionRestoredEvent,
+    EventType.SLOT_SETTLED.value: SlotSettledEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
     EventType.TOOL_OUTPUT.value: ToolOutputEvent,
@@ -2359,6 +2555,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.REPLAY_MESSAGES_RESULT.value: ReplayMessagesResultEvent,
     EventType.RESOLVE_FORK_POINT_REQUEST.value: ResolveForkPointRequest,
     EventType.RESOLVE_FORK_POINT_RESULT.value: ResolveForkPointResultEvent,
+    EventType.WAKE_BIND_RESULT.value: WakeBindResultEvent,
+    EventType.SESSION_WOKEN.value: SessionWokenEvent,
     # SDK feature parity — permission policy verbs
     EventType.PERMISSION_ADD_WHITELIST_REQUEST.value: PermissionAddWhitelistRequest,
     EventType.PERMISSION_ADD_BLACKLIST_REQUEST.value: PermissionAddBlacklistRequest,

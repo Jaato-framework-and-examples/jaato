@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-sdk"
-version = "0.14.6"
+version = "0.15.0"
 description = "Jaato SDK - Protocol and client library for jaato server"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -30,15 +30,26 @@ dependencies = [
 Repository = "https://github.com/Jaato-framework-and-examples/jaato"
 Issues = "https://github.com/Jaato-framework-and-examples/jaato/issues"
 
+[project.scripts]
+# Client-side preflight doctor — diagnoses an SDK client's env / socket /
+# daemon / auth before it ever calls connect().  Mirrors jaato-server's
+# jaato-scaffold console script (see jaato-server/pyproject.toml).
+jaato-doctor = "jaato_sdk.doctor:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest",
     "pytest-asyncio",
 ]
+# WebSocket transport (WSClient) — drive a remote daemon over ws:// / wss://.
+# Optional so the IPC / in-process paths don't require it.
+ws = [
+    "websockets>=12.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["jaato_sdk*"]
+include = ["jaato_sdk*", "jaato*"]
 
 [tool.pytest.ini_options]
 markers = [

@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -70,6 +71,13 @@
           <li><a href="../providers/ollama.html">Ollama</a></li>
           <li><a href="../providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../providers/vllm.html">vLLM</a></li>
+          <li><a href="../providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../providers/nebius.html">Nebius</a></li>
+          <li><a href="../providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../providers/triton.html">Triton</a></li>
         </ul>
       </div>
 
@@ -104,6 +112,17 @@
             fallback that works everywhere.
           </p>
 
+          <div class="callout callout-warning">
+            <div class="callout-title">Formatter pipeline component — NOT a PluginRegistry plugin</div>
+            <code>mermaid_formatter</code> has <strong>no <code>PLUGIN_KIND</code></strong> and is
+            <strong>not discoverable by <code>PluginRegistry</code></strong>. Calling
+            <code>registry.expose_tool('mermaid_formatter')</code> will silently fail because the
+            module has no <code>PLUGIN_KIND</code> attribute and is skipped during directory
+            discovery. It is registered exclusively via the formatter pipeline —
+            configure it in <code>.jaato/formatters.json</code> or programmatically via
+            the formatter pipeline API.
+          </div>
+
           <table>
             <tbody>
               <tr>
@@ -112,7 +131,7 @@
               </tr>
               <tr>
                 <td><strong>Type</strong></td>
-                <td>Formatter Pipeline Plugin</td>
+                <td>Formatter Pipeline Plugin (not a PluginRegistry tool/enrichment plugin)</td>
               </tr>
               <tr>
                 <td><strong>Priority</strong></td>
@@ -281,22 +300,25 @@ ESC P0;1;0q"1;1;W;H #0;2;R;G;B ...data... ESC\
             </tbody>
           </table>
 
-          <h3>mermaid-py (Python fallback)</h3>
+          <h3>kroki.io (remote fallback)</h3>
           <p>
-            Python package that produces SVG, converted to PNG via cairosvg.
-            Used when mmdc is not available.
+            Used when <code>mmdc</code> is not installed. Posts the diagram source as
+            plain text to <code>POST https://kroki.io/mermaid/png</code>. No local
+            dependencies required. Configure a self-hosted endpoint via
+            <code>JAATO_KROKI_URL</code> for air-gapped or enterprise environments.
           </p>
           <table>
             <tbody>
-              <tr><td><strong>Install</strong></td><td><code>pip install mermaid cairosvg</code></td></tr>
-              <tr><td><strong>Optional extra</strong></td><td><code>pip install jaato[mermaid]</code></td></tr>
+              <tr><td><strong>Endpoint</strong></td><td><code>POST https://kroki.io/mermaid/png</code></td></tr>
+              <tr><td><strong>Override</strong></td><td><code>JAATO_KROKI_URL</code> (self-hosted kroki)</td></tr>
+              <tr><td><strong>No install</strong></td><td>Uses <code>shared.http.get_url_opener()</code> (stdlib)</td></tr>
             </tbody>
           </table>
 
-          <h3>Passthrough (no renderer)</h3>
+          <h3>Passthrough (no renderer available)</h3>
           <p>
-            When neither renderer is available, the source is emitted as a
-            <code>```mermaid</code> code block with a dim install hint. The
+            When both <code>mmdc</code> and kroki.io are unavailable, the source is
+            emitted as a <code>```mermaid</code> code block with a dim install hint. The
             downstream <code>code_block_formatter</code> applies syntax highlighting.
           </p>
         </div>
@@ -346,11 +368,11 @@ sankey            Sankey diagrams</code></pre>
           <table>
             <tbody>
               <tr><td><strong>Type</strong></td><td><code>string</code></td></tr>
-              <tr><td><strong>Values</strong></td><td><code>kitty</code>, <code>iterm</code>, <code>sixel</code>, <code>ascii</code>, <code>off</code></td></tr>
+              <tr><td><strong>Values</strong></td><td><code>kitty</code>, <code>iterm</code>, <code>sixel</code>, <code>off</code></td></tr>
               <tr><td><strong>Default</strong></td><td>Auto-detect</td></tr>
             </tbody>
           </table>
-          <p>Setting <code>off</code> disables diagram rendering entirely.</p>
+          <p>Setting <code>off</code> disables diagram rendering entirely. When no backend is selected or auto-detection finds no image protocol, the plugin falls back to passing the mermaid source through as a <code>```mermaid</code> code block (the <code>rich_pixels</code> backend in the backends table below refers to the Unicode half-block <em>auto-detected</em> fallback, not an accepted env var value).</p>
 
           <h3>JAATO_MERMAID_THEME</h3>
           <p>

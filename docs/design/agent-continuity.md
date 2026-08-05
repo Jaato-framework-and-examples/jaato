@@ -22,9 +22,15 @@ with a stable scope-id (project, A2A `contextId`, ticket number, etc.);
 the rest happens for free.
 
 This document is the canonical reference. It is intentionally a
-**design pattern**, not a feature spec — there is no code to ship in
-either jaato-server or jaato-premium beyond optional documentation
-notes and (optional) curated example agents.
+**design pattern**, not a feature spec — it composes existing jaato
+primitives with no new framework code to ship.  **Note (corrected
+2026-06-27):** the advisor/curator step is **NOT optional** — enrichment
+surfaces *curated* memories only (`plugin.py:246`), so a curator that
+drains raw→curated is **required** for cross-session continuity, not a
+refinement nicety.  The reference impl
+(`jaato-knowledge-manager/.jaato.example/`) ships that curator as a
+reactor; wire it (or run the advisor on a schedule), or memories stay raw
+and never surface.
 
 ## Status & verification disclaimer
 
@@ -40,7 +46,7 @@ current repo state at write time:
 | `agent_params` validated against profile schema      | `session_manager.py:1110+` |
 | `%prompt-name` expansion + param substitution        | `session_manager.py:2463` (`_expand_prompt_references`) |
 | Raw → curated memory lifecycle (advisor pattern)     | `shared/plugins/memory/plugin.py` docstrings (lines 4, 53, 184, 240, 328) |
-| Memory advisor as auto-firing reactor on `agent.completed` | **Pattern shipped in `jaato-knowledge-manager/.jaato.example/`** as the canonical example. Reactor rule in `reactors.json` matches `agent.completed where source_agent == 'main'`, fires `reactors/on_session_complete.py`, which spawns a headless session with the `memory-advisor` profile (`profiles/memory-advisor.json`) — see "Reference implementation" section below. Continuity works without auto-curation too — the agent's own postamble nudges `store_memory`, and the next session's `enrich_prompt` surfaces the raw memory regardless. Curation refines what's surfaced; absence delays refinement, doesn't block continuity. |
+| Memory advisor as auto-firing reactor on `agent.completed` | **Pattern shipped in `jaato-knowledge-manager/.jaato.example/`** as the canonical example. Reactor rule in `reactors.json` matches `agent.completed where source_agent == 'main'`, fires `reactors/on_session_complete.py`, which spawns a headless session with the `memory-advisor` profile (`profiles/memory-advisor.json`) — see "Reference implementation" section below. **CORRECTED 2026-06-27:** enrichment surfaces **curated memories only** — the index is built from `curated.jsonl` (`plugin.py:246`: *"Build index from CURATED memories only — raw memories are the curator's queue and aren't surfaced as enrichment hints"*). So auto-curation (the advisor reactor) is **REQUIRED** for continuity, not optional: without it `curated.jsonl` stays empty, `enrich_prompt` surfaces nothing, and the next session sees a "fresh start" even though raw memories exist on disk. (A stored-but-raw memory is still reachable via the explicit `retrieve_memories` tool — its `maturity` filter accepts raw — but it does **not** auto-surface as a 💡 hint.) |
 
 Future readers: re-verify before relying on file:line citations.
 Re-verify the advisor-reactor question if you're building a system
@@ -55,7 +61,11 @@ where automatic curation timing matters.
 The memory plugin subscribes to the `enrich_prompt` surface. It
 receives the assembled prompt (system instructions + user message +
 plugin contributions), tokenises into tags, and surfaces an
-`💡 Available Memories` hint listing memories whose tags match.
+`💡 Available Memories` hint listing **curated** memories whose tags
+match. The enrichment index is built from `curated.jsonl` only
+(`plugin.py:246`); raw memories are the curator's queue and are **not**
+in it — so a memory must be curated (raw→validated) before it can
+auto-surface here.
 
 The match is **paragraph-coherent**: a tag like `ctx-acme-customer-api`
 matches a prompt that mentions both `acme` and `customer-api` in the
@@ -63,8 +73,10 @@ same paragraph, but doesn't false-positive when the components appear
 in unrelated contexts.
 
 **Continuity uses this**: a literal scope-id string in the prompt is
-itself a tag. Memories stored under that tag in prior sessions auto-
-surface in the new session's prompt, no explicit lookup required.
+itself a tag. **Curated** memories tagged with it from prior sessions
+auto-surface in the new session's prompt, no explicit lookup required.
+(Raw, uncurated memories under that tag do not — they must be curated
+first; see §2.)
 
 #### 2. Memory raw-then-curated lifecycle
 
@@ -76,13 +88,21 @@ validated/curated ones (deduplicating, merging, tagging consistency),
 and write back via `update_memory`.
 
 **Continuity uses this**: agents storing continuity summaries don't
-need to think about consistency — the advisor (when invoked) handles
-that. Until curated, raw memories still surface; they're just less
-refined.
+need to think about consistency — the advisor handles that. **But until
+a memory is curated (raw→validated), it does NOT surface in enrichment**
+— raw is the curator's queue (`plugin.py:246`); the enrichment index is
+built from `curated.jsonl` only. A raw memory is reachable only via the
+explicit `retrieve_memories` tool, not the auto 💡 hint. So the advisor
+must run for stored summaries to surface next session.
 
-When (or if) automatic curation lands as a reactor on
-`agent.completed`, the cycle becomes hands-off. Today, callers can
-invoke the advisor on a schedule or after batches.
+Automatic curation **is available** as a reactor on `agent.completed` —
+the `jaato-knowledge-manager/.jaato.example/` memory-advisor reactor (see
+Reference implementation below) makes the cycle hands-off: wire it by
+copying the example into the workspace's (or `~/.jaato`'s) tier. Without a
+curator wired, callers must invoke the advisor explicitly (schedule,
+daemon extension, manual) — and because enrichment is curated-only, an
+unwired curator means stored summaries stay raw and never surface (the
+"fresh start" failure mode).
 
 #### 3. `agent_params` substitution
 
@@ -203,11 +223,15 @@ the same `continuity_scope`:
    nudges the agent to call
    `store_memory(tags=["acme-customer-api"], content=<summary>)`
    before signalling completion.
-6. **`AgentCompletedEvent` fires.** Memory is now in raw state,
-   surfaceable to future sessions immediately. (When the advisor
-   pattern runs, the raw entry gets curated/validated/merged.)
-7. **Session N+1 starts** with the same scope. Step 2 now finds
-   session N's memory + any earlier curated ones. Cycle repeats.
+6. **`AgentCompletedEvent` fires.** Memory is now in **raw** state —
+   the curator's queue. It is NOT yet surfaceable via enrichment.
+7. **Advisor curates.** The `agent.completed` reactor spawns the
+   memory-advisor, which reviews the raw entry and `update_memory(...,
+   maturity="validated")` — draining it into `curated.jsonl`. **This
+   step is required**: without it the memory stays raw and never
+   surfaces.
+8. **Session N+1 starts** with the same scope. Step 2's enrichment now
+   finds the curated memory (+ any earlier curated ones). Cycle repeats.
 
 ## Watch items
 
@@ -279,12 +303,14 @@ completion" and run a compactor over the session transcript.
 
 ### Curation timing
 
-If the memory advisor curation isn't auto-fired (see verification
-table at top), curated entries lag raw ones. Continuity still
-**works** — raw entries surface — but they may be redundant or
-inconsistent until a curation pass runs. For high-frequency
-continuity workflows, schedule the advisor explicitly (cron, daemon
-extension, manual invocation) until automatic curation lands.
+If the memory advisor curation isn't fired (see verification table at
+top), nothing curates and `curated.jsonl` stays empty. Because
+enrichment is curated-only (`plugin.py:246`), **continuity then does NOT
+work** — stored memories sit raw on disk and never surface, so the next
+session sees a "fresh start." This is not a refinement lag; it is the
+common failure mode. Wire the advisor as a reactor on `agent.completed`
+(the reference impl) or run it on a schedule (cron, daemon extension,
+manual invocation) — it is required, not optional.
 
 ## Reference implementation: `jaato-knowledge-manager/.jaato.example/`
 

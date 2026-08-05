@@ -4,9 +4,6 @@ import json
 import socket
 import time
 import urllib.request
-from typing import Any, Dict
-
-import pytest
 
 from shared.plugins.webhook.plugin import WebhookPlugin, create_plugin
 
@@ -95,7 +92,7 @@ class TestWebhookSubscribe:
     def test_subscribe_returns_id(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         try:
             result = plugin._execute_subscribe({})
             assert "subscription_id" in result
@@ -107,7 +104,7 @@ class TestWebhookSubscribe:
     def test_subscribe_starts_server(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         try:
             assert plugin._http_server is None
             plugin._execute_subscribe({})
@@ -122,8 +119,8 @@ class TestWebhookSubscribe:
         plugin.initialize({
             "port": port,
             "routes": {
-                "github": {"path": "/webhook/github"},
-                "slack": {"path": "/webhook/slack"},
+                "github": {"path": "/webhook/github", "allow_unauthenticated": True},
+                "slack": {"path": "/webhook/slack", "allow_unauthenticated": True},
             },
         })
         try:
@@ -154,7 +151,7 @@ class TestWebhookPoll:
     def test_poll_returns_empty_on_timeout(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         try:
             sub = plugin._execute_subscribe({})
             sub_id = sub["subscription_id"]
@@ -170,7 +167,7 @@ class TestWebhookPoll:
     def test_poll_receives_posted_event(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         try:
             sub = plugin._execute_subscribe({})
             sub_id = sub["subscription_id"]
@@ -194,7 +191,7 @@ class TestWebhookPoll:
     def test_poll_drains_buffer(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         try:
             sub = plugin._execute_subscribe({})
             sub_id = sub["subscription_id"]
@@ -226,8 +223,8 @@ class TestWebhookPoll:
         plugin.initialize({
             "port": port,
             "routes": {
-                "github": {"path": "/webhook/github"},
-                "slack": {"path": "/webhook/slack"},
+                "github": {"path": "/webhook/github", "allow_unauthenticated": True},
+                "slack": {"path": "/webhook/slack", "allow_unauthenticated": True},
             },
         })
         try:
@@ -262,7 +259,7 @@ class TestWebhookStatus:
     def test_status_after_subscribe(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         try:
             plugin._execute_subscribe({})
             result = plugin._execute_status({})
@@ -275,7 +272,7 @@ class TestWebhookStatus:
     def test_status_counts_events(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         try:
             plugin._execute_subscribe({})
             _post(port, "/webhook", {"a": 1})
@@ -294,7 +291,7 @@ class TestWebhookPluginLifecycle:
     def test_shutdown_stops_server(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         plugin._execute_subscribe({})
         assert plugin._http_server.is_running
         plugin.shutdown()
@@ -303,7 +300,7 @@ class TestWebhookPluginLifecycle:
     def test_shutdown_clears_subscriptions(self):
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         plugin._execute_subscribe({})
         plugin._execute_subscribe({})
         assert len(plugin._subscriptions) == 2
@@ -339,7 +336,7 @@ class TestEventBusBridge:
         bus, session = self._make_bus_and_session()
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         plugin.set_session(session)
         try:
             plugin._execute_subscribe({})
@@ -366,6 +363,7 @@ class TestEventBusBridge:
                 "github": {
                     "path": "/webhook/github",
                     "event_type_header": "X-GitHub-Event",
+                    "allow_unauthenticated": True,
                 },
             },
         })
@@ -391,7 +389,7 @@ class TestEventBusBridge:
         bus, session = self._make_bus_and_session()
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         plugin.set_session(session)
         try:
             plugin._execute_subscribe({})
@@ -414,8 +412,8 @@ class TestEventBusBridge:
         plugin.initialize({
             "port": port,
             "routes": {
-                "github": {"path": "/webhook/github"},
-                "slack": {"path": "/webhook/slack"},
+                "github": {"path": "/webhook/github", "allow_unauthenticated": True},
+                "slack": {"path": "/webhook/slack", "allow_unauthenticated": True},
             },
         })
         plugin.set_session(session)
@@ -439,7 +437,7 @@ class TestEventBusBridge:
         bus, session = self._make_bus_and_session()
         port = _find_free_port()
         plugin = create_plugin()
-        plugin.initialize({"port": port})
+        plugin.initialize({"port": port, "routes": {"generic": {"path": "/webhook", "allow_unauthenticated": True}}})
         plugin.set_session(session)
         try:
             plugin._execute_subscribe({})

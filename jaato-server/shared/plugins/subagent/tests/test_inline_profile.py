@@ -49,6 +49,59 @@ class TestBuildInlineProfile:
         assert p.max_turns == 25
         assert p.env == {"FOO": "bar"}
 
+    def test_spec_name_is_honored(self):
+        """The spec's own ``name`` is used (like disk profiles), not silently
+        replaced by the ``<inline>`` placeholder — so profile_name and the
+        agent display read e.g. 'nano-chat'."""
+        p = build_inline_profile(
+            {"name": "nano-chat", "model": "gemini-nano", "plugins": []})
+        assert p.name == "nano-chat"
+
+    def test_name_falls_back_to_placeholder_when_spec_omits_it(self):
+        # No name in the spec → the param default ("<inline>") stands.
+        assert build_inline_profile(
+            {"model": "X", "plugins": []}).name == "<inline>"
+        # An explicit name param still wins when the spec omits name.
+        assert build_inline_profile(
+            {"model": "X", "plugins": []}, name="ops").name == "ops"
+
+    def test_suppress_base_instructions_forwarded(self):
+        """``suppress_base_instructions`` must round-trip onto the profile so
+        disk-restore (which reconstructs an inline profile from the persisted
+        spec) re-applies it — else a restored session silently regains the
+        framework instructions and tiny-context models overflow.
+
+        Normalized to the canonical frozenset: ``true`` drops {disk,
+        constants} (security kept)."""
+        assert build_inline_profile(
+            {"model": "gemini-nano", "plugins": [],
+             "suppress_base_instructions": True}
+        ).suppress_base_instructions == frozenset({"disk", "constants"})
+        # Default stays empty (suppress nothing) when the key is absent.
+        assert build_inline_profile(
+            {"model": "gemini-nano", "plugins": []}
+        ).suppress_base_instructions == frozenset()
+
+    def test_suppress_base_instructions_granular_dict(self):
+        """A dict gives per-piece control; absent key = keep.  ``security``
+        is dropped only when named (never by the blanket ``true``)."""
+        # Drop constants only — keep the disk base and the security boundary.
+        assert build_inline_profile(
+            {"model": "m", "plugins": [],
+             "suppress_base_instructions": {"constants": True}}
+        ).suppress_base_instructions == frozenset({"constants"})
+        # Explicitly drop everything, including the security boundary.
+        assert build_inline_profile(
+            {"model": "m", "plugins": [],
+             "suppress_base_instructions": {
+                 "disk": True, "constants": True, "security": True}}
+        ).suppress_base_instructions == frozenset({"disk", "constants", "security"})
+        # Unknown piece fails loud at profile-build time.
+        with pytest.raises(ValueError, match="unknown piece"):
+            build_inline_profile(
+                {"model": "m", "plugins": [],
+                 "suppress_base_instructions": {"bogus": True}})
+
     def test_preload_annotation_in_plugin_list(self):
         """``plugin(preload)`` syntax is split the same as on-disk profiles."""
         p = build_inline_profile({

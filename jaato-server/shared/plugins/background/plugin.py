@@ -13,7 +13,10 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 
 from jaato_sdk.plugins.base import ToolPlugin, UserCommand
 from .protocol import BackgroundCapable, TaskHandle, TaskResult, TaskStatus
@@ -148,7 +151,7 @@ Returns a task_id you can use to check status or get results later.""",
                     "required": ["tool_name", "arguments"]
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="getBackgroundTask",
@@ -189,7 +192,7 @@ Response fields:
                     "required": ["task_id"]
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="cancelBackgroundTask",
@@ -205,7 +208,7 @@ Response fields:
                     "required": ["task_id"]
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listBackgroundTasks",
@@ -220,7 +223,7 @@ Response fields:
                     },
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listBackgroundCapableTools",
@@ -232,7 +235,7 @@ Use this to discover which tools can be run in background mode.""",
                     "properties": {},
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

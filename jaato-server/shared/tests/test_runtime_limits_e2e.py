@@ -236,6 +236,7 @@ class TestFakeFsE2E:
             "name": "child_ov",
             "description": "Child overrides",
             "inherits": ["parent_ov"],
+            "plugins": [],  # required key; empty keeps the inherited surface
             "runtime_limits": {
                 "memory_max_mb": 4096,
             },
@@ -265,6 +266,7 @@ class TestFakeFsE2E:
             "name": "child_conflict",
             "description": "Child with conflicting parents",
             "inherits": ["p1_conflict", "p2_conflict"],
+            "plugins": [],  # required key; empty keeps the inherited surface
         })
 
         _scan_profiles_dir(tmp_path, profiles := {}, errors := {})
@@ -345,9 +347,21 @@ def _find_writable_cgroup_parent():
 
 _REAL_CGROUP_AVAILABLE = sys.platform == "linux" and _find_writable_cgroup_parent() is not None
 
+# Explicit opt-in for the real-kernel cgroup e2e tests.  A writable cgroup
+# parent (``_REAL_CGROUP_AVAILABLE``) is necessary but NOT sufficient: hosted
+# CI runners (e.g. GitHub Actions) expose a writable parent yet don't delegate
+# the v2 controller tree, so a *spawned runner* doesn't land in the session
+# cgroup — the lightweight ``_can_migrate_to`` precondition can't detect that,
+# and the tests fail instead of skipping.  Gate them behind JAATO_E2E_CGROUP=1
+# so they run only on a host known to support delegated cgroup migration
+# (a dev box / self-hosted runner) and skip everywhere else by default.
+_E2E_CGROUP_OPT_IN = os.environ.get("JAATO_E2E_CGROUP") == "1"
+
 skip_no_real_cgroup = pytest.mark.skipif(
-    not _REAL_CGROUP_AVAILABLE,
-    reason="Requires Linux with writable cgroup v2 parent",
+    not (_E2E_CGROUP_OPT_IN and _REAL_CGROUP_AVAILABLE),
+    reason="Real-kernel cgroup e2e: set JAATO_E2E_CGROUP=1 on a host with a "
+    "writable, delegated cgroup v2 parent (hosted CI runners lack the "
+    "delegation; the precondition can't tell a spawned child won't migrate)",
 )
 
 

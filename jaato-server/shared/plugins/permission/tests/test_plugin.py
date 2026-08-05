@@ -1157,40 +1157,63 @@ class TestPermissionPluginUserCommands:
 
 
 class TestPermissionPluginTrustedBridgeContext:
-    """Tests for the trusted-bridge short-circuit in check_permission.
+    """Tests for the trusted-bridge behavior in check_permission.
 
     When a plugin-provided interpreter (notebook's Python tool bindings)
-    wraps inner dispatch in trusted_bridge_context(), permission checks
-    for bridge-dispatched tool calls must return ALLOW immediately —
-    the outer tool call was already user-approved and the user saw every
-    inner ``tools.X(...)`` call in the approved code.
+    wraps inner dispatch in trusted_bridge_context(), the bridge suppresses
+    the redundant interactive PROMPT for each inner ``tools.X(...)`` call —
+    the user already approved the outer cell.  It does NOT bypass the
+    operator's hard boundaries: a blacklisted / evaluator-denied /
+    default-denied tool is still refused inside the bridge (a user approving
+    a cell cannot override the operator's policy).
     """
 
-    def test_trusted_context_allows_tool_that_would_be_denied(self):
-        """Inside a trusted bridge scope, a tool denied by policy is allowed."""
+    @staticmethod
+    def _deny_channel():
+        """A channel that auto-denies, so an ASK resolves without touching
+        stdin — lets a test assert the non-bridge baseline deterministically."""
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
+            request_id="test",
+            decision=ChannelDecision.DENY,
+            reason="denied by test channel",
+        )
+        return mock_channel
+
+    def test_bridge_suppresses_prompt_for_ask_default(self):
+        """A tool that would only ASK (rule-miss under defaultPolicy=ask) is
+        allowed inside the bridge without prompting — the legitimate case."""
         from shared.ai_tool_runner import trusted_bridge_context
 
         plugin = PermissionPlugin()
-        plugin.initialize({
-            "policy": {
-                "defaultPolicy": "deny",  # normally deny everything
-            },
-        })
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+        plugin._channel = self._deny_channel()
 
-        # Outside: deny
-        allowed, info = plugin.check_permission("writeNewFile", {"path": "x"})
+        # Outside: the channel is consulted and denies → not allowed.
+        allowed, _ = plugin.check_permission("writeNewFile", {"path": "x"})
         assert allowed is False
 
-        # Inside: allow via trusted bridge
+        # Inside: the redundant prompt is suppressed → allow.
         with trusted_bridge_context():
-            allowed, info = plugin.check_permission(
-                "writeNewFile", {"path": "x"}
-            )
+            allowed, info = plugin.check_permission("writeNewFile", {"path": "x"})
         assert allowed is True
         assert info["method"] == "trusted_bridge"
 
-    def test_trusted_context_skips_blacklist(self):
-        """Even blacklisted tools are allowed inside a trusted bridge scope."""
+    def test_bridge_does_not_override_default_deny(self):
+        """defaultPolicy=deny is a hard boundary the bridge must not override."""
+        from shared.ai_tool_runner import trusted_bridge_context
+
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("writeNewFile", {"path": "x"})
+        assert allowed is False
+        assert info["method"] != "trusted_bridge"
+
+    def test_bridge_does_not_skip_blacklist(self):
+        """A blacklisted tool is refused even inside a trusted bridge (the fix
+        for the trusted_bridge bypass finding)."""
         from shared.ai_tool_runner import trusted_bridge_context
 
         plugin = PermissionPlugin()
@@ -1201,24 +1224,41 @@ class TestPermissionPluginTrustedBridgeContext:
             },
         })
 
-        # Outside: blacklisted tool denied
+        # Outside: blacklisted tool denied.
         allowed, _ = plugin.check_permission("dangerous_tool", {})
         assert allowed is False
 
-        # Inside: allowed via trusted bridge (outer approval dominates)
+        # Inside the bridge: STILL denied — the operator's blacklist wins.
         with trusted_bridge_context():
             allowed, info = plugin.check_permission("dangerous_tool", {})
-        assert allowed is True
-        assert info["method"] == "trusted_bridge"
+        assert allowed is False
+        assert info["method"] != "trusted_bridge"
+
+    def test_bridge_does_not_skip_evaluator_deny(self):
+        """A deterministic evaluator's DENY is honored even inside the bridge."""
+        from shared.ai_tool_runner import trusted_bridge_context
+        from shared.plugins.permission.evaluator import PolicyDecision
+
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        def deny_evaluator(tool_name, args, context):
+            return PolicyDecision.DENY
+
+        plugin._policy.set_evaluators({"guarded_tool": deny_evaluator})
+
+        with trusted_bridge_context():
+            allowed, info = plugin.check_permission("guarded_tool", {})
+        assert allowed is False
+        assert info["method"] != "trusted_bridge"
 
     def test_context_is_balanced(self):
-        """Nested contexts balance correctly; permission restored on full exit."""
+        """Nested contexts balance correctly; prompt-suppression restored on exit."""
         from shared.ai_tool_runner import trusted_bridge_context
 
         plugin = PermissionPlugin()
-        plugin.initialize({
-            "policy": {"defaultPolicy": "deny"},
-        })
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+        plugin._channel = self._deny_channel()
 
         with trusted_bridge_context():
             allowed, _ = plugin.check_permission("x", {})
@@ -1230,7 +1270,7 @@ class TestPermissionPluginTrustedBridgeContext:
             allowed, _ = plugin.check_permission("x", {})
             assert allowed is True
 
-        # Fully exited → back to deny policy
+        # Fully exited → no bridge → ask resolves via channel → denied
         allowed, _ = plugin.check_permission("x", {})
         assert allowed is False
 
@@ -1240,19 +1280,18 @@ class TestPermissionPluginTrustedBridgeContext:
         from shared.ai_tool_runner import trusted_bridge_context
 
         plugin = PermissionPlugin()
-        plugin.initialize({
-            "policy": {"defaultPolicy": "deny"},
-        })
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+        plugin._channel = self._deny_channel()
 
         results = {}
 
         def worker():
-            # Worker thread has no trusted context; deny policy applies
+            # Worker thread has no trusted context; channel denies → not allowed.
             allowed, _ = plugin.check_permission("x", {})
             results["worker"] = allowed
 
         with trusted_bridge_context():
-            # Main thread is inside the context; allow
+            # Main thread is inside the context; prompt suppressed → allow.
             allowed, _ = plugin.check_permission("x", {})
             assert allowed is True
 
@@ -1265,13 +1304,11 @@ class TestPermissionPluginTrustedBridgeContext:
         )
 
     def test_trusted_bridge_method_label(self):
-        """The decision metadata identifies the short-circuit path."""
+        """The decision metadata identifies the prompt-suppression path."""
         from shared.ai_tool_runner import trusted_bridge_context
 
         plugin = PermissionPlugin()
-        plugin.initialize({
-            "policy": {"defaultPolicy": "deny"},
-        })
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
         with trusted_bridge_context():
             allowed, info = plugin.check_permission("x", {})

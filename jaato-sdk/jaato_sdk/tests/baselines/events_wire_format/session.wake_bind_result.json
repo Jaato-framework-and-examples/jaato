@@ -1,0 +1,9 @@
+{
+  "type": "session.wake_bind_result",
+  "timestamp": "<TIMESTAMP>",
+  "wake_ref": "",
+  "outcome": "",
+  "detail": "",
+  "expires_at": 0.0,
+  "endpoint": ""
+}

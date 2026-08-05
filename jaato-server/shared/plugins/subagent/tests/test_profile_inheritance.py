@@ -30,6 +30,49 @@ class TestNormalizeInherits:
         assert _normalize_inherits(42) is None
 
 
+class TestSuppressBaseInstructionsMerge:
+    """``suppress_base_instructions`` merges by UNION across the chain — a
+    piece dropped by any layer stays dropped (a minimalist parent can't be
+    silently overridden)."""
+
+    def test_union_of_parent_and_child_pieces(self):
+        profiles = {
+            # Parent drops only the framework constants.
+            "base": SubagentProfile(
+                name="base", description="Base",
+                suppress_base_instructions={"constants": True},
+            ),
+            # Child drops only the disk layer.
+            "child": SubagentProfile(
+                name="child", description="Child",
+                suppress_base_instructions={"disk": True},
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # Union: both pieces suppressed.
+        assert resolved["child"].suppress_base_instructions == frozenset(
+            {"disk", "constants"}
+        )
+
+    def test_child_empty_still_inherits_parent_suppression(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                suppress_base_instructions=True,  # -> {disk, constants}
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].suppress_base_instructions == frozenset(
+            {"disk", "constants"}
+        )
+
+
 class TestResolveSingleInheritance:
     """Tests for single-parent inheritance."""
 

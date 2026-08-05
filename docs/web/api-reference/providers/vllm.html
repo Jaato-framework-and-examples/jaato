@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>vLLM Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+          <li><a href="zhipuai.html">Zhipu AI</a></li>
+          <li><a href="nim.html">NVIDIA NIM</a></li>
+          <li><a href="lmstudio.html">LM Studio</a></li>
+          <li><a href="vllm.html" class="active">vLLM</a></li>
+          <li><a href="tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="openrouter.html">OpenRouter</a></li>
+          <li><a href="nebius.html">Nebius</a></li>
+          <li><a href="ovhcloud.html">OVHcloud</a></li>
+          <li><a href="triton.html">Triton</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>vLLM Provider</h1>
+          <p class="lead">
+            High-throughput self-hosted GPU inference via vLLM's OpenAI-compatible server.
+            Supports 200+ model architectures, PagedAttention for memory efficiency,
+            continuous batching, LoRA adapter hot-loading, and prefix caching.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>vllm</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.vllm</code></td></tr>
+              <tr><td><strong>SDK</strong></td><td><code>openai</code> (OpenAI-compatible API)</td></tr>
+              <tr><td><strong>Auth</strong></td><td>Optional bearer token (only when <code>--api-key</code> passed to <code>vllm serve</code>)</td></tr>
+              <tr><td><strong>Mode</strong></td><td>Passive &mdash; provider talks to an already-running vLLM server</td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="highlights">Highlights</h2>
+          <ul>
+            <li><strong>High throughput</strong> &mdash; PagedAttention, continuous batching, prefix caching</li>
+            <li><strong>200+ architectures</strong> &mdash; Qwen, Llama, Mistral, DeepSeek, Phi, Gemma, and more</li>
+            <li><strong>LoRA adapters</strong> &mdash; Hot-loading of fine-tuned adapters</li>
+            <li><strong>Structured outputs</strong> &mdash; xgrammar-constrained decoding via <code>--enable-guided-decoding</code></li>
+            <li><strong>Tool calling</strong> &mdash; Via <code>--enable-auto-tool-choice --tool-call-parser</code> at server launch</li>
+            <li><strong>Quirks system</strong> &mdash; Profile-level workarounds for small-model behavior gaps</li>
+          </ul>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Passive Provider &mdash; No Load Endpoint</div>
+            The provider does <strong>not</strong> start or configure vLLM. Model choice
+            (<code>--model</code>), context length (<code>--max-model-len</code>), and
+            tool-call parser (<code>--enable-auto-tool-choice --tool-call-parser</code>)
+            all live at the <code>vllm serve</code> command boundary. Configure them once
+            at server launch, not per-session.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Start vLLM server</div>
+          <div class="code-block">
+            <pre><code class="language-bash">vllm serve Qwen/Qwen2.5-7B-Instruct \
+    --host 0.0.0.0 --port 8000 \
+    --max-model-len 32768 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Connect jaato</div>
+          <div class="code-block">
+            <pre><code class="language-bash">export VLLM_HOST=http://localhost:8000
+export VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct
+export VLLM_CONTEXT_LENGTH=32768</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Python quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import JaatoClient
+
+client = JaatoClient(provider_name="vllm")
+client.connect(
+    project=None,
+    location=None,
+    model="Qwen/Qwen2.5-7B-Instruct"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from vLLM!",
+    on_output=on_output
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>VLLM_HOST</code></td>
+                <td>&mdash;</td>
+                <td>Yes</td>
+                <td>vLLM server URL (e.g. <code>http://localhost:8000</code>). No localhost fallback.</td>
+              </tr>
+              <tr>
+                <td><code>VLLM_MODEL</code></td>
+                <td>&mdash;</td>
+                <td>Recommended</td>
+                <td>Model name as vLLM reports it in <code>/v1/models</code></td>
+              </tr>
+              <tr>
+                <td><code>VLLM_CONTEXT_LENGTH</code></td>
+                <td>Auto-detected</td>
+                <td>If auto-detect fails</td>
+                <td>Context window size. Current vLLM surfaces <code>max_model_len</code> in <code>/v1/models</code>; set this only for older builds or to pin a value.</td>
+              </tr>
+              <tr>
+                <td><code>VLLM_API_TOKEN</code></td>
+                <td>&mdash;</td>
+                <td>No</td>
+                <td>Bearer token when server was launched with <code>--api-key</code> or sits behind an auth proxy</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Context Length Auto-Detection</div>
+            Current vLLM versions surface <code>max_model_len</code> in each
+            <code>GET /v1/models</code> entry. The provider reads this at
+            <code>initialize()</code> time (tier-1). <code>VLLM_CONTEXT_LENGTH</code>
+            is a tier-3 fallback for older builds. If neither resolves, the provider
+            raises rather than using a hardcoded default.
+          </div>
+
+          <h3>Profile Knobs (<code>plugin_configs.vllm</code>)</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>host</code></td>
+                <td>str</td>
+                <td>Override <code>VLLM_HOST</code></td>
+              </tr>
+              <tr>
+                <td><code>context_length</code></td>
+                <td>int</td>
+                <td>Override context window (tier-2; skips auto-detect)</td>
+              </tr>
+              <tr>
+                <td><code>api_token</code></td>
+                <td>str</td>
+                <td>Bearer token override</td>
+              </tr>
+              <tr>
+                <td><code>max_tokens</code></td>
+                <td>int</td>
+                <td>Cap per-request output budget; forwarded as OpenAI <code>max_tokens</code>. Omit to use vLLM's default.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Full .env example</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env
+JAATO_PROVIDER=vllm
+VLLM_HOST=http://localhost:8000
+VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct
+VLLM_CONTEXT_LENGTH=32768</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Profile with per-session override</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: vllm-qwen
+model: Qwen/Qwen2.5-7B-Instruct
+provider: vllm
+
+plugins:
+  - cli
+  - file_edit
+
+plugin_configs:
+  vllm:
+    host: "http://gpu-host:8000"
+    context_length: 32768
+    max_tokens: 4096</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tool Calling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tool-calling">Tool Calling</h2>
+          <p>
+            Tool calling requires configuring vLLM at <strong>server launch</strong> with the
+            correct tool-call parser for your model family. The provider passes tool schemas
+            using the OpenAI wire format; the server-side parser extracts tool calls from
+            the model's output.
+          </p>
+
+          <h3>Tool-Call Parser by Model Family</h3>
+          <table>
+            <thead>
+              <tr><th>Parser Flag</th><th>Models</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>hermes</code></td>
+                <td>Qwen2.5, Hermes</td>
+              </tr>
+              <tr>
+                <td><code>mistral</code></td>
+                <td>Mistral Instruct</td>
+              </tr>
+              <tr>
+                <td><code>llama3_json</code></td>
+                <td>Llama 3.1</td>
+              </tr>
+              <tr>
+                <td><code>pythonic</code></td>
+                <td>Llama 3.2, Llama 4</td>
+              </tr>
+              <tr>
+                <td><code>granite</code></td>
+                <td>IBM Granite</td>
+              </tr>
+              <tr>
+                <td><code>deepseek_v4</code></td>
+                <td>DeepSeek-V4 / Qwen 3.5</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            See the <a href="https://docs.vllm.ai/en/stable/serving/openai_compatible_server.html#tool-calling" target="_blank">vLLM Tool-Calling docs</a>
+            for the full parser list.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Launch vLLM with tool calling (Qwen2.5)</div>
+          <div class="code-block">
+            <pre><code class="language-bash">vllm serve Qwen/Qwen2.5-7B-Instruct \
+    --host 0.0.0.0 --port 8000 \
+    --max-model-len 32768 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Launch with Llama 3.1 (llama3_json)</div>
+          <div class="code-block">
+            <pre><code class="language-bash">vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --host 0.0.0.0 --port 8000 \
+    --max-model-len 131072 \
+    --enable-auto-tool-choice \
+    --tool-call-parser llama3_json</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Quirks -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="quirks">Quirks System</h2>
+          <p>
+            vLLM is the <strong>only</strong> jaato provider that implements a quirks subsystem.
+            Quirks are profile-level workarounds for behavioral gaps in small models running
+            on vLLM, activated via <code>profile.quirks.*</code>. All quirks default to
+            <code>false</code> and are opt-in.
+          </p>
+
+          <h3>Available Quirks</h3>
+          <table>
+            <thead>
+              <tr><th>Quirk Key</th><th>Since</th><th>What It Does</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>coerce_typed_tool_args</code></td>
+                <td>server 0.6.194+</td>
+                <td>
+                  When the model emits a string value for a tool argument whose schema type
+                  is <code>array</code>, <code>object</code>, <code>integer</code>,
+                  <code>number</code>, or <code>boolean</code>, the provider attempts
+                  <code>ast.literal_eval</code> (handles Python repr with single quotes)
+                  then <code>json.loads</code> to coerce it before passing to the tool executor.
+                  Workaround for Llama 3.1 on vLLM with the <code>llama3_json</code> parser
+                  under <code>tool_choice: "auto"</code>.
+                </td>
+              </tr>
+              <tr>
+                <td><code>force_tool_choice_for_lifecycle</code></td>
+                <td>server 0.6.195+</td>
+                <td>
+                  Forwards the session's <code>tool_choice</code> kwarg to vLLM as a named-function
+                  constraint (<code>{"type":"function","function":{"name":"..."}}}</code>), engaging
+                  vLLM's xgrammar decoding. Produces correctly-typed args at the source instead of
+                  coercing them after. Effective universally (unlike the parser-tag-gated coerce quirk).
+                </td>
+              </tr>
+              <tr>
+                <td><code>force_narration_between_tools</code></td>
+                <td>server 0.6.197+</td>
+                <td>
+                  After every <code>tool_result</code> turn, the session injects a synthetic
+                  USER-role prompt asking the model to produce 1&ndash;2 sentences of narrative
+                  before the next tool call. Closes the small-model narration-skipping failure
+                  class where models like Qwen3-14b at temperature 0 skip narration entirely
+                  even with in-context examples.
+                </td>
+              </tr>
+              <tr>
+                <td><code>auto_finalize_on_complete</code></td>
+                <td>server 0.6.199+</td>
+                <td>
+                  When the composite <code>is_complete</code> gate flips true (schema floor met,
+                  no completeness processor reports <code>incomplete[]</code>), the framework
+                  synthesizes <code>signal_completion()</code> server-side without a model
+                  round-trip. Prevents context-overflow-at-finalize: the accumulator model
+                  would otherwise over-run the context window attempting another turn.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Profile with quirks (YAML)</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: vllm-llama31-quirks
+model: meta-llama/Llama-3.1-8B-Instruct
+provider: vllm
+
+plugin_configs:
+  vllm:
+    host: "http://localhost:8000"
+    context_length: 131072
+
+# Opt-in workarounds for Llama 3.1 + hermes parser
+quirks:
+  coerce_typed_tool_args: true
+  force_tool_choice_for_lifecycle: true</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Quirks for small-model cascade workloads</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: vllm-qwen3-14b-cascade
+model: Qwen/Qwen3-14B-Instruct
+provider: vllm
+
+plugin_configs:
+  vllm:
+    host: "http://localhost:8000"
+    context_length: 32768
+
+quirks:
+  force_narration_between_tools: true
+  auto_finalize_on_complete: true</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+
+          <table>
+            <thead>
+              <tr><th>Exception</th><th>Cause</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>VLLMConnectionError</code></td>
+                <td>Server unreachable (not running, wrong host/port, firewall); transient — reliability layer retries</td>
+              </tr>
+              <tr>
+                <td><code>VLLMAuthenticationError</code></td>
+                <td>Bearer token rejected (HTTP 401 from <code>/health</code> probe)</td>
+              </tr>
+              <tr>
+                <td><code>VLLMModelNotFoundError</code></td>
+                <td>Requested model is not in <code>/v1/models</code> (server is hosting a different model)</td>
+              </tr>
+              <tr>
+                <td><code>VLLMMidStreamError</code></td>
+                <td>Connection dropped mid-response (HTTP 200 committed but engine terminated early &mdash; check server logs for OOM / generation errors)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Mid-Stream vs Pre-Flight Errors</div>
+            The provider distinguishes mid-stream drops (engine error after HTTP 200 was
+            committed — check vLLM server logs for the root cause) from pre-flight
+            connection failures (host unreachable / firewall / DNS). These are surfaced
+            as different exception types so you can route them to different remediation paths.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handle errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.vllm.errors import (
+    VLLMConnectionError,
+    VLLMModelNotFoundError,
+    VLLMMidStreamError,
+)
+
+try:
+    provider.initialize(config)
+    provider.connect("Qwen/Qwen2.5-7B-Instruct")
+    result = provider.complete(messages, tools=tools)
+except VLLMConnectionError:
+    print("vLLM server not reachable. Is it running?")
+except VLLMModelNotFoundError as e:
+    print(f"Model not loaded: {e}")
+    print("Check 'vllm serve' is using the right --model flag")
+except VLLMMidStreamError:
+    print("vLLM dropped mid-response. Check server logs.")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Health check</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># vLLM's liveness probe — 200 = healthy, 503 = engine dead
+curl http://localhost:8000/health
+
+# List served models
+curl http://localhost:8000/v1/models</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Cancellation -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="cancellation">Cancellation Behaviour</h2>
+          <p>
+            When a streaming response is cancelled, the provider closes the OpenAI
+            client's HTTP connection pool immediately (<code>client.close()</code>),
+            which sends a TCP FIN to vLLM and stops GPU generation within ~50ms.
+          </p>
+          <p>
+            Without this, vLLM continues generating tokens until <code>max_tokens</code>
+            is reached because the OpenAI SDK's <code>Stream.close()</code> releases
+            the wrapper without aggressively closing the underlying TCP socket, which
+            httpx keeps alive for keep-alive reuse.
+          </p>
+          <div class="callout callout-info">
+            <div class="callout-title">Per-Session Providers</div>
+            Providers are per-session, so closing the client on cancel only affects
+            the cancelled session. The next session gets a fresh client.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Cancel a streaming request</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import JaatoClient
+
+client = JaatoClient(provider_name="vllm")
+client.connect(None, None, "Qwen/Qwen2.5-7B-Instruct")
+
+# Start streaming in background (framework handles this)
+# Call client.stop() to cancel:
+client.stop()  # Signals cancel_token; provider closes TCP conn</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

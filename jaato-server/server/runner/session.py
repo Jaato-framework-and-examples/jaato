@@ -139,6 +139,91 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
     )
 
 
+def _set_runner_workspace_context(
+    workspace_path: Optional[str], config_root: Optional[str]
+) -> None:
+    """Seed the runner process's workspace/config root for runner-tier plugins.
+
+    Runner-tier path plugins (filesystem_query / file_edit / cli / notebook) read
+    the session workspace from ``session_context.get_workspace_root()`` (a
+    ContextVar, with an ``os.environ['JAATO_WORKSPACE_ROOT']`` fallback) when
+    their per-plugin config carries no explicit root.  The runner — unlike the
+    daemon's ``JaatoServer._in_workspace`` (core.py:913-948) — historically set
+    NEITHER, so a pool-/cold-served session initialized with ``workspace=none``
+    and path tools were denied, UNLESS ``JAATO_WORKSPACE_ROOT`` happened to be
+    exported globally (the env mask that hid this build-wide regression).
+
+    Both surfaces are seeded: the ContextVar (read + cached by each plugin's
+    ``initialize()`` in the bootstrap context) and ``os.environ`` (for
+    cross-thread / ``os.environ``-reading consumers).  There is NO reset — a
+    runner process serves exactly one session for its whole lifetime, so the
+    root is constant.  Must be called BEFORE ``expose_all``.
+    """
+    from shared.session_context import set_workspace_root, set_config_root
+    if workspace_path:
+        set_workspace_root(workspace_path)
+        os.environ["JAATO_WORKSPACE_ROOT"] = workspace_path
+    if config_root:
+        set_config_root(config_root)
+        os.environ["JAATO_CONFIG_ROOT"] = config_root
+
+
+# Sentinel plugin name routed daemon-side by the daemon.plugin_execute handler
+# to the session registry's client-tool proxy executor.
+_CLIENT_TOOL_PLUGIN = "__client_tools__"
+
+
+def _make_client_tool_forwarder(registry, tool_name):
+    """Runner-side executor for a client-provided ("host") tool.
+
+    Forwards the call to the daemon via ``daemon.plugin_execute`` (under the
+    ``__client_tools__`` sentinel plugin name), which the daemon-side handler
+    routes to the session registry's existing proxy executor →
+    ``ToolExecuteRequestEvent`` → the ws client → ``ToolExecuteResultEvent``.
+    ``runner_rpc_client`` is resolved per-call (the registry attribute is set
+    runner-side after bootstrap completes, before any tool call).
+    """
+    def _executor(args):
+        rpc = getattr(registry, "runner_rpc_client", None)
+        if rpc is None:
+            return {"error": f"client tool '{tool_name}': runner->daemon channel "
+                             "unavailable (bootstrap incomplete?)"}
+        return rpc.daemon_plugin_execute(
+            plugin_name=_CLIENT_TOOL_PLUGIN, tool_name=tool_name, args=args)
+    return _executor
+
+
+def _register_client_tools_on_runner(registry, client_tools) -> None:
+    """Register client-provided tool SCHEMAS on the runner registry as core
+    tools (so the model sees them in list_tools), each with a daemon-forwarding
+    executor.  Entries are schema dicts (name/description/parameters/category)
+    ferried in ``envelope.client_tools``.
+    """
+    from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
+    for ct in client_tools:
+        name = ct.get("name")
+        if not name:
+            continue
+        schema = ToolSchema(
+            name=name,
+            description=ct.get("description", ""),
+            parameters=ct.get("parameters", {}),
+            category=ct.get("category") or None,
+            # Client-provided tools default to 'core' (EAGER): the client
+            # explicitly provided them, so the model should see them in its
+            # initial schema and use them on INTENT — not only after a
+            # list_tools discovery or a persona that names them.  Honor an
+            # explicit "discoverability" from the dict to opt a tool back to
+            # "discoverable" (a self-extending agent with many tools that
+            # would bloat the eager surface).
+            discoverability=ct.get("discoverability", DISCOVERABILITY_EAGER),
+        )
+        registry.register_core_tool(
+            schema, _make_client_tool_forwarder(registry, name),
+            auto_approved=True,
+        )
+
+
 def _configure_runtime_plugins(
     runtime: "JaatoRuntime", envelope: SessionInitEnvelope,
 ) -> None:
@@ -267,6 +352,11 @@ def _configure_runtime_plugins(
         registry.set_workspace_path(workspace_path)
     if envelope.config_root:
         registry.set_config_root(envelope.config_root)
+    # Seed the runner PROCESS's workspace/config context (session_context
+    # ContextVar + os.environ fallback) so runner-tier path plugins resolve the
+    # session workspace at ``initialize()`` — BEFORE ``expose_all`` below.  See
+    # the helper for why the runner must do this and why both surfaces.
+    _set_runner_workspace_context(workspace_path, envelope.config_root)
     if session_id:
         registry.set_session_id(session_id)
     if envelope.agent_id:
@@ -275,7 +365,7 @@ def _configure_runtime_plugins(
     # Step 4: expose_all — initializes each plugin.  No on_progress
     # callback runner-side.  Initializes ALL discovered runner-tier
     # plugins; tool exposure to the model is gated separately at the
-    # ``runtime.create_session(tools=...)`` layer.
+    # ``runtime.create_session(plugins=...)`` layer.
     #
     # **PR-112 / option C disabled at the call site (2026-05-15).**
     # PR-112 introduced ``requested_plugins=`` gating on this call
@@ -313,6 +403,16 @@ def _configure_runtime_plugins(
             registry.set_workspace_path(workspace_path)
         if envelope.config_root:
             registry.set_config_root(envelope.config_root)
+
+    # Step 7.5: client-provided ("host") tools.  Register the schemas the client
+    # registered BEFORE session.new (carried in envelope.client_tools) on the
+    # RUNNER registry as core tools, so the model SEES them in list_tools.
+    # Execution forwards back to the daemon's existing proxy executor via
+    # daemon.plugin_execute (sentinel plugin name) → ToolExecuteRequestEvent →
+    # ws client.  Pre-fix these registered only on the daemon registry, so the
+    # runner-tier model was blind (the #344-sibling daemon-vs-runner split).
+    if envelope.client_tools:
+        _register_client_tools_on_runner(registry, envelope.client_tools)
 
     # Step 8: permission plugin.  Default policy mirrors daemon-side
     # `core.py:1778-1794` baseline; profile-supplied
@@ -891,6 +991,21 @@ def bootstrap_session(
                 "to session; plugin reads will fall back to os.environ",
             )
 
+    # ---- 3b. Stamp the daemon session_id onto the runner-side session.
+    # Pre-this, ``_daemon_session_id`` was set ONLY daemon-side (by
+    # ``JaatoClient``), so the runner-side JaatoSession carried None.
+    # That forced any runner-tier consumer of the per-session id (the
+    # ``memory`` plugin's ``source_session``, telemetry span
+    # ``jaato.session_id``, dynamic-instructions ``{{session_id}}``) to
+    # fall back to SHARED state — ``registry._session_id`` — which is
+    # overwritten by whichever sibling subagent bootstrapped last,
+    # leaking one sibling's id into another's records.  Each sibling has
+    # its OWN JaatoSession, so stamping the id here (envelope.session_id
+    # is this session's daemon id) gives every consumer a per-execution,
+    # per-sibling-correct value via ``get_current_session()``.
+    if envelope.session_id:
+        session.set_daemon_session_id(envelope.session_id)
+
     # ---- 4. Phase 5 §5.10c — install AppArmor child-profile
     # transition callback on subprocess-spawning plugins.
     _maybe_install_child_callback(envelope, session)
@@ -971,7 +1086,7 @@ def _build_session(
 
     Plugin spec extraction: each entry in ``envelope.plugins`` is a
     dict ``{"name": "...", "preload": bool, "config": dict?}``.
-    The plugin-list (just names) feeds ``tools=...`` so the runtime
+    The plugin-list (just names) feeds ``plugins=...`` so the runtime
     exposes them; the per-plugin configs feed
     ``plugin_configs=...``; the preload set feeds
     ``preloaded_plugins=...``.
@@ -1035,7 +1150,7 @@ def _build_session(
         # Pass the list verbatim — empty means empty (minimal set:
         # introspection + lifecycle + framework infra like stream /
         # event_bus that are registered as core tools regardless).
-        tools=tool_names,
+        plugins=tool_names,
         system_instructions=envelope.system_instructions,
         plugin_configs=plugin_configs or None,
         provider_name=envelope.provider_name or None,

@@ -323,20 +323,75 @@ class TestMessageConversion:
 
     def test_user_message(self):
         msg = Message.from_text(Role.USER, "Hello")
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)   # single-element list
         assert result["role"] == "user"
         assert result["content"] == "Hello"
 
+    def test_user_message_with_image_marshals_image_url_block(self):
+        # OpenRouter declares vision via the catalog, but the wire converter
+        # only emitted text — the image was silently dropped and the model
+        # confabulated.  An inline_data part must become an OpenAI image_url
+        # content block (base64 data URL).
+        import base64
+        png = b"\x89PNG\r\n\x1a\nFAKEPNG"
+        msg = Message(role=Role.USER, parts=[
+            Part(text="What is in this image?"),
+            Part(inline_data={"mime_type": "image/png", "data": png}),
+        ])
+        result, = message_to_openai(msg)
+        assert result["role"] == "user"
+        assert isinstance(result["content"], list)
+        img = [b for b in result["content"] if b["type"] == "image_url"]
+        txt = [b for b in result["content"] if b["type"] == "text"]
+        assert txt[0]["text"] == "What is in this image?"
+        assert len(img) == 1
+        assert img[0]["image_url"]["url"] == (
+            "data:image/png;base64," + base64.b64encode(png).decode("utf-8")
+        )
+
+    def test_text_only_user_message_stays_a_string(self):
+        # Regression: no images -> plain-string content, unchanged wire shape.
+        msg = Message(role=Role.USER, parts=[Part(text="just text")])
+        result, = message_to_openai(msg)
+        assert result["content"] == "just text"
+        assert isinstance(result["content"], str)
+
+    def test_tool_result_image_routed_to_followup_user_message(self):
+        # OpenAI/OpenRouter tool messages can't carry images, so a tool result
+        # with an image attachment (readFile on a PNG) surfaces the image as a
+        # follow-up user message; the tool message keeps the text result.
+        from jaato_sdk.plugins.model_provider.types import Attachment
+        tr = ToolResult(
+            call_id="c1", name="readFile",
+            result={"path": "x.png", "type": "image"},
+            attachments=[Attachment(mime_type="image/png", data=b"PNGBYTES",
+                                    display_name="x.png")],
+        )
+        msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
+        out = message_to_openai(msg)
+        assert out[0]["role"] == "tool"
+        assert "x.png" in out[0]["content"]
+        assert out[-1]["role"] == "user"
+        imgs = [b for b in out[-1]["content"] if b["type"] == "image_url"]
+        assert len(imgs) == 1
+        assert imgs[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_tool_result_without_image_emits_no_followup(self):
+        tr = ToolResult(call_id="c1", name="grep", result={"matches": 3})
+        msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
+        out = message_to_openai(msg)
+        assert len(out) == 1 and out[0]["role"] == "tool"
+
     def test_assistant_message_text(self):
         msg = Message(role=Role.MODEL, parts=[Part(text="Hi there")])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
         assert result["role"] == "assistant"
         assert result["content"] == "Hi there"
 
     def test_assistant_message_with_tool_calls(self):
         fc = FunctionCall(id="call_1", name="read_file", args={"path": "/tmp"})
         msg = Message(role=Role.MODEL, parts=[Part(function_call=fc)])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
 
         assert result["role"] == "assistant"
         assert result["content"] is None
@@ -350,10 +405,30 @@ class TestMessageConversion:
     def test_tool_result_message(self):
         tr = ToolResult(call_id="call_1", name="read_file", result={"x": 1})
         msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
         assert result["role"] == "tool"
         assert result["tool_call_id"] == "call_1"
         assert json.loads(result["content"]) == {"x": 1}
+
+    def test_parallel_tool_results_all_reach_wire(self):
+        """A TOOL message with N parallel function_response parts must
+        produce N wire ``role:"tool"`` messages — one per call_id — NOT just
+        the first (the parallel-tool-result truncation bug, 2026-06-12
+        build_descriptor: 7 parallel call_service results, only #1 reached
+        the model)."""
+        trs = [
+            ToolResult(call_id=f"call_{i}", name="call_service",
+                       result={"docs": [{"a": f"artifact-{i}"}]})
+            for i in range(7)
+        ]
+        msg = Message(role=Role.TOOL,
+                      parts=[Part(function_response=tr) for tr in trs])
+        result = message_to_openai(msg)
+        assert len(result) == 7, "all 7 parallel results must reach the wire"
+        assert [m["tool_call_id"] for m in result] == [f"call_{i}" for i in range(7)]
+        assert all(m["role"] == "tool" for m in result)
+        assert [json.loads(m["content"])["docs"][0]["a"] for m in result] == \
+            [f"artifact-{i}" for i in range(7)]
 
 
 class TestResponseConversion:
@@ -1025,6 +1100,85 @@ class TestProviderRouting:
         }
         # And the streaming flag must still be set on the same call.
         assert call_kwargs.get("stream") is True
+
+
+class TestServiceTierKnob:
+    """Tests for ``api_params.service_tier`` (OpenAI-style processing tier).
+
+    ``"flex"`` buys discounted best-effort processing, ``"priority"``
+    low-latency processing; OpenRouter forwards the field to
+    tier-supporting upstreams.  Default is unset — the field must not
+    appear on the wire unless the profile opts in.
+    """
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_unset_by_default_and_absent_from_wire(self, mock_client_class):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(api_key="sk-or-test"))
+        assert provider._service_tier is None
+
+        provider.connect("openai/gpt-4o", skip_model_test=True)
+        provider.complete([Message.from_text(Role.USER, "hi")])
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert "service_tier" not in call_kwargs
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_flex_forwarded_on_the_wire(self, mock_client_class):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = create_mock_response(
+            text="ok", finish_reason="stop"
+        )
+        mock_client_class.return_value = lambda **kw: fake_client
+
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"service_tier": "flex"}},
+        ))
+        assert provider._service_tier == "flex"
+
+        provider.connect("openai/gpt-4o", skip_model_test=True)
+        provider.complete([Message.from_text(Role.USER, "hi")])
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["service_tier"] == "flex"
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_value_is_normalised_to_lowercase(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"api_params": {"service_tier": "Priority"}},
+        ))
+        assert provider._service_tier == "priority"
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_invalid_tier_raises(self, mock_client_class):
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        with pytest.raises(ValueError, match="service_tier.*flex.*priority"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"api_params": {"service_tier": "turbo"}},
+            ))
+
+    @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
+    def test_legacy_flat_key_still_read(self, mock_client_class):
+        # The _knob fallback accepts the legacy flat position with a
+        # deprecation warning, same as the other api_params knobs.
+        mock_client_class.return_value = MagicMock()
+        provider = OpenRouterProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-or-test",
+            extra={"service_tier": "flex"},
+        ))
+        assert provider._service_tier == "flex"
 
 
 class TestThinkingKnobs:
@@ -1893,7 +2047,7 @@ class TestParallelToolCallsKnob:
         block under config.extra."""
         from shared.plugins.model_provider.base import ProviderConfig
         provider = OpenRouterProvider()
-        provider._verify_connectivity = lambda: None  # type: ignore[assignment]
+        provider._verify_connectivity = lambda *a, **k: None  # type: ignore[assignment]
         provider._trace = lambda _msg: None  # type: ignore[assignment]
         provider._list_models_for_catalog = lambda: []  # type: ignore[assignment]
         cfg = ProviderConfig(
@@ -1918,3 +2072,103 @@ class TestParallelToolCallsKnob:
             {"parallel_tool_calls": True}
         )
         assert provider._parallel_tool_calls is True
+
+
+# ==================== Modality Detection Tests ====================
+
+
+class TestModalityDetection:
+    """OpenRouter resolves a model's INPUT modalities from the catalog's
+    ``architecture.input_modalities`` (detect-PRIMARY, self-updating),
+    falling back to the manual ``modalities`` knob, then the text-only
+    floor.  Foundation for vision via the model-tier roles
+    (``docs/design/multimodal-model-support.md``).
+    """
+
+    def _provider_with_catalog(self, catalog):
+        provider = OpenRouterProvider()
+        provider._catalog_cache = catalog  # seed cache; detect wins
+        return provider
+
+    def test_text_floor_when_not_connected(self):
+        provider = OpenRouterProvider()
+        provider._model_name = None
+        assert provider.modalities() == {"text"}
+
+    def test_detect_vision_model_from_catalog(self):
+        provider = self._provider_with_catalog([
+            {"id": "google/gemini-3-pro",
+             "architecture": {"input_modalities": ["text", "image"]}},
+        ])
+        provider._model_name = "google/gemini-3-pro"
+        assert provider.modalities() == {"text", "image"}
+        assert provider.supports_modality("image") is True
+
+    def test_detect_text_only_model_from_catalog(self):
+        provider = self._provider_with_catalog([
+            {"id": "openai/gpt-5-mini",
+             "architecture": {"input_modalities": ["text"]}},
+        ])
+        provider._model_name = "openai/gpt-5-mini"
+        assert provider.modalities() == {"text"}
+        assert provider.supports_modality("image") is False
+
+    def test_knob_used_when_model_absent_from_catalog(self):
+        # Self-hosted gateway / catalog gap: detect returns None, the
+        # manual assertion takes over.
+        provider = self._provider_with_catalog([])  # empty catalog
+        provider._model_name = "some/uncatalogued-vision-model"
+        provider._modalities_knob = ["text", "image"]
+        assert provider.modalities() == {"text", "image"}
+
+    def test_text_floor_when_model_absent_and_no_knob(self):
+        provider = self._provider_with_catalog([])
+        provider._model_name = "some/uncatalogued-model"
+        provider._modalities_knob = None
+        # Unknown image-support degrades to the safe text floor (never a
+        # false image claim).
+        assert provider.modalities() == {"text"}
+
+    def test_detect_wins_over_knob(self):
+        provider = self._provider_with_catalog([
+            {"id": "openai/gpt-5-mini",
+             "architecture": {"input_modalities": ["text"]}},
+        ])
+        provider._model_name = "openai/gpt-5-mini"
+        provider._modalities_knob = ["text", "image"]  # stale assertion
+        # Live catalog beats the manual knob.
+        assert provider.modalities() == {"text"}
+
+    def test_missing_architecture_field_falls_through(self):
+        provider = self._provider_with_catalog([
+            {"id": "weird/model"},  # no architecture key
+        ])
+        provider._model_name = "weird/model"
+        provider._modalities_knob = ["text", "image"]
+        assert provider.modalities() == {"text", "image"}
+
+    def test_modalities_knob_parsed_from_config(self):
+        with patch(
+            "shared.plugins.model_provider.openrouter.provider."
+            "get_openai_client_class"
+        ) as mock_client_class:
+            mock_client_class.return_value = MagicMock()
+            provider = OpenRouterProvider()
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"framework_overrides": {"modalities": ["text", "image"]}},
+            ))
+        assert provider._modalities_knob == ["text", "image"]
+
+    def test_modalities_knob_rejects_non_list(self):
+        with patch(
+            "shared.plugins.model_provider.openrouter.provider."
+            "get_openai_client_class"
+        ) as mock_client_class:
+            mock_client_class.return_value = MagicMock()
+            provider = OpenRouterProvider()
+            with pytest.raises(TypeError):
+                provider.initialize(ProviderConfig(
+                    api_key="sk-or-test",
+                    extra={"framework_overrides": {"modalities": "image"}},
+                ))

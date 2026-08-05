@@ -209,7 +209,11 @@ class TestNotebookPlugin:
     def test_initialize(self):
         """Test plugin initialization."""
         plugin = NotebookPlugin()
-        plugin.initialize({"enable_kaggle": False})
+        # Pin the in-process backend: these exercise plugin create/execute
+        # orchestration (backend-agnostic).  The subprocess kernel is the default
+        # since the 1c cutover and needs a session workspace; it has its own
+        # coverage in test_subprocess_kernel.py.
+        plugin.initialize({"enable_kaggle": False, "backend": "local"})
 
         assert plugin._initialized
         assert "local" in plugin._backends
@@ -219,7 +223,11 @@ class TestNotebookPlugin:
     def test_get_tool_schemas(self):
         """Test getting tool schemas."""
         plugin = NotebookPlugin()
-        plugin.initialize({"enable_kaggle": False})
+        # Pin the in-process backend: these exercise plugin create/execute
+        # orchestration (backend-agnostic).  The subprocess kernel is the default
+        # since the 1c cutover and needs a session workspace; it has its own
+        # coverage in test_subprocess_kernel.py.
+        plugin.initialize({"enable_kaggle": False, "backend": "local"})
 
         schemas = plugin.get_tool_schemas()
 
@@ -238,7 +246,11 @@ class TestNotebookPlugin:
     def test_get_executors(self):
         """Test getting executors."""
         plugin = NotebookPlugin()
-        plugin.initialize({"enable_kaggle": False})
+        # Pin the in-process backend: these exercise plugin create/execute
+        # orchestration (backend-agnostic).  The subprocess kernel is the default
+        # since the 1c cutover and needs a session workspace; it has its own
+        # coverage in test_subprocess_kernel.py.
+        plugin.initialize({"enable_kaggle": False, "backend": "local"})
 
         executors = plugin.get_executors()
 
@@ -250,7 +262,11 @@ class TestNotebookPlugin:
     def test_execute_auto_creates_notebook(self):
         """Test that execute auto-creates a notebook if needed."""
         plugin = NotebookPlugin()
-        plugin.initialize({"enable_kaggle": False})
+        # Pin the in-process backend: these exercise plugin create/execute
+        # orchestration (backend-agnostic).  The subprocess kernel is the default
+        # since the 1c cutover and needs a session workspace; it has its own
+        # coverage in test_subprocess_kernel.py.
+        plugin.initialize({"enable_kaggle": False, "backend": "local"})
 
         # Execute without creating notebook first
         result = plugin._execute_code({"code": "1 + 1"})
@@ -264,7 +280,11 @@ class TestNotebookPlugin:
     def test_create_and_execute(self):
         """Test creating a notebook and executing code."""
         plugin = NotebookPlugin()
-        plugin.initialize({"enable_kaggle": False})
+        # Pin the in-process backend: these exercise plugin create/execute
+        # orchestration (backend-agnostic).  The subprocess kernel is the default
+        # since the 1c cutover and needs a session workspace; it has its own
+        # coverage in test_subprocess_kernel.py.
+        plugin.initialize({"enable_kaggle": False, "backend": "local"})
 
         # Create notebook
         create_result = plugin._create_notebook({"name": "test-nb"})
@@ -285,7 +305,11 @@ class TestNotebookPlugin:
     def test_list_backends(self):
         """Test listing backends."""
         plugin = NotebookPlugin()
-        plugin.initialize({"enable_kaggle": False})
+        # Pin the in-process backend: these exercise plugin create/execute
+        # orchestration (backend-agnostic).  The subprocess kernel is the default
+        # since the 1c cutover and needs a session workspace; it has its own
+        # coverage in test_subprocess_kernel.py.
+        plugin.initialize({"enable_kaggle": False, "backend": "local"})
 
         result = plugin._list_backends({})
 
@@ -301,7 +325,11 @@ class TestNotebookPlugin:
     def test_get_system_instructions(self):
         """Test getting system instructions."""
         plugin = NotebookPlugin()
-        plugin.initialize({"enable_kaggle": False})
+        # Pin the in-process backend: these exercise plugin create/execute
+        # orchestration (backend-agnostic).  The subprocess kernel is the default
+        # since the 1c cutover and needs a session workspace; it has its own
+        # coverage in test_subprocess_kernel.py.
+        plugin.initialize({"enable_kaggle": False, "backend": "local"})
 
         instructions = plugin.get_system_instructions()
 
@@ -314,7 +342,11 @@ class TestNotebookPlugin:
     def test_auto_approved_tools(self):
         """Test auto-approved tools list."""
         plugin = NotebookPlugin()
-        plugin.initialize({"enable_kaggle": False})
+        # Pin the in-process backend: these exercise plugin create/execute
+        # orchestration (backend-agnostic).  The subprocess kernel is the default
+        # since the 1c cutover and needs a session workspace; it has its own
+        # coverage in test_subprocess_kernel.py.
+        plugin.initialize({"enable_kaggle": False, "backend": "local"})
 
         auto_approved = plugin.get_auto_approved_tools()
 

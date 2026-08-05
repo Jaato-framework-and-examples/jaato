@@ -18,7 +18,16 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    TYPE_CHECKING,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +39,8 @@ if TYPE_CHECKING:
     from google.genai import types
 
 from ..base import (
+    MODALITY_TEXT,
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     GoogleAuthMethod,
     ModelProviderPlugin,
@@ -37,6 +48,8 @@ from ..base import (
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -98,10 +111,18 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "gemini-pro": 32_760,
 }
 
-DEFAULT_CONTEXT_LIMIT = 1_048_576
+# INPUT modalities per Gemini model family.  Gemini 1.5 / 2.x / 3.x are
+# multimodal (accept image input); legacy Gemini 1.0 / "gemini-pro" were
+# text-only and are absent here (-> text-only floor in modalities()).
+# Prefix-matched like MODEL_CONTEXT_LIMITS.
+MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
+    "gemini-1.5": frozenset({"text", "image", "file"}),
+    "gemini-2": frozenset({"text", "image", "file"}),
+    "gemini-3": frozenset({"text", "image", "file"}),
+}
 
 
-class GoogleGenAIProvider:
+class GoogleGenAIProvider(ModalityCapabilityMixin):
     """Google GenAI / Vertex AI model provider (stateless design).
 
     This provider is **stateless** with respect to conversation history.
@@ -153,6 +174,24 @@ class GoogleGenAIProvider:
         """
         self._client: Optional[genai.Client] = None
         self._model_name: Optional[str] = None
+        # Per-profile context-window override (plugin_configs.google_genai.
+        # context_length).  Wins over MODEL_CONTEXT_LIMITS in get_context_limit()
+        # — escape hatch for an unlisted model.  None = use the table; unknown
+        # model + no override → raise (no hardcoded fallback, per project rule).
+        self._context_length_knob: Optional[int] = None
+        # INPUT-modality assertion (plugin_configs.google_genai.modalities)
+        # layered over MODEL_INPUT_MODALITIES in modalities().
+        self._modalities_knob: Optional[List[str]] = None
+        # Sampling parameters (plugin_configs.google_genai.api_params.*).
+        # ``None`` = omit from GenerateContentConfig and let Gemini apply its
+        # server-side default.  A profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        # Threaded into BOTH generation_config build sites in complete().
+        self._temperature: Optional[float] = None
+        self._top_p: Optional[float] = None
+        self._top_k: Optional[int] = None
+        self._seed: Optional[int] = None
+        self._max_output_tokens: Optional[int] = None
         self._project: Optional[str] = None
         self._location: Optional[str] = None
 
@@ -239,6 +278,60 @@ class GoogleGenAIProvider:
         self._auth_method = resolved_config.auth_method
         self._project = resolved_config.project
         self._location = resolved_config.location
+
+        # Context-window override (plugin_configs.google_genai.context_length)
+        # via the shared precedence helper.  Google models' windows are
+        # documented constants (MODEL_CONTEXT_LIMITS), so there is no live
+        # auto-detect tier and no env var — the knob is the only override,
+        # layered over the table in get_context_limit().
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=(resolved_config.extra or {}).get("context_length"),
+            env_value=None,
+        )
+
+        # INPUT-modality assertion (plugin_configs.google_genai.modalities)
+        # — escape hatch for a model not in MODEL_INPUT_MODALITIES.
+        modalities_override = (resolved_config.extra or {}).get("modalities")
+        if modalities_override is not None:
+            if not isinstance(modalities_override, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_override
+            ):
+                raise TypeError(
+                    "Google GenAI 'modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_override).__name__}"
+                )
+            self._modalities_knob = list(modalities_override)
+
+        # Sampling parameters (plugin_configs.google_genai.api_params).  They
+        # live NESTED at config.extra["api_params"][...] — the canonical
+        # namespaced layer mirroring anthropic / openrouter.  ``None`` means
+        # "omit from GenerateContentConfig and let Gemini apply its server-side
+        # default"; a profile wanting determinism sets
+        # ``api_params.temperature: 0.0`` (falsy → ``is not None`` guards).
+        api_params = (resolved_config.extra or {}).get("api_params") or {}
+        if not isinstance(api_params, dict):
+            raise TypeError(
+                "Google GenAI 'api_params' config must be a dict of "
+                "GenerateContentConfig fields, got "
+                f"{type(api_params).__name__}"
+            )
+        temp_extra = api_params.get("temperature")
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = api_params.get("top_p")
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = api_params.get("top_k")
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        seed_extra = api_params.get("seed")
+        if seed_extra is not None:
+            self._seed = int(seed_extra)
+        max_output_extra = api_params.get("max_output_tokens")
+        if max_output_extra is not None:
+            self._max_output_tokens = int(max_output_extra)
 
         # Validate configuration before attempting connection
         self._validate_config(resolved_config)
@@ -733,22 +826,65 @@ class GoogleGenAIProvider:
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``context_length`` override knob (``_context_length_knob``) — the
+           escape hatch for a model not yet in the table.
+        2. ``MODEL_CONTEXT_LIMITS`` exact then prefix match — the documented
+           per-model window.
+        3. else raise — an unknown model with no override is a configuration
+           error, surfaced loudly rather than papered over with a guess.
+
         Returns:
             Maximum tokens the model can handle.
+
+        Raises:
+            ValueError: when neither the knob nor the table yields a value.
         """
-        if not self._model_name:
-            return DEFAULT_CONTEXT_LIMIT
+        if self._context_length_knob:
+            return self._context_length_knob
 
-        # Try exact match first
-        if self._model_name in MODEL_CONTEXT_LIMITS:
-            return MODEL_CONTEXT_LIMITS[self._model_name]
+        if self._model_name:
+            # Try exact match first
+            if self._model_name in MODEL_CONTEXT_LIMITS:
+                return MODEL_CONTEXT_LIMITS[self._model_name]
+            # Try prefix match
+            for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
+                if self._model_name.startswith(model_prefix):
+                    return limit
 
-        # Try prefix match
-        for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
-            if self._model_name.startswith(model_prefix):
-                return limit
+        raise ValueError(
+            f"Google GenAI provider: no known context window for model "
+            f"{self._model_name!r}, and no override is set.  Add the model to "
+            f"MODEL_CONTEXT_LIMITS, or set plugin_configs.google_genai."
+            f"context_length in the profile.  No hardcoded fallback exists per "
+            f"the project's no-fallback rule."
+        )
 
-        return DEFAULT_CONTEXT_LIMIT
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
+        """INPUT modalities the active Gemini model accepts.
+
+        Precedence mirrors get_context_limit() (no live endpoint):
+        modalities knob -> MODEL_INPUT_MODALITIES (exact then prefix) ->
+        text-only floor.
+        """
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=self._lookup_input_modalities(model),
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
+
+    def _lookup_input_modalities(
+        self, model: Optional[str] = None
+    ) -> Optional[FrozenSet[str]]:
+        """Table-declared input modalities for ``model`` (or active)."""
+        model = model or self._model_name
+        if model:
+            if model in MODEL_INPUT_MODALITIES:
+                return MODEL_INPUT_MODALITIES[model]
+            for prefix, mods in MODEL_INPUT_MODALITIES.items():
+                if model.startswith(prefix):
+                    return mods
+        return None
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.
@@ -811,6 +947,28 @@ class GoogleGenAIProvider:
         pass
 
     # ==================== Stateless Completion ====================
+
+    def _apply_sampling_knobs(self, config_kwargs: Dict[str, Any]) -> None:
+        """Thread profile sampling knobs into a GenerateContentConfig kwargs dict.
+
+        Reads the per-profile sampling overrides resolved at ``initialize()``
+        from ``plugin_configs.google_genai.api_params`` and copies each one that
+        was set into ``config_kwargs`` so it reaches the wire.  ``None`` keys are
+        skipped (``is not None`` guards), so ``temperature: 0.0`` — the
+        determinism knob — survives while unset knobs let Gemini apply its
+        server-side defaults.  Called at BOTH config build sites in
+        ``complete()`` (cache + non-cache).
+        """
+        if self._temperature is not None:
+            config_kwargs["temperature"] = self._temperature
+        if self._top_p is not None:
+            config_kwargs["top_p"] = self._top_p
+        if self._top_k is not None:
+            config_kwargs["top_k"] = self._top_k
+        if self._seed is not None:
+            config_kwargs["seed"] = self._seed
+        if self._max_output_tokens is not None:
+            config_kwargs["max_output_tokens"] = self._max_output_tokens
 
     def complete(
         self,
@@ -884,6 +1042,7 @@ class GoogleGenAIProvider:
                 if response_schema:
                     config_kwargs["response_mime_type"] = "application/json"
                     config_kwargs["response_schema"] = response_schema
+                self._apply_sampling_knobs(config_kwargs)
                 config = get_types().GenerateContentConfig(**config_kwargs)
 
         if config is None:
@@ -899,6 +1058,7 @@ class GoogleGenAIProvider:
             if response_schema:
                 config_kwargs["response_mime_type"] = "application/json"
                 config_kwargs["response_schema"] = response_schema
+            self._apply_sampling_knobs(config_kwargs)
             config = get_types().GenerateContentConfig(**config_kwargs)
 
         if on_chunk:

@@ -21,8 +21,13 @@ from .config import (
     expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
     validate_profile,
 )
+from shared.instruction_suppression import suppression_to_wire
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_FRAMEWORK_LEVEL,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..gc import load_gc_plugin, GCConfig
 from ...message_queue import SourceType
 
@@ -279,7 +284,11 @@ class SubagentPlugin:
                 self._config.default_model = env_conn['model']
                 logger.debug("Using MODEL_NAME from environment: %s", env_conn['model'])
 
-        # Auto-discover profiles from profiles_dir if enabled
+        # Auto-discover profiles from profiles_dir if enabled.  discover_profiles
+        # scans three tiers (workspace / ~/.jaato/profiles / premium) and skips
+        # any tier that's missing or inaccessible — so a confined session denied
+        # the HOME tier still discovers the workspace tier (set_config_root
+        # re-runs this per session).  See _scan_profiles_dir's OSError handling.
         if self._config.auto_discover_profiles:
             discovery = discover_profiles(self._config.profiles_dir)
             # Merge discovered profiles, with explicit profiles taking precedence
@@ -547,7 +556,7 @@ class SubagentPlugin:
                 # Create session using runtime
                 session = runtime.create_session(
                     model=model,
-                    tools=profile.plugins,
+                    plugins=profile.plugins,
                     system_instructions=profile.system_instructions,
                     plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                     provider_name=provider,
@@ -788,7 +797,7 @@ class SubagentPlugin:
                     "required": ["task"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 # Subagent initialization needs broad filesystem read
                 # access (plugin discovery, agent definitions, skill
                 # files) that the workspace AppArmor profile doesn't
@@ -828,7 +837,7 @@ class SubagentPlugin:
                     "required": ["subagent_id", "message"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='close_subagent',
@@ -855,7 +864,7 @@ class SubagentPlugin:
                     "required": ["subagent_id"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='cancel_subagent',
@@ -884,7 +893,7 @@ class SubagentPlugin:
                     "required": ["subagent_id"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='list_active_subagents',
@@ -916,7 +925,7 @@ class SubagentPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='list_subagent_profiles',
@@ -930,7 +939,7 @@ class SubagentPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='validateProfile',
@@ -950,7 +959,7 @@ class SubagentPlugin:
                     "required": ["path"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
         return declarations
@@ -1491,20 +1500,37 @@ class SubagentPlugin:
 
         The handler must be a callable with the following keyword arguments:
 
-        ================ ====== ========================================
-        Argument         Type   Description
-        ================ ====== ========================================
-        ``server``       str    Name of the target peer server.
-        ``task``         str    The prompt/task for the subagent.
-        ``profile_name`` str    Profile name (empty for inline).
-        ``context``      Any    Context string or structured dict.
-        ``inline_config``dict|None  Optional inline config overrides.
-        ``custom_name``  str    Optional custom agent name.
-        ================ ====== ========================================
+        ==================== ====== ====================================
+        Argument             Type   Description
+        ==================== ====== ====================================
+        ``server``           str    Name of the target peer server.
+        ``task``             str    The prompt/task for the subagent.
+        ``profile_name``     str    Profile name (empty for inline).
+        ``context``          Any    Context string or structured dict.
+        ``inline_config``    dict|None  Optional inline config overrides.
+        ``custom_name``      str    Optional custom agent name.
+        ``parent_session_id``str|None  Daemon session id of the invoking
+                                    session — the key
+                                    ``SessionManager.inject_prompt_to_session``
+                                    uses to deliver the remote subagent's
+                                    output back.  Post-seat-flip this is
+                                    threaded runner→daemon: stamped into
+                                    the forwarded args from
+                                    ``get_current_session()._daemon_session_id``
+                                    (server 0.6.x / PR #311).
+        ==================== ====== ====================================
 
         The handler must return a dict with at least ``success`` (bool).
         On failure, include ``error`` (str).  On success, include
         ``subagent_id``, ``status``, ``remote_server``, ``message``.
+
+        Post-seat-flip the handler is registered on the DAEMON-side
+        subagent instance, but ``spawn_subagent`` executes runner-side;
+        the runner-side ``server=`` branch bridges the call to the
+        daemon-side instance via ``daemon.plugin_execute`` (see
+        :meth:`_execute_spawn_subagent`).  Register on the daemon-side
+        ``JaatoServer.registry`` so the forward reaches the instance
+        carrying this handler.
 
         Without this handler, the ``server`` parameter returns a clear
         error asking the user to install jaato-premium.
@@ -2388,7 +2414,8 @@ class SubagentPlugin:
             "plugins": list(profile.plugins),
             "plugin_configs": dict(profile.plugin_configs),
             "system_instructions": profile.system_instructions,
-            "suppress_base_instructions": profile.suppress_base_instructions,
+            "suppress_base_instructions": suppression_to_wire(
+                profile.suppress_base_instructions),
             "max_turns": profile.max_turns,
             "env": dict(profile.env),
         }
@@ -2684,6 +2711,43 @@ class SubagentPlugin:
         # ── Remote spawn path ──────────────────────────────────────────
         if server:
             if self._remote_spawn_handler is None:
+                # Post-seat-flip the gossip remote-spawn handler is
+                # registered (by jaato-premium) on the DAEMON-side
+                # subagent instance, but this tool executes RUNNER-side,
+                # where ``_remote_spawn_handler`` is None — the "Gap #1
+                # trap" (shared/plugins/CLAUDE.md).  Bridge runner→daemon:
+                # forward the call via ``daemon.plugin_execute`` to the
+                # daemon-side instance (where the handler IS set).  Stamp
+                # ``parent_session_id`` (this session's daemon id — the
+                # invoking session IS the parent) into the forwarded args
+                # so the daemon-side handler can inject results back via
+                # ``inject_prompt_to_session``.
+                registry = (
+                    self._runtime.registry
+                    if self._runtime is not None else None
+                )
+                rpc_client = getattr(
+                    registry, "runner_rpc_client", None,
+                ) if registry is not None else None
+                if rpc_client is not None:
+                    from shared.plugins.daemon_forwarding import (
+                        _forward_via_daemon,
+                    )
+                    from shared.session_context import get_current_session
+                    try:
+                        parent_session_id = getattr(
+                            get_current_session(), "_daemon_session_id", None,
+                        )
+                    except LookupError:
+                        parent_session_id = None
+                    forwarded = dict(args)
+                    forwarded["parent_session_id"] = parent_session_id
+                    return _forward_via_daemon(
+                        rpc_client, "subagent", "spawn_subagent", forwarded,
+                    )
+                # No runner→daemon channel AND no handler → premium
+                # genuinely isn't installed (or this is a non-runner
+                # context).  Surface the actionable error.
                 return SubagentResult(
                     success=False,
                     response='',
@@ -2692,6 +2756,10 @@ class SubagentPlugin:
                         'Install it to enable the "server" parameter on spawn_subagent.'
                     ),
                 ).to_dict()
+            # Handler is registered (daemon-side instance, reached via the
+            # forward above; or legacy in-process pre-seat-flip).
+            # ``parent_session_id`` is present on the daemon-side re-entry
+            # (stamped into args by the runner-side forward).
             return self._remote_spawn_handler(
                 server=server,
                 task=task,
@@ -2699,6 +2767,7 @@ class SubagentPlugin:
                 context=context,
                 inline_config=inline_config,
                 custom_name=custom_name,
+                parent_session_id=args.get('parent_session_id'),
             )
 
         # ── Isolated-runner opt-in (Phase 4 §4.3.1 stub) ───────────────
@@ -2721,12 +2790,20 @@ class SubagentPlugin:
         # to build profile_payload for the RPC).  See the branch
         # near self._executor.submit below.
 
-        # Resolve workspace path early — needed for tech stack detection on inline profiles
+        # Resolve workspace path early — needed for tech stack detection on inline
+        # profiles.  Import get_workspace_root UNCONDITIONALLY here, NOT inside the
+        # ``workspace_path is None`` branch: a conditional import binds the name
+        # function-local, so when the workspace resolves early (self._workspace_path
+        # or registry.get_workspace_path() non-None — the common case, ALWAYS true
+        # for an embedded session) the branch is skipped and the later uses (the
+        # spawn-schema workspace fallback at ``or get_workspace_root()`` and the
+        # debug line) raise UnboundLocalError. Binding it once up-front keeps the
+        # name a proper local for every path.
+        from shared.session_context import get_workspace_root
         workspace_path = self._workspace_path
         if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
         if workspace_path is None:
-            from shared.session_context import get_workspace_root
             workspace_path = get_workspace_root()
         parent_cwd = workspace_path or os.getcwd()
 
@@ -3073,11 +3150,11 @@ class SubagentPlugin:
 
         # Resolve trace paths to absolute so they work even if CWD changes later
         # (e.g., when parent's _in_workspace() context exits and restores CWD)
-        trace_log = os.environ.get("JAATO_TRACE_LOG")
+        trace_log = os.environ.get("JAATO_TRACE_LOG")  # env: debug — path of the shared trace log plugins and servers append diagnostic lines to
         if trace_log and not os.path.isabs(trace_log):
             os.environ["JAATO_TRACE_LOG"] = os.path.abspath(trace_log)
 
-        provider_trace_env = os.environ.get("JAATO_PROVIDER_TRACE")
+        provider_trace_env = os.environ.get("JAATO_PROVIDER_TRACE")  # env: debug — path of the provider request/response trace log (set via client config)
         if provider_trace_env and not os.path.isabs(provider_trace_env):
             os.environ["JAATO_PROVIDER_TRACE"] = os.path.abspath(provider_trace_env)
 
@@ -3180,13 +3257,22 @@ class SubagentPlugin:
             parent_session = self._parent_session
             logger.debug(f"SUBAGENT_DEBUG: Saved parent_session={parent_session} (is None={parent_session is None})")
 
+            # Fail closed: this is the IN-PROCESS spawn path (shared runtime,
+            # no runner subprocess — the isolated-runner opt-in routes
+            # elsewhere).  A profile declaring kernel runtime_limits cannot be
+            # confined here, and silently ignoring them would run the subagent
+            # unconfined while the author believes it is bounded.  Reject
+            # instead — spawn as an isolated runner, or drop runtime_limits.
+            from shared.runtime_limits import assert_inprocess_can_honor
+            assert_inprocess_can_honor(profile)
+
             # Create session.  Pass ``agent_params`` through so the
             # spawned subagent's dynamic-instructions render scripts
             # (the ``{{!py:scripts/X.py}}`` placeholders) can read the
             # forwarded ``case_data`` from the spawn call.
             session = self._runtime.create_session(
                 model=model,
-                tools=profile.plugins,
+                plugins=profile.plugins,
                 system_instructions=profile.system_instructions,
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                 provider_name=provider,
@@ -3450,6 +3536,7 @@ class SubagentPlugin:
                         function_calls=turn.get('function_calls', []),
                         cache_read_tokens=turn.get('cache_read'),
                         cache_creation_tokens=turn.get('cache_creation'),
+                        finish_reason=turn.get('finish_reason', 'stop'),
                     )
 
                 self._ui_hooks.on_agent_context_updated(

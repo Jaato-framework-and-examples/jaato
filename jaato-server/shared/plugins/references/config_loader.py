@@ -61,18 +61,29 @@ def discover_references(
         else:
             project_root = str(resolved_refs.parent)
 
-    if not refs_path.exists():
-        logger.debug("References directory does not exist: %s", refs_path)
-        return []
-
-    if not refs_path.is_dir():
-        logger.warning("References path is not a directory: %s", refs_path)
+    try:
+        if not refs_path.exists():
+            logger.debug("References directory does not exist: %s", refs_path)
+            return []
+        if not refs_path.is_dir():
+            logger.warning("References path is not a directory: %s", refs_path)
+            return []
+        entries = sorted(refs_path.iterdir())
+    except OSError as exc:
+        # Inaccessible directory: a confined session correctly denied this tier
+        # (e.g. ~/.jaato/references under AppArmor — exists() raises
+        # PermissionError, which pathlib does NOT ignore for EACCES).  This is
+        # an OPTIONAL tier: treat as "no references here" rather than aborting
+        # the load, so the workspace tier (resolved by set_workspace_path ->
+        # _reload_catalog) still loads.
+        logger.debug(
+            "References directory %s not scannable (%s); skipping", refs_path, exc)
         return []
 
     sources: List[ReferenceSource] = []
 
     # Scan for reference files
-    for file_path in sorted(refs_path.iterdir()):
+    for file_path in entries:
         if not file_path.is_file():
             continue
 
@@ -600,9 +611,16 @@ def load_config(
             default_paths.append(ws / ".references.json")
         default_paths.append(Path.home() / ".config" / "jaato" / "references.json")
         for default_path in default_paths:
-            if default_path.exists():
-                path = str(default_path)
-                break
+            try:
+                if default_path.exists():
+                    path = str(default_path)
+                    break
+            except OSError:
+                # A confined session is correctly denied this default location
+                # (e.g. ~/.config/jaato/references.json under AppArmor — exists()
+                # raises PermissionError for EACCES, it does not return False).
+                # Skip it and try the next candidate.
+                continue
 
     # Start with defaults
     config = ReferencesConfig(

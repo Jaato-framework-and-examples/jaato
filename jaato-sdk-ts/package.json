@@ -27,7 +27,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --import tsx --test --test-force-exit src/client.test.ts",
+    "test": "node --import tsx --test --test-force-exit src/client.test.ts src/convenience.test.ts",
     "test:load": "node --import tsx --test --test-force-exit src/client.load.test.ts",
     "codegen": "cd .. && .venv/bin/python scripts/codegen_ts_events.py",
     "codegen:check": "cd .. && .venv/bin/python scripts/codegen_ts_events.py --check"

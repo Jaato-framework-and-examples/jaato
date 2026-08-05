@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 from typing import List, Optional, Tuple
 
 import pytest
@@ -194,3 +195,93 @@ async def test_cancel_token_trips_runner_cancel() -> None:
         assert env.error.type == "CancelledException"
     finally:
         await client.close(timeout=3)
+
+
+# ----------------------------------------------------------------------
+# #284/#280 — slot teardown sweeps the slot's process-group subtree
+# (jdtls / mcp / PTY children) instead of orphaning it to the daemon.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_runner_leads_own_session() -> None:
+    """The runner calls ``os.setsid()`` at fork, so it leads its own
+    session — pgid == its own pid, distinct from the daemon's group.
+    This is the precondition that makes the killpg subtree-sweep safe
+    (it can never hit the daemon's group)."""
+    spawner = RunnerSpawner()
+    spawned, client = await _make_client(spawner)
+    try:
+        assert os.getpgid(spawned.pid) == spawned.pid
+        assert os.getpgid(spawned.pid) != os.getpgrp()
+    finally:
+        await client.close(timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_close_sweeps_slot_subprocess_group() -> None:
+    """A long-lived subprocess the slot spawned (stand-in for jdtls) is
+    SIGKILLed by ``close()``'s process-group sweep — not left to
+    re-parent to the daemon subreaper and leak (the #284 OOM)."""
+    spawner = RunnerSpawner()
+    spawned, client = await _make_client(spawner)
+    # Runner spawns a detached, long-lived background process; ``echo
+    # $!`` returns its pid.  fds redirected so the cli shell returns
+    # immediately rather than blocking on the child.
+    env = await client.call(
+        "tool.execute",
+        {
+            "name": "cli_based_tool",
+            "args": {"command": "sleep 300 >/dev/null 2>&1 & echo $!"},
+        },
+    )
+    assert env.ok is True
+    child_pid = int(env.result["stdout"].strip())
+    # The stand-in inherited the slot's process group.
+    assert os.getpgid(child_pid) == spawned.pid
+
+    await client.close(timeout=3)
+
+    # The group sweep SIGKILLed it; wait up to ~2s for kill + reap.
+    for _ in range(40):
+        try:
+            os.getpgid(child_pid)
+        except (ProcessLookupError, OSError):
+            break
+        await asyncio.sleep(0.05)
+    else:
+        # Belt-and-suspenders cleanup so a failing test never leaks the
+        # stand-in process.
+        try:
+            os.kill(child_pid, 9)
+        except OSError:
+            pass
+        pytest.fail(f"slot subprocess {child_pid} survived close() sweep")
+
+
+@pytest.mark.asyncio
+async def test_list_group_members_finds_self() -> None:
+    """``_list_group_members`` enumerates live pids of a process group
+    from /proc — the instrumentation that proves which children the
+    sweep kills."""
+    members = RunnerRPCClient._list_group_members(os.getpgrp())
+    pids = {pid for pid, _comm in members}
+    assert os.getpid() in pids
+
+
+@pytest.mark.asyncio
+async def test_capture_slot_pgid_refuses_daemon_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pgid guard returns None — skipping the sweep — when the slot
+    appears to share the daemon's own process group (setsid regressed),
+    so ``killpg`` can never SIGKILL the daemon itself."""
+    a, b = socket.socketpair()
+    try:
+        client = RunnerRPCClient(a, runner_pid=os.getpid())
+        # Force "slot shares our (daemon) group".
+        monkeypatch.setattr(os, "getpgid", lambda _pid: os.getpgrp())
+        assert client._capture_slot_pgid() is None
+    finally:
+        a.close()
+        b.close()

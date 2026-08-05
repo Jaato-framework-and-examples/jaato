@@ -418,7 +418,10 @@ class StreamManager:
         Returns:
             List containing the dismiss_stream ToolSchema.
         """
-        from jaato_sdk.plugins.model_provider.types import ToolSchema
+        from jaato_sdk.plugins.model_provider.types import (
+            ToolSchema,
+            DISCOVERABILITY_DEFERRED,
+        )
 
         return [
             ToolSchema(
@@ -442,7 +445,7 @@ class StreamManager:
                     "required": ["stream_id"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

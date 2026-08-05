@@ -160,7 +160,7 @@ def get_workspace_root(default: Optional[str] = None) -> Optional[str]:
     value = _workspace_root.get()
     if value is not None:
         return value
-    return os.environ.get('JAATO_WORKSPACE_ROOT', default)
+    return os.environ.get('JAATO_WORKSPACE_ROOT', default)  # env: internal — set by the framework per session: workspace root; read via session_context helpers
 
 
 def set_config_root(value: Optional[str]) -> Token:
@@ -187,7 +187,7 @@ def get_config_root(default: Optional[str] = None) -> Optional[str]:
     value = _config_root.get()
     if value is not None:
         return value
-    return os.environ.get('JAATO_CONFIG_ROOT', default)
+    return os.environ.get('JAATO_CONFIG_ROOT', default)  # env: internal — set by the framework per session: config root; read via session_context helpers
 
 
 # ── Session-bootstrap isolation (server 0.6.71+) ────────────────────────

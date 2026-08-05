@@ -48,6 +48,7 @@ from shared import (
     active_cert_bundle,
 )
 from shared.dynamic_instructions import DynamicInstructionsError
+from shared.instruction_suppression import normalize_suppression
 from shared.instruction_token_cache import InstructionTokenCache
 from shared.message_queue import SourceType
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
@@ -74,6 +75,7 @@ from jaato_sdk.events import (
     AgentOutputEvent,
     AgentStatusChangedEvent,
     AgentCompletedEvent,
+    AgentErrorEvent,
     ToolCallStartEvent,
     ToolCallEndEvent,
     ToolOutputEvent,
@@ -129,6 +131,7 @@ _SERVER_TO_BUS: Dict[EventType, BusEventType] = {
     EventType.AGENT_OUTPUT: BusEventType.AGENT_OUTPUT,
     EventType.AGENT_STATUS_CHANGED: BusEventType.AGENT_STATUS_CHANGED,
     EventType.AGENT_COMPLETED: BusEventType.AGENT_COMPLETED,
+    EventType.AGENT_ERROR: BusEventType.AGENT_ERROR,
     EventType.TOOL_CALL_START: BusEventType.TOOL_CALL_STARTED,
     EventType.TOOL_CALL_END: BusEventType.TOOL_CALL_COMPLETED,
     EventType.TOOL_OUTPUT: BusEventType.TOOL_OUTPUT,
@@ -147,6 +150,18 @@ _SERVER_TO_BUS: Dict[EventType, BusEventType] = {
     # (Bug A) made `reason` JMESPath-visible, but the event wasn't
     # reaching the matcher at all.  See PR for diagnosis trace.
     EventType.SESSION_TERMINATED: BusEventType.SESSION_TERMINATED,
+    # Cascade stage settled — bridged so cascade reactors can gate next-stage
+    # spawn on this universal per-stage event (SlotSettledEvent, cascade only).
+    EventType.SLOT_SETTLED: BusEventType.SLOT_SETTLED,
+    # HandoffGate release — bridged so reactor rules matching
+    # event_type=gate.released fire (premium reliability's T3 gate-park
+    # resume). Same bug+fix shape as SESSION_TERMINATED above: pre-bridge the
+    # event went only to client sinks via the registry's daemon-wide
+    # broadcast_event, so the reactor engine (bus subscriber) never saw it.
+    # The GateRegistry now routes gate.released through the parked session's
+    # server.emit() (premium); gate.announced stays a daemon-wide client
+    # broadcast. See jaato-premium docs/design/gate-released-bus-delivery.md.
+    EventType.GATE_RELEASED: BusEventType.GATE_RELEASED,
 }
 
 
@@ -166,11 +181,57 @@ def _server_event_to_bus_event(server_event: Event) -> Optional[BusEvent]:
         if k not in ("type", "timestamp")
     }
 
+    # Hoist a nested typed ``payload`` (e.g. AgentCompletedEvent's validated
+    # signal_completion payload) to the bus-event top level.  ``to_dict()``
+    # leaves the typed payload nested under a ``payload`` key, but reactor
+    # consumers read it via ``build_merged_view``'s single
+    # ``view.update(event.payload)`` hoist — one level too shallow to reach
+    # the nested fields.  Without this hoist a cascade's ``event.get("facts")``
+    # returned None despite a validated typed payload (the
+    # ``AgentCompletedEvent.payload`` contract was honoured on the raw event
+    # but lost on the bus hop the reactor actually receives).  ``setdefault``
+    # so the typed fields never clobber envelope identity (agent_id, success,
+    # ...); the nested ``payload`` key is preserved for back-compat.
+    typed_payload = payload.get("payload")
+    if isinstance(typed_payload, dict):
+        for k, v in typed_payload.items():
+            payload.setdefault(k, v)
+
     return BusEvent.create(
         event_type=bus_type,
         source_agent=payload.get("agent_id", "server"),
         payload=payload,
     )
+
+
+def _extract_provider_request_id(exc: Optional[BaseException]) -> Optional[str]:
+    """Best-effort provider request-id extraction for ``AgentErrorEvent``.
+
+    Provider SDK exceptions expose the upstream request id under various
+    attributes (OpenAI/OpenRouter: ``request_id``; some wrappers stash it on
+    ``response.headers["x-request-id"]``).  Returns the first non-empty value
+    found, else ``None``.  Walks the ``__cause__`` chain once because the
+    framework often re-raises a jaato-typed error wrapping the provider's.
+    Purely informational — never raises.
+    """
+    seen = 0
+    cur: Optional[BaseException] = exc
+    while cur is not None and seen < 4:
+        rid = getattr(cur, "request_id", None)
+        if isinstance(rid, str) and rid:
+            return rid
+        resp = getattr(cur, "response", None)
+        headers = getattr(resp, "headers", None)
+        if headers is not None:
+            try:
+                hid = headers.get("x-request-id") or headers.get("X-Request-Id")
+            except Exception:
+                hid = None
+            if isinstance(hid, str) and hid:
+                return hid
+        cur = getattr(cur, "__cause__", None)
+        seen += 1
+    return None
 
 
 class AgentState:
@@ -232,7 +293,7 @@ class JaatoServer:
         instruction_token_cache: Optional[InstructionTokenCache] = None,
         profile: Optional[Any] = None,
         system_instruction_override: Optional[str] = None,
-        suppress_base_instructions: bool = False,
+        suppress_base_instructions: Any = False,
         agent_name: Optional[str] = None,
     ):
         """Initialize the server.
@@ -283,7 +344,17 @@ class JaatoServer:
         self._provider = provider
         self._profile = profile
         self._system_instruction_override = system_instruction_override
-        self._suppress_base_instructions = suppress_base_instructions
+        # Canonical frozenset of framework instruction pieces to drop
+        # (accepts bool / dict / list / frozenset; see instruction_suppression).
+        self._suppress_base_instructions = normalize_suppression(
+            suppress_base_instructions
+        )
+        # Client-provided ("host") tools registered via the WS/IPC protocol
+        # (websocket._register_client_tools).  name -> schema dict.  Read by
+        # spawn_session_runner to seed envelope.client_tools so the RUNNER-tier
+        # model sees them in list_tools (registering only on self.registry left
+        # the runner model blind — the #344-sibling daemon-vs-runner split).
+        self.client_tool_schemas: Dict[str, Dict[str, Any]] = {}
         self._on_event = on_event or (lambda e: None)
         self._on_auth_complete: Optional[Callable[[], None]] = None
 
@@ -362,6 +433,16 @@ class JaatoServer:
         # (DONE / NOW / DAEMON / INTERNAL / WIRING / §7b.2 / TRUTHINESS).
         self._runner_rpc: Optional["RunnerRPCClient"] = None
         self._spawned_runner: Optional["SpawnedRunner"] = None
+        # Signals the runner has finished ``session.bootstrap`` and can service
+        # this session's RPCs.  CLEARED when the rpc handle is wired
+        # (set_runner_rpc) and SET by ``mark_runner_ready`` after
+        # ``dispatch_bootstrap_envelope`` — readiness is bootstrap-complete, NOT
+        # rpc-handle-live, because a reused warm pool slot's handle is live the
+        # instant it's claimed yet can't service the session until bootstrap
+        # finishes.  Both the send path AND the mid-session client-tool push gate
+        # on this (attach has no synchronous ready-gate like session.new, and the
+        # §7c seat-flip forwards both to the runner).  Cleared on teardown.
+        self._runner_ready: threading.Event = threading.Event()
         # Phase 2 cascade-sharing (server 0.6.144+): pool manager
         # reference for the cascade-aware teardown path in shutdown().
         # When the runner was served from the pool AND the cascade
@@ -380,6 +461,16 @@ class JaatoServer:
         # :meth:`shutdown`.
         self._prompt_operator_handler: Optional[
             "PromptOperatorHandler"
+        ] = None
+
+        # Clarification relay handler (symmetric with the prompt-operator
+        # handler) — relays runner-fired clarification batches to the
+        # connected client via emit(ClarificationBatchEvent) and awaits the
+        # client's answers via resolve_response (called from
+        # :meth:`respond_to_clarification_batch`).  Set in
+        # :meth:`set_runner_rpc`; torn down in :meth:`shutdown`.
+        self._clarification_relay_handler: Optional[
+            "ClarificationRelayHandler"
         ] = None
 
         # Path E (cycle 6) §7c step 6.6.4.5b race fix: cached
@@ -459,6 +550,13 @@ class JaatoServer:
         # Background model thread
         self._model_thread: Optional[threading.Thread] = None
         self._model_running: bool = False
+        # How the most recent turn terminated: "error" when a terminal error
+        # (provider exhaustion / NudgeExhausted) ended the turn, else None
+        # (natural).  Reset per-turn at model-thread start; read at the
+        # SlotSettledEvent emit so a cascade stage-advance reactor can SKIP
+        # advancement on an error-terminated session (the recovery path
+        # re-spawns it).  See docs/design/agent-error-recovery-event.md.
+        self._terminal_reason: Optional[str] = None
         # Continuation text stashed by continuation_callback when called from
         # _drain_child_messages() while _model_running is still True.  Processed
         # in the model_thread finally block after _model_running is cleared.
@@ -1388,7 +1486,24 @@ class JaatoServer:
         # can populate their output panels with the conversation content.
         # This must happen after AgentCreatedEvent (so client buffers exist)
         # and before status events (so tool trees get finalized properly).
-        self._emit_conversation_replay(emit)
+        #
+        # SKIP for chat-type clients: their conversation is already
+        # persistently on-screen (Telegram, Slack, …), so replaying it as
+        # OUTPUT events makes the client render the whole history as the answer
+        # to the user's NEXT message.  Replay is a redraw concept — it applies
+        # only to ephemeral display surfaces (terminal / web).  Gated on the
+        # session's presentation ``client_type`` (set via ClientConfigRequest);
+        # when the presentation context is unknown, default to replaying (the
+        # prior behavior, correct for the TUI).
+        from jaato_sdk.events import ClientType
+        pres = self._presentation_context
+        if pres is None or pres.client_type != ClientType.CHAT:
+            self._emit_conversation_replay(emit)
+        else:
+            logger.info(
+                "  skipping conversation replay for chat-type client "
+                "(persistent history)"
+            )
 
         # Emit agent status. For idle agents, this triggers stop_spinner() on
         # the client which finalizes any replayed tool trees. For non-idle
@@ -1531,16 +1646,21 @@ class JaatoServer:
         Args:
             emit: Event callback to use for emission.
         """
-        for agent_id, agent in self._agents.items():
-            if not agent.history:
+        for agent_id in list(self._agents.keys()):
+            # Read via get_history so the MAIN agent's transcript comes from
+            # the runner (authoritative post-seat-flip) — the daemon-side
+            # agent.history is empty for a cold-restored runner session, which
+            # is why reconnecting clients saw a blank panel.
+            history = self.get_history(agent_id)
+            if not history:
                 continue
 
             logger.info(
-                f"  replaying {len(agent.history)} history messages "
+                f"  replaying {len(history)} history messages "
                 f"for agent {agent_id}"
             )
 
-            for msg in agent.history:
+            for msg in history:
                 role = msg.role
                 # Compare by value to avoid import dependency on Role enum
                 role_value = role.value if hasattr(role, 'value') else str(role)
@@ -1664,7 +1784,22 @@ class JaatoServer:
         # Phase 3 §7c step 6.6.4.5c.5: route through runner-RPC.
         # Daemon wrapper reconstructs ToolSchema NamedTuples so
         # ``.name`` and ``.category`` attr access works unchanged.
-        if self._runner_rpc is not None:
+        # ``session_get_tool_schemas_threadsafe`` is a _threadsafe RPC
+        # (run_coroutine_threadsafe + future.result()).  Invoked ON the event
+        # loop it SELF-DEADLOCKS — the loop blocks on .result() for a coro only
+        # the loop can pump (the runner replies in ~1ms but the loop can't
+        # deliver the reply) -> 15s timeout.  SAME re-entrancy class as the
+        # register-RPC stall.  Gate it OFF-loop only: on-loop emits
+        # (emit_current_state / initialize / _register_client_tools) map
+        # daemon-tier names from the registry walk below; the OFF-loop re-emits
+        # (runner-ready + client-tool _push) invoke this RPC to add runner-tier.
+        import asyncio as _asyncio
+        try:
+            _asyncio.get_running_loop()
+            on_loop_thread = True
+        except RuntimeError:
+            on_loop_thread = False
+        if self._runner_rpc is not None and not on_loop_thread:
             try:
                 schemas = self._runner_rpc.session_get_tool_schemas_threadsafe()
             except Exception:  # noqa: BLE001 — best-effort registry build
@@ -1674,7 +1809,18 @@ class JaatoServer:
                 if schema.category:
                     mappings[name_to_id(schema.category, prefix="c")] = schema.category
         if self.registry:
-            for schema in self.registry.get_exposed_tool_schemas():
+            # ALWAYS exclude runner-tier: the daemon-side registry walk must
+            # NEVER invoke a runner-tier plugin's get_tool_schemas
+            # (prompt_library's filesystem discovery) — a tier violation that,
+            # on the event-loop thread, blocked the loop ~15s on re-attach and
+            # self-blocked the register-RPC send.  Runner-tier names come from
+            # the runner (session_get_tool_schemas, above), reachable only via
+            # the OFF-loop re-emits (post-bootstrap runner-ready re-emit in
+            # runner_spawn + the client-tool _push re-emit).  On-loop emits map
+            # daemon-tier names immediately; off-loop re-emits add runner-tier.
+            for schema in self.registry.get_exposed_tool_schemas(
+                exclude_runner_tier=True,
+            ):
                 mappings[name_to_id(schema.name)] = schema.name
                 if schema.category:
                     mappings[name_to_id(schema.category, prefix="c")] = schema.category
@@ -1686,8 +1832,19 @@ class JaatoServer:
     ) -> None:
         """Emit the tool ID registry to clients.
 
-        Used during ``initialize()`` (new sessions) and
-        ``emit_current_state()`` (reconnects).
+        Called from ``initialize()`` (new sessions), ``emit_current_state()``
+        (reconnect/re-attach), the mid-session client-tool push, and the
+        post-bootstrap runner-ready re-emit.
+
+        The daemon-side registry walk in ``_build_tool_id_mappings`` ALWAYS
+        excludes runner-tier plugins, so this never runs a runner-tier plugin's
+        filesystem discovery (``prompt_library``) on the event-loop thread —
+        the re-attach self-block.  Runner-tier names come from the runner
+        (``session_get_tool_schemas``), which only runs off-loop, so they are
+        supplied by the OFF-loop callers: the post-bootstrap runner-ready
+        re-emit (``runner_spawn.dispatch_bootstrap_envelope``) and the
+        client-tool ``_push`` re-emit.  On-loop callers map daemon-tier names
+        immediately; the off-loop re-emits add runner-tier.
         """
         from jaato_sdk.events import ToolIdRegistryEvent
         mappings = self._build_tool_id_mappings()
@@ -2395,7 +2552,7 @@ class JaatoServer:
 
         # Emit bootstrap timing report to session trace log
         _timer.finish()
-        if os.environ.get("JAATO_BOOTSTRAP_TIMING", "").lower() in ("1", "true", "yes"):
+        if os.environ.get("JAATO_BOOTSTRAP_TIMING", "").lower() in ("1", "true", "yes"):  # env: print a session bootstrap timing report (with per-plugin breakdown) to the trace log
             import io as _io
             _buf = _io.StringIO()
             _timer.report(file=_buf)
@@ -2533,7 +2690,9 @@ class JaatoServer:
         if self._system_instruction_override is not None:
             kwargs["system_instruction_override"] = self._system_instruction_override
         if self._suppress_base_instructions:
-            kwargs["suppress_base_instructions"] = True
+            # Pass the canonical frozenset through; configure() normalizes it
+            # (idempotent) and gates each framework layer accordingly.
+            kwargs["suppress_base_instructions"] = self._suppress_base_instructions
 
         return kwargs or None
 
@@ -2924,6 +3083,32 @@ class JaatoServer:
                     payload=payload,
                 ))
 
+            def on_agent_error(self, agent_id, error_type, error_summary, *,
+                               session_id, request_id=None, attempt="0",
+                               classification=None,
+                               framework_retries_exhausted=None,
+                               occurred_at=None):
+                """Emit AgentErrorEvent — the recovery contract.
+
+                Fires from the terminal-error sites AFTER the framework's
+                automatic management is exhausted, BEFORE the teardown
+                SessionTerminatedEvent.  See
+                docs/design/agent-error-recovery-event.md.
+                """
+                if agent_id in server._agents:
+                    server._agents[agent_id].status = "error"
+                server.emit(AgentErrorEvent(
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    error_type=error_type,
+                    error_summary=error_summary,
+                    request_id=request_id,
+                    attempt=attempt,
+                    classification=classification,
+                    framework_retries_exhausted=framework_retries_exhausted,
+                    occurred_at=occurred_at,
+                ))
+
             def on_session_quiescent(self, agent_id, reason="natural"):
                 """Emit SessionTerminatedEvent after natural completion.
 
@@ -2944,7 +3129,8 @@ class JaatoServer:
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,
                                         output_tokens, total_tokens, duration_seconds,
                                         function_calls, cache_read_tokens=None,
-                                        cache_creation_tokens=None):
+                                        cache_creation_tokens=None,
+                                        finish_reason="stop"):
                 # Flush any remaining buffered content from the agent's formatter pipeline
                 agent_pipeline = server._get_agent_pipeline(agent_id)
                 if agent_pipeline:
@@ -2992,6 +3178,7 @@ class JaatoServer:
                     ),
                     duration_seconds=duration_seconds,
                     function_calls=function_calls,
+                    finish_reason=finish_reason,
                 ))
 
             def on_agent_context_updated(self, agent_id, total_tokens, prompt_tokens,
@@ -3153,12 +3340,14 @@ class JaatoServer:
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
                                  error_message=None, call_id=None, backgrounded=False,
-                                 continuation_id=None, show_output=None, show_popup=None):
+                                 continuation_id=None, show_output=None, show_popup=None,
+                                 is_error_result=False):
                 server.emit(ToolCallEndEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
                     call_id=call_id,
                     success=success,
+                    is_error_result=is_error_result,
                     duration_seconds=duration_seconds,
                     error_message=error_message,
                     backgrounded=backgrounded,
@@ -3297,6 +3486,176 @@ class JaatoServer:
         require runner activity pre-initialize) drops cleanly.
         """
         return getattr(self, "_agent_hooks", None)
+
+    def _read_spawn_attempt(self) -> str:
+        """Read the reactor-level ``attempt`` from the session's spawn params.
+
+        The kb passes ``agent_params={"attempt": "<n>"}`` at ``create_session``
+        (echoed verbatim onto ``AgentErrorEvent.attempt``).  The envelope types
+        agent_params as ``Dict[str, str]``; we return the string as-is, falling
+        back to ``"0"`` when absent / unreadable.  Never raises.
+
+        This is the REACTOR-level re-spawn count — NOT ``with_retry``'s internal
+        per-request attempts (which are framework-only and never surfaced).
+        See docs/design/agent-error-recovery-event.md.
+        """
+        try:
+            jaato = getattr(self, "_jaato", None)
+            session = jaato.get_session() if jaato is not None else None
+            params = getattr(session, "_agent_params", None) or {}
+            val = params.get("attempt")
+            if isinstance(val, str) and val:
+                return val
+            if val is not None:
+                return str(val)
+        except Exception:
+            pass
+        return "0"
+
+    def _emit_agent_error(
+        self,
+        *,
+        error_type: str,
+        error_summary: str,
+        request_id: Optional[str] = None,
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """Emit ``AgentErrorEvent`` for a terminal error, BEFORE teardown.
+
+        The recovery contract (docs/design/agent-error-recovery-event.md):
+        called at the terminal-error sites — model-thread terminal, nudge
+        exhaustion, bootstrap failure — each of which is, by construction, a
+        point where the framework's automatic management (``with_retry`` /
+        nudge) is exhausted or never applied.  Routes through the daemon-side
+        ``ServerAgentHooks.on_agent_error`` so the event reaches the bus +
+        clients.  No-ops (logs) if hooks aren't wired yet.  Never raises into
+        the caller's teardown path.
+
+        ``session_id`` / ``agent_id`` default to the server's own state but may
+        be overridden (bootstrap-failure path, where the server's session state
+        isn't fully wired yet — the caller knows the ids).
+        """
+        try:
+            hooks = self._get_ui_hooks()
+            if hooks is None:
+                return
+            import time as _time
+            sid = session_id if session_id is not None else (getattr(self, "session_id", None) or "")
+            aid = agent_id if agent_id is not None else (getattr(self, "_main_agent_id", None) or "main")
+            hooks.on_agent_error(
+                agent_id=aid,
+                error_type=error_type,
+                error_summary=error_summary,
+                session_id=sid,
+                request_id=request_id,
+                attempt=self._read_spawn_attempt(),
+                classification=classification,
+                framework_retries_exhausted=framework_retries_exhausted,
+                occurred_at=_time.time(),
+            )
+        except Exception:
+            logger.warning("Failed to emit AgentErrorEvent", exc_info=True)
+
+    def _emit_agent_error_from_exc(
+        self,
+        exc: BaseException,
+        *,
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """Convenience wrapper: emit ``AgentErrorEvent`` from a caught
+        exception, deriving ``error_type`` / ``error_summary`` / ``request_id``.
+        """
+        self._emit_agent_error(
+            error_type=type(exc).__name__,
+            error_summary=str(exc),
+            request_id=_extract_provider_request_id(exc),
+            classification=classification,
+            framework_retries_exhausted=framework_retries_exhausted,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+
+    def _emit_error_termination(
+        self,
+        *,
+        error_type: str,
+        error_summary: str,
+        request_id: Optional[str] = None,
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """THE single chokepoint for an error-terminated session.
+
+        Emits, in order: (1) ``AgentErrorEvent`` — the recovery first-refusal,
+        and (2) ``SessionTerminatedEvent(reason="error")`` — the teardown
+        signal; and stamps ``_terminal_reason="error"`` so the later
+        ``SlotSettledEvent`` carries it.
+
+        This makes the invariant **structural, not conventional**: "an
+        ``AgentErrorEvent`` precedes EVERY ``SessionTerminatedEvent(reason=
+        "error")``" holds because no error-termination path constructs the
+        terminal event directly — they all route here, so the recovery offer
+        can never be skipped.  Downstream that lets a cascade safely retire the
+        redundant ``on session.terminated reason=error`` abort reactor (which
+        otherwise races the recovery reactor's ``mark_handled``).  A guard test
+        (``test_error_termination_single_chokepoint``) fails the build if any
+        ``reason="error"`` terminal emit appears outside this method.  See
+        docs/design/agent-error-recovery-event.md.
+        """
+        from jaato_sdk.events import SessionTerminatedEvent
+        sid = session_id if session_id is not None else (getattr(self, "session_id", None) or "")
+        aid = agent_id if agent_id is not None else (getattr(self, "_main_agent_id", None) or "main")
+        # Stamp before teardown so SlotSettledEvent (emitted in shutdown) carries
+        # terminal_reason="error" → stage-advance reactor skips, recovery re-spawns.
+        self._terminal_reason = "error"
+        # 1. Recovery first refusal (fires only after Layer-1 exhaustion).
+        self._emit_agent_error(
+            error_type=error_type,
+            error_summary=error_summary,
+            request_id=request_id,
+            classification=classification,
+            framework_retries_exhausted=framework_retries_exhausted,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+        # 2. Terminal teardown signal (back-compat; carries the cause).
+        self.emit(SessionTerminatedEvent(
+            session_id=sid,
+            agent_id=aid,
+            reason="error",
+            error_summary=error_summary,
+            error_type=error_type,
+        ))
+
+    def _emit_error_termination_from_exc(
+        self,
+        exc: BaseException,
+        *,
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """Convenience wrapper: :meth:`_emit_error_termination` from a caught
+        exception, deriving ``error_type`` / ``error_summary`` / ``request_id``.
+        """
+        self._emit_error_termination(
+            error_type=type(exc).__name__,
+            error_summary=str(exc),
+            request_id=_extract_provider_request_id(exc),
+            classification=classification,
+            framework_retries_exhausted=framework_retries_exhausted,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
 
     def _setup_permission_hooks(self) -> None:
         """Set up permission lifecycle hooks."""
@@ -3871,8 +4230,9 @@ class JaatoServer:
             status="active",
         ))
 
-        # Start model in background (file references should be expanded client-side)
-        self._start_model_thread(text)
+        # Start model in background.  Attachments (client-expanded base64 dicts)
+        # ride the first send to the runner session's multimodal path.
+        self._start_model_thread(text, attachments=attachments)
 
     def _build_send_message_notification_handler(self):
         """Build the per-call ``on_notification`` demuxer used by
@@ -4063,6 +4423,7 @@ class JaatoServer:
                             continuation_id=payload.get("continuation_id"),
                             show_output=payload.get("show_output"),
                             show_popup=payload.get("show_popup"),
+                            is_error_result=bool(payload.get("is_error_result", False)),
                         )
                     return
 
@@ -4187,6 +4548,7 @@ class JaatoServer:
                             function_calls=fc_payload,
                             cache_read_tokens=payload.get("cache_read_tokens"),
                             cache_creation_tokens=payload.get("cache_creation_tokens"),
+                            finish_reason=payload.get("finish_reason", "stop"),
                         )
                     return
 
@@ -4260,8 +4622,15 @@ class JaatoServer:
 
         return _handle
 
-    def _start_model_thread(self, prompt: str) -> None:
+    def _start_model_thread(
+        self, prompt: str, attachments: Optional[List[Dict]] = None
+    ) -> None:
         """Start the model call in a background thread.
+
+        ``attachments`` (user-message multimodal: ``[{mime_type, data:
+        base64-str, display_name}, ...]``) ride only the FIRST send to the
+        runner session; continuation sends (formatter feedback, nudges, child
+        messages) are text-only.
 
         Phase 3 §7c step 6.6.4.3b: switched from
         ``server._jaato.send_message(...)`` (daemon-side
@@ -4325,14 +4694,38 @@ class JaatoServer:
             # retried by COMPLETION_NUDGE.  See PR fixing "Fix #2e:
             # COMPLETION_NUDGE fires on provider exceptions".
             terminal_error: Optional[Exception] = None
+            # Per-turn clean slate — only an error-terminated turn flips this to
+            # "error" (read at the SlotSettledEvent emit).  Reset here so warm
+            # slot reuse can't leak a prior session's terminal reason.
+            server._terminal_reason = None
             try:
+                # A fresh attach to a restored session may still be (re)spawning
+                # its runner asynchronously (attach has no synchronous ready-gate
+                # like session.new).  Await readiness rather than deref a None
+                # ``_runner_rpc`` — the reported NoneType crash.  Bounded; raise a
+                # clean error on timeout (caught below as a terminal error)
+                # instead of a hard AttributeError.
+                # Readiness is now bootstrap-complete (mark_runner_ready), not
+                # rpc-handle-live — so wait whenever it's unset.  Covers BOTH the
+                # attach re-spawn (rpc None) AND a reused warm pool slot whose
+                # handle is live but whose bootstrap for this session hasn't
+                # finished yet (same window the client-tool-push stall hit).
+                if not server._runner_ready.is_set():
+                    server._runner_ready.wait(timeout=30.0)
+                _rpc = server._runner_rpc
+                if _rpc is None or not server._runner_ready.is_set():
+                    raise RuntimeError(
+                        "session runner not ready: (re)spawn + bootstrap did not "
+                        "complete within 30s"
+                    )
                 # Run in workspace context so file operations use client's CWD
                 # Also apply session env so provider/tools can access session-specific config
                 with server._with_session_env(), server._in_workspace():
-                    server._runner_rpc.session_send_message_threadsafe(
+                    _rpc.session_send_message_threadsafe(
                         prompt,
                         on_output=output_callback,
                         on_notification=notification_handler,
+                        attachments=attachments,
                     )
 
                     # Auto-continuation for formatter feedback
@@ -4421,19 +4814,15 @@ class JaatoServer:
                 # orchestrator / TUI a terminal signal so they don't sit
                 # waiting for AGENT_COMPLETED that will never arrive.
                 if terminal_error is not None:
-                    from jaato_sdk.events import SessionTerminatedEvent
-                    # Server 0.6.159+: carry the terminal error onto the
-                    # SessionTerminatedEvent so cascade observers can
-                    # surface the failure cause without grepping the
-                    # daemon log.  terminal_error is the Exception that
-                    # escaped with_retry above.
-                    server.emit(SessionTerminatedEvent(
-                        session_id=server.session_id or "",
-                        agent_id=server._main_agent_id,
-                        reason="error",
-                        error_summary=str(terminal_error),
-                        error_type=type(terminal_error).__name__,
-                    ))
+                    # Single chokepoint: emits AgentErrorEvent (recovery first
+                    # refusal — this point is post-with_retry-exhaustion by
+                    # construction) THEN SessionTerminatedEvent(reason=error)
+                    # (teardown, carrying the cause for log-grep-free
+                    # surfacing), and stamps _terminal_reason.  The invariant
+                    # "AgentErrorEvent precedes every reason=error" is structural
+                    # because the terminal event is never constructed here
+                    # directly.  See docs/design/agent-error-recovery-event.md.
+                    server._emit_error_termination_from_exc(terminal_error)
                     clear_logging_context()
                     return
 
@@ -4451,6 +4840,46 @@ class JaatoServer:
                     server._start_model_thread(pending)
                     clear_logging_context()
                     return  # new thread handles idle/done status
+
+                # Multi-turn deadlock fix: drain a high-priority (USER) send
+                # that raced into this turn's wind-down.  ``turn.completed``
+                # reaches the client (which sends its next turn) BEFORE this
+                # finally cleared ``_model_running`` above, so the daemon gate
+                # forwarded that send as an ``inject_prompt``; the runner-side
+                # session — idle, with its per-RPC continuation callback
+                # already restored to None — queued it with no drainer (see
+                # ``JaatoSession.inject_prompt`` / ``try_drain_pending_user``).
+                # Atomically pop it and start a fresh turn.  Mirrors the
+                # ``_pending_continuation`` drain above; runner-tier only
+                # (daemon-local sessions have no ``_runner_rpc``).
+                if server._runner_rpc is not None:
+                    drained = None
+                    try:
+                        drained = (
+                            server._runner_rpc
+                            .session_try_drain_pending_user_threadsafe()
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Best-effort — a transport error just means no drain
+                        # this turn; don't tear down the model thread.
+                        server._trace(
+                            f"DRAIN_PENDING_USER_RPC: try_drain_pending_user "
+                            f"raised {type(exc).__name__}: {exc} — skipping "
+                            f"drain this turn",
+                        )
+                    if drained:
+                        server._trace(
+                            f"DRAIN_PENDING_USER: starting fresh turn for a "
+                            f"send that raced the turn wind-down "
+                            f"({len(drained)} chars)",
+                        )
+                        server.emit(AgentStatusChangedEvent(
+                            agent_id=server._main_agent_id,
+                            status="active",
+                        ))
+                        server._start_model_thread(drained)
+                        clear_logging_context()
+                        return  # new thread handles idle/done status
 
                 # Determine whether the main agent is truly finished or just
                 # paused waiting for external input.
@@ -4598,10 +5027,7 @@ class JaatoServer:
                     nudges_fired >= MAX_COMPLETION_NUDGES
                     and signal_completion_in_surface
                 ):
-                    from jaato_sdk.events import (
-                        ErrorEvent as _ErrorEvent,
-                        SessionTerminatedEvent as _SessionTerminatedEvent,
-                    )
+                    from jaato_sdk.events import ErrorEvent as _ErrorEvent
                     server._trace(
                         f"NUDGE_EXHAUSTED: agent looped "
                         f"{nudges_fired}/{MAX_COMPLETION_NUDGES} "
@@ -4617,17 +5043,17 @@ class JaatoServer:
                         error=nudge_exhaust_summary,
                         error_type="NudgeExhausted",
                     ))
-                    # Server 0.6.159+: same error context flows to the
-                    # cascade observer via SessionTerminatedEvent so
-                    # nudge-exhaust is distinguishable from a provider
-                    # error without log-grep.
-                    server.emit(_SessionTerminatedEvent(
-                        session_id=server.session_id or "",
-                        agent_id=server._main_agent_id,
-                        reason="error",
-                        error_summary=nudge_exhaust_summary,
+                    # Single chokepoint: AgentErrorEvent (recovery first refusal
+                    # — nudge exhaustion is the framework's automatic-management
+                    # giving up) THEN SessionTerminatedEvent(reason=error) so
+                    # nudge-exhaust is distinguishable from a provider error
+                    # without log-grep, plus _terminal_reason.  Structural
+                    # invariant — see _emit_error_termination /
+                    # docs/design/agent-error-recovery-event.md.
+                    server._emit_error_termination(
                         error_type="NudgeExhausted",
-                    ))
+                        error_summary=nudge_exhaust_summary,
+                    )
 
                 server.emit(AgentStatusChangedEvent(
                     agent_id=server._main_agent_id,
@@ -4712,13 +5138,22 @@ class JaatoServer:
     def respond_to_clarification_batch(self, request_id: str, answers: List[str]) -> None:
         """Respond to a batch clarification request with all answers at once.
 
-        Each answer is fed into the channel input queue sequentially so the
-        QueueChannel loop picks them up one by one and completes normally.
+        Runner-tier sessions resolve the ``ClarificationRelayHandler``
+        future directly (the runner-side relay channel is awaiting it);
+        daemon-local sessions feed the legacy ``_channel_input_queue`` so
+        the QueueChannel loop picks the answers up one by one.
 
         Args:
             request_id: The clarification request ID.
             answers: Ordered list of answer strings, one per question.
         """
+        # Runner→daemon relay path (post-seat-flip runner sessions) — mirror
+        # of respond_to_permission's prompt_operator_handler.resolve_response.
+        relay = getattr(self, "_clarification_relay_handler", None)
+        if relay is not None and relay.resolve_response(request_id, answers):
+            return
+
+        # Legacy daemon-local QueueChannel path.
         if self._pending_clarification_request_id != request_id:
             self.emit(ErrorEvent(
                 error=f"Unknown clarification request: {request_id}",
@@ -5071,12 +5506,57 @@ class JaatoServer:
 
         ``agent_id=None`` resolves to the main agent's id (``main`` by
         default, or the ``--agent <name>`` value when one was supplied).
+
+        Post-seat-flip the session and its AUTHORITATIVE history live
+        runner-side; the daemon-side ``_agents[*].history`` is NOT
+        maintained for a runner-based session — it is empty after a cold
+        disk-restore and stale after new turns (``on_agent_history_updated``
+        only fires in the in-process path).  So for the MAIN agent, when a
+        runner is attached, read from the runner via the RPC surface the
+        architecture mandates (see the ``get_session`` removal note above).
+        Without this, disk-restored WS sessions replayed an empty transcript
+        and ``history.request`` returned nothing even though the runner had
+        the turns.  Subagents (no per-agent runner history RPC) and
+        in-process sessions read the daemon-side copy as before.  A runner
+        read failure falls back to daemon-side so a transient RPC blip
+        degrades rather than raises.
         """
         if agent_id is None:
             agent_id = self._main_agent_id
+        if self._runner_rpc is not None and agent_id == self._main_agent_id:
+            fetched = self._runner_history_or_none()
+            if fetched is not None:
+                return fetched
         if agent_id in self._agents:
             return self._agents[agent_id].history
         return []
+
+    def _runner_history_or_none(self) -> Optional[List[Any]]:
+        """Fetch + deserialize the runner-side main history, or None on any
+        failure (so ``get_history`` can fall back to the daemon-side copy).
+
+        The runner serializes each message with the canonical session
+        serializer (``_serialize_message_for_wire`` → ``serialize_message``),
+        so ``deserialize_history`` round-trips it back to ``Message`` objects
+        — the shape every ``get_history`` consumer already expects.
+        """
+        rpc = self._runner_rpc
+        if rpc is None:
+            return None
+        try:
+            dicts = rpc.session_get_history_threadsafe(timeout=10.0)
+        except Exception:  # noqa: BLE001 — read boundary; degrade to daemon-side
+            logger.warning(
+                "get_history: runner fetch failed; falling back to daemon-side",
+                exc_info=True)
+            return None
+        try:
+            from shared.plugins.session.serializer import deserialize_history
+            return deserialize_history(dicts)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "get_history: runner history deserialize failed", exc_info=True)
+            return None
 
     def get_turn_accounting(self, agent_id: Optional[str] = None) -> List[Dict]:
         """Get turn accounting for an agent.
@@ -5154,6 +5634,18 @@ class JaatoServer:
     # Confined runner (Phase 2 §4.6)
     # =========================================================================
 
+    def mark_runner_ready(self) -> None:
+        """Signal that the per-session runner has finished ``session.bootstrap``
+        and can service mid-session RPCs (the client-tool push) + the send path.
+
+        Readiness is bootstrap-complete, NOT rpc-handle-live (see
+        :meth:`set_runner_rpc`).  Called from ``dispatch_bootstrap_envelope``
+        after the bootstrap RPC settles (success OR the daemon-authoritative
+        failure path) so a reused warm pool slot doesn't strand the push/send on
+        a readiness timeout.  Idempotent.
+        """
+        self._runner_ready.set()
+
     def set_runner_rpc(
         self,
         rpc_client: Optional["RunnerRPCClient"],
@@ -5180,6 +5672,15 @@ class JaatoServer:
         """
         self._runner_rpc = rpc_client
         self._spawned_runner = spawned
+        # Runner readiness is BOOTSTRAP-complete, NOT rpc-handle-live.  A reused
+        # warm pool slot's rpc handle is live the instant it's claimed, but the
+        # slot can't service THIS session until its ``session.bootstrap``
+        # completes — so wiring the handle CLEARS readiness; ``mark_runner_ready``
+        # (called from ``dispatch_bootstrap_envelope`` after the bootstrap RPC)
+        # sets it.  This closes the re-attach stall where the mid-session
+        # client-tool push and the send-path gate raced ahead of the reused
+        # slot's async bootstrap and hit a 15s push TimeoutError.
+        self._runner_ready.clear()
         # Plumb onto the registry so plugins can consume via the
         # registry-attribute pattern (§5.4 of the Phase 2 plan).
         if self.registry is not None and rpc_client is not None:
@@ -5204,6 +5705,21 @@ class JaatoServer:
             )
             register_prompt_operator(
                 rpc_client.rpc_server, self._prompt_operator_handler,
+            )
+            # Clarification relay — symmetric with prompt_operator.  Lets a
+            # runner-tier (confined / pool) session deliver clarifications to
+            # the connected client (the runner-side QueueChannel has no
+            # daemon-wired input_queue).  See
+            # server/runner_rpc_handlers/clarification_relay.py.
+            from server.runner_rpc_handlers.clarification_relay import (
+                ClarificationRelayHandler,
+                register as register_clarification_relay,
+            )
+            self._clarification_relay_handler = ClarificationRelayHandler(
+                emit_event=self.emit,
+            )
+            register_clarification_relay(
+                rpc_client.rpc_server, self._clarification_relay_handler,
             )
             # Phase 4 §4.3.2: register the
             # ``subagent.spawn_isolated_runner`` handler.  Stub body
@@ -5261,6 +5777,7 @@ class JaatoServer:
             )
         else:
             self._prompt_operator_handler = None
+            self._clarification_relay_handler = None
             self._spawn_isolated_runner_handler = None
             self._daemon_plugin_execute_handler = None
 
@@ -5295,6 +5812,19 @@ class JaatoServer:
                     "shutdown raised",
                 )
             self._prompt_operator_handler = None
+        # Tear down the clarification relay handler (symmetric with the
+        # prompt-operator teardown above) — fails in-flight clarifications
+        # with a clean error so the runner-side awaiter sees a typed cancel.
+        clarif_relay = getattr(self, "_clarification_relay_handler", None)
+        if clarif_relay is not None:
+            try:
+                clarif_relay.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                logger.exception(
+                    "JaatoServer.shutdown: clarification_relay_handler "
+                    "shutdown raised",
+                )
+            self._clarification_relay_handler = None
         # Phase 4 §4.3.2: tear down the spawn_isolated_runner handler.
         # Stub body holds no in-flight state (just a closed flag) so
         # this is a no-op beyond marking the handler closed; §4.3.6
@@ -5339,6 +5869,7 @@ class JaatoServer:
         spawned = self._spawned_runner
         pool_manager = self._pool_manager_ref
         self._runner_rpc = None
+        self._runner_ready.clear()  # runner torn down — send path must await respawn
         self._spawned_runner = None
         self._pool_manager_ref = None
 
@@ -5421,6 +5952,39 @@ class JaatoServer:
                         "(%s); falling through to runner close",
                         exc,
                     )
+
+        # SlotSettledEvent (cascade warm-reuse handoff): emit ONCE per cascade
+        # stage HERE — after the pool-return decision (``cascade_returned``
+        # known) but BEFORE the warm-path early-return + the cold-close — so it
+        # fires on EVERY teardown path (warm-return / pool-torn-down / cold-
+        # spawn).  Gated on the session's cascade affinity.  ``was_warm`` tells
+        # the reactor whether the next stage's spawn reuses the warm slot.
+        # Universal + stall-proof: a cascade reactor gates the next stage on
+        # this single event with no timeout.
+        cascade_driver_id = getattr(self, "_cascade_driver_id", None)
+        if cascade_driver_id:
+            try:
+                from jaato_sdk.events import SlotSettledEvent
+                self.emit(SlotSettledEvent(
+                    session_id=self._session_id or "",
+                    agent_id=self._main_agent_id,
+                    cascade_driver_id=cascade_driver_id,
+                    was_warm=cascade_returned,
+                    pool_slot_pid=(
+                        pool_slot.pid
+                        if (pool_slot is not None and cascade_returned)
+                        else 0
+                    ),
+                    # Discriminator for the slot.settled-vs-recovery collision:
+                    # an error-terminated session's stage is re-spawned by the
+                    # recovery reactor, so the stage-advance reactor must SKIP it.
+                    terminal_reason=getattr(self, "_terminal_reason", None),
+                ))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "JaatoServer.shutdown: SlotSettledEvent emit raised %s",
+                    exc,
+                )
 
         if cascade_returned:
             # Slot is back in the pool serving the next session.  Do

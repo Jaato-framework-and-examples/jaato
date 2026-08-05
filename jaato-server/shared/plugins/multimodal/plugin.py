@@ -30,7 +30,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from jaato_sdk.plugins.base import PromptEnrichmentResult, UserCommand
 
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
@@ -261,7 +264,7 @@ class MultimodalPlugin(RunnerForwardingMixin):
                 "required": ["path"]
             },
             category="filesystem",
-            discoverability="discoverable",
+            discoverability=DISCOVERABILITY_DEFERRED,
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:

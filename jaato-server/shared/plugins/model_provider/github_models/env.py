@@ -62,7 +62,7 @@ def resolve_auth_method() -> AuthMethod:
     Returns:
         The resolved authentication method.
     """
-    explicit = os.environ.get(ENV_GITHUB_AUTH_METHOD, "").lower()
+    explicit = os.environ.get(ENV_GITHUB_AUTH_METHOD, "").lower()  # env: force auth method: pat, app_token, or auto (default)
     if explicit in ("pat", "app_token", "auto"):
         return explicit  # type: ignore
     return "auto"
@@ -90,7 +90,7 @@ def resolve_token() -> Optional[str]:
         pass  # oauth module not available
 
     # Fall back to environment variable
-    return os.environ.get(ENV_GITHUB_TOKEN)
+    return os.environ.get(ENV_GITHUB_TOKEN)  # env: GitHub PAT with models:read permission (fallback when no OAuth login)
 
 
 def resolve_token_source() -> Optional[str]:
@@ -124,7 +124,7 @@ def resolve_organization() -> Optional[str]:
     Returns:
         Organization name if found, None otherwise.
     """
-    return os.environ.get(ENV_GITHUB_ORGANIZATION)
+    return os.environ.get(ENV_GITHUB_ORGANIZATION)  # env: organization for billing attribution
 
 
 def resolve_enterprise() -> Optional[str]:
@@ -135,7 +135,7 @@ def resolve_enterprise() -> Optional[str]:
     Returns:
         Enterprise name if found, None otherwise.
     """
-    return os.environ.get(ENV_GITHUB_ENTERPRISE)
+    return os.environ.get(ENV_GITHUB_ENTERPRISE)  # env: enterprise name for enterprise context / policy compliance
 
 
 def resolve_endpoint() -> str:
@@ -148,21 +148,28 @@ def resolve_endpoint() -> str:
     Returns:
         The API endpoint URL.
     """
-    return os.environ.get(ENV_GITHUB_ENDPOINT, DEFAULT_ENDPOINT)
+    return os.environ.get(ENV_GITHUB_ENDPOINT, DEFAULT_ENDPOINT)  # env: GitHub Models endpoint (default https://models.github.ai/inference)
 
 
-def get_checked_credential_locations(auth_method: AuthMethod = "auto") -> List[str]:
+def get_checked_credential_locations(
+    auth_method: AuthMethod = "auto", config=None
+) -> List[str]:
     """Get list of locations checked for credentials.
 
     Used for error messages to help users understand what was checked.
 
     Args:
         auth_method: The authentication method being used.
+        config: Optional ``ProviderConfig`` — surfaces the highest-precedence
+            source, the profile ``plugin_configs.github_models.api_key`` knob,
+            which the env/OAuth checks below cannot see.
 
     Returns:
         List of location descriptions.
     """
-    locations = []
+    from ..base import profile_api_key_location
+
+    locations = [profile_api_key_location(config, "github_models")]
 
     # Check stored OAuth token
     try:

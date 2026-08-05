@@ -114,13 +114,18 @@ class _ExtensionContext:
         gc_plugin_factories: Dict mapping GC plugin names to their factory
             functions.  Extensions can instantiate a GC plugin to call
             ``get_config_schema()`` for settings introspection.
+        event_bus: The daemon-wide reactor ``EventBus`` — the single bus each
+            per-session bus sinks into.  A reactor engine subscribes ONCE here
+            (instead of per-loaded-session) to receive events from all
+            sessions, including delivery that survives a session's unload.
+            See docs/design/reactor-bus-session-scope.md.
     """
 
     __slots__ = (
         "session_manager", "ws_server", "ipc_server", "web_socket",
         "ipc_socket", "server_name", "dashboard_port",
         "available_plugins", "plugin_registry",
-        "available_gc_plugins", "gc_plugin_factories",
+        "available_gc_plugins", "gc_plugin_factories", "event_bus",
     )
 
     def __init__(
@@ -136,6 +141,7 @@ class _ExtensionContext:
         available_gc_plugins: frozenset = frozenset(),
         gc_plugin_factories: dict = None,
         ipc_server=None,
+        event_bus=None,
     ):
         self.session_manager = session_manager
         self.ws_server = ws_server
@@ -148,6 +154,7 @@ class _ExtensionContext:
         self.plugin_registry = plugin_registry
         self.available_gc_plugins = available_gc_plugins
         self.gc_plugin_factories = gc_plugin_factories or {}
+        self.event_bus = event_bus
 
     def broadcast_event(self, event) -> None:
         """Broadcast a daemon-wide event to every connected IPC + WS client.
@@ -338,6 +345,7 @@ class JaatoDaemon:
         self._session_manager: Optional[SessionManager] = None
         self._ipc_server = None
         self._ws_server = None
+        self._wake_ingress = None  # daemon-tier mode-B wake HTTP ingress
 
         # Daemon extensions loaded via ``jaato.extensions`` entry points.
         # See ``_load_extensions()`` for the discovery and lifecycle protocol.
@@ -367,7 +375,7 @@ class JaatoDaemon:
         # configurable via ``JAATO_RUNNER_POOL_SIZE`` env var (default
         # 2).  Pool-empty fallback path = today's cold-spawn session-
         # mode (preserved through PR 4's flag-gated rollout).
-        _pool_size_raw = os.environ.get("JAATO_RUNNER_POOL_SIZE", "2")
+        _pool_size_raw = os.environ.get("JAATO_RUNNER_POOL_SIZE", "2")  # env: number of idle pre-warm runner slots to keep (raise for concurrent cascade fan-out)
         try:
             _pool_size = int(_pool_size_raw)
         except ValueError:
@@ -542,6 +550,10 @@ class JaatoDaemon:
         if self._ipc_server:
             self._ipc_server._on_session_request = self._command_router.handle_request
             self._ipc_server._on_command_list_request = self._command_router.get_command_list
+            # Give the IPC transport a SessionManager handle so it can register
+            # client-provided ("host") tools onto a session's registry (mirrors
+            # the WS transport's _command_router access).
+            self._ipc_server._session_manager = self._session_manager
             self._ipc_server._on_client_disconnect = self._command_router.handle_client_disconnect
         if self._ws_server:
             self._ws_server.set_command_router(self._command_router)
@@ -564,6 +576,30 @@ class JaatoDaemon:
         # Start daemon extensions after transport servers are up
         for ext in self._extensions:
             await ext.start()
+
+        # Start the daemon-tier wake ingress (mode-B) if configured. It lives at
+        # the daemon tier (not the runner-bound webhook plugin) so it survives
+        # session unload — a wake can arrive long after the session detached.
+        # Opt-in via ~/.jaato/wake.json (enabled=true).
+        try:
+            import pathlib
+            from server.wake_ingress import WakeIngressConfig, WakeIngressServer
+            wake_cfg = WakeIngressConfig.from_file(
+                pathlib.Path.home() / ".jaato" / "wake.json")
+            # Advertise the operator's public endpoint via bind_wake results even
+            # if the local listener can't bind — the URL is the operator's
+            # routing declaration, independent of the local bind.
+            self._session_manager.set_wake_public_url(wake_cfg.public_url)
+            if wake_cfg.enabled:
+                ingress = WakeIngressServer(
+                    wake_cfg,
+                    resolve_binding=self._session_manager.resolve_wake_binding,
+                    wake_fn=self._session_manager.wake_session,
+                )
+                if ingress.start():
+                    self._wake_ingress = ingress
+        except Exception:  # noqa: BLE001 — ingress must never block daemon boot
+            logger.exception("wake ingress: failed to start (continuing without it)")
 
         # Pool PR 5b: claim subreaper role for the daemon.  Pool slots
         # are template-children (forked from the template, no exec).
@@ -727,6 +763,11 @@ class JaatoDaemon:
                 await ext.stop()
             except Exception as exc:
                 logger.warning("Extension stop failed: %s", exc)
+        if self._wake_ingress:
+            try:
+                self._wake_ingress.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("wake ingress stop failed: %s", exc)
         if self._ipc_server:
             await self._ipc_server.stop()
         if self._ws_server:
@@ -1022,6 +1063,7 @@ class JaatoDaemon:
             plugin_registry=_discovery_registry,
             available_gc_plugins=_available_gc,
             gc_plugin_factories=_gc_factories,
+            event_bus=self._session_manager.reactor_event_bus,
         )
 
         for ep in ext_eps:
@@ -1198,7 +1240,7 @@ def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:
 
 
 def check_pipe_exists(pipe_name: str) -> bool:
-    """Check if a Windows named pipe already exists.
+    r"""Check if a Windows named pipe already exists.
 
     Uses ``WaitNamedPipeW`` with a minimal timeout to probe without consuming
     a pipe instance.
@@ -1232,11 +1274,66 @@ def check_pipe_exists(pipe_name: str) -> bool:
     return error == ERROR_SEM_TIMEOUT
 
 
-def check_running(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
-    """Check if a server is already running.
+def _pid_on_socket(socket_path: Optional[str]) -> Optional[int]:
+    """PID of the jaato daemon bound to a Unix socket (the authoritative signal).
+
+    Fallback for when the pidfile is missing/stale but a daemon is still
+    listening — e.g. an ephemeral client-autostarted daemon that began teardown
+    (removed its pidfile) but survived.  Without this, ``--stop`` trusts the
+    pidfile alone and reports "not running" while orphaning a live daemon (the
+    gap peer-reported 2026-06-20: ``jaato-server --stop`` missing an
+    autostarted daemon on the default socket).
+
+    Verifies the owner is actually a jaato server process (cmdline contains
+    ``-m server`` / ``jaato-server``) before returning it, so a process that
+    merely happens to bind the path is never targeted.  Returns None on
+    Windows / no listener / permission / non-jaato owner.
+    """
+    if sys.platform == "win32" or not socket_path:
+        return None
+    if not os.path.exists(socket_path):
+        return None
+    try:
+        import psutil
+        for conn in psutil.net_connections(kind="unix"):
+            if conn.laddr == socket_path and conn.pid:
+                try:
+                    cmdline = " ".join(psutil.Process(conn.pid).cmdline())
+                except Exception:
+                    continue
+                if "-m server" in cmdline or "jaato-server" in cmdline:
+                    return conn.pid
+    except Exception:
+        return None
+    return None
+
+
+def check_running(
+    pid_file: str = DEFAULT_PID_FILE,
+    ipc_socket: Optional[str] = None,
+) -> Optional[int]:
+    """Check if a server is already running — pidfile first, socket fallback.
+
+    Resolves via the pidfile; if that yields nothing (missing / stale / points
+    at a dead PID) but a daemon is still bound to ``ipc_socket``, falls back to
+    the authoritative socket signal (:func:`_pid_on_socket`).  This is what lets
+    ``--stop`` / ``--status`` find a client-autostarted daemon whose ephemeral
+    teardown removed the pidfile but survived.
 
     Returns:
         The PID if running, None otherwise.
+    """
+    pid = _check_running_via_pidfile(pid_file)
+    if pid is not None:
+        return pid
+    return _pid_on_socket(ipc_socket) if ipc_socket else None
+
+
+def _check_running_via_pidfile(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
+    """Check the pidfile alone for a running server (no socket fallback).
+
+    Returns:
+        The PID if the pidfile names a live process, None otherwise.
     """
     if not os.path.exists(pid_file):
         return None
@@ -1393,7 +1490,10 @@ def _reap_orphan_descendants(pids: List[int]) -> int:
     return killed
 
 
-def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
+def stop_server(
+    pid_file: str = DEFAULT_PID_FILE,
+    ipc_socket: Optional[str] = None,
+) -> bool:
     """Stop a running server.
 
     Snapshots the daemon's descendant PIDs BEFORE sending SIGTERM
@@ -1406,7 +1506,7 @@ def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
     Returns:
         True if stopped, False if not running.
     """
-    pid = check_running(pid_file)
+    pid = check_running(pid_file, ipc_socket)
     if not pid:
         return False
 
@@ -1756,12 +1856,18 @@ Examples:
 
     # Handle --status
     if args.status:
-        pid = check_running(args.pid_file)
+        pid = check_running(args.pid_file, args.ipc_socket or DEFAULT_SOCKET_PATH)
         if pid:
             print(f"Jaato server is running (PID: {pid})")
             # Show socket info
             if os.path.exists(DEFAULT_SOCKET_PATH):
                 print(f"  IPC socket: {DEFAULT_SOCKET_PATH}")
+            # Surface the RUNNING daemon's active JAATO_* overrides (read from
+            # its own /proc/<pid>/environ, not this shell's), secrets redacted.
+            from server.env_report import format_overrides, read_proc_environ
+            daemon_env = read_proc_environ(pid)
+            if daemon_env:
+                print(f"  {format_overrides(daemon_env)}")
             sys.exit(0)
         else:
             print("Jaato server is not running")
@@ -1769,7 +1875,7 @@ Examples:
 
     # Handle --stop
     if args.stop:
-        if stop_server(args.pid_file):
+        if stop_server(args.pid_file, args.ipc_socket or DEFAULT_SOCKET_PATH):
             print("Jaato server stopped")
             sys.exit(0)
         else:
@@ -1785,10 +1891,11 @@ Examples:
             sys.exit(1)
 
         # Stop current server
-        pid = check_running(args.pid_file)
+        _probe = args.ipc_socket or DEFAULT_SOCKET_PATH
+        pid = check_running(args.pid_file, _probe)
         if pid:
             print(f"Stopping server (PID: {pid})...")
-            if not stop_server(args.pid_file):
+            if not stop_server(args.pid_file, _probe):
                 print("Error: Failed to stop server")
                 sys.exit(1)
             print("Server stopped")
@@ -1826,8 +1933,11 @@ Examples:
         else:
             print(f"No endpoint specified, using default IPC socket: {args.ipc_socket}")
 
-    # Check if already running
-    pid = check_running(args.pid_file)
+    # Check if already running.  Pass the socket being started so a daemon
+    # already bound to it is detected even when its pidfile is missing/stale
+    # — preventing a duplicate daemon (the Unix analog of the Windows
+    # named-pipe fallback below).
+    pid = check_running(args.pid_file, args.ipc_socket)
     if pid:
         print(f"Error: Jaato server is already running (PID: {pid})")
         print(f"  Use 'python -m server --stop' to stop it")
@@ -1849,7 +1959,7 @@ Examples:
             pass  # Best-effort; ctypes may not be available
 
     # Daemonize if requested (skip if already daemonized on Windows)
-    if args.daemon and not os.environ.get("JAATO_DAEMONIZED"):
+    if args.daemon and not os.environ.get("JAATO_DAEMONIZED"):  # env: internal — set by the daemonizer for its re-exec'd child; not an operator knob
         print(f"Starting Jaato server as daemon...")
         print(f"  PID file: {args.pid_file}")
         print(f"  Log file: {args.log_file}")
@@ -1859,6 +1969,12 @@ Examples:
             print(f"  WebSocket: {args.web_socket}")
         if args.dashboard_port:
             print(f"  Dashboard: :{args.dashboard_port}")
+        # Surface the operator's active JAATO_* env overrides at startup so a
+        # feature flag set in a previous session isn't silently forgotten.
+        # (Full catalog of every framework env var lives in
+        # ``jaato-scaffold explain env``.)
+        from server.env_report import format_overrides
+        print(f"  {format_overrides(dict(os.environ))}")
         daemonize(args.log_file)
 
     # Reconfigure logging for daemon/background mode with rotating file handler

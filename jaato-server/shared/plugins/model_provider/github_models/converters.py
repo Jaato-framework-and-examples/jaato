@@ -38,6 +38,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     TokenUsage,
     ToolResult,
+    render_result_for_model,
     ToolSchema,
 )
 
@@ -135,8 +136,15 @@ def tool_schemas_to_sdk(schemas: Optional[List[ToolSchema]]) -> Optional[List[Ch
 
 # ==================== Message Conversion ====================
 
-def message_to_sdk(message: Message) -> ChatRequestMessage:
-    """Convert internal Message to SDK ChatRequestMessage.
+def message_to_sdk(message: Message) -> List["ChatRequestMessage"]:
+    """Convert internal Message to SDK ChatRequestMessage(s).
+
+    Returns a LIST: one internal ``TOOL`` message can carry N parallel
+    ``function_response`` parts (a parallel tool-call batch is appended as a
+    single ``Message(role=TOOL, parts=[...N...])``), and the chat format
+    requires ONE ``ToolMessage`` per ``tool_call_id``.  Emitting only
+    ``function_responses[0]`` silently dropped results #2..N off the wire.
+    Non-tool messages map to a single-element list.
 
     The SDK uses different message classes for different roles:
     - SystemMessage for system prompts
@@ -157,13 +165,16 @@ def message_to_sdk(message: Message) -> ChatRequestMessage:
     function_responses = [p.function_response for p in message.parts if p.function_response]
 
     if function_responses:
-        # Tool result message - use the first response
-        fr = function_responses[0]
-        result_str = json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
-        return get_models().ToolMessage(
-            tool_call_id=fr.call_id,
-            content=result_str,
-        )
+        # One ``ToolMessage`` PER function_response so all N parallel
+        # results reach the model (each keyed by its own call_id).
+        tool_msgs: List["ChatRequestMessage"] = []
+        for fr in function_responses:
+            result_str = render_result_for_model(fr.result, fr.model_suffix, untrusted=fr.untrusted, untrusted_source=fr.untrusted_source)
+            tool_msgs.append(get_models().ToolMessage(
+                tool_call_id=fr.call_id,
+                content=result_str,
+            ))
+        return tool_msgs
 
     if role == Role.MODEL:
         # Assistant message - may include tool calls
@@ -178,14 +189,14 @@ def message_to_sdk(message: Message) -> ChatRequestMessage:
                 )
                 for fc in function_calls
             ]
-            return get_models().AssistantMessage(
+            return [get_models().AssistantMessage(
                 content=content if content else None,
                 tool_calls=tool_calls,
-            )
-        return get_models().AssistantMessage(content=content)
+            )]
+        return [get_models().AssistantMessage(content=content)]
 
     # Default to user message
-    return get_models().UserMessage(content=content)
+    return [get_models().UserMessage(content=content)]
 
 
 def message_from_sdk(msg: "ChatRequestMessage") -> Message:
@@ -248,7 +259,11 @@ def message_from_sdk(msg: "ChatRequestMessage") -> Message:
 
 def history_to_sdk(history: List[Message]) -> List[ChatRequestMessage]:
     """Convert internal history to SDK message list."""
-    return [message_to_sdk(m) for m in (history or [])]
+    # Flatten: message_to_sdk returns a LIST (a TOOL message with N
+    # parallel function_responses → N wire ToolMessages).
+    return [
+        wire for m in (history or []) for wire in message_to_sdk(m)
+    ]
 
 
 def history_from_sdk(history: List[ChatRequestMessage]) -> List[Message]:

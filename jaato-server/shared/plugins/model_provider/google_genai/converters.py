@@ -111,12 +111,12 @@ def part_to_sdk(part: Part) -> get_types().Part:
         )
 
     if part.function_response is not None:
-        fr = part.function_response
-        response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
-        return get_types().Part.from_function_response(
-            name=name_to_id(fr.name),
-            response=response
-        )
+        # Delegate to the multimodal-aware builder so a tool result's image
+        # attachments actually reach the model.  The inline
+        # ``from_function_response`` here dropped ``attachments`` silently — the
+        # live history_to_sdk path never used tool_result_to_sdk_part, so
+        # google_genai declared-but-didn't-deliver tool-result vision.
+        return tool_result_to_sdk_part(part.function_response)
 
     if part.inline_data is not None:
         return get_types().Part(
@@ -243,13 +243,31 @@ def tool_result_to_sdk_part(result: ToolResult) -> get_types().Part:
     response = result.result if isinstance(result.result, dict) else {"result": result.result}
     if result.is_error:
         response = {"error": str(result.result)}
+    elif result.untrusted:
+        # Untrusted external content (web_fetch/web_search/MCP): deliver the
+        # result as a single boundary-wrapped field so the model treats it as
+        # data, not instructions (indirect-prompt-injection mitigation).
+        from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+        _text = result.result if isinstance(result.result, str) else json.dumps(result.result)
+        response = {"untrusted_external_content":
+                    wrap_untrusted_content(_text, result.untrusted_source)}
+    # Dict-response provider: deliver the model-facing steering suffix as a
+    # reserved key (model still sees it; the structured result + ledger stay
+    # clean — the ledger reads history, not this converter output).
+    if result.model_suffix:
+        response = {**response, "_agent_guidance": result.model_suffix}
+
+    # Names must be id-mapped to match the function_call name emitted at
+    # part_to_sdk (``name_to_id(fc.name)``) — otherwise google can't pair the
+    # response to its call.
+    fn_name = name_to_id(result.name)
 
     # Handle multimodal attachments
     if result.attachments:
-        return _build_multimodal_function_response(result.name, response, result.attachments)
+        return _build_multimodal_function_response(fn_name, response, result.attachments)
 
     return get_types().Part.from_function_response(
-        name=result.name,
+        name=fn_name,
         response=response
     )
 

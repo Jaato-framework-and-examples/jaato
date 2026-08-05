@@ -373,6 +373,11 @@ class LocalJupyterBackend(NotebookBackend):
             The value of the last expression, or None if not applicable
         """
         import ast
+        from ..cell_transform import transform_cell_source, inject_shell_helper
+
+        # IPython-style `!shell` lines -> a helper call that streams output.
+        code = transform_cell_source(code)
+        inject_shell_helper(namespace)
 
         try:
             # Parse the code into an AST

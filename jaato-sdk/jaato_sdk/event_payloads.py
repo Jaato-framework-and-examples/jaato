@@ -141,6 +141,9 @@ class AgentCreatedPayload(TypedDict):
     profile_name: NotRequired[Optional[str]]
     parent_agent_id: NotRequired[Optional[str]]
     created_at: NotRequired[Optional[str]]
+    # Daemon-side session identifier (server 0.6.175+); mirrors the
+    # AgentCreatedEvent field added for per-stage session_id correlation.
+    session_id: NotRequired[str]
 
 
 class AgentOutputPayload(TypedDict):
@@ -203,6 +206,7 @@ class ToolCallCompletedPayload(TypedDict):
     tool_name: str
     call_id: NotRequired[Optional[str]]
     success: bool
+    is_error_result: NotRequired[bool]  # computed deeper error check — success=True but error body; distinct from `success`
     duration_seconds: float
     error_message: NotRequired[Optional[str]]
     backgrounded: NotRequired[bool]
@@ -243,7 +247,10 @@ class TurnCompletedPayload(TypedDict):
 
     Source: ``TurnCompletedEvent``.  ``usage`` mirrors the
     ``UsageBreakdown`` shape on the wire (token counts, cache hits,
-    reasoning/thinking tokens, optional ``cost_usd``).
+    reasoning/thinking tokens, optional ``cost_usd``).  ``finish_reason``
+    is the terminal response's ``FinishReason`` value (``"stop"`` by
+    default; ``"max_tokens"`` / ``"safety"`` / ``"error"`` flag an
+    abnormal/truncated turn).
     """
     agent_id: str
     turn_number: int
@@ -251,6 +258,7 @@ class TurnCompletedPayload(TypedDict):
     duration_seconds: float
     function_calls: List[Dict[str, Any]]
     formatted_text: NotRequired[Optional[str]]
+    finish_reason: str
 
 
 class TurnProgressPayload(TypedDict):

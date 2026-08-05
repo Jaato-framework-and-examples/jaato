@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -70,6 +71,13 @@
           <li><a href="ollama.html">Ollama</a></li>
           <li><a href="zhipuai.html">Zhipu AI</a></li>
           <li><a href="nim.html">NVIDIA NIM</a></li>
+          <li><a href="lmstudio.html">LM Studio</a></li>
+          <li><a href="vllm.html">vLLM</a></li>
+          <li><a href="tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="openrouter.html">OpenRouter</a></li>
+          <li><a href="nebius.html">Nebius</a></li>
+          <li><a href="ovhcloud.html">OVHcloud</a></li>
+          <li><a href="triton.html">Triton</a></li>
         </ul>
       </div>
 
@@ -162,6 +170,48 @@
                 <td>Available</td>
                 <td>Llama, DeepSeek-R1, Nemotron</td>
               </tr>
+              <tr>
+                <td><strong><a href="lmstudio.html">LM Studio</a></strong></td>
+                <td><code>lmstudio</code></td>
+                <td>Available</td>
+                <td>Any model loaded in LM Studio (local)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="vllm.html">vLLM</a></strong></td>
+                <td><code>vllm</code></td>
+                <td>Available</td>
+                <td>200+ architectures via self-hosted vLLM server (local/GPU)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="tensorrt-llm.html">TensorRT-LLM</a></strong></td>
+                <td><code>tensorrt_llm</code></td>
+                <td>Available</td>
+                <td>NVIDIA TensorRT-LLM engines via trtllm-serve (self-hosted GPU)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="triton.html">Triton</a></strong></td>
+                <td><code>triton</code></td>
+                <td>Available</td>
+                <td>Triton Inference Server &mdash; OpenAI frontend + KServe v2 (self-hosted)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="openrouter.html">OpenRouter</a></strong></td>
+                <td><code>openrouter</code></td>
+                <td>Available</td>
+                <td>300+ models (OpenAI, Anthropic, Google, Meta, Mistral, DeepSeek&hellip;)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="nebius.html">Nebius Token Factory</a></strong></td>
+                <td><code>nebius</code></td>
+                <td>Available</td>
+                <td>Serverless open models (Llama, Qwen, DeepSeek-R1, Mistral&hellip;)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="ovhcloud.html">OVHcloud AI Endpoints</a></strong></td>
+                <td><code>ovhcloud</code></td>
+                <td>Available</td>
+                <td>Serverless open models on OVHcloud's EU cloud (Llama, Mistral, Qwen, gpt-oss&hellip;)</td>
+              </tr>
             </tbody>
           </table>
 
@@ -210,6 +260,22 @@
                 <td>NVIDIA GPU infrastructure</td>
                 <td>NVIDIA NIM - hosted or self-hosted, Llama/DeepSeek-R1/Nemotron</td>
               </tr>
+              <tr>
+                <td>Local GUI model management</td>
+                <td>LM Studio - GUI, load control, any HuggingFace model</td>
+              </tr>
+              <tr>
+                <td>High-throughput GPU inference (self-hosted)</td>
+                <td>vLLM - PagedAttention, 200+ architectures, LoRA hot-loading</td>
+              </tr>
+              <tr>
+                <td>Maximum GPU throughput (custom engine)</td>
+                <td>TensorRT-LLM - build your own FP8/INT4 engine with trtllm-build</td>
+              </tr>
+              <tr>
+                <td>Multi-vendor / single API key</td>
+                <td>OpenRouter - 300+ models, cross-model fallback, provider routing</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -244,7 +310,8 @@ client.connect(model="qwen3:32b")</code></pre>
 providers = discover_providers()
 print(f"Available: {list(providers.keys())}")
 # ['google_genai', 'anthropic', 'github_models',
-#  'claude_cli', 'antigravity', 'ollama', 'zhipuai', 'nim']
+#  'claude_cli', 'antigravity', 'ollama', 'zhipuai', 'nim',
+#  'lmstudio', 'vllm', 'tensorrt_llm', 'openrouter']
 
 # Load a specific provider
 provider = load_provider("anthropic")
@@ -296,7 +363,7 @@ print(f"Loaded: {provider.name}")</code></pre>
             <tbody>
               <tr>
                 <td><code>JAATO_PROVIDER</code></td>
-                <td><code>anthropic</code>, <code>google_genai</code>, <code>github_models</code>, <code>claude_cli</code>, <code>antigravity</code>, <code>ollama</code>, <code>zhipuai</code>, <code>nim</code></td>
+                <td><code>anthropic</code>, <code>google_genai</code>, <code>github_models</code>, <code>claude_cli</code>, <code>antigravity</code>, <code>ollama</code>, <code>zhipuai</code>, <code>nim</code>, <code>lmstudio</code>, <code>vllm</code>, <code>tensorrt_llm</code>, <code>openrouter</code></td>
                 <td>Default provider for all sessions</td>
               </tr>
             </tbody>
@@ -402,6 +469,38 @@ client.connect()  # Reads JAATO_PROVIDER and MODEL_NAME from env</code></pre>
             <li><strong>Features:</strong> OpenAI-compatible API, function calling, streaming, reasoning (DeepSeek-R1)</li>
             <li><strong>Best for:</strong> NVIDIA GPU infrastructure, self-hosted models, NIM catalog access</li>
           </ul>
+
+          <h3>LM Studio</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> Local LM Studio server (localhost:1234)</li>
+            <li><strong>Auth:</strong> None (local) or optional bearer token</li>
+            <li><strong>Features:</strong> GUI model management, load-control API, context length auto-detection, function calling</li>
+            <li><strong>Best for:</strong> Local development with GUI, precise per-session GPU/context configuration</li>
+          </ul>
+
+          <h3>vLLM</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> Self-hosted vLLM OpenAI-compatible server</li>
+            <li><strong>Auth:</strong> Optional bearer token (<code>--api-key</code> at server launch)</li>
+            <li><strong>Features:</strong> PagedAttention, continuous batching, 200+ model architectures, LoRA hot-loading, quirks system for small models</li>
+            <li><strong>Best for:</strong> High-throughput self-hosted GPU inference, broad model architecture support</li>
+          </ul>
+
+          <h3>TensorRT-LLM</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> Self-hosted trtllm-serve instance</li>
+            <li><strong>Auth:</strong> Optional bearer token (auth proxy only; trtllm-serve has no built-in key mechanism)</li>
+            <li><strong>Features:</strong> FP8/INT4 quantization, in-flight batching, KV-cache reuse, speculative decoding</li>
+            <li><strong>Best for:</strong> Maximum GPU throughput, custom-built TensorRT-LLM engines, NVIDIA H100/A100/L40S</li>
+          </ul>
+
+          <h3>OpenRouter</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> OpenRouter API (<code>https://openrouter.ai/api/v1</code>)</li>
+            <li><strong>Auth:</strong> API key (<code>sk-or-...</code>)</li>
+            <li><strong>Features:</strong> 300+ models, cross-model fallback, provider routing, prompt caching, extended thinking, <code>openrouter/auto</code></li>
+            <li><strong>Best for:</strong> Multi-provider access via a single key, fallback resilience, model experimentation</li>
+          </ul>
         </div>
         <div class="panel-code">
           <div class="code-label">Provider capabilities</div>
@@ -438,6 +537,10 @@ print(f"Token count: {tokens}")</code></pre>
             <li><a href="ollama.html">Ollama Provider</a> - Local models, no API costs</li>
             <li><a href="zhipuai.html">Zhipu AI Provider</a> - GLM models, chain-of-thought reasoning</li>
             <li><a href="nim.html">NVIDIA NIM Provider</a> - Hosted and self-hosted NIM models</li>
+            <li><a href="lmstudio.html">LM Studio Provider</a> - Local GUI, load control</li>
+            <li><a href="vllm.html">vLLM Provider</a> - High-throughput GPU inference, quirks system</li>
+            <li><a href="tensorrt-llm.html">TensorRT-LLM Provider</a> - Custom TensorRT-LLM engines</li>
+            <li><a href="openrouter.html">OpenRouter Provider</a> - 300+ models, provider routing</li>
             <li><a href="../../core-concepts/providers.html">Provider Concepts</a> - How providers work</li>
             <li><a href="../types.html">Types Reference</a> - Provider-agnostic types</li>
           </ul>
@@ -456,7 +559,11 @@ print(f"Token count: {tokens}")</code></pre>
 ├── antigravity/         # Google IDE backend
 ├── ollama/              # Ollama local models
 ├── zhipuai/             # Zhipu AI GLM models
-└── nim/                 # NVIDIA NIM (hosted + self-hosted)</code></pre>
+├── nim/                 # NVIDIA NIM (hosted + self-hosted)
+├── lmstudio/            # LM Studio local models (OpenAI-compat + load control)
+├── vllm/                # vLLM (OpenAI-compat, self-hosted GPU, quirks)
+├── tensorrt_llm/        # TensorRT-LLM via trtllm-serve (self-hosted GPU)
+└── openrouter/          # OpenRouter (300+ models, unified gateway)</code></pre>
           </div>
         </div>
       </section>
