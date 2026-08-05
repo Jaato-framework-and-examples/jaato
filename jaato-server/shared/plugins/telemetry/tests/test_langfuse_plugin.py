@@ -50,7 +50,9 @@ class TestSettingsDerivation:
         )
         assert s["exporter"] == "otlp"
         assert s["protocol"] == "http/protobuf"
-        assert s["endpoint"] == "https://cloud.langfuse.com/api/public/otel"
+        # Full traces signal path — the base /api/public/otel POSTs 404 (the HTTP
+        # exporter uses an explicit endpoint verbatim, no /v1/traces append).
+        assert s["endpoint"] == "https://cloud.langfuse.com/api/public/otel/v1/traces"
         assert s["headers"]["Authorization"] == _basic("pk-lf-1", "sk-lf-2")
 
     def test_keys_from_env(self, monkeypatch):
@@ -58,14 +60,14 @@ class TestSettingsDerivation:
         monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-env")
         s = LangfusePlugin._resolve_settings({})
         assert s["headers"]["Authorization"] == _basic("pk-env", "sk-env")
-        assert s["endpoint"] == "https://cloud.langfuse.com/api/public/otel"
+        assert s["endpoint"] == "https://cloud.langfuse.com/api/public/otel/v1/traces"
 
     def test_custom_host_self_hosted(self):
         s = LangfusePlugin._resolve_settings(
             {"public_key": "p", "secret_key": "s", "host": "https://lf.internal:3000/"}
         )
-        # Trailing slash trimmed; /api/public/otel appended.
-        assert s["endpoint"] == "https://lf.internal:3000/api/public/otel"
+        # Trailing slash trimmed; /api/public/otel/v1/traces appended.
+        assert s["endpoint"] == "https://lf.internal:3000/api/public/otel/v1/traces"
 
     def test_explicit_endpoint_preserved(self):
         s = LangfusePlugin._resolve_settings(
@@ -139,3 +141,7 @@ class TestDerivedConfigSelectsHttpExporter:
         assert type(exporter).__module__ == (
             "opentelemetry.exporter.otlp.proto.http.trace_exporter"
         )
+        # Regression guard: the exporter must POST to the full traces signal path.
+        # The HTTP exporter uses an explicit endpoint verbatim, so a base without
+        # /v1/traces silently 404s against Langfuse (the bug this fix closes).
+        assert exporter._endpoint.endswith("/api/public/otel/v1/traces")

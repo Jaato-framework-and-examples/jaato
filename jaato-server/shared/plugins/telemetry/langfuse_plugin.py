@@ -7,8 +7,11 @@ not a second emission path. This subclass exists only to remove the three
 Langfuse-specific footguns that otherwise make the generic OTLP path fail
 silently against Langfuse:
 
-1. **Endpoint path** — Langfuse ingests at ``<host>/api/public/otel``, not
-   the bare host.
+1. **Endpoint path** — Langfuse's OTLP traces endpoint is
+   ``<host>/api/public/otel/v1/traces``. jaato passes this to the OTLP/HTTP
+   exporter as an explicit endpoint (POSTed verbatim, no ``/v1/traces``
+   auto-append), so the full signal path — not the bare host, and not just the
+   ``/api/public/otel`` base — must be baked in or Langfuse returns 404.
 2. **Transport** — Langfuse is OTLP/HTTP only; jaato's exporter is
    gRPC-first, so the protocol must be pinned to ``http/protobuf``.
 3. **Auth** — HTTP Basic over ``base64("<public_key>:<secret_key>")`` (not
@@ -41,7 +44,13 @@ from .otel_plugin import OTelPlugin
 logger = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "https://cloud.langfuse.com"
-_OTEL_PATH = "/api/public/otel"
+# Full OTLP/HTTP *traces* signal path, not just Langfuse's ``/api/public/otel``
+# base. ``OTelPlugin._create_exporter`` hands this to the OTLP/HTTP exporter as
+# its explicit ``endpoint=`` kwarg, which is POSTed verbatim — the exporter only
+# appends ``/v1/traces`` when it reads a *base* from ``OTEL_EXPORTER_OTLP_ENDPOINT``
+# itself, never for an explicit endpoint. So the base alone POSTs to
+# ``/api/public/otel`` and Langfuse returns 404; the signal path must be baked in.
+_OTEL_PATH = "/api/public/otel/v1/traces"
 
 
 class LangfusePlugin(OTelPlugin):
@@ -87,8 +96,8 @@ class LangfusePlugin(OTelPlugin):
         if "protocol" not in settings and not os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL"):
             settings["protocol"] = "http/protobuf"
 
-        # Endpoint: derive <host>/api/public/otel unless one is already given
-        # (config key or the standard OTLP env var).
+        # Endpoint: derive <host>/api/public/otel/v1/traces unless one is already
+        # given (config key or the standard OTLP env var).
         if "endpoint" not in settings and not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
             settings["endpoint"] = host.rstrip("/") + _OTEL_PATH
 
