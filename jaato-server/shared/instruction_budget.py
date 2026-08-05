@@ -13,6 +13,63 @@ from enum import Enum
 from typing import Dict, Optional, List, Any
 
 
+class PayloadExceedsContextError(Exception):
+    """Raised when the next ``provider.complete()`` would send a prompt
+    that exceeds the model's context window, and GC has nothing
+    droppable left to reclaim.
+
+    The framework refuses to dispatch the doomed request and surfaces
+    a structured error pointing at the concrete knobs the operator can
+    turn: reduce ``max_tokens``, switch to a larger-window model, or
+    trim the agent profile (system_instructions, tools, body-wired
+    schemas).
+
+    Without this gate the prompt would be sent to the upstream and
+    rejected with a misleading template message (e.g. vLLM 0.22's
+    ``"prompt contains at least N tokens"`` where N is
+    ``max_model_len + 1 - max_tokens`` — a deterministic lower-bound
+    template that under-reports the real prompt size).
+
+    Attributes:
+        total_tokens: Framework's accounted prompt token count (post-GC).
+        max_output_tokens: Provider's per-request output cap, or ``None``
+            when the provider exposes no cap (gate then fires on prompt
+            alone exceeding ``context_limit``).
+        context_limit: Operator-configured context window.
+    """
+
+    def __init__(
+        self,
+        total_tokens: int,
+        max_output_tokens: Optional[int],
+        context_limit: int,
+        message: Optional[str] = None,
+    ):
+        self.total_tokens = total_tokens
+        self.max_output_tokens = max_output_tokens
+        self.context_limit = context_limit
+        if message is None:
+            if max_output_tokens is not None:
+                projected = total_tokens + max_output_tokens
+                message = (
+                    f"Payload of {total_tokens} prompt tokens + "
+                    f"max_tokens={max_output_tokens} = {projected} would "
+                    f"exceed context_limit={context_limit}. GC has nothing "
+                    f"droppable. Reduce max_tokens, switch to a "
+                    f"larger-window model, or trim the agent profile "
+                    f"(system_instructions, tools, body-wired schemas)."
+                )
+            else:
+                message = (
+                    f"Payload of {total_tokens} prompt tokens exceeds "
+                    f"context_limit={context_limit}. GC has nothing "
+                    f"droppable. Switch to a larger-window model or trim "
+                    f"the agent profile (system_instructions, tools, "
+                    f"body-wired schemas)."
+                )
+        super().__init__(message)
+
+
 class InstructionSource(Enum):
     """The 5 tracked instruction source layers."""
     SYSTEM = "system"           # System instructions (children: base, client, framework)

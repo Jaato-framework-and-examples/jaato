@@ -235,6 +235,11 @@ class TestJaatoSessionSendMessage:
         # Mock streaming support (enabled by default)
         mock_provider.supports_streaming.return_value = True
         mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
+        # Providers always return an int context window; the budget builder
+        # feeds it into context_limit, which the pre-flight refuse-send gate
+        # compares against. Without a realistic int here the gate would see a
+        # MagicMock and TypeError on ``<=``.
+        mock_provider.get_context_limit.return_value = 128_000
 
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []
@@ -1668,3 +1673,233 @@ class TestForceNarrationBetweenToolsQuirk:
         ]
         assert len(warnings) == 1
         assert "made_up_quirk_does_not_exist" in warnings[0]
+
+
+class TestAssertPayloadFitsContext:
+    """Tests for JaatoSession._assert_payload_fits_context() — the
+    PR-β pre-flight refuse-send gate.
+
+    The gate raises ``PayloadExceedsContextError`` when the framework's
+    accounted prompt budget (post-GC) plus the provider's configured
+    ``max_tokens`` cap would exceed the model's context window.
+    """
+
+    def _make_session_with_budget(
+        self,
+        total_tokens: int,
+        context_limit: int,
+        provider_max_output_tokens=...,
+    ):
+        """Build a minimally-stubbed session whose budget reports the
+        given totals.  When ``provider_max_output_tokens`` is the
+        sentinel ``...``, the provider exposes no ``get_max_output_tokens``
+        method (mimics anthropic/google_genai/etc).  Otherwise the
+        provider's method returns the supplied value.
+        """
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "test-model")
+
+        # Stub the instruction budget directly.
+        mock_budget = MagicMock()
+        mock_budget.total_tokens.return_value = total_tokens
+        mock_budget.context_limit = context_limit
+        session._instruction_budget = mock_budget
+
+        # Stub a provider (the gate checks both _provider AND _instruction_budget).
+        mock_provider = MagicMock(spec=[])  # spec=[] → no implicit attrs
+        if provider_max_output_tokens is not ...:
+            # Attach the method explicitly with the supplied return value.
+            mock_provider.get_max_output_tokens = MagicMock(
+                return_value=provider_max_output_tokens
+            )
+        session._provider = mock_provider
+
+        return session
+
+    def test_no_budget_is_noop(self):
+        """No instruction_budget → no gate (no-op, no raise)."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "test-model")
+        session._instruction_budget = None
+        session._provider = MagicMock()
+
+        # Must not raise.
+        session._assert_payload_fits_context()
+
+    def test_no_provider_is_noop(self):
+        """No provider → no gate (no wire-send pending)."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "test-model")
+        mock_budget = MagicMock()
+        mock_budget.total_tokens.return_value = 999_999
+        mock_budget.context_limit = 100
+        session._instruction_budget = mock_budget
+        session._provider = None
+
+        # Must not raise even with budget wildly over limit.
+        session._assert_payload_fits_context()
+
+    def test_context_limit_zero_is_noop(self):
+        """Degenerate context_limit=0 → gate disabled."""
+        session = self._make_session_with_budget(
+            total_tokens=999_999, context_limit=0,
+        )
+        # Must not raise.
+        session._assert_payload_fits_context()
+
+    def test_raises_when_total_plus_max_tokens_exceeds_limit(self):
+        """Empirical qwen3-14b case: total 42,312 + max_tokens 2,048
+        = 44,360 > limit 40,960.  Gate must fire with the projected
+        total in the message."""
+        from shared.instruction_budget import PayloadExceedsContextError
+
+        session = self._make_session_with_budget(
+            total_tokens=42_312,
+            context_limit=40_960,
+            provider_max_output_tokens=2_048,
+        )
+        with pytest.raises(PayloadExceedsContextError) as exc_info:
+            session._assert_payload_fits_context()
+
+        assert exc_info.value.total_tokens == 42_312
+        assert exc_info.value.max_output_tokens == 2_048
+        assert exc_info.value.context_limit == 40_960
+
+    def test_raises_when_prompt_alone_exceeds_limit_no_max_tokens(self):
+        """Provider exposes no max_output_tokens (e.g. anthropic,
+        google_genai).  Gate fires only when prompt ALONE exceeds
+        the limit."""
+        from shared.instruction_budget import PayloadExceedsContextError
+
+        # Provider has no get_max_output_tokens method.
+        session = self._make_session_with_budget(
+            total_tokens=50_000,
+            context_limit=40_960,
+            # provider_max_output_tokens omitted → no method attached
+        )
+        with pytest.raises(PayloadExceedsContextError) as exc_info:
+            session._assert_payload_fits_context()
+
+        assert exc_info.value.total_tokens == 50_000
+        assert exc_info.value.max_output_tokens is None
+        assert exc_info.value.context_limit == 40_960
+
+    def test_no_raise_when_under_limit_with_max_tokens(self):
+        """total + max_tokens < limit → no raise."""
+        session = self._make_session_with_budget(
+            total_tokens=30_000,
+            context_limit=40_960,
+            provider_max_output_tokens=2_048,
+        )
+        # 30000 + 2048 = 32048 < 40960 → must not raise.
+        session._assert_payload_fits_context()
+
+    def test_no_raise_when_under_limit_without_max_tokens(self):
+        """total < limit and no max_tokens → no raise."""
+        session = self._make_session_with_budget(
+            total_tokens=30_000,
+            context_limit=40_960,
+        )
+        # 30000 < 40960 → must not raise.
+        session._assert_payload_fits_context()
+
+    def test_no_raise_when_prompt_alone_under_limit_even_if_sum_would_exceed(self):
+        """Provider exposes no max_output_tokens, so the gate ignores
+        any output cap and considers only prompt vs context_limit.
+        This is the 'degraded coverage' case documented in the helper
+        docstring — caught by the upstream 400 instead."""
+        session = self._make_session_with_budget(
+            total_tokens=39_000,
+            context_limit=40_960,
+            # No get_max_output_tokens method → gate uses prompt only.
+        )
+        # 39000 < 40960 → does NOT raise (even though 39000 + a
+        # hypothetical 4096 output budget would land at 43096 > limit).
+        # Coverage gap is documented; not the framework's job to
+        # invent a number it doesn't know.
+        session._assert_payload_fits_context()
+
+    def test_max_output_tokens_zero_treated_as_unknown(self):
+        """A provider returning 0 (degenerate config) is treated as
+        'no cap exposed' — gate falls back to prompt-only check.
+        Avoids spurious raises on 'prompt + 0 > limit when prompt
+        is exactly at limit'."""
+        from shared.instruction_budget import PayloadExceedsContextError
+
+        # 41000 > 40960 → still raises on prompt-only check.
+        session = self._make_session_with_budget(
+            total_tokens=41_000,
+            context_limit=40_960,
+            provider_max_output_tokens=0,
+        )
+        with pytest.raises(PayloadExceedsContextError) as exc_info:
+            session._assert_payload_fits_context()
+        assert exc_info.value.max_output_tokens is None
+
+        # 30000 < 40960 → no raise (despite the 0 return value).
+        session = self._make_session_with_budget(
+            total_tokens=30_000,
+            context_limit=40_960,
+            provider_max_output_tokens=0,
+        )
+        session._assert_payload_fits_context()
+
+    def test_provider_get_max_output_tokens_exception_treated_as_unknown(self):
+        """If get_max_output_tokens raises, gate falls back to
+        prompt-only check rather than propagating the inner error."""
+        mock_runtime = MagicMock()
+        session = JaatoSession(mock_runtime, "test-model")
+
+        mock_budget = MagicMock()
+        mock_budget.total_tokens.return_value = 30_000
+        mock_budget.context_limit = 40_960
+        session._instruction_budget = mock_budget
+
+        mock_provider = MagicMock(spec=[])
+        mock_provider.get_max_output_tokens = MagicMock(
+            side_effect=RuntimeError("boom"),
+        )
+        session._provider = mock_provider
+
+        # 30000 < 40960 prompt-only → no raise.  The provider's
+        # buggy method must not crash the gate.
+        session._assert_payload_fits_context()
+
+
+class TestProviderGetMaxOutputTokens:
+    """Tests for the get_max_output_tokens() method added to vllm,
+    openrouter, and tensorrt_llm providers in PR-β.  Pins the contract:
+    returns the configured output cap (or ``None`` when unset).
+    """
+
+    def test_vllm_returns_max_tokens(self):
+        from shared.plugins.model_provider.vllm.provider import VLLMProvider
+
+        p = VLLMProvider()
+        # Default (unset) returns None.
+        assert p.get_max_output_tokens() is None
+
+        # Configured value passes through.
+        p._max_tokens = 2_048
+        assert p.get_max_output_tokens() == 2_048
+
+    def test_openrouter_returns_max_tokens(self):
+        from shared.plugins.model_provider.openrouter.provider import OpenRouterProvider
+
+        p = OpenRouterProvider()
+        assert p.get_max_output_tokens() is None
+
+        p._max_tokens = 4_096
+        assert p.get_max_output_tokens() == 4_096
+
+    def test_tensorrt_llm_returns_max_tokens(self):
+        from shared.plugins.model_provider.tensorrt_llm.provider import TensorRTLLMProvider
+
+        p = TensorRTLLMProvider()
+        # Default (unset) returns None.  This provider stores its cap in
+        # ``_api_params["max_tokens"]`` (OpenAI-compat base), NOT a
+        # ``_max_tokens`` attribute — see get_max_output_tokens().
+        assert p.get_max_output_tokens() is None
+
+        p._api_params["max_tokens"] = 8_192
+        assert p.get_max_output_tokens() == 8_192

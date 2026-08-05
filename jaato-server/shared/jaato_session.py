@@ -75,6 +75,7 @@ from .instruction_budget import (
     GCPolicy,
     PluginToolType,
     DEFAULT_TOOL_POLICIES,
+    PayloadExceedsContextError,
 )
 from .instruction_token_cache import InstructionTokenCache
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
@@ -3233,6 +3234,93 @@ class JaatoSession:
         # Emit budget update event
         self._emit_instruction_budget_update()
 
+    def _assert_payload_fits_context(self) -> None:
+        """Pre-flight refuse-send gate.
+
+        Raises ``PayloadExceedsContextError`` when the framework's
+        accounted prompt budget (post-GC) plus the provider's
+        configured ``max_tokens`` cap would exceed the model's
+        context window.
+
+        Call this immediately before a ``provider.complete()`` dispatch,
+        AFTER the outgoing prompt is in history and the budget has been
+        refreshed (``_update_conversation_budget``) — otherwise the
+        gate reads a budget that doesn't yet reflect the prompt about to
+        be sent.  The call sites are the two dispatch chokepoints: the
+        initial turn dispatch in ``_run_chat_loop`` (after the user
+        message is appended) and the intra-turn tool-results dispatch.
+
+        No-ops when:
+
+        - ``self._instruction_budget`` is ``None`` (no budget tracking,
+          can't gate)
+        - ``self._provider`` is ``None`` (no wire-send pending)
+        - ``budget.context_limit`` is ``0`` (honest-unknown limit — the
+          framework does not invent a window it wasn't told)
+
+        The gate uses ``budget.total_tokens()`` (post-GC) compared
+        against ``budget.context_limit``.  When the provider exposes a
+        ``get_max_output_tokens()`` method (vllm, openrouter,
+        tensorrt_llm at time of writing), the comparison includes that
+        cap; otherwise it fires only when the prompt ALONE exceeds the
+        limit.
+
+        Rationale: vLLM 0.22 rejects any request where ``prompt +
+        max_tokens > max_model_len`` with the misleading template
+        message ``"prompt contains at least N tokens"`` where ``N =
+        max_model_len + 1 - max_tokens`` (a deterministic lower-bound
+        template, NOT the real prompt size).  This gate refuses the
+        doomed dispatch and surfaces a structured error pointing at
+        the concrete knobs the operator can turn.
+        """
+        if not self._instruction_budget:
+            return
+        if not self._provider:
+            return
+        limit = self._instruction_budget.context_limit
+        if limit <= 0:
+            return
+
+        total = self._instruction_budget.total_tokens()
+
+        # Provider-side per-request output cap, if exposed.  Three
+        # providers expose this today (vllm / openrouter /
+        # tensorrt_llm); others inherit no method and the gate
+        # degrades to prompt-only.
+        max_tokens: Optional[int] = None
+        get_max = getattr(self._provider, 'get_max_output_tokens', None)
+        if callable(get_max):
+            try:
+                value = get_max()
+            except Exception:
+                value = None
+            if isinstance(value, int) and value > 0:
+                max_tokens = value
+
+        if max_tokens is not None:
+            projected = total + max_tokens
+            if projected > limit:
+                self._trace(
+                    f"REFUSE_SEND: total={total} + max_tokens={max_tokens} "
+                    f"= {projected} > context_limit={limit}"
+                )
+                raise PayloadExceedsContextError(
+                    total_tokens=total,
+                    max_output_tokens=max_tokens,
+                    context_limit=limit,
+                )
+        else:
+            if total > limit:
+                self._trace(
+                    f"REFUSE_SEND: total={total} > context_limit={limit} "
+                    f"(provider exposes no max_tokens; gate on prompt alone)"
+                )
+                raise PayloadExceedsContextError(
+                    total_tokens=total,
+                    max_output_tokens=None,
+                    context_limit=limit,
+                )
+
     def _update_thinking_budget(self, thinking_tokens: int) -> None:
         """Update THINKING entry in instruction budget with cumulative thinking tokens."""
         if not self._instruction_budget:
@@ -4837,6 +4925,15 @@ NOTES
             self._update_conversation_budget()
             self._maybe_collect_before_send()
 
+        # 2.7. Intra-turn refuse-send gate (dispatch chokepoint).  Refresh the
+        # budget so it reflects the post-GC tool-results payload about to be
+        # sent, then refuse if it still exceeds the context window.  Runs
+        # regardless of GC config (GC only tries to reduce; the gate is the
+        # hard stop) — the refresh above is inside the GC branch and would be
+        # skipped when GC is disabled.
+        self._update_conversation_budget()
+        self._assert_payload_fits_context()
+
         # 3. Send results and get continuation
         response = self._send_tool_results_and_continue(
             tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
@@ -4977,6 +5074,18 @@ NOTES
             # The message stays in history across retries (correct: the user DID send it).
             # Rolled back in the outer except block if all retries fail.
             self._history.append(Message.from_text(Role.USER, message))
+
+            # Pre-flight refuse-send gate (dispatch chokepoint).  The user
+            # message is now in history; refresh the budget so it reflects
+            # THIS outgoing prompt, then refuse to dispatch if the accounted
+            # payload (plus the provider's max_tokens cap when known) exceeds
+            # the context window.  Placed here — not at the top of
+            # send_message — because that is before the prompt is appended, so
+            # the budget there cannot see it (the single massive first-turn
+            # prompt would slip through).  Runs once before the rewind retry
+            # loop.
+            self._update_conversation_budget()
+            self._assert_payload_fits_context()
 
             # Send message (streaming or batched) with telemetry.
             #
