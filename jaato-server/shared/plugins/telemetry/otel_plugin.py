@@ -734,6 +734,26 @@ class OTelPlugin:
         if daemon_sid:
             attrs["jaato.session_id"] = daemon_sid
 
+    def _inject_session_id(self, attrs: Dict[str, Any]) -> None:
+        """Stamp the OpenInference ``session.id`` on a child span.
+
+        The turn (AGENT root) span already carries ``session.id``.
+        Propagating the SAME id onto child ``llm`` / ``tool`` spans lets
+        observability backends filter and aggregate **per observation** by
+        session, not just at the trace root — the practice Langfuse
+        recommends for OTLP ingestion (trace-level attributes should be
+        present on every span). ``session.id`` is read by Langfuse's
+        ingestion mapping directly (it accepts the OpenInference key
+        alongside ``langfuse.session.id``).
+
+        The active turn's session id lives on the thread-local
+        (``agent_id``, set by :meth:`turn_span`); this is a no-op outside a
+        turn context or if a caller already set ``session.id`` explicitly.
+        """
+        session_id = getattr(self._agent_context, "agent_id", None)
+        if session_id and "session.id" not in attrs:
+            attrs["session.id"] = session_id
+
     def _get_context_metadata(self) -> Dict[str, Any]:
         """Build metadata dict from thread-local context.
 
@@ -890,6 +910,7 @@ class OTelPlugin:
             "llm.model_name": model,
         }
         self._inject_daemon_session_id(attrs)
+        self._inject_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["streaming"] = streaming
@@ -930,6 +951,7 @@ class OTelPlugin:
             "tool.id": call_id,
         }
         self._inject_daemon_session_id(attrs)
+        self._inject_session_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["plugin_type"] = plugin_type

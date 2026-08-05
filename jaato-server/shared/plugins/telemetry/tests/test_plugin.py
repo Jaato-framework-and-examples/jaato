@@ -1024,3 +1024,45 @@ class TestOTLPProtocolSelection:
             env="http/protobuf",
         )
         assert type(exp).__module__ == self._GRPC_MOD
+
+
+@pytest.mark.skipif(not OTEL_AVAILABLE, reason="OpenTelemetry not installed")
+class TestSessionIdPropagation:
+    """session.id must appear on child llm/tool spans, not just the turn root.
+
+    Langfuse (and other OTLP backends) filter/aggregate per observation, so a
+    trace-level attribute like session.id has to be present on every span, not
+    only the AGENT root. Langfuse's ingestion reads the OpenInference
+    ``session.id`` key directly.
+    """
+
+    def _spans_by_kind(self, exporter):
+        return {
+            s.attributes.get("openinference.span.kind"): s
+            for s in exporter.get_finished_spans()
+        }
+
+    def test_child_spans_inherit_turn_session_id(self):
+        plugin, exporter = _create_test_plugin()
+        with plugin.turn_span(session_id="sess-xyz", agent_type="main",
+                              agent_name="main"):
+            with plugin.llm_span("m", "p"):
+                pass
+            with plugin.tool_span("cli", "call-1"):
+                pass
+        plugin.shutdown()
+
+        spans = self._spans_by_kind(exporter)
+        assert spans["AGENT"].attributes["session.id"] == "sess-xyz"
+        assert spans["LLM"].attributes["session.id"] == "sess-xyz"
+        assert spans["TOOL"].attributes["session.id"] == "sess-xyz"
+
+    def test_llm_span_without_turn_context_omits_session_id(self):
+        # Outside a turn there is no session id to attach — no crash, no key.
+        plugin, exporter = _create_test_plugin()
+        with plugin.llm_span("m", "p"):
+            pass
+        plugin.shutdown()
+
+        llm = self._spans_by_kind(exporter)["LLM"]
+        assert "session.id" not in llm.attributes

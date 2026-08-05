@@ -990,6 +990,32 @@ don't report cost. When neither supplies a number, Langfuse falls back to its
 own model-pricing catalog (model name + token counts). See §5 for the cost
 resolution path.
 
+**Best-practice alignment.** Langfuse recommends that trace-level attributes be
+present on *every* span (not only the root) so its per-observation filters and
+aggregations work. jaato stamps the OpenInference `session.id` on the turn
+(AGENT) span **and** propagates it onto the child `llm` / `tool` spans — so
+Langfuse groups the whole conversation into one Session and per-observation
+session filters resolve. All the attribute keys jaato emits are ones Langfuse's
+OTLP ingestion reads directly: `session.id`, `llm.token_count.*`,
+`gen_ai.usage.cost` / `llm.cost.total`, `llm.model_name`, and the OpenInference
+`input.value` / `llm.input_messages.*` message attributes.
+
+**Two knobs worth setting:**
+
+- **Prompt/response content is redacted by default.** jaato sets
+  `JAATO_TELEMETRY_REDACT_CONTENT=true`, so out of the box Langfuse shows
+  `[REDACTED: N chars]` instead of message text. Set
+  `JAATO_TELEMETRY_REDACT_CONTENT=false` to send full input/output (mind your
+  data-governance posture — this ships prompts and completions to Langfuse).
+- **Environment separation.** Langfuse reads `deployment.environment.name`.
+  It's a resource attribute, so no jaato flag is needed — the OTel SDK merges
+  `OTEL_RESOURCE_ATTRIBUTES` into every span's resource:
+  `export OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=production`.
+
+**Not yet emitted:** `user.id` (Langfuse's user analytics). jaato has a
+`set_client_user()` identity hook (premium SSO); wiring it onto spans is a
+follow-up — until then, Langfuse per-user views stay empty.
+
 ### 12.2 Arize Phoenix
 
 ```python
