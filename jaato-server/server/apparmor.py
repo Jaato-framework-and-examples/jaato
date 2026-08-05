@@ -2597,8 +2597,8 @@ def resolve_plugin_apparmor_rules(
         # Iterating the full discovered set SELF-FILTERS to the runner-tier
         # filesystem plugins: only they define ``get_apparmor_rules``.
         # Daemon-tier plugins run daemon-side, never in the confined runner,
-        # and contribute nothing (verified: all 7 ``get_apparmor_rules``
-        # plugins are ``PLUGIN_TIER="runner"``; ``test_plugin_tier_partition``
+        # and contribute nothing (verified: every ``get_apparmor_rules``
+        # plugin is ``PLUGIN_TIER="runner"``; ``test_plugin_tier_partition``
         # enforces the daemon/runner split).  ``plugin_configs`` is still
         # honoured per-plugin so a declared plugin's profile config reaches
         # its rule contributor.
