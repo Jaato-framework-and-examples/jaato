@@ -186,6 +186,9 @@ class TestExecuteToolsAndContinueTermination:
         session._cancel_token = None
         session._is_cancelled = lambda: False
         session._provider = None  # lazy — not created until _ensure_provider
+        session._instruction_budget = None  # __init__ sets this; the pre-flight
+        # refuse-send gate reads it (no-ops when None) at the tool-results
+        # dispatch chokepoint that _execute_tools_and_continue reaches.
         session._executor = MagicMock()
         session._gc_plugin = None
         session._gc_config = None

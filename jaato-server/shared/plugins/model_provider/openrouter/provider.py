@@ -1609,6 +1609,16 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         """Return the context window for the current model."""
         return self._context_length
 
+    def get_max_output_tokens(self) -> Optional[int]:
+        """Per-request output cap (``max_tokens``) configured via
+        ``plugin_configs.openrouter.api_params.max_tokens``.
+
+        Returns ``None`` when no cap is configured.  Used by
+        ``JaatoSession``'s pre-flight refuse-send gate to compute
+        ``prompt + max_tokens`` against the context window.
+        """
+        return self._max_tokens
+
     def get_token_usage(self) -> TokenUsage:
         """Return token usage from the last response."""
         return self._last_usage

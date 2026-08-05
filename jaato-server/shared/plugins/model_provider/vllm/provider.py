@@ -1032,6 +1032,18 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
 
     # ==================== Token Management ====================
 
+    def get_max_output_tokens(self) -> Optional[int]:
+        """Per-request output cap (``max_tokens``) configured via
+        ``plugin_configs.vllm.max_tokens``.
+
+        Returns ``None`` when no cap is configured, in which case vLLM
+        applies its own default (bounded by ``--max-model-len`` minus
+        prompt).  Used by ``JaatoSession``'s pre-flight refuse-send
+        gate to compute ``prompt + max_tokens`` against the context
+        window.
+        """
+        return self._max_tokens
+
     def get_context_limit(self) -> int:
         """Return the context window size for the currently connected model.
 

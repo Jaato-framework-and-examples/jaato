@@ -162,6 +162,22 @@ class TensorRTLLMProvider(OpenAICompatLocalHostProvider):
             logger.warning("Failed to list trtllm-serve models: %s", exc)
             return []
 
+    def get_max_output_tokens(self) -> Optional[int]:
+        """Per-request output cap (``max_tokens``) configured via
+        ``plugin_configs.tensorrt_llm.max_tokens``.
+
+        Returns ``None`` when no cap is configured.  Used by
+        ``JaatoSession``'s pre-flight refuse-send gate to compute
+        ``prompt + max_tokens`` against the context window.
+
+        Note: this provider stores its output cap in
+        ``self._api_params["max_tokens"]`` (folded in by
+        ``_read_api_params``), not a dedicated ``_max_tokens``
+        attribute — it runs on the OpenAI-compat base which forwards
+        ``api_params`` verbatim.
+        """
+        return self._api_params.get("max_tokens")
+
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models served by this trtllm-serve instance (usually one)."""
         names = [entry["id"] for entry in self._fetch_catalog()]
