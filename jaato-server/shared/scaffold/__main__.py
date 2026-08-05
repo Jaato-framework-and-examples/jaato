@@ -153,7 +153,8 @@ def _cmd_validate(args) -> int:
         for d in diags:
             loc = f" @ {d.where}" if d.where else ""
             who = f"{d.profile}: " if d.profile else ""
-            print(f"[{d.severity}] {who}{d.code}: {d.message}{loc}")
+            tier = f"[{d.tier}] " if d.tier else ""
+            print(f"[{d.severity}] {tier}{who}{d.code}: {d.message}{loc}")
     return 1 if any(d.severity == "error" for d in diags) else 0
 
 
