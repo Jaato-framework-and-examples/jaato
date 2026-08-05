@@ -234,12 +234,10 @@ class TestJaatoSessionSendMessage:
 
         # Mock streaming support (enabled by default)
         mock_provider.supports_streaming.return_value = True
+        # Real int so the pre-flight budget gate no-ops (0 = honest-unknown)
+        # instead of comparing a MagicMock context_limit (_assert_payload_fits_context).
+        mock_provider.get_context_limit.return_value = 0
         mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
-        # Providers always return an int context window; the budget builder
-        # feeds it into context_limit, which the pre-flight refuse-send gate
-        # compares against. Without a realistic int here the gate would see a
-        # MagicMock and TypeError on ``<=``.
-        mock_provider.get_context_limit.return_value = 128_000
 
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []
@@ -278,6 +276,9 @@ class TestJaatoSessionSendMessage:
         mock_response.get_text.return_value = "Hello back!"
 
         mock_provider.supports_streaming.return_value = True
+        # Real int so the pre-flight budget gate no-ops (0 = honest-unknown)
+        # instead of comparing a MagicMock context_limit (_assert_payload_fits_context).
+        mock_provider.get_context_limit.return_value = 0
         mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
 
         mock_runtime.create_provider.return_value = mock_provider
@@ -317,6 +318,9 @@ class TestJaatoSessionSendMessage:
         mock_response.usage = TokenUsage(prompt_tokens=1, output_tokens=1, total_tokens=2)
         mock_response.get_text.return_value = "hi"
         mock_provider.supports_streaming.return_value = True
+        # Real int so the pre-flight budget gate no-ops (0 = honest-unknown)
+        # instead of comparing a MagicMock context_limit (_assert_payload_fits_context).
+        mock_provider.get_context_limit.return_value = 0
         mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []
@@ -356,6 +360,31 @@ class TestJaatoSessionTelemetryUserId:
         session = JaatoSession(MagicMock(), "m")
         session._session_env = {}
         assert session._resolve_telemetry_user_id() is None
+
+
+class TestJaatoSessionLlmSpanAttributes:
+    """set_llm_span_attributes stamps custom keys on generation spans —
+    the vendor-neutral hook a prefetch uses for prompt→trace linking."""
+
+    def test_custom_attrs_land_in_llm_span_attributes(self):
+        session = JaatoSession(MagicMock(), "m")
+        session.set_llm_span_attributes({
+            "langfuse.observation.prompt.name": "jaato/tests/test1",
+            "langfuse.observation.prompt.version": 3,
+        })
+        attrs = session._build_llm_span_attributes()
+        assert attrs["langfuse.observation.prompt.name"] == "jaato/tests/test1"
+        assert attrs["langfuse.observation.prompt.version"] == 3
+
+    def test_merge_and_replace(self):
+        session = JaatoSession(MagicMock(), "m")
+        session.set_llm_span_attributes({"a": 1})
+        session.set_llm_span_attributes({"b": 2})          # merge (default)
+        attrs = session._build_llm_span_attributes()
+        assert attrs["a"] == 1 and attrs["b"] == 2
+        session.set_llm_span_attributes({"c": 3}, merge=False)  # replace
+        attrs = session._build_llm_span_attributes()
+        assert "a" not in attrs and "b" not in attrs and attrs["c"] == 3
 
 
 class TestJaatoSessionGetHistory:
